@@ -34,6 +34,7 @@ import uuid
 from typing import cast
 
 import structlog
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.support_escalation import post_to_support_channel
 from daimon.core.config import SupportSettings
@@ -73,7 +74,7 @@ class FeedbackModal(discord.ui.Modal, title="What went wrong?"):
         raw_text = str(self.text_input.value or "")
 
         if not raw_text.strip():
-            await interaction.followup.send(_EMPTY_TEXT, ephemeral=True)
+            await interaction.followup.send(embed=build_notice_embed(_EMPTY_TEXT), ephemeral=True)
             return
 
         async with self._runtime.sessionmaker() as session, session.begin():
@@ -86,7 +87,9 @@ class FeedbackModal(discord.ui.Modal, title="What went wrong?"):
 
         if updated_row is None:
             _log.info("feedback_modal.no_longer_available", feedback_id=str(self._feedback_id))
-            await interaction.followup.send(_NO_LONGER_AVAILABLE, ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(_NO_LONGER_AVAILABLE), ephemeral=True
+            )
             return
 
         _log.info("feedback_modal.submit", feedback_id=str(self._feedback_id))
@@ -105,7 +108,9 @@ class FeedbackModal(discord.ui.Modal, title="What went wrong?"):
                 feedback_id=str(self._feedback_id),
                 delivered=delivered,
             )
-        await interaction.followup.send(_THANKS, ephemeral=True)
+        await interaction.followup.send(
+            embed=build_notice_embed(_THANKS, neutral=True), ephemeral=True
+        )
 
     async def _support_post(self, interaction: discord.Interaction, row: MessageFeedbackRow) -> str:
         """Who, a link to the answer, the agent, and the text. Not the answer itself."""
@@ -142,9 +147,13 @@ class FeedbackModal(discord.ui.Modal, title="What went wrong?"):
         """
         _log.exception("feedback_modal.on_error", err_type=type(error).__name__)
         if interaction.response.is_done():
-            await interaction.followup.send(_SUBMIT_FAILED, ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(_SUBMIT_FAILED), ephemeral=True
+            )
         else:
-            await interaction.response.send_message(_SUBMIT_FAILED, ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed(_SUBMIT_FAILED), ephemeral=True
+            )
 
 
 def support_channel_for(support: SupportSettings, tenant_id: uuid.UUID) -> str | None:

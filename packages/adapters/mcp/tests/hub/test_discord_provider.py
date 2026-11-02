@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import httpx
-from daimon.adapters.mcp.hub.discord_provider import DaimonDiscordProvider, fetch_discord_workspaces
+from daimon.adapters.mcp.hub.discord_provider import DaimonDiscordProvider
 from daimon.testing.factories import make_tenant
 from key_value.aio.stores.memory import MemoryStore
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -19,13 +19,6 @@ def _discord_http(*, user_id: str, guilds: list[tuple[str, str]]) -> httpx.Async
         return httpx.Response(404)
 
     return httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://discord.com")
-
-
-async def test_fetch_discord_workspaces_returns_user_and_guilds() -> None:
-    http = _discord_http(user_id="u1", guilds=[("g1", "PyMC"), ("g2", "Bayes")])
-    user, guilds = await fetch_discord_workspaces(http, access_token="upstream-tok")
-    assert user == "u1", f"got {user!r}"
-    assert guilds == [("g1", "PyMC"), ("g2", "Bayes")], f"got {guilds!r}"
 
 
 def _provider(

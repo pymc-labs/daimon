@@ -283,9 +283,7 @@ async def test_shared_configuration_helpers_recheck_delegation(
     for revoke in (False, True):
         await change_grant(db_session, **key, revoke=revoke)
         await db_session.commit()
-        assert not await can_manage_agent_github(
-            db_session, tenant_id=tenant.id, platform="discord", caller=caller
-        ), "GitHub is platform-only"
+        assert not await can_manage_agent_github(db_session, **common), "GitHub is platform-only"
         assert (
             await may_bind_as_channel_default(db_session, **common, channel_id="channel")
             is not revoke

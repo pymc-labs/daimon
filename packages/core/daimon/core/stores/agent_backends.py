@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 
-from daimon.core._models import (
-    Account,
-    AgentBackendRevisionRecord,
-    Tenant,
-)
+from daimon.core._models import Account, AgentBackendRevisionRecord, Tenant
 from daimon.core.stores import read_persisted_columns
 from daimon.core.stores.domain import AgentBackendRevision
 from mux.contracts.ids import Provider
@@ -38,22 +35,6 @@ async def actor_exists(session: AsyncSession, tenant_id: uuid.UUID, account_id: 
     )
 
 
-async def ever_had_fleet_grant(
-    session: AsyncSession, tenant_id: uuid.UUID, agent_id: uuid.UUID
-) -> bool:
-    """Whether any revision of this agent stored a fleet grant (or the off marker)."""
-    query = (
-        select(AgentBackendRevisionRecord.local)
-        .where(
-            AgentBackendRevisionRecord.tenant_id == tenant_id,
-            AgentBackendRevisionRecord.agent_id == agent_id,
-            AgentBackendRevisionRecord.fleet_grant.is_not(None),
-        )
-        .limit(1)
-    )
-    return await session.scalar(query) is not None
-
-
 async def current(
     session: AsyncSession,
     tenant_id: uuid.UUID,
@@ -75,6 +56,24 @@ async def current(
     else:
         row = await session.scalar(query)
     return AgentBackendRevision.model_validate(row) if row is not None else None
+
+
+async def current_many(
+    session: AsyncSession, tenant_id: uuid.UUID, agent_ids: Collection[uuid.UUID]
+) -> dict[uuid.UUID, AgentBackendRevision]:
+    """`current` for many agents in one read; an agent with no revision is absent."""
+    if not agent_ids:
+        return {}
+    rows = await session.scalars(
+        select(AgentBackendRevisionRecord)
+        .where(
+            AgentBackendRevisionRecord.tenant_id == tenant_id,
+            AgentBackendRevisionRecord.agent_id.in_(list(agent_ids)),
+        )
+        .distinct(AgentBackendRevisionRecord.agent_id)
+        .order_by(AgentBackendRevisionRecord.agent_id, AgentBackendRevisionRecord.local.desc())
+    )
+    return {row.agent_id: AgentBackendRevision.model_validate(row) for row in rows}
 
 
 async def has_backend_preference_by_name(
@@ -110,7 +109,6 @@ async def put_revision(
     previous_local: int | None,
     agent_name: str,
     preview_digest: str,
-    fleet_grant: JsonValue | None = None,
     drop_consent: JsonValue | None = None,
     model: str | None = None,
     profile: str | None = None,
@@ -130,7 +128,6 @@ async def put_revision(
         previous_local=previous_local,
         agent_name=agent_name,
         preview_digest=preview_digest,
-        fleet_grant=fleet_grant,
         drop_consent=drop_consent,
     )
     session.add(row)

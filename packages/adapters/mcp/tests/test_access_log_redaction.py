@@ -78,6 +78,28 @@ def _production_mcp_app() -> object:
     )
 
 
+def test_uvicorn_lines_in_the_production_mcp_app_are_single_line_json(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """The access log is one JSON line with a severity, like every other record."""
+    import json
+
+    upload_token = secrets.token_urlsafe(24)
+    with _serve(_production_mcp_app) as base, contextlib.suppress(httpx.HTTPError):
+        httpx.put(f"{base}/uploads/{upload_token}", content=b"data")
+
+    out = capfd.readouterr()
+    lines = [line for line in (out.out + out.err).splitlines() if line.strip()]
+    records = [json.loads(line) for line in lines if line.startswith("{")]
+    access = [r for r in records if r.get("logger") == "uvicorn.access"]
+    assert access, f"no access line among {lines!r}"
+    assert access[0]["severity"] == "INFO"
+    assert "/uploads/" in access[0]["event"]
+    assert upload_token not in out.out + out.err
+    started = [r for r in records if r.get("logger") == "uvicorn.error"]
+    assert started, "uvicorn's own messages are JSON too"
+
+
 def test_production_mcp_app_logs_no_upload_token_or_oauth_query_values(
     capfd: pytest.CaptureFixture[str],
 ) -> None:
@@ -179,6 +201,39 @@ def test_failing_tool_traceback_in_the_real_app_is_redacted_and_has_no_locals(
     assert "RuntimeError" in logged, "the tool failure was logged"
     assert text_canary not in logged
     assert local_canary not in logged
+
+
+def test_failing_tool_in_the_real_app_logs_one_json_line(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """fastmcp's tool-error record is a single JSON line with a structured
+    exception, not rich's multi-line traceback."""
+    import json
+
+    from fastmcp import Client, FastMCP
+
+    _production_mcp_app()
+    mcp = FastMCP("one-line-probe")
+
+    @mcp.tool
+    def explode() -> str:
+        raise RuntimeError("tool exploded")
+
+    async def _call() -> None:
+        async with Client(mcp) as client:
+            with contextlib.suppress(Exception):
+                await client.call_tool("explode", {})
+
+    capfd.readouterr()
+    asyncio.run(_call())
+
+    err_lines = capfd.readouterr().err.splitlines()
+    records = [json.loads(line) for line in err_lines if line.strip()]
+    (failure,) = [r for r in records if "explode" in str(r.get("event"))]
+    assert failure["severity"] == "ERROR"
+    assert failure["logger"].startswith("fastmcp")
+    assert failure["exception"][0]["exc_type"] == "RuntimeError"
+    assert all(line.startswith("{") for line in err_lines if line.strip()), err_lines
 
 
 def test_structlog_after_create_mcp_app_renders_redacted_json_without_locals(

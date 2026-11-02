@@ -13,7 +13,7 @@ from decimal import Decimal
 from typing import Any, cast
 
 from daimon.core._models import ChannelBudget
-from daimon.core.stores import check_persisted_read, read_persisted_columns
+from daimon.core.stores import read_persisted_columns
 from daimon.core.stores.domain import BudgetWindow, ChannelBudgetRow
 from sqlalchemy import Select, delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -28,15 +28,6 @@ def _channel_budget_query(
         ChannelBudget.tenant_id == tenant_id,
         ChannelBudget.platform == platform,
         ChannelBudget.channel_id == channel_id,
-    )
-
-
-def check_channel_budget_read(
-    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, channel_id: str
-) -> None:
-    """What `get_channel_budget(persisted=True)` refuses, without reading the budget."""
-    check_persisted_read(
-        session, _channel_budget_query(tenant_id, platform, channel_id), reject_new=True
     )
 
 

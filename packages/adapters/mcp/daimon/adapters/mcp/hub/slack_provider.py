@@ -26,6 +26,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import httpx
 from daimon.adapters.mcp.hub.claims import encode_hub_claims
 from daimon.core.hub_identity import resolve_hub_tenants
+from daimon.core.platform_sign_in import SLACK_TOKEN_URL, exchange_slack_user_code
 from daimon.core.slack_oauth import SLACK_USER_SCOPES
 from fastmcp.server.auth import AccessToken, TokenVerifier
 from fastmcp.server.auth.oauth_proxy import OAuthProxy
@@ -33,7 +34,6 @@ from key_value.aio.protocols import AsyncKeyValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 SLACK_AUTHORIZE_URL = "https://slack.com/oauth/v2/authorize"
-SLACK_TOKEN_URL = "https://slack.com/api/oauth.v2.access"
 SLACK_AUTH_TEST_URL = "https://slack.com/api/auth.test"
 # Non-rotating xoxp tokens carry no expiry; cap the issued login at 30 days.
 _FALLBACK_EXPIRY_S = 30 * 24 * 60 * 60
@@ -73,35 +73,26 @@ class _SlackTokenClient:
     async def fetch_token(
         self, *, url: str, code: str, redirect_uri: str, **_: object
     ) -> dict[str, Any]:
-        response = await self._http.post(
-            url,
-            data={
-                "code": code,
-                "client_id": self.client_id,
-                "client_secret": self.client_secret,
-                "redirect_uri": redirect_uri,
-            },
+        grant = await exchange_slack_user_code(
+            self._http,
+            client_id=self.client_id,
+            client_secret=self.client_secret,
+            code=code,
+            redirect_uri=redirect_uri,
+            url=url,
         )
-        response.raise_for_status()
-        payload: dict[str, Any] = response.json()
-        if not payload.get("ok"):
-            raise ValueError(f"slack exchange failed: {payload.get('error', 'unknown_error')}")
-        if payload.get("is_enterprise_install"):
-            raise ValueError("Enterprise Grid installs are not supported")
-        authed_user: dict[str, Any] = payload.get("authed_user") or {}
-        if "access_token" not in authed_user:
-            raise ValueError("slack exchange returned no user token")
+        team = {"id": grant.team_id, "name": grant.team_name}
         lifted: dict[str, Any] = {
-            "access_token": authed_user["access_token"],
+            "access_token": grant.access_token,
             "token_type": "bearer",
-            "scope": authed_user.get("scope", ""),
-            "team": payload.get("team") or {},
-            "authed_user": {"id": authed_user.get("id")},
+            "scope": grant.scope,
+            "team": {k: v for k, v in team.items() if v is not None},
+            "authed_user": {"id": grant.user_id},
         }
-        if authed_user.get("expires_in") is not None:
-            lifted["expires_in"] = int(authed_user["expires_in"])
-        if authed_user.get("refresh_token"):
-            lifted["refresh_token"] = authed_user["refresh_token"]
+        if grant.expires_in is not None:
+            lifted["expires_in"] = grant.expires_in
+        if grant.refresh_token:
+            lifted["refresh_token"] = grant.refresh_token
         return lifted
 
 

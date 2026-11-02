@@ -3,7 +3,7 @@
 A timer is a wake row with `reason = 'timer'` and `available_at` set to its
 fire time; nothing else about the table changes. Older builds reject the new
 reason when reading a row, so every adapter and MCP process must be on a
-timer-aware build before timers are created (docs/architecture.md).
+timer-aware build before timers are created (docs/operations.md).
 Downgrade deletes every timer row.
 
 downgrade: destructive

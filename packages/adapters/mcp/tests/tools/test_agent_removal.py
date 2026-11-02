@@ -704,6 +704,59 @@ async def test_remove_skill_impl_detaches_by_resolved_display_name(
     assert captured.get("skills") == [], "resolved display name must match and detach the skill"
 
 
+async def test_remove_skill_impl_refuses_a_name_two_attached_skills_share(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id = uuid.uuid4()
+    account_id = uuid.uuid4()
+    metadata = {
+        "daimon_tenant": str(tenant_id),
+        "daimon_name": "demo",
+        "daimon_account": str(account_id),
+    }
+    skills = [
+        {"type": "custom", "skill_id": "skill_own", "version": "1"},
+        {"type": "custom", "skill_id": "skill_legacy", "version": "latest"},
+    ]
+    agent = ma_agent(id="ag_removal", name="demo", skills=skills, metadata=metadata)
+    titles = {"skill_own": f"{str(tenant_id)[:8]}-build-models", "skill_legacy": "x/build-models"}
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda _r, _m: list_response([agent.model_dump(mode="json")]))
+    router.add(
+        "GET",
+        r"/v1/skills",
+        lambda _r, _m: list_response(
+            [
+                SkillListResponse(
+                    id=skill_id,
+                    type="custom",
+                    display_title=title,
+                    latest_version="1",
+                    created_at="2026-04-21T00:00:00Z",
+                    updated_at="2026-04-21T00:00:00Z",
+                    source="custom",
+                ).model_dump(mode="json")
+                for skill_id, title in titles.items()
+            ]
+        ),
+    )
+    router.add(
+        "GET",
+        r"/v1/agents/([^/]+)",
+        lambda _r, _m: httpx.Response(200, json=agent.model_dump(mode="json")),
+    )
+    client = build_fake_anthropic(router.dispatch)
+
+    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    with pytest.raises(ToolError, match="more than one skill"):
+        await _remove_skill_impl(
+            _runtime(client, session_factory=db_session_factory),
+            auth,
+            agent_name="demo",
+            skill_id="build-models",
+        )
+
+
 async def test_remove_skill_impl_raises_when_nothing_matches_listing_attached(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

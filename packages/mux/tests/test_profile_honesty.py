@@ -632,7 +632,7 @@ async def _gemini_usage(rig: Rig) -> object:
 
 
 async def _gemini_output_limit(rig: Rig) -> object:
-    """A worker envelope: the driver compiles the output ceiling into the request."""
+    """The ordinary model mode compiles the output ceiling into the request."""
     inner = gemini_rig_for(workspace=False, max_output_tokens=64)
     async with inner() as limited:
         await _gemini_send(limited, MESSAGE)
@@ -641,19 +641,12 @@ async def _gemini_output_limit(rig: Rig) -> object:
         return request
 
 
-async def _gemini_input_limit(rig: Rig) -> object:
-    inner = gemini_rig_for(workspace=False, max_output_tokens=64, max_input_tokens=100)
-    async with inner() as limited:
-        return await _gemini_send(limited, MESSAGE)
-
-
 GEMINI_PROBES: dict[Capability, Probe] = {
     "neutral_catalog": lambda r: r.driver.agents.create(
         r.scope,
         AgentSpec(name="b", model=ModelRef(provider="gemini", id="gemini-3.8-flash")),
         key="catalog",
     ),
-    "input_token_limit": _gemini_input_limit,
     "output_token_limit": _gemini_output_limit,
     "turn_lifecycle": lambda r: _gemini_send(r, MESSAGE),
     "cancel": lambda r: r.driver.events.cancel(r.scope, r.session, turn_id="t", key="cancel"),

@@ -387,6 +387,7 @@ async def test_admit_bills_an_operator_token(
             sessionmaker=sessionmaker,
             membership_resolver=FixtureMembershipResolver(operator.platform_user_id),
             billing_config=None,
+            markup=Decimal(1),
             tool_name="ask",
         )
 

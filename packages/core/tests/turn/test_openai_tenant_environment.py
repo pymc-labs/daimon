@@ -280,15 +280,6 @@ async def test_an_install_without_an_openai_key_provisions_nothing(provisioning,
     assert environments.creates == 0
 
 
-async def test_a_worker_turn_provisions_nothing(provisioning):
-    request, environments, _ = provisioning
-    worker = object()
-    assert (
-        await openai_deployment.prepare_tenant_environment(replace(request, worker=worker))
-    ).worker is worker
-    assert environments.creates == 0
-
-
 async def test_the_operation_record_never_holds_the_key(provisioning):
     request, _, _ = provisioning
     await openai_deployment.prepare_tenant_environment(request)

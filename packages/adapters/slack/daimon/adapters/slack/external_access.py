@@ -15,6 +15,7 @@ import contextlib
 from typing import Any, Final
 
 import structlog
+from daimon.adapters.slack.blockkit import notice_fields
 from daimon.adapters.slack.click_replies import CLICK_REPLY_ERRORS, notice_modal
 from daimon.adapters.slack.feedback import (
     FEEDBACK_DETAILS_ACTION_ID,
@@ -94,12 +95,12 @@ async def refuse_external_click(
     text = text or host_only_notice(workspace_name)
     try:
         await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-            channel=channel, user=user_id, thread_ts=message.get("thread_ts"), text=text
+            channel=channel, user=user_id, thread_ts=message.get("thread_ts"), **notice_fields(text)
         )
         return
     except CLICK_REPLY_ERRORS as err:
         log.info("slack.external_refusal.ephemeral_failed", error=type(err).__name__)
     with contextlib.suppress(*CLICK_REPLY_ERRORS):
         await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-            channel=channel, thread_ts=thread_ts, text=f"<@{user_id}> {text}"
+            channel=channel, thread_ts=thread_ts, **notice_fields(f"<@{user_id}> {text}")
         )

@@ -16,9 +16,7 @@ from daimon.core.stores import mux_state
 from daimon.core.stores.model_spend import model_spend_today, utc_midnight
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
-from daimon.core.turn.openai_host import (
-    _check_daily_model_cap,  # pyright: ignore[reportPrivateUsage]
-)
+from daimon.core.turn.openai_host import _check_daily_model_cap
 from daimon.testing.factories import make_tenant
 from mux.contracts.ids import ChannelRef, ModelRef, ResourceRef, ThreadRef
 from mux.contracts.resources import ProviderBinding
@@ -134,7 +132,6 @@ async def spent(sm, model: str, *, tenant: uuid.UUID = TENANT, now: datetime = N
             model=model,
             now=now,
             rates=PRICES[model],
-            markup=Decimal(1),
         )
 
 
@@ -186,15 +183,6 @@ async def test_the_cap_refuses_a_model_at_its_limit_and_leaves_others_alone(sess
     await _check_daily_model_cap(_request(sessions, cap=used + 1), runtime(model), _revision(model))
     other = "gpt-6-luna" if model == "gpt-6-astra" else "gpt-6-astra"
     await _check_daily_model_cap(_request(sessions, cap=used), runtime(other), _revision(other))
-
-
-async def test_a_worker_may_use_the_cap_exactly(sessions):
-    """Its own reservation already counts toward today's spend."""
-    await record(sessions, "astra", usage(BINDINGS["astra"][1], "gpt-6-astra"))
-    used = await spent(sessions, "gpt-6-astra")
-    await _check_daily_model_cap(
-        _request(sessions, cap=used, worker=True), runtime("gpt-6-astra"), _revision("gpt-6-astra")
-    )
 
 
 async def test_no_cap_configured_checks_nothing(sessions):
@@ -257,9 +245,7 @@ def test_a_gemini_refusal_names_the_gemini_model():
 def test_a_gemini_grounding_call_is_logged_as_a_leak(count):
     """The real usage shape: a list of `{type, count}` per grounding tool."""
     import structlog.testing
-    from daimon.core.turn.gemini_prepare import (
-        _warn_on_grounding,  # pyright: ignore[reportPrivateUsage]
-    )
+    from daimon.core.turn.gemini_prepare import _warn_on_grounding
 
     session = ResourceRef(
         provider="gemini",
@@ -368,7 +354,6 @@ async def test_a_fallback_without_a_tariff_never_runs_and_the_503_stands():
 
     request = SimpleNamespace(
         tenant_id=TENANT,
-        worker=None,
         now=lambda: NOW,
         deps=SimpleNamespace(sessionmaker=no_db, markup=Decimal(1)),
     )

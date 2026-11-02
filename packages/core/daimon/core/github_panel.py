@@ -5,9 +5,11 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
+from daimon.core.agent_ownership import owns_agent
 from daimon.core.config import Settings
 from daimon.core.github_credentials import build_multifernet, decrypt_token, encrypt_token
-from daimon.core.native_admins import AdminCaller, load_live_subject
+from daimon.core.native_admins import AdminCaller, load_live_subject, read_stored_admin
+from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.github_access import (
     SERVER_WIDE_GRANT_MESSAGE,
     InstallationLimitError,
@@ -47,6 +49,7 @@ __all__ = [
     "sync_connect_admin",
     "pending_connect_link",
     "can_manage_agent_github",
+    "requester_manages_agent",
 ]
 
 CONNECT_COPY = "Choose repos on GitHub. If someone else has access to them, send them this link."
@@ -58,11 +61,72 @@ async def can_manage_agent_github(
     tenant_id: uuid.UUID,
     platform: str,
     caller: AdminCaller,
+    agent_names: tuple[str | None, ...],
+    ma_agent_id: str,
+    is_daimon_managed: bool,
+    default: DeploymentDefault,
 ) -> bool:
-    """Only a platform admin can connect, grant and remove repos for an agent."""
-    return (
+    """A platform admin, or an owner of the agent, can connect, grant and remove its repos.
+
+    The owner is read now, from the live caller's platform user; a defaults-managed
+    agent has no owner who counts.
+    """
+    if (
         await load_live_subject(session, tenant_id=tenant_id, platform=platform, caller=caller)
-    ).is_admin
+    ).is_admin:
+        return True
+    return (
+        not is_daimon_managed
+        and caller.platform_user_id is not None
+        and await owns_agent(
+            session,
+            tenant_id=tenant_id,
+            ma_agent_id=ma_agent_id,
+            platform=platform,
+            platform_user_id=caller.platform_user_id,
+        )
+    )
+
+
+async def requester_manages_agent(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    platform: str | None,
+    platform_user_id: str | None,
+    agent_name: str | None,
+    ma_agent_id: str | None,
+    default: DeploymentDefault,
+    is_daimon_managed: bool | None,
+    other_names: tuple[str | None, ...] = (),
+    allow_owner: bool = True,
+) -> bool:
+    """The stored native admin role, or a current owner of the agent, for an out-of-turn save.
+
+    The owner is read from the owner tables at the call, never from the invitation
+    that carries the request. A person from another organisation never owns an agent
+    and a defaults-managed agent has no owner who counts. A caller whose credential
+    cannot stand for an owner (an agent-scoped key) passes `allow_owner=False`.
+    """
+    if not agent_name or not ma_agent_id or platform is None or is_daimon_managed is None:
+        return False
+    stored = await read_stored_admin(
+        session,
+        tenant_id=tenant_id,
+        platform=platform,
+        account_id=account_id,
+        platform_user_id=platform_user_id,
+    )
+    if stored.is_admin:
+        return True
+    return (
+        allow_owner
+        and not is_daimon_managed
+        and await owns_agent(
+            session, tenant_id=tenant_id, ma_agent_id=ma_agent_id, account_id=account_id
+        )
+    )
 
 
 async def sync_connect_admin(

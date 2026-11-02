@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -613,3 +615,18 @@ def test_load_agent_spec_refuses_a_server_name_with_a_slash(tmp_path: Path) -> N
     )
     with pytest.raises(SpecError, match="linear/bridge"):
         load_agent_spec(spec)
+
+
+def test_importing_specs_emits_no_typeddict_extra_config_warning() -> None:
+    """The SDK's open custom-tool schema TypedDict must not inherit `extra="forbid"`."""
+    code = (
+        "import warnings\n"
+        "from pydantic.warnings import TypedDictExtraConfigWarning\n"
+        "with warnings.catch_warnings(record=True) as caught:\n"
+        "    warnings.simplefilter('always')\n"
+        "    import daimon.core.specs\n"
+        "hits = [str(w.message) for w in caught if issubclass(w.category, TypedDictExtraConfigWarning)]\n"
+        "assert not hits, hits\n"
+    )
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr

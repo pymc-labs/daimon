@@ -103,7 +103,7 @@ async def test_tool_words_stay_literal_in_title_and_details(value: str, safe: st
     click = _interaction(999)
     await _buttons(view)[2].callback(click)
     kwargs = click.response.send_message.await_args.kwargs
-    assert click.response.send_message.await_args.args[0] == (f"File: {safe}")
+    assert click.response.send_message.await_args.kwargs["embed"].description == (f"File: {safe}")
     assert kwargs["ephemeral"] is True
     assert kwargs["allowed_mentions"].to_dict() == {"parse": []}
 
@@ -166,9 +166,9 @@ async def _post_and_click(
     stranger = _interaction(999)
     await (approve if choice == "approve" else deny).callback(stranger)
     stranger.response.send_message.assert_awaited_once()
-    assert stranger.response.send_message.await_args.args[0] == NOT_YOURS_MESSAGE.format(
-        requester="<@111>"
-    )
+    assert stranger.response.send_message.await_args.kwargs[
+        "embed"
+    ].description == NOT_YOURS_MESSAGE.format(requester="<@111>")
     assert stranger.response.send_message.await_args.kwargs["ephemeral"] is True
     assert stranger.response.send_message.await_args.kwargs["allowed_mentions"].users is False
     assert not waiting.done(), "a stranger's click answers nothing"
@@ -252,7 +252,7 @@ async def test_always_button_refuses_requester_without_admin_rights(
     monkeypatch.setattr(confirmation_module, "save_always_allow", save)
     click = _interaction(111)
     await _buttons(view)[2].callback(click)
-    assert click.followup.send.await_args.args[0] == (
+    assert click.followup.send.await_args.kwargs["embed"].description == (
         "Only an admin can allow this for everyone.\n"
         "Ask an admin, or use Approve for just this time."
     )
@@ -426,7 +426,9 @@ async def test_turn_cancel_after_always_settle_keeps_stopped_card(
     assert _texts(message.edit.await_args.kwargs["view"])[0] == "**Stopped**"
     assert interaction.edit_original_response.await_count == 1
     if save_result == "stale":
-        assert interaction.followup.send.await_args.args[0].startswith("Approved this time only.")
+        assert interaction.followup.send.await_args.kwargs["embed"].description.startswith(
+            "Approved this time only."
+        )
     else:
         interaction.followup.send.assert_not_awaited()
 
@@ -647,8 +649,8 @@ async def test_upload_card_and_details_are_scannable() -> None:
     await _buttons(view)[2].callback(click)
     click.response.send_message.assert_awaited_once()
     assert click.response.send_message.await_args.kwargs["ephemeral"] is True
-    assert click.response.send_message.await_args.args[0] == "Title: Bug"
-    assert "```" not in click.response.send_message.await_args.args[0]
+    assert click.response.send_message.await_args.kwargs["embed"].description == "Title: Bug"
+    assert "```" not in click.response.send_message.await_args.kwargs["embed"].description
 
 
 async def test_admin_confirmation_rechecks_each_click_before_settlement() -> None:
@@ -673,7 +675,8 @@ async def test_admin_confirmation_rechecks_each_click_before_settlement() -> Non
         denied = _interaction(111)
         await _buttons(view)[0].callback(denied)
         assert (
-            denied.response.send_message.await_args.args[0] == "Current admin permission required."
+            denied.response.send_message.await_args.kwargs["embed"].description
+            == "Current admin permission required."
         )
         denied.response.edit_message.assert_not_awaited()
         assert not waiting.done()
@@ -880,7 +883,7 @@ async def test_lead_details_send_max_escape_heavy_evidence_in_bounded_pages() ->
     click = _interaction(222)
     await _buttons(_lead_view(prompt))[-1].callback(click)
     click.response.defer.assert_awaited_once()
-    pages = [sent.args[0] for sent in click.followup.send.await_args_list]
+    pages = [sent.kwargs["embed"].description for sent in click.followup.send.await_args_list]
     assert 1 < len(pages) <= confirmation_module.DETAILS_MAX_PAGES
     assert all(len(page) <= confirmation_module.DETAILS_PAGE_LIMIT for page in pages)
     assert all(not page.endswith("\\") or page.endswith("\\\\") for page in pages)
@@ -901,7 +904,7 @@ async def test_lead_details_are_refused_to_a_clicker_who_cannot_read_the_lead() 
     prompt = _lead_prompt("Private enquirer evidence that must stay hidden.")
     click = _interaction(333)
     await _buttons(_lead_view(prompt, allowed=False))[-1].callback(click)
-    sent = [call.args[0] for call in click.followup.send.await_args_list]
+    sent = [call.kwargs["embed"].description for call in click.followup.send.await_args_list]
     assert sent == [confirmation_module.LEAD_DETAILS_REFUSED_MESSAGE]
     click.response.send_message.assert_not_awaited()
 
@@ -911,7 +914,7 @@ async def test_lead_details_without_a_reader_check_are_refused() -> None:
     card = build_confirmation_card(prompt, state="pending", token="tok_abcdefgh")
     click = _interaction(333)
     await _buttons(build_confirmation_view(card, prompt))[-1].callback(click)
-    sent = [call.args[0] for call in click.followup.send.await_args_list]
+    sent = [call.kwargs["embed"].description for call in click.followup.send.await_args_list]
     assert sent == [confirmation_module.LEAD_DETAILS_REFUSED_MESSAGE]
 
 
@@ -938,7 +941,9 @@ async def test_lead_details_reload_on_every_click_and_ignore_cached_prompt_lines
     for version in (1, 2):
         click = _interaction(222)
         await _buttons(view)[-1].callback(click)
-        assert click.followup.send.await_args.args[0] == f"live evidence v{version}"
+        assert click.followup.send.await_args.kwargs["embed"].description == (
+            f"live evidence v{version}"
+        )
     assert load.await_count == 2
 
 
@@ -1007,8 +1012,135 @@ async def test_a_card_still_open_replies_once_mentioning_only_its_requester(monk
     answer = await discord_confirmation_hook(channel)(prompt)
     assert answer == "expired"
     (call,) = message.reply.await_args_list
-    assert call.args[0] == (
-        f"<@{prompt.requester_platform_user_id}> This is still waiting for your click."
-    )
+    assert call.args == (f"<@{prompt.requester_platform_user_id}>",)
+    assert call.kwargs["embed"].description == "This is still waiting for your click."
     mentions = call.kwargs["allowed_mentions"].to_dict()
     assert mentions.get("parse") == ["users"] and call.kwargs["mention_author"] is False
+
+
+def _dm_runtime_hook(
+    monkeypatch: pytest.MonkeyPatch, *, client: object, guild: object
+) -> tuple[MagicMock, AsyncMock]:
+    """A runtime hook on a DM channel; returns the backend factory and the tenant lookup."""
+    from uuid import uuid4
+
+    from daimon.core import confirmation
+    from daimon.core.config import TurnSettings
+
+    runtime = MagicMock()
+    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    factory = MagicMock(return_value=(AsyncMock(), AsyncMock()))
+    monkeypatch.setattr(confirmation, "backend_switch_callbacks", factory)
+    lookup = AsyncMock(return_value=guild)
+    monkeypatch.setattr(confirmation_module, "tenant_guild", lookup)
+    discord_confirmation_hook(
+        MagicMock(spec=discord.DMChannel),
+        runtime=runtime,
+        tenant_id=uuid4(),
+        account_id=uuid4(),
+        client=client,  # pyright: ignore[reportArgumentType]
+    )
+    return factory, lookup
+
+
+async def test_dm_admin_card_checks_the_tenants_server_live(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Friction #36: a DM has no guild, so the admin re-check uses the turn's tenant server."""
+    guild = MagicMock(spec=discord.Guild)
+    guild.owner_id = 999
+    member = MagicMock(spec=discord.Member)
+    member.id = 111
+    member.roles = []
+    member.guild_permissions = discord.Permissions(manage_guild=True)
+    guild.fetch_member = AsyncMock(return_value=member)
+    callers = []
+
+    async def live_subject(_session, *, caller, **_kwargs):  # type: ignore[no-untyped-def]
+        # No Daimon admin grants: only the live server role counts.
+        callers.append(caller)
+        return SimpleNamespace(is_admin=caller.is_server_admin)
+
+    monkeypatch.setattr(confirmation_module, "load_live_subject", live_subject)
+    factory, lookup = _dm_runtime_hook(monkeypatch, client=MagicMock(), guild=guild)
+    check = factory.call_args.kwargs["current_admin"]
+    assert await check("111") is True
+    assert callers[-1].platform_user_id == "111"
+    member.guild_permissions = discord.Permissions.none()
+    assert await check("111") is False
+    assert guild.fetch_member.await_count == 2
+    assert lookup.await_count == 2
+
+
+async def test_dm_admin_card_without_a_client_or_server_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory, lookup = _dm_runtime_hook(monkeypatch, client=None, guild=MagicMock())
+    assert await factory.call_args.kwargs["current_admin"]("111") is False
+    lookup.assert_not_awaited()
+    factory, lookup = _dm_runtime_hook(monkeypatch, client=MagicMock(), guild=None)
+    assert await factory.call_args.kwargs["current_admin"]("111") is False
+    lookup.assert_awaited_once()
+
+
+class _OneSession:
+    def __call__(self) -> _OneSession:
+        return self
+
+    async def __aenter__(self) -> object:
+        return object()
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+
+@pytest.mark.parametrize(
+    ("platform", "external_id", "cached", "fetched", "expected"),
+    [
+        ("discord", "42", "cached", None, "cached"),
+        ("discord", "42", None, "fetched", "fetched"),
+        ("discord", "42", None, discord.NotFound, None),
+        ("cli", "42", "cached", None, None),
+        ("discord", "not-a-guild", "cached", None, None),
+        (None, "42", "cached", None, None),
+    ],
+)
+async def test_tenant_guild_resolves_only_a_discord_tenants_server(
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str | None,
+    external_id: str,
+    cached: str | None,
+    fetched: object,
+    expected: str | None,
+) -> None:
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    from daimon.core.stores import tenants
+
+    tenant = (
+        None if platform is None else SimpleNamespace(platform=platform, external_id=external_id)
+    )
+    monkeypatch.setattr(tenants, "get_tenant", AsyncMock(return_value=tenant))
+    client = MagicMock()
+    client.get_guild = MagicMock(return_value=cached)
+    if fetched is discord.NotFound:
+        client.fetch_guild = AsyncMock(
+            side_effect=discord.NotFound(MagicMock(status=404, reason="nf"), "Unknown Guild")
+        )
+    else:
+        client.fetch_guild = AsyncMock(return_value=fetched)
+    got = await confirmation_module.tenant_guild(client, _OneSession(), uuid4())  # pyright: ignore[reportArgumentType]
+    assert got == expected
+    if expected is not None:
+        client.get_guild.assert_called_once_with(42)
+
+
+def test_an_admin_card_shows_its_details_once_without_a_details_button() -> None:
+    """Friction #55: the details are inline on an admin card, so no button repeats them."""
+    prompt = _prompt().model_copy(update={"admin": True, "detail_lines": ("Model: gpt-6-luna",)})
+    view = build_confirmation_view(
+        build_confirmation_card(prompt, state="pending", token="tok_abcdefgh"), prompt
+    )
+    assert [b.label for b in _buttons(view)] == ["Confirm", "Deny"]
+    assert _texts(view).count("Model: gpt-6-luna") == 1

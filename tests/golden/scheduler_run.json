@@ -70,6 +70,7 @@
           "trigger_message": "trigger",
           "usage_record_factory": {
             "bindings": {
+              "agent_id": "<id:1>",
               "channel_id": "C_ENV",
               "managed_session_id": "<id:3>",
               "markup": "1.0",

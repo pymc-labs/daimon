@@ -24,16 +24,13 @@ from datetime import datetime, timedelta
 from typing import Literal, get_args
 
 from daimon.core._models import Account, CredentialRequest, TaskContinuation, ThreadSession
-from daimon.core._models import FleetRun as FleetRunModel
-from daimon.core.fleet import RUN_TRANSITIONS, FleetRun
-from daimon.core.stores import read_persisted_columns
 from daimon.core.stores.domain import (
     ContinuationReason,
     Role,
     TaskContinuationRow,
     UnattendedRequester,
 )
-from sqlalchemy import and_, exists, func, or_, select, text, true, update
+from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -74,7 +71,7 @@ async def record_continuation(
     `available_at` makes it a wake: polled, and not claimable before then.
     """
     if reason not in get_args(ContinuationReason):
-        raise ValueError("Unknown continuation reason")
+        raise ValueError("unsupported continuation reason")
     if reason == "watch_fired":
         from daimon.core.continuity.continuation import require_writable_reason
 
@@ -173,51 +170,18 @@ async def get_continuation(
     return None if orm is None else TaskContinuationRow.model_validate(orm)
 
 
-async def list_worker_finished_for_run(
-    session: AsyncSession,
-    *,
-    tenant_id: _uuid.UUID,
-    run_id: _uuid.UUID,
-) -> tuple[TaskContinuationRow, ...]:
-    """Read this tenant's canonical run waits, including processed audit rows.
-
-    The frozen producer serializes run_id first. Retain malformed owned bodies
-    for the consumer to refuse; never cast untrusted text or mutate scheduling.
-    Root/cohort/key validation and capture completeness remain consumer checks.
-    """
-    rows = await read_persisted_columns(
-        session,
-        select(*TaskContinuation.__table__.c)
-        .where(
-            exists(
-                select(FleetRunModel.id).where(
-                    FleetRunModel.tenant_id == tenant_id,
-                    FleetRunModel.id == run_id,
-                )
-            ),
-            TaskContinuation.tenant_id == tenant_id,
-            TaskContinuation.reason == "worker_finished",
-            TaskContinuation.requested_work.startswith(f'{{"run_id":"{run_id}",', autoescape=True),
-        )
-        .order_by(TaskContinuation.created_at, TaskContinuation.id),
-    )
-    return tuple(TaskContinuationRow.model_validate(dict(row)) for row in rows.mappings())
-
-
 async def list_pending_continuations(
     session: AsyncSession,
     *,
     tenant_id: _uuid.UUID,
     platform: str,
     thread_id: str,
-    include_future: bool = False,
 ) -> list[TaskContinuationRow]:
     """Undispatched continuations for one thread that are due now, oldest first.
 
     A wake scheduled for later (`available_at` in the future, by the database
     clock) is left out, so a caller that predates the wake queue can never
-    run it early. `include_future` is for the host inspecting a frozen wait;
-    it does not claim or start a row.
+    run it early.
     """
     rows = (
         await session.execute(
@@ -229,7 +193,6 @@ async def list_pending_continuations(
                 TaskContinuation.thread_id == thread_id,
                 TaskContinuation.status == "pending",
                 or_(
-                    true() if include_future else False,
                     TaskContinuation.available_at.is_(None),
                     TaskContinuation.available_at <= func.now(),
                 ),
@@ -440,96 +403,6 @@ async def cancel_wake_row(
     ).scalar_one_or_none()
     await session.flush()
     return cancelled is not None
-
-
-def _run_wakes(run: FleetRun, *, open_only: bool = True) -> list[ColumnElement[bool]]:
-    """This run's worker_finished rows that may still schedule a turn (all of
-    them, settled ones too, without `open_only`).
-
-    Frozen waits use canonical JSON with run_id first. Match that closed prefix
-    without casting untrusted text, so a corrupt wait cannot roll back run end.
-    """
-    return [
-        TaskContinuation.tenant_id == run.tenant_id,
-        TaskContinuation.reason == "worker_finished",
-        TaskContinuation.platform == run.platform,
-        TaskContinuation.parent_channel_id == run.channel_id,
-        TaskContinuation.thread_id == run.thread_id,
-        TaskContinuation.requester_account_id == run.orchestrator_account_id,
-        TaskContinuation.requested_work.startswith(f'{{"run_id":"{run.id}",'),
-        *((TaskContinuation.status.in_(("pending", "claimed")),) if open_only else ()),
-    ]
-
-
-async def retire_worker_finished_rows(
-    session: AsyncSession, *, run: FleetRun, keep_id: _uuid.UUID | None = None
-) -> int:
-    """Withdraw this ended run's scheduling, retaining native/audit evidence.
-
-    `keep_id` is the wake whose turn ended the run: its own claim settles as
-    delivered through the wake owner, not as cancelled here.
-    The caller holds the run lock; publication takes that same lock first.
-    """
-    retired = await session.scalars(
-        update(TaskContinuation)
-        .where(
-            exists(
-                select(FleetRunModel.id).where(
-                    FleetRunModel.tenant_id == run.tenant_id,
-                    FleetRunModel.id == run.id,
-                    FleetRunModel.status.not_in(tuple(RUN_TRANSITIONS)),
-                )
-            ),
-            *_run_wakes(run),
-            *((TaskContinuation.id != keep_id,) if keep_id is not None else ()),
-        )
-        .values(
-            status="cancelled",
-            skip_reason="run_ended",
-            lease_owner=None,
-            lease_expires_at=None,
-        )
-        .returning(TaskContinuation.id)
-    )
-    await session.flush()
-    return len(tuple(retired))
-
-
-async def run_end_wakes(session: AsyncSession, *, run: FleetRun) -> tuple[datetime | None, bool]:
-    """(latest start of a wake turn that may still be running, whether one delivered).
-
-    A wake the run's end withdrew while its turn ran keeps `started_at`: that
-    turn may still answer and render the card, so a run-end notice waits for it.
-    """
-    rows = (
-        await session.execute(
-            select(TaskContinuation.status, TaskContinuation.started_at).where(
-                *_run_wakes(run, open_only=False)
-            )
-        )
-    ).all()
-    started = [
-        row.started_at
-        for row in rows
-        if row.started_at is not None and row.status in ("claimed", "cancelled")
-    ]
-    return max(started, default=None), any(row.status == "delivered" for row in rows)
-
-
-async def count_run_wakes(
-    session: AsyncSession, *, run: FleetRun, exclude_id: _uuid.UUID | None = None
-) -> int:
-    """This run's pending or claimed worker_finished wakes, other than `exclude_id`."""
-    return (
-        await session.scalar(
-            select(func.count())
-            .select_from(TaskContinuation)
-            .where(
-                *_run_wakes(run),
-                *((TaskContinuation.id != exclude_id,) if exclude_id is not None else ()),
-            )
-        )
-    ) or 0
 
 
 async def list_dispatchable_continuations(
@@ -827,28 +700,3 @@ async def list_waiting_requesters(
         )
         for user_id, role, role_ids in rows.tuples()
     ]
-
-
-async def publish_worker_finished_row(
-    session: AsyncSession,
-    *,
-    tenant_id: _uuid.UUID,
-    idempotency_key: _uuid.UUID,
-    expected_available_at: datetime,
-    available_at: datetime,
-) -> bool:
-    """Offer an unready frozen wait once, inside the caller's transaction."""
-    return (
-        await session.execute(
-            update(TaskContinuation)
-            .where(
-                TaskContinuation.tenant_id == tenant_id,
-                TaskContinuation.idempotency_key == idempotency_key,
-                TaskContinuation.reason == "worker_finished",
-                TaskContinuation.status == "pending",
-                TaskContinuation.available_at == expected_available_at,
-            )
-            .values(available_at=available_at)
-            .returning(TaskContinuation.id)
-        )
-    ).scalar_one_or_none() is not None

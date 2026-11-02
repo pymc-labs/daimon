@@ -10,6 +10,7 @@ import pytest
 from aioresponses import aioresponses
 from cryptography.fernet import Fernet
 from daimon.adapters.slack import app as slack_app
+from daimon.adapters.slack.blockkit import notice_fields
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.stores.github_connect_notices import ConnectNotice
 from pydantic import SecretStr
@@ -55,7 +56,7 @@ async def test_bare_connect_confirms_ephemerally_in_origin_thread(
         channel="C1",
         user="U1",
         thread_ts="123.456",
-        text="Connected private/repo. Ready.",
+        **notice_fields("Connected private/repo. Ready.", neutral=True),
     )
 
 

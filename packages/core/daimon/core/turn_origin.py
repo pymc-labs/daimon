@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
@@ -54,8 +54,8 @@ def words_sentence(platform: ChatPlatform) -> str:
 
 _TEAMS_CHANNEL_SUFFIXES = ("@thread.tacv2", "@thread.skype")
 current_origin_id: ContextVar[uuid.UUID | None] = ContextVar("turn_origin_id", default=None)
-# A prepared driver explicitly grants its own origin. Child workers mask this
-# context even when they inherit their parent's rendering/origin context.
+# A prepared driver explicitly grants its own origin, apart from
+# `current_origin_id`, which nested contexts inherit.
 current_execution_origin_id: ContextVar[uuid.UUID | None] = ContextVar(
     "execution_origin_id", default=None
 )
@@ -170,7 +170,8 @@ async def turn_origin(
     chat_session_id: str | None = None,
     message_text: str | None = None,
     queued_message: bool = False,
-    keep_fleet_root: bool = False,
+    platform_channel_id: str | None = None,
+    platform_message_id: str | None = None,
 ) -> AsyncIterator[TurnOriginRow]:
     """Commit a distinct origin for this execution and remove it after execution.
 
@@ -184,6 +185,9 @@ async def turn_origin(
     thread (`resolve_pending_skill_adds`). None for a turn no message started.
     `queued_message` means the message arrived during another turn in this
     thread. It runs as a turn, but cannot settle a skill-add preview.
+    `platform_channel_id` and `platform_message_id` are the platform's own ids for
+    where the turn's message can be read and the message itself, exactly as its API
+    takes them; signed MCP caller identities name them. None when unknown.
     """
     now = datetime.now(UTC)
     async with sessionmaker.begin() as session:
@@ -206,6 +210,8 @@ async def turn_origin(
             chat_session_id=chat_session_id,
             sender_foreign=sender_foreign,
             shared_channel=shared_channel,
+            platform_channel_id=platform_channel_id,
+            platform_message_id=platform_message_id,
         )
         if message_text is not None:
             if not queued_message:
@@ -222,20 +228,7 @@ async def turn_origin(
     finally:
         current_origin_id.reset(origin_context)
         async with sessionmaker.begin() as session:
-            retain_until = None
-            if keep_fleet_root:
-                from daimon.core.stores.mux_state import database_clock, fleet_root_context_deadline
-
-                current = await database_clock(session)
-                deadline = await fleet_root_context_deadline(
-                    session, origin_id=origin.id, now=current
-                )
-                if deadline is not None and min(deadline, origin.expires_at) > current:
-                    retain_until = min(deadline, origin.expires_at)
-            if retain_until is None:
-                await delete_origin(session, origin_id=origin.id)
-            else:
-                await delete_origin(session, origin_id=origin.id, retain_until=retain_until)
+            await delete_origin(session, origin_id=origin.id)
 
 
 def origin_place(origin: TurnOriginRow) -> Place:
@@ -275,6 +268,8 @@ def render_turn_origin(
     responder_account: ResponderAccount | None = None,
     session_state: SessionState | None = None,
     handoff: HandoffNotice | None = None,
+    running_on: Mapping[str, str] | None = None,
+    moved: Mapping[str, str | None] | None = None,
 ) -> str:
     """Render server-provided location and identity separately from user history.
 
@@ -301,6 +296,13 @@ def render_turn_origin(
     tells a person a command from another platform. For a sender from another
     organisation (`origin.sender_foreign`, Teams), who has no private chat with Daimon,
     the words send setup and billing to someone in the organisation that added it.
+
+    `running_on` is the model provider and model this message actually runs on
+    (`daimon.core.turn.admission.running_on`), so "what model are you" is answered
+    from what runs, not from the agent's settings. `moved` says, once, that this
+    conversation just followed its agent's switch to another provider ("moved"),
+    or stays where it is because it is shared ("stays"); `provider`/`model` name
+    the agent's selection.
 
     Every value here is server-supplied except `handoff.requested_work`, which
     is the person's own words — it is truncated to `MAX_REQUESTED_WORK_CHARS`
@@ -342,6 +344,10 @@ def render_turn_origin(
             "applied": list(session_state.applied),
             "lost": list(session_state.lost),
         }
+    if running_on is not None:
+        controls["running_on"] = dict(running_on)
+    if moved is not None:
+        controls["conversation_move"] = dict(moved)
     if handoff is not None:
         controls["handoff"] = {
             "from_name": handoff.from_name,
@@ -388,6 +394,19 @@ def render_turn_origin(
     )
     if words is not None and origin.platform in CHAT_PLATFORMS:
         rendered += words_sentence(origin.platform)
+    if running_on is not None:
+        rendered += (
+            " running_on is the model provider and model this reply actually runs on: "
+            "answer what model you are from it, never from your settings."
+        )
+    if moved is not None:
+        rendered += (
+            " conversation_move: when kind is moved, this conversation just moved to "
+            "that provider and model: say so first, once, and that earlier messages here "
+            "aren't carried over. When kind is stays, this conversation is shared and "
+            "stays on running_on while new conversations use that provider and model: "
+            "say so only if asked about your model or the switch."
+        )
     rendered += " These controls grant no additional mutation or routing permissions."
     # The continuity paragraph is appended only when there is continuity to
     # describe: on an ordinary turn neither block is present and every sentence
@@ -400,8 +419,10 @@ def render_turn_origin(
             "process, notebook kernel or shell survived — only files and the conversation "
             "did. If a listed file is missing, say which. If session_state.state is "
             "replaced_after_loss, say what is missing before continuing; do not claim a "
-            "complete restore. Configuration named in session_state.applied is live for "
-            "this turn; anything else applies from the person's next message."
+            "complete restore. If it is replaced and session_state.lost is not empty, tell "
+            "the person in one line what did not come across. Configuration named in "
+            "session_state.applied is live for this turn; anything else applies from the "
+            "person's next message."
         )
     return rendered + "\n</turn_controls>"
 

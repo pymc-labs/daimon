@@ -1,8 +1,10 @@
 """Worker retry bounds and the never-refreshed backfill for installation refreshes."""
 
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 import httpx
+import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from daimon.core._models import GitHubAppInstallation, GitHubInstallationReconciliation
@@ -39,6 +41,8 @@ def _github(
     missing: bool = False,
     account_id: int | None = None,
     account_login: str = "owner",
+    repository_selection: str | None = "selected",
+    suspended_at: str | None = None,
 ) -> httpx.AsyncClient:
     """Fake GitHub: the installation lookup, listing token and repository page."""
 
@@ -48,19 +52,18 @@ def _github(
         if request.url.path == f"/app/installations/{installation_id}":
             if missing:
                 return httpx.Response(404)
-            return httpx.Response(
-                200,
-                json={
-                    "id": installation_id,
-                    "account": {
-                        "id": account_id or installation_id,
-                        "login": account_login,
-                        "type": "Organization",
-                    },
-                    "repository_selection": "selected",
-                    "suspended_at": None,
+            installation: dict[str, object] = {
+                "id": installation_id,
+                "account": {
+                    "id": account_id or installation_id,
+                    "login": account_login,
+                    "type": "Organization",
                 },
-            )
+                "suspended_at": suspended_at,
+            }
+            if repository_selection is not None:
+                installation["repository_selection"] = repository_selection
+            return httpx.Response(200, json=installation)
         if request.url.path == f"/app/installations/{installation_id}/access_tokens":
             return httpx.Response(201, json={"token": "metadata-only-token"})
         if request.url.path == "/installation/repositories":
@@ -77,7 +80,10 @@ def _github(
 
 
 async def _add_installation(
-    sessionmaker: async_sessionmaker[AsyncSession], installation_id: int
+    sessionmaker: async_sessionmaker[AsyncSession],
+    installation_id: int,
+    *,
+    repository_selection: Literal["all", "selected"] = "selected",
 ) -> None:
     async with sessionmaker.begin() as session:
         await installation_store.upsert_github_app(
@@ -86,7 +92,7 @@ async def _add_installation(
             account_id=installation_id,
             account_login="owner",
             account_type="Organization",
-            repository_selection="selected",
+            repository_selection=repository_selection,
             suspended_at=None,
         )
 
@@ -298,3 +304,94 @@ async def test_drain_leaves_refreshed_and_removed_installations_alone(
     assert processed == 0
     assert await _queue_state(db_session_factory, refreshed_id) is None
     assert await _queue_state(db_session_factory, removed_id) is None
+
+
+async def _enqueue_refresh(
+    sessionmaker: async_sessionmaker[AsyncSession], installation_id: int, now: datetime
+) -> None:
+    from daimon.core.stores import github_installation_reconciliation as reconciliation_store
+
+    async with sessionmaker.begin() as session:
+        assert await reconciliation_store.enqueue(
+            session,
+            installation_id=installation_id,
+            delivery_id=f"selection-refresh-{installation_id}",
+            event="installation",
+            deleted=False,
+            now=now,
+        )
+
+
+async def _stored_selection(
+    sessionmaker: async_sessionmaker[AsyncSession], installation_id: int
+) -> str | None:
+    async with sessionmaker() as session:
+        row = await installation_store.get(session, installation_id=installation_id)
+    assert row is not None
+    return row.repository_selection
+
+
+async def test_reconcile_refreshes_repository_selection_from_github(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An installation switched from all to selected repositories must not keep saying "all"."""
+    installation_id = 9308
+    await _add_installation(db_session_factory, installation_id, repository_selection="all")
+    now = datetime.now(UTC)
+    await _enqueue_refresh(db_session_factory, installation_id, now)
+
+    async with _github(installation_id, ["owner/one"], repository_selection="selected") as client:
+        processed = await drain_github_installation_reconciliations(
+            sessionmaker=db_session_factory, http_client=client, github_app=_settings(), now=now
+        )
+
+    assert processed == 1
+    assert await _stored_selection(db_session_factory, installation_id) == "selected"
+
+
+async def test_reconcile_refreshes_repository_selection_while_suspended(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    installation_id = 9309
+    await _add_installation(db_session_factory, installation_id, repository_selection="all")
+    now = datetime.now(UTC)
+    await _enqueue_refresh(db_session_factory, installation_id, now)
+
+    async with _github(
+        installation_id,
+        [],
+        repository_selection="selected",
+        suspended_at="2026-10-01T00:00:00Z",
+    ) as client:
+        assert (
+            await drain_github_installation_reconciliations(
+                sessionmaker=db_session_factory, http_client=client, github_app=_settings(), now=now
+            )
+            == 1
+        )
+
+    async with db_session_factory() as session:
+        row = await installation_store.get(session, installation_id=installation_id)
+    assert row is not None
+    assert row.suspended_at is not None
+    assert row.repository_selection == "selected"
+
+
+@pytest.mark.parametrize("reported", [None, "everything"])
+async def test_reconcile_keeps_stored_selection_when_github_omits_or_garbles_it(
+    db_session_factory: async_sessionmaker[AsyncSession], reported: str | None
+) -> None:
+    installation_id = 9310 if reported is None else 9311
+    await _add_installation(db_session_factory, installation_id, repository_selection="all")
+    now = datetime.now(UTC)
+    await _enqueue_refresh(db_session_factory, installation_id, now)
+
+    async with _github(installation_id, ["owner/one"], repository_selection=reported) as client:
+        assert (
+            await drain_github_installation_reconciliations(
+                sessionmaker=db_session_factory, http_client=client, github_app=_settings(), now=now
+            )
+            == 1
+        )
+
+    assert await _stored_selection(db_session_factory, installation_id) == "all"

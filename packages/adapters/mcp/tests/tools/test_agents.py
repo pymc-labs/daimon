@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from dataclasses import replace
 from typing import Any, cast
 from unittest.mock import MagicMock
 
@@ -82,6 +83,7 @@ def _make_settings(*, public_url: str | None = None) -> MagicMock:
     """Return a minimal settings mock with mcp.public_url wired explicitly."""
     settings = MagicMock()
     settings.mcp.public_url = public_url
+    settings.mcp.member_copy_limit = 5
     settings.github.oauth_scopes = ("repo", "read:user")
     return settings
 
@@ -1192,6 +1194,365 @@ async def test_fork_agent_impl_creates_ma_agent_from_source_spec(
         "forked agent should be tagged with new name"
     )
     assert queued == [(tenant_id, "myfork")], "the copy's face renders when it is created"
+
+
+def _fork_router(tenant_id: uuid.UUID, created: list[dict[str, Any]]) -> MARouter:
+    """Two agents to copy: the one answering this turn (ag_src) and another (ag_other).
+
+    A created copy is listed and read back with exactly what was asked (its metadata
+    included), as the real API does.
+    """
+    agents = {
+        f"ag_{name}": ma_agent(
+            id=f"ag_{name}",
+            name=name,
+            system=f"{name}'s private instructions",
+            mcp_servers=[{"name": "crm", "type": "url", "url": f"https://{name}.crm.invalid/mcp"}],
+            tools=[
+                {
+                    "type": "mcp_toolset",
+                    "mcp_server_name": "crm",
+                    "default_config": {
+                        "enabled": True,
+                        "permission_policy": {"type": "always_allow"},
+                    },
+                    "configs": [],
+                }
+            ],
+            metadata={"daimon_tenant": str(tenant_id), "daimon_name": name},
+        )
+        for name in ("src", "other")
+    }
+
+    def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        created.append(json_body(req))
+        body = agents["ag_src"].model_copy(
+            update={
+                "id": f"ag_new{len(created)}",
+                "name": created[-1]["name"],
+                "metadata": created[-1].get("metadata"),
+            }
+        )
+        agents[body.id] = body
+        return httpx.Response(200, json=body.model_dump(mode="json"))
+
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda _req, _m: list_response([a.model_dump(mode="json") for a in agents.values()]),
+    )
+    router.add(
+        "GET",
+        r"/v1/agents/([^/]+)",
+        lambda _req, m: httpx.Response(200, json=agents[m.group(1)].model_dump(mode="json")),
+    )
+    router.add("POST", r"/v1/agents", on_create)
+
+    def on_update(req: httpx.Request, m: re.Match[str]) -> httpx.Response:
+        patch = json_body(req)
+        current = agents[m.group(1)]
+        agents[current.id] = current.model_copy(
+            update={
+                key: value
+                for key, value in patch.items()
+                if key in ("description", "system", "name")
+            }
+            | {"version": current.version + 1}
+        )
+        return httpx.Response(200, json=agents[current.id].model_dump(mode="json"))
+
+    router.add("POST", r"/v1/agents/([^/]+)", on_update)
+
+    def on_archive(req: httpx.Request, m: re.Match[str]) -> httpx.Response:
+        created.append({"archived": m.group(1)})
+        return httpx.Response(200, json=agents[m.group(1)].model_dump(mode="json"))
+
+    router.add("POST", r"/v1/agents/([^/]+)/archive", on_archive)
+    return router
+
+
+async def _member(db_session_factory: async_sessionmaker[AsyncSession], **changes: Any):
+    from daimon.testing.factories import make_account
+
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+        account = await make_account(session, tenant=tenant)
+    auth = AuthIdentity(
+        account_id=account.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        is_admin=False,
+        platform="discord",
+        platform_user_id="member-1",
+        chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_src"),
+    )
+    return tenant.id, replace(auth, **changes) if changes else auth
+
+
+async def test_a_member_copies_the_agent_answering_their_turn_and_owns_the_copy(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daimon.core.stores import agent_owners
+
+    monkeypatch.setattr(agent_fork, "queue_agent_face", lambda *a, **k: None)
+    tenant_id, auth = await _member(db_session_factory)
+    created: list[dict[str, Any]] = []
+    client = build_fake_anthropic(_fork_router(tenant_id, created).dispatch)
+    runtime = _runtime(client, session_factory=db_session_factory)
+    copy = await _fork_agent_impl(
+        runtime, auth, source_name="src", new_name="mycopy", expected_ma_agent_id="ag_src"
+    )
+    assert copy.name == "mycopy" and len(created) == 1
+    async with db_session_factory() as session:
+        owner = await agent_owners.owner_of(
+            session, tenant_id, derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_new1")
+        )
+    assert owner == auth.account_id, "the member who made the copy owns it"
+
+
+async def _member_copy(db_session_factory, monkeypatch, **auth_changes):
+    monkeypatch.setattr(agent_fork, "queue_agent_face", lambda *a, **k: None)
+    tenant_id, auth = await _member(db_session_factory, **auth_changes)
+    created: list[dict[str, Any]] = []
+    client = build_fake_anthropic(_fork_router(tenant_id, created).dispatch)
+    runtime = _runtime(client, session_factory=db_session_factory)
+    return tenant_id, auth, created, runtime
+
+
+async def test_a_member_copy_keeps_every_tool_rule_its_source_has(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daimon.core.authz import Subject
+    from daimon.core.stores import agent_tool_rules
+
+    tenant_id, auth, _, runtime = await _member_copy(db_session_factory, monkeypatch)
+    admin = Subject(is_admin=True, platform_user_id="admin-1")
+    url = "https://src.crm.invalid/mcp"
+    async with db_session_factory.begin() as session:
+        for tool_key, rule, channel in (
+            ("crm/delete_contact", "deny", None),
+            ("crm/send_email", "ask", None),
+            ("crm/export", "deny", "C-SECRET"),
+        ):
+            await agent_tool_rules.set_rule(
+                session,
+                tenant_id=tenant_id,
+                agent_id="ag_src",
+                agent_name="src",
+                tool_key=tool_key,
+                channel_id=channel,
+                server_url=url,
+                rule=rule,
+                set_by="admin-1",
+                actor=admin,
+            )
+    copy = await _fork_agent_impl(
+        runtime, auth, source_name="src", new_name="mycopy", expected_ma_agent_id="ag_src"
+    )
+    async with db_session_factory() as session:
+        rules = await agent_tool_rules.list_rules(session, tenant_id=tenant_id, agent_id=copy.id)
+        denied = await agent_tool_rules.get_for_call(
+            session,
+            tenant_id=tenant_id,
+            agent_id=copy.id,
+            tool_key="crm/delete_contact",
+            server_url=url,
+            channel_id="C1",
+        )
+    assert sorted((r.tool_key, r.rule, r.channel_id) for r in rules) == [
+        ("crm/delete_contact", "deny", None),
+        ("crm/export", "deny", "C-SECRET"),
+        ("crm/send_email", "ask", None),
+    ]
+    # A tool denied on the source stays denied through the member's copy.
+    assert denied is not None and denied.rule == "deny"
+    # And the member, its owner, still can't change its rules.
+    with pytest.raises(PermissionError):
+        async with db_session_factory.begin() as session:
+            await agent_tool_rules.set_rule(
+                session,
+                tenant_id=tenant_id,
+                agent_id=copy.id,
+                agent_name=copy.name,
+                tool_key="crm/delete_contact",
+                server_url=url,
+                rule="allow",
+                set_by=str(auth.account_id),
+                actor=Subject(platform_user_id="member-1"),
+            )
+
+
+async def test_a_member_copy_keeps_its_inherited_setup_an_admins_to_read(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daimon.adapters.mcp.tools.agents import (
+        _get_agent_impl,  # pyright: ignore[reportPrivateUsage]
+        _list_agents_impl,  # pyright: ignore[reportPrivateUsage]
+        _update_agent_impl,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    tenant_id, auth, created, runtime = await _member_copy(db_session_factory, monkeypatch)
+    copy = await _fork_agent_impl(
+        runtime, auth, source_name="src", new_name="mycopy", expected_ma_agent_id="ag_src"
+    )
+    assert created[0]["metadata"]["daimon_setup_hidden"] == "true"
+    # What the fork answers, and every later read by its owner: capabilities only.
+    assert copy.mcp_servers is None and copy.system is None
+    mine = await _get_agent_impl(runtime, auth, "mycopy", expected_ma_agent_id=copy.id)
+    assert mine.owned_by_you and mine.system is None and mine.mcp_servers is None
+    listed = next(a for a in await _list_agents_impl(runtime, auth, None) if a.id == copy.id)
+    assert listed.owned_by_you and listed.mcp_servers is None
+    # An owner's own edit never answers with the inherited setup either.
+    edited = await _update_agent_impl(
+        runtime,
+        auth,
+        "mycopy",
+        model=None,
+        description="mine now",
+        system=None,
+        tools=None,
+        mcp_servers=None,
+        skills=None,
+        expected_ma_agent_id=copy.id,
+    )
+    assert edited.mcp_servers is None and edited.system is None
+    # An admin reads it, as on the source.
+    admin = replace(auth, role=Role.ADMIN, is_admin=True)
+    seen = await _get_agent_impl(runtime, admin, "mycopy", expected_ma_agent_id=copy.id)
+    assert seen.system and seen.mcp_servers
+
+
+async def test_a_member_may_own_only_so_many_copies(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tenant_id, auth, created, runtime = await _member_copy(db_session_factory, monkeypatch)
+    runtime.settings.mcp.member_copy_limit = 1
+    await _fork_agent_impl(
+        runtime, auth, source_name="src", new_name="first", expected_ma_agent_id="ag_src"
+    )
+    with pytest.raises(ToolError, match="most is 1") as full:
+        await _fork_agent_impl(
+            runtime, auth, source_name="src", new_name="second", expected_ma_agent_id="ag_src"
+        )
+    assert len(created) == 1, "nothing more is created"
+    # Archiving is admin-only, so the way out names who can do it.
+    assert "Ask a server admin to archive one" in str(full.value)
+    # An admin is not limited.
+    admin = replace(auth, role=Role.ADMIN, is_admin=True)
+    await _fork_agent_impl(
+        runtime, admin, source_name="src", new_name="by-admin", expected_ma_agent_id="ag_src"
+    )
+    assert len(created) == 2
+
+
+async def test_a_copy_of_a_members_hidden_copy_stays_hidden_and_counts(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daimon.core.authz import Subject
+
+    tenant_id, auth, created, runtime = await _member_copy(db_session_factory, monkeypatch)
+    runtime.settings.mcp.member_copy_limit = 2
+    await _fork_agent_impl(
+        runtime, auth, source_name="src", new_name="mycopy", expected_ma_agent_id="ag_src"
+    )
+    # An admin's channel copy of it (owned like its source: by the member).
+    await agent_fork.fork_agent(
+        runtime.client,
+        db_session_factory,
+        tenant_id=tenant_id,
+        source_name="mycopy",
+        new_name="mycopy-channel",
+        public_url=None,
+        subject=Subject(is_admin=True, platform_user_id="admin-1"),
+        default_agent_name=None,
+        owner="source",
+    )
+    assert created[1]["metadata"]["daimon_setup_hidden"] == "true", "the flag is inherited"
+    # Both count toward the member's own copies.
+    with pytest.raises(ToolError, match="most is 2"):
+        await _fork_agent_impl(
+            runtime, auth, source_name="src", new_name="third", expected_ma_agent_id="ag_src"
+        )
+
+
+async def test_a_copy_that_cant_take_its_sources_rules_is_never_kept(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daimon.core.stores import agent_owners, agent_tool_rules
+
+    tenant_id, auth, created, runtime = await _member_copy(db_session_factory, monkeypatch)
+
+    async def broken(*args: Any, **kwargs: Any) -> int:
+        raise RuntimeError("rules store down")
+
+    monkeypatch.setattr(agent_tool_rules, "copy_rules", broken)
+    with pytest.raises(ToolError, match="tool rules"):
+        await _fork_agent_impl(
+            runtime, auth, source_name="src", new_name="mycopy", expected_ma_agent_id="ag_src"
+        )
+    assert created[-1] == {"archived": "ag_new1"}, "the new copy is archived"
+    async with db_session_factory() as session:
+        owner = await agent_owners.owner_of(
+            session, tenant_id, derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_new1")
+        )
+    assert owner is None, "and nobody owns it"
+
+
+async def test_in_a_handed_off_thread_a_member_copies_the_agent_now_answering(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The thread was handed to ag_other: it answers this turn, so it is the one a
+    # member may copy (the same holds in a DM, where the turn credential is the same).
+    tenant_id, auth, created, runtime = await _member_copy(db_session_factory, monkeypatch)
+    auth = replace(
+        auth, chat_agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_other")
+    )
+    await _fork_agent_impl(
+        runtime, auth, source_name="other", new_name="mine", expected_ma_agent_id="ag_other"
+    )
+    with pytest.raises(ToolError):
+        await _fork_agent_impl(
+            runtime, auth, source_name="src", new_name="not-mine", expected_ma_agent_id="ag_src"
+        )
+    assert len(created) == 1
+
+
+@pytest.mark.parametrize(
+    "who",
+    ["another_agent", "agent_key", "client", "held_turn", "no_turn"],
+)
+async def test_a_member_may_copy_only_the_agent_answering_their_own_turn(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    who: str,
+) -> None:
+    from daimon.core.turn_hold import TurnHold
+
+    monkeypatch.setattr(agent_fork, "queue_agent_face", lambda *a, **k: None)
+    tenant_id, auth = await _member(db_session_factory)
+    source = "src"
+    if who == "another_agent":
+        source = "other"  # the turn's agent is ag_src; the model names another
+    elif who == "agent_key":
+        auth = replace(auth, agent_id=auth.chat_agent_id)
+    elif who == "client":
+        auth = replace(auth, foreign_home_id="other-org")
+    elif who == "held_turn":
+        auth = replace(auth, hold=TurnHold(platform="discord", channel_id="C1", client=False))
+    else:
+        auth = replace(auth, chat_agent_id=None)
+    created: list[dict[str, Any]] = []
+    client = build_fake_anthropic(_fork_router(tenant_id, created).dispatch)
+    with pytest.raises(ToolError):
+        await _fork_agent_impl(
+            _runtime(client, session_factory=db_session_factory),
+            auth,
+            source_name=source,
+            new_name="mycopy",
+            expected_ma_agent_id=f"ag_{source}",
+        )
+    assert created == [], "nothing is created"
 
 
 async def test_fork_agent_impl_adds_base_toolset_when_source_lacks_it(

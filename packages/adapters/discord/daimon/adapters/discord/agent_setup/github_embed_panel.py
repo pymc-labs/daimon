@@ -11,6 +11,7 @@ from daimon.adapters.discord.agent_setup.navigation import (
     STALE_PANEL_MESSAGE,
 )
 from daimon.adapters.discord.agent_setup.state import PanelState
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.theme import COLOR_AMBER, COLOR_BLURPLE, COLOR_GREEN, COLOR_RED
 
@@ -93,10 +94,14 @@ class GitHubEmbedPanel(ExpiringView, discord.ui.View):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:  # type: ignore[override]
         if interaction.user.id != self.allowed_user_id:
-            await interaction.response.send_message(INVOKER_ONLY_MESSAGE, ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed(INVOKER_ONLY_MESSAGE), ephemeral=True
+            )
             return False
         if self._is_superseded():
-            await interaction.response.send_message(STALE_PANEL_MESSAGE, ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed(STALE_PANEL_MESSAGE), ephemeral=True
+            )
             return False
         return True
 
@@ -104,7 +109,9 @@ class GitHubEmbedPanel(ExpiringView, discord.ui.View):
         self, interaction: discord.Interaction, view: GitHubEmbedPanel | PanelViewBase
     ) -> None:
         if self._is_superseded():
-            await interaction.response.send_message(STALE_PANEL_MESSAGE, ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed(STALE_PANEL_MESSAGE), ephemeral=True
+            )
             return
         target = view.bind_render_interaction(interaction, panel=self.state)
         if isinstance(view, GitHubEmbedPanel):

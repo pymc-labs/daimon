@@ -175,7 +175,10 @@ class _World:
 
 
 def _told(client: MagicMock) -> list[str]:
-    return [call.kwargs["text"] for call in client.chat_postEphemeral.await_args_list]
+    return [
+        call.kwargs.get("text") or call.kwargs["attachments"][0]["fallback"]
+        for call in client.chat_postEphemeral.await_args_list
+    ]
 
 
 async def test_an_unbound_agent_refuses_a_members_skill_add(

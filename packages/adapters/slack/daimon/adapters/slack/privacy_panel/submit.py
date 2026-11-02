@@ -29,13 +29,14 @@ import anthropic
 import structlog
 from daimon.adapters.slack.privacy_panel.read import resolve_privacy_account
 from daimon.adapters.slack.privacy_panel.views import (
+    build_delete_failed_view,
     build_delete_paused_view,
     build_deleting_view,
     build_post_delete_view,
 )
 from daimon.adapters.slack.runtime import SlackRuntime, resolve_bot_display_name
 from daimon.core.errors import DaimonError
-from daimon.core.purge import purge_account
+from daimon.core.purge import AccountPurgeFailed, purge_account
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
@@ -236,3 +237,11 @@ async def run_purge_and_update(
             account_id=str(account_id),
             exc_info=exc,
         )
+        if isinstance(exc, AccountPurgeFailed):
+            # The purge rolled back whole: say so, instead of leaving "Deleting…" up.
+            try:
+                await web_client.views_update(  # pyright: ignore[reportUnknownMemberType]
+                    view_id=view_id, view=build_delete_failed_view(str(exc))
+                )
+            except SlackApiError:
+                log.warning("privacy.purge.failed_view_not_shown", account_id=str(account_id))

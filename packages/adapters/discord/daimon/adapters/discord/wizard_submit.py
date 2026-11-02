@@ -85,6 +85,7 @@ from daimon.adapters.discord.errors import (
     render_error,
 )
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle, SendFn
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.adapters.discord.provider_actions import (
     discord_provider_action_hook,
@@ -126,7 +127,7 @@ from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, 
 from daimon.core.turn.bookkeeping import release_turn_markers
 from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.lifecycle import TurnLifecycle
-from daimon.core.turn.outcomes import observe_turn, record_refusal
+from daimon.core.turn.outcomes import finish_with_error, observe_turn, record_refusal
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.protection import ProtectionState
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
@@ -350,9 +351,9 @@ async def _render_wizard_turn_error(
     if channel is None or not isinstance(channel, discord.abc.Messageable):
         return
     if isinstance(channel, discord.Thread):
-        await safe_thread_send(channel, error_text)
+        await safe_thread_send(channel, embed=build_notice_embed(error_text))
     else:
-        await channel.send(error_text)
+        await channel.send(embed=build_notice_embed(error_text))
 
 
 async def run_wizard_submit_turn(
@@ -467,7 +468,7 @@ async def run_wizard_submit_turn_observed(
             _log.info(
                 "wizard_submit.skipped.over_cap", tenant_id=str(row.tenant_id), reason="queue_full"
             )
-            await channel.send(_OVER_CAP)
+            await channel.send(embed=build_notice_embed(_OVER_CAP))
             return
 
         # --- Stage one: admission -- admit(). Same four branches
@@ -504,7 +505,7 @@ async def run_wizard_submit_turn_observed(
                 short_id=row.id,
                 missing=list(err.missing),
             )
-            await channel.send(NOT_SET_UP_NOTICE)
+            await channel.send(embed=build_notice_embed(NOT_SET_UP_NOTICE))
             return
         except MAResolverMissError as err:
             _log.warning(
@@ -513,7 +514,7 @@ async def run_wizard_submit_turn_observed(
                 daimon_tag=err.daimon_tag,
                 tenant_id=str(err.tenant_id),
             )
-            await channel.send(SETUP_OUT_OF_DATE_NOTICE)
+            await channel.send(embed=build_notice_embed(SETUP_OUT_OF_DATE_NOTICE))
             return
         except AdmissionDenied as err:
             if err.reason == "writers_none":
@@ -533,13 +534,20 @@ async def run_wizard_submit_turn_observed(
                 _log.info("wizard_submit.skipped.over_balance", tenant_id=str(row.tenant_id))
             elif err.reason == "channel_budget_exceeded":
                 _log.info("wizard_submit.skipped.over_channel_budget", short_id=row.id)
+            elif err.reason == "allowance_exhausted":
+                _log.info("wizard_submit.skipped.allowance_exhausted", short_id=row.id)
             else:
                 _log.info("wizard_submit.skipped.over_cap", user_id=str(interaction.user.id))
             if err.reason != "writers_none":
                 await channel.send(
-                    "Your answers were recorded.\n\n"
-                    + admission_refusal_message(
-                        err.reason, bot.runtime.settings, cause=err.cause, provider=err.provider
+                    embed=build_notice_embed(
+                        "Your answers were recorded.\n\n"
+                        + admission_refusal_message(
+                            err.reason,
+                            bot.runtime.settings,
+                            cause=err.cause,
+                            provider=err.provider,
+                        )
                     )
                 )
             return
@@ -662,12 +670,13 @@ async def run_wizard_submit_turn_observed(
         )
         bot._track_live_turn_card(turn_card_intent.id)  # pyright: ignore[reportPrivateUsage]
 
-        async def _end_card(text: str) -> None:
+        async def _end_card(text: str, *, title: str | None = None) -> None:
             """Collapse the card of a turn that never ran, and retire its intent."""
+            ended = build_notice_embed(text, title=title)
             if lifecycle.message_ref is not None:
-                await _edit_message(lifecycle.message_ref, content=text, embed=None, view=None)
+                await _edit_message(lifecycle.message_ref, content=None, embed=ended, view=None)
             else:
-                await channel.send(text)
+                await channel.send(embed=ended)
             await retire_terminal_turn_card(
                 bot.runtime.sessionmaker,
                 intent_id=turn_card_intent.id,
@@ -683,12 +692,13 @@ async def run_wizard_submit_turn_observed(
         if slot != "started":
             await _end_card(
                 {
-                    "cancelled": "Stopped.\nSend a message to start again.",
+                    "cancelled": "Send a message to start again.",
                     "timed_out": QUEUE_TIMED_OUT_TEXT,
                     "balance_depleted": admission_refusal_message(
                         "balance_depleted", bot.runtime.settings
                     ),
-                }.get(slot, QUEUE_TIMED_OUT_TEXT)
+                }.get(slot, QUEUE_TIMED_OUT_TEXT),
+                title="Stopped." if slot == "cancelled" else None,
             )
             return
 
@@ -809,6 +819,7 @@ async def run_wizard_submit_turn_observed(
                     tenant_id=row.tenant_id,
                     account_id=admission.account_id,
                     admission=admission,
+                    client=bot,
                 ),
                 # A dead-session recovery moves this turn's marker to the replacement.
                 active_turn_message_id=marker_ids.get(prepared.mapping_id)
@@ -868,6 +879,7 @@ async def run_wizard_submit_turn_observed(
                     await wm_session.commit()
     except (DaimonError, _anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
         _log.warning("wizard_submit.turn_failed", error=str(exc), short_id=row.id)
+        finish_with_error(exc)
         await _render_wizard_turn_error(
             interaction, tenant_id=row.tenant_id, rid=rid, exc=exc, post_state=post_state
         )
@@ -875,6 +887,7 @@ async def run_wizard_submit_turn_observed(
         # background-task adapter boundary (see module docstring); nothing above this task will
         # otherwise report the failure
         _log.exception("wizard_submit.turn_failed_unexpected", error=str(exc), short_id=row.id)
+        finish_with_error(exc)
         await _render_wizard_turn_error(
             interaction, tenant_id=row.tenant_id, rid=rid, exc=exc, post_state=post_state
         )

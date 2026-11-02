@@ -100,7 +100,7 @@ async def test_callback_when_send_modal_raises_replies_once_and_swallows_the_err
     await item.callback(interaction)  # must not raise -- dispatcher-swallowing boundary
 
     interaction.response.send_message.assert_awaited_once()
-    message = interaction.response.send_message.call_args.args[0]
+    message = interaction.response.send_message.call_args.kwargs["embed"].description
     assert "didn't work" in message.lower(), (
         "failure reply must tell the user opening the form failed"
     )

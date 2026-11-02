@@ -14,7 +14,7 @@ from mux.drivers.gemini.catalog_transport import AgentCatalogTransport
 from mux.drivers.gemini.core import GeminiAgents, compile_agent, now, page_values, refuse
 from mux.drivers.gemini.mcp_auth import MCPSecretResolver
 from mux.drivers.gemini.skill_deployment import GCSBundleDeployment
-from mux.drivers.gemini.storage import Records, Storage, owner
+from mux.drivers.gemini.storage import Records, Storage, owner, read_records
 from mux.drivers.gemini.transport import NO_TOOLS_TOOL, Object, Transport, object_value
 from mux.errors import ProviderError, ScopeViolation
 from mux.profiles.gemini import INLINE_REUSE
@@ -263,7 +263,8 @@ class GeminiCatalogAdapter(GeminiAgents):
     async def retrieve(self, scope: Scope, ref: ResourceRef) -> Agent:
         self._admit_catalog(scope)
         self._check(scope, ref, "agent")
-        async with self._storage.transaction() as records:
+        # A pure read: the committed snapshot, never the account's write lock.
+        async with read_records(self._storage) as records:
             agent = records.agents.get(ref.id)
             if agent is None or agent.ref != ref:
                 raise ScopeViolation(ref.id, "no owned native catalog agent")
@@ -293,7 +294,8 @@ class GeminiCatalogAdapter(GeminiAgents):
         """
         self._admit_catalog(scope)
         self._owned(retained, scope)
-        async with self._storage.transaction() as records:
+        # A pure read: the committed snapshot, never the account's write lock.
+        async with read_records(self._storage) as records:
             if records.agents.get(retained.ref.id) != retained:
                 raise ScopeViolation(retained.ref.id, "skill deployment agent differs")
             skill_sources(records, scope, self._account, retained.spec.skills)
@@ -317,7 +319,8 @@ class GeminiCatalogAdapter(GeminiAgents):
 
     async def list(self, scope: Scope, *, filters: AgentFilter, page: PageRequest) -> Page[Agent]:
         self._admit_catalog(scope)
-        async with self._storage.transaction() as records:
+        # A pure read: the committed snapshot, never the account's write lock.
+        async with read_records(self._storage) as records:
             candidates = tuple(
                 agent
                 for agent in records.agents.values()

@@ -22,6 +22,7 @@ from time import monotonic
 from typing import TYPE_CHECKING
 
 import structlog
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.theme import COLOR_AMBER, COLOR_GREEN, COLOR_GREYPLE
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Subject
@@ -208,7 +209,9 @@ class _ConfirmationView(discord.ui.LayoutView):
                 )
                 always.callback = self._on_always
                 row.add_item(always)
-            row.add_item(details)
+            # An admin card already shows its details above the buttons.
+            if not prompt.admin:
+                row.add_item(details)
             container.add_item(row)
         footer = _footer(card, prompt)
         if footer is not None:
@@ -235,7 +238,9 @@ class _ConfirmationView(discord.ui.LayoutView):
         reference = self._prompt.tool_rule
         clicker = str(interaction.user.id)
         if reference is None or self._rule_factory is None or self._rule_subject is None:
-            await interaction.response.send_message(NO_LONGER_PENDING_MESSAGE, ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed(NO_LONGER_PENDING_MESSAGE), ephemeral=True
+            )
             return
         await interaction.response.defer()
         try:
@@ -248,10 +253,10 @@ class _ConfirmationView(discord.ui.LayoutView):
             message = ONLY_ADMIN_MESSAGE
             if clicker == self._prompt.requester_platform_user_id:
                 message += "\n" + ASK_ADMIN_MESSAGE
-            await interaction.followup.send(message, ephemeral=True)
+            await interaction.followup.send(embed=build_notice_embed(message), ephemeral=True)
             return
         if refusal := settle_local_admin_confirmation(self._prompt, self._answer):
-            await interaction.followup.send(refusal, ephemeral=True)
+            await interaction.followup.send(embed=build_notice_embed(refusal), ephemeral=True)
             return
         self.stop()
         self._queue_always_answer(interaction, clicker, "once")
@@ -277,7 +282,9 @@ class _ConfirmationView(discord.ui.LayoutView):
             log.info("tool_confirmation.always_edit_token_expired")
         if result != "saved":
             await interaction.followup.send(
-                STALE_RULE_MESSAGE if result == "stale" else SAVE_FAILED_MESSAGE,
+                embed=build_notice_embed(
+                    STALE_RULE_MESSAGE if result == "stale" else SAVE_FAILED_MESSAGE
+                ),
                 ephemeral=True,
             )
 
@@ -314,29 +321,38 @@ class _ConfirmationView(discord.ui.LayoutView):
                 lines = await self._lead_details(self._prompt, str(interaction.user.id))
             except LookupError:
                 await interaction.followup.send(
-                    "This lead is no longer available.", ephemeral=True, allowed_mentions=none
+                    embed=build_notice_embed("This lead is no longer available."),
+                    ephemeral=True,
+                    allowed_mentions=none,
                 )
                 return
             except Exception:
                 lines = ()
             if not lines:
                 await interaction.followup.send(
-                    LEAD_DETAILS_REFUSED_MESSAGE, ephemeral=True, allowed_mentions=none
+                    embed=build_notice_embed(LEAD_DETAILS_REFUSED_MESSAGE),
+                    ephemeral=True,
+                    allowed_mentions=none,
                 )
                 return
         pages = details_pages(lines)
         if pages is None:
-            pages = [DETAILS_UNAVAILABLE_MESSAGE]
-        elif not pages:
-            pages = ["No additional details."]
+            embeds = [build_notice_embed(DETAILS_UNAVAILABLE_MESSAGE)]
+        else:
+            embeds = [
+                build_notice_embed(page, neutral=True)
+                for page in (pages or ["No additional details."])
+            ]
         try:
-            for index, page in enumerate(pages):
+            for index, embed in enumerate(embeds):
                 if index == 0 and not deferred:
                     await interaction.response.send_message(
-                        page, ephemeral=True, allowed_mentions=none
+                        embed=embed, ephemeral=True, allowed_mentions=none
                     )
                 else:
-                    await interaction.followup.send(page, ephemeral=True, allowed_mentions=none)
+                    await interaction.followup.send(
+                        embed=embed, ephemeral=True, allowed_mentions=none
+                    )
         except discord.HTTPException:
             log.warning("tool_confirmation.details_failed")
 
@@ -346,7 +362,7 @@ class _ConfirmationView(discord.ui.LayoutView):
         The admin re-check (with the card's own digest) first, then requester,
         expiry and single use. None means the answer was taken.
         """
-        refusal = await check_confirmation_admin(self._prompt, clicker, self._check_admin)
+        refusal = await check_confirmation_admin(self._prompt, clicker, self._check_admin, answer)
         if refusal is not None:
             return refusal
         return settle_local_confirmation(self._prompt, self._answer, clicker, answer)
@@ -357,7 +373,9 @@ class _ConfirmationView(discord.ui.LayoutView):
             if refusal == NOT_YOURS_MESSAGE:
                 refusal = refusal.format(requester=f"<@{self._prompt.requester_platform_user_id}>")
             await interaction.response.send_message(
-                refusal, ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
+                embed=build_notice_embed(refusal),
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
             )
             return
         # Answered: nothing on this card listens any more.
@@ -403,6 +421,28 @@ def confirmation_requester(view: object) -> str | None:
     return view.pending_requester() if isinstance(view, _ConfirmationView) else None
 
 
+async def tenant_guild(
+    client: discord.Client,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+) -> discord.Guild | None:
+    """The Discord server a tenant stands for, or None when it can't be found."""
+    from daimon.core.stores.tenants import get_tenant
+
+    async with sessionmaker() as session:
+        tenant = await get_tenant(session, tenant_id)
+    if tenant is None or tenant.platform != "discord" or not tenant.external_id.isdigit():
+        return None
+    guild_id = int(tenant.external_id)
+    guild = client.get_guild(guild_id)
+    if guild is not None:
+        return guild
+    try:
+        return await client.fetch_guild(guild_id)
+    except discord.HTTPException:
+        return None
+
+
 def discord_confirmation_hook(
     channel: discord.abc.Messageable,
     *,
@@ -412,8 +452,27 @@ def discord_confirmation_hook(
     account_id: uuid.UUID | None = None,
     prepare_admin: Callable[[ConfirmationPrompt], Awaitable[ConfirmationPrompt]] | None = None,
     check_admin: Callable[[ConfirmationPrompt, str], Awaitable[str | None]] | None = None,
+    client: discord.Client | None = None,
 ) -> ConfirmationHook:
-    """A hook that posts each prompt's card into `channel` (the turn's thread)."""
+    """A hook that posts each prompt's card into `channel` (the turn's thread).
+
+    The clicker's admin role is read live from the server the turn belongs to:
+    the thread's or text channel's own server, or for a DM the tenant's server,
+    which needs `client`. Anywhere else, or a DM without `client`, the clicker
+    counts as no admin.
+    """
+
+    async def role_guild() -> discord.Guild | None:
+        if isinstance(channel, (discord.Thread, discord.TextChannel)):
+            return channel.guild
+        if (
+            not isinstance(channel, discord.DMChannel)
+            or client is None
+            or runtime is None
+            or tenant_id is None
+        ):
+            return None
+        return await tenant_guild(client, runtime.sessionmaker, tenant_id)
 
     if runtime is not None:
         from daimon.core.channel_backend import backend_selection_enabled, make_backend_service
@@ -428,15 +487,17 @@ def discord_confirmation_hook(
                 raise ValueError("Backend confirmation requires an admitted account and tenant")
 
             async def current_platform_admin(clicker: str) -> bool:
-                if not isinstance(channel, (discord.Thread, discord.TextChannel)):
+                guild = await role_guild()
+                if guild is None:
                     return False
-                role, _ = await requester_role(channel.guild, clicker)
+                role, _ = await requester_role(guild, clicker)
                 return role is Role.ADMIN
 
             async def current_admin(clicker: str) -> bool:
-                if not isinstance(channel, (discord.Thread, discord.TextChannel)):
+                guild = await role_guild()
+                if guild is None:
                     return False
-                role, _roles = await requester_role(channel.guild, clicker)
+                role, _roles = await requester_role(guild, clicker)
                 async with runtime.sessionmaker() as session:
                     subject = await load_live_subject(
                         session,
@@ -523,13 +584,12 @@ def discord_confirmation_hook(
         from daimon.adapters.discord.bot import requester_role
         from daimon.core.stores.domain import Role
 
-        if (
-            rule_factory is None
-            or tenant_id is None
-            or not isinstance(channel, (discord.Thread, discord.TextChannel))
-        ):
+        if rule_factory is None or tenant_id is None:
             return Subject()
-        role, _roles = await requester_role(channel.guild, clicker)
+        guild = await role_guild()
+        if guild is None:
+            return Subject()
+        role, _roles = await requester_role(guild, clicker)
         async with rule_factory() as session:
             return await load_live_subject(
                 session,
@@ -634,7 +694,8 @@ def discord_confirmation_hook(
         async def remind() -> None:
             # Once, after a while: the requester is pinged in the card's own thread.
             await message.reply(
-                f"<@{prompt.requester_platform_user_id}> {STILL_WAITING_MESSAGE}",
+                f"<@{prompt.requester_platform_user_id}>",
+                embed=build_notice_embed(STILL_WAITING_MESSAGE, neutral=True),
                 allowed_mentions=discord.AllowedMentions(
                     users=True, roles=False, everyone=False, replied_user=False
                 ),

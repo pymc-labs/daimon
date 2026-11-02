@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from cryptography.fernet import Fernet, MultiFernet
+import warnings
+
 from daimon.adapters.mcp.hub.storage import (
     HUB_KV_POOL_MAX,
     asyncpg_dsn,
     build_hub_kv_base,
     hub_kv_for,
 )
+from daimon.testing.crypto import make_fernet
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
@@ -18,10 +20,21 @@ def test_asyncpg_dsn_strips_sqlalchemy_driver() -> None:
     assert asyncpg_dsn("postgresql://u:p@h/d") == "postgresql://u:p@h/d"
 
 
+def test_building_the_store_emits_no_warning() -> None:
+    """Startup logs stay free of the store library's stability notice; no connection is opened."""
+    fernet = make_fernet()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        build_hub_kv_base(database_url="postgresql://u:p@localhost/d", fernet=fernet)
+    assert not [w for w in caught if issubclass(w.category, UserWarning)], (
+        f"construction should not warn, got {[str(w.message) for w in caught]!r}"
+    )
+
+
 async def test_platforms_share_the_table_but_not_keys(
     db_engine: AsyncEngine, db_session: AsyncSession, db_schema: str
 ) -> None:
-    fernet = MultiFernet([Fernet(Fernet.generate_key())])
+    fernet = make_fernet()
     dsn = asyncpg_dsn(str(db_engine.url.render_as_string(hide_password=False)))
     dsn = f"{dsn}?options=-csearch_path%3D{db_schema}"
     store, base = build_hub_kv_base(database_url=dsn, fernet=fernet)
@@ -50,7 +63,7 @@ async def test_platforms_share_the_table_but_not_keys(
 
 
 async def test_store_pool_stays_small(db_engine: AsyncEngine, db_schema: str) -> None:
-    fernet = MultiFernet([Fernet(Fernet.generate_key())])
+    fernet = make_fernet()
     dsn = asyncpg_dsn(str(db_engine.url.render_as_string(hide_password=False)))
     dsn = f"{dsn}?options=-csearch_path%3D{db_schema}"
     store, _ = build_hub_kv_base(database_url=dsn, fernet=fernet)

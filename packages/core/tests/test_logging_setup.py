@@ -110,3 +110,25 @@ def test_warning_level_filters_info_lines(
 
     captured = capsys.readouterr().out.strip()
     assert captured == "", "WARNING level should filter out a .info() line — nothing emitted"
+
+
+@pytest.mark.parametrize(
+    ("method", "severity"),
+    [
+        ("debug", "DEBUG"),
+        ("info", "INFO"),
+        ("warning", "WARNING"),
+        ("error", "ERROR"),
+        ("critical", "CRITICAL"),
+        ("exception", "ERROR"),
+    ],
+)
+def test_structlog_lines_carry_a_severity(
+    capsys: pytest.CaptureFixture[str], method: str, severity: str
+) -> None:
+    configure_log_level("DEBUG")
+
+    getattr(structlog.get_logger(), method)("some.event")
+
+    record = json.loads(capsys.readouterr().out)
+    assert record["severity"] == severity

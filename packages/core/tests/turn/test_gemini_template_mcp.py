@@ -10,6 +10,7 @@ HTTP edge is replaced; the MCP catalogue is the real verifier and middleware.
 
 from __future__ import annotations
 
+import contextlib
 import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -208,8 +209,12 @@ def _connection(selected):
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
 async def test_consent_keeps_daimon_tools_and_drops_only_what_gemini_lacks(template):
     _, quote, *_ = template
-    assert "mcp" not in quote.declared_drops and "tools" in quote.declared_drops
+    assert "mcp" not in quote.declared_drops
     assert {"memory", "skills"} <= set(quote.declared_drops)
+    # J6b: its execution tools map to code_execution; web search and fetch
+    # (grounding, off) are each a named loss, never all of its tools.
+    assert "tools" not in quote.declared_drops
+    assert {"builtin_tool:web_fetch", "builtin_tool:web_search"} <= set(quote.declared_drops)
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
@@ -538,6 +543,22 @@ async def test_the_server_refuses_gated_tools_for_a_provider_turn_credential(
         assert ran.count("add_skill") == 1
 
 
+@pytest.fixture
+def no_agent_notices(monkeypatch):
+    """These fakes have no database; `test_run_agent_notices` covers notices."""
+    from daimon.core.turn import run as run_module
+
+    async def unchanged(*_args, user_message, reseed_user_message, **_kwargs):
+        return user_message, reseed_user_message, []
+
+    async def dropped(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(run_module, "_with_agent_notices", unchanged)
+    monkeypatch.setattr(run_module, "_queue_agent_notices", dropped)
+
+
+@pytest.mark.usefixtures("no_agent_notices")
 async def test_a_second_cancel_cannot_abandon_credential_revocation(monkeypatch):
     import asyncio
     from types import SimpleNamespace
@@ -558,6 +579,7 @@ async def test_a_second_cancel_cannot_abandon_credential_revocation(monkeypatch)
         activate=lambda: __import__("contextlib").nullcontext(),
         finish=lambda **_: None,
         thread_id=None,
+        model_by_session={},
     )
     prepared = SimpleNamespace(
         admission=SimpleNamespace(
@@ -568,6 +590,7 @@ async def test_a_second_cancel_cannot_abandon_credential_revocation(monkeypatch)
             origin_thread_id=None,
             agent=SimpleNamespace(id="agent"),
             backend_footer_profile=None,
+            backend_revision=None,
         ),
         ma_session_id="session",
         _finalize=finalize,
@@ -602,6 +625,140 @@ async def test_a_second_cancel_cannot_abandon_credential_revocation(monkeypatch)
     await asyncio.wait_for(finished.wait(), timeout=2)
 
 
+@pytest.mark.usefixtures("no_agent_notices")
+async def test_a_second_cancel_during_revocation_still_restores_the_callers_log_fields(
+    monkeypatch,
+):
+    import asyncio
+    from types import SimpleNamespace
+
+    import structlog
+    from daimon.core.turn import run as run_module
+
+    released = asyncio.Event()
+
+    async def finalize() -> None:
+        await released.wait()
+
+    async def forever(*_args, **_kwargs):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(run_module, "run_prepared_turn_impl", forever)
+    observation = SimpleNamespace(
+        activate=lambda: __import__("contextlib").nullcontext(),
+        finish=lambda **_: None,
+        thread_id=None,
+        model_by_session={},
+    )
+    prepared = SimpleNamespace(
+        admission=SimpleNamespace(
+            observation=observation,
+            account_id=None,
+            agent=SimpleNamespace(id="agent"),
+            backend_footer_profile=None,
+            backend_revision=None,
+        ),
+        ma_session_id="session",
+        _finalize=finalize,
+    )
+    deps = SimpleNamespace(
+        backend_selection_enabled=False,
+        running_turns=SimpleNamespace(track=lambda: __import__("contextlib").nullcontext()),
+    )
+
+    async def caller() -> dict[str, object]:
+        structlog.contextvars.bind_contextvars(backend="the caller's")
+        with contextlib.suppress(asyncio.CancelledError):
+            await run_module.run_prepared_turn(
+                deps,  # pyright: ignore[reportArgumentType]
+                prepared,  # pyright: ignore[reportArgumentType]
+                tenant_id=None,  # pyright: ignore[reportArgumentType]
+                platform="discord",
+                thread_id="t",
+                external_user_id="u",
+                user_message="m",
+                lifecycle=None,  # pyright: ignore[reportArgumentType]
+                cancel=asyncio.Event(),
+                reseed_user_message=None,  # pyright: ignore[reportArgumentType]
+                recovery_lifecycle=None,  # pyright: ignore[reportArgumentType]
+            )
+        return dict(structlog.contextvars.get_contextvars())
+
+    task = asyncio.create_task(caller())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    await asyncio.sleep(0.05)
+    task.cancel()  # a second cancel lands while the finally is revoking
+    left = await task
+    released.set()
+    assert left == {"backend": "the caller's"}, "the turn's fields never outlive it"
+
+
+@pytest.mark.usefixtures("no_agent_notices")
+async def test_a_failing_revocation_still_restores_the_callers_log_fields(
+    monkeypatch,
+):
+    import asyncio
+    from types import SimpleNamespace
+
+    import structlog
+    from daimon.core.turn import run as run_module
+
+    async def finalize() -> None:
+        raise RuntimeError("revocation failed")
+
+    async def forever(*_args, **_kwargs):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(run_module, "run_prepared_turn_impl", forever)
+    observation = SimpleNamespace(
+        activate=lambda: __import__("contextlib").nullcontext(),
+        finish=lambda **_: None,
+        thread_id=None,
+        model_by_session={},
+    )
+    prepared = SimpleNamespace(
+        admission=SimpleNamespace(
+            observation=observation,
+            account_id=None,
+            agent=SimpleNamespace(id="agent"),
+            backend_footer_profile=None,
+            backend_revision=None,
+        ),
+        ma_session_id="session",
+        _finalize=finalize,
+    )
+    deps = SimpleNamespace(
+        backend_selection_enabled=False,
+        running_turns=SimpleNamespace(track=lambda: __import__("contextlib").nullcontext()),
+    )
+
+    async def caller() -> dict[str, object]:
+        structlog.contextvars.bind_contextvars(backend="the caller's")
+        with contextlib.suppress(asyncio.CancelledError, RuntimeError):
+            await run_module.run_prepared_turn(
+                deps,  # pyright: ignore[reportArgumentType]
+                prepared,  # pyright: ignore[reportArgumentType]
+                tenant_id=None,  # pyright: ignore[reportArgumentType]
+                platform="discord",
+                thread_id="t",
+                external_user_id="u",
+                user_message="m",
+                lifecycle=None,  # pyright: ignore[reportArgumentType]
+                cancel=asyncio.Event(),
+                reseed_user_message=None,  # pyright: ignore[reportArgumentType]
+                recovery_lifecycle=None,  # pyright: ignore[reportArgumentType]
+            )
+        return dict(structlog.contextvars.get_contextvars())
+
+    task = asyncio.create_task(caller())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    left = await task
+    assert left == {"backend": "the caller's"}, "the turn's fields never outlive it"
+
+
+@pytest.mark.usefixtures("no_agent_notices")
 async def test_a_finalizer_outliving_its_wait_stays_referenced_and_its_failure_is_logged(
     monkeypatch,
 ):
@@ -609,6 +766,7 @@ async def test_a_finalizer_outliving_its_wait_stays_referenced_and_its_failure_i
     from types import SimpleNamespace
 
     from daimon.core.turn import run as run_module
+    from daimon.core.turn.state import TurnState
     from structlog.testing import capture_logs
 
     release = asyncio.Event()
@@ -618,7 +776,9 @@ async def test_a_finalizer_outliving_its_wait_stays_referenced_and_its_failure_i
         raise RuntimeError("revocation failed")
 
     async def answered(*_args, **_kwargs):
-        return SimpleNamespace(ma_session_id="session", state=None, recovered=False)
+        return SimpleNamespace(
+            ma_session_id="session", state=TurnState(), recovered=False, continuity=None
+        )
 
     monkeypatch.setattr(run_module, "run_prepared_turn_impl", answered)
     monkeypatch.setattr(run_module, "_FINALIZE_TIMEOUT_S", 0.05)
@@ -626,6 +786,7 @@ async def test_a_finalizer_outliving_its_wait_stays_referenced_and_its_failure_i
         activate=lambda: __import__("contextlib").nullcontext(),
         finish=lambda **_: None,
         thread_id=None,
+        model_by_session={},
     )
     prepared = SimpleNamespace(
         admission=SimpleNamespace(
@@ -636,6 +797,7 @@ async def test_a_finalizer_outliving_its_wait_stays_referenced_and_its_failure_i
             origin_thread_id=None,
             agent=SimpleNamespace(id="agent"),
             backend_footer_profile=None,
+            backend_revision=None,
         ),
         ma_session_id="session",
         _finalize=slow_failing_finalize,
@@ -664,3 +826,164 @@ async def test_a_finalizer_outliving_its_wait_stays_referenced_and_its_failure_i
     assert not run_module._PENDING_FINALIZERS  # pyright: ignore[reportPrivateUsage]
     events = [entry["event"] for entry in logs]
     assert "turn.finalize_timeout" in events and "turn.finalize_failed" in events
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_gemini_root_offers_and_runs_the_hand_off_tools(template):
+    """J6: a Gemini root has the same switch and hand-off tools as a GPT one."""
+    from .test_openai_template_mcp import handoff_mcp, live_token, offered_and_run
+
+    request, quote, *_ = template
+    assert "mcp" not in quote.declared_drops
+    async with handoff_mcp(request) as app:
+        await offered_and_run(app, await live_token(request))
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_the_switch_tool_is_offered_in_a_template_its_card_posted_by_daimon(
+    template, monkeypatch
+):
+    """The switch tool posts Daimon's own card, so a template may call it; the rest stay out."""
+    from daimon.core.mcp_oauth import discovery
+
+    request, *_ = template
+    catalogue = frozenset({"search_tools", "call_tool", "request_agent_backend_switch", *GATED})
+
+    async def listed(_url, _token):
+        return catalogue
+
+    monkeypatch.setattr(discovery, "list_mcp_tools", listed)
+    from daimon.core.turn.runtime_manifest import capture_preparation_source
+
+    captured = await capture_preparation_source(request, fresh=True)
+    (representation,) = [r for r in captured.representations if r.target.mcp_servers]
+    (connection,) = representation.target.mcp_servers
+    allowed = set(connection.tool_policy["allowed_tools"])  # pyright: ignore[reportArgumentType]
+    assert allowed == {"search_tools", "call_tool", "request_agent_backend_switch"}
+    assert set(representation.unavailable_mcp_tools) == {f"mcp_tool:daimon-mcp:{t}" for t in GATED}
+
+
+@pytest.fixture
+def consent_recorded_before_self_cards(monkeypatch):
+    """While on, gated-tool handling is as before Daimon posted the switch card itself.
+
+    The catalogue also lists the switch tool and one other gated tool, so the
+    consent has something to drop.
+    """
+    from daimon.core import tool_safety
+    from daimon.core.mcp_oauth import discovery
+
+    listed = discovery.list_mcp_tools
+
+    async def with_gated_tools(url, token):
+        return frozenset(await listed(url, token)) | {"request_agent_backend_switch", "add_skill"}
+
+    monkeypatch.setattr(discovery, "list_mcp_tools", with_gated_tools)
+    real = tool_safety.self_carded_tools
+    state = {"old": True}
+    monkeypatch.setattr(
+        tool_safety, "self_carded_tools", lambda: frozenset() if state["old"] else real()
+    )
+    return state
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_consent_that_dropped_the_switch_tool_still_prepares(
+    consent_recorded_before_self_cards, template
+):
+    """Agents switched before the switch tool was offered keep working without re-confirming."""
+    request, quote, *_ = template
+    switch_drop = "mcp_tool:daimon-mcp:request_agent_backend_switch"
+    assert switch_drop in quote.declared_drops, "the consent was recorded the old way"
+    consent_recorded_before_self_cards["old"] = False
+    selected, _ = await _prepared(request)
+    allowed = _connection(selected).tool_policy["allowed_tools"]
+    assert "request_agent_backend_switch" in allowed, "the tool is offered from now on"
+    assert switch_drop not in selected.target_spec.declared_drops
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_an_old_consent_with_any_other_difference_still_needs_a_new_confirmation(
+    consent_recorded_before_self_cards, template, monkeypatch
+):
+    from daimon.core import tool_safety
+    from daimon.core.channel_backend import AgentBackendRefused
+
+    request, *_ = template
+    consent_recorded_before_self_cards["old"] = False
+    # One more gated tool now offered as well: more than the switch tool changed.
+    monkeypatch.setattr(
+        tool_safety,
+        "self_carded_tools",
+        lambda: frozenset({"request_agent_backend_switch", "add_skill"}),
+    )
+    with pytest.raises((AgentBackendRefused, AdmissionDenied)):
+        await _prepared(request)
+
+
+@pytest.fixture
+def consent_recorded_before_template_tools(monkeypatch):
+    """While the consent is recorded, a template maps none of the source's tools and
+    drops them whole, as before #1483."""
+    import mux.profiles
+    from mux.errors import InvalidConfig
+
+    real = mux.profiles.represented_execution_tools
+
+    def unmapped(profile, tools):
+        raise InvalidConfig("as before #1483")
+
+    monkeypatch.setattr(mux.profiles, "represented_execution_tools", unmapped)
+    return lambda: monkeypatch.setattr(mux.profiles, "represented_execution_tools", real)
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_consent_that_dropped_tools_still_prepares_and_now_keeps_them(
+    consent_recorded_before_template_tools, template
+):
+    """PRE fleet-gemini (smoke 4acca048): switched before #1483, its consent named
+    `tools` a whole loss. It keeps working without re-confirming, and runs with
+    code execution from now on."""
+    request, quote, *_ = template
+    assert "tools" in quote.declared_drops, "the consent was recorded the old way"
+    assert not any(drop.startswith("builtin_tool:") for drop in quote.declared_drops)
+    consent_recorded_before_template_tools()  # today's template maps the tools
+    selected, _ = await _prepared(request)
+    assert "tools" not in selected.target_spec.declared_drops
+    assert [tool.name for tool in selected.target_spec.tools or ()] == ["code_execution"]
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_consent_that_dropped_tools_and_the_switch_tool_still_prepares(
+    consent_recorded_before_self_cards, consent_recorded_before_template_tools, template
+):
+    request, quote, *_ = template
+    switch_drop = "mcp_tool:daimon-mcp:request_agent_backend_switch"
+    assert {"tools", switch_drop} <= set(quote.declared_drops)
+    consent_recorded_before_self_cards["old"] = False
+    consent_recorded_before_template_tools()
+    selected, _ = await _prepared(request)
+    spec = selected.target_spec
+    assert not {"tools", switch_drop} & set(spec.declared_drops)
+    assert [tool.name for tool in spec.tools or ()] == ["code_execution"]
+    assert "request_agent_backend_switch" in _connection(selected).tool_policy["allowed_tools"]
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_an_old_consent_with_tools_and_any_other_difference_still_needs_a_new_confirmation(
+    consent_recorded_before_self_cards,
+    consent_recorded_before_template_tools,
+    template,
+    monkeypatch,
+):
+    """Tools are explained by #1483; one more gated tool offered is not: a fresh card."""
+    from daimon.core import tool_safety
+    from daimon.core.channel_backend import AgentBackendRefused
+
+    request, quote, *_ = template
+    assert "tools" in quote.declared_drops, "the consent was recorded the old way"
+    consent_recorded_before_template_tools()
+    # The switch tool stays dropped as consented; add_skill is newly offered.
+    monkeypatch.setattr(tool_safety, "self_carded_tools", lambda: frozenset({"add_skill"}))
+    with pytest.raises((AgentBackendRefused, AdmissionDenied)):
+        await _prepared(request)

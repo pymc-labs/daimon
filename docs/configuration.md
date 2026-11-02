@@ -27,14 +27,17 @@ typo is silent — check the spelling here.
 - [Ops](#ops)
 - [MCP Server](#mcp-server)
 - [MCP OAuth](#mcp-oauth)
+- [MCP Identity](#mcp-identity)
 - [Hub](#hub)
 - [Agent Identity](#agent-identity)
 - [Environment](#environment)
 - [Discord](#discord)
 - [Thread Participation](#thread-participation)
 - [Progress Plans](#progress-plans)
+- [Mcp Context](#mcp-context)
 - [Slack](#slack)
 - [Teams](#teams)
+- [Web](#web)
 - [GitHub](#github)
 - [GitHub App](#github-app)
 - [Repo Memory](#repo-memory)
@@ -51,7 +54,6 @@ typo is silent — check the spelling here.
 - [Turn](#turn)
 - [Thread Naming](#thread-naming)
 - [Turn Queue](#turn-queue)
-- [Fleet](#fleet)
 - [Watches](#watches)
 - [Private Channel Messages](#private-channel-messages)
 - [Tool Safety](#tool-safety)
@@ -290,8 +292,8 @@ Read from `daimon.core.config.AnthropicSettings`. Prefix `DAIMON_ANTHROPIC__`.
 `SecretStr | None` · optional · default unset · secret
 
 Anthropic API key used to authenticate all Managed Agents SDK calls. Required unless
-this deployment is OpenAI-only (see docs/self-hosting.md's 'Self-host on OpenAI'), in
-which case leave it unset.
+this deployment is OpenAI-only (see docs/providers.md's 'Run on OpenAI'), in which case
+leave it unset.
 
 ### `DAIMON_ANTHROPIC__BASE_URL`
 
@@ -379,6 +381,13 @@ Both fields are optional so deployments that don't run the MCP adapter keep work
 `SecretStr | None` · **required to run the MCP adapter** · default unset · secret
 
 Secret used to sign and verify MCP bearer tokens. Required to run the MCP adapter.
+
+### `DAIMON_MCP__MEMBER_COPY_LIMIT`
+
+`int` · optional · default `5`
+
+How many live copies one member may own of agents they copied while talking to them
+(fork_agent without admin). Admins are not limited. 0 turns member copies off.
 
 ### `DAIMON_MCP__LEGACY_TOKEN_CUTOFF`
 
@@ -474,6 +483,38 @@ is on that host; it then also asks for offline_access when the authorization ser
 offers it. Every other sign-in registers a client dynamically. Default: [] (always
 register).
 
+## MCP Identity
+
+Read from `daimon.core.config.McpIdentitySettings`. Prefix `DAIMON_MCP_IDENTITY__`.
+
+### `DAIMON_MCP_IDENTITY__SIGNING_KEY`
+
+`SecretStr | None` · optional · default unset · secret
+
+Ed25519 private key that signs caller identities for the servers in
+DAIMON_MCP_IDENTITY__SERVERS: an unencrypted PKCS#8 PEM or a base64url 32-byte seed.
+Generate one with `daimon mcp identity-keygen`, which also prints the public key to
+register with each server. Read by the mcp service, and by the web service when a
+DAIMON_WEB__NODES__* node names a server.
+
+### `DAIMON_MCP_IDENTITY__SERVERS`
+
+`list[SignedIdentityServer]` · optional · default unset
+
+Remote MCP servers that opt in to signed identity. A JSON array; each entry has name
+(lowercase letters, digits and dashes), url (the server's https MCP endpoint), issuer
+(the issuer id the server gave you), audience (the server's base URL) and optionally
+workspaces, the only workspaces whose agents may use it, each
+"&lt;platform&gt;:&lt;workspace id&gt;" (for example "discord:&lt;guild id&gt;";
+default: every workspace). Optional ca_certificate is a public PEM CA certificate for a
+private HTTPS server. Attach such a server to an agent at &lt;app root&gt;/mcp-
+identity/&lt;name&gt; instead of its own URL: Daimon forwards each request with a short-
+lived EdDSA token naming the agent, the workspace and, for a person's turn, who asked,
+the channel and the message. Daimon names the asker only while that person's turn is
+live in the calling session's thread. The MCP service requires
+DAIMON_MCP_IDENTITY__SIGNING_KEY; chat workers use the same server policy without the
+signing key. Default: [] (off).
+
 ## Hub
 
 Read from `daimon.core.config.HubSettings`. Prefix `DAIMON_HUB__`.
@@ -490,9 +531,8 @@ otherwise invalidate every issued login).
 
 `str | None` · optional · default unset
 
-Slack OAuth app client ID for the /slack/mcp login mount. Register
-&lt;DAIMON_MCP__PUBLIC_URL origin&gt;/slack/auth/callback as a redirect URL on the Slack
-app.
+Slack OAuth app client ID for the /slack/mcp login mount. Register &lt;hub
+origin&gt;/slack/auth/callback as a redirect URL on the Slack app (see public_url).
 
 ### `DAIMON_HUB__SLACK_CLIENT_SECRET`
 
@@ -504,15 +544,26 @@ Slack OAuth app client secret for the /slack/mcp login mount.
 
 `str | None` · optional · default unset
 
-Discord OAuth app client ID for the /discord/mcp login mount. Register
-&lt;DAIMON_MCP__PUBLIC_URL origin&gt;/discord/auth/callback as a redirect URI on the
-Discord app.
+Discord OAuth app client ID for the /discord/mcp login mount. Register &lt;hub
+origin&gt;/discord/auth/callback as a redirect URI on the Discord app (see public_url).
+Web app sign-in with Discord uses this app too: also register &lt;web public
+url&gt;/auth/discord/callback.
 
 ### `DAIMON_HUB__DISCORD_CLIENT_SECRET`
 
 `SecretStr | None` · optional · default unset · secret
 
 Discord OAuth app client secret for the /discord/mcp login mount.
+
+### `DAIMON_HUB__PUBLIC_URL`
+
+`HttpUrl | None` · optional · default unset
+
+Origin the login mounts are served from, e.g. https://mcp.example.com. It becomes the
+OAuth issuer and callback base, so it must be the address coding agents connect to.
+Unset, the mounts use the origin of DAIMON_MCP__PUBLIC_URL. Set it to give the mounts a
+public hostname without moving the agents' /mcp endpoint, whose URL is stored in every
+agent's credential vault.
 
 ### `DAIMON_HUB__ALLOWED_CLIENT_REDIRECT_URIS`
 
@@ -817,6 +868,52 @@ may add one-line updates on what it found and does next. off: shown only where a
 workspace, channel or thread is turned on. disabled: never shown, and cannot be turned
 on. on: shown everywhere unless turned off below.
 
+## Mcp Context
+
+Read from `daimon.core.config.McpContextSettings`. Prefix `DAIMON_MCP_CONTEXT__`.
+
+Per-turn context: each chat message is first shown to the agent's MCP servers that offer
+a context tool, and what they answer goes in front of it.
+
+Context from connected MCP servers on each chat turn. See McpContextSettings.
+
+### `DAIMON_MCP_CONTEXT__ENABLED`
+
+`bool` · optional · default `True`
+
+Before each chat turn, send the person's message to every MCP server the agent was
+connected to with a shared token that offers the context tool, and put each non-empty
+answer in front of the message as quoted data. A server without the tool is unaffected:
+it is looked up once in the background, never waited on, then left alone for six hours
+(one whose lookup fails is tried again after ten minutes, then ever less often). The
+servers receive the message text, without mentions, and an opaque id for the thread
+(rotating the first crypto key changes it). The call follows the agent's toolset and
+tool safety: with tool safety on, mark the tool a read in DAIMON_TOOL_SAFETY__EFFECTS
+(`&lt;server&gt;/context`). Unprompted replies, held turns, channels shared with another
+organisation and sealed channels ask nothing.
+
+### `DAIMON_MCP_CONTEXT__TENANTS`
+
+`list[UUID]` · optional · default unset
+
+Limit per-turn context to these tenants, by tenant UUID. Empty: every tenant. Configure
+DAIMON_MCP_CONTEXT__TENANTS as a JSON array.
+
+### `DAIMON_MCP_CONTEXT__TOOL`
+
+`str` · optional · default `context`
+
+Name of the tool to call. A server offers it when the tool's input takes a string
+`prompt` and a string `session` (the thread's id) and requires nothing else.
+
+### `DAIMON_MCP_CONTEXT__TIMEOUT_S`
+
+`float` · optional · default `2.0`
+
+Seconds a turn waits for each server's answer. A server that fails or is slower adds
+nothing, and one that failed is not asked again for a minute. A server's MCP session is
+reused for ten minutes, so most turns cost one request per server that offers the tool.
+
 ## Slack
 
 Read from `daimon.core.config.SlackSettings`. Prefix `DAIMON_SLACK__`.
@@ -966,6 +1063,107 @@ get the admin role in turns, create routines, replace shared keys, top up and se
 everyone's usage. Adding an admin means making them an owner of that team; no redeploy.
 The app must be installed in that team. To find the ID, open the team's ⋯ menu in Teams,
 choose Get link to team and copy the groupId parameter. Unset: nobody is an admin.
+
+## Web
+
+Read from `daimon.core.config.WebSettings`. Prefix `DAIMON_WEB__`.
+
+The web app: its server, Discord sign-in and connection nodes.
+
+Optional so deployments without the web app boot unchanged; the block is ``None`` when
+no ``DAIMON_WEB__*`` variable is set.
+
+This whole block is optional: it stays unset until at least one of its variables is set,
+and the features that read it are inactive while it is.
+
+### `DAIMON_WEB__PUBLIC_URL`
+
+`HttpUrl` · **required**
+
+Address people open the web app at, with no path. Sign-in redirects and the origin check
+on writes use it. Must be https unless `dev` is on.
+
+### `DAIMON_WEB__PORT`
+
+`int` · optional · default `8780`
+
+Port the web process listens on.
+
+### `DAIMON_WEB__STATIC_DIR`
+
+`Path | None` · optional · default unset
+
+Folder holding the built web app. Unset: the `static` folder inside the web adapter
+package, where the image build puts it.
+
+### `DAIMON_WEB__MODULES`
+
+`tuple['chat' | 'agents' | 'credits' | 'admin', ...]` · optional · default `chat,agents,credits,admin`
+
+Sections of the web app that are on, comma-separated: chat, agents, credits, admin.
+
+### `DAIMON_WEB__NODES__DATA_SERVER__IDENTITY_SERVER`
+
+`str | None` · optional · default unset
+
+Name of the `DAIMON_MCP_IDENTITY__SERVERS` entry for the server. Its MCP relay is what a
+connected agent gets; its audience is the server's base URL, which serves the API and
+`/oauth/token`. Required by the web service.
+
+### `DAIMON_WEB__NODES__DATA_SERVER__LABEL`
+
+`str` · optional · default `Data server`
+
+Name the agent editor shows.
+
+### `DAIMON_WEB__NODES__DATA_SERVER__CLIENT_ID`
+
+`str | None` · optional · default unset
+
+OAuth client the web app exchanges tokens as. Required by the web service.
+
+### `DAIMON_WEB__NODES__DATA_SERVER__CLIENT_SECRET`
+
+`SecretStr | None` · optional · default unset · secret
+
+Secret of that client. Required by the web service.
+
+### `DAIMON_WEB__NODES__DATA_SERVER__SCOPE`
+
+`str` · optional · default `openid`
+
+Scopes asked for in the token exchange.
+
+### `DAIMON_WEB__SESSION_TTL_DAYS`
+
+`int` · optional · default `30`
+
+Days a sign-in lasts, counted from sign-in; visits never extend it.
+
+### `DAIMON_WEB__RENDER_INTERVAL_S`
+
+`float` · optional · default `0.3`
+
+Seconds between updates while an answer streams in.
+
+### `DAIMON_WEB__MAX_CONCURRENT_TURNS_PER_TENANT`
+
+`int` · optional · default `3`
+
+Most web turns one workspace may run at once.
+
+### `DAIMON_WEB__MANUAL_TOPUP`
+
+`bool` · optional · default `False`
+
+Let admins add credit by hand instead of paying, for staging deployments.
+
+### `DAIMON_WEB__DEV`
+
+`bool` · optional · default `False`
+
+Local development only: serves the fake sign-in and dev routes. Refused unless the
+public URL is localhost or a loopback address.
 
 ## GitHub
 
@@ -1366,21 +1564,20 @@ payment before use.
 `Decimal` · optional · default `20`
 
 Most a tenant may spend each UTC day on any one Gemini model, in provider USD at list
-price, counted across every agent turn and fleet worker. A Gemini agent turn has no
-token envelope and its usage reaches no ledger debit, so this is the guard. Checked as
-each turn or worker starts, for its first request's model and any Flash fallback of it,
-never mid-turn; a model with no current tariff is refused, and an unpriced fallback
-never runs. It resets at midnight UTC. 0 allows no Gemini turns.
+price, counted across every agent turn. A Gemini agent turn has no token envelope and
+its usage reaches no ledger debit, so this is the guard. Checked as each turn starts,
+for its first request's model and any Flash fallback of it, never mid-turn; a model with
+no current tariff is refused, and an unpriced fallback never runs. It resets at midnight
+UTC. 0 allows no Gemini turns.
 
 ### `DAIMON_BILLING__OPENAI_DAILY_MODEL_CAP_USD`
 
 `Decimal` · optional · default `20`
 
 Most a tenant may spend each UTC day on any one OpenAI model, in provider USD at list
-price, counted across every agent turn and fleet worker. OpenAI sessions carry no native
-spend limit on this project, so this is the guard. Checked as each turn or worker
-starts, never mid-turn; a model with no current tariff is refused. It resets at midnight
-UTC. 0 allows no OpenAI turns.
+price, counted across every agent turn. OpenAI sessions carry no native spend limit on
+this project, so this is the guard. Checked as each turn starts, never mid-turn; a model
+with no current tariff is refused. It resets at midnight UTC. 0 allows no OpenAI turns.
 
 ## Support
 
@@ -1586,52 +1783,6 @@ refused with the plain capacity notice.
 
 Seconds a queued turn may wait for a slot. A safeguard only: the turn then leaves the
 queue and its card ends with the ordinary error.
-
-## Fleet
-
-Read from `daimon.core.config.FleetSettings`. Prefix `DAIMON_FLEET__`.
-
-Orchestrated worker fleets (``DAIMON_FLEET__*``). On by default.
-
-An orchestrator turn fans out to worker turns on any enabled backend. Their concurrency
-is a pool of its own, counted from the durable worker rows, so a fan-out never takes the
-chat turns' slots. Each agent still needs its own fleet grant and stays inside the
-tenant's budgets.
-
-### `DAIMON_FLEET__ENABLED`
-
-`bool` · optional · default `True`
-
-Allow orchestrator turns to start worker fleets. On by default. Emergency stop only:
-false refuses new fleets and new workers before they are funded, and holds finished-
-worker wakes until it is on again; the run's deadline sweep ends what is left. Fleets
-also stop when the turn path or either backend flag is off.
-
-### `DAIMON_FLEET__MAX_WORKERS_PER_RUN`
-
-`int` · optional · default `8`
-
-Most workers one fleet run may start.
-
-### `DAIMON_FLEET__MAX_CONCURRENT_WORKERS_PER_TENANT`
-
-`int` · optional · default `3`
-
-Most worker turns one tenant may have starting or running at once, across all its fleet
-runs and processes. Separate from the chat turn cap.
-
-### `DAIMON_FLEET__MAX_CONCURRENT_WORKERS`
-
-`int` · optional · default `6`
-
-Most worker turns one process runs at once, across all tenants.
-
-### `DAIMON_FLEET__MAX_ATTEMPTS`
-
-`int` · optional · default `2`
-
-Most times in total a worker is started when it keeps being lost before its turn is
-sent. A worker whose turn was sent is reconciled, never resent.
 
 ## Watches
 

@@ -303,7 +303,7 @@ async def test_retried_submission_of_a_consumed_request_writes_nothing_and_recor
         "the one queued turn is the one the consuming submission recorded"
     )
 
-    retry_message: Any = second.followup.send.call_args.args[0]
+    retry_message: Any = second.followup.send.call_args.kwargs["embed"].description
     assert "no longer valid" in retry_message, (
         "the retry must tell the person the request is spent rather than silently no-op"
     )

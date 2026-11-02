@@ -1052,3 +1052,88 @@ async def test_the_operator_assigns_shows_and_clears_an_owner(operator):
     async with rt.sessionmaker() as db:
         rows = await security_audit.list_events(db, tenant_id=tenant.id, tool_name="agent_owner")
     assert sorted(row.operation for row in rows) == ["assign", "clear"]
+
+
+async def test_the_operator_adds_shows_and_removes_a_co_owner(operator):
+    from daimon.adapters.cli.commands.agents import agents_owner
+    from daimon.core.agent_ownership import agent_co_owners, owns_agent
+    from daimon.core.errors import StoreError
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.testing.factories import (
+        make_account,
+        make_platform_principal,
+        mark_principal_foreign,
+    )
+
+    rt, tenant, agent, *_ = operator
+    async with rt.sessionmaker.begin() as db:
+        primary = await make_account(db, tenant=tenant)
+        await make_platform_principal(
+            db, tenant=tenant, account=primary, platform="discord", external_id="41"
+        )
+        co_owner = await make_account(db, tenant=tenant)
+        await make_platform_principal(
+            db, tenant=tenant, account=co_owner, platform="discord", external_id="42"
+        )
+        outsider = await make_account(db, tenant=tenant)
+        await make_platform_principal(
+            db, tenant=tenant, account=outsider, platform="discord", external_id="43"
+        )
+        await mark_principal_foreign(db, account_id=outsider.id)
+    agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=agent.id)
+    output = StringIO()
+    console = Console(file=output, width=240)
+    await agents_owner(
+        rt=rt, console=console, name="Research", change="set", account=str(primary.id), yes=True
+    )
+    await agents_owner(
+        rt=rt,
+        console=console,
+        name="Research",
+        change="add",
+        platform="discord",
+        user="42",
+        yes=True,
+    )
+    assert await agent_co_owners(rt.sessionmaker, tenant_id=tenant.id, agent_id=agent_id) == [
+        co_owner.id
+    ]
+    async with rt.sessionmaker() as db:
+        assert await owns_agent(
+            db, tenant_id=tenant.id, ma_agent_id=agent.id, account_id=co_owner.id
+        )
+    output.truncate(0)
+    output.seek(0)
+    await agents_owner(rt=rt, console=console, name="Research")
+    shown = output.getvalue()
+    assert f"owner {primary.id}" in shown and f"co-owner {co_owner.id}" in shown
+    with pytest.raises(StoreError, match="another organisation"):
+        await agents_owner(
+            rt=rt,
+            console=console,
+            name="Research",
+            change="add",
+            platform="discord",
+            user="43",
+            yes=True,
+        )
+    await agents_owner(
+        rt=rt,
+        console=console,
+        name="Research",
+        change="remove",
+        platform="discord",
+        user="42",
+        yes=True,
+    )
+    assert await agent_co_owners(rt.sessionmaker, tenant_id=tenant.id, agent_id=agent_id) == []
+    async with rt.sessionmaker() as db:
+        rows = await security_audit.list_events(db, tenant_id=tenant.id, tool_name="agent_owner")
+    # Each co-owner change writes the operator's row and one keyed by the co-owner.
+    assert sorted(row.operation for row in rows) == [
+        "add_co_owner",
+        "add_co_owner",
+        "assign",
+        "remove_co_owner",
+        "remove_co_owner",
+    ]

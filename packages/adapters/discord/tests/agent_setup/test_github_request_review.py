@@ -84,7 +84,10 @@ async def test_shared_review_requires_live_admin_and_returns_ephemeral_detail(
     interaction.edit_original_response = AsyncMock()
     runtime = SimpleNamespace(sessionmaker=_Sessions())
     assert await module.handle_request_card(interaction, runtime)  # type: ignore[arg-type]
-    assert "Only a server admin" in interaction.edit_original_response.await_args.kwargs["content"]
+    assert (
+        "Only a server admin"
+        in interaction.edit_original_response.await_args.kwargs["embed"].description
+    )
     sync.assert_not_awaited()
     admin.return_value = True
     interaction.edit_original_response.reset_mock()
@@ -226,7 +229,9 @@ async def test_uncached_member_decision_edits_requester_thread_card(
     interaction.response.defer.assert_awaited_once_with(thinking=False)
     interaction.response.edit_message.assert_not_awaited()
     if cap_error:
-        assert "Remove one first." in interaction.followup.send.await_args.args[0]
+        assert (
+            "Remove one first." in interaction.followup.send.await_args.kwargs["embed"].description
+        )
         interaction.edit_original_response.assert_not_awaited()
     else:
         assert interaction.edit_original_response.await_args.kwargs["embed"] is not None

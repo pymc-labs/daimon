@@ -166,6 +166,7 @@
                 "server_name": "notion"
               }
             ],
+            "package_install_error": null,
             "rate_limit_until": null,
             "retrying_error": null,
             "seen_event_ids": [
@@ -218,6 +219,7 @@
                 "server_name": "notion"
               }
             ],
+            "package_install_error": null,
             "rate_limit_until": null,
             "retrying_error": null,
             "seen_event_ids": [

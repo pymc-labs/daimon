@@ -8,10 +8,11 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 from secrets import randbits
 from typing import Any, cast
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import discord
 import pytest
-from daimon.adapters.discord.__main__ import start_when_leased
+from daimon.adapters.discord.__main__ import connect_gateway, start_when_leased
 from daimon.adapters.discord.runtime import DiscordRuntime, hold_worker_owner
 from daimon.core.config import McpSettings
 from daimon.core.ma_resolver import new_resolver_cache
@@ -21,6 +22,7 @@ from daimon.core.stores.discord_gateway_lease import GatewayLease
 from daimon.core.stores.worker_ownership import OWNER_LOSS_GRACE_S
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from daimon.testing.turn_fakes import deps_for
+from discord.ext import commands
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, async_sessionmaker
 
@@ -575,3 +577,60 @@ def test_heartbeat_grace_outlasts_the_holders_fail_stop_bound() -> None:
         OWNER_PROBE_INTERVAL_S + OWNER_PROBE_TIMEOUT_S + OWNER_RETRY_BUDGET_S + OWNER_HARD_EXIT_S
     )
     assert fail_stop_bound < OWNER_LOSS_GRACE_S
+
+
+def _intents_bot(*, members: bool) -> MagicMock:
+    bot = MagicMock()
+    bot.intents = discord.Intents.default()
+    bot.intents.members = members
+    bot.start = AsyncMock(side_effect=discord.PrivilegedIntentsRequired(None))
+    bot.connect = AsyncMock()
+    return bot
+
+
+async def test_without_the_members_intent_the_bot_connects_without_it() -> None:
+    """The Server Members intent is optional: refused, the bot connects again without it
+    and member lists stay unloaded."""
+    bot = _intents_bot(members=True)
+
+    with patch(
+        "daimon.adapters.discord.__main__.members_store.clear_platform_lists", AsyncMock()
+    ) as clear:
+        await connect_gateway(bot, "token")
+
+    bot.connect.assert_awaited_once()
+    clear.assert_awaited_once()
+    assert clear.await_args is not None
+    assert clear.await_args.kwargs == {"platform": "discord"}, (
+        "lists loaded while the intent was on are cleared, so sign-ins decide again"
+    )
+    assert bot._connection._intents.members is False, "identifies again without members"
+    assert bot._connection._intents.message_content == bot.intents.message_content
+
+
+async def test_a_refusal_without_the_members_intent_still_fails() -> None:
+    """Message Content cannot be dropped: the bot could not read mentions."""
+    bot = _intents_bot(members=False)
+
+    with pytest.raises(discord.PrivilegedIntentsRequired):
+        await connect_gateway(bot, "token")
+    bot.connect.assert_not_awaited()
+
+
+async def test_the_members_intent_swap_reaches_a_real_bots_intents() -> None:
+    """The swap writes a private attribute of discord.py's connection state; on a real
+    bot it must still turn the public `intents.members` off, or a rename there would
+    leave the bot identifying with the intent unnoticed."""
+    intents = discord.Intents.default()
+    intents.members = True
+    bot = commands.Bot(command_prefix="!", intents=intents)
+    assert bot.intents.members is True, "the bot starts with the intent on"
+    bot.runtime = MagicMock()  # pyright: ignore[reportAttributeAccessIssue]  # stand-in for DaimonRuntime
+    bot.start = AsyncMock(side_effect=discord.PrivilegedIntentsRequired(None))  # pyright: ignore[reportAttributeAccessIssue]
+    bot.connect = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
+
+    with patch("daimon.adapters.discord.__main__.members_store.clear_platform_lists", AsyncMock()):
+        await connect_gateway(cast("Any", bot), "token")
+
+    assert bot.intents.members is False, "the real bot no longer asks for the members intent"
+    bot.connect.assert_awaited_once()

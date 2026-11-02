@@ -133,9 +133,12 @@ async def test_modal_lookup_timeout_replies_once_and_stops(
         0.2,
     )
     assert await item.interaction_check(interaction) is False
-    interaction.response.send_message.assert_awaited_once_with(
-        "That took too long. Try the button again.", ephemeral=True
+    interaction.response.send_message.assert_awaited_once()
+    sent = interaction.response.send_message.await_args.kwargs
+    assert sent["embed"].description == "That took too long. Try the button again.", (
+        "the timeout is the error card"
     )
+    assert sent["ephemeral"] is True, "only the tapper sees it"
     interaction.response.send_modal.assert_not_awaited()
     interaction.followup.send.assert_not_awaited()
 
@@ -208,7 +211,7 @@ async def test_interaction_check_rejects_a_different_user_with_no_state_change(
     allowed = await item.interaction_check(interaction)
 
     assert allowed is False, "a non-requester tap must be rejected"
-    message = interaction.followup.send.call_args.args[0]
+    message = interaction.followup.send.call_args.kwargs["embed"].description
     assert "someone else" in message, "rejection must say the form was for someone else"
 
     async with db_session_factory() as session:
@@ -233,7 +236,7 @@ async def test_interaction_check_rejects_a_tap_from_a_different_message(
     allowed = await item.interaction_check(interaction)
 
     assert allowed is False, "a tap that did not come from the form's own message must be rejected"
-    message = interaction.followup.send.call_args.args[0]
+    message = interaction.followup.send.call_args.kwargs["embed"].description
     assert "no longer available" in message
 
     async with db_session_factory() as session:
@@ -254,7 +257,7 @@ async def test_interaction_check_rejects_unknown_short_id(
     allowed = await item.interaction_check(interaction)
 
     assert allowed is False, "an unknown short id must be rejected"
-    message = interaction.followup.send.call_args.args[0]
+    message = interaction.followup.send.call_args.kwargs["embed"].description
     assert "no longer available" in message
 
 
@@ -271,7 +274,7 @@ async def test_interaction_check_rejects_an_already_submitted_row(
     allowed = await item.interaction_check(interaction)
 
     assert allowed is False, "a submitted row must reject further taps"
-    message = interaction.followup.send.call_args.args[0]
+    message = interaction.followup.send.call_args.kwargs["embed"].description
     assert "already submitted" in message
 
 
@@ -291,7 +294,7 @@ async def test_interaction_check_rejects_an_expired_row(
         "an expired form must say so -- this replaces what would otherwise be "
         "a silent no-op on a stale form"
     )
-    message = interaction.followup.send.call_args.args[0]
+    message = interaction.followup.send.call_args.kwargs["embed"].description
     assert "expired" in message
 
 
@@ -499,7 +502,7 @@ async def test_second_tap_computed_from_the_same_base_row_is_refused_as_stale(
         "the second tap must not erase the answer the first tap recorded"
     )
     interaction_b.edit_original_response.assert_not_awaited()
-    stale_message = interaction_b.followup.send.call_args.args[0]
+    stale_message = interaction_b.followup.send.call_args.kwargs["embed"].description
     assert "changed" in stale_message, "the losing tap must say the form changed under it"
 
 
@@ -558,7 +561,7 @@ async def test_whitespace_only_modal_text_writes_nothing_and_replies(
 
     interaction.edit_original_response.assert_not_awaited()
     interaction.followup.send.assert_awaited_once()
-    message = interaction.followup.send.call_args.args[0]
+    message = interaction.followup.send.call_args.kwargs["embed"].description
     assert message == "Type an answer first."
 
     async with db_session_factory() as session:

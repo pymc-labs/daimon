@@ -54,7 +54,7 @@ from mux.drivers.gemini.mcp_auth import (
     validate_intent,
 )
 from mux.drivers.gemini.normalize import OUTCOMES, actions, event, saved_events
-from mux.drivers.gemini.storage import Records, SessionRecord, Storage, owner
+from mux.drivers.gemini.storage import Records, SessionRecord, Storage, owner, read_records
 from mux.drivers.gemini.transport import (
     NO_TOOLS_FUNCTION,
     NO_TOOLS_TOOL,
@@ -138,17 +138,9 @@ class Base:
         mcp_secrets: MCPSecretResolver | None = None,
         gcs_secrets: GCSSecretResolver | None = None,
         native_agent: Agent | None = None,
-        max_total_tokens: int | None = None,
         max_output_tokens: int | None = None,
-        max_input_tokens: int | None = None,
     ) -> None:
-        self._max_input_tokens = max_input_tokens
-        if max_input_tokens is not None and (
-            type(max_input_tokens) is not int or max_input_tokens <= 0 or max_output_tokens is None
-        ):
-            refuse("worker_token_envelope")
         self._max_output_tokens = max_output_tokens
-        self._max_total_tokens = max_total_tokens
         self._native_agent = native_agent
         self._transport, self._storage, self._account = transport, storage, account_scope_id
         self._mcp_secrets = mcp_secrets
@@ -171,15 +163,10 @@ class Base:
         request = compile_agent(
             agent.spec,
             authenticated_mcp=self._mcp_secrets is not None,
-            max_total_tokens=self._max_total_tokens,
             max_output_tokens=self._max_output_tokens,
         )
         if self._max_output_tokens is not None:
-            if (
-                (self._native_agent is not None and self._max_input_tokens is None)
-                or spec.environment is not None
-                or spec.resources
-            ):
+            if self._native_agent is not None or spec.environment is not None or spec.resources:
                 refuse("model_interaction_resources")
             return request
         if self._native_agent is not None:
@@ -299,13 +286,86 @@ class Base:
             raise ProviderError(
                 "upstream", retryable=False, native_code="interaction_identity_mismatch"
             )
+        self._same_workspace(record, raw)
+        return raw
+
+    @staticmethod
+    def _same_workspace(record: SessionRecord, raw: Object) -> None:
         expected = record.environment_id
         actual = raw.get("environment_id")
         if expected is not None and actual is not None and actual != expected:
             raise ContinuityLost(
                 record.session.binding.id, ("Gemini replaced the reused workspace.",)
             )
-        return raw
+
+    async def _fetch_interactions(
+        self, scope: Scope, session: ResourceRef
+    ) -> tuple[tuple[str, str, Object], ...]:
+        """Read every interaction of the session from the provider, holding no lock.
+
+        The interactions come from a committed snapshot and the GETs run outside the
+        records transaction, so a slow provider read never holds the account's
+        records row (every other session in the account waits on it).
+        """
+        async with read_records(self._storage) as snapshot:
+            seen = self._record(snapshot, scope, session)
+            pending = tuple(seen.interactions.items())
+        fetched: list[tuple[str, str, Object]] = []
+        for interaction, root in pending:
+            fetched.append((interaction, root, await self._get(seen, interaction)))
+        return tuple(fetched)
+
+    def _apply_fetched(
+        self, record: SessionRecord, fetched: tuple[tuple[str, str, Object], ...]
+    ) -> None:
+        """Apply provider reads to the current record, inside the write transaction.
+
+        A read applies only to the interaction it was made for: one removed or
+        replaced since (its root changed) is skipped, never written onto another
+        turn. The workspace is checked again against the current record, and
+        `_observe` ignores a read older than the one already recorded.
+        """
+        for interaction, root, raw in fetched:
+            if record.interactions.get(interaction) != root:
+                continue
+            self._same_workspace(record, raw)
+            self._observe(record, raw, root)
+
+    def _regresses(self, record: SessionRecord, raw: Object, root: str) -> bool:
+        """A read no newer than the recorded one that would undo it.
+
+        Provider reads now run outside the records transaction, so an older read can
+        commit after a fresher one. A seconds-precision `updated` (or the `created`
+        fallback) can't order two such reads; their content can: a reading never
+        un-finalises, never lowers or un-measures a token count, and never re-opens
+        a finished turn.
+        """
+        interaction = string(raw["id"])
+        prior = record.observations.get(interaction)
+        if prior is not None:
+            fresh = observation_from_interaction(
+                raw,
+                record.session.ref,
+                revision=prior.revision,
+                observed_at=now(),
+                root_turn=root,
+                model=record.interaction_models.get(interaction, record.model),
+            )
+            if prior.final and not fresh.final:
+                return True
+            for before, after in (
+                (prior.input_tokens, fresh.input_tokens),
+                (prior.input_cached_tokens, fresh.input_cached_tokens),
+                (prior.output_tokens, fresh.output_tokens),
+                (prior.output_reasoning_tokens, fresh.output_reasoning_tokens),
+            ):
+                if before is not None and (after is None or after < before):
+                    return True
+        return (
+            interaction == record.current
+            and record.session.state == "idle"
+            and string(raw["status"]) not in OUTCOMES
+        )
 
     def _observe(self, record: SessionRecord, raw: Object, root: str) -> None:
         try:
@@ -320,9 +380,23 @@ class Base:
                     raise ValueError("provider timestamp has no timezone")
                 stamp = stamp.astimezone(UTC)
                 watermark = record.native_updated.get(interaction)
+                if watermark is not None and stamp.microsecond == 0:
+                    # The create reply can carry microseconds (23:07:10.142775)
+                    # while every later read says 23:07:10. Ordered exactly, each
+                    # read looks older, is discarded, and the session stays
+                    # running forever. Compare a whole-second read in whole seconds.
+                    watermark = watermark.replace(microsecond=0)
                 if watermark is not None and stamp < watermark:
                     return
+                if (
+                    watermark is not None
+                    and stamp == watermark
+                    and self._regresses(record, raw, root)
+                ):
+                    return
                 record.native_updated[interaction] = stamp
+            elif self._regresses(record, raw, root):
+                return
             env = raw.get("environment_id")
             if env is not None:
                 record.environment_id = string(env)
@@ -483,7 +557,6 @@ def compile_agent(
     spec: AgentSpec,
     *,
     authenticated_mcp: bool = False,
-    max_total_tokens: int | None = None,
     max_output_tokens: int | None = None,
 ) -> Object:
     if spec.model.provider != "gemini" or not spec.model.id or spec.model.options:
@@ -491,7 +564,7 @@ def compile_agent(
     if spec.extensions:
         refuse("agent_extensions")
     if max_output_tokens is not None:
-        if max_total_tokens is not None or spec.tools or spec.skills or spec.mcp_servers:
+        if spec.tools or spec.skills or spec.mcp_servers:
             refuse("model_interaction_resources")
         result: Object = {
             "model": spec.model.id,
@@ -508,10 +581,6 @@ def compile_agent(
         # Omission would enable provider defaults, including billable web tools.
         "tools": [],  # filled below; never sent empty
     }
-    if max_total_tokens is not None:
-        if type(max_total_tokens) is not int or max_total_tokens <= 0:
-            refuse("agent_token_budget")
-        object_value(result["agent_config"])["max_total_tokens"] = max_total_tokens
     if spec.system is not None:
         result["system_instruction"] = spec.system
     if spec.tools is not None or spec.mcp_servers is not None:
@@ -718,7 +787,6 @@ class GeminiSessions(Base):
                 spec,
                 agent.spec.model,
                 request,
-                max_input_tokens=self._max_input_tokens,
                 mcp_server_names=server_names(agent.spec.mcp_servers or ()),
             )
             records.creations[(*owner(scope), key)] = scope.principal_id, digest, id_
@@ -818,9 +886,7 @@ class GeminiEvents(Base):
         mcp_secrets: MCPSecretResolver | None = None,
         gcs_secrets: GCSSecretResolver | None = None,
         native_agent: Agent | None = None,
-        max_total_tokens: int | None = None,
         max_output_tokens: int | None = None,
-        max_input_tokens: int | None = None,
     ) -> None:
         super().__init__(
             transport,
@@ -829,9 +895,7 @@ class GeminiEvents(Base):
             mcp_secrets=mcp_secrets,
             gcs_secrets=gcs_secrets,
             native_agent=native_agent,
-            max_total_tokens=max_total_tokens,
             max_output_tokens=max_output_tokens,
-            max_input_tokens=max_input_tokens,
         )
         self._state_store = state_store
         self._model_for_interaction = model_for_interaction
@@ -970,15 +1034,6 @@ class GeminiEvents(Base):
                 not isinstance(event, UserMessage) for event in events
             ):
                 refuse("model_interaction_resources")
-            if record.max_input_tokens != self._max_input_tokens:
-                refuse("changed_worker_token_envelope")
-            if (self._max_total_tokens is not None or self._max_input_tokens is not None) and (
-                record.current is not None
-                or len(events) != 1
-                or not isinstance(events[0], UserMessage)
-                or events[0].mode != "new_turn"
-            ):
-                refuse("worker_single_interaction")
             if expected_turn is not None and expected_turn != record.session.active_root_turn:
                 raise ProviderError("conflict", retryable=False)
             overrides: Object = {}
@@ -1037,14 +1092,6 @@ class GeminiEvents(Base):
             if record.current is not None and authenticated:
                 # Admission/authentication precedes this native history read.
                 await self._get(record, record.current)
-            if self._max_input_tokens is not None:
-                from mux.drivers.gemini.transport import TokenCountingTransport
-
-                if not isinstance(self._transport, TokenCountingTransport):
-                    refuse("worker_input_token_count")
-                count = await self._transport.count_input_tokens(request)
-                if type(count) is not int or count <= 0 or count > self._max_input_tokens:
-                    refuse("worker_input_token_limit")
             root = record.root if is_result else str(uuid4())
             if root is None:
                 refuse("unknown_function_action")
@@ -1179,7 +1226,10 @@ class GeminiEvents(Base):
                         # Status events alone have no saved final content. Fetch
                         # canonical steps; EOF or a child/native event is never an end.
                         await self.reconcile(scope, session)
-                        async with self._storage.transaction() as records:
+                        # The reconcile just committed this turn's events: read them from
+                        # the committed snapshot, never waiting behind the account's
+                        # writers again (J6g PAKM6G failed busy here).
+                        async with read_records(self._storage) as records:
                             current = self._record(records, scope, session)
                             batch = tuple(e for e in current.events.values() if e.turn_id == root)
                         for item in batch:
@@ -1238,17 +1288,17 @@ class GeminiEvents(Base):
                 await close()
 
     async def list(self, scope: Scope, session: ResourceRef, *, page: PageRequest) -> Page[Event]:
-        async with self._storage.transaction() as records:
+        async with read_records(self._storage) as records:
             return page_values(tuple(self._record(records, scope, session).events.values()), page)
 
     async def reconcile(self, scope: Scope, session: ResourceRef) -> ProjectionSnapshot:
         return await self.retrying(lambda: self._reconcile(scope, session))
 
     async def _reconcile(self, scope: Scope, session: ResourceRef) -> ProjectionSnapshot:
+        fetched = await self._fetch_interactions(scope, session)
         async with self._storage.transaction() as records:
             record = self._record(records, scope, session)
-            for interaction, root in record.interactions.items():
-                self._observe(record, await self._get(record, interaction), root)
+            self._apply_fetched(record, fetched)
             s = record.session
             return ProjectionSnapshot(
                 session=session,
@@ -1327,11 +1377,19 @@ class GeminiEvents(Base):
             )
 
     async def _observe_stop(self, scope: Scope, receipt: CancelReceipt) -> StopObservation:
+        # The provider read runs holding no lock (a stop waits on it repeatedly), then a
+        # short transaction applies it to the same turn's same interaction only.
+        async with read_records(self._storage) as snapshot:
+            seen = self._record(snapshot, scope, receipt.session)
+            if seen.root != receipt.turn_id or seen.current is None:
+                raise ProviderError("conflict", retryable=False)
+            interaction = seen.current
+        raw = await self._get(seen, interaction)
         async with self._storage.transaction() as records:
             record = self._record(records, scope, receipt.session)
-            if record.root != receipt.turn_id or record.current is None:
+            if record.root != receipt.turn_id or record.current != interaction:
                 raise ProviderError("conflict", retryable=False)
-            raw = await self._get(record, record.current)
+            self._same_workspace(record, raw)
             self._observe(record, raw, receipt.turn_id)
             outcome = OUTCOMES.get(string(raw["status"]))
             return StopObservation(

@@ -160,30 +160,6 @@ def test_init_is_idempotent_and_does_not_reprovision(
     assert len(calls) == 2
 
 
-def test_init_conversation_only_profile_skips_environment(
-    monkeypatch: pytest.MonkeyPatch, manifest_path: Path
-) -> None:
-    monkeypatch.setenv("DAIMON_CHANNEL_OPENAI_KEY", "sk-test-not-a-real-key")
-    calls: list[httpx.Request] = []
-    monkeypatch.setattr(
-        "daimon.adapters.cli.commands.openai.configured_transport", fake_transport_factory(calls)
-    )
-
-    openai_init_command(
-        tenant_id=TENANT_ID,
-        project="proj_123",
-        model="gpt-6-luna",
-        manifest=manifest_path,
-        profile="openai.conversation_only",
-        defaults_root=manifest_path.parent / "no-defaults",
-    )
-
-    rows = json.loads(manifest_path.read_text())
-    deployment = OpenAIDeployment.model_validate(rows[0])
-    assert deployment.environment_id is None
-    assert [c.url.path for c in calls] == ["/v1/agents"]
-
-
 def test_init_seeds_every_default_skill_onto_a_persistent_workspace_agent(
     monkeypatch: pytest.MonkeyPatch, manifest_path: Path, tmp_path: Path
 ) -> None:
@@ -249,29 +225,6 @@ def test_init_leaves_out_a_skill_a_default_agent_limits_to_platforms(
     assert [c.url.path for c in calls].count("/v1/skills") == 1, (
         "the Teams-only one is not uploaded"
     )
-
-
-def test_init_conversation_only_profile_never_seeds_skills(
-    monkeypatch: pytest.MonkeyPatch, manifest_path: Path, tmp_path: Path
-) -> None:
-    defaults_root = tmp_path / "defaults"
-    write_skill(defaults_root, "alpha")
-    monkeypatch.setenv("DAIMON_CHANNEL_OPENAI_KEY", "sk-test-not-a-real-key")
-    calls: list[httpx.Request] = []
-    monkeypatch.setattr(
-        "daimon.adapters.cli.commands.openai.configured_transport", fake_transport_factory(calls)
-    )
-
-    openai_init_command(
-        tenant_id=TENANT_ID,
-        project="proj_123",
-        model="gpt-6-luna",
-        manifest=manifest_path,
-        profile="openai.conversation_only",
-        defaults_root=defaults_root,
-    )
-
-    assert [c.url.path for c in calls] == ["/v1/agents"]
 
 
 def test_init_skip_default_skills_flag_creates_a_bare_agent(

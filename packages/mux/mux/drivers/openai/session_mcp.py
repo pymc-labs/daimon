@@ -175,3 +175,46 @@ async def prepare(
         managed = SessionMCPVault(vault.ref, name, credential.id)
         tools.append({**expected, "credential_id": credential.id, "connection_origin": "service"})
         return tools, managed
+
+
+async def rotate(
+    context: Context,
+    scope: Scope,
+    managed: SessionMCPVault,
+    agent: Object,
+    resolver: MCPSecretResolver,
+    *,
+    key: str,
+) -> None:
+    """Write this turn's bearer into the session's own vault credential, in place.
+
+    The session keeps the credential id it was created with; only its secret
+    changes, so a per-turn credential serves every later turn of the session.
+    """
+    connections = decode(agent, context)
+    if len(connections) != 1 or managed.credential_id is None:
+        raise ValueError("session MCP vault has no single bound credential")
+    if scope.is_platform or scope.is_legacy_host_authorized:
+        raise context.unsupported("caller_scoped_mcp_vault")
+    connection = connections[0]
+    reference = connection.credential_ref
+    if reference is None:
+        raise ValueError("missing MCP credential reference")
+    try:
+        secret = valid_secret(await resolver(scope, reference, connection.url))
+    except Exception:
+        raise ProviderError(
+            "permission", retryable=False, native_code="mcp_secret_unavailable"
+        ) from None
+
+    async def resolve(candidate: Scope, credential_ref: str) -> str:
+        if candidate != scope or credential_ref != reference:
+            raise ScopeViolation(credential_ref, "MCP credential has a foreign scope")
+        return secret
+
+    port = _port(context, scope, {managed.vault.id}, resolve)
+    with suppress_mcp_error_details():
+        actual = await port.retrieve(scope, managed.vault)
+        if actual.name != managed.name:
+            raise ScopeViolation(managed.vault.id, "session MCP vault identity changed")
+        await port.replace_secret(scope, managed.vault, managed.credential_id, reference, key=key)

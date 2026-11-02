@@ -55,6 +55,7 @@ from .conftest import (
     make_group_activity,
     make_inbound,
     make_message_activity,
+    shown_text,
 )
 
 TENANT = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
@@ -113,7 +114,7 @@ async def test_a_notice_reaches_only_its_sender() -> None:
     sender = FakeSender()
     await _replies(sender, []).tell_sender(_channel("hi"), "only you")
     [(where, notice, _)] = sender.sent
-    assert where == THREAD_ID and notice.text == "only you" and _is_private(notice)
+    assert where == THREAD_ID and shown_text(notice) == "only you" and _is_private(notice)
     assert notice.recipient is not None and notice.recipient.id == SENDER_ID
 
 
@@ -122,7 +123,7 @@ async def test_a_refused_notice_is_posted_in_the_thread(status: int) -> None:
     sender = FakeSender(refuse_on={0}, refuse_status=status)
     await _replies(sender, []).tell_sender(_channel("hi"), "only you")
     first, second = sender.activities
-    assert _is_private(first) and not _is_private(second) and second.text == "only you"
+    assert _is_private(first) and not _is_private(second) and shown_text(second) == "only you"
 
 
 async def test_a_timed_out_notice_is_not_sent_twice() -> None:
@@ -138,7 +139,7 @@ async def test_a_channel_command_is_answered_privately_in_its_thread() -> None:
     sender, seen, direct = FakeSender(), [], _Direct()
     await _replies(sender, seen, direct=direct).run(_channel("help"), TENANT, ("help", ""))
     [(where, answer, _)] = sender.sent
-    assert where == THREAD_ID and answer.text == "answer" and _is_private(answer)
+    assert where == THREAD_ID and shown_text(answer) == "answer" and _is_private(answer)
     assert [inbound.kind for inbound in seen] == ["channel"] and direct.looked_up == 0
     assert not answer.entities, "an @mention gets no prompt preview"
 
@@ -156,7 +157,7 @@ async def test_a_group_chat_command_is_answered_privately_in_the_chat(name: str)
     sender, seen, direct = FakeSender(), [], _Direct()
     await _replies(sender, seen, direct=direct).run(_group(name), TENANT, (name, ""))
     [(where, answer, _)] = sender.sent
-    assert where == CHAT and answer.text == "answer" and _is_private(answer)
+    assert where == CHAT and shown_text(answer) == "answer" and _is_private(answer)
     assert [inbound.kind for inbound in seen] == ["group"] and direct.looked_up == 0
 
 
@@ -173,7 +174,7 @@ async def test_a_group_chat_refusal_reaches_only_its_sender() -> None:
     ctx = _ctx(make_group_activity(), send)
     await reply_privately(ctx)("no")
     (notice,) = send.await_args.args
-    assert notice.text == "no" and _is_private(notice)
+    assert shown_text(notice) == "no" and _is_private(notice)
     ctx.reply.assert_not_awaited()
 
 
@@ -195,7 +196,9 @@ async def test_a_refused_private_answer_moves_to_the_1_1_chat(
     replies = _replies(sender, seen, runtime=runtime, direct=_Direct())
     await replies.run(_channel("memory"), TENANT, ("memory", ""))
     _, pointer, answer = sender.sent
-    assert pointer[1].text == ANSWERED_IN_CHAT.format(name="memory") and _is_private(pointer[1])
+    assert shown_text(pointer[1]) == ANSWERED_IN_CHAT.format(name="memory") and _is_private(
+        pointer[1]
+    )
     assert answer[0] == "a:direct" and not _is_private(answer[1])
     assert [inbound.kind for inbound in seen] == ["channel", "dm"]
 
@@ -209,7 +212,7 @@ async def test_a_refused_forget_is_not_run_again() -> None:
     )
     assert len(seen) == 1, "the deletion runs once"
     notice = sender.sent[-1][1]
-    assert notice.text == UNSHOWN.format(name="memory forget-mine a1b2c3")
+    assert shown_text(notice) == UNSHOWN.format(name="memory forget-mine a1b2c3")
     assert len(sender.sent) == 2, "no 1:1 chat answer follows"
 
 
@@ -223,7 +226,7 @@ async def test_setup_in_a_channel_keeps_the_1_1_chat(
         _channel("setup"), TENANT, ("setup", "")
     )
     [(_, pointer, _), (where, _, _)] = sender.sent
-    assert pointer.text == ANSWERED_IN_CHAT.format(name="setup") and _is_private(pointer)
+    assert shown_text(pointer) == ANSWERED_IN_CHAT.format(name="setup") and _is_private(pointer)
     assert where == "a:direct" and [inbound.kind for inbound in seen] == ["dm"]
 
 
@@ -252,7 +255,7 @@ async def test_a_refused_pointer_still_gets_the_1_1_answer(
     with structlog.testing.capture_logs() as logs:
         await replies.run(_channel("setup"), TENANT, ("setup", ""))
     assert [inbound.kind for inbound in seen] == ["dm"]
-    assert sender.sent[-1][0] == "a:direct" and sender.sent[-1][1].text == "answer"
+    assert sender.sent[-1][0] == "a:direct" and shown_text(sender.sent[-1][1]) == "answer"
     [failed] = [log for log in logs if log["event"] == "teams.notice.pointer_failed"]
     assert failed["status"] == 400 and failed["error_code"] == "BadArgument"
     assert "secret text" not in json.dumps(logs, default=str)
@@ -327,7 +330,7 @@ async def test_new_in_a_channel_is_told_privately() -> None:
     sender = FakeSender()
     await _replies(sender, []).run(_channel("new"), TENANT, ("new", ""))
     [notice] = sender.activities
-    assert notice.text == NEW_IN_CHANNEL and _is_private(notice)
+    assert shown_text(notice) == NEW_IN_CHANNEL and _is_private(notice)
 
 
 @pytest.mark.usefixtures("provisioned_tenant")
@@ -349,7 +352,7 @@ async def test_a_targeted_question_starts_no_turn(
     inbound = dataclasses.replace(_channel("what changed?", targeted=True), bot_name="Daimon")
     await teams._handle(inbound)
     [notice] = sender.activities
-    assert notice.text == NOT_YET_PRIVATE.format(bot="Daimon") and _is_private(notice)
+    assert shown_text(notice) == NOT_YET_PRIVATE.format(bot="Daimon") and _is_private(notice)
 
 
 @pytest.mark.parametrize(
@@ -371,7 +374,7 @@ async def test_a_channel_refusal_reaches_only_its_sender(targeted: bool) -> None
     ctx = _ctx(make_channel_activity(targeted=targeted), send)
     await reply_privately(ctx)("no")
     (notice,) = send.await_args.args
-    assert notice.text == "no" and _is_private(notice)
+    assert shown_text(notice) == "no" and _is_private(notice)
     assert bool(notice.entities) is targeted, "only a targeted prompt is previewed"
     ctx.reply.assert_not_awaited()
 
@@ -384,7 +387,7 @@ async def test_a_refused_channel_refusal_is_replied_as_before() -> None:
     ctx = _ctx(make_channel_activity(), AsyncMock(side_effect=refused))
     await reply_privately(ctx)("no")
     (public,) = ctx.reply.await_args.args
-    assert public.text == "no" and not _is_private(public)
+    assert shown_text(public) == "no" and not _is_private(public)
 
 
 class _RefusesTargeted(TeamsApiFake):
@@ -422,14 +425,18 @@ async def test_a_refused_refusal_to_a_targeted_message_is_posted_for_everyone(ki
     await reply_privately(ctx)("no")
     targeted_try, public = wire.activity_requests
     assert "isTargetedActivity=true" in targeted_try.url, "the sender alone first"
-    assert "isTargetedActivity" not in public.url and public.body["text"].endswith("no")
+    assert "isTargetedActivity" not in public.url and public.body["attachments"][0]["content"][
+        "fallbackText"
+    ].endswith("no")
 
 
 async def test_a_1_1_refusal_is_replied_as_before() -> None:
     send = AsyncMock()
     ctx = _ctx(make_message_activity(), send)
     await reply_privately(ctx)("no")
-    ctx.reply.assert_awaited_once_with("no")
+    (notice,) = ctx.reply.await_args.args
+    assert shown_text(notice) == "no" and not _is_private(notice), "an error card, not targeted"
+    ctx.reply.assert_awaited_once()
     send.assert_not_awaited()
 
 

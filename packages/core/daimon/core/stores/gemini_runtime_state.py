@@ -126,15 +126,22 @@ class PostgresPayloadDatabase:
                     return stack, session, transaction, predicates, body
             except BaseException as error:
                 await complete(stack.aclose())
-                if isinstance(error, (FenceUnavailable, TimeoutError, PoolTimeoutError)) or (
+                # Each acquisition that can fail is named (fixed labels, never data).
+                if isinstance(error, FenceUnavailable):
+                    raise FenceUnavailable(deadline, error.reason) from None
+                if isinstance(error, PoolTimeoutError):
+                    raise FenceUnavailable(deadline, "pool_timeout") from None
+                if isinstance(error, TimeoutError):
+                    raise FenceUnavailable(deadline, "deadline") from None
+                if (
                     isinstance(error, DBAPIError)
                     and getattr(error.orig, "sqlstate", None) == "55P03"
                 ):
-                    raise FenceUnavailable(deadline) from None
+                    raise FenceUnavailable(deadline, "row_nowait") from None
                 raise
 
         stack, session, transaction, predicates, body = await retry_fences(
-            acquire, backoff=not after_dispatch
+            acquire, backoff=not after_dispatch, label=f"gemini_state:{self._key['kind']}"
         )
         try:
 
@@ -153,6 +160,37 @@ class PostgresPayloadDatabase:
             raise
         finally:
             await complete(stack.aclose())
+
+    async def read(self) -> str | None:
+        """The last committed payload, for a pure read: no fence, no row lock.
+
+        Every session in the account shares this row, so a usage or event listing that
+        waited behind its writers (fence plus FOR UPDATE NOWAIT, 5 s before dispatch)
+        failed as busy under load. The connection is released before the caller decodes.
+        """
+        deadline = asyncio.get_running_loop().time() + PRE_DISPATCH_BUSY_BOUND_S
+
+        async def attempt() -> str | None:
+            try:
+                async with asyncio.timeout_at(deadline):
+                    async with self._sessions() as session, session.begin():
+                        await session.execute(text("SET TRANSACTION READ ONLY"))
+                        await self._require_account(session, locking=False)
+                        return await session.scalar(
+                            select(GeminiRuntimeState.body).where(
+                                GeminiRuntimeState.tenant_id == self._key["tenant_id"],
+                                GeminiRuntimeState.account_id == self._key["account_id"],
+                                GeminiRuntimeState.project == self._key["project"],
+                                GeminiRuntimeState.kind == self._key["kind"],
+                            )
+                        )
+            # No lock to wait for, but a connection may be: busy, named, as for writes.
+            except PoolTimeoutError:
+                raise FenceUnavailable(deadline, "pool_timeout") from None
+            except TimeoutError:
+                raise FenceUnavailable(deadline, "deadline") from None
+
+        return await retry_fences(attempt, label=f"gemini_state:{self._key['kind']}:read")
 
     @asynccontextmanager
     async def transaction(self, *, after_dispatch: bool = False) -> AsyncIterator[Payload]:

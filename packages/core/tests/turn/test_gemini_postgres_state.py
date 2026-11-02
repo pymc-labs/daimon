@@ -654,3 +654,199 @@ async def test_post_dispatch_outcome_waits_past_busy_bound_without_wedging_sessi
         if not task.done():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+async def _gemini_session(storage, scope):
+    """A real Gemini driver on `storage`, with one session that ran one turn (i1)."""
+    from mux.contracts.actions import UserMessage
+    from mux.contracts.events import TextPart
+    from mux.contracts.extensions import ExtensionConfig
+    from mux.contracts.ids import ChannelRef, ThreadRef
+    from mux.contracts.resources import AgentSpec, EnvironmentSpec, SessionSpec
+    from mux.drivers.gemini import GeminiManagedAgents
+    from mux.state.memory import MemoryStateStore
+    from mux.testing.drivers.gemini.fake import FakeTransport
+
+    transport = FakeTransport()
+    driver = GeminiManagedAgents(
+        transport, storage=storage, state_store=MemoryStateStore(), account_scope_id="project"
+    )
+    agent = await driver.agents.create(
+        scope,
+        AgentSpec(name="a", model=ModelRef(provider="gemini", id="gemini-3.8-flash")),
+        key="agent",
+    )
+    env = await driver.environments.create(scope, EnvironmentSpec(name="e"), key="env")
+    thread = ThreadRef(
+        channel=ChannelRef(tenant_id=scope.tenant_id, platform="discord", channel_id="c"),
+        thread_id="th",
+    )
+    spec = SessionSpec(
+        agent=agent.ref,
+        agent_revision=agent.revision,
+        environment=env.ref,
+        config_revision=1,
+        extensions={
+            "gemini.session": ExtensionConfig(
+                namespace="gemini.session",
+                version=1,
+                value={"thread": thread.model_dump(mode="json"), "binding_id": "b"},
+            )
+        },
+    )
+    session = await driver.sessions.create(scope, spec, key="session")
+    stamp = datetime.now(UTC).isoformat()
+    transport.responses.append(
+        {
+            "id": "i1",
+            "status": "completed",
+            "created": stamp,
+            "updated": stamp,
+            "environment_id": "e1",
+            "steps": [{"type": "model_output", "content": [{"type": "text", "text": "done"}]}],
+            "usage": {
+                "total_input_tokens": 10,
+                "total_output_tokens": 20,
+                "total_thought_tokens": 0,
+            },
+        }
+    )
+    await driver.events.send(
+        scope, session.ref, (UserMessage(content=(TextPart(text="hi"),)),), key="send"
+    )
+    return driver, transport, session
+
+
+async def test_usage_and_event_listing_never_wait_behind_the_accounts_records_writer(
+    postgres_state,
+):
+    """Smokes a1d991fb/dce44708/7da21ee3 (J2 1YK993, J6g PAKM6G): every copy in an account
+    shares one records row, and a usage or event listing took the writers' fence and row
+    lock, so under load it waited out the 5 s pre-dispatch bound and failed the turn as
+    SessionBusyError. Listings now read the last committed records, never the fence."""
+    from mux.contracts.ids import PageRequest
+
+    sessions, scope, _, _ = postgres_state
+    storage = PostgresGeminiStorage(sessions, scope=scope, project="project")
+    driver, _, session = await _gemini_session(storage, scope)
+    expected = await driver.usage.list(scope, session.ref, page=PageRequest())
+    assert expected.data, "the turn's usage is recorded"
+
+    held, release = asyncio.Event(), asyncio.Event()
+
+    async def writer():  # another copy's turn in the same account, mid-write
+        async with storage.transaction():
+            held.set()
+            await release.wait()
+
+    task = asyncio.create_task(writer())
+    await held.wait()
+    try:
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        pages = await asyncio.wait_for(
+            asyncio.gather(
+                *(driver.usage.list(scope, session.ref, page=PageRequest()) for _ in range(8)),
+                *(driver.events.list(scope, session.ref, page=PageRequest()) for _ in range(8)),
+            ),
+            timeout=8,
+        )
+        assert loop.time() - started < 2, "no listing waited behind the writer"
+        assert all(page == expected for page in pages[:8]), "the last committed usage"
+        assert all(page.data for page in pages[8:])
+    finally:
+        release.set()
+        await task
+
+
+async def test_a_slow_provider_read_during_reconcile_never_holds_the_records_row(
+    postgres_state,
+):
+    """`_reconcile` used to await each interaction's provider GET inside the account's
+    records transaction: one slow read held every other session's writes. The GETs now
+    run with no lock held; a short transaction applies their results."""
+    sessions, scope, _, _ = postgres_state
+    storage = PostgresGeminiStorage(sessions, scope=scope, project="project")
+    driver, transport, session = await _gemini_session(storage, scope)
+    reading, finish = asyncio.Event(), asyncio.Event()
+    real_get = transport.get
+
+    async def slow_get(interaction):
+        reading.set()
+        await finish.wait()
+        return await real_get(interaction)
+
+    transport.get = slow_get
+    reconcile = asyncio.create_task(driver.usage.reconcile(scope, session.ref))
+    await reading.wait()
+    try:
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        async with storage.transaction():  # another session's write, while the GET runs
+            pass
+        assert loop.time() - started < 1, "the write did not wait for the provider read"
+    finally:
+        finish.set()
+    observations = await reconcile
+    assert observations and observations[-1].output_tokens == 20
+
+
+async def test_a_records_writer_that_gives_up_logs_which_acquisition_failed(
+    postgres_state, monkeypatch
+):
+    """A write that can't get the account's records row in time still fails as busy, and
+    the log says which acquisition stopped it (here the advisory fence another writer
+    holds), under a fixed label."""
+    from daimon.core.turn.errors import SessionBusyError
+    from structlog.testing import capture_logs
+
+    monkeypatch.setattr(gemini_runtime_state, "PRE_DISPATCH_BUSY_BOUND_S", 0.3)
+    sessions, scope, _, _ = postgres_state
+    storage = PostgresGeminiStorage(sessions, scope=scope, project="project")
+    async with storage.transaction():
+        pass  # the row exists
+    held, release = asyncio.Event(), asyncio.Event()
+
+    async def writer():
+        async with storage.transaction():
+            held.set()
+            await release.wait()
+
+    task = asyncio.create_task(writer())
+    await held.wait()
+    try:
+        with capture_logs() as logs, pytest.raises(SessionBusyError):
+            async with storage.transaction():
+                pass
+    finally:
+        release.set()
+        await task
+    named = [e for e in logs if e["event"] == "session_fence.unavailable"]
+    assert [e["label"] for e in named] == ["gemini_state:records"]
+    assert "advisory" in named[0]["reasons"], named
+
+
+async def test_a_snapshot_read_that_gets_no_connection_is_busy_and_named(
+    postgres_state, monkeypatch
+):
+    """#1557 review 3: the committed-snapshot read takes no lock, but may wait for a
+    pooled connection; that surfaces as the labelled busy error, not a raw pool error."""
+    from daimon.core.turn.errors import SessionBusyError
+    from sqlalchemy.exc import TimeoutError as PoolTimeoutError
+    from structlog.testing import capture_logs
+
+    monkeypatch.setattr(gemini_runtime_state, "PRE_DISPATCH_BUSY_BOUND_S", 0.2)
+    sessions, scope, _, _ = postgres_state
+
+    def no_connection():
+        raise PoolTimeoutError("QueuePool limit reached")
+
+    database = gemini_runtime_state.PostgresPayloadDatabase(
+        no_connection, scope=scope, project="project", kind="records"
+    )
+    with capture_logs() as logs, pytest.raises(SessionBusyError):
+        await database.read()
+    named = [e for e in logs if e["event"] == "session_fence.unavailable"]
+    assert [(e["label"], e["reasons"]) for e in named] == [
+        ("gemini_state:records:read", ["pool_timeout"])
+    ]

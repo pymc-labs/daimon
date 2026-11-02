@@ -136,9 +136,12 @@ async def test_submit_lookup_defers_then_replies_on_timeout(
     assert started.is_set()
     assert await item.interaction_check(interaction) is False
     interaction.response.defer.assert_awaited_once()
-    interaction.followup.send.assert_awaited_once_with(
-        "That took too long. Try the button again.", ephemeral=True
+    interaction.followup.send.assert_awaited_once()
+    sent = interaction.followup.send.await_args.kwargs
+    assert sent["embed"].description == "That took too long. Try the button again.", (
+        "the timeout is the error card"
     )
+    assert sent["ephemeral"] is True, "only the tapper sees it"
     interaction.response.send_message.assert_not_awaited()
 
 
@@ -339,7 +342,7 @@ async def test_a_submit_during_drain_claims_nothing_and_leaves_the_form_tappable
 
     assert bot.spawned == [], "no turn may start while the process is draining"
     interaction.edit_original_response.assert_not_awaited()
-    message = interaction.followup.send.call_args.args[0]
+    message = interaction.followup.send.call_args.kwargs["embed"].description
     assert "restarting" in message, "the refusal must say the bot is restarting"
 
 
@@ -358,7 +361,7 @@ async def test_submit_by_a_non_requester_is_rejected_writes_nothing_spawns_nothi
     allowed = await item.interaction_check(interaction)
 
     assert allowed is False, "a non-requester submit tap must be rejected"
-    message = interaction.followup.send.call_args.args[0]
+    message = interaction.followup.send.call_args.kwargs["embed"].description
     assert "someone else" in message
 
     async with db_session_factory() as session:
@@ -384,7 +387,7 @@ async def test_submit_from_a_different_message_is_rejected_and_claims_nothing(
     allowed = await item.interaction_check(interaction)
 
     assert allowed is False, "a submit that did not come from the form's own message is rejected"
-    message = interaction.followup.send.call_args.args[0]
+    message = interaction.followup.send.call_args.kwargs["embed"].description
     assert "no longer available" in message
 
     async with db_session_factory() as session:

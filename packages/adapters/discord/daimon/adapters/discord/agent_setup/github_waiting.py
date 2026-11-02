@@ -12,15 +12,13 @@ from daimon.adapters.discord.agent_setup.github_embed_panel import (
     GitHubEmbedPanel as PanelViewBase,
 )
 from daimon.adapters.discord.agent_setup.state import PanelState
-from daimon.adapters.discord.checks import admin_caller, is_platform_admin
+from daimon.adapters.discord.checks import is_platform_admin
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.agent_reach import load_target_facts
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.github_panel import connect_link, safe_github_error, sync_connect_admin
 from daimon.core.github_request_cards import admin_card
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
-from daimon.core.operation_policy import TargetFacts, decide_operation
 from daimon.core.stores.github_access import AuthorizedRepo, list_authorized_repos
 from daimon.core.stores.github_access_requests import (
     AccessRequest,
@@ -47,30 +45,14 @@ async def _may_manage_request(
     member: discord.Member,
     is_admin: bool,
 ) -> bool:
+    # The waiting list is admin-only: an agent's owner connects repos for their own
+    # agent from its repos panel, not from requests other people made.
+    if not is_admin:
+        return False
     live_agent = await find_agent_by_derived_uuid(
         runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
     )
-    if live_agent is None or live_agent.id != row.ma_agent_id:
-        return False
-    managed = live_agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-    async with runtime.sessionmaker() as session:
-        facts = (
-            TargetFacts(is_daimon_managed=managed, is_reachable_in_tenant=False)
-            if is_admin
-            else await load_target_facts(
-                session,
-                "github_grant",
-                tenant_id=row.tenant_id,
-                platform="discord",
-                agent_names=(row.agent_name, live_agent.name),
-                ma_agent_id=str(live_agent.id),
-                default=runtime.deployment_default,
-                caller=admin_caller(member),
-                is_daimon_managed=managed,
-                caller_platform_user_id=str(member.id),
-            )
-        )
-    return decide_operation("github_grant", is_admin=is_admin, target=facts) == "allow"
+    return live_agent is not None and live_agent.id == row.ma_agent_id
 
 
 class GitHubWaitingView(PanelViewBase):
@@ -313,11 +295,15 @@ class GitHubWaitingView(PanelViewBase):
             interaction.user.id != self.allowed_user_id
             or interaction.guild_id != self.state.guild_id
         ):
-            await interaction.response.send_message("This panel is private.", ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed("This panel is private."), ephemeral=True
+            )
             return False
         server_admin = is_platform_admin(interaction)  # pyright: ignore[reportArgumentType]
         if admin and not server_admin:
-            await interaction.response.send_message("This request is unavailable.", ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed("This request is unavailable."), ephemeral=True
+            )
             return False
         if admin and self.selected_id is not None:
             row = next((item for item in self.requests if item.id == self.selected_id), None)
@@ -325,14 +311,14 @@ class GitHubWaitingView(PanelViewBase):
             guild = interaction.guild
             if row is None or guild is None or not isinstance(member, discord.Member):
                 await interaction.response.send_message(
-                    "This request is unavailable.", ephemeral=True
+                    embed=build_notice_embed("This request is unavailable."), ephemeral=True
                 )
                 return False
             if not await _may_manage_request(
                 self.runtime, row=row, member=member, is_admin=server_admin
             ):
                 await interaction.response.send_message(
-                    "This request is unavailable.", ephemeral=True
+                    embed=build_notice_embed("This request is unavailable."), ephemeral=True
                 )
                 return False
             if not server_admin and not all(
@@ -345,7 +331,8 @@ class GitHubWaitingView(PanelViewBase):
                 for name in row.repo_names
             ):
                 await interaction.response.send_message(
-                    "Only a server admin can connect repos.", ephemeral=True
+                    embed=build_notice_embed("Only a server admin can connect repos."),
+                    ephemeral=True,
                 )
                 return False
             if row.parent_channel_id != row.thread_id:
@@ -357,7 +344,7 @@ class GitHubWaitingView(PanelViewBase):
                         raise ValueError("channel unavailable")
                 except (ValueError, discord.HTTPException):
                     await interaction.response.send_message(
-                        "This request is unavailable.", ephemeral=True
+                        embed=build_notice_embed("This request is unavailable."), ephemeral=True
                     )
                     return False
         return True
@@ -409,7 +396,9 @@ class GitHubWaitingView(PanelViewBase):
                         account_id=self.state.account_id,
                     )
         except ValueError as error:
-            await interaction.response.send_message(safe_github_error(error), ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed(safe_github_error(error)), ephemeral=True
+            )
             return
         if changed:
             from daimon.adapters.discord.agent_setup.github_requests import update_requester_card

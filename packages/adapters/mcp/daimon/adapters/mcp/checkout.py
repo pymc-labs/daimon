@@ -18,7 +18,7 @@ from daimon.adapters.mcp.auth.verifier import CHAT_EXECUTION_CLAIM, TOKEN_KIND_C
 from daimon.adapters.mcp.web_shell import render_page
 from daimon.core.admin_actions import is_checkout_credential
 from daimon.core.admin_authority import resolve_authority
-from daimon.core.billing import BillingConfig
+from daimon.core.billing import BillingConfig, CheckoutAmountUnavailable, create_checkout_session
 from daimon.core.config import Settings
 from daimon.core.stores.accounts import get_account_with_tenant
 from fastmcp.server.auth import AccessToken
@@ -29,7 +29,6 @@ from starlette.responses import HTMLResponse, JSONResponse, Response
 
 if TYPE_CHECKING:
     from stripe import StripeClient
-    from stripe.params.checkout._session_create_params import SessionCreateParams
 
 log = structlog.get_logger(__name__)
 
@@ -115,27 +114,13 @@ def build_checkout_route(
         except (KeyError, ValueError, TypeError):
             return Response(status_code=400)
 
-        price_id = billing_config.prices.get(amount)
-        if price_id is None:
+        try:
+            url = await create_checkout_session(
+                stripe_client, billing_config, tenant_id=tenant_id, amount=amount
+            )
+        except CheckoutAmountUnavailable:
             return Response(status_code=422)
-
-        params: SessionCreateParams = {
-            "mode": "payment",  # one-time, NOT subscription
-            "line_items": [{"price": price_id, "quantity": 1}],
-            "success_url": billing_config.success_url,
-            "cancel_url": billing_config.cancel_url,
-            "metadata": {
-                "tenant_id": str(tenant_id),  # the credit target
-            },
-        }
-        session = await stripe_client.v1.checkout.sessions.create_async(params)
-        log.info(
-            "stripe.checkout.session_created",
-            tenant_id=str(tenant_id),
-            amount=amount,
-            session_id=session.id,
-        )
-        return JSONResponse({"url": session.url})
+        return JSONResponse({"url": url})
 
     return handler
 

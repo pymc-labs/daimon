@@ -57,6 +57,7 @@ from typing import Any, Self, cast
 import structlog
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.feedback_modal import FeedbackModal
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.core.message_feedback import CUSTOM_ID_TEMPLATE, build_custom_id
 
 import discord
@@ -124,6 +125,10 @@ class FeedbackButton(
             # with neither the modal nor the apology. Same guard
             # `FeedbackModal.on_error` uses.
             if interaction.response.is_done():
-                await interaction.followup.send(_CALLBACK_FAILED, ephemeral=True)
+                await interaction.followup.send(
+                    embed=build_notice_embed(_CALLBACK_FAILED), ephemeral=True
+                )
             else:
-                await interaction.response.send_message(_CALLBACK_FAILED, ephemeral=True)
+                await interaction.response.send_message(
+                    embed=build_notice_embed(_CALLBACK_FAILED), ephemeral=True
+                )

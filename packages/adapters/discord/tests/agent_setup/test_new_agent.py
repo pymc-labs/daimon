@@ -274,7 +274,7 @@ async def test_submit_rejects_a_retired_model_id_without_creating(
     await modal.on_submit(interaction)
 
     interaction.response.send_message.assert_called_once()
-    message = interaction.response.send_message.call_args.args[0]
+    message = interaction.response.send_message.call_args.kwargs["embed"].description
     assert "claude-retired-99" in message, "the error must name the model that was refused"
     interaction.response.defer.assert_not_called()
     assert not create_called, "a retired model id must never reach create_blank_agent"
@@ -320,7 +320,7 @@ async def test_member_creation_confirms_success_without_showing_hidden_details(
 
     interaction.edit_original_response.assert_not_called()
     interaction.followup.send.assert_called_once()
-    text = interaction.followup.send.call_args.args[0]
+    text = interaction.followup.send.call_args.kwargs["embed"].description
     assert "Not answering in any channel yet" in text
     assert "An admin can make it answer" in text
     assert _state_after.selected_agent is None
@@ -524,7 +524,7 @@ async def test_real_discord_name_collision_is_rendered_without_a_sentry_capture(
 
     assert captured == [], "an expected refusal must not be captured as an exception"
     interaction.followup.send.assert_called_once()
-    message = interaction.followup.send.call_args.args[0]
+    message = interaction.followup.send.call_args.kwargs["embed"].description
     assert message.startswith(
         "This server already has an agent with that name. Pick a different name.\n\n-# Ref "
     ), "the caller sees the reason and a short ref, without an exception body"
@@ -544,7 +544,7 @@ async def test_unregistered_server_keeps_setup_guidance_from_real_tenant_resolut
     await modal.on_submit(interaction)
 
     interaction.followup.send.assert_called_once()
-    assert interaction.followup.send.call_args.args[0].startswith(
+    assert interaction.followup.send.call_args.kwargs["embed"].description.startswith(
         "This server is not registered. Ask a server admin to finish setup.\n\n-# Ref "
     )
     assert interaction.followup.send.call_args.kwargs["ephemeral"] is True

@@ -21,6 +21,7 @@ from collections.abc import Awaitable, Callable, Mapping
 
 import httpx
 import structlog
+from daimon.adapters.teams.card import notice_card
 from daimon.adapters.teams.commands import (
     ANSWERED_IN_CHAT,
     CHANNEL_POINTER,
@@ -123,18 +124,16 @@ def reply_privately(ctx: ActivityContext[MessageActivity]) -> Callable[[str], Aw
 
     async def reply(text: str) -> object:
         if activity.conversation.conversation_type not in ("channel", "groupChat"):
-            return await ctx.reply(text)
+            return await ctx.reply(notice_card(text))
         prompt = activity.id if activity.recipient.is_targeted else None
         try:
-            return await ctx.send(
-                targeted(MessageActivityInput(text=text), activity.from_, prompt_id=prompt)
-            )
+            return await ctx.send(targeted(notice_card(text), activity.from_, prompt_id=prompt))
         except _TIMEOUTS:
             raise
         except TEAMS_SEND_ERRORS as exc:
             _refused("teams.refusal.targeted_refused", exc)
             # A plain reply to a targeted message is targeted by the SDK: name the sender openly.
-            public = MessageActivityInput(text=text).with_recipient(activity.from_)
+            public = notice_card(text).with_recipient(activity.from_)
             return await ctx.reply(public)
 
     return reply
@@ -162,12 +161,15 @@ class PrivateReplies:
     def command(self, inbound: TeamsInbound) -> tuple[str, str] | None:
         return parse_command(inbound.text, self._commands)
 
-    async def tell_sender(self, inbound: TeamsInbound, text: str) -> None:
-        """`text` for `inbound`'s sender only; where Teams refuses that, posted as before."""
+    async def tell_sender(self, inbound: TeamsInbound, text: str, *, error: bool = True) -> None:
+        """`text` as a card for `inbound`'s sender only; where Teams refuses that, posted as before.
+
+        `error=False` is for a pointer, not a failure.
+        """
         recipient = _recipient(inbound)
         if recipient is not None:
             prompt = inbound.activity_id if inbound.is_targeted else None
-            activity = targeted(MessageActivityInput(text=text), recipient, prompt_id=prompt)
+            activity = targeted(notice_card(text, error=error), recipient, prompt_id=prompt)
             try:
                 await self._sender.send(
                     inbound.conversation_id, activity, service_url=inbound.service_url
@@ -179,7 +181,7 @@ class PrivateReplies:
                 _refused("teams.notice.targeted_refused", exc)
         await self._sender.send(
             inbound.conversation_id,
-            MessageActivityInput(text=text),
+            notice_card(text, error=error),
             service_url=inbound.service_url,
         )
 
@@ -202,7 +204,7 @@ class PrivateReplies:
             await self._invoke(name, args, routed, tenant_id, send=self._public(routed))
             return
         if name == "new" and inbound.kind == "channel":
-            await self.tell_sender(inbound, NEW_IN_CHANNEL)
+            await self.tell_sender(inbound, NEW_IN_CHANNEL, error=False)
             return
         recipient = _recipient(inbound)
         private = IN_THREAD | {"new"} if inbound.kind == "group" else IN_THREAD
@@ -226,12 +228,12 @@ class PrivateReplies:
         chat = await self._direct_chat(inbound)
         pointer = ANSWERED_IN_CHAT if chat else CHANNEL_POINTER
         if chat is None:
-            await self.tell_sender(inbound, pointer.format(name=name))
+            await self.tell_sender(inbound, pointer.format(name=name), error=False)
             return
         # The answer goes to the 1:1 chat, so the pointer is a courtesy: a refused
         # or timed-out one (it may have landed) must not withhold the answer.
         try:
-            await self.tell_sender(inbound, pointer.format(name=name))
+            await self.tell_sender(inbound, pointer.format(name=name), error=False)
         except TEAMS_SEND_ERRORS as exc:
             status, error_code = send_error_details(exc)
             log.info(

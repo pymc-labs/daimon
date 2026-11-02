@@ -14,6 +14,8 @@ from daimon.core.config import DirectMessagePolicy
 from daimon.core.turn.deps import TurnDeps
 from slack_sdk.errors import SlackApiError
 
+from .conftest import shown_text
+
 _TENANT = uuid.uuid4()
 
 
@@ -61,7 +63,9 @@ async def test_each_allowed_recipient_gets_a_dm_and_one_failure_skips_only_them(
     client.chat_postMessage.assert_awaited_once()
     kwargs = client.chat_postMessage.await_args.kwargs
     assert kwargs["channel"] == "D-U2"
-    assert kwargs["text"] == ("<#C1> has used its $2.00 budget.\n\nRaise the budget to resume now.")
+    assert shown_text(kwargs) == (
+        "<#C1> has used its $2.00 budget.\n\nRaise the budget to resume now."
+    )
 
 
 def test_a_real_runtime_gets_the_notifier() -> None:

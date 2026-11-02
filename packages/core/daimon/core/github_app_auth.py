@@ -370,6 +370,9 @@ class InstallationAccountState:
     # GitHub always sends account.id; None only when a response omits it, so
     # owner correction is skipped rather than failing the reconciliation.
     account_id: int | None = None
+    # None when GitHub omits repository_selection or sends a value we do not
+    # know, so the stored value is kept rather than failing the refresh.
+    repository_selection: Literal["all", "selected"] | None = None
 
 
 async def get_app_installation_account(
@@ -423,8 +426,17 @@ async def get_app_installation_account(
         and account_id_raw > 0
         else None
     )
+    selection_raw = body_object.get("repository_selection")
+    repository_selection: Literal["all", "selected"] | None = None
+    if selection_raw == "all":
+        repository_selection = "all"
+    elif selection_raw == "selected":
+        repository_selection = "selected"
     return InstallationAccountState(
-        account_login=login, suspended_at=suspended_at, account_id=account_id
+        account_login=login,
+        suspended_at=suspended_at,
+        account_id=account_id,
+        repository_selection=repository_selection,
     )
 
 

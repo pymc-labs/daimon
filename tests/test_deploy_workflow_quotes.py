@@ -11,10 +11,8 @@ and fails, which errs toward a loud false positive, never a missed split.
 
 from __future__ import annotations
 
-import os
 import re
 import shlex
-import subprocess
 from pathlib import Path
 from typing import cast
 
@@ -169,9 +167,31 @@ def test_deploy_workflow_remote_scripts() -> None:
     for workflow in sorted((*_WORKFLOWS.glob("*.yml"), *_WORKFLOWS.glob("*.yaml"))):
         scripts += _check_workflow(workflow.name, workflow.read_text())
     # deploy.yml has 4 inline payloads and 1 forwarded shell variable (the boot
-    # reconcile wait); lane.yml has 2 `lane_ssh` wrappers that each forward one
-    # shell variable as the single --command argument.
-    assert scripts == 7, f"expected exactly 7 remote scripts, found {scripts}"
+    # reconcile wait).
+    assert scripts == 5, f"expected exactly 5 remote scripts, found {scripts}"
+
+
+def test_hosted_lane_workflow_is_absent() -> None:
+    assert not (_WORKFLOWS / "lane.yml").exists(), "hosted lane workflow must stay absent"
+    for workflow in (*_WORKFLOWS.glob("*.yml"), *_WORKFLOWS.glob("*.yaml")):
+        source = workflow.read_text()
+        assert "lane/**" not in source, f"{workflow.name} must not run on lane branch pushes"
+        if workflow.name != "self-hosting.yml":
+            assert "deploy/lanes/" not in source, (
+                f"{workflow.name} must not use the self-hosting Compose file"
+            )
+
+
+def test_self_hosting_workflow_uses_placeholder_configuration() -> None:
+    workflow = _WORKFLOWS / "self-hosting.yml"
+    assert workflow.exists(), "Compose configuration should be checked in Actions"
+    source = workflow.read_text()
+    assert "docker compose" in source, "Actions should render Compose"
+    assert "POSTGRES_PASSWORD is required" in source, "Actions should check missing settings"
+    for privileged_input in ("id-token:", "vars.", "secrets.", "gcloud"):
+        assert privileged_input not in source, (
+            f"self-hosting workflow must not use {privileged_input}"
+        )
 
 
 @pytest.mark.parametrize(
@@ -212,101 +232,3 @@ def test_ssh_behind_timeout_is_still_checked() -> None:
     )
     with pytest.raises(AssertionError, match="one argument"):
         _check_workflow("fixture.yml", source)
-
-
-@pytest.mark.parametrize(
-    ("stage", "failures", "code", "error", "attempts", "success"),
-    [
-        ("refresh", 2, 1, "private refresh failure", 3, True),
-        ("scp", 2, 255, "private copy failure", 3, True),
-        ("refresh", 3, 255, "private refresh failure", 3, False),
-        ("scp", 3, 255, "private copy failure", 3, False),
-        ("action", 2, 255, "user@host: Permission denied (publickey).", 3, True),
-        ("action", 3, 255, "user@host: Permission denied (publickey).", 3, False),
-        ("action", 1, 255, "private connection lost after command started", 1, False),
-        ("action", 1, 1, "user@host: Permission denied (publickey).", 1, False),
-        ("action", 1, 255, "remote log: Permission denied (publickey)", 1, False),
-        (
-            "action",
-            1,
-            255,
-            "lane-remote-started\nx@y: Permission denied (publickey).",
-            1,
-            False,
-        ),
-    ],
-)
-def test_lane_action_retries(
-    tmp_path: Path,
-    stage: str,
-    failures: int,
-    code: int,
-    error: str,
-    attempts: int,
-    success: bool,
-) -> None:
-    source = (_WORKFLOWS / "lane.yml").read_text()
-    document = cast("Node", yaml.compose(source))  # pyright: ignore[reportUnknownMemberType]
-    script = next(block.value for block in _run_blocks(document) if "refresh=" in block.value)
-    # Exercise the actual workflow locally: no network, cloud credentials or sleeps.
-    mock = r"""
-set -euo pipefail
-declare -A counts=([refresh]=0 [scp]=0 [action]=0)
-sleep() { [[ "$1" == 3 ]]; }
-gcloud() {
-  local stage=action
-  if [[ "$2" == scp ]]; then stage=scp;
-  elif [[ "$*" == *metadata.google.internal* ]]; then stage=refresh; fi
-  if [[ "$stage" == action ]]; then
-    [[ "${!#}" == '--command=echo lane-remote-started >&2; sudo lane '* ]] || return 99
-  fi
-  counts[$stage]=$(( ${counts[$stage]} + 1 ))
-  printf '%s\n' "$stage" >> "$RUNNER_TEMP/calls"
-  echo 'PRIVATE remote stdout'
-  echo "$FAIL_ERROR" >&2
-  if [[ "$stage" == "$FAIL_STAGE" ]] && (( ${counts[$stage]} <= FAILURES )); then
-    return "$FAIL_CODE"
-  fi
-}
-"""
-    result = subprocess.run(
-        ["bash", "-c", mock + _EXPRESSION.sub("host", script)],
-        cwd=_WORKFLOWS.parents[1],
-        env={
-            **os.environ,
-            "RUNNER_TEMP": str(tmp_path),
-            "LANE": "preview",
-            "GITHUB_RUN_ID": "123",
-            "GITHUB_RUN_ATTEMPT": "1",
-            "ACTION": "deploy",
-            "ZONE": "zone",
-            "HOST": "host",
-            "PROJECT": "project",
-            "DAIMON_NOTEBOOK_IMAGE": "notebook:sha",
-            "DAIMON_LANE_IMAGE": "daimon:sha",
-            "SHA": "a" * 40,
-            "ACTOR": "actor",
-            "RUN_URL": "https://example.test/run",
-            "FAIL_STAGE": stage,
-            "FAILURES": str(failures),
-            "FAIL_CODE": str(code),
-            "FAIL_ERROR": error,
-        },
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    calls = (tmp_path / "calls").read_text().splitlines()
-    assert calls.count(stage) == attempts
-    assert (result.returncode == 0) == success
-    assert result.stdout == ""
-    expected_error = {
-        "refresh": "Lane host CLI refresh failed after 3 attempts\n",
-        "scp": "Lane compose copy failed after 3 attempts\n",
-        "action": "Lane action failed. Full logs stay on the lane host (sudo lane logs).\n",
-    }
-    assert result.stderr == ("" if success else expected_error[stage])
-    if not success:
-        assert result.returncode == 1
-    if not success and stage != "action":
-        assert "action" not in calls

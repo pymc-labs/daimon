@@ -43,7 +43,7 @@ ENV_EXAMPLE_PATH = REPO_ROOT / ".env.example"
 
 # Vars that are always required to boot the app at all — uncommented at the
 # top of the file. DAIMON_ANTHROPIC__API_KEY is required unless the
-# deployment is OpenAI-only (docs/self-hosting.md's "Self-host on OpenAI"),
+# deployment is OpenAI-only (docs/providers.md's "Run on OpenAI"),
 # so it lives in the Anthropic (optional) section instead.
 ALWAYS_REQUIRED = {
     "DAIMON_DATABASE__URL",

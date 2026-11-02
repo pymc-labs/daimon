@@ -73,7 +73,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 UnattendedEntryPoint = Literal[
-    "watch", "routine", "wake", "mcp_chat", "fleet_worker", "cli_run", "checkpoint", "long_job"
+    "watch", "routine", "wake", "mcp_chat", "cli_run", "checkpoint", "long_job"
 ]
 
 log = structlog.get_logger(__name__)
@@ -115,7 +115,6 @@ ENTRY_POINT_POLICY: Final[Mapping[UnattendedEntryPoint, CapabilityPolicy]] = {
     "routine": CapabilityPolicy(allow_builtins=False, allow_skills=True),
     "wake": CapabilityPolicy(allow_builtins=False, allow_skills=True),
     "mcp_chat": CapabilityPolicy(allow_builtins=False, allow_skills=True),
-    "fleet_worker": CapabilityPolicy(allow_builtins=False, allow_skills=True),
     "cli_run": CapabilityPolicy(allow_builtins=False, allow_skills=True),
     "checkpoint": CapabilityPolicy(allow_builtins=False, allow_skills=True),
 }
@@ -131,7 +130,7 @@ def capability_policy(
     `routine_sandbox_tools` is the routine's own admin opt-in
     (`Routine.sandbox_tools_enabled`). It turns built-ins on for the `routine`
     entry point and is ignored for every other: watches, wakes, agent chat,
-    fleet workers, `daimon run` and checkpoints have no opt-in.
+    `daimon run` and checkpoints have no opt-in.
     """
     policy = _CLOSED if entry_point is None else ENTRY_POINT_POLICY[entry_point]
     if entry_point == "routine" and routine_sandbox_tools:
@@ -142,11 +141,9 @@ def capability_policy(
 def unattended_entry_point(origin: TurnContext) -> UnattendedEntryPoint:
     """The entry point of a prepared turn nobody attends, by its origin.
 
-    A fleet worker and a routine are their own; every other prepared
-    unattended turn is a timer or a finished worker waking its thread.
+    A routine is its own; every other prepared unattended turn is a timer
+    or a finished job waking its thread.
     """
-    if origin == "worker":
-        return "fleet_worker"
     if origin == "routine":
         return "routine"
     return "wake"

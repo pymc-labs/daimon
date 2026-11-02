@@ -49,8 +49,8 @@ async def change_rule(
     writers: ChannelWriters | None = None,
     copy: bool = False,
     release: bool = False,
-) -> str:
-    """Apply one click and return what happened, worded for the admin who clicked."""
+) -> tuple[str, bool]:
+    """Apply one click: what happened, worded for the admin who clicked, and whether it failed."""
     audit = functools.partial(
         record_panel_write,
         runtime.sessionmaker,
@@ -63,7 +63,7 @@ async def change_rule(
         channel = normalize_channel_id("slack", channel_id)
     except InvalidChannelId as exc:
         await audit(outcome="error", reason="invalid_channel")
-        return f"{exc}. Nothing changed."
+        return f"{exc}. Nothing changed.", True
     async with runtime.sessionmaker.begin() as session:
         actor = await get_or_create_platform_principal(
             session, platform="slack", external_id=user_id, tenant_id=tenant_id
@@ -89,9 +89,9 @@ async def change_rule(
         )
     except ChannelRuleRefused as exc:
         await audit(outcome="denied", reason=f"rule:{exc.reason}")
-        return f"{exc} Nothing changed."
+        return f"{exc} Nothing changed.", True
     except DaimonError as exc:  # a copy that can't be made
         await audit(outcome="error", reason="failed")
-        return f"{exc} Nothing changed."
+        return f"{exc} Nothing changed.", True
     await audit(outcome="allowed", reason="completed")
-    return f"<#{channel}>: " + "\n\n".join(escape_mrkdwn(note) for note in change.notes)
+    return f"<#{channel}>: " + "\n\n".join(escape_mrkdwn(note) for note in change.notes), False

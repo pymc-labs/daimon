@@ -1,6 +1,7 @@
 """Skills and version history, preserving direct multipart upload requests."""
 
 from collections.abc import AsyncIterator
+from datetime import datetime
 from typing import Protocol, cast
 
 from anthropic import AsyncAnthropic, omit
@@ -20,7 +21,7 @@ from mux.drivers.anthropic.resources._authorization import (
     visible_skill,
 )
 from mux.drivers.anthropic.resources._errors import provider_call, provider_iter
-from mux.errors import UnsupportedCapability
+from mux.errors import ProviderError, UnsupportedCapability
 
 
 class NativeSkillVersions(SkillVersions, Protocol):
@@ -31,6 +32,17 @@ class NativeSkillVersions(SkillVersions, Protocol):
     def download_by_id(
         self, scope: Scope, skill_id: str, version_id: str
     ) -> AsyncIterator[bytes]: ...
+
+
+def names_skill_version(pinned: str, version: str, version_id: str) -> bool:
+    """Whether a pin names this version: its number, or its id under either prefix.
+
+    An agent names a version "skver_<id>"; the version list names it "skill_version_<id>".
+    """
+    if pinned in (version, version_id):
+        return True
+    _, sep, suffix = pinned.rpartition("_")
+    return bool(sep) and suffix == version_id.rpartition("_")[2]
 
 
 def skill_record(item: SkillCreateResponse | SkillListResponse | SkillRetrieveResponse) -> Skill:
@@ -174,13 +186,26 @@ class AnthropicSkillVersions:
         authorize(self._authorization, scope, "skill", ref.id)
         if ref.version is None:
             raise ValueError("a version must be pinned before downloading")
-        content = await provider_call(
-            self._client.beta.skills.versions.download(ref.version, skill_id=ref.id)
-        )
-        try:
-            yield await provider_call(content.read())
-        finally:
-            await provider_call(content.close())
+        # The skills beta header gets a workspace key refused (403). Without it the
+        # endpoint names a version by its id, not its number, so the id is looked up.
+        version_id = await self._version_id(ref.id, ref.version)
+        async for chunk in self.download_by_id(scope, ref.id, version_id):
+            yield chunk
+
+    async def _version_id(self, skill_id: str, version: str) -> str:
+        """The id of ``version`` (a number or an id); "latest" is the newest one."""
+        newest: tuple[datetime, str] | None = None
+        async for item in provider_iter(
+            self._client.beta.skills.versions.list(skill_id=skill_id, limit=100)
+        ):
+            if names_skill_version(version, item.version, item.id):
+                return item.id
+            made = datetime.fromisoformat(item.created_at)
+            if version == "latest" and (newest is None or made > newest[0]):
+                newest = (made, item.id)
+        if newest is None:
+            raise ProviderError("not_found", retryable=False)
+        return newest[1]
 
     async def walk_native(self, scope: Scope, skill_id: str) -> AsyncIterator[dict[str, JsonValue]]:
         """Preserve main's lazy list and partial native version rows."""

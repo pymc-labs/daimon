@@ -19,12 +19,13 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Literal
 
 import structlog
+from daimon.core.spend_gate import SpendBlock
 from daimon.core.stores.tenants import get_turn_cap
 from daimon.core.tenant_balance import is_over_balance
 from daimon.core.turn.outcomes import current_outcome
@@ -36,6 +37,7 @@ __all__ = [
     "QUEUE_TIMED_OUT_TEXT",
     "SlotResult",
     "holding",
+    "register_spend_recheck",
     "release_turn_slot",
     "wait_for_slot",
     "wait_for_ticket",
@@ -43,12 +45,17 @@ __all__ = [
 
 log = structlog.get_logger(__name__)
 
-SlotResult = Literal["started", "cancelled", "timed_out", "balance_depleted", "queue_full"]
+SlotResult = Literal[
+    "started", "cancelled", "timed_out", "balance_depleted", "allowance_exhausted", "queue_full"
+]
+
+type SpendRecheck = Callable[[], Awaitable[SpendBlock | None]]
 
 _REASONS = {
     "cancelled": TerminationReason.INTERRUPTED,
     "timed_out": TerminationReason.ADMISSION_CONCURRENCY_SHED,
     "balance_depleted": TerminationReason.ADMISSION_BALANCE_DEPLETED,
+    "allowance_exhausted": TerminationReason.ADMISSION_DENIED,
     "queue_full": TerminationReason.ADMISSION_CONCURRENCY_SHED,
 }
 
@@ -64,6 +71,7 @@ class _Holder:
         self.first: TurnTicket | None = ticket
         self.current: TurnTicket | None = None
         self.template = ticket
+        self.recheck: SpendRecheck | None = None
 
     def release(self) -> None:
         for ticket in (self.first, self.current):
@@ -85,6 +93,17 @@ def holding(ticket: TurnTicket) -> Iterator[TurnTicket]:
     finally:
         _current_holder.reset(token)
         holder.release()
+
+
+def register_spend_recheck(recheck: SpendRecheck) -> None:
+    """Admission's word on what a turn of this run is checked against once it holds a slot.
+
+    Set by each admission that passes, for the run's current person and agent; a run
+    outside `holding` has nowhere to keep it and is checked on balance alone.
+    """
+    holder = _current_holder.get()
+    if holder is not None:
+        holder.recheck = recheck
 
 
 def release_turn_slot() -> None:
@@ -136,7 +155,12 @@ async def wait_for_slot(
             return "queue_full"
     holder.current = ticket
     result = await wait_for_ticket(
-        ticket, cancel, sessionmaker=sessionmaker, tenant_id=tenant_id, on_queued=on_queued
+        ticket,
+        cancel,
+        sessionmaker=sessionmaker,
+        tenant_id=tenant_id,
+        on_queued=on_queued,
+        recheck=holder.recheck,
     )
     if result != "started":
         ticket.release()  # a Stop that raced the grant, or a refusal after it
@@ -151,16 +175,24 @@ async def wait_for_ticket(
     sessionmaker: async_sessionmaker[AsyncSession],
     tenant_id: uuid.UUID,
     on_queued: Callable[[], None] | None = None,
+    recheck: SpendRecheck | None = None,
 ) -> SlotResult:
-    """`wait_for_slot` for a caller that holds its ticket directly."""
+    """`wait_for_slot` for a caller that holds its ticket directly.
+
+    A turn that waited is checked again: by `recheck` (admission's balance and
+    allowance gate) when given, else on the tenant balance alone."""
     result: SlotResult = await ticket.wait(cancel, on_wait=on_queued)
-    if (
-        result == "started"
-        and ticket.waited
-        and await is_over_balance(sessionmaker=sessionmaker, tenant_id=tenant_id)
-    ):
-        log.info("turn.queue.balance_depleted", tenant_id=str(tenant_id))
-        result = "balance_depleted"
+    if result == "started" and ticket.waited:
+        block: SpendBlock | None
+        if recheck is not None:
+            block = await recheck()
+        elif await is_over_balance(sessionmaker=sessionmaker, tenant_id=tenant_id):
+            block = "balance_depleted"
+        else:
+            block = None
+        if block is not None:
+            log.info("turn.queue.spend_blocked", tenant_id=str(tenant_id), block=block)
+            result = "allowance_exhausted" if block == "allowance_exhausted" else "balance_depleted"
     if result != "started" and (observation := current_outcome.get()) is not None:
         observation.finish(reason=_REASONS[result])
     return result

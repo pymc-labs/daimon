@@ -162,13 +162,9 @@ async def gate_session_snapshot(
     ungated session. An `entry_point` of None gets no built-ins and no skills.
     """
     # Attended turns are admitted and reauthorized by the turn driver. Of the
-    # unattended entry points, only workers and MCP chat have proved a principal.
+    # unattended entry points, only MCP chat has proved a principal.
     # New entry points must fail closed until their own admission is reviewed.
-    if (
-        entry_point not in ("fleet_worker", "mcp_chat")
-        and session_factory is not None
-        and tenant_id is not None
-    ):
+    if entry_point != "mcp_chat" and session_factory is not None and tenant_id is not None:
         from daimon.core.access_policy import agent_invoker_roles
         from daimon.core.authz import build_agent_ref
         from daimon.core.mux_compat import retrieve_agent

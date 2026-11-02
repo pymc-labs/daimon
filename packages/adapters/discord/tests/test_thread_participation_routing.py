@@ -22,6 +22,8 @@ from unittest.mock import AsyncMock, MagicMock
 import discord
 import pytest
 import pytest_asyncio
+import structlog
+import structlog.testing
 from daimon.adapters.discord import bot as bot_module
 from daimon.adapters.discord import thread_participation
 from daimon.adapters.discord.bot import DaimonBot
@@ -426,12 +428,16 @@ async def test_concurrency_shed_is_silent(
     turns = _stub_turn(bot)
     message = _thread_message(_make_thread(), content="anyone?")
 
-    await bot.on_message(message)
-    await _drain_timer(bot)
+    with structlog.testing.capture_logs() as logs:
+        await bot.on_message(message)
+        await _drain_timer(bot)
 
     assert turns == [], "the tenant override sheds the unasked-for turn"
     assert bot.turn_queue.depth() == 0, "an unasked-for turn never queues"
     message.channel.send.assert_not_called()
+    assert [e for e in logs if e["event"] == "turn.user_failure"] == [], (
+        "nobody asked, so nobody is told it failed"
+    )
 
 
 async def test_a_burst_is_judged_for_the_newest_author_only(

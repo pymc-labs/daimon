@@ -547,6 +547,8 @@ async def test_public_start_turn_keeps_bundle_probe_send_and_clock(
 ) -> None:
     isolated = ma_agent(id="agent", tenant_id=TENANT, metadata={"daimon_isolated": "true"})
     monkeypatch.setattr(agent_chat, "_resolve_ma_agent", AsyncMock(return_value=isolated))
+    # A Claude agent (the provider guard's own read is tested in test_j4_create_*).
+    monkeypatch.setattr(agent_chat, "_refuse_another_provider", AsyncMock(return_value=None))
     monkeypatch.setattr(agent_chat, "_resolve_environment_name", AsyncMock(return_value="env"))
     monkeypatch.setattr(
         agent_chat,
@@ -594,6 +596,8 @@ async def test_public_continue_turn_keeps_ownership_recheck_send_and_clock(
     host_guards: list[Scope],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # A Claude agent (the provider guard's own read is tested in test_j4_create_*).
+    monkeypatch.setattr(agent_chat, "_refuse_another_provider", AsyncMock(return_value=None))
     clock = dt.datetime(2026, 10, 9, 12, tzinfo=dt.UTC)
     replies: list[tuple[str, str, int, dict[str, Any]]] = [
         ("GET", "/v1/sessions/session", 200, BODY),

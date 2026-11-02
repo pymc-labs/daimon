@@ -42,6 +42,9 @@ class _HubKVStore(PostgreSQLStore):
             self._url, min_size=1, max_size=HUB_KV_POOL_MAX
         )
 
+    def _warn_about_stability(self) -> None:
+        """PostgreSQLStore takes no ``stable_api`` switch, so its stability warning is noise."""
+
 
 def asyncpg_dsn(sqlalchemy_url: str) -> str:
     """Drop the ``+asyncpg`` driver marker; asyncpg wants a plain postgresql:// DSN."""

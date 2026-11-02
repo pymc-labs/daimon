@@ -10,6 +10,7 @@ import anthropic
 import httpx
 import pytest
 from cryptography.fernet import InvalidToken
+from daimon.adapters.slack.blockkit import ERROR_COLOR
 from daimon.adapters.slack.errors import (
     NOT_SET_UP_NOTICE,
     SETUP_OUT_OF_DATE_NOTICE,
@@ -297,8 +298,10 @@ class TestSurfaceCommandError:
         body = ephemerals[0].kwargs["json"]
         assert body["channel"] == "C_TEST"
         assert body["user"] == "U_TEST"
-        assert body["text"] == f"{OUR_SIDE}\n\n{REF}"
-        assert body["blocks"][1]["elements"][0]["text"] == "Ref 000000"
+        (attachment,) = body["attachments"]
+        assert attachment["color"] == ERROR_COLOR, "a red-barred notice"
+        assert attachment["fallback"] == f"{OUR_SIDE}\n\n{REF.strip('_')}"
+        assert attachment["blocks"][1]["elements"][0]["text"] == "Ref 000000"
 
     async def test_secondary_slack_failure_is_swallowed(self) -> None:
         client = MagicMock(spec=AsyncWebClient)

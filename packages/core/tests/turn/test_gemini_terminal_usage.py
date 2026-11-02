@@ -454,19 +454,24 @@ async def test_retained_storage_transaction_failure_is_not_swallowed(
     await io.send(
         [{"type": "user.message", "content": [{"type": "text", "text": "offline question"}]}]
     )
-    original = native_host.journal.storage.transaction
+    storage = native_host.journal.storage
     reads = 0
 
-    @asynccontextmanager
-    async def broken_read() -> AsyncIterator[Records]:
-        nonlocal reads
-        reads += 1
-        if reads == 2:
-            raise OSError("offline retained storage unavailable")
-        async with original() as records:
-            yield records
+    def broken(original):  # the second storage access fails, write or snapshot read
+        @asynccontextmanager
+        async def access(*args, **kwargs) -> AsyncIterator[Records]:
+            nonlocal reads
+            reads += 1
+            if reads == 2:
+                raise OSError("offline retained storage unavailable")
+            async with original(*args, **kwargs) as records:
+                yield records
 
-    monkeypatch.setattr(native_host.journal.storage, "transaction", broken_read)
+        return access
+
+    monkeypatch.setattr(storage, "transaction", broken(storage.transaction))
+    if callable(getattr(storage, "read", None)):
+        monkeypatch.setattr(storage, "read", broken(storage.read))
     refuse_meter(native_host)
     with pytest.raises(OSError, match="retained storage unavailable"):
         await driver._replay_usage(  # pyright: ignore[reportPrivateUsage]

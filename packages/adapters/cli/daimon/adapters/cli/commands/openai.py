@@ -46,7 +46,7 @@ from mux.drivers.openai import (
     configured_transport,
 )
 from mux.errors import MuxError
-from mux.profiles.openai import CONVERSATION_ONLY, PERSISTENT_WORKSPACE
+from mux.profiles.openai import PERSISTENT_WORKSPACE
 from rich.console import Console
 
 PROVIDER_NAME = PERSISTENT_WORKSPACE.provider
@@ -56,7 +56,6 @@ profile contract, never hand-typed, so it can't drift from it."""
 openai_app = typer.Typer(help="Self-host Daimon on an OpenAI-only key.")
 
 _PERSISTENT_WORKSPACE = PERSISTENT_WORKSPACE.profile_id
-_CONVERSATION_ONLY = CONVERSATION_ONLY.profile_id
 _WILDCARD = "*"
 _MANIFEST_ENV = "DAIMON_TURN__PROVIDER_RUNTIME_FILE"
 _SMOKE_TENANT_ID = uuid.uuid5(uuid.NAMESPACE_URL, "daimon-openai-smoke")
@@ -197,10 +196,6 @@ def openai_init_command(
         Path | None,
         typer.Option("--manifest", help=f"Runtime file path; defaults to ${_MANIFEST_ENV}."),
     ] = None,
-    profile: Annotated[
-        str,
-        typer.Option("--profile", help=f"{_PERSISTENT_WORKSPACE} or {_CONVERSATION_ONLY}."),
-    ] = _PERSISTENT_WORKSPACE,
     defaults_root: Annotated[
         Path,
         typer.Option("--defaults-root", help="Defaults tree to seed the new agent's skills from."),
@@ -222,10 +217,7 @@ def openai_init_command(
     Reusing an existing row does not re-sync skills.
     """
     console = _console()
-    if profile not in (_PERSISTENT_WORKSPACE, _CONVERSATION_ONLY):
-        raise typer.BadParameter(
-            f"--profile must be {_PERSISTENT_WORKSPACE} or {_CONVERSATION_ONLY}"
-        )
+    profile = _PERSISTENT_WORKSPACE
     path = _manifest_path(manifest)
     rows = _read_rows(path)
     selector = {
@@ -264,7 +256,7 @@ def openai_init_command(
             platform_reason="daimon openai init: operator-authorized bootstrap",
         )
         default_skills: tuple[SkillRef, ...] = ()
-        if profile == _PERSISTENT_WORKSPACE and not skip_default_skills:
+        if not skip_default_skills:
             # Tenant-scoped, not per-channel: skills are a shared resource an
             # operator's narrower, per-channel `init` runs (step 3's
             # non-wildcard alternative) should reuse rather than re-upload a
@@ -289,15 +281,14 @@ def openai_init_command(
         )
 
         environment_id: str | None = None
-        if profile == _PERSISTENT_WORKSPACE:
-            environments = OpenAIEnvironments(context)
-            environment_key = (
-                f"daimon-openai-init-environment:{tenant_id}:{platform}:{channel_id}:{account_id}"
-            )
-            environment = await environments.create(
-                scope, EnvironmentSpec(name=name), key=environment_key
-            )
-            environment_id = environment.ref.id
+        environments = OpenAIEnvironments(context)
+        environment_key = (
+            f"daimon-openai-init-environment:{tenant_id}:{platform}:{channel_id}:{account_id}"
+        )
+        environment = await environments.create(
+            scope, EnvironmentSpec(name=name), key=environment_key
+        )
+        environment_id = environment.ref.id
 
         grant = ConfigurationGrant(
             profiles=(profile,),

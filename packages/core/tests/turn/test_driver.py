@@ -15,9 +15,11 @@ from daimon.testing.turn_fakes import (
     DelayThenYield,
     FakeAnthropic,
     RecordingLifecycle,
+    StreamAction,
     YieldEvent,
     run_turn_on_leg,
 )
+from structlog.testing import capture_logs
 
 from .conftest import (
     make_agent_message,
@@ -1153,6 +1155,162 @@ async def test_retrying_error_behind_a_partial_answer_fails_when_ma_says_retries
 
     assert final.error is not None and "overloaded" in final.error.message
     assert len(lc.terminal_failures) == 1, "retries ran out behind the partial text"
+
+
+# --- 2026-10-26: a sandbox package install timeout the session survives ---
+
+_PACKAGE_MESSAGE = (
+    "Package installation failed: pip ran out of time before installing typst, duckdb, pyarrow."
+)
+
+
+def _unknown_error_event(event_id: str, message: str, *, retry: str = "exhausted"):
+    from anthropic.types.beta.sessions.beta_managed_agents_retry_status_exhausted import (
+        BetaManagedAgentsRetryStatusExhausted,
+    )
+    from anthropic.types.beta.sessions.beta_managed_agents_retry_status_terminal import (
+        BetaManagedAgentsRetryStatusTerminal,
+    )
+    from anthropic.types.beta.sessions.beta_managed_agents_unknown_error import (
+        BetaManagedAgentsUnknownError,
+    )
+
+    from .conftest import make_session_error
+
+    status = (
+        BetaManagedAgentsRetryStatusTerminal(type="terminal")
+        if retry == "terminal"
+        else BetaManagedAgentsRetryStatusExhausted(type="exhausted")
+    )
+    return make_session_error(
+        event_id=event_id,
+        error=BetaManagedAgentsUnknownError(
+            type="unknown_error", message=message, retry_status=status
+        ),
+    )
+
+
+async def _run_scripted_turn(events: list[StreamAction]) -> tuple[TurnState, RecordingLifecycle]:
+    fa = FakeAnthropic()
+    fa.beta.sessions.events.stream_scripts = [events]
+    lc = RecordingLifecycle()
+    final = await run_turn_on_leg(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=lc,
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+    )
+    return final, lc
+
+
+async def test_package_install_failure_then_answer_completes_and_warns() -> None:
+    """The session kept running and answered: the turn is not failed, and the
+    operator still sees the degraded environment in the log."""
+    with capture_logs() as logs:
+        final, lc = await _run_scripted_turn(
+            [
+                YieldEvent(_unknown_error_event("e_1", _PACKAGE_MESSAGE)),
+                YieldEvent(make_agent_message(event_id="m_1", text="here is the answer")),
+                YieldEvent(make_status_idle(event_id="s_1", stop_reason=make_end_turn())),
+            ]
+        )
+
+    assert final.error is None
+    assert final.termination == TerminationReason.COMPLETED
+    assert len(lc.terminal_success) == 1 and lc.terminal_failures == []
+    degraded = [entry for entry in logs if entry["event"] == "turn.environment_degraded"]
+    assert [(entry["session_id"], entry["message"]) for entry in degraded] == [
+        ("sess_1", _PACKAGE_MESSAGE)
+    ]
+    assert degraded[0]["log_level"] == "warning"
+    assert not [entry for entry in logs if entry["event"] == "turn.failed"]
+
+
+async def test_package_install_failure_with_no_content_fails_with_the_package_message() -> None:
+    final, lc = await _run_scripted_turn(
+        [
+            YieldEvent(_unknown_error_event("e_1", _PACKAGE_MESSAGE)),
+            YieldEvent(make_status_idle(event_id="s_1", stop_reason=make_end_turn())),
+        ]
+    )
+
+    assert final.error is not None and final.error.kind == "upstream"
+    assert final.error.message == _PACKAGE_MESSAGE
+    assert final.termination == TerminationReason.UPSTREAM
+    assert len(lc.terminal_failures) == 1 and lc.terminal_success == []
+
+
+async def test_package_install_failure_with_only_tool_use_fails_with_the_package_message() -> None:
+    """A tool call is not an answer: without text the package error stays the turn's."""
+    final, lc = await _run_scripted_turn(
+        [
+            YieldEvent(_unknown_error_event("e_1", _PACKAGE_MESSAGE)),
+            YieldEvent(make_tool_use(event_id="t_1", name="bash")),
+            YieldEvent(make_status_idle(event_id="s_1", stop_reason=make_end_turn())),
+        ]
+    )
+
+    assert final.error is not None and final.error.message == _PACKAGE_MESSAGE
+    assert len(lc.terminal_failures) == 1 and lc.terminal_success == []
+
+
+async def test_package_install_failure_behind_retries_exhausted_fails() -> None:
+    final, lc = await _run_scripted_turn(
+        [
+            YieldEvent(_unknown_error_event("e_1", _PACKAGE_MESSAGE)),
+            YieldEvent(make_agent_message(event_id="m_1", text="partial")),
+            YieldEvent(make_status_idle(event_id="s_1", stop_reason=make_retries_exhausted())),
+        ]
+    )
+
+    assert final.error is not None and final.error.message == _PACKAGE_MESSAGE
+    assert len(lc.terminal_failures) == 1
+
+
+async def test_terminal_package_install_failure_stays_fatal_despite_an_answer() -> None:
+    final, lc = await _run_scripted_turn(
+        [
+            YieldEvent(_unknown_error_event("e_1", _PACKAGE_MESSAGE, retry="terminal")),
+            YieldEvent(make_agent_message(event_id="m_1", text="answer")),
+            YieldEvent(make_status_idle(event_id="s_1", stop_reason=make_end_turn())),
+        ]
+    )
+
+    assert final.error is not None and final.error.message == _PACKAGE_MESSAGE
+    assert len(lc.terminal_failures) == 1
+
+
+async def test_other_exhausted_unknown_error_still_fails_a_turn_that_answers() -> None:
+    """No broad suppression: only the package-install message is set aside."""
+    other = "Sandbox crashed"
+    final, lc = await _run_scripted_turn(
+        [
+            YieldEvent(_unknown_error_event("e_1", other)),
+            YieldEvent(make_agent_message(event_id="m_1", text="answer")),
+            YieldEvent(make_status_idle(event_id="s_1", stop_reason=make_end_turn())),
+        ]
+    )
+
+    assert final.error is not None and final.error.message == other
+    assert len(lc.terminal_failures) == 1
+
+
+async def test_another_error_after_a_package_install_failure_keeps_the_turn_failed() -> None:
+    final, lc = await _run_scripted_turn(
+        [
+            YieldEvent(_unknown_error_event("e_1", _PACKAGE_MESSAGE)),
+            YieldEvent(make_agent_message(event_id="m_1", text="answer")),
+            YieldEvent(_unknown_error_event("e_2", "Sandbox crashed")),
+            YieldEvent(make_status_idle(event_id="s_1", stop_reason=make_end_turn())),
+        ]
+    )
+
+    assert final.error is not None and final.error.message == "Sandbox crashed"
+    assert len(lc.terminal_failures) == 1
 
 
 async def test_driver_acknowledges_only_after_final_delivery():

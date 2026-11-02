@@ -40,9 +40,9 @@ async def test_interaction_check_refuses_anyone_but_the_invoker() -> None:
     intruder = _clicker(user_id=7)
 
     assert await view.interaction_check(intruder) is False, "only the invoker may click"
-    assert intruder.response.send_message.call_args.args[0] == INVOKER_ONLY_MESSAGE, (
-        "the refusal names the rule"
-    )
+    assert (
+        intruder.response.send_message.call_args.kwargs["embed"].description == INVOKER_ONLY_MESSAGE
+    ), "the refusal names the rule"
 
 
 async def test_interaction_check_admits_the_invoker() -> None:

@@ -422,6 +422,10 @@ async def _first_turn(
     if thread_id != _TRIGGER:
         event["thread_ts"] = thread_id
     admission = MagicMock(is_admin=False, is_platform_admin=False)
+    # What the turn controls read: on the default provider, no move (M03).
+    admission.backend_revision = None
+    admission.backend_follow = None
+    admission.agent.model.id = "claude-haiku-5-5"
     admission.account_id = tenant.account_id
     admission.agent.id = "agent_test_id"
     admission.agent.name = _AGENT

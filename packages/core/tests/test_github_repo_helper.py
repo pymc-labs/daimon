@@ -48,7 +48,7 @@ def test_per_repo_helper_selects_exact_placeholder_and_configures_clone(tmp_path
     fake_gh.chmod(0o755)
     capture = tmp_path / "capture"
     capture.mkdir()
-    env = os.environ.copy()
+    env = _isolated_env(tmp_path / "global-gitconfig")
     env.update(
         {
             "PATH": f"{bin_dir}:{env['PATH']}",
@@ -139,12 +139,14 @@ def test_per_repo_helper_selects_exact_placeholder_and_configures_clone(tmp_path
             "credential.https://github.com.helper",
         ],
         text=True,
+        env=env,
     ).splitlines()
     assert helpers == ["", "!sh /mnt/session/uploads/github-repo.sh --git-credential"]
     assert (
         subprocess.check_output(
             ["git", "-C", str(clone_dir), "config", "--get", "credential.useHttpPath"],
             text=True,
+            env=env,
         ).strip()
         == "true"
     )
@@ -160,6 +162,7 @@ def test_per_repo_helper_selects_exact_placeholder_and_configures_clone(tmp_path
             "credential.https://github.com.helper",
         ],
         check=True,
+        env=env,
     )
     for value in ("", f"!sh {script} --git-credential"):
         subprocess.run(
@@ -173,6 +176,7 @@ def test_per_repo_helper_selects_exact_placeholder_and_configures_clone(tmp_path
                 value,
             ],
             check=True,
+            env=env,
         )
     credential = subprocess.run(
         ["git", "-C", str(clone_dir), "credential", "fill"],
@@ -233,6 +237,19 @@ def test_git_credential_mode_only_answers_exact_granted_https_path(tmp_path: Pat
         assert result.stdout == result.stderr == ""
 
 
+def _isolated_env(global_config: Path) -> dict[str, str]:
+    """The ambient environment minus every GIT_* variable, with git config pinned.
+
+    Dropping GIT_CONFIG_COUNT/KEY_n/VALUE_n, GIT_DIR, GIT_WORK_TREE and friends
+    keeps an outer git invocation (a hook, a worktree) from changing what the
+    fixture's git commands do; only `global_config` is read.
+    """
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env["GIT_CONFIG_GLOBAL"] = str(global_config)
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    return env
+
+
 def _push_fixture(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
     """Script, env, capture dir and a clone of OwnerB/RepoB with a recording fake git."""
     script = tmp_path / "github-repo.sh"
@@ -244,6 +261,7 @@ def _push_fixture(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
     )
     real_git = shutil.which("git")
     assert real_git is not None
+    env = _isolated_env(tmp_path / "global-gitconfig")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     fake_git = bin_dir / "git"
@@ -262,7 +280,7 @@ def _push_fixture(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
     capture = tmp_path / "capture"
     capture.mkdir()
     clone = tmp_path / "clone"
-    subprocess.run([real_git, "init", "-q", "-b", "main", str(clone)], check=True)
+    subprocess.run([real_git, "init", "-q", "-b", "main", str(clone)], check=True, env=env)
     subprocess.run(
         [
             real_git,
@@ -274,15 +292,16 @@ def _push_fixture(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
             "https://github.com/ownerb/REPOB.git",
         ],
         check=True,
+        env=env,
     )
     identity = ["-c", "user.name=t", "-c", "user.email=t@example.com"]
     subprocess.run(
         [real_git, "-C", str(clone), *identity, "commit", "-q", "--allow-empty", "-m", "x"],
         check=True,
+        env=env,
     )
     for branch in ("feature", "other/nested"):
-        subprocess.run([real_git, "-C", str(clone), "branch", branch], check=True)
-    env = os.environ.copy()
+        subprocess.run([real_git, "-C", str(clone), "branch", branch], check=True, env=env)
     env.update(
         {
             "PATH": f"{bin_dir}:{env['PATH']}",
@@ -290,8 +309,6 @@ def _push_fixture(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
             "GH_TOKEN_I101_0": "opaque-placeholder-A",
             "GH_TOKEN_I202_0": "opaque-placeholder-B",
             "GH_TOKEN": "wrong-alias",
-            "GIT_CONFIG_GLOBAL": str(tmp_path / "global-gitconfig"),
-            "GIT_CONFIG_NOSYSTEM": "1",
         }
     )
     return script, env, capture, clone
@@ -481,6 +498,7 @@ def test_push_ignores_configured_push_refspec_and_uses_the_explicit_one(tmp_path
             "+refs/heads/feature:refs/heads/main",
         ],
         check=True,
+        env=_SETUP_ENV,
     )
     pushed = _run_in(script, env, clone, "OwnerB/RepoB", "push", "feature")
     assert pushed.returncode == 0, pushed.stderr
@@ -500,6 +518,7 @@ def test_push_refuses_more_than_one_push_url(tmp_path: Path) -> None:
         subprocess.run(
             [real_git, "-C", str(clone), "config", "--add", "remote.origin.pushurl", url],
             check=True,
+            env=_SETUP_ENV,
         )
     # Two push URLs: the first matches the repo, the second does not.
     refused = _run_in(script, env, clone, "OwnerB/RepoB", "push", "feature")
@@ -519,9 +538,187 @@ def test_push_refuses_a_push_url_redirected_away_from_the_repo(tmp_path: Path) -
         ("url.https://github.com/OwnerA/.insteadOf", "https://github.com/ownerb/"),
     )
     for key, value in redirects:
-        subprocess.run([real_git, "-C", str(clone), "config", key, value], check=True)
+        subprocess.run(
+            [real_git, "-C", str(clone), "config", key, value], check=True, env=_SETUP_ENV
+        )
         refused = _run_in(script, env, clone, "OwnerB/RepoB", "push", "feature")
         assert refused.returncode == 2, (key, value)
         assert "opaque-placeholder" not in refused.stdout + refused.stderr
-        subprocess.run([real_git, "-C", str(clone), "config", "--unset", key], check=True)
+        subprocess.run(
+            [real_git, "-C", str(clone), "config", "--unset", key], check=True, env=_SETUP_ENV
+        )
     assert not (capture / "push-args").exists()
+
+
+_REAL_GIT = shutil.which("git") or ""
+_SETUP_ENV = _isolated_env(Path(os.devnull))
+_IDENTITY = ["-c", "user.name=t", "-c", "user.email=t@example.com"]
+
+
+def _git(repo: Path, *args: str) -> str:
+    """Run real git in `repo` and return stdout."""
+    return subprocess.run(
+        [_REAL_GIT, "-C", str(repo), *_IDENTITY, *args],
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_SETUP_ENV,
+    ).stdout.strip()
+
+
+def _remote_refs(bare: Path) -> dict[str, str]:
+    """Every ref in the bare repo mapped to the object it points at."""
+    listing = _git(bare, "for-each-ref", "--format=%(refname) %(objectname)")
+    return dict(line.split(" ") for line in listing.splitlines())
+
+
+def _real_push_fixture(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
+    """The push fixture, but `git push` really runs and lands in a local bare repo.
+
+    The wrapper adds an `insteadOf` rewrite only to the push command, so the
+    helper's own origin check still sees the GitHub URL while the transfer goes
+    to the bare repo and every `remote.origin.*` / `push.*` setting still applies.
+    The bare repo holds a `main` and a `feature` whose histories diverge from
+    the clone's, plus a `stale` branch the clone does not have.
+    """
+    script, env, _, clone = _push_fixture(tmp_path)
+    assert _REAL_GIT
+    _git(clone, "checkout", "-q", "feature")
+    _git(clone, "commit", "-q", "--allow-empty", "-m", "local feature work")
+    _git(clone, "checkout", "-q", "main")
+    _git(clone, "branch", "-f", "other/nested", "feature")
+
+    bare = tmp_path / "remote.git"
+    subprocess.run(
+        [_REAL_GIT, "init", "-q", "--bare", "-b", "main", str(bare)], check=True, env=_SETUP_ENV
+    )
+    seed = tmp_path / "seed"
+    subprocess.run([_REAL_GIT, "init", "-q", "-b", "main", str(seed)], check=True, env=_SETUP_ENV)
+    _git(seed, "commit", "-q", "--allow-empty", "-m", "remote main")
+    _git(seed, "branch", "stale")
+    _git(seed, "branch", "remote-feature")
+    _git(seed, "checkout", "-q", "remote-feature")
+    _git(seed, "commit", "-q", "--allow-empty", "-m", "remote feature work")
+    _git(
+        seed,
+        "push",
+        "-q",
+        str(bare),
+        "main:refs/heads/main",
+        "stale:refs/heads/stale",
+        "remote-feature:refs/heads/remote-feature",
+    )
+
+    wrapper = tmp_path / "bin" / "git"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        'for arg in "$@"; do\n'
+        '  if [ "$arg" = push ]; then\n'
+        f"    exec {_REAL_GIT} -c url.{bare}.insteadOf=https://github.com/ownerb/REPOB.git "
+        '"$@"\n'
+        "  fi\n"
+        "done\n"
+        f'exec {_REAL_GIT} "$@"\n'
+    )
+    return script, env, clone, bare
+
+
+def test_real_push_lands_the_named_branches_in_the_remote(tmp_path: Path) -> None:
+    script, env, clone, bare = _real_push_fixture(tmp_path)
+    before = _remote_refs(bare)
+
+    pushed = _run_in(script, env, clone, "OwnerB/RepoB", "push", "feature", "other/nested")
+    assert pushed.returncode == 0, pushed.stderr
+    feature = _git(clone, "rev-parse", "refs/heads/feature")
+    assert _remote_refs(bare) == {
+        **before,
+        "refs/heads/feature": feature,
+        "refs/heads/other/nested": feature,
+    }
+
+
+def test_real_push_ignores_a_configured_forcing_remapping_refspec(tmp_path: Path) -> None:
+    script, env, clone, bare = _real_push_fixture(tmp_path)
+    _git(clone, "config", "remote.origin.push", "+refs/heads/feature:refs/heads/main")
+    before = _remote_refs(bare)
+
+    pushed = _run_in(script, env, clone, "OwnerB/RepoB", "push", "feature")
+    assert pushed.returncode == 0, pushed.stderr
+    after = _remote_refs(bare)
+    assert after["refs/heads/main"] == before["refs/heads/main"]
+    assert after == {**before, "refs/heads/feature": _git(clone, "rev-parse", "feature")}
+
+
+def test_real_push_does_not_force_a_diverged_remote_branch(tmp_path: Path) -> None:
+    script, env, clone, bare = _real_push_fixture(tmp_path)
+    _git(clone, "config", "remote.origin.push", "+refs/heads/*:refs/heads/*")
+    _git(clone, "config", "push.default", "matching")
+    diverged = _git(bare, "rev-parse", "refs/heads/remote-feature")
+    _git(bare, "update-ref", "refs/heads/feature", diverged)
+    before = _remote_refs(bare)
+
+    rejected = _run_in(script, env, clone, "OwnerB/RepoB", "push", "feature")
+    assert rejected.returncode != 0
+    assert "[rejected]" in rejected.stderr
+    assert _remote_refs(bare) == before
+
+
+def test_real_push_with_mirror_config_deletes_and_overwrites_nothing(tmp_path: Path) -> None:
+    script, env, clone, bare = _real_push_fixture(tmp_path)
+    _git(clone, "config", "remote.origin.mirror", "true")
+    before = _remote_refs(bare)
+    assert {"refs/heads/main", "refs/heads/stale", "refs/heads/remote-feature"} <= set(before)
+
+    refused = _run_in(script, env, clone, "OwnerB/RepoB", "push", "feature")
+    # Git refuses to combine a mirror remote with the helper's explicit refspecs.
+    assert refused.returncode != 0
+    assert "--mirror can't be combined with refspecs" in refused.stderr
+    assert _remote_refs(bare) == before
+
+
+def test_real_push_with_matching_default_pushes_only_the_named_branch(tmp_path: Path) -> None:
+    script, env, clone, bare = _real_push_fixture(tmp_path)
+    # Make local main a fast-forward of remote main, so a `matching` push of
+    # every same-named branch would really advance it.
+    _git(clone, "fetch", "-q", str(bare), "main")
+    _git(clone, "checkout", "-q", "-B", "main", "FETCH_HEAD")
+    _git(clone, "commit", "-q", "--allow-empty", "-m", "local main ahead")
+    _git(clone, "config", "push.default", "matching")
+    before = _remote_refs(bare)
+    assert _git(clone, "merge-base", "--is-ancestor", before["refs/heads/main"], "main") == ""
+
+    pushed = _run_in(script, env, clone, "OwnerB/RepoB", "push", "feature")
+    assert pushed.returncode == 0, pushed.stderr
+    assert _remote_refs(bare) == {
+        **before,
+        "refs/heads/feature": _git(clone, "rev-parse", "feature"),
+    }
+
+
+def test_real_push_follow_tags_adds_only_new_tags_for_the_pushed_commits(tmp_path: Path) -> None:
+    script, env, clone, bare = _real_push_fixture(tmp_path)
+    _git(clone, "config", "push.followTags", "true")
+    _git(clone, "tag", "-a", "-m", "release", "v1", "feature")
+    # `v2` exists on the remote at another commit: the local one must not replace it.
+    _git(clone, "tag", "-a", "-m", "local v2", "v2", "feature")
+    _git(bare, "tag", "-a", "-m", "remote v2", "v2", "refs/heads/main")
+    _git(bare, "tag", "-a", "-m", "remote only", "remote-only", "refs/heads/stale")
+    # `v0` points at a commit that is not part of what is pushed.
+    _git(clone, "checkout", "-q", "-b", "side", "main")
+    _git(clone, "commit", "-q", "--allow-empty", "-m", "unpushed side work")
+    _git(clone, "tag", "-a", "-m", "elsewhere", "v0", "side")
+    _git(clone, "checkout", "-q", "main")
+    before = _remote_refs(bare)
+
+    _run_in(script, env, clone, "OwnerB/RepoB", "push", "feature")
+    after = _remote_refs(bare)
+    assert after["refs/heads/feature"] == _git(clone, "rev-parse", "feature")
+    assert after["refs/tags/v1"] == _git(clone, "rev-parse", "refs/tags/v1")
+    assert after["refs/tags/v2"] == before["refs/tags/v2"]
+    assert after["refs/tags/v2"] != _git(clone, "rev-parse", "refs/tags/v2")
+    assert after["refs/tags/remote-only"] == before["refs/tags/remote-only"]
+    # Documented git behaviour: followTags adds annotated tags reachable from
+    # the pushed branch. Tags are never moved or deleted, and `v0` (reachable
+    # only from the unpushed `side` branch) stays local.
+    assert set(after) - set(before) == {"refs/heads/feature", "refs/tags/v1"}
+    assert {ref: oid for ref, oid in after.items() if ref in before} == before

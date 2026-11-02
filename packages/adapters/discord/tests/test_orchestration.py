@@ -21,6 +21,7 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.adapters.discord.theme import COLOR_RED
 from daimon.adapters.discord.views import CancelView
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import McpSettings, ThreadNamingSettings
@@ -323,12 +324,13 @@ class TestNewThreadCreation:
 
         await bot.on_message(message)
 
-        # The failure is answered with exactly one plain reply, never a
+        # The failure is answered with exactly one red card reply, never a
         # channel-level "opening your chat" notice or a second error.
         message.create_thread.assert_awaited_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        message.reply.assert_awaited_once_with(  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-            "Couldn't open a thread. @mention Daimon again.", mention_author=False
-        )
+        message.reply.assert_awaited_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        reply = message.reply.await_args  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
+        assert reply.kwargs["mention_author"] is False  # pyright: ignore[reportUnknownMemberType]
+        assert reply.kwargs["embed"].description == "Couldn't open a thread. @mention Daimon again."  # pyright: ignore[reportUnknownMemberType]
         message.channel.send.assert_not_awaited()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         assert bot.turn_queue.in_flight() == 0
         assert bot.turn_queue.depth() == 0
@@ -809,7 +811,7 @@ class TestNewThreadCreation:
 
         message.create_thread.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         message.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        sent_text: str = message.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
+        sent_text: str = message.channel.send.call_args.kwargs["embed"].description  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
         # One notice whatever is missing; CR-01: it points at /agent-setup.
         assert sent_text == (
             "Daimon isn't set up in this channel yet.\n\nAsk an admin to run `/agent-setup`."
@@ -865,8 +867,8 @@ class TestNewThreadCreation:
         message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         card.edit.assert_awaited_once()
         edit_kwargs = card.edit.call_args.kwargs
-        assert edit_kwargs["view"] is None and edit_kwargs["embed"] is None
-        error_text: str = edit_kwargs["content"]
+        assert edit_kwargs["view"] is None and edit_kwargs["content"] is None
+        error_text: str = edit_kwargs["embed"].description
         assert "rid:" not in error_text, "the full trace id stays in logs"
         assert error_text.startswith(
             "Daimon couldn't reach its AI service.\n\nTry again in a minute.\n\n-# Ref "
@@ -919,7 +921,7 @@ class TestNewThreadCreation:
 
         message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         assert mock_thread.send.await_count == 2, "card, then the error below it"
-        error_text: str = mock_thread.send.call_args.args[0]
+        error_text: str = mock_thread.send.call_args.kwargs["embed"].description
         assert "couldn't reach its AI service" in error_text
         retire.assert_not_awaited()  # the card is still up: recovery owns its intent
         mock_run_turn.assert_not_called()
@@ -980,7 +982,7 @@ class TestNewThreadCreation:
         assert any(c is not None and "The answer" in c for c in contents)
         db_error = "Something went wrong on our side."
         assert not any(c is not None and db_error in c for c in contents), "answer overwritten"
-        error_text: str = mock_thread.send.call_args.args[0]
+        error_text: str = mock_thread.send.call_args.kwargs["embed"].description
         assert db_error in error_text
 
     @patch("daimon.adapters.discord.bot.retire_terminal_turn_card", new_callable=AsyncMock)
@@ -1036,7 +1038,10 @@ class TestNewThreadCreation:
         await bot.on_message(message)
 
         message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        assert "couldn't reach its AI service" in replacement.edit.call_args.kwargs["content"]
+        assert (
+            "couldn't reach its AI service"
+            in replacement.edit.call_args.kwargs["embed"].description
+        )
         retire.assert_not_awaited()
 
 
@@ -1377,7 +1382,7 @@ class TestHandleMentionErrorBoundary:
 
         # The error lands on the turn's own card in its thread, not the channel.
         message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        error_text: str = card.edit.call_args.kwargs["content"]
+        error_text: str = card.edit.call_args.kwargs["embed"].description
         assert "rid:" not in error_text, (
             f"error boundary must not publish trace ids; got: {error_text!r}"
         )
@@ -1423,7 +1428,7 @@ class TestHandleMentionErrorBoundary:
 
         # The error lands on the turn's own card in its thread, not the channel.
         message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        error_text: str = card.edit.call_args.kwargs["content"]
+        error_text: str = card.edit.call_args.kwargs["embed"].description
         assert "couldn't reach its AI service" in error_text, (
             f"the connection failure should have a plain retry instruction; got: {error_text!r}"
         )
@@ -1554,14 +1559,14 @@ class TestInvokerAccessPolicy:
         mock_run_turn.assert_not_called()
         message.create_thread.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         message.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        sent_text: str = message.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
+        sent_text: str = message.channel.send.call_args.kwargs["embed"].description  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
         assert "can't accept your request here" in sent_text, sent_text
 
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
     @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock)
+    @patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
     async def test_mention_from_an_allowlisted_user_passes_the_policy(
         self,
@@ -1699,7 +1704,7 @@ class TestProtectedChannelNotice:
             message.create_thread.assert_not_called()
         message.add_reaction.assert_awaited_once_with("🔒")
         message.author.send.assert_awaited_once()
-        notice = message.author.send.await_args.args[0]
+        notice = message.author.send.await_args.kwargs["embed"].description
         assert "<#789>" in notice, "the notice names the protected channel, not the thread"
         assert "**Who can post**" in notice and "**Nobody**" in notice, "names the rule"
         assert "server admin" in notice and "/agent-setup" in notice, "says who can change it"
@@ -2045,7 +2050,7 @@ class TestProtectedChannelNoticeNeedsAMatchedRule:
 
         message.channel.send.assert_not_called()
         message.add_reaction.assert_awaited_once_with("🔒")
-        notice = message.author.send.await_args.args[0]
+        notice = message.author.send.await_args.kwargs["embed"].description
         assert "<#789>" in notice and "its category is **Nobody**" in notice, (
             "a category rule is named as the category's, not the channel's"
         )
@@ -2248,7 +2253,7 @@ class TestProtectedChannelBeforeAnyNotice:
         ],
         ids=["no-policy", "no-category-policy", "category-policy-fetches-once"],
     )
-    @patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock)
+    @patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
     async def test_an_uncached_parent_is_fetched_only_for_a_category_policy_and_once(
         self,
@@ -2430,7 +2435,7 @@ class TestBillingAdmissionGate:
     @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
     @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock)
+    @patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
     async def test_over_cap_skips_turn(
         self,
@@ -2466,7 +2471,7 @@ class TestBillingAdmissionGate:
         mock_run_turn.assert_not_called()
         message.create_thread.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         message.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        sent_text: str = message.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
+        sent_text: str = message.channel.send.call_args.kwargs["embed"].description  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
         assert sent_text == (
             "You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
         )
@@ -2475,7 +2480,7 @@ class TestBillingAdmissionGate:
     @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
     @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock)
+    @patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
     async def test_under_cap_proceeds_normally(
         self,
@@ -2512,7 +2517,7 @@ class TestBillingAdmissionGate:
         mock_create_session.assert_called_once()
         mock_run_turn.assert_called_once()
 
-    @patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock)
+    @patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock)
     async def test_dm_no_gate_short_circuit(
         self,
         mock_is_over_cap: AsyncMock,
@@ -2536,7 +2541,7 @@ class TestBillingAdmissionGate:
     @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
     @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock)
+    @patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
     async def test_billed_record_wired_with_session_model_id(
         self,
@@ -3357,7 +3362,7 @@ class TestUnpromptedAdmission:
         mention = _make_thread_message()
         await bot._orchestrate(mention, "123456", tenant.id)  # pyright: ignore[reportPrivateUsage]
         mention.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        sent: str = mention.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
+        sent: str = mention.channel.send.call_args.kwargs["embed"].description  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
         assert "credit" in sent.lower(), "a mention still gets the depleted-credit notice"
 
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
@@ -3393,7 +3398,7 @@ class TestUnpromptedAdmission:
         mention = _make_thread_message()
         await bot._orchestrate(mention, "123456", tenant.id)  # pyright: ignore[reportPrivateUsage]
         mention.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        sent: str = mention.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
+        sent: str = mention.channel.send.call_args.kwargs["embed"].description  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
         assert "budget is used up" in sent, "a mention gets the channel budget notice"
 
 
@@ -3432,6 +3437,10 @@ class TestOverCapQueue:
     @staticmethod
     def _card_texts(card: MagicMock) -> list[str]:
         return [str(c.kwargs.get("content")) for c in card.edit.await_args_list]
+
+    @staticmethod
+    def _card_embeds(card: MagicMock) -> list[discord.Embed]:
+        return [c.kwargs["embed"] for c in card.edit.await_args_list if c.kwargs.get("embed")]
 
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
@@ -3489,7 +3498,13 @@ class TestOverCapQueue:
         view._cancel.set()  # pyright: ignore[reportPrivateUsage]  # the Stop click
         await asyncio.wait_for(turn, 5)
 
-        assert self._card_texts(card) == ["Stopped.\nSend a message to start again."]
+        (embed,) = self._card_embeds(card)
+        assert (embed.title, embed.description, embed.color.value) == (  # type: ignore[union-attr]
+            "Stopped.",
+            "Send a message to start again.",
+            COLOR_RED,
+        ), "a stop while queued ends the card on the red Stopped card, not plain text"
+        assert self._card_texts(card) == ["None"], "no plain content beside the card"
         assert bot.turn_queue.depth() == 0
         held.release()
         await asyncio.sleep(0.05)
@@ -3529,7 +3544,11 @@ class TestOverCapQueue:
 
         await asyncio.wait_for(bot.on_message(message), 5)
 
-        assert self._card_texts(card) == ["Something went wrong. Mention me to try again."]
+        (embed,) = self._card_embeds(card)
+        assert embed.description == "Something went wrong. Mention me to try again.", (
+            "the max wait ends the card with the ordinary error"
+        )
+        assert embed.color.value == COLOR_RED, "the queue ending is the red error card"  # type: ignore[union-attr]
         mock_create_session.assert_not_called()
         assert bot.turn_queue.depth() == 0
         assert bot.turn_queue.in_flight() == 1, "only the other guild's turn holds a slot"
@@ -3656,9 +3675,17 @@ class TestOverCapQueue:
         db_session_factory: async_sessionmaker[AsyncSession],
         exit_kind: str,
     ) -> None:
+        calls = 0
+
+        async def balance_gone_after_admission(**_kwargs: object) -> bool:
+            # Fine at admission (the first call), depleted at the re-check after the wait.
+            nonlocal calls
+            calls += 1
+            return exit_kind == "balance" and calls > 1
+
         with patch(
-            "daimon.core.turn.slots.is_over_balance",
-            AsyncMock(return_value=exit_kind == "balance"),
+            "daimon.core.spend_gate.is_over_balance",
+            AsyncMock(side_effect=balance_gone_after_admission),
         ):
             async with _over_cap_turn(
                 db_session,
@@ -3687,7 +3714,9 @@ class TestOverCapQueue:
                 else:
                     ctx.create_session.assert_awaited_once()
                 if exit_kind == "stop":
-                    assert str(ctx.card.edit.await_args.kwargs["content"]).startswith("Stopped.")
+                    assert ctx.card.edit.await_args.kwargs["embed"].title == "Stopped.", (
+                        "the stopped wait ends on the Stopped card"
+                    )
                 assert ctx.bot.turn_queue.depth() == 0
 
     @pytest.mark.parametrize("exit_kind", ["stop", "timeout", "grant"])

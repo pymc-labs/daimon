@@ -149,7 +149,7 @@ async def test_submitting_from_a_different_user_writes_nothing(
         db_session_factory, tenant_id=tenant.id, account_id=account.id, message_id="msg-wronguser"
     )
     assert stored_text is None, "a click carrying someone else's row id must write nothing"
-    message = interaction.followup.send.call_args.args[0]
+    message = interaction.followup.send.call_args.kwargs["embed"].description
     assert "expired" in message.lower(), (
         "a foreign-row submission must report unavailability, not distinguish it from a missing row"
     )
@@ -164,7 +164,7 @@ async def test_submitting_for_a_missing_feedback_id_reports_unavailable_and_writ
     interaction = _interaction(user_id=_VOTER_ID)
     await modal.on_submit(interaction)
 
-    message = interaction.followup.send.call_args.args[0]
+    message = interaction.followup.send.call_args.kwargs["embed"].description
     assert "expired" in message.lower(), (
         "a missing row must report the same unavailability message as a foreign row"
     )
@@ -189,7 +189,7 @@ async def test_submitting_whitespace_only_text_writes_nothing(
         db_session_factory, tenant_id=tenant.id, account_id=account.id, message_id="msg-whitespace"
     )
     assert stored_text is None, "whitespace-only text must never be written"
-    message = interaction.followup.send.call_args.args[0]
+    message = interaction.followup.send.call_args.kwargs["embed"].description
     assert message == "Write a few words first."
 
 

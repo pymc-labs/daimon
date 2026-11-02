@@ -364,7 +364,7 @@ async def test_on_coding_tools_refuses_unavailable_card_agent_without_minting(
     )
 
     kwargs = interaction.response.send_message.call_args.kwargs
-    refusal = interaction.response.send_message.call_args.args[0]
+    refusal = interaction.response.send_message.call_args.kwargs["embed"].description
     assert kwargs["ephemeral"] is True, "unavailable card target errors must remain private"
     assert "no longer available" in refusal, (
         "unavailable exact identity should explain that Details must be reopened"
@@ -585,8 +585,9 @@ async def test_revoke_confirmation_edits_message_content_and_clears_view(
     interaction_revoke.response.edit_message.assert_called_once()
     edit_kwargs = interaction_revoke.response.edit_message.call_args.kwargs
 
-    assert "revoked" in edit_kwargs.get("content", "").lower(), (
-        f"Revoke confirmation must edit the message content; got {edit_kwargs.get('content')!r}"
+    assert edit_kwargs.get("content") is None, "Revoke must clear the config block text"
+    assert "revoked" in edit_kwargs["embed"].description.lower(), (
+        f"Revoke confirmation must edit the message card; got {edit_kwargs['embed'].description!r}"
     )
     assert edit_kwargs.get("view") is None, (
         "Revoke confirmation must drop the button by passing view=None"
@@ -784,8 +785,8 @@ async def test_on_coding_tools_binds_a_token_minted_in_a_sealed_channel(
     )
 
     if not platform_admin:
-        refusal = interaction.response.send_message.call_args.args[0]
-        assert "Only platform admins" in refusal
+        refusal = interaction.response.send_message.call_args.kwargs["embed"].description
+        assert refusal == mcp_access_mod.CODING_TOOLS_REFUSAL
         assert await count_tokens_for_account(db_session, account_id=account_id) == 0
         return
     content: str = interaction.response.send_message.call_args.kwargs["content"]
@@ -809,7 +810,7 @@ def test_render_mcp_config_puts_a_blank_line_between_lines(channel_id: str | Non
     paragraphs = content.split("\n\n")
     head = [
         "**Use expert-bot from your coding tools**",
-        "Copy the setup below now. The token is shown only once.",
+        "Copy this now: the key is shown only once. It acts as you.",
     ]
     if channel_id is not None:
         head.append("It runs in <#555>, with that channel's rules and budget.")

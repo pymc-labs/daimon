@@ -19,6 +19,15 @@ java -cp "$TLA2TOOLS_JAR" tlc2.TLC \
 java -cp "$TLA2TOOLS_JAR" tlc2.TLC \
   -config formal/github_installation/InstallationReconciliation.cfg \
   formal/github_installation/InstallationReconciliation.tla
+java -cp "$TLA2TOOLS_JAR" tlc2.TLC \
+  -config formal/github_installation/ConnectPositiveCacheSafe.cfg \
+  formal/github_installation/ConnectPositiveCache.tla
+java -cp "$TLA2TOOLS_JAR" tlc2.TLC \
+  -config formal/github_installation/ConnectPositiveCacheNoFence.cfg \
+  formal/github_installation/ConnectPositiveCache.tla
+java -cp "$TLA2TOOLS_JAR" tlc2.TLC \
+  -config formal/github_installation/ConnectPositiveCacheUnknown.cfg \
+  formal/github_installation/ConnectPositiveCache.tla
 ```
 
 ## Implementation mapping
@@ -33,6 +42,10 @@ java -cp "$TLA2TOOLS_JAR" tlc2.TLC \
 | Authoritative `FetchComplete` | [`github_app_auth.py`](../../packages/core/daimon/core/github_app_auth.py) uses a metadata-only installation token and reads every page from `GET /installation/repositories`; an API or payload failure leaves the last complete cache unchanged and the job retryable. |
 | Delete fence | The `installation.deleted` webhook clears the cache and advances the same durable generation. A result already in flight cannot write across that generation change. The TLA+ model checks the generation fence only; immediate cache deletion is covered by executable tests, not modeled. |
 | `CompletedSnapshotIsCurrent` | Signed webhook tests in [`test_webhooks_github.py`](../../packages/adapters/mcp/tests/test_webhooks_github.py) run both reported delivery orders through PostgreSQL and a deterministic GitHub API fake, then compare the cache with the fake's authoritative set. |
+| `CaptureRevision` / `FetchSelected` | [`oauth_github.py`](../../packages/adapters/mcp/daimon/adapters/mcp/oauth_github.py) captures `github_refreshed_at` before the per-installation GitHub user repository GET. The request returns only names visible to that user. |
+| `Save` | [`github_app_installations.py`](../../packages/core/daimon/core/stores/github_app_installations.py) `upsert_github_app` locks the installation row, compares the captured revision, and merges verified names into a populated cache. A mismatch raises `StaleInstallationSnapshotError`; `oauth_github.py` returns HTTP 409 and rolls the transaction back. A `NULL` cache is left untouched. |
+| `Reconcile` | [`github_installation_reconciliation.py`](../../packages/core/daimon/core/stores/github_installation_reconciliation.py) writes the complete snapshot and `github_refreshed_at` under the same installation lock. |
+| `FreshRemovalNotReintroduced` | [`test_github_app_installations.py`](../../packages/core/tests/stores/test_github_app_installations.py) checks a stale verified revision against a newer PostgreSQL cache row; [`test_oauth_github_connect.py`](../../packages/adapters/mcp/tests/test_oauth_github_connect.py) checks the HTTP save path. |
 
 GitHub [documents that webhook deliveries can arrive out of order](https://docs.github.com/en/webhooks/testing-and-troubleshooting-webhooks/troubleshooting-webhooks#webhooks-deliveries-are-out-of-order)
 and suggests using payload timestamps when comparing event time. The [installation event schema](https://docs.github.com/en/webhooks/webhook-events-and-payloads#installation)
@@ -50,6 +63,35 @@ freshness comparison for these events.
 transactions: two add different names, and one removes a name initially
 present. It isolates lost updates caused by replacing the array from a stale
 read. Atomic SQL expressions preserve those concurrent deltas.
+
+`ConnectPositiveCache` models one Connect attempt and one complete reconciliation.
+Connect first captures the cache revision, then receives a user-visible selected
+list, then saves under the installation lock. Reconciliation may happen at any
+boundary and replaces the complete set while advancing the revision. The user
+listing is positive evidence only: successful Connect adds selected names to
+the existing set, leaves an unknown (`NULL`) cache unknown, and does not change
+removal or suspension markers. Reconciliation may update those markers. The old
+listing contains a repository that the newer complete refresh removes. With
+the revision fence, Connect
+rejects that stale save; without it, TLC finds this counterexample:
+
+1. Connect captures the old revision and receives the old user-visible list.
+2. Reconciliation replaces the cache with a complete list excluding the removed repository.
+3. Connect merges its older list into that new cache, restoring the removed repository.
+
+The safe populated-cache configuration checks 12 distinct states; the unfenced
+configuration violates `FreshRemovalNotReintroduced` after 10; the unknown-cache
+configuration checks 12. These are finite checks of one installation, one
+Connect, one reconciliation, and three repository names. The model assumes a
+user list fetched after the new revision is captured reflects the newer
+membership; GitHub's API does not promise an atomic cross-endpoint snapshot.
+The revision fence therefore blocks a listing captured before a completed
+reconciliation; it does not establish that a current-revision user listing is
+globally current. The model does not represent API failures, transaction
+rollback, permissions, duplicate requests, or
+multiple installations. The PostgreSQL and HTTP tests provide executable
+counterparts for the stale-save ordering; no live GitHub contract or production
+trace was used for this change.
 
 `InstallationDeliveryOrder` models one installation, one changed repository,
 and at most three deliveries. In the `Created` configuration the creation

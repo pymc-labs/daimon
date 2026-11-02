@@ -122,6 +122,7 @@ _BALANCE_BLOCKED_TEXT = (
     "Your team has no Daimon credit yet.\n\nAn admin can add some with `/billing`."
 )
 _CAP_BLOCKED_TEXT = "You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
+_ALLOWANCE_BLOCKED_TEXT = "You've used your Daimon credit.\n\nAsk an admin to add more."
 
 
 def _platform_user(url: URL, *, team_id: str, is_admin: bool) -> CallbackResult:
@@ -202,8 +203,12 @@ def _extract_posted_texts(mock: AioResponsesMock) -> list[str]:
             req_kwargs = cast(dict[str, Any], req.kwargs)  # pyright: ignore[reportUnknownMemberType]
             body = cast(dict[str, Any], req_kwargs.get("json") or {})
             text = cast(Any, body.get("text"))
-            if isinstance(text, str):
+            if isinstance(text, str) and text:
                 posted.append(text)
+            for attachment in cast(list[dict[str, Any]], body.get("attachments") or []):
+                fallback = attachment.get("fallback")
+                if isinstance(fallback, str):
+                    posted.append(fallback)
     return posted
 
 
@@ -438,8 +443,12 @@ class SlackDriver:
             posted = _extract_posted_texts(mock)
         return posted
 
-    def expected_blocked_text(self, kind: Literal["balance", "cap"]) -> str:
-        return _BALANCE_BLOCKED_TEXT if kind == "balance" else _CAP_BLOCKED_TEXT
+    def expected_blocked_text(self, kind: Literal["balance", "cap", "allowance"]) -> str:
+        return {
+            "balance": _BALANCE_BLOCKED_TEXT,
+            "cap": _CAP_BLOCKED_TEXT,
+            "allowance": _ALLOWANCE_BLOCKED_TEXT,
+        }[kind]
 
     def _agent_tool_context(
         self,
@@ -750,7 +759,8 @@ class SlackDriver:
             return None
         if not refusals:
             raise AssertionError("the click neither opened a form nor said why not")
-        return str(refusals[0].get("text") or "")
+        attachments = refusals[0].get("attachments") or [{}]
+        return str(attachments[0].get("fallback") or refusals[0].get("text") or "")
 
     async def submit_private_input(
         self,

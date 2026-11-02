@@ -19,6 +19,7 @@ from typing import Any, cast
 
 import structlog
 from anthropic import AsyncAnthropic
+from daimon.adapters.slack.blockkit import notice_attachments
 from daimon.core.media.filenames import display_filename_for
 from daimon.core.output_delivery import (
     MAX_BYTES_CEILING,
@@ -245,7 +246,9 @@ def _build_skip_notice(
         await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
             channel=channel_id,
             thread_ts=thread_ts,
-            text=render_oversize_notice(skipped, max_bytes=max_bytes, for_whom=pending),
+            attachments=notice_attachments(
+                render_oversize_notice(skipped, max_bytes=max_bytes, for_whom=pending)
+            ),
         )
         if mention is not None:
             mention.posted()
@@ -322,7 +325,7 @@ async def deliver_session_outputs(
             await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
                 channel=channel_id,
                 thread_ts=thread_ts,
-                text=notice,
+                attachments=notice_attachments(notice),
             )
             notice_keys.add(notice_key)
 

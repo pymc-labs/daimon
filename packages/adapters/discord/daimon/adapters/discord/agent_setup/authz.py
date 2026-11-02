@@ -54,6 +54,7 @@ from daimon.adapters.discord.checks import (
     is_guild_admin,
     is_platform_admin,
 )
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_reach import load_target_facts
@@ -112,9 +113,9 @@ async def _target_facts(
 
 async def _send_ephemeral(interaction: discord.Interaction, content: str) -> None:  # type: ignore[type-arg]  # discord.Interaction default generic arg; only response/followup are used
     if interaction.response.is_done():
-        await interaction.followup.send(content, ephemeral=True)
+        await interaction.followup.send(embed=build_notice_embed(content), ephemeral=True)
     else:
-        await interaction.response.send_message(content, ephemeral=True)
+        await interaction.response.send_message(embed=build_notice_embed(content), ephemeral=True)
 
 
 async def refuse_if_reachable_and_not_admin(

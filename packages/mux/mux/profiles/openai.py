@@ -15,12 +15,18 @@ LUNA_MODEL = "gpt-6-luna"
 ASTRA_MODEL = "gpt-6-astra"
 # Every model the native OpenAI host runs; the admitted revision selects one.
 NATIVE_MODELS = (LUNA_MODEL, ASTRA_MODEL)
+# GPT-5.6 and later bill cache writes at 1.25x uncached input (OpenAI prompt-caching
+# guide), but Agents API turn usage "do[es] not expose a separate cache-write count,
+# so they cannot determine the exact model charge when that pricing applies" (Agents
+# API observability). The driver's meter therefore never reports one.
+_METERS_CACHE_WRITES = False
 
 PERSISTENT_WORKSPACE = Profile(
     provider="openai",
     profile_id="openai.persistent_workspace",
     schema_version="1",
     accounting_mode=AccountingMode.NATIVE_ROOT_TOTALS,
+    meters_cache_writes=_METERS_CACHE_WRITES,
     sdk_pin="openai>=2.54.0,<3",
     core=True,  # Nine mandatory capabilities have actual-driver evidence; see driver README.
     execution_tool="bash",
@@ -73,6 +79,7 @@ CONVERSATION_ONLY = Profile(
     profile_id="openai.conversation_only",
     schema_version="1",
     accounting_mode=AccountingMode.NATIVE_ROOT_TOTALS,
+    meters_cache_writes=_METERS_CACHE_WRITES,
     sdk_pin="openai>=2.54.0,<3",
     core=False,
     support={

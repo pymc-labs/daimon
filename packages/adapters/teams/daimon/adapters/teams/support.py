@@ -50,7 +50,7 @@ from daimon.adapters.teams.answer_access import (
     refusal_text,
     sealed_at,
 )
-from daimon.adapters.teams.card import ASK_HUMAN_DIALOG
+from daimon.adapters.teams.card import ASK_HUMAN_DIALOG, notice_card
 from daimon.adapters.teams.card_actions import (
     FAILED,
     Actor,
@@ -101,7 +101,6 @@ from daimon.core.support_routing import support_recipient_tiers
 from microsoft_teams.api import (
     AdaptiveCardInvokeActivity,
     AdaptiveCardInvokeResponse,
-    MessageActivityInput,
     TaskFetchInvokeActivity,
     TaskModuleResponse,
     TaskSubmitInvokeActivity,
@@ -292,12 +291,12 @@ class SupportCommand:
             actor = Actor(asked.user_id, context.tenant_id, context.is_admin, asked.conversation_id)
             access = await check_answer_access(self._runtime, actor, asked.place)
             if access.access != "allowed":
-                await context.send(MessageActivityInput(text=_refusal(access)))
+                await context.send(notice_card(_refusal(access)))
                 return
             asked = replace(asked, sealed=access.sealed)
         remaining = await self._remaining(context.tenant_id, asked.user_id)
         if remaining <= 0:
-            await context.send(MessageActivityInput(text=OUT_OF_CREDITS))
+            await context.send(notice_card(OUT_OF_CREDITS))
             return
         token = secrets.token_urlsafe(16)
         self._asked[token] = asked

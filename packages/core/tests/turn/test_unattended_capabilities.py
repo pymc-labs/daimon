@@ -402,7 +402,7 @@ async def test_decider_lets_builtins_through_only_for_an_opted_in_routine(
 
 @pytest.mark.parametrize(
     ("origin", "entry_point"),
-    [("worker", "fleet_worker"), ("routine", "routine"), ("chat", "wake"), ("relay", "wake")],
+    [("routine", "routine"), ("chat", "wake"), ("relay", "wake")],
 )
 def test_prepared_origin_maps_to_entry_point(origin: Any, entry_point: str) -> None:
     assert unattended_entry_point(origin) == entry_point
@@ -1259,7 +1259,7 @@ def _sdk_value(annotation: Any, field: str) -> object:
             return [_sdk_payload(member) for member in members]
         return [_sdk_value(item, field)]
     if origin is dict:
-        return {"daimon_tenant": "449f4dc5-5990-52c0-96e0-45a4ab3bf0e4"}
+        return {"daimon_tenant": "6f1c2a3e-0d4b-4e8a-9c7f-2b5d8e1a4c90"}
     if origin in (Union, UnionType):
         options = [arg for arg in get_args(annotation) if arg is not type(None)]
         if models := _models_in(annotation):

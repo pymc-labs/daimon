@@ -12,6 +12,7 @@ from collections.abc import Collection, Mapping, Sequence
 from typing import Any, Literal
 
 from daimon.adapters.teams.billing_panel import channel_name_text
+from daimon.adapters.teams.card import notice_adaptive_card
 from daimon.adapters.teams.card_actions import button, clip, heading
 from daimon.adapters.teams.channel_settings_card import CHANNEL_DIALOG
 from daimon.core import channel_backend
@@ -38,6 +39,7 @@ from daimon.core.setup_conversations import (
 )
 from daimon.core.skills.ingest import SkillPreview
 from daimon.core.stores.domain import McpTokenRow
+from daimon.core.turn.notices import conversations_follow_line
 from microsoft_teams.cards import (
     Action,
     ActionSet,
@@ -316,7 +318,11 @@ def backend_preview_card(
         shown = names if len(names) <= 500 else names[:500] + "… (truncated)"
         lines.append(f"{label}: {shown}")
     lines.extend(
-        [preview.cost_line, "Existing threads keep their provider; channel settings still apply."]
+        [
+            preview.cost_line,
+            conversations_follow_line(agent_name, None if clear else preview.target_backend)
+            + " Channel settings still apply.",
+        ]
     )
     if not preview.allowed:
         lines.append("This provider is off for this organisation. Pick another.")
@@ -548,10 +554,10 @@ def token_card(
     *, agent_name: str, cli: str, mcp_json: str, jti: str, channel_id: str | None = None
 ) -> AdaptiveCard:
     """The minted token, shown once inside a dialog, with a Revoke button."""
-    revoke = SubmitAction(title="🗑 Revoke this token", data=SubmitData(TOKEN_DIALOG, {"jti": jti}))
+    revoke = SubmitAction(title="🗑 Revoke this key", data=SubmitData(TOKEN_DIALOG, {"jti": jti}))
     lines = [
         _text(f"Use {agent_name} from your coding tools", bold=True),
-        _text("Copy the setup below now. The token is shown only once.", spacing="Medium"),
+        _text("Copy this now: the key is shown only once. It acts as you.", spacing="Medium"),
     ]
     if channel_id is not None:
         bound = f"It runs in {channel_id}, with that channel's rules and budget."
@@ -622,5 +628,5 @@ def welcome_card(*, target_name: str | None, opener: str, thread_id: str) -> Ada
     return _card(setup_thread_name(target_name), [_text(opener), _text(how, subtle=True)], [end])
 
 
-def notice_card(text: str) -> AdaptiveCard:
-    return AdaptiveCard(body=[_text(text)], fallback_text=text)
+def notice_card(text: str, *, error: bool = True) -> AdaptiveCard:
+    return notice_adaptive_card(text, error=error)

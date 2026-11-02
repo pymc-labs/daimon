@@ -125,6 +125,7 @@ async def _add(
     text: str | None = None,
     added_by: uuid.UUID | None = None,
     recheck: AgentRecheck | None = None,
+    attach: bool = True,
 ):
     async def allow(_fresh: BetaManagedAgentsAgent) -> None:
         return None
@@ -139,6 +140,7 @@ async def _add(
         origin="pasted",
         added_by_account_id=added_by,
         recheck=recheck or allow,
+        attach=attach,
     )
 
 
@@ -170,6 +172,18 @@ async def test_new_skill_is_uploaded_agent_scoped_recorded_and_attached(
     assert row is not None
     assert (row.source, row.origin, row.added_by_account_id) == ("upload", "pasted", account.id)
     assert row.source_repo_url == "", "no repo owns it, so no repo sync deletes it"
+
+
+async def test_a_skill_added_without_attaching_leaves_the_agent_alone(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session)
+    fake = _FakeMA(agent=ma_agent(id="ag_1", name="agent", tenant_id=tenant.id))
+
+    result = await _add(fake, db_session_factory, tenant.id, attach=False)
+
+    assert result.action == "created" and fake.created_titles, "the skill is still published"
+    assert fake.updates == [], "the caller pins it in a draft; the agent changes on apply"
 
 
 async def test_re_adding_pushes_a_version_only_when_the_content_changed(

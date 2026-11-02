@@ -233,3 +233,8 @@ def apply_credential_guidance(system: str) -> str:
     if not body:
         return CREDENTIAL_GUIDANCE_BLOCK
     return f"{CREDENTIAL_GUIDANCE_BLOCK}\n\n{body}"
+
+
+def without_credential_guidance(system: str) -> str:
+    """The person's own prompt: ``system`` without the guidance block. Pure."""
+    return _strip_existing_block(system)

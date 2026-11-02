@@ -172,6 +172,9 @@ class OpenAIEvents:
             raise self._c.unsupported("expected_turn")
         if not events:
             raise ProviderError("invalid_request", retryable=False, native_code="empty_input")
+        if any(isinstance(e, UserMessage) and e.mode == "new_turn" for e in events):
+            # A per-turn MCP bearer: this turn's credential replaces the last one.
+            await self._sessions.refresh_mcp(scope, session, key=key + ":mcp-rotate")
         current = await self._sessions.retrieve(scope, session)
         if current.state == "terminated":
             raise self._c.unsupported("session_not_accepting_input")

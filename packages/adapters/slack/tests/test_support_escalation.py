@@ -49,6 +49,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .conftest import shown_text
 from .harness import build_slack_runtime
 
 pytestmark = pytest.mark.asyncio
@@ -125,7 +126,7 @@ def _submit_payload(note: str, *, message_ts: str = _ANSWER_TS) -> dict[str, Any
 
 
 def _ephemeral_texts(fake: Any) -> list[str]:
-    return [c.kwargs["json"]["text"] for c in fake.mock.requests.get(_EPHEMERAL, [])]
+    return [shown_text(c.kwargs["json"]) for c in fake.mock.requests.get(_EPHEMERAL, [])]
 
 
 def _shown(fake: Any) -> list[dict[str, Any]]:

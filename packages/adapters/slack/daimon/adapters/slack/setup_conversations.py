@@ -7,6 +7,7 @@ from typing import Any
 
 import aiohttp
 from daimon.adapters.slack.admin import ADMIN_NOUN, resolve_is_admin
+from daimon.adapters.slack.blockkit import notice_fields, notice_update_fields
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.admin_actions import DelegatedAction
@@ -98,7 +99,7 @@ async def create_setup_conversation(
         admin_noun=ADMIN_NOUN,
     )
     posted = await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
-        channel=channel_id, text="Starting a thread with Daimon…"
+        channel=channel_id, **notice_fields("Starting a thread with Daimon…", neutral=True)
     )
     thread_id = str(posted.get("ts") or "")
     if not thread_id:
@@ -121,7 +122,7 @@ async def create_setup_conversation(
         reply = await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
             channel=channel_id,
             thread_ts=thread_id,
-            text=opener,
+            **notice_fields(opener, neutral=True),
         )
         opener_ts = str(reply.get("ts") or "")
         if not opener_ts:
@@ -140,6 +141,7 @@ async def create_setup_conversation(
             channel=channel_id,
             ts=thread_id,
             text=f"{launcher}\n<{link}|Reply to Daimon>",
+            attachments=[],
             blocks=[
                 {"type": "section", "text": {"type": "mrkdwn", "text": launcher}},
                 setup_reply_button(link),
@@ -156,8 +158,7 @@ async def create_setup_conversation(
                     await client.chat_update(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
                         channel=channel_id,
                         ts=message_ts,
-                        text="Setup failed. Reopen /agent-setup to try again.",
-                        blocks=[],
+                        **notice_update_fields("Setup failed. Reopen /agent-setup to try again."),
                     )
         async with runtime.sessionmaker.begin() as session:
             await update_lifecycle(

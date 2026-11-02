@@ -79,7 +79,7 @@ async def test_cost_reads_equal_per_row_pricing_on_random_rows(
         """The former per-row sum, over the same filters."""
         total = 0.0
         for r in stored:
-            if r.tenant_id != tenant.id or r.occurred_at < since or r.platform_user_id is None:
+            if r.tenant_id != tenant.id or r.occurred_at < since:
                 continue
             if user is not None and r.platform_user_id != user:
                 continue

@@ -196,13 +196,11 @@ async def assert_ordinary_native_preparation_and_turns(ordinary, *, first_reuse=
     await service.clear_backend(source, accepted.local, actor)
     request, lookup = scope_channel_runtimes(request)
     selected = await read_preparation_counterpart(request)
-    assert selected.worker is None
     assert selected.target_spec == canonical.target_spec
     assert selected.verified_counterpart == selected.counterpart
     assert isinstance(lookup.resolved.journal, GeminiJournal)
     deployment = lookup.resolved.journal.deployment
     assert deployment.agent == canonical.target_spec
-    assert deployment.max_total_tokens is deployment.max_output_tokens is None
     assert selected.target_spec.system.startswith("Authoritative source instructions\n\n")
     assert all(call.method == "GET" for call in calls)
     assert (
@@ -311,7 +309,6 @@ async def test_ordinary_preparation_requires_each_shared_native_proof_fact(ordin
         "mcp",
         "operator_tools",
         "cap",
-        "materialization",
     ],
 )
 def test_ordinary_compiler_refuses_unproven_native_intent(ordinary, defect):
@@ -339,7 +336,6 @@ def test_ordinary_compiler_refuses_unproven_native_intent(ordinary, defect):
             update={
                 "operator_tools": {"tools": (ToolSpec(kind="builtin", name="code_execution"),)},
                 "cap": {"max_output_tokens": 4096},
-                "materialization": {"worker_materialization": True},
             }[defect]
         )
     with pytest.raises(AdmissionDenied):

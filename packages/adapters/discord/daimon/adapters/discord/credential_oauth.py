@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 
 import structlog
 from daimon.adapters.discord.credential_origin import resolve_credential_target
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.posted_controls import edit_posted_card
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_pins import FormPinRefused
@@ -52,7 +53,7 @@ async def start_mcp_oauth_from_click(
     # A superset of the route mount's predicate (mount needs fernet + app root;
     # this also needs jwt_secret): never hand out a link the routes cannot serve.
     if app_root_url is None or mcp.jwt_secret is None or runtime.turn_deps.fernet is None:
-        await interaction.followup.send(_UNCONFIGURED, ephemeral=True)
+        await interaction.followup.send(embed=build_notice_embed(_UNCONFIGURED), ephemeral=True)
         return
     agent = await resolve_credential_target(interaction, runtime=runtime, row=row)
     if agent is None:
@@ -63,10 +64,12 @@ async def start_mcp_oauth_from_click(
             runtime.sessionmaker, row=row, agent=agent, app_root_url=app_root_url, now=now
         )
     except FormPinRefused as refused:
-        await interaction.followup.send(refused.refusal, ephemeral=True)
+        await interaction.followup.send(embed=build_notice_embed(refused.refusal), ephemeral=True)
         return
     if consumed is None or flow is None:
-        await interaction.followup.send(NO_LONGER_VALID_MESSAGE, ephemeral=True)
+        await interaction.followup.send(
+            embed=build_notice_embed(NO_LONGER_VALID_MESSAGE), ephemeral=True
+        )
         return
     # The row is spent: the card must stop offering a button that can only
     # answer "already used" from here on, the same moment every other kind
@@ -78,7 +81,12 @@ async def start_mcp_oauth_from_click(
         agent_id=str(consumed.agent_id),
     )
     await interaction.followup.send(
-        invite_copy(server_name=consumed.target, agent_name=consumed.target_name or "the agent"),
+        embed=build_notice_embed(
+            invite_copy(
+                server_name=consumed.target, agent_name=consumed.target_name or "the agent"
+            ),
+            neutral=True,
+        ),
         view=build_invite_view(start_url(app_root_url, state=flow.state)),
         ephemeral=True,
     )

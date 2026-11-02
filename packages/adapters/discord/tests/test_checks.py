@@ -64,7 +64,7 @@ class TestRequireRegisteredGuild:
 
         interaction.response.send_message.assert_awaited_once()
         call_kwargs = interaction.response.send_message.call_args
-        assert "only available in a server" in call_kwargs.args[0], (
+        assert "only available in a server" in call_kwargs.kwargs["embed"].description, (
             "should mention server requirement"
         )
         assert call_kwargs.kwargs.get("ephemeral") is True, "error should be ephemeral"
@@ -95,7 +95,9 @@ class TestRequireRegisteredGuild:
 
         interaction.response.send_message.assert_awaited_once()
         call_kwargs = interaction.response.send_message.call_args
-        assert "not registered" in call_kwargs.args[0], "should mention registration"
+        assert "not registered" in call_kwargs.kwargs["embed"].description, (
+            "should mention registration"
+        )
         assert call_kwargs.kwargs.get("ephemeral") is True
         wrapped.assert_not_awaited()
 
@@ -213,9 +215,9 @@ async def test_refuse_if_not_admin_refuses_a_member_with_one_ephemeral() -> None
 
     assert refused is True, "an ordinary member must be refused"
     interaction.response.send_message.assert_awaited_once()
-    assert "Daimon admin" in interaction.response.send_message.call_args.args[0], (
-        "the refusal should name the permission the member is missing"
-    )
+    assert "Daimon admin" in (
+        interaction.response.send_message.call_args.kwargs["embed"].description
+    ), "the refusal should name the permission the member is missing"
     assert interaction.response.send_message.call_args.kwargs.get("ephemeral") is True, (
         "the refusal must be ephemeral"
     )
@@ -255,7 +257,7 @@ async def test_routines_refusal_gives_an_admin_the_requested_action() -> None:
     await routines(object(), interaction)
 
     assert called is False, "a member must not run the admin command"
-    message = interaction.response.send_message.call_args.args[0]
+    message = interaction.response.send_message.call_args.kwargs["embed"].description
     assert "Daimon admin" in message, "the refusal must name the required role"
     assert "Please open `/routines`" in message, "the handover must preserve the requested action"
     assert "this server’s scheduled routines" in message, "the handover must preserve the target"

@@ -19,6 +19,7 @@ from daimon.core.turn_hold import RequesterOrg
 from slack_sdk.errors import SlackApiError
 from slack_sdk.socket_mode.request import SocketModeRequest
 
+from .conftest import shown_text
 from .test_shared_channels import (
     _CHANNEL,
     _HOST,
@@ -85,7 +86,7 @@ async def test_a_click_that_does_not_prove_membership_is_checked_with_users_info
     assert ran.await_count == int(allowed)
     assert client.chat_postEphemeral.await_count == int(not allowed)
     if not allowed:
-        assert client.chat_postEphemeral.await_args.kwargs["text"].startswith(
+        assert shown_text(client.chat_postEphemeral.await_args.kwargs).startswith(
             "That's only for people at"
         )
 
@@ -228,7 +229,7 @@ async def test_a_slash_command_needs_a_verified_host_member(
     if not allowed:
         kwargs = client.chat_postEphemeral.await_args.kwargs
         assert kwargs["user"] == "U_UNPLACED" and kwargs["channel"] == _CHANNEL
-        assert kwargs["text"].startswith("That's only for people at")
+        assert shown_text(kwargs).startswith("That's only for people at")
 
 
 async def test_help_stays_open_to_everyone_without_a_lookup() -> None:
@@ -451,7 +452,7 @@ async def test_a_slow_lookup_gets_a_try_again_for_a_slash_command_and_opens_noth
         await _run_slash(app, _slash("/agent-setup"), client)
         await _settle(app)
     ran.assert_not_awaited()
-    assert client.chat_postEphemeral.await_args.kwargs["text"] == TRY_AGAIN_NOTICE
+    assert shown_text(client.chat_postEphemeral.await_args.kwargs) == TRY_AGAIN_NOTICE
 
 
 async def test_a_slow_click_lookup_gets_a_try_again() -> None:
@@ -468,4 +469,4 @@ async def test_a_slow_click_lookup_gets_a_try_again() -> None:
         await _deliver(app, _unproven_click("agent_setup__open"), client)
         await _settle(app)
     ran.assert_not_awaited()
-    assert client.chat_postEphemeral.await_args.kwargs["text"] == TRY_AGAIN_NOTICE
+    assert shown_text(client.chat_postEphemeral.await_args.kwargs) == TRY_AGAIN_NOTICE

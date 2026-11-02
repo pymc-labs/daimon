@@ -427,9 +427,7 @@ async def _run_continuation_and_capture_controls(
     assert resolve_identity.await_args.kwargs["enabled"] == (not excluded_identity)
 
     assert run_turn.await_args is not None, "the follow-up turn should have run"
-    assert run_turn.await_args.kwargs["attended"] is (
-        row.attended and row.reason not in ("timer", "worker_finished")
-    )
+    assert run_turn.await_args.kwargs["attended"] is (row.attended and row.reason != "timer")
     user_message = run_turn.await_args.kwargs["user_message"]
     assert isinstance(user_message, str), "user_message should be the rendered controls + seed"
     return user_message

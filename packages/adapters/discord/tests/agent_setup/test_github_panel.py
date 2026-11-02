@@ -19,6 +19,7 @@ from daimon.adapters.discord.agent_setup.github_repos import GitHubReposView
 from daimon.adapters.discord.agent_setup.github_waiting import GitHubWaitingView
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.commands.github import GitHubCog
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.core.github_panel import GrantsPanel, RepoChoice
 from daimon.core.roster import RosterAgent
 from daimon.core.stores.github_access import AuthorizedRepo
@@ -88,7 +89,9 @@ async def test_new_repo_notice_defers_before_database_lookup(
     monkeypatch.setattr(notice_module, "notices_for_day", AsyncMock(return_value=None))
     runtime = SimpleNamespace(sessionmaker=sessionmaker)
     assert await notice_module.handle_dm_notice(interaction, runtime)  # type: ignore[arg-type]
-    interaction.followup.send.assert_awaited_once_with("This card is unavailable.", ephemeral=True)
+    interaction.followup.send.assert_awaited_once_with(
+        embed=build_notice_embed("This card is unavailable."), ephemeral=True
+    )
 
 
 @pytest.mark.asyncio

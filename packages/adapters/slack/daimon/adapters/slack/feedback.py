@@ -526,6 +526,7 @@ async def handle_feedback_vote(runtime: SlackRuntime, payload: dict[str, Any]) -
             thread_ts=thread_ts,
             message_ts=message_ts,
             text=_NOT_ALLOWED,
+            error=True,
         )
         return
 
@@ -569,6 +570,7 @@ async def handle_feedback_vote(runtime: SlackRuntime, payload: dict[str, Any]) -
             thread_ts=thread_ts,
             message_ts=message_ts,
             text=text,
+            error=True,
         )
         return
 
@@ -636,6 +638,7 @@ async def handle_feedback_details_click(runtime: SlackRuntime, payload: dict[str
             thread_ts=thread_ts,
             message_ts=message_ts,
             text=_FORM_DID_NOT_OPEN,
+            error=True,
         )
 
 
@@ -659,7 +662,7 @@ async def run_feedback_text_submission(
         return
     d = decision
 
-    async def reply(text: str) -> None:
+    async def reply(text: str, *, error: bool = True) -> None:
         await post_ephemeral(
             client,
             channel_id=d.channel_id,
@@ -667,6 +670,7 @@ async def run_feedback_text_submission(
             thread_ts=d.thread_ts,
             message_ts=d.message_ts,
             text=text,
+            error=error,
         )
 
     if not d.message_ts:
@@ -718,7 +722,7 @@ async def run_feedback_text_submission(
         log.info(
             "feedback.routed_to_support", feedback_id=str(recorded.row_id), delivered=delivered
         )
-    await reply(_THANKS_TEXT)
+    await reply(_THANKS_TEXT, error=False)
 
 
 def render_feedback_post(

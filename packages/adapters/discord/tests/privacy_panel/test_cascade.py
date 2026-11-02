@@ -265,3 +265,20 @@ def test_cascade_container_slack_turn_contexts_row_absent_when_zero() -> None:
     assert "temporary request record" not in joined, (
         "zero-count slack_turn_contexts must NOT render a row"
     )
+
+
+def test_cascade_names_the_conversations_it_deletes_and_the_shared_ones_it_keeps() -> None:
+    preview = _make_preview(
+        mux_slots=PurgePreviewRow(count=2, example=None),
+        retained_shared_conversations=PurgePreviewRow(count=3, example=None),
+    )
+    text = _joined_text(build_cascade_preview_container(preview))
+    assert "Delete Daimon's copy of **2** saved conversations, with its messages" in text
+    assert (
+        "Your messages in **3** shared conversations stay for the people still using them." in text
+    )
+
+
+def test_cascade_is_silent_about_conversations_when_there_are_none() -> None:
+    text = _joined_text(build_cascade_preview_container(_make_preview()))
+    assert "saved conversation" not in text and "shared conversation" not in text

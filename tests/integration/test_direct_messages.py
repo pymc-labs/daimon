@@ -393,7 +393,7 @@ async def test_discord_answers_an_unselected_dm_once_without_guild_or_model_call
     await cog.on_message(message)
     bot.get_guild.assert_not_called()
     message.channel.send.assert_awaited_once()
-    assert "/dm-me" in message.channel.send.await_args.args[0]
+    assert "/dm-me" in message.channel.send.await_args.kwargs["embed"].description
 
 
 async def test_discord_refuses_a_departed_member_before_running_a_dm(
@@ -510,7 +510,10 @@ async def test_discord_dm_waits_for_a_global_slot_and_releases_on_success_and_er
             release.set()
             await asyncio.gather(first, second)
     assert replies == ["reply", "reply"]
-    assert not any(call.args[:1] == (GLOBAL_CAP_NOTICE,) for call in channel.send.await_args_list)
+    assert not any(
+        "embed" in call.kwargs and call.kwargs["embed"].description == GLOBAL_CAP_NOTICE
+        for call in channel.send.await_args_list
+    )
     assert bot.turn_queue.in_flight() == 0
 
     with (
@@ -733,7 +736,7 @@ async def test_discord_move_command_seeds_and_runs_a_real_private_turn(
         return
     assert route is not None
     assert "Continue this task privately" in route.context
-    assert "discord.com/channels/123/100" in dm.send.call_args.args[0]
+    assert "discord.com/channels/123/100" in dm.send.call_args.kwargs["embed"].description
     message = MagicMock(spec=discord.Message)
     message.author.bot = False
     message.author.id = 42
@@ -986,7 +989,7 @@ async def test_slack_missing_im_grants_refuses_before_open_or_policy_write(
         )
         assert not any("conversations." in str(url) for _, url in http.requests)
         replies = [
-            call.kwargs["json"]["text"]
+            call.kwargs["json"]["attachments"][0]["fallback"]
             for (method, url), calls in http.requests.items()
             if "chat.postEphemeral" in str(url)
             for call in calls
@@ -1038,7 +1041,7 @@ async def test_slack_open_failure_requires_reauthorization_without_creating_rout
         http.post("https://slack.com/api/chat.postEphemeral", payload={"ok": True})
         await handle_dm_command(runtime, {"team_id": "T1", "user_id": "42", "channel_id": "C1"})
         replies = [
-            call.kwargs["json"]["text"]
+            call.kwargs["json"]["attachments"][0]["fallback"]
             for (_, url), calls in http.requests.items()
             if "chat.postEphemeral" in str(url)
             for call in calls
@@ -1235,6 +1238,7 @@ async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_
     from daimon.core.headless_runner import run_turn as headless_turn
     from daimon.core.ma_identity import derive_agent_uuid
     from daimon.core.mcp_auth import mint_agent_mcp_token, mint_jwt, mint_panel_mcp_token
+    from daimon.core.stores.agent_owners import set_owner
     from daimon.core.stores.slack_user_tokens import upsert_slack_user_token
     from daimon.core.turn import io as turn_io_module
     from daimon.testing.asgi import call_mcp_tool
@@ -1389,6 +1393,15 @@ async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_
         await check_sessions(other, handle)
         other_tokens.append((other, False))
         async with db_session_factory.begin() as token_db:
+            # A coding key verifies only for an admin or an owner of its agent; the
+            # point here is that even a valid one cannot borrow the DM execution.
+            await set_owner(
+                token_db,
+                tenant_id=tenant.id,
+                agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=admission.agent.id),
+                owner_account_id=admission.account_id,
+                source="admin_assigned",
+            )
             agent_token = await mint_agent_mcp_token(
                 token_db,
                 account_id=admission.account_id,
@@ -1730,7 +1743,9 @@ async def test_discord_dm_move_from_thread_under_sealed_parent_refuses_with_real
 
     thread.history.assert_not_called()
     member.create_dm.assert_not_called()
-    assert "Only conversations inside" in interaction.followup.send.await_args.args[0]
+    assert "Only conversations inside" in (
+        interaction.followup.send.await_args.kwargs["embed"].description
+    )
 
 
 async def test_slack_dm_move_withholds_a_thread_sealed_on_its_own_with_real_admission(
@@ -1939,4 +1954,6 @@ async def test_discord_generic_guidance_does_not_resolve_guild_or_run_a_model(db
     await DirectMessageCog(bot).on_message(message)
     bot.get_guild.assert_not_called()
     message.channel.send.assert_awaited_once()
-    assert message.channel.send.await_args.args[0] == cold_dm_text("discord", dms_on=None)
+    assert message.channel.send.await_args.kwargs["embed"].description == cold_dm_text(
+        "discord", dms_on=None
+    )

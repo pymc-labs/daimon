@@ -170,13 +170,19 @@ def _card(request: SentRequest) -> dict[str, Any]:
     return attachment["content"]
 
 
+def _elements(request: SentRequest) -> list[dict[str, Any]]:
+    """The card's body, with an error card's red container opened up."""
+    body = cast(list[dict[str, Any]], _card(request)["body"])
+    return [e for b in body for e in (b["items"] if b["type"] == "Container" else [b])]
+
+
 def _texts(request: SentRequest) -> list[str]:
     """The card's TextBlocks, in order."""
-    return [b["text"] for b in _card(request)["body"] if b["type"] == "TextBlock"]
+    return [b["text"] for b in _elements(request) if b["type"] == "TextBlock"]
 
 
 def _actions(request: SentRequest) -> list[dict[str, Any]]:
-    sets = [b for b in _card(request)["body"] if b["type"] == "ActionSet"]
+    sets = [b for b in _elements(request) if b["type"] == "ActionSet"]
     return [action for s in sets for action in s["actions"]]
 
 

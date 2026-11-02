@@ -204,6 +204,41 @@ class OpenAIVaults:
         return metadata_credential(raw, vault.id)
 
     @owned
+    async def replace_secret(
+        self,
+        scope: Scope,
+        vault: ResourceRef,
+        credential_id: str,
+        credential_ref: str,
+        *,
+        key: str,
+    ) -> None:
+        """Replace one static-bearer credential's secret in place, keeping its id.
+
+        A session binds its MCP tool to the credential id, so rotating a per-turn
+        bearer must keep the id (re-adding under the same name is refused).
+        """
+        self._c.check(scope, vault, "vault")
+        if self._secrets is None:
+            raise self._c.unsupported("host_secret_resolver")
+        try:
+            secret = await self._secrets(scope, credential_ref)
+        except Exception:
+            raise ProviderError(
+                "permission", retryable=False, native_code="secret_unavailable"
+            ) from None
+        if not secret:
+            raise ProviderError("permission", retryable=False, native_code="secret_unavailable")
+        raw = await self._c.call(
+            "POST",
+            f"/vaults/{segment(vault.id)}/credentials/{segment(credential_id)}",
+            body={"auth": {"type": "static_bearer", "token": RedactedCredential(secret)}},
+            key=key,
+        )
+        if raw.get("id") != credential_id:
+            raise ValueError("wrong credential identity")
+
+    @owned
     async def remove(
         self, scope: Scope, vault: ResourceRef, credential_id: str, *, key: str
     ) -> Operation:

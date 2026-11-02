@@ -79,6 +79,18 @@ async def get_account(session: AsyncSession, account_id: uuid.UUID) -> AccountRo
     return AccountRow.model_validate(orm)
 
 
+async def list_roles(
+    session: AsyncSession, account_ids: Collection[uuid.UUID]
+) -> dict[uuid.UUID, Role]:
+    """The role of each account among `account_ids` in one read; an unknown account is absent."""
+    if not account_ids:
+        return {}
+    rows = await session.execute(
+        select(Account.id, Account.role).where(Account.id.in_(list(account_ids)))
+    )
+    return {account_id: Role(role) for account_id, role in rows.all()}
+
+
 async def set_role(
     session: AsyncSession,
     account_id: uuid.UUID,

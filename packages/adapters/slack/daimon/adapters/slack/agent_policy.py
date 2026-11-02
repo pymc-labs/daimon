@@ -39,6 +39,7 @@ import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.slack.admin import ADMIN_NOUN, resolve_is_admin, resolve_is_platform_admin
 from daimon.adapters.slack.admin_caller import admin_caller
+from daimon.adapters.slack.blockkit import notice_fields
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_pins import agent_pin_names, pin_refusal
@@ -426,6 +427,6 @@ async def _post_refusal(
     await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
         channel=channel_id or user_id,
         user=user_id,
-        text=text,
         thread_ts=thread_ts,
+        **notice_fields(text),
     )

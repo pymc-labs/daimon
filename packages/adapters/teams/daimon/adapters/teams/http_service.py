@@ -63,6 +63,7 @@ from daimon.adapters.teams.thread_handoff import TeamsThreadHandoff
 from daimon.adapters.teams.thread_reader import ThreadReader
 from daimon.adapters.teams.wizard import TeamsWizards
 from daimon.core.config import TeamsSettings
+from daimon.core.logging_setup import mark_shutting_down
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.posted_controls.teams_card import CREDENTIAL_DIALOG
 from daimon.core.stores.domain import TeamsChannelSubscriptionRow, TeamsInstallationRow
@@ -202,6 +203,7 @@ def create_teams_http_service(
         try:
             yield
         finally:
+            mark_shutting_down()
             ready.clear()
             await turns.drain(timeout=DRAIN_GRACE_S)
             await teams_app.stop()

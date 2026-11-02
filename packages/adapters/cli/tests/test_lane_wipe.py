@@ -34,7 +34,7 @@ def marker(lane: str) -> SimpleNamespace:
 
 @pytest.fixture(autouse=True)
 def workspace_ports(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DAIMON_ENVIRONMENT__NAME", "lane-fleet")
+    monkeypatch.setenv("DAIMON_ENVIRONMENT__NAME", "lane-qa")
 
     async def list_agents(client: FakeClient, *, include_archived: bool = False) -> list[object]:
         client.include_archived_calls.append(include_archived)
@@ -67,23 +67,23 @@ async def test_non_lane_environment_rejected_before_api_calls(
     monkeypatch.setenv("DAIMON_ENVIRONMENT__NAME", "staging")
     client = FakeClient()
     with pytest.raises(RuntimeError, match="DAIMON_ENVIRONMENT__NAME"):
-        await lane_wipe.check_workspace(client, "lane-fleet")  # type: ignore[arg-type]
+        await lane_wipe.check_workspace(client, "lane-qa")  # type: ignore[arg-type]
     assert client.rows == []
 
 
 @pytest.mark.asyncio
 async def test_fresh_workspace_is_claimed() -> None:
     client = FakeClient()
-    await lane_wipe.check_workspace(client, "lane-fleet")  # type: ignore[arg-type]
+    await lane_wipe.check_workspace(client, "lane-qa")  # type: ignore[arg-type]
     assert len(client.rows) == 1
-    assert client.rows[0].name == "daimon-lane-marker-fleet"
+    assert client.rows[0].name == "daimon-lane-marker-qa"
     assert client.rows[0].metadata == {"daimon_workspace": "disposable"}
 
 
 @pytest.mark.asyncio
 async def test_own_marker_is_accepted_without_creating_another() -> None:
-    client = FakeClient(agents=[marker("fleet"), SimpleNamespace(name="tenant-agent")])
-    await lane_wipe.check_workspace(client, "lane-fleet")  # type: ignore[arg-type]
+    client = FakeClient(agents=[marker("qa"), SimpleNamespace(name="tenant-agent")])
+    await lane_wipe.check_workspace(client, "lane-qa")  # type: ignore[arg-type]
     assert len(client.rows) == 2
 
 
@@ -91,9 +91,9 @@ async def test_own_marker_is_accepted_without_creating_another() -> None:
 async def test_foreign_nonempty_workspace_is_refused() -> None:
     client = FakeClient(agents=[SimpleNamespace(name="staging-agent")])
     with pytest.raises(
-        lane_wipe.WorkspaceNotOwned, match="^workspace not owned by lane-fleet; refusing$"
+        lane_wipe.WorkspaceNotOwned, match="^workspace not owned by lane-qa; refusing$"
     ):
-        await lane_wipe.check_workspace(client, "lane-fleet")  # type: ignore[arg-type]
+        await lane_wipe.check_workspace(client, "lane-qa")  # type: ignore[arg-type]
     assert len(client.rows) == 1
 
 
@@ -101,17 +101,17 @@ async def test_foreign_nonempty_workspace_is_refused() -> None:
 async def test_other_lane_marker_is_refused() -> None:
     client = FakeClient(agents=[marker("other")])
     with pytest.raises(lane_wipe.WorkspaceNotOwned):
-        await lane_wipe.check_workspace(client, "lane-fleet")  # type: ignore[arg-type]
+        await lane_wipe.check_workspace(client, "lane-qa")  # type: ignore[arg-type]
     assert len(client.rows) == 1
 
 
 @pytest.mark.asyncio
 async def test_archived_own_marker_is_refused() -> None:
-    archived = marker("fleet")
+    archived = marker("qa")
     archived.archived_at = "2026-01-01T00:00:00Z"
     client = FakeClient(agents=[archived])
     with pytest.raises(lane_wipe.WorkspaceNotOwned):
-        await lane_wipe.check_workspace(client, "lane-fleet")  # type: ignore[arg-type]
+        await lane_wipe.check_workspace(client, "lane-qa")  # type: ignore[arg-type]
     assert client.include_archived_calls == [True]
 
 
@@ -123,7 +123,7 @@ async def test_custom_skill_blocks_claim(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(lane_wipe, "list_skills_strict", list_skills)
     client = FakeClient()
     with pytest.raises(lane_wipe.WorkspaceNotOwned):
-        await lane_wipe.check_workspace(client, "lane-fleet")  # type: ignore[arg-type]
+        await lane_wipe.check_workspace(client, "lane-qa")  # type: ignore[arg-type]
     assert client.rows == []
 
 
@@ -132,13 +132,13 @@ async def test_custom_skill_blocks_claim(monkeypatch: pytest.MonkeyPatch) -> Non
 async def test_other_resource_blocks_claim(kind: str) -> None:
     client = FakeClient(**{kind: [object()]})
     with pytest.raises(lane_wipe.WorkspaceNotOwned):
-        await lane_wipe.check_workspace(client, "lane-fleet")  # type: ignore[arg-type]
+        await lane_wipe.check_workspace(client, "lane-qa")  # type: ignore[arg-type]
     assert client.rows == []
 
 
 @pytest.mark.asyncio
 async def test_wipe_recreates_marker(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = FakeClient(agents=[marker("fleet"), SimpleNamespace(name="tenant-agent")])
+    client = FakeClient(agents=[marker("qa"), SimpleNamespace(name="tenant-agent")])
     calls = 0
 
     async def delete(fake: FakeClient, *, i_understand_this_destroys_all_tenants: bool) -> None:
@@ -148,25 +148,25 @@ async def test_wipe_recreates_marker(monkeypatch: pytest.MonkeyPatch) -> None:
         fake.rows.clear()
 
     monkeypatch.setattr(lane_wipe, "delete_entire_workspace_for_testing", delete)
-    await lane_wipe.wipe_workspace(client, "lane-fleet")  # type: ignore[arg-type]
+    await lane_wipe.wipe_workspace(client, "lane-qa")  # type: ignore[arg-type]
     assert calls == 1
     # The ownership check sees archived agents; the post-wipe look does not.
     assert client.include_archived_calls == [True, False]
     assert len(client.rows) == 1
-    assert client.rows[0].name == "daimon-lane-marker-fleet"
+    assert client.rows[0].name == "daimon-lane-marker-qa"
     assert client.rows[0].metadata == {"daimon_workspace": "disposable"}
 
 
 def test_cli_refusal_has_only_generic_message(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setenv("DAIMON_ENVIRONMENT__NAME", "lane-fleet")
+    monkeypatch.setenv("DAIMON_ENVIRONMENT__NAME", "lane-qa")
 
     async def refuse(_command: str, _lane: str) -> None:
-        raise lane_wipe.WorkspaceNotOwned("workspace not owned by lane-fleet; refusing")
+        raise lane_wipe.WorkspaceNotOwned("workspace not owned by lane-qa; refusing")
 
     monkeypatch.setattr(lane_wipe, "_run", refuse)
     assert lane_wipe.main(["wipe"]) == 3
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err == "workspace not owned by lane-fleet; refusing\n"
+    assert captured.err == "workspace not owned by lane-qa; refusing\n"

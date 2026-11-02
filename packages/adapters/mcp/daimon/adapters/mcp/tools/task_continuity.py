@@ -17,8 +17,9 @@ writes the switch under the tenant policy lock.
 
 from __future__ import annotations
 
+import re
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Annotated, Literal, cast
@@ -26,6 +27,7 @@ from typing import Annotated, Literal, cast
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._owner import may_own
 from daimon.adapters.mcp.tools._rule_view import load_isolation_view
 from daimon.adapters.mcp.tools._words import admin_noun
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
@@ -50,6 +52,7 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_NAME,
     forked_in,
 )
+from daimon.core.handoff_context import redact_handoff_summary
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.native_admins import AdminCaller
 from daimon.core.security_audit import record_authz_denial
@@ -57,6 +60,7 @@ from daimon.core.stores import agent_backends
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import ChatPlatform, TurnOriginRow
 from daimon.core.stores.task_continuations import record_continuation
+from daimon.core.stores.thread_agent_bindings import set_handoff_summary
 from daimon.core.stores.thread_session_lineage import request_fresh_start
 from daimon.core.stores.thread_sessions import (
     get_live_thread_session,
@@ -65,6 +69,7 @@ from daimon.core.stores.thread_sessions import (
 from daimon.core.thread_handoff import (
     HandoffCaller,
     HandoffDestination,
+    RecordedSession,
     ThreadHandoffRefused,
     hand_over_thread,
     locked_thread_sessions,
@@ -188,6 +193,7 @@ async def _hand_off_task_impl(
     unsaved_work: Literal["copy", "leave"] | None = None,
     keep_provider: bool = False,
     switch: Literal["check", "commit"] | None = None,
+    summary: str | None = None,
 ) -> TaskHandoffResult:
     """Bind this thread's responder to another agent, optionally queueing work.
 
@@ -241,6 +247,7 @@ async def _hand_off_task_impl(
             "hand_off_task again with keep_provider=true. Nothing was changed."
         )
     continuation = sanitize_requested_work(continuation, echoes=(destination_name,))
+    summary = _clean_summary(summary)
     if continuation is not None and auth.platform_user_id is None:
         raise ToolError(
             "Continuing work needs the requester's platform identity, which this "
@@ -311,6 +318,8 @@ async def _hand_off_task_impl(
         is_daimon_managed=destination.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
     )
     work_withheld = False
+    summary_withheld = False
+    moved: str | None = None
 
     try:
         # One transaction, decided under the tenant policy lock
@@ -330,6 +339,11 @@ async def _hand_off_task_impl(
                     admin=admin,
                     via_agent_key=auth.agent_id is not None,
                     human_invocation=origin.human_invocation is True,
+                    # A person's own unheld credential: a copy they own may take
+                    # this thread even before it answers anywhere.
+                    may_own=may_own(auth) and auth.hold is None,
+                    client=auth.client,
+                    hold=auth.hold,
                 ),
                 destination=handoff_destination,
                 current_responder_ma_agent_id=origin.responder_ma_agent_id,
@@ -338,19 +352,54 @@ async def _hand_off_task_impl(
                 recorded=recorded,
                 membership_resolver=runtime.membership_resolver,
             )
-            if switch != "commit":
-                # After the decision, so authorization speaks first; raising rolls it
-                # back. A confirmed switch moves this thread to the copy's provider.
-                await _refuse_another_providers_destination(
+            recorded = await locked_thread_sessions(
+                session, tenant_id=auth.tenant_id, platform=platform, thread_id=origin.thread_id
+            )
+            readable = may_carry_work(
+                await load_access_policy(session, tenant_id=auth.tenant_id),
+                destination=handoff_destination,
+                parent_channel_id=origin.parent_channel_id,
+                thread_id=origin.thread_id,
+                recorded=recorded or (),
+                account_id=auth.account_id,
+            )
+            # After the decision, so authorization speaks first; raising rolls it back.
+            # A confirmed switch (`switch`) moves this thread to the copy's provider
+            # itself (`_move_this_thread`); a plain hand-off moves it here.
+            moved = (
+                await _move_to_another_provider(
                     session,
                     auth,
                     origin,
                     destination_ma_agent_id=destination.id,
                     destination_name=destination_name,
+                    summary=summary,
+                    recorded=recorded,
                 )
+                if switch is None
+                else None
+            )
+            if (moved is not None or (switch is not None and summary is not None)) and not readable:
+                # The summary is this conversation, retold: a destination that
+                # may not read the conversation may not read it either, and a
+                # move without it would start blind.
+                raise ToolError(
+                    f"{destination_name} can't read this conversation, which only "
+                    "conversations inside its channel can read, so it can't take it over on "
+                    f"{moved or 'another provider'}. Nothing changed. Ask {destination_name} "
+                    "in a new conversation."
+                )
+            # Never silent: a hand-off that goes ahead without its summary says so.
+            summary_withheld = summary is not None and not readable
             if repo is not None and unsaved_work is None:
                 # Raised inside the transaction, so the binding rolls back.
-                raise ToolError(render_tool_unsaved_work_question(repo))
+                raise ToolError(
+                    render_tool_unsaved_work_question(
+                        repo,
+                        # A switch's hand-off: the answer rides the switch's calls.
+                        retry="hand_off_task" if switch is None else "request_agent_backend_switch",
+                    )
+                )
             if switch == "check":
                 raise _HandOffChecked
             if unsaved_work is not None and live_session is not None:
@@ -359,17 +408,21 @@ async def _hand_off_task_impl(
                 # binds. Written in the same transaction as the binding so a
                 # thread can never end up switched with the answer lost.
                 await set_pending_unsaved_work(session, id=live_session.id, choice=unsaved_work)
-            recorded = await locked_thread_sessions(
-                session, tenant_id=auth.tenant_id, platform=platform, thread_id=origin.thread_id
-            )
-            if request is not None and not may_carry_work(
-                await load_access_policy(session, tenant_id=auth.tenant_id),
-                destination=handoff_destination,
-                parent_channel_id=origin.parent_channel_id,
-                thread_id=origin.thread_id,
-                recorded=recorded or (),
-                account_id=auth.account_id,
-            ):
+            if summary is not None and readable:
+                # Waits for the destination's first turn here: on its own provider
+                # after a move or a confirmed switch, as quoted, untrusted text.
+                await set_handoff_summary(
+                    session,
+                    tenant_id=auth.tenant_id,
+                    platform=platform,
+                    parent_channel_id=origin.parent_channel_id,
+                    thread_id=origin.thread_id,
+                    responder_ma_agent_id=destination.id,
+                    account_id=auth.account_id,
+                    from_name=origin.responder_name,
+                    summary=summary,
+                )
+            if request is not None and not readable:
                 # The next bind won't carry this session to the destination,
                 # so the work named in it doesn't go either.
                 request, queued_work, work_withheld = None, None, True
@@ -410,6 +463,15 @@ async def _hand_off_task_impl(
         channel=_channel_mention(platform, origin.parent_channel_id),
         requested_work=queued_work,
     )
+    if moved is not None:
+        confirmation += (
+            f"\nThis conversation continues with {destination_name} on {moved}; "
+            "it has a summary of what we discussed."
+        )
+    elif summary_withheld:
+        confirmation += (
+            f"\n(without the summary: this conversation can't be shared with {destination_name})"
+        )
     if work_withheld:
         confirmation += (
             f"\n{destination_name} can't read this conversation's history, which only "
@@ -425,26 +487,54 @@ async def _hand_off_task_impl(
     )
 
 
-async def _refuse_another_providers_destination(
+MAX_HANDOFF_SUMMARY = 2000
+_MIN_HANDOFF_SUMMARY = 20
+
+
+def _clean_summary(summary: str | None) -> str | None:
+    """The summary as stored: no turn-origin ids or credential-shaped strings, trimmed,
+    blank-line runs collapsed, capped. Too short to carry anything is refused."""
+    if summary is None:
+        return None
+    text = redact_handoff_summary(summary)
+    text = re.sub(r"\n{3,}", "\n\n", text.strip())[:MAX_HANDOFF_SUMMARY]
+    if len(text) < _MIN_HANDOFF_SUMMARY:
+        raise ToolError(
+            "That summary is too short to carry the conversation. Nothing changed. Write "
+            "what was asked, what was decided and what's still open, then call again."
+        )
+    return text
+
+
+async def _move_to_another_provider(
     session: AsyncSession,
     auth: AuthIdentity,
     origin: TurnOriginRow,
     *,
     destination_ma_agent_id: str,
     destination_name: str,
-) -> None:
-    """Refuse a hand-off to an agent on another provider than this thread is pinned to.
+    summary: str | None,
+    recorded: Sequence[RecordedSession],
+) -> str | None:
+    """Move this caller's conversation to the destination's provider, if it differs.
 
-    The thread keeps its provider, so the destination would answer here on the
-    old one. Moving a thread drops its history, which only a confirmed switch
-    may do (`daimon.core.thread_release`), never this unconfirmed tool.
+    The conversation itself can't cross providers, so the handing-off agent's
+    `summary` crosses instead (`set_handoff_summary`): this caller's slot is
+    released, and the destination's first turn here starts on its own provider
+    seeded with the summary. Returns the words for where it now runs, or None
+    when nothing moves. Refuses without a usable summary, and in a conversation
+    shared with anyone else (a shared binding, or another participant's live
+    session): moving would leave them on a provider this one no longer runs on.
     """
+    from daimon.core.agent_model_names import model_name
     from daimon.core.ma_identity import derive_agent_uuid
     from daimon.core.stores import agent_backends, mux_state
     from daimon.core.stores.thread_sessions import get_thread_session_at
-    from daimon.core.thread_release import caller_slot
+    from daimon.core.thread_release import caller_slot, request_thread_release
     from daimon.core.turn.notices import provider_name
     from mux.contracts.config import DEFAULT_BACKEND
+    from mux.contracts.ids import ModelRef
+    from mux.profiles import backend_selection
 
     setting = await agent_backends.current(
         session,
@@ -459,9 +549,8 @@ async def _refuse_another_providers_destination(
         thread_id=origin.thread_id,
         account_id=auth.account_id,
     )
-    pinned = await mux_state.get_binding(
-        session, slot.model_copy(update={"account_id": None})
-    ) or await mux_state.get_binding(session, slot)
+    shared = await mux_state.get_binding(session, slot.model_copy(update={"account_id": None}))
+    pinned = shared or await mux_state.get_binding(session, slot)
     if pinned is not None:
         here = pinned.provider
     elif await get_thread_session_at(
@@ -474,16 +563,35 @@ async def _refuse_another_providers_destination(
     ):
         here = DEFAULT_BACKEND
     else:
-        return  # Nothing pins this thread yet: the destination's provider applies.
+        return None  # Nothing pins this thread now: the destination's provider applies.
     if here == target:
-        return
-    raise ToolError(
-        f"{destination_name} runs on {provider_name(target)}, and this conversation runs on "
-        f"{provider_name(here)}, so it can't take over here. Nothing changed. To have "
-        f"{destination_name} answer here, hand this conversation over while it is on "
-        f"{provider_name(here)}, then switch it with a confirmation; or ask it in a new "
-        "conversation."
+        return None
+    others = any(r.account_id is not None and r.account_id != auth.account_id for r in recorded)
+    if shared is not None or others:
+        raise ToolError(
+            f"{destination_name} runs on {provider_name(target)}, and this conversation is "
+            f"shared on {provider_name(here)}, so it can't move. Nothing changed. Ask "
+            f"{destination_name} in a new conversation."
+        )
+    if summary is None:
+        raise ToolError(
+            f"{destination_name} runs on {provider_name(target)}, so this conversation's "
+            f"history can't move to it. Nothing changed. Call hand_off_task again with "
+            f"`summary`: a short summary of this conversation for {destination_name} "
+            "(what was asked, what was decided, what's still open), in plain words, with "
+            "no secrets, keys or tool output."
+        )
+    last = await mux_state.get_binding(session, slot, include_released=True)
+    await request_thread_release(
+        session,
+        slot,
+        generation=last.generation if last is not None else 0,
+        now=datetime.now(UTC),
     )
+    model = (
+        setting.model if setting is not None and setting.model else backend_selection(target).model
+    )
+    return model_name(ModelRef(provider=target, id=model)) if model else provider_name(target)
 
 
 def _refusal_text(refusal: HandoffRefused, *, channel: str, admin: str) -> str:
@@ -510,6 +618,13 @@ def _refusal_text(refusal: HandoffRefused, *, channel: str, admin: str) -> str:
                 "Tell the caller an admin can make the handoff, or ask in one of that "
                 "agent's own channels.",
                 "Nothing was changed. Do not retry.",
+            ]
+        )
+    if refusal.reason == "shared_thread":
+        return "\n".join(
+            [
+                render_handoff_refused(refusal, channel=channel),
+                "Tell the caller exactly that. Nothing was changed. Do not retry.",
             ]
         )
     if refusal.reason in ("writers_none", "invoker_not_allowed", "own_agents_only", "not_a_reader"):
@@ -593,6 +708,19 @@ def register_task_continuity_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 )
             ),
         ] = False,
+        summary: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "A short summary of this conversation for the destination: what was "
+                    "asked, decided and still open, in plain words; no secrets, keys or "
+                    "tool output. Required when the destination runs on another provider. "
+                    "For a copy being switched, pass it to request_agent_backend_switch "
+                    "as handoff_summary instead."
+                ),
+                max_length=MAX_HANDOFF_SUMMARY,
+            ),
+        ] = None,
     ) -> TaskHandoffResult:
         """Hand this task over to another agent in the same conversation: "have that one take over", "let churn-explorer finish this".
 
@@ -618,6 +746,10 @@ def register_task_continuity_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         "Take over" alone is switch-only — null. Never restate finished work. A
         too-short, empty, or name-only value is auto-nulled — get the wording
         right regardless.
+
+        A destination on another provider (Gemini, OpenAI) can't read this
+        conversation: pass `summary`, and it starts there from that summary
+        instead. Its result says so; relay it verbatim.
         """  # noqa: E501
         return await _hand_off_task_impl(
             runtime,
@@ -627,6 +759,7 @@ def register_task_continuity_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             continuation=continuation,
             unsaved_work=unsaved_work,
             keep_provider=keep_provider,
+            summary=summary,
         )
 
     @mcp.tool

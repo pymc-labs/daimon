@@ -54,10 +54,7 @@ from typing import Literal
 import anthropic
 import structlog
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import (
-    BetaManagedAgentsSystemContentBlockParam,
-    FileMetadata,
-)
+from anthropic.types.beta import BetaManagedAgentsSystemContentBlockParam, FileMetadata
 from anthropic.types.beta.beta_managed_agents_file_resource_params import (
     BetaManagedAgentsFileResourceParams,
 )
@@ -299,6 +296,7 @@ def _bind_checkpoint_recorder(
     model_id: str,
     markup: Decimal,
     channel_id: str | None,
+    agent_id: str | None,
 ) -> UsageRecorder:
     """Meter the checkpoint turn to the tenant, at the OLD session's model.
 
@@ -326,6 +324,7 @@ def _bind_checkpoint_recorder(
         pricing=pricing,
         reason="checkpoint_debit",
         channel_id=channel_id,
+        agent_id=agent_id,
     )
 
 
@@ -619,6 +618,7 @@ async def transfer_workspace(
                         model_id=old_snapshot.pricing_id,
                         markup=markup,
                         channel_id=channel_id,
+                        agent_id=old_snapshot.ma_agent_id,
                     )
                 ),
                 tool_confirmation=unattended_posture(

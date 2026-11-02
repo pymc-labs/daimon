@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
@@ -15,14 +16,18 @@ from daimon.adapters.slack.thread_handoff import HAND_OVER_ACTION_ID, handle_han
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, ScopeContext
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.agent_notices import take_agent_notices
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.turn.agent_notices import HANDED_OVER_NOTICE
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from yarl import URL
+
+from .conftest import shown_text
 
 _TEAM = "T_HANDOVER"
 _CHANNEL = "C_PARENT"
@@ -37,7 +42,11 @@ def _payload() -> dict[str, Any]:
         "user": {"id": "U_CLICKER", "team_id": _TEAM},
         "channel": {"id": _CHANNEL},
         "container": {"channel_id": _CHANNEL, "message_ts": "1700000000.000200"},
-        "message": {"ts": "1700000000.000200", "thread_ts": _THREAD_TS, "text": "notice"},
+        "message": {
+            "ts": "1700000000.000200",
+            "thread_ts": _THREAD_TS,
+            "attachments": [{"fallback": "notice", "blocks": [{"type": "actions"}]}],
+        },
         "actions": [{"action_id": HAND_OVER_ACTION_ID, "value": "ag_research"}],
     }
 
@@ -97,11 +106,11 @@ async def test_a_click_hands_the_thread_to_the_channels_agent(
 ) -> None:
     tenant = await _click(db_session, db_session_factory, fake_slack_web_client, monkeypatch)
 
-    (posted,) = _sent(fake_slack_web_client, "chat.postMessage")
-    assert posted["thread_ts"] == _THREAD_TS
-    assert "Your latest message is being sent to research-bot" in posted["text"]
+    assert _sent(fake_slack_web_client, "chat.postMessage") == [], "Daimon posts no success line"
     (updated,) = _sent(fake_slack_web_client, "chat.update")
-    assert updated["blocks"] == [], "the notice loses its button"
+    (card,) = updated["attachments"]
+    assert card["fallback"] == "notice", "the notice card keeps its words"
+    assert all(block["type"] != "actions" for block in card["blocks"]), "and loses its button"
     async with db_session_factory() as session:
         routed = await resolve(
             session,
@@ -112,6 +121,16 @@ async def test_a_click_hands_the_thread_to_the_channels_agent(
         )
     assert routed.responder_ma_agent_id == "ag_research", "later messages go to research-bot"
     assert routed.thread_binding_kind == "handoff"
+    async with db_session_factory.begin() as session:
+        notices = await take_agent_notices(
+            session,
+            tenant_id=tenant.id,
+            platform="slack",
+            thread_id=_THREAD_TS,
+            agent_id="ag_research",
+            since=datetime.now(UTC) - timedelta(hours=1),
+        )
+    assert notices == [HANDED_OVER_NOTICE], "research-bot hears of the hand-over instead"
 
 
 async def test_a_refused_click_answers_privately_and_writes_nothing(
@@ -131,7 +150,7 @@ async def test_a_refused_click_answers_privately_and_writes_nothing(
     assert _sent(fake_slack_web_client, "chat.postMessage") == []
     (ephemeral,) = _sent(fake_slack_web_client, "chat.postEphemeral")
     assert ephemeral["user"] == "U_CLICKER"
-    assert "Nothing was changed" in ephemeral["text"]
+    assert "Nothing was changed" in shown_text(ephemeral)
     async with db_session_factory() as session:
         routed = await resolve(
             session,
@@ -141,6 +160,16 @@ async def test_a_refused_click_answers_privately_and_writes_nothing(
             default=_DEFAULT,
         )
     assert routed.thread_binding_id is None
+    async with db_session_factory.begin() as session:
+        notices = await take_agent_notices(
+            session,
+            tenant_id=tenant.id,
+            platform="slack",
+            thread_id=_THREAD_TS,
+            agent_id="ag_research",
+            since=datetime.now(UTC) - timedelta(hours=1),
+        )
+    assert notices == [], "a refused click tells the agent nothing"
 
     tenant.ingress.assert_not_awaited()
 

@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Final, Self
 
 from daimon.adapters.discord.agent_setup.expiry import ExpiringView
 from daimon.adapters.discord.agent_setup.state import PanelState
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.roster import Page
 
@@ -56,10 +57,14 @@ class PanelViewBase(ExpiringView, discord.ui.LayoutView):
         guard for the case where they somehow do.
         """
         if interaction.user.id != self.allowed_user_id:
-            await interaction.response.send_message(INVOKER_ONLY_MESSAGE, ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed(INVOKER_ONLY_MESSAGE), ephemeral=True
+            )
             return False
         if self._is_superseded():
-            await interaction.response.send_message(STALE_PANEL_MESSAGE, ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed(STALE_PANEL_MESSAGE), ephemeral=True
+            )
             return False
         return True
 
@@ -76,9 +81,13 @@ class PanelViewBase(ExpiringView, discord.ui.LayoutView):
         """
         if self._is_superseded():
             if interaction.response.is_done():
-                await interaction.followup.send(STALE_PANEL_MESSAGE, ephemeral=True)
+                await interaction.followup.send(
+                    embed=build_notice_embed(STALE_PANEL_MESSAGE), ephemeral=True
+                )
             else:
-                await interaction.response.send_message(STALE_PANEL_MESSAGE, ephemeral=True)
+                await interaction.response.send_message(
+                    embed=build_notice_embed(STALE_PANEL_MESSAGE), ephemeral=True
+                )
             return
         if isinstance(view, discord.ui.View):
             # Component V2 messages cannot gain embeds. Open the GitHub embed

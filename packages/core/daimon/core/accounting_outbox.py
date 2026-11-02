@@ -19,6 +19,7 @@ from daimon.core.pricing import (
     provider_cost_of,
     provider_usage_tokens,
     uncached_input_tokens,
+    unreported_cache_writes,
     usage_tokens,
 )
 from daimon.core.stores import accounting_outbox, mux_state, tenant_ledger, usage_events
@@ -79,6 +80,7 @@ async def apply_usage_outbox(
     billing_grain: BillingGrain = "model_request",
     provider_price: ProviderPrice | None = None,
     infrastructure_usd: Decimal | None = None,
+    agent_id: str | None = None,
 ) -> bool:
     """Claim, project and debit one durable revision atomically. True if claimed.
 
@@ -160,6 +162,7 @@ async def apply_usage_outbox(
         projected_tokens=provider_usage_tokens(projection, provider_price)
         if provider_price is not None
         else None,
+        agent_id=agent_id,
     )
     amount = (
         exact_amount
@@ -193,6 +196,11 @@ async def apply_usage_outbox(
             idempotency_key=key,
             channel_id=channel_id,
             occurred_at=revisions.occurred_at,
+            estimate="cache_writes_unreported"
+            if exact_amount is not None
+            and provider_price is not None
+            and unreported_cache_writes(observation, provider_price)
+            else None,
         )
     return True
 
@@ -211,6 +219,7 @@ async def record_observation_usage(
     billing_grain: BillingGrain = "model_request",
     provider_price: ProviderPrice | None = None,
     infrastructure_usd: Decimal | None = None,
+    agent_id: str | None = None,
 ) -> bool:
     """Record neutral usage and apply its outbox in the same host transaction."""
     if tenant_id is None:
@@ -244,4 +253,5 @@ async def record_observation_usage(
         billing_grain=billing_grain,
         provider_price=provider_price,
         infrastructure_usd=infrastructure_usd,
+        agent_id=agent_id,
     )

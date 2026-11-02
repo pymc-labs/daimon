@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Any, cast
 
 from daimon.adapters.slack.admin import resolve_is_platform_admin
@@ -9,8 +10,16 @@ from daimon.adapters.slack.agent_setup import github_repos
 from daimon.adapters.slack.agent_setup.read import load_panel_roster
 from daimon.adapters.slack.agent_setup.state import PanelMetadata
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.github_panel import connect_link, load_grants_panel, sync_connect_admin
+from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+from daimon.core.github_panel import (
+    can_manage_agent_github,
+    connect_link,
+    load_grants_panel,
+    sync_connect_admin,
+)
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
+from daimon.core.native_admins import AdminCaller
 from slack_sdk.web.async_client import AsyncWebClient
 
 _ACTIONS = frozenset(
@@ -50,7 +59,7 @@ async def handle(
                 is_admin=await resolve_is_platform_admin(
                     client, user_id=user_id, host_team_id=team_id
                 ),
-                user_id=user_id,
+                viewer_user_id=user_id,
             )
             if view is not None:
                 await client.views_update(  # pyright: ignore[reportUnknownMemberType]
@@ -81,23 +90,30 @@ async def handle(
             agent_name=name,
         )
     connect_url = None
-    if is_admin:
+    manages = is_admin or await _owns_agent_now(
+        runtime, tenant_id=tenant_id, user_id=user_id, ma_agent_id=agent.ma_agent_id
+    )
+    if manages:
         try:
             async with runtime.sessionmaker.begin() as session:
-                await sync_connect_admin(
-                    session,
-                    tenant_id=tenant_id,
-                    platform="slack",
-                    platform_user_id=user_id,
-                    is_platform_admin=True,
-                )
+                if is_admin:
+                    await sync_connect_admin(
+                        session,
+                        tenant_id=tenant_id,
+                        platform="slack",
+                        platform_user_id=user_id,
+                        is_platform_admin=True,
+                    )
+                # An owner's link promotes nobody; it is for this one agent and the
+                # owner is read again when it is saved.
                 connect_url = await connect_link(
                     session,
                     settings=runtime.settings,
                     tenant_id=tenant_id,
                     platform="slack",
                     platform_user_id=user_id,
-                    verified_tenant_admin=True,
+                    verified_tenant_admin=is_admin,
+                    verified_agent_manager=not is_admin,
                     agent_id=derive_agent_uuid(
                         tenant_id=tenant_id,
                         ma_agent_id=agent.ma_agent_id,
@@ -117,3 +133,27 @@ async def handle(
         view=view,
     )
     return True
+
+
+async def _owns_agent_now(
+    runtime: SlackRuntime, *, tenant_id: uuid.UUID, user_id: str, ma_agent_id: str
+) -> bool:
+    """Whether a member who is not an admin owns the agent right now (read at the click)."""
+    live = await find_agent_by_derived_uuid(
+        runtime.anthropic,
+        tenant_id=tenant_id,
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id),
+    )
+    if live is None or live.id != ma_agent_id:
+        return False
+    async with runtime.sessionmaker() as session:
+        return await can_manage_agent_github(
+            session,
+            tenant_id=tenant_id,
+            platform="slack",
+            caller=AdminCaller(platform_user_id=user_id),
+            agent_names=(),
+            ma_agent_id=ma_agent_id,
+            is_daimon_managed=live.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
+            default=runtime.deployment_default,
+        )

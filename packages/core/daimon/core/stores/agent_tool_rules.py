@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import UTC, datetime
 from typing import Literal, NamedTuple
 
@@ -67,11 +67,15 @@ async def list_rules(
     *,
     tenant_id: uuid.UUID,
     agent_id: str | None = None,
+    agent_ids: Collection[str] | None = None,
     channel_id: str | None = None,
 ) -> list[AgentToolRule]:
+    """The tenant's rules, narrowed to one agent, to several, or to a channel."""
     query = select(AgentToolRuleRecord).where(AgentToolRuleRecord.tenant_id == tenant_id)
     if agent_id is not None:
         query = query.where(AgentToolRuleRecord.agent_id == agent_id)
+    if agent_ids is not None:
+        query = query.where(AgentToolRuleRecord.agent_id.in_(list(agent_ids)))
     if channel_id is not None:
         query = query.where(AgentToolRuleRecord.channel_id == channel_id)
     rows = (
@@ -377,3 +381,70 @@ async def clear_rule(
         actor=actor,
         expected_revision=expected_revision,
     )
+
+
+async def copy_rules(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    source_agent_id: str,
+    agent_id: str,
+    agent_name: str,
+    set_by: str,
+) -> int:
+    """Give a new copy every live rule its source has (agent-wide and per channel).
+
+    The copy then runs no looser than its source. In the caller's transaction, for a
+    copy that has no rules yet (it was just created); each row gets its history entry.
+    Returns how many rules were copied.
+    """
+    await session.scalar(
+        select(Tenant.id).where(Tenant.id == tenant_id).with_for_update(key_share=True)
+    )
+    rows = (
+        await session.scalars(
+            select(AgentToolRuleRecord).where(
+                AgentToolRuleRecord.tenant_id == tenant_id,
+                AgentToolRuleRecord.agent_id == source_agent_id,
+                AgentToolRuleRecord.rule.is_not(None),
+            )
+        )
+    ).all()
+    now = datetime.now(UTC)
+    for row in rows:
+        session.add(
+            AgentToolRuleRecord(
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                agent_name=agent_name,
+                tool_key=row.tool_key,
+                channel_id=row.channel_id,
+                server_url=row.server_url,
+                rule=row.rule,
+                scope=row.scope,
+                revision=1,
+                set_by=set_by,
+                set_at=now,
+            )
+        )
+        session.add(
+            AgentToolRuleHistoryRecord(
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                tool_key=row.tool_key,
+                channel_id=row.channel_id,
+                revision=1,
+                set_by=set_by,
+                set_at=now,
+                before_rule=None,
+                before_scope=None,
+                before_agent_name=None,
+                before_server_url=None,
+                after_rule=row.rule,
+                after_scope=row.scope,
+                after_agent_name=agent_name,
+                after_server_url=row.server_url,
+            )
+        )
+    await session.flush()
+    return len(rows)

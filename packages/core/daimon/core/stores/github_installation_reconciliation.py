@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timedelta
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from daimon.core._models import (
     GitHubAppInstallation,
@@ -251,11 +251,14 @@ async def finish(
     repos: list[str] | None,
     now: datetime,
     suspended_at: datetime | None = None,
+    repository_selection: Literal["all", "selected"] | None = None,
 ) -> bool:
     """Write a complete snapshot only for the current claim and generation.
 
     ``account_login is None`` means GitHub confirmed the installation no longer
     exists. ``repos`` must be a complete successfully paginated list otherwise.
+    ``repository_selection`` refreshes a live App installation's stored value;
+    None keeps what is stored.
     """
     previous = await lock_for_reconciliation(session, installation_id=job.installation_id)
     result = await session.execute(
@@ -313,6 +316,8 @@ async def finish(
             previous.github_refreshed_at = now
             previous.github_removed_at = None
             previous.suspended_at = suspended_at
+            if repository_selection is not None:
+                previous.repository_selection = repository_selection
         else:
             if repos is None:
                 raise ValueError("a live installation requires a complete repository snapshot")

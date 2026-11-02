@@ -1441,7 +1441,7 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
 
         monkeypatch.setattr(github_access, "set_working_repo", reject_working)
         rolled_back = await save(hidden, repo="102", working="102")
-        assert rolled_back.status_code == 400
+        assert rolled_back.status_code == 500
         monkeypatch.setattr(github_access, "set_working_repo", original_set_working)
         async with sessionmaker() as session:
             status, _ = await github_connect.invitation_status(session, hidden["invitation"])

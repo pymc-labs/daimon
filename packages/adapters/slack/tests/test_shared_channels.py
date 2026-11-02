@@ -66,6 +66,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from yarl import URL
 
+from .conftest import shown_text
 from .harness import make_orchestrate_app, register_conversations_info
 
 _HOST = "T_HOST"
@@ -554,7 +555,7 @@ async def test_a_failed_requester_lookup_still_refuses_the_mention(
         if url == URL("https://slack.com/api/chat.postMessage")
         for req in reqs
     ]
-    assert any("couldn't verify" in str(p.get("text")) for p in posts)
+    assert any("Couldn't check your workspace role" in shown_text(p) for p in posts)
 
 
 # ---------------------------------------------------------------------------
@@ -647,7 +648,7 @@ async def test_an_external_click_outside_the_allowlist_gets_the_host_copy_and_ru
     client.chat_postEphemeral.assert_awaited_once()
     sent = client.chat_postEphemeral.await_args.kwargs
     assert sent["user"] == _EXTERNAL
-    assert sent["text"] == _HOST_COPY
+    assert shown_text(sent) == _HOST_COPY
 
 
 async def test_an_external_provider_action_click_is_refused() -> None:
@@ -656,7 +657,7 @@ async def test_an_external_provider_action_click_is_refused() -> None:
     with patch.object(app._provider_actions, "handle_click", new_callable=AsyncMock) as handled:  # pyright: ignore[reportPrivateUsage]
         await _deliver(app, _click_payload("dpa:browser_sign_in"), client)
     handled.assert_not_awaited()
-    assert client.chat_postEphemeral.await_args.kwargs["text"] == _HOST_COPY
+    assert shown_text(client.chat_postEphemeral.await_args.kwargs) == _HOST_COPY
 
 
 async def test_the_refusal_falls_back_to_a_thread_reply_naming_the_person() -> None:
@@ -668,7 +669,7 @@ async def test_the_refusal_falls_back_to_a_thread_reply_naming_the_person() -> N
     await _deliver(app, _click_payload("billing_topup"), client)
     sent = client.chat_postMessage.await_args.kwargs
     assert sent["thread_ts"] == "1700000000.000001"
-    assert sent["text"] == f"<@{_EXTERNAL}> {_HOST_COPY}"
+    assert shown_text(sent) == f"<@{_EXTERNAL}> {_HOST_COPY}"
 
 
 async def test_a_host_member_click_is_not_refused() -> None:
@@ -766,7 +767,7 @@ async def test_an_external_stop_on_their_own_turn_works_and_on_someone_elses_is_
     )
     await _deliver(app, other, client)
     assert not theirs.is_set()
-    assert "person who asked" in client.chat_postEphemeral.await_args.kwargs["text"]
+    assert "person who asked" in shown_text(client.chat_postEphemeral.await_args.kwargs)
 
 
 def _external_click(action_id: str, user: str) -> dict[str, Any]:
@@ -810,7 +811,7 @@ async def test_an_external_requester_approves_their_own_card_but_not_someone_els
 
     await cards.handle_click(_external_click(approve_id, "U_OTHER_EXTERNAL"))
     assert not waiting.done()
-    assert client.chat_postEphemeral.await_args.kwargs["text"] == NOT_YOURS_MESSAGE.format(
+    assert shown_text(client.chat_postEphemeral.await_args.kwargs) == NOT_YOURS_MESSAGE.format(
         requester=f"<@{_EXTERNAL}>"
     )
 
@@ -835,11 +836,11 @@ async def test_an_external_member_never_gets_always_allow_or_someone_elses_detai
 
     await cards.handle_click(_external_click(f"dcf:{token}:always", _EXTERNAL))
     assert not waiting.done()
-    assert "only for people at" in client.chat_postEphemeral.await_args.kwargs["text"]
-    assert "admin" not in client.chat_postEphemeral.await_args.kwargs["text"].lower()
+    assert "only for people at" in shown_text(client.chat_postEphemeral.await_args.kwargs)
+    assert "admin" not in shown_text(client.chat_postEphemeral.await_args.kwargs).lower()
 
     await cards.handle_click(_external_click(f"dcf:{token}:details", "U_OTHER_EXTERNAL"))
-    assert client.chat_postEphemeral.await_args.kwargs["text"] == NOT_YOURS_MESSAGE.format(
+    assert shown_text(client.chat_postEphemeral.await_args.kwargs) == NOT_YOURS_MESSAGE.format(
         requester=f"<@{_EXTERNAL}>"
     )
     waiting.cancel()

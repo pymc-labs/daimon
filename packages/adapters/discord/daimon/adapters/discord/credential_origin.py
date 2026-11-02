@@ -5,6 +5,7 @@ from __future__ import annotations
 import anthropic
 import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_pins import request_pin_refusal
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
@@ -70,14 +71,18 @@ async def resolve_credential_target(
             "credential_target.lookup_failed", tenant_id=str(row.tenant_id)
         )
         await interaction.followup.send(
-            "I couldn't verify this agent. Nothing was saved; please try submitting again.",
+            embed=build_notice_embed(
+                "I couldn't verify this agent. Nothing was saved; please try submitting again."
+            ),
             ephemeral=True,
         )
         return None
     if agent is None:
         await interaction.followup.send(
-            "This request's agent no longer exists. Nothing was saved. "
-            "Ask Daimon for a new request for the intended agent.",
+            embed=build_notice_embed(
+                "This request's agent no longer exists. Nothing was saved. "
+                "Ask Daimon for a new request for the intended agent."
+            ),
             ephemeral=True,
         )
         return None
@@ -98,5 +103,5 @@ async def refuse_if_pinned_elsewhere(
         refusal = await request_pin_refusal(session, row=row, agent=agent)
     if refusal is None:
         return False
-    await interaction.followup.send(refusal, ephemeral=True)
+    await interaction.followup.send(embed=build_notice_embed(refusal), ephemeral=True)
     return True

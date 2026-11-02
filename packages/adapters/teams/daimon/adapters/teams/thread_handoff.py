@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
 import structlog
 from daimon.adapters.teams.admin_caller import admin_caller
+from daimon.adapters.teams.card import notice_adaptive_card
 from daimon.adapters.teams.card_actions import (
     FAILED,
     button,
@@ -26,7 +27,6 @@ from daimon.adapters.teams.card_actions import (
     guarded,
     replace_card,
     submitted_fields,
-    text_lines,
     toast,
 )
 from daimon.adapters.teams.identity import (
@@ -40,7 +40,7 @@ from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.thread_handoff import handover_seed, switch_thread_on_request
 from microsoft_teams.api import AdaptiveCardInvokeActivity, AdaptiveCardInvokeResponse
 from microsoft_teams.apps import ActivityContext
-from microsoft_teams.cards import AdaptiveCard, ExecuteAction
+from microsoft_teams.cards import ExecuteAction
 
 __all__ = ["VERB", "TeamsThreadHandoff", "hand_over_button"]
 
@@ -49,9 +49,17 @@ log = structlog.get_logger()
 VERB: Final = "thread_hand_over"
 
 
-def hand_over_button(*, agent_id: str, agent_name: str) -> ExecuteAction:
-    """One Hand over button carrying the agent's MA id."""
-    return button(VERB, f"Switch to {agent_name}", "hand_over", style="positive", agent=agent_id)
+def hand_over_button(*, agent_id: str, agent_name: str, offer: str) -> ExecuteAction:
+    """One Hand over button carrying the agent's MA id and its card's text, `offer`,
+    so a click can redraw the card without the button."""
+    return button(
+        VERB,
+        f"Switch to {agent_name}",
+        "hand_over",
+        style="positive",
+        agent=agent_id,
+        offer=offer,
+    )
 
 
 class TeamsThreadHandoff:
@@ -153,7 +161,9 @@ class TeamsThreadHandoff:
                 handover_notice_id=notice,
             )
         )
-        # Everyone sees who handed it over; the button has done its job.
-        who = activity.from_.name or "Someone"
-        text = f"{who} handed this conversation over. {outcome.text}"
-        return replace_card(AdaptiveCard(body=text_lines(text), fallback_text=text))
+        # The agent now answering is told (`switch_thread_on_request`); the offer
+        # keeps its words and drops its button. A card from before `offer` gets a pop-up.
+        offer = str(submitted_fields(activity.value.action.data).get("offer") or "")
+        if not offer:
+            return toast(outcome.text)
+        return replace_card(notice_adaptive_card(offer, error=False))

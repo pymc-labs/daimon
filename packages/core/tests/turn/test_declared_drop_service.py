@@ -9,14 +9,13 @@ from daimon.core.turn.runtime_manifest import source_preservation_pin
 
 from ..test_agent_backend import enable
 from ..test_agent_backend import owned as owned
-from ..test_fleet_permissions import captured_worker_source, parent
-from .test_agent_fleet_grants import NOW, revoke_grant, set_grant
+from .source_projection_support import captured_source
 
 
 @pytest.fixture
 async def switching(owned):
     _, agent, actor, sessions = owned
-    _, source = captured_worker_source(parent())
+    source = captured_source()
     source = source.model_copy(
         update={
             "tenant_id": agent.tenant_id,
@@ -230,33 +229,6 @@ async def test_a_switch_claiming_drops_against_an_undeclared_backend_refuses(own
         )
     assert await service.current(agent) is None
     assert await service.audit(agent.tenant_id) == before
-
-
-async def test_fleet_mutations_carry_consent_without_resurrecting_a_revoked_grant(switching):
-    service, agent, actor, _, _, _ = switching
-    preview = await service.preview(agent, "openai")
-    original = await service.set_backend(
-        agent,
-        "openai",
-        0,
-        actor,
-        accepted_drops=preview.declared_drops,
-        expected_preview_digest=preview.digest,
-    )
-    granted = await set_grant(service, agent, actor)
-    revoked = await revoke_grant(service, agent, actor)
-    assert granted.drop_consent == revoked.drop_consent == original.drop_consent
-    # Turned off is stored, so no later change falls back to the default fleet either.
-    assert revoked.fleet_off
-    await service.clear_backend(agent, revoked.local, actor)
-    quote = await service.preview(agent, "openai")
-    restored = await service.revert(
-        agent, actor, expected_revision=revoked.local + 1, expected_preview_digest=quote.digest
-    )
-    assert restored.drop_consent == original.drop_consent
-    assert restored.fleet_off
-    setting = await service.fleet_setting(agent.tenant_id, agent.agent_id, now=NOW)
-    assert setting.kind == "off" and setting.grant is None
 
 
 async def test_revert_cannot_add_consent_to_an_unconfirmed_original(switching):
