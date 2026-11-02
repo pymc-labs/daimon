@@ -1514,6 +1514,7 @@ async def test_watch_confirmation_send_rechecks_each_spend_gate(db_session_facto
             platform=tenant.platform,
             external_user_id="owner",
             budget_channel_id="budget-channel",
+            agent_id="agent-watch",
             now=datetime.now(UTC),
         )
 
@@ -1536,3 +1537,62 @@ async def test_watch_confirmation_send_rechecks_each_spend_gate(db_session_facto
         for event in batch
     )
     assert not _confirmations(fa), "fresh spend denial must precede the real tool-confirmation POST"
+
+
+async def test_watch_send_stops_on_the_owners_used_up_allowance(db_session_factory):
+    from decimal import Decimal
+
+    from daimon.core.stores import spend_allowances, tenant_ledger, usage_events
+    from daimon.core.turn.admission import require_current_spend
+    from daimon.core.turn.errors import AdmissionDenied
+    from daimon.testing.factories import make_tenant
+    from daimon.testing.turn_fakes import deps_for
+    from mux.testing.drivers.anthropic.ma_models import ma_model_usage
+
+    now = datetime.now(UTC)
+    async with db_session_factory.begin() as db:
+        tenant = await make_tenant(db)
+        await tenant_ledger.insert_entry(
+            db,
+            tenant_id=tenant.id,
+            delta_usd=Decimal(100),
+            reason="trial",
+            idempotency_key=f"initial:{tenant.id}",
+        )
+        await usage_events.record(
+            db,
+            tenant_id=tenant.id,
+            platform_user_id="owner",
+            managed_session_id="s-owner",
+            model="claude-opus-4-7",
+            model_usage=ma_model_usage(input_tokens=1_000_000, output_tokens=0),
+            event_id="e-owner",
+            agent_id="agent-watch",
+        )
+        await spend_allowances.create_allowance(
+            db,
+            tenant_id=tenant.id,
+            subject_kind="group",
+            subject_id="everyone",
+            agent_id="agent-watch",
+            amount_usd=Decimal(1),
+            window="month",
+            starts_at=now - timedelta(days=40),
+        )
+    deps = deps_for(sm=db_session_factory)
+
+    async def send(agent_id: str) -> None:
+        await require_current_spend(
+            deps,
+            tenant_id=tenant.id,
+            platform=tenant.platform,
+            external_user_id="owner",
+            budget_channel_id="budget-channel",
+            agent_id=agent_id,
+            now=now,
+        )
+
+    with pytest.raises(AdmissionDenied) as denied:
+        await send("agent-watch")
+    assert denied.value.reason == "allowance_exhausted"
+    await send("another-agent")

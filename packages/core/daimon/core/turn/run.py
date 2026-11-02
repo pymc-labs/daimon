@@ -1515,6 +1515,7 @@ async def run_prepared_turn_impl(
             platform=watch_row.platform,
             external_user_id=watch_row.requester_external_user_id,
             budget_channel_id=admission.budget_channel_id or watch_row.parent_channel_id,
+            agent_id=admission.agent.id,
             now=now(),
         )
         if before_send is not None:
