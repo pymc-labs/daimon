@@ -8,8 +8,10 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import jwt
 import pytest
+from cryptography.fernet import Fernet
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.auth.verifier import (
     CHAT_EXECUTION_CLAIM,
@@ -45,6 +47,7 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_SEALED,
 )
 from daimon.core.discord_membership import DiscordRestMembershipResolver
+from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.github_panel import sync_connect_admin
 from daimon.core.mcp_auth import (
     mint_agent_mcp_token,
@@ -59,6 +62,7 @@ from daimon.core.stores import agent_owners
 from daimon.core.stores.accounts import get_account, set_role
 from daimon.core.stores.daimon_admins import change_grant
 from daimon.core.stores.domain import Role
+from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.testing.asgi import call_mcp_tool, mcp_session
 from daimon.testing.factories import make_platform_principal, make_tenant
 from fastmcp import Context, FastMCP
@@ -711,3 +715,60 @@ async def test_abandoned_lookups_end_at_the_deadline_and_pending_ones_are_capped
     await asyncio.gather(*callers, return_exceptions=True)
     await asyncio.sleep(0.1)
     assert not cache._in_flight, "a lookup every caller abandoned must still end"
+
+
+async def test_slack_rate_limit_reply_refuses_without_being_cached_as_a_denial(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await make_tenant(db_session, platform="slack", workspace_id="T0RATELIMIT")
+    key = Fernet.generate_key().decode()
+    await upsert_slack_bot_token(
+        db_session,
+        team_id="T0RATELIMIT",
+        encrypted_token=encrypt_token(build_multifernet((key,)), "xoxb-test"),
+    )
+    await db_session.commit()
+    replies = [
+        {"ok": False, "error": "ratelimited"},
+        {
+            "ok": True,
+            "user": {
+                "id": "U0ADMIN",
+                "team_id": "T0RATELIMIT",
+                "deleted": False,
+                "is_bot": False,
+                "is_admin": True,
+            },
+        },
+    ]
+    asked = 0
+
+    def respond(_request: httpx.Request) -> httpx.Response:
+        nonlocal asked
+        asked += 1
+        return httpx.Response(200, json=replies[asked - 1])
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        admin_authority.httpx,
+        "AsyncClient",
+        lambda **kwargs: real_client(transport=httpx.MockTransport(respond), **kwargs),
+    )
+    settings = MagicMock(crypto=SimpleNamespace(keys=(SecretStr(key),)))
+    cache = AuthorityCache()
+
+    async def authority() -> bool:
+        resolved = await resolve_authority(
+            db_session_factory,
+            settings,
+            tenant_id=tenant.id,
+            platform_user_id="U0ADMIN",
+            cache=cache,
+        )
+        return resolved.platform_admin
+
+    assert not await authority()
+    assert await authority()
+    assert asked == 2
