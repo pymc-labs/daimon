@@ -590,10 +590,10 @@ async def test_selfhosted_handover_click_refuses_before_anthropic(
 
 @pytest.mark.parametrize("seed", [None, "yes", " research-bot ", "x" * 600])
 def test_button_seed_is_sanitized_and_bounded(seed: str | None) -> None:
-    from daimon.core.thread_handoff import handover_seed
+    from daimon.core.thread_handoff import HANDOVER_FALLBACK_SEED, handover_seed
 
     assert handover_seed(seed, agent_name="research-bot") == (
-        "x" * 500 if seed and len(seed) > 500 else "Pick up this conversation where it left off."
+        "x" * 500 if seed and len(seed) > 500 else HANDOVER_FALLBACK_SEED
     )
 
 
