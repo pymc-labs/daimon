@@ -54,7 +54,10 @@ class AuthorityCache:
     """Answered platform lookups by (tenant, platform, user), kept `ttl_s` from lookup start.
 
     A refusal is kept like a grant. A failed lookup raises and is not kept, so
-    the next request asks again. Concurrent requests for one key share a lookup.
+    the next request asks again. Concurrent requests for one key share a lookup,
+    which is abandoned after `ttl_s`; a caller that receives an answer older than
+    `ttl_s` gets a failure instead. Past `max_in_flight` pending lookups a new
+    key fails without asking the platform.
     """
 
     def __init__(
@@ -62,13 +65,15 @@ class AuthorityCache:
         *,
         ttl_s: float = AUTHORITY_TTL_S,
         max_entries: int = 4_096,
+        max_in_flight: int = 256,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._ttl_s = ttl_s
         self._max_entries = max_entries
+        self._max_in_flight = max_in_flight
         self._clock = clock
         self._entries: dict[AuthorityKey, tuple[float, _Attestation | None]] = {}
-        self._in_flight: dict[AuthorityKey, asyncio.Task[_Attestation | None]] = {}
+        self._in_flight: dict[AuthorityKey, asyncio.Task[tuple[float, _Attestation | None]]] = {}
 
     async def get(
         self, key: AuthorityKey, fetch: Callable[[], Awaitable[_Attestation | None]]
@@ -78,27 +83,37 @@ class AuthorityCache:
             return entry[1]
         task = self._in_flight.get(key)
         if task is None or task.get_loop() is not asyncio.get_running_loop():
+            if len(self._in_flight) >= self._max_in_flight:
+                raise LookupError("too many pending authority lookups")
             task = asyncio.create_task(self._fetch(key, fetch), name="admin_authority.lookup")
             self._in_flight[key] = task
             task.add_done_callback(lambda done: self._forget(key, done))
         # Shielded: one caller giving up must not cancel the lookup the others await.
-        return await asyncio.shield(task)
+        started, attestation = await asyncio.shield(task)
+        if self._clock() - started >= self._ttl_s:
+            raise LookupError("authority lookup answered too late")
+        return attestation
 
     async def _fetch(
         self, key: AuthorityKey, fetch: Callable[[], Awaitable[_Attestation | None]]
-    ) -> _Attestation | None:
+    ) -> tuple[float, _Attestation | None]:
         started = self._clock()
-        attestation = await fetch()
+        async with asyncio.timeout(self._ttl_s):
+            attestation = await fetch()
+        now = self._clock()
+        if now - started >= self._ttl_s:
+            return started, attestation
         self._entries.pop(key, None)
         self._entries[key] = (started, attestation)
         if len(self._entries) > self._max_entries:
-            now = self._clock()
             self._entries = {k: v for k, v in self._entries.items() if now - v[0] < self._ttl_s}
             while len(self._entries) > self._max_entries:
                 del self._entries[next(iter(self._entries))]
-        return attestation
+        return started, attestation
 
-    def _forget(self, key: AuthorityKey, done: asyncio.Task[_Attestation | None]) -> None:
+    def _forget(
+        self, key: AuthorityKey, done: asyncio.Task[tuple[float, _Attestation | None]]
+    ) -> None:
         if self._in_flight.get(key) is done:
             del self._in_flight[key]
 
