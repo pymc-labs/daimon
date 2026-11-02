@@ -211,21 +211,16 @@ async def test_c2_input_accepted_but_receipt_never_arrives(scenario: Scenario, m
 async def test_c2x_connection_drops_after_the_provider_accepted_the_input(
     scenario: Scenario,
 ) -> None:
-    """No process dies: the answer to the send is lost and the SDK has retries left."""
+    """No process dies: the answer to the send is lost after the provider took it."""
     scenario.world.send_faults.append("accept_drop")
     _turn, task = start_chat(scenario.process, scenario.tenant_id, "only question")
     outcome = await asyncio.wait_for(task, timeout=30)
     world = scenario.world
     after = await ledger(scenario.engine, scenario.tenant_id)
     inputs = [t for _, t in world.accepted_inputs]
-    if scenario.path == "mux":
-        assert inputs == ["only question"], "mux sends once; an unknown delivery is not resent"
-        assert outcome.state.error is None, "the driver reattaches and reads the answer back"
-        assert after.debits == 1
-    else:
-        assert inputs == ["only question", "only question"], "legacy's SDK resends the POST"
-        assert outcome.state.error is None
-        assert after.debits == 2, "and the duplicate input is a second model call to pay for"
+    assert inputs == ["only question"], "a send is one attempt; an unknown delivery is not resent"
+    assert outcome.state.error is None, "the driver reattaches and reads the answer back"
+    assert after.debits == 1
     record(
         "chat",
         "C2x connection drop after acceptance (no restart)",

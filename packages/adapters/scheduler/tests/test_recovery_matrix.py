@@ -419,10 +419,7 @@ async def test_r2x_connection_drop_after_acceptance_no_restart(fleet: Fleet) -> 
     row = await fleet.row()
     after = await ledger(fleet.engine, fleet.tenant_id)
     inputs = [t for _, t in fleet.world.accepted_inputs]
-    if fleet.path == "mux":
-        assert len(inputs) == 1
-    else:
-        assert len(inputs) == 2, "legacy's SDK resends the POST"
+    assert len(inputs) == 1, "a send is one attempt on either path"
     record(
         "routine",
         "R2x connection drop after acceptance (no restart)",

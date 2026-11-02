@@ -52,6 +52,7 @@ class ChatTurn:
             channel_id=CHANNEL,
             thread_id=self.thread_id,
             now=datetime.now(UTC),
+            origin="chat",
         )
         self.prepared = await bind_session(
             deps,
