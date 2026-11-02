@@ -39,7 +39,6 @@ from daimon.core.handoff_context import (
     render_previous_session,
     select_recent_turns,
 )
-from daimon.core.helpers import serve_helpers
 from daimon.core.ma import replay_events
 from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import TurnBackendRequest, TurnRuntime
@@ -1002,6 +1001,9 @@ async def run_prepared_turn(
     turn_card_intent_id: uuid.UUID | None = None,
     request_text: str | None = None,
 ) -> RunOutcome:
+    # Imported here: `daimon.core.helpers` runs helper turns through this module.
+    from daimon.core.helpers import serve_helpers
+
     observation = (
         prepared.admission.observation
         or current_outcome.get()

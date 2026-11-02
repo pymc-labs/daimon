@@ -14,27 +14,39 @@ from __future__ import annotations
 import asyncio
 import contextvars
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from contextlib import asynccontextmanager, nullcontext
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
 import structlog
+from daimon.core.anthropic_guard import anthropic_disabled, without_anthropic
 from daimon.core.confirmation import ConfirmationHook
 from daimon.core.context_prompt import TurnContext
 from daimon.core.errors import UserFacingError
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.scope import HelperTarget
 from daimon.core.stores import agent_helpers, helper_asks
-from daimon.core.stores.domain import HelperAskRow, HelperAskStatus, TurnOriginRow
+from daimon.core.stores.domain import (
+    HelperAskRow,
+    HelperAskStatus,
+    TurnOriginRow,
+    helper_thread_key,
+)
 from daimon.core.stores.turn_origins import get_active_origin, mark_serving_helpers
 from daimon.core.turn.admission import Admission, AdmitRequest, HelperCall
 from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied, MissingTurnConfigError
 from daimon.core.turn.lifecycle import TurnLifecycle
-from daimon.core.turn.provider_actions import ProviderActionHook
+from daimon.core.turn.provider_actions import (
+    NativeActionResponse,
+    ProviderActionHook,
+    ProviderActionPrompt,
+)
+from daimon.core.turn.slots import holding, run_template, wait_for_slot
 from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.core.turn_origin import current_origin_id
+from daimon.core.turn_queue import TurnTicket
 
 log = structlog.get_logger(__name__)
 
@@ -63,13 +75,8 @@ _REFUSALS = {
 }
 
 
-def helper_thread_key(thread_id: str, helper_agent_id: str) -> str:
-    """The key of a helper's own conversation in a thread: its session and provider slot.
-
-    One per helper and thread (and, as for any thread, per person), so asking the
-    same helper again in the same thread continues where it left off. Pure.
-    """
-    return f"{thread_id}~helper~{helper_agent_id}"
+def _busy(helper_name: str) -> str:
+    return f"{helper_name} can't run now: too many agents are running. Try later."
 
 
 def refusal_words(error: Exception, helper_name: str) -> str:
@@ -108,6 +115,10 @@ class _Desk:
     deadline: datetime
     confirm_write: ConfirmationHook | None
     provider_action: ProviderActionHook | None
+    # The asking run's slot ticket (None: it claims none) and its self-hosted guard,
+    # which a helper's fresh context would otherwise drop.
+    slots: TurnTicket | None
+    no_anthropic: bool
     running: dict[str, asyncio.Task[None]] = field(default_factory=dict[str, asyncio.Task[None]])
     stops: dict[str, list[asyncio.Event]] = field(default_factory=dict[str, list[asyncio.Event]])
 
@@ -117,13 +128,18 @@ class _Desk:
                 if task.done():
                     del self.running[helper_id]
                     self.stops.pop(helper_id, None)
-            async with self.deps.sessionmaker.begin() as session:
-                claimed = await helper_asks.claim_queued(
-                    session,
-                    origin_id=self.origin.id,
-                    skip_helpers=self.running.keys(),
-                    limit=MAX_RUNNING - len(self.running),
-                )
+            try:
+                async with self.deps.sessionmaker.begin() as session:
+                    claimed = await helper_asks.claim_queued(
+                        session,
+                        origin_id=self.origin.id,
+                        skip_helpers=self.running.keys(),
+                        limit=MAX_RUNNING - len(self.running),
+                    )
+            # One failed poll is retried on the next; it must not end serving.
+            except Exception as error:
+                log.warning("helpers.poll_failed", err_type=type(error).__name__, exc_info=error)
+                claimed = []
             for ask in claimed:
                 cancel = asyncio.Event()
                 self.stops[ask.helper_agent_id] = [cancel]
@@ -155,7 +171,8 @@ class _Desk:
         )
         status: HelperAskStatus
         try:
-            status, reply = await self._run(ask, cancel)
+            with without_anthropic() if self.no_anthropic else nullcontext():
+                status, reply = await self._slotted(ask, cancel)
         # A helper's turn is a named boundary: whatever stops it is the asking
         # agent's to hear about, and must never end the asking turn.
         except Exception as error:
@@ -166,7 +183,21 @@ class _Desk:
                 session, ask_id=ask.id, status=status, reply=reply, now=datetime.now(UTC)
             )
 
-    async def _run(self, ask: HelperAskRow, cancel: asyncio.Event) -> tuple[HelperAskStatus, str]:
+    async def _slotted(
+        self, ask: HelperAskRow, cancel: asyncio.Event
+    ) -> tuple[HelperAskStatus, str]:
+        """Run the ask holding a slot of the tenant's cap, as a follow-up would."""
+        if self.slots is None:
+            return await self._run(ask, cancel, slotted=False)
+        ticket = self.slots.successor()
+        if ticket is None:
+            return "failed", _busy(ask.helper_name)
+        with holding(ticket):
+            return await self._run(ask, cancel, slotted=True)
+
+    async def _run(
+        self, ask: HelperAskRow, cancel: asyncio.Event, *, slotted: bool
+    ) -> tuple[HelperAskStatus, str]:
         from daimon.core.turn.admission import admit_helper, backend_facts
         from daimon.core.turn.prepare import bind_session
         from daimon.core.turn.run import run_prepared_turn
@@ -178,6 +209,16 @@ class _Desk:
             thread_key=helper_thread_key(asking.thread_id, ask.helper_agent_id),
         )
         admission = await admit_helper(deps, request, call, now=datetime.now(UTC))
+        if slotted:
+            slot = await wait_for_slot(
+                cancel, sessionmaker=deps.sessionmaker, tenant_id=request.tenant_id
+            )
+            if slot == "cancelled":
+                return "stopped", f"{ask.helper_name} was stopped before it finished."
+            if slot in _REFUSALS:
+                return "failed", f"{ask.helper_name} can't run for this person: {_REFUSALS[slot]}."
+            if slot != "started":
+                return "failed", _busy(ask.helper_name)
         prepared = await bind_session(
             deps,
             admission,
@@ -239,7 +280,7 @@ class _Desk:
                 origin="helper",
                 deadline=self.deadline,
                 confirm_write=self.confirm_write,
-                provider_action=self.provider_action,
+                provider_action=_in_thread(self.provider_action, asking.thread_id),
             )
         if cancel.is_set():
             return "stopped", f"{ask.helper_name} was stopped before it finished."
@@ -248,6 +289,19 @@ class _Desk:
             return "failed", f"{ask.helper_name} stopped with an error before it answered."
         reply = extract_final_response(outcome.state.content).strip()
         return "done", reply or f"{ask.helper_name} finished without a reply."
+
+
+def _in_thread(hook: ProviderActionHook | None, thread_id: str) -> ProviderActionHook | None:
+    """``hook`` with prompts placed in the asking thread: the helper's session runs under
+    its own key, but the person answers where they asked."""
+    if hook is None:
+        return None
+
+    async def placed(prompt: ProviderActionPrompt) -> NativeActionResponse | None:
+        requester = replace(prompt.context.requester, thread_id=thread_id)
+        return await hook(replace(prompt, context=replace(prompt.context, requester=requester)))
+
+    return placed
 
 
 @asynccontextmanager
@@ -296,6 +350,8 @@ async def serve_helpers(
         deadline=deadline or turn_deadline(now=datetime.now(UTC)),
         confirm_write=confirm_write,
         provider_action=provider_action,
+        slots=run_template(),
+        no_anthropic=anthropic_disabled(),
     )
     async with deps.sessionmaker.begin() as session:
         await mark_serving_helpers(session, origin_id=asking.id)
@@ -304,8 +360,11 @@ async def serve_helpers(
         yield
     finally:
         serving.cancel()
-        [ended] = await asyncio.gather(serving, return_exceptions=True)
-        if isinstance(ended, Exception):
-            # Asks left queued are stopped below; the asking agent hears that.
-            log.warning("helpers.serve_failed", err_type=type(ended).__name__, exc_info=ended)
-        await asyncio.shield(desk.stop())
+        await asyncio.gather(serving, return_exceptions=True)
+        # Helpers stop even when the asking turn is cancelled meanwhile.
+        stopping = asyncio.create_task(desk.stop())
+        try:
+            await asyncio.shield(stopping)
+        except asyncio.CancelledError:
+            await stopping
+            raise

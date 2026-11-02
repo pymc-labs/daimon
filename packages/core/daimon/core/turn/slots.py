@@ -39,6 +39,7 @@ __all__ = [
     "holding",
     "register_spend_recheck",
     "release_turn_slot",
+    "run_template",
     "wait_for_slot",
     "wait_for_ticket",
 ]
@@ -93,6 +94,16 @@ def holding(ticket: TurnTicket) -> Iterator[TurnTicket]:
     finally:
         _current_holder.reset(token)
         holder.release()
+
+
+def run_template() -> TurnTicket | None:
+    """The ticket this run's turns take slots from, or None for a run that claims none.
+
+    A turn's helpers (`daimon.core.helpers`) each take a fresh ticket from it, so they
+    count against the tenant's cap like follow-ups.
+    """
+    holder = _current_holder.get()
+    return None if holder is None else holder.template
 
 
 def register_spend_recheck(recheck: SpendRecheck) -> None:

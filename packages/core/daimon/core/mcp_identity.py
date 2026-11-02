@@ -301,7 +301,7 @@ def matching_turn(
     found = [
         origin
         for origin in origins
-        if origin.thread_id == thread_id
+        if origin.session_thread_id == thread_id
         and derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=origin.responder_ma_agent_id)
         == agent_id
     ]
