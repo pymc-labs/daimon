@@ -431,6 +431,31 @@ async def test_new_conversation_rechecks_access(db_session_factory, monkeypatch,
     await cog.cog_unload()
 
 
+@pytest.mark.parametrize("control", ["switch", "new-button", "new-command"])
+async def test_controls_answer_at_once_while_a_reply_is_running(
+    db_session_factory, monkeypatch, control
+):
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    msg = message()
+    await cog.on_message(msg)
+    old = await conversation(db_session_factory)
+    click = interaction(channel=msg.channel)
+    running = cog._lock((999, 555))
+    async with running:
+        if control == "new-command":
+            pressed = cog.new.callback(cog, click)
+        else:
+            pressed = switch_view(msg).children[0 if control == "switch" else 1].callback(click)
+        await asyncio.wait_for(pressed, timeout=1)
+    embed = click.response.send_message.await_args.kwargs["embed"]
+    assert embed.color == module.build_notice_embed("", neutral=True).color, (
+        "a busy notice is a neutral card"
+    )
+    assert click.response.send_message.await_args.kwargs["ephemeral"] is True
+    assert (await conversation(db_session_factory)).scope_id == old.scope_id
+    await cog.cog_unload()
+
+
 async def test_new_command_replaces_current_conversation(db_session_factory, monkeypatch):
     cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
     msg = message()

@@ -101,6 +101,7 @@ _DM_FAILURES = (
     SQLAlchemyError,
 )
 _DISCOVERY_FAILURE_NOTICE = "Couldn't open a private conversation. Please retry or ask an admin."
+_BUSY_NOTICE = "I'm still answering your last message.\nTry again once it's done, or press Stop."
 
 
 @dataclass(frozen=True)
@@ -160,6 +161,19 @@ class DirectMessageCog(commands.Cog):
             lock = asyncio.Lock()
             self._locks[key] = lock
         return lock
+
+    async def _busy(self, interaction: discord.Interaction, key: tuple[int, int]) -> bool:
+        """Answer a control at once while a reply holds the conversation.
+
+        A turn holds the lock through its queue wait and any approval card,
+        far past the three seconds Discord gives an interaction to respond.
+        """
+        if not self._lock(key).locked():
+            return False
+        await interaction.response.send_message(
+            embed=build_notice_embed(_BUSY_NOTICE, neutral=True), ephemeral=True
+        )
+        return True
 
     def _claim_discovery(self, user_id: int) -> bool:
         now = monotonic()
@@ -430,6 +444,8 @@ class DirectMessageCog(commands.Cog):
     def _switch_control(self, *, user_id: int, route_id: int, scope_id: str) -> ServerSwitch:
         async def switch(interaction: discord.Interaction) -> None:
             key = (user_id, route_id)
+            if await self._busy(interaction, key):
+                return
             async with self._lock(key):
                 async with self.bot.runtime.sessionmaker() as session:
                     current = await get_conversation(
@@ -497,6 +513,8 @@ class DirectMessageCog(commands.Cog):
             await interaction.response.send_message("Run /new in your DMs with me.", ephemeral=True)
             return
         key = (interaction.user.id, channel.id)
+        if await self._busy(interaction, key):
+            return
         async with self._lock(key):
             async with self.bot.runtime.sessionmaker() as session:
                 current = await get_conversation(
