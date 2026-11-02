@@ -85,14 +85,16 @@ async def get_web_turn_origin(
     return None if origin is None else _held_by_caller(auth, origin)
 
 
+HELPER_REFUSAL = "You are helping another agent, so you can't do this. Tell it what is needed."
+
+
 def refuse_helper(origin: TurnOriginRow) -> TurnOriginRow:
     """``origin``, unless it is a helper's: a helper works inside another agent's turn, so
-    it may not change who answers the conversation, wake it later or ask helpers itself.
-    Every other tool runs for a helper as for the person."""
+    it may not change who answers the conversation, start a flow that wakes it later (a
+    timer, a key, access or connection request) or ask helpers itself. Every other tool
+    runs for a helper as for the person."""
     if origin.helper_of is not None:
-        raise ToolError(
-            "You are helping another agent, so you can't do this. Tell it what is needed."
-        )
+        raise ToolError(HELPER_REFUSAL)
     return origin
 
 

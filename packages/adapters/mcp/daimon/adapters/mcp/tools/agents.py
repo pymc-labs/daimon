@@ -51,6 +51,7 @@ from daimon.adapters.mcp.tools.agent_chat import require_outside_chat_turn
 from daimon.adapters.mcp.tools.setup_target import (
     get_chat_origin,
     origin_channel_id,
+    refuse_helper,
     resolve_setup_agent,
 )
 from daimon.core import agent_editing, channel_backend
@@ -1940,6 +1941,7 @@ async def _request_agent_backend_switch_impl(
     origin = await get_chat_origin(runtime, auth, origin_context_id)
     if origin is None:
         raise ToolError("Request this change from your active chat conversation.")
+    refuse_helper(origin)
 
     from daimon.adapters.mcp.tools._session_gate import session_card_gap
     from daimon.adapters.mcp.tools.task_continuity import (

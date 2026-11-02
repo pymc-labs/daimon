@@ -52,6 +52,7 @@ from daimon.adapters.mcp.tools.discord._visibility import (
     _ensure_thread_parent_cached,  # pyright: ignore[reportPrivateUsage]
     _require_discord_channel_writable,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools.setup_target import HELPER_REFUSAL
 from daimon.core.agent_identity import identity_enabled_for
 from daimon.core.channel_tidy import TidyOperation, TidyTarget
 from daimon.core.stores.agent_posts import AgentPostRow, get_post, list_posts_in, mark_deleted
@@ -457,6 +458,8 @@ async def _archive_thread_impl(  # pyright: ignore[reportUnusedFunction]
         )
 
         scheduled = ctx.origin is not None and ctx.origin.channel_id == str(thread.id)
+        if scheduled and ctx.helper:
+            raise ToolError(HELPER_REFUSAL)
 
         async def act() -> None:
             if not scheduled:

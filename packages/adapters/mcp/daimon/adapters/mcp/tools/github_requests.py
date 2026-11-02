@@ -19,7 +19,7 @@ from daimon.adapters.mcp.tools.github_request_delivery import (
     deliver_private_request_card,
     deliver_shared_admin_card,
 )
-from daimon.adapters.mcp.tools.setup_target import require_turn_origin
+from daimon.adapters.mcp.tools.setup_target import refuse_helper, require_turn_origin
 from daimon.adapters.mcp.tools.slack._client import slack_web_client
 from daimon.core.github_app_session import effective_repo_state
 from daimon.core.github_request_cards import RequestCard, requester_card
@@ -119,7 +119,7 @@ async def request_github_access_impl(
     remaining_work: str,
 ) -> GitHubRequestResult:
     """Request access for the verified asker's unfinished work in this thread."""
-    origin = await require_turn_origin(runtime, auth, origin_context_id)
+    origin = refuse_helper(await require_turn_origin(runtime, auth, origin_context_id))
     if origin.platform == "teams":
         return GitHubRequestResult(
             status="unavailable",

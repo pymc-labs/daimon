@@ -40,6 +40,7 @@ from daimon.adapters.mcp.tools.reachability import (
 from daimon.adapters.mcp.tools.setup_target import (
     get_web_turn_origin,
     origin_channel_id,
+    refuse_helper,
     require_turn_origin,
     resolve_setup_agent,
 )
@@ -209,7 +210,9 @@ async def _require_origin(
 ) -> TurnOriginRow:
     """The turn's origin: a web chat's when the id names one, else the chat platform's."""
     web = await get_web_turn_origin(runtime, auth, origin_context_id)
-    return web if web is not None else await require_turn_origin(runtime, auth, origin_context_id)
+    return refuse_helper(
+        web if web is not None else await require_turn_origin(runtime, auth, origin_context_id)
+    )
 
 
 def _bounded_pending_task(pending_task: str | None, *, echoes: tuple[str, ...]) -> str | None:
