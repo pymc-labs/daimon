@@ -75,7 +75,7 @@ class ChannelActor:
     """Runs in each change's transaction once it is written (a surface's audit row)."""
 
 
-async def _wrote(session: AsyncSession, actor: ChannelActor, changed: bool) -> None:
+async def after_write(session: AsyncSession, actor: ChannelActor, changed: bool) -> None:
     if changed and actor.on_write is not None:
         await actor.on_write(session)
 
@@ -115,13 +115,13 @@ def _budget_json(value: BudgetValue | None) -> JsonValue:
     return None if value is None else value.as_json()
 
 
-_NEEDS_ADMIN = "Only an admin can change this channel."
+NEEDS_ADMIN = "Only an admin can change this channel."
 
 
-def _require_admin(actor: ChannelActor) -> None:
+def require_channel_admin(actor: ChannelActor) -> None:
     """Channel settings are admins' alone; an agent key never counts as one."""
     if not actor.subject.is_admin or actor.subject.via_agent_key:
-        raise ChannelChangeRefused(_NEEDS_ADMIN, kind="forbidden")
+        raise ChannelChangeRefused(NEEDS_ADMIN, kind="forbidden")
 
 
 def _refused_binding(reason: BindingRefusal, agent_name: str | None) -> ChannelChangeRefused:
@@ -167,7 +167,7 @@ async def set_default_agent(
     Refused when an agent rule would make it refuse every turn here
     (`binding_refusal`), checked under the policy lock with the write.
     """
-    _require_admin(actor)
+    require_channel_admin(actor)
     names = tuple(dict.fromkeys((agent_name, *agent_names)))
     async with sessionmaker.begin() as session:
         await lock_access_policy(session, tenant_id=actor.tenant_id)
@@ -188,7 +188,7 @@ async def set_default_agent(
             surface=actor.surface,
             set_by_admin=True,
         )
-        await _wrote(session, actor, prior != agent_name)
+        await after_write(session, actor, prior != agent_name)
     return DefaultChange(prior, agent_name)
 
 
@@ -204,7 +204,7 @@ async def clear_default_agent(
 
     A channel only its own agents read keeps one of them (`clear_refusal`).
     """
-    _require_admin(actor)
+    require_channel_admin(actor)
     async with sessionmaker.begin() as session:
         await lock_access_policy(session, tenant_id=actor.tenant_id)
         policy = await load_access_policy(session, tenant_id=actor.tenant_id)
@@ -223,7 +223,7 @@ async def clear_default_agent(
             actor_account_id=actor.account_id,
             surface=actor.surface,
         )
-        await _wrote(session, actor, prior is not None)
+        await after_write(session, actor, prior is not None)
     return DefaultChange(prior, None)
 
 
@@ -242,7 +242,7 @@ async def keep_agent(
     expected: Expected[Sequence[str]] | None = None,
 ) -> AgentRuleChange:
     """Keep `agent_name` to this channel: its rule names the channel alone."""
-    _require_admin(actor)
+    require_channel_admin(actor)
     return await _set_kept(
         anthropic,
         sessionmaker,
@@ -268,7 +268,7 @@ async def release_agent(
     expected: Expected[Sequence[str]] | None = None,
 ) -> AgentRuleChange:
     """Stop keeping `agent_name` here: its rule is cleared, so it may run anywhere."""
-    _require_admin(actor)
+    require_channel_admin(actor)
     async with sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=actor.tenant_id)
     kept = sorted(runs_only_in(policy, channel_id))
@@ -378,7 +378,7 @@ async def set_access(
 
 def _require_budget_admin(actor: ChannelActor, channel_id: str) -> None:
     if not may_set_channel_budget(actor.subject, channel_id):
-        raise ChannelChangeRefused(_NEEDS_ADMIN, kind="forbidden")
+        raise ChannelChangeRefused(NEEDS_ADMIN, kind="forbidden")
 
 
 async def _current_budget(
@@ -421,7 +421,7 @@ async def _record_budget(
         actor_account_id=actor.account_id,
         surface=actor.surface,
     )
-    await _wrote(session, actor, before != after)
+    await after_write(session, actor, before != after)
 
 
 async def set_budget(

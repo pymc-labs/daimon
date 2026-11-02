@@ -47,6 +47,7 @@ async def set_participation_mode(
     scope: ParticipationScope,
     scope_id: str | None,
     mode: ParticipationMode,
+    parent_id: str | None = None,
 ) -> None:
     await set_scope_mode(
         session,
@@ -56,6 +57,7 @@ async def set_participation_mode(
         scope=scope,
         scope_id=scope_id,
         mode=mode,
+        parent_id=parent_id,
     )
 
 

@@ -523,6 +523,8 @@ class Routine(Base):
     # Channel the routine's spend is attributed to and budget-gated by: its
     # destination's parent channel, resolved when the destination is set.
     channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The channel the routine was created from; None from the web or the CLI.
+    made_in_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -2468,6 +2470,13 @@ class ThreadParticipationScope(Base):
         CheckConstraint(
             "mode IN ('on', 'off', 'disabled')", name="ck_thread_participation_scopes_mode"
         ),
+        Index(
+            "ix_thread_participation_scopes_parent",
+            "tenant_id",
+            "platform",
+            "parent_id",
+            postgresql_where=text("parent_id IS NOT NULL"),
+        ),
     )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
@@ -2477,6 +2486,8 @@ class ThreadParticipationScope(Base):
     scope: Mapped[str] = mapped_column(Text)
     scope_id: Mapped[str] = mapped_column(Text)
     mode: Mapped[str] = mapped_column(Text, nullable=False)
+    # The channel a thread row sits under; None for other scopes and old Discord rows.
+    parent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -2500,6 +2511,13 @@ class ProgressPlanScope(Base):
             "scope IN ('workspace', 'channel', 'thread')", name="ck_progress_plan_scopes_scope"
         ),
         CheckConstraint("mode IN ('on', 'off', 'disabled')", name="ck_progress_plan_scopes_mode"),
+        Index(
+            "ix_progress_plan_scopes_parent",
+            "tenant_id",
+            "platform",
+            "parent_id",
+            postgresql_where=text("parent_id IS NOT NULL"),
+        ),
     )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
@@ -2509,6 +2527,8 @@ class ProgressPlanScope(Base):
     scope: Mapped[str] = mapped_column(Text)
     scope_id: Mapped[str] = mapped_column(Text)
     mode: Mapped[str] = mapped_column(Text, nullable=False)
+    # The channel a thread row sits under; None for other scopes and old Discord rows.
+    parent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -3625,6 +3645,7 @@ class PlatformChannelName(Base):
     parent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     parent_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    archived: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
 
 class ChannelChange(Base):

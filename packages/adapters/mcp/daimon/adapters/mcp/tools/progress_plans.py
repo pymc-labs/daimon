@@ -23,6 +23,7 @@ from typing import Annotated, Final, Literal
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._authz_facts import chat_actor
 from daimon.adapters.mcp.tools._channel_policy import require_within_hold
 from daimon.adapters.mcp.tools._channel_target import resolve_channel
 from daimon.adapters.mcp.tools._ctx import (
@@ -31,18 +32,15 @@ from daimon.adapters.mcp.tools._ctx import (
 )
 from daimon.adapters.mcp.tools.discord import verify_participation_scope
 from daimon.adapters.mcp.tools.teams._participation import verify_teams_participation_scope
+from daimon.core.channel_changes import ChannelChangeRefused
+from daimon.core.channel_switches import SwitchTarget, set_switch, switch_refusal
 from daimon.core.scope_cascade import (
     CascadeMode,
     CascadeScope,
-    resolve_above,
     resolve_modes,
-    scope_label,
-    tier_word,
 )
 from daimon.core.stores.progress_plans import (
-    clear_progress_plan_mode,
     get_progress_plan_modes,
-    set_progress_plan_mode,
 )
 from daimon.core.turn.progress_plans import (
     build_progress_plans_explanation,
@@ -56,15 +54,6 @@ _PLATFORMS: Final = frozenset({"discord", "slack", "teams"})
 _MAX_STEPS: Final = 12
 
 _WRONG_PLATFORM = "Progress plans show on the chat card, so there is nothing to turn on here."
-_DEPLOYMENT_DISABLED = (
-    "Progress plans are turned off for all of Daimon and cannot be turned on; "
-    "the operator would have to change that."
-)
-_DISABLED_NEEDS_A_WIDER_SCOPE = (
-    "'disabled' is not a thread-level setting — use mode='off' to stop showing "
-    "a plan in this thread. 'disabled' locks a whole channel or everything here and "
-    "is an admin action there."
-)
 _PLAN_UPDATED = "Plan updated. This is not a reply: carry on with the task."
 
 
@@ -186,70 +175,45 @@ async def _set_progress_plans_impl(
     channel_id: str | None,
 ) -> ProgressPlansResult:
     """Validate every refusal BEFORE any write: a refused call must leave no row behind."""
-    platform = _require_platform(auth)
+    platform = auth.platform or ""
     deployment = runtime.settings.progress_plans.mode
-    if deployment is CascadeMode.DISABLED:
-        raise ToolError(_DEPLOYMENT_DISABLED)
-    target = _target(platform, thread_id, channel_id)
-    if target.scope is not CascadeScope.THREAD:
-        _require_admin(auth)
-    if target.scope is CascadeScope.THREAD and mode == "disabled":
-        raise ToolError(_DISABLED_NEEDS_A_WIDER_SCOPE)
-    target = await _verify(runtime, auth, target)
     requested = None if mode == "inherit" else CascadeMode(mode)
-
-    async with runtime.session_factory.begin() as session:
-        before = await get_progress_plan_modes(
-            session,
-            tenant_id=auth.tenant_id,
+    actor = chat_actor(auth)
+    try:
+        refusal = switch_refusal(
+            "progress_plans",
+            actor,
             platform=platform,
-            channel_id=target.channel_id,
-            thread_id=target.thread_id,
+            deployment=deployment,
+            scope=_target(platform, thread_id, channel_id).scope,
+            mode=requested,
         )
-        above = resolve_above(target.scope, deployment, before)
-        if requested is CascadeMode.ON and above.mode is CascadeMode.DISABLED:
-            tier = tier_word(above.tier, platform)
-            raise ToolError(
-                f"Progress plans are disabled at the {tier} level, so "
-                f"{scope_label(target.scope, target.scope_id, platform)} cannot be turned "
-                f"on. An admin would have to change the {tier} setting first."
-            )
-        if requested is None:
-            await clear_progress_plan_mode(
-                session,
-                tenant_id=auth.tenant_id,
-                platform=platform,
-                scope=target.scope,
-                scope_id=target.scope_id,
-            )
-        else:
-            await set_progress_plan_mode(
-                session,
-                tenant_id=auth.tenant_id,
-                platform=platform,
-                scope=target.scope,
-                scope_id=target.scope_id,
-                mode=requested,
-            )
-        after = await get_progress_plan_modes(
-            session,
-            tenant_id=auth.tenant_id,
+        if refusal is not None:
+            raise refusal
+        target = await _verify(runtime, auth, _target(platform, thread_id, channel_id))
+        change = await set_switch(
+            runtime.session_factory,
+            actor,
+            "progress_plans",
             platform=platform,
-            channel_id=target.channel_id,
-            thread_id=target.thread_id,
+            deployment=deployment,
+            target=SwitchTarget(target.scope, target.scope_id, target.channel_id, target.thread_id),
+            mode=requested,
         )
-
-    effective = resolve_modes(deployment, after)
+    except ChannelChangeRefused as exc:
+        if exc.reason == "admin_required":
+            _require_admin(auth)
+        raise ToolError(str(exc)) from exc
     return ProgressPlansResult(
         scope=_result_label(target),
         mode="inherit" if requested is None else requested.value,
-        effective_mode=effective.mode.value,
-        effective_tier=effective.tier,
+        effective_mode=change.effective.mode.value,
+        effective_tier=change.effective.tier,
         note=build_progress_plans_note(
             scope=target.scope,
             scope_id=target.scope_id,
             requested=requested,
-            effective=effective,
+            effective=change.effective,
             platform=platform,
         ),
     )

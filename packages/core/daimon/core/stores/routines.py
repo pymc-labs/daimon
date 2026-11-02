@@ -61,8 +61,10 @@ async def create_routine(
     destination_kind: RoutineDestinationKind | None = None,
     destination_id: str | None = None,
     channel_id: str | None = None,
+    made_in_channel_id: str | None = None,
 ) -> RoutineRow:
-    """`channel_id` is the channel the routine's spend counts against (see `Routine`)."""
+    """`channel_id` is the channel the routine's spend counts against (see `Routine`);
+    `made_in_channel_id` the one it was created from."""
     if catch_up_policy not in ("skip", "run-once"):
         raise StoreError("catch_up_policy must be skip or run-once")
     _check_destination(destination_kind, destination_id)
@@ -80,6 +82,7 @@ async def create_routine(
         destination_kind=destination_kind,
         destination_id=destination_id,
         channel_id=channel_id,
+        made_in_channel_id=made_in_channel_id,
     )
     session.add(orm)
     await session.flush()
@@ -123,6 +126,24 @@ async def list_routines_for_tenant(
         (await session.execute(select(Routine).where(Routine.tenant_id == tenant_id)))
         .scalars()
         .all()
+    )
+    return [RoutineRow.model_validate(r) for r in rows]
+
+
+async def list_routines_for_channel(
+    session: AsyncSession, *, tenant_id: _uuid.UUID, channel_id: str
+) -> list[RoutineRow]:
+    """Routines that post in `channel_id` (their destination's channel) or were made there."""
+    rows = await session.scalars(
+        select(Routine)
+        .where(
+            Routine.tenant_id == tenant_id,
+            or_(
+                and_(Routine.destination_kind.is_not(None), Routine.channel_id == channel_id),
+                Routine.made_in_channel_id == channel_id,
+            ),
+        )
+        .order_by(Routine.created_at, Routine.id)
     )
     return [RoutineRow.model_validate(r) for r in rows]
 

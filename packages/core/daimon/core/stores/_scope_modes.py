@@ -70,7 +70,10 @@ async def set_scope_mode(
     scope: CascadeScope,
     scope_id: str | None,
     mode: CascadeMode,
+    parent_id: str | None = None,
 ) -> None:
+    """Write one scope's mode; `parent_id` is a thread's channel, kept once known."""
+    parent = parent_id if scope is CascadeScope.THREAD else None
     stmt = (
         pg_insert(table)
         .values(
@@ -79,11 +82,16 @@ async def set_scope_mode(
             scope=scope.value,
             scope_id=_scope_id(scope, scope_id),
             mode=mode.value,
+            parent_id=parent,
             updated_at=func.now(),
         )
         .on_conflict_do_update(
             constraint=f"pk_{table.__tablename__}",
-            set_={"mode": mode.value, "updated_at": func.now()},
+            set_={
+                "mode": mode.value,
+                "parent_id": func.coalesce(parent, table.parent_id),
+                "updated_at": func.now(),
+            },
         )
     )
     await session.execute(stmt)
@@ -110,3 +118,22 @@ async def clear_scope_mode(
     )
     await session.flush()
     return cast(CursorResult[Any], result).rowcount == 1
+
+
+async def list_scope_modes(
+    session: AsyncSession,
+    table: ScopeModeTable,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    scope: CascadeScope,
+    parent_id: str | None = None,
+) -> dict[str, CascadeMode]:
+    """Every `scope` row's mode by scope id; thread rows only under `parent_id` when given."""
+    stmt = select(table.scope_id, table.mode).where(
+        table.tenant_id == tenant_id, table.platform == platform, table.scope == scope.value
+    )
+    if parent_id is not None:
+        stmt = stmt.where(table.parent_id == parent_id)
+    rows = (await session.execute(stmt)).all()
+    return {scope_id: CascadeMode(mode) for scope_id, mode in rows}

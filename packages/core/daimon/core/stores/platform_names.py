@@ -183,6 +183,8 @@ class ChannelSighting:
     kind: str | None = None
     parent_id: str | None = None
     parent_name: str | None = None
+    archived: bool | None = None
+    """As the platform reports it; None when the sighting can't tell."""
 
     @property
     def label(self) -> str | None:
@@ -216,6 +218,7 @@ async def upsert_channel_names(
                 "kind": _clean(sighting.kind),
                 "parent_id": _clean(sighting.parent_id),
                 "parent_name": _clean(sighting.parent_name),
+                "archived": sighting.archived,
                 "updated_at": now,
                 "last_seen_at": now,
             }
@@ -237,7 +240,7 @@ async def upsert_channel_names(
                 column: func.coalesce(
                     getattr(stmt.excluded, column), getattr(PlatformChannelName, column)
                 )
-                for column in ("kind", "parent_id", "parent_name")
+                for column in ("kind", "parent_id", "parent_name", "archived")
             },
         },
     )

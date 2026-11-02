@@ -40,6 +40,7 @@ async def set_progress_plan_mode(
     scope: CascadeScope,
     scope_id: str | None,
     mode: CascadeMode,
+    parent_id: str | None = None,
 ) -> None:
     await set_scope_mode(
         session,
@@ -49,6 +50,7 @@ async def set_progress_plan_mode(
         scope=scope,
         scope_id=scope_id,
         mode=mode,
+        parent_id=parent_id,
     )
 
 

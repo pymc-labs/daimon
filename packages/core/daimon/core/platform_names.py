@@ -110,6 +110,7 @@ def _merge(new: _Seen, old: _Seen | None) -> _Seen:
             new.kind or old.kind,
             new.parent_id or old.parent_id,
             new.parent_name or old.parent_name,
+            new.archived if new.archived is not None else old.archived,
         )
     if not isinstance(old, KnownName):
         return new
@@ -123,6 +124,7 @@ def _cleaned(name: _Seen) -> _Seen:
             _clean(name.kind),
             _clean(name.parent_id),
             _clean(name.parent_name),
+            name.archived,
         )
     return KnownName(_clean(name.display_name), _clean(name.handle))
 

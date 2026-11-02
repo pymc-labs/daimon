@@ -253,6 +253,7 @@ class RoutineRow(BaseModel):
     delivery_payload: str | None = None
     delivered_at: datetime | None = None
     channel_id: str | None = None
+    made_in_channel_id: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -563,7 +564,24 @@ class ChannelBudgetRow(BaseModel):
 
 ChangeSurface = Literal["web", "chat", "panel", "cli"]
 """Where a channel change was made: the web app, a chat tool, a platform panel, the CLI."""
-ChannelSetting = Literal["default_agent", "kept_agents", "access", "budget"]
+ChannelSetting = Literal[
+    "default_agent",
+    "kept_agents",
+    "access",
+    "budget",
+    "participation",
+    "progress_plans",
+    "environment",
+    "skills",
+    "provider_pin",
+    "channel_copy",
+    "thread_participation",
+    "thread_progress_plans",
+    "thread_rule",
+    "thread_handoff",
+]
+"""What a change record names. The `thread_*` settings are a thread's own, recorded under
+its channel with the thread id in the values."""
 
 
 class ChannelChangeRow(BaseModel):
@@ -595,6 +613,7 @@ class ChannelNameRow(BaseModel):
     parent_id: str | None = None
     parent_name: str | None = None
     last_seen_at: datetime | None = None
+    archived: bool | None = None
 
 
 AllowanceSubjectKind = Literal["person", "group", "invite"]
