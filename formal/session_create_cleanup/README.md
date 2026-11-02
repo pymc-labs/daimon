@@ -16,7 +16,7 @@ Ownership of one session, as modelled:
 | --- | --- | --- |
 | `sessions.create` accepted | `create_session` returns | `create_session` (archives on any failure; assumed correct, not modelled) |
 | `create_session` returns | `create_ma_session` returns `CreatedSession` | `create_ma_session` (fixed: archives on any failure; a session returned by a replayed recorded create is archived only if no `thread_sessions` row names it) |
-| `CreatedSession` returned | row committed | the caller (recovery, native worker; `create_fresh_session` has no cleanup) |
+| `CreatedSession` returned | row committed | the caller (recovery; `create_fresh_session` has no cleanup) |
 | row committed | | the row; nobody archives it |
 | adopted from another turn | | that turn's row; this turn never archives it |
 
@@ -26,15 +26,15 @@ Line numbers are for the fixed code.
 
 | Model action | Code |
 | --- | --- |
-| `StartCreate` | callers of `create_ma_session`: [`run.py:717`](../../packages/core/daimon/core/turn/run.py#L717) (dead-session recovery), [`prepare.py:899`](../../packages/core/daimon/core/turn/prepare.py#L899) (`create_fresh_session`), [`prepare.py:1569`](../../packages/core/daimon/core/turn/prepare.py#L1569) (native worker) |
+| `StartCreate` | callers of `create_ma_session`: [`run.py:717`](../../packages/core/daimon/core/turn/run.py#L717) (dead-session recovery), [`prepare.py:899`](../../packages/core/daimon/core/turn/prepare.py#L899) (`create_fresh_session`), [`prepare.py:1569`](../../packages/core/daimon/core/turn/prepare.py#L1569) |
 | `StartAdopt` | [`run.py:641`](../../packages/core/daimon/core/turn/run.py#L641) finds another turn's live row and returns it at [`run.py:674`](../../packages/core/daimon/core/turn/run.py#L674) without calling `create_ma_session` |
 | `Create` | [`prepare.py:685`](../../packages/core/daimon/core/turn/prepare.py#L685) `create(...)` returns through [`sessions.py:1313`](../../packages/core/daimon/core/sessions.py#L1313) `return created`; the first await after it is the lookup, so the return and the start of the lookup are one action |
 | `FailBeforeCreate` | `create_session` archives its own session at [`sessions.py:1314`](../../packages/core/daimon/core/sessions.py#L1314) (native and app-mode paths) and the vault at [`sessions.py:1339`](../../packages/core/daimon/core/sessions.py#L1339); a `SkillUnavailable` retry loops at [`prepare.py:683`](../../packages/core/daimon/core/turn/prepare.py#L683) |
 | `LookupDone` | [`prepare.py:721`](../../packages/core/daimon/core/turn/prepare.py#L721) `get_personal_memory_store_id` completes |
 | `CloseDone` | [`prepare.py:721`](../../packages/core/daimon/core/turn/prepare.py#L721) `async with deps.sessionmaker()` exit awaits the connection close; the snapshot build and `return CreatedSession` at [`prepare.py:768`](../../packages/core/daimon/core/turn/prepare.py#L768) have no await |
 | `FailInWindow` | fixed: the `except BaseException` in `create_ma_session` calls `_archive_orphaned_session` ([`run.py:476`](../../packages/core/daimon/core/turn/run.py#L476), shielded, fixed 5 s deadline). `allocated_here` is set inside the call passed to `persistence.mutate`; when it is false the session was replayed and a `thread_ids_for_sessions` read must show no row names it, otherwise (row found, or read failed) nothing is archived and the skip is logged |
-| `Insert`, `Commit` | recovery: [`run.py:720`](../../packages/core/daimon/core/turn/run.py#L720) `insert_mapping` inside `db.begin()` ([`run.py:612`](../../packages/core/daimon/core/turn/run.py#L612)), committed at the `async with` exit; `create_fresh_session`: [`prepare.py:908`](../../packages/core/daimon/core/turn/prepare.py#L908) and `session.commit()`; native worker: [`prepare.py:1592`](../../packages/core/daimon/core/turn/prepare.py#L1592) |
-| `CallerFail` | recovery archives at [`run.py:744`](../../packages/core/daimon/core/turn/run.py#L744) when `created is not None`; the native worker archives only the span before its insert ([`prepare.py:1580`](../../packages/core/daimon/core/turn/prepare.py#L1580)); `create_fresh_session` ([`prepare.py:899`](../../packages/core/daimon/core/turn/prepare.py#L899)) has no cleanup |
+| `Insert`, `Commit` | recovery: [`run.py:720`](../../packages/core/daimon/core/turn/run.py#L720) `insert_mapping` inside `db.begin()` ([`run.py:612`](../../packages/core/daimon/core/turn/run.py#L612)), committed at the `async with` exit; `create_fresh_session`: [`prepare.py:908`](../../packages/core/daimon/core/turn/prepare.py#L908) and `session.commit()` |
+| `CallerFail` | recovery archives at [`run.py:744`](../../packages/core/daimon/core/turn/run.py#L744) when `created is not None`; `create_fresh_session` ([`prepare.py:899`](../../packages/core/daimon/core/turn/prepare.py#L899)) has no cleanup |
 | `CommitThenError` | a commit that lands but raises (lost acknowledgement) inside the same `except BaseException` blocks |
 | `AdoptedOk`, `AdoptedFail` | [`run.py:674`](../../packages/core/daimon/core/turn/run.py#L674) returns the adopted session; there is no cleanup of it |
 | `Retry` | `SkillUnavailable` loop in `create_ma_session`; `SessionBusyError` from the seal fence ([`prepare.py:575`](../../packages/core/daimon/core/turn/prepare.py#L575)) re-prepares; the user asking again |
@@ -108,7 +108,6 @@ Unsupported until a contract test or a real log shows them.
 | Archiving an already archived or deleted session is harmless and idempotent | not tested against staging |
 | `create_session` cleans up its own session on every failure before `return created` | read from [`sessions.py:1314`](../../packages/core/daimon/core/sessions.py#L1314); read from the code: after creation only the app-mode and native paths await |
 | A cancel is delivered only at an await | asyncio semantics |
-| A recorded `session_create` is replayed by a later attempt under the same operation key ([`persistence.py:214`](../../packages/core/daimon/core/turn/persistence.py#L214), [`persistence.py:234`](../../packages/core/daimon/core/turn/persistence.py#L234)). The key is `fleet_root:{origin_id}` for a controlled root (new origin per turn execution, [`turn_origin.py:158`](../../packages/core/daimon/core/turn_origin.py#L158)) and `fleet:{run_id}:spawn:{ordinal}` for a native worker ([`fleet.py:196`](../../packages/core/daimon/core/fleet.py#L196), passed at [`headless_runner.py:928`](../../packages/core/daimon/core/headless_runner.py#L928)), so a restarted or retried worker spawn reuses it | read from the code; `test_root_controls.py` (`first == second`) shows the replay for two calls in one process. Whether a worker spawn is re-prepared after its mapping committed is not shown, which is why the replay configs are included and the fix does not rely on it not happening |
 
 ## Not modelled
 

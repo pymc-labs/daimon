@@ -6,6 +6,7 @@ from dataclasses import replace
 from typing import cast
 
 import structlog
+from daimon.adapters.teams.card import notice_card
 from daimon.adapters.teams.deployment_admins import live_admin_ids
 from daimon.adapters.teams.direct_chats import DirectChats
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
@@ -30,7 +31,7 @@ def teams_budget_notifier(runtime: TeamsRuntime, direct: DirectChats) -> BudgetN
             try:
                 member = await direct.member(notice.channel_id, user_id)
                 if member is not None:
-                    await direct.post(await direct.open_chat(member), text)
+                    await direct.post_card(await direct.open_chat(member), notice_card(text))
                     delivered += 1
             except TEAMS_SEND_ERRORS as exc:
                 log.info("channel_budget.notice_undelivered", err_type=type(exc).__name__)

@@ -38,24 +38,12 @@ from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from mux.testing.isolated_sdk import build_async_openai
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .conformance_support import (
-    ACCOUNT as ACCOUNT,
-)
-from .conformance_support import (
-    PROFILE as PROFILE,
-)
-from .conformance_support import (
-    REVISION as REVISION,
-)
-from .conformance_support import (
-    TENANT as TENANT,
-)
-from .conformance_support import (
-    admission as admission,
-)
-from .conformance_support import (
-    record_usage as record_usage,
-)
+from .conformance_support import ACCOUNT as ACCOUNT
+from .conformance_support import PROFILE as PROFILE
+from .conformance_support import REVISION as REVISION
+from .conformance_support import TENANT as TENANT
+from .conformance_support import admission as admission
+from .conformance_support import record_usage as record_usage
 
 SCOPE = Scope(
     tenant_id=str(TENANT),
@@ -531,13 +519,7 @@ async def test_application_runtime_is_lazy_scoped_and_carried_into_execution(
     lookup: bool,
     injected: bool,
 ) -> None:
-    from daimon.core.config import (
-        AnthropicSettings,
-        DatabaseSettings,
-        FleetSettings,
-        Settings,
-        TurnSettings,
-    )
+    from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings, TurnSettings
     from daimon.core.turn.deps import build_turn_deps
     from pydantic import PostgresDsn, SecretStr
 
@@ -570,7 +552,6 @@ async def test_application_runtime_is_lazy_scoped_and_carried_into_execution(
         anthropic=AnthropicSettings(api_key=SecretStr("offline")),
         database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://offline/unused")),
         turn=TurnSettings(path="mux", channel_backends=True),
-        fleet=FleetSettings(enabled=False),
     )
     transport = ScriptedTransport()
     async with transport.client() as client:

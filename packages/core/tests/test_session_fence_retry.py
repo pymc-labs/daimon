@@ -95,3 +95,23 @@ def test_small_pool_rejected_at_engine_startup(capacity):
             pool_size=capacity,
             max_overflow=0,
         )
+
+
+async def test_a_fence_that_runs_out_names_which_acquisition_failed():
+    """Fresh-eyes cause 1: advisory contention, a NOWAIT row, the pool and the deadline all
+    surfaced as the same "session busy". When retry_fences gives up it logs the caller's
+    fixed label and the reasons it saw; the error raised is unchanged."""
+    from daimon.core.session_fence_retry import FenceUnavailable, retry_fences
+    from daimon.core.turn.errors import SessionBusyError
+    from structlog.testing import capture_logs
+
+    async def busy_row():
+        raise FenceUnavailable(asyncio.get_running_loop().time() - 1, "row_nowait")
+
+    with capture_logs() as logs, pytest.raises(SessionBusyError):
+        await retry_fences(busy_row, label="gemini_state:records")
+    assert [
+        (e["label"], e["reasons"], e["last"])
+        for e in logs
+        if e["event"] == "session_fence.unavailable"
+    ] == [("gemini_state:records", ["row_nowait"], "row_nowait")]

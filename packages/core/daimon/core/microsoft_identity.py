@@ -71,14 +71,19 @@ def _endpoint(config: MicrosoftAccountsSettings, name: str) -> str:
 
 
 def build_authorize_url(
-    config: MicrosoftAccountsSettings, *, redirect_uri: str, state: str, code_challenge: str
+    config: MicrosoftAccountsSettings,
+    *,
+    redirect_uri: str,
+    state: str,
+    code_challenge: str,
+    scopes: tuple[str, ...] = MICROSOFT_SCOPES,
 ) -> str:
     params = {
         "client_id": config.client_id or "",
         "response_type": "code",
         "redirect_uri": redirect_uri,
         "response_mode": "query",
-        "scope": " ".join(MICROSOFT_SCOPES),
+        "scope": " ".join(scopes),
         "state": state,
         "code_challenge": code_challenge,
         "code_challenge_method": "S256",
@@ -127,6 +132,7 @@ async def exchange_code(
     code: str,
     code_verifier: str,
     redirect_uri: str,
+    scopes: tuple[str, ...] = MICROSOFT_SCOPES,
 ) -> MicrosoftTokens:
     return await _token_request(
         client,
@@ -136,7 +142,7 @@ async def exchange_code(
             "code": code,
             "code_verifier": code_verifier,
             "redirect_uri": redirect_uri,
-            "scope": " ".join(MICROSOFT_SCOPES),
+            "scope": " ".join(scopes),
         },
     )
 
@@ -156,7 +162,7 @@ async def refresh_tokens(
     )
 
 
-def _claims(id_token: str) -> dict[str, Any]:
+def id_token_claims(id_token: str) -> dict[str, Any]:
     # No signature check: the id_token came straight from the token endpoint
     # over TLS in this same exchange (OpenID Connect Core 3.1.3.7).
     parts = id_token.split(".")
@@ -172,7 +178,7 @@ def _claims(id_token: str) -> dict[str, Any]:
     return cast(dict[str, Any], claims)
 
 
-def _canonical(value: object) -> str | None:
+def canonical_uuid(value: object) -> str | None:
     try:
         return str(uuid.UUID(str(value)))
     except ValueError:
@@ -189,12 +195,12 @@ def verify_identity(
     """
     if tokens.id_token is None:
         raise MicrosoftIdentityMismatch("token response carried no id_token")
-    claims = _claims(tokens.id_token)
-    if _canonical(claims.get("tid")) != config.tenant_id:
+    claims = id_token_claims(tokens.id_token)
+    if canonical_uuid(claims.get("tid")) != config.tenant_id:
         raise MicrosoftIdentityMismatch("account belongs to another tenant")
     if claims.get("aud") != config.client_id:
         raise MicrosoftIdentityMismatch("id_token was issued to another app")
-    oid = _canonical(claims.get("oid"))
-    if oid is None or oid != _canonical(expected_user_id):
+    oid = canonical_uuid(claims.get("oid"))
+    if oid is None or oid != canonical_uuid(expected_user_id):
         raise MicrosoftIdentityMismatch("signed-in account is not the Teams person")
     return oid

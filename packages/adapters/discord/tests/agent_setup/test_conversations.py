@@ -128,9 +128,9 @@ async def test_setup_entry_binds_exact_target_before_ready_without_a_billed_turn
                 thread_id="333",
             )
         assert binding is not None, "the binding must be committed before the opener is visible"
-        assert "specialist" in str(args[0]) and "<@123>" in str(args[0]), (
-            "opener names target and reply mention"
-        )
+        assert (
+            "specialist" in kwargs["embed"].description and "<@123>" in kwargs["embed"].description
+        ), "opener names target and reply mention"
 
     thread.send = AsyncMock(side_effect=send_opener)
     view = RosterView(state, runtime=runtime, allowed_user_id=42)
@@ -163,7 +163,7 @@ async def test_setup_entry_binds_exact_target_before_ready_without_a_billed_turn
         assert binding.configuration_target_ma_agent_id == "agent_specialist", (
             "target stores exact MA identity"
         )
-        assert thread.jump_url in interaction.followup.send.call_args.args[0], (
+        assert thread.jump_url in interaction.followup.send.call_args.kwargs["embed"].description, (
             "entry returns a clickable link"
         )
         thread.delete.assert_not_awaited()
@@ -179,6 +179,6 @@ async def test_setup_entry_refuses_unsupported_channel_before_platform_creation(
         runtime=MagicMock(spec=DiscordRuntime),
         state=PanelState(roster=[], selected=None, account_id=uuid.uuid4()),
     )
-    assert "server text channel" in interaction.followup.send.call_args.args[0], (
-        "unsupported channels need a concrete remedy"
-    )
+    assert (
+        "server text channel" in interaction.followup.send.call_args.kwargs["embed"].description
+    ), "unsupported channels need a concrete remedy"

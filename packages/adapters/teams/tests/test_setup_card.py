@@ -100,7 +100,7 @@ def test_token_card_is_a_title_then_lines_a_blank_line_apart() -> None:
     title, copy, run, *_ = body(None)
     assert (title["text"], title.get("weight")) == ("Use analyst from your coding tools", "Bolder")
     assert (copy["text"], copy.get("spacing")) == (
-        "Copy the setup below now. The token is shown only once.",
+        "Copy this now: the key is shown only once. It acts as you.",
         "Medium",
     )
     assert run["text"] == "**Run this:**", "no channel line for a token bound to no channel"

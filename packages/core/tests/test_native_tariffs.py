@@ -94,11 +94,14 @@ def test_luna_context_and_unknown_write_keep_exact_actual_pending():
     aggregate = usage(price, input_tokens=272_001)
     assert pricing.provider_cost_of(aggregate, price, infrastructure_usd=Decimal(0)) is None
     assert pricing.minimum_cost_of(aggregate, price) == Decimal(".0272092")
-    assert (
-        pricing.provider_cost_of(
-            usage(price, input_cache_write_tokens=None), price, infrastructure_usd=Decimal(0)
-        )
-        is None
+    # OpenAI's turn meter never counts cache writes (ROOT D2=B): an unknown write is
+    # priced as no write, an estimate marked on its debit, never above the counts.
+    unreported = usage(price, input_cache_write_tokens=None)
+    assert pricing.unreported_cache_writes(unreported, price)
+    assert pricing.provider_cost_of(
+        unreported, price, infrastructure_usd=Decimal(0)
+    ) == pricing.provider_cost_of(
+        usage(price, input_cache_write_tokens=0), price, infrastructure_usd=Decimal(0)
     )
     assert pricing.provider_cost_of(usage(price), price, infrastructure_usd=None) is None
 

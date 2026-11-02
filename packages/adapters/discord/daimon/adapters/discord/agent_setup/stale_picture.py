@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from typing import Any, Self
 
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.core.agent_identity import CUSTOM_PICTURES_OFF
 
 import discord
@@ -40,4 +41,6 @@ class StalePictureChangeButton(
     async def callback(  # type: ignore[override]  # see from_custom_id
         self, interaction: discord.Interaction[commands.Bot]
     ) -> None:
-        await interaction.response.send_message(CUSTOM_PICTURES_OFF, ephemeral=True)
+        await interaction.response.send_message(
+            embed=build_notice_embed(CUSTOM_PICTURES_OFF), ephemeral=True
+        )

@@ -26,7 +26,6 @@ from daimon.core.config import (
     CryptoSettings,
     DatabaseSettings,
     DiscordSettings,
-    FleetSettings,
     GeminiSettings,
     McpSettings,
     MicrosoftAccountsSettings,
@@ -48,7 +47,6 @@ from syrupy.assertion import SnapshotAssertion
 # leaves a group unconfigured) — checked before the snapshot comparison so
 # that failure mode is loud rather than a quietly smaller snapshot.
 _MUST_CONTAIN = {
-    "fleet_spawn",
     "create_watch",
     "list_watches",
     "lead_intake_resolve",
@@ -75,10 +73,9 @@ def _fully_configured_settings() -> Settings:
     which is the exact partial-truth failure this test exists to catch."""
     return Settings(
         _env_file=None,  # pyright: ignore[reportCallIssue]
-        turn=TurnSettings(path="mux", channel_backends=True, agent_backends=True),
-        fleet=FleetSettings(enabled=True),
         repo_memory=RepoMemorySettings(enabled=True),
         database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
+        turn=TurnSettings(path="mux", channel_backends=True, agent_backends=True),
         anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
         mcp=McpSettings(
             jwt_secret=SecretStr("a" * 32),
@@ -296,3 +293,24 @@ async def test_create_environment_exposes_nested_pip_package_list(
     assert items.get("type") == "string", (
         f"hop 5 (spec.config.packages.pip.items): expected type 'string', got {items}"
     )
+
+
+async def test_the_tools_for_forking_onto_a_model_name_the_real_reason(sessionmaker) -> None:
+    """J7: "fork yourself onto gpt-3.5-turbo" must never read as an admin/owner rule.
+
+    The model only knows what these descriptions say. A copy can name the model the
+    person asked for, so an unavailable one is refused as unavailable. A saved copy
+    can subsequently switch its provider through the ordinary confirmation flow.
+    """
+    app = create_mcp_app(
+        settings=_fully_configured_settings(),
+        sessionmaker=sessionmaker,
+        auth=StaticTokenVerifier(tokens={}),
+        anthropic=build_stub_anthropic(),
+    )
+    tools = {tool.name: tool for tool in await app.state.mcp.local_provider.list_tools()}
+    fork = tools["fork_agent"].description or ""
+    assert "pass it as ``model``" in fork, fork
+    assert "request a backend switch" in fork, fork
+    assert not any("fleet" in name.lower() for name in tools)
+    assert {"fork_agent", "request_provider_allowlist", "request_channel_pin_clear"} <= tools.keys()

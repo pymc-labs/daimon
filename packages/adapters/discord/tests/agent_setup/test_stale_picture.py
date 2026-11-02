@@ -8,6 +8,7 @@ from daimon.adapters.discord.agent_setup.stale_picture import (
     STALE_CHANGE_ID,
     StalePictureChangeButton,
 )
+from daimon.adapters.discord.notice_card import build_notice_embed
 
 _REFUSAL = "Custom pictures are turned off."
 
@@ -26,5 +27,7 @@ async def test_old_change_button_click_only_sends_the_refusal() -> None:
     with patch("daimon.core.stores.agent_avatars.replace_avatar") as replace_avatar:
         await item.callback(interaction)
 
-    interaction.response.send_message.assert_awaited_once_with(_REFUSAL, ephemeral=True)
+    interaction.response.send_message.assert_awaited_once_with(
+        embed=build_notice_embed(_REFUSAL), ephemeral=True
+    )
     replace_avatar.assert_not_called()

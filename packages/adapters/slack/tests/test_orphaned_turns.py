@@ -25,6 +25,7 @@ import httpx
 import pytest
 import yarl
 from cryptography.fernet import Fernet
+from daimon.adapters.slack.blockkit import ERROR_COLOR
 from daimon.adapters.slack.boot_sweep import retire_orphaned_turns
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.core.defaults.provisioning import provision_tenant
@@ -257,7 +258,9 @@ async def test_sweep_edits_the_frozen_card_and_clears_the_marker(
     body = update_calls[0].kwargs["json"]
     assert body["channel"] == "C_REACHABLE", "must edit the row's own channel"
     assert body["ts"] == "1111.1", "must edit the row's own message ts"
-    assert body["blocks"][0]["text"]["text"] == "Daimon restarted before this request finished.", (
+    card = body["attachments"][0]
+    assert card["color"] == ERROR_COLOR, "an interrupted turn is an error card"
+    assert card["blocks"][0]["text"]["text"] == "Daimon restarted before this request finished.", (
         "the card must say the turn was interrupted"
     )
 

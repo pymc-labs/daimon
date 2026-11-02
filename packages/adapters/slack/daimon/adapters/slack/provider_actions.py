@@ -14,6 +14,7 @@ from typing import Any, TypedDict, cast
 import aiohttp
 import structlog
 from daimon.adapters.slack.agent_post import post_as_agent
+from daimon.adapters.slack.blockkit import notice_fields
 from daimon.core.agent_identity import AgentIdentity
 from daimon.core.posted_controls.lifecycle import edit_card_within
 from daimon.core.turn.prepare import PreparedTurn
@@ -215,9 +216,7 @@ class SlackProviderActions:
                 await posted.client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs are Unknown
                     channel=posted.channel,
                     user=user,
-                    text=refusal,
-                    mrkdwn=False,
-                    parse="none",
+                    **notice_fields(refusal),
                 )
             except _SEND_ERRORS:
                 log.warning("slack.provider_action.refusal_failed")

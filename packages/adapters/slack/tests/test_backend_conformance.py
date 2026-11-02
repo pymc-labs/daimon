@@ -25,7 +25,6 @@ from daimon.core.config import (
     AnthropicSettings,
     CryptoSettings,
     DatabaseSettings,
-    FleetSettings,
     Settings,
     SlackSettings,
     TurnSettings,
@@ -166,7 +165,6 @@ async def setup(
         # existing thread keeps its bound backend after a channel change; that is
         # test_retained_anthropic_thread_replies_after_channel_switches_to_selfhosted.
         turn=TurnSettings(path="legacy", channel_backends=True, agent_backends=False),
-        fleet=FleetSettings(enabled=False),
     )
     runtime = build_slack_runtime(key, db_session_factory, anthropic=client)
     resolver_cache = new_resolver_cache()

@@ -169,9 +169,31 @@ def test_deploy_workflow_remote_scripts() -> None:
     for workflow in sorted((*_WORKFLOWS.glob("*.yml"), *_WORKFLOWS.glob("*.yaml"))):
         scripts += _check_workflow(workflow.name, workflow.read_text())
     # deploy.yml has 4 inline payloads and 1 forwarded shell variable (the boot
-    # reconcile wait); lane.yml has 2 `lane_ssh` wrappers that each forward one
-    # shell variable as the single --command argument.
-    assert scripts == 7, f"expected exactly 7 remote scripts, found {scripts}"
+    # reconcile wait).
+    assert scripts == 5, f"expected exactly 5 remote scripts, found {scripts}"
+
+
+def test_hosted_lane_workflow_is_absent() -> None:
+    assert not (_WORKFLOWS / "lane.yml").exists(), "hosted lane workflow must stay absent"
+    for workflow in (*_WORKFLOWS.glob("*.yml"), *_WORKFLOWS.glob("*.yaml")):
+        source = workflow.read_text()
+        assert "lane/**" not in source, f"{workflow.name} must not run on lane branch pushes"
+        if workflow.name != "self-hosting.yml":
+            assert "deploy/lanes/" not in source, (
+                f"{workflow.name} must not use the self-hosting Compose file"
+            )
+
+
+def test_self_hosting_workflow_uses_placeholder_configuration() -> None:
+    workflow = _WORKFLOWS / "self-hosting.yml"
+    assert workflow.exists(), "Compose configuration should be checked in Actions"
+    source = workflow.read_text()
+    assert "docker compose" in source, "Actions should render Compose"
+    assert "POSTGRES_PASSWORD is required" in source, "Actions should check missing settings"
+    for privileged_input in ("id-token:", "vars.", "secrets.", "gcloud"):
+        assert privileged_input not in source, (
+            f"self-hosting workflow must not use {privileged_input}"
+        )
 
 
 @pytest.mark.parametrize(

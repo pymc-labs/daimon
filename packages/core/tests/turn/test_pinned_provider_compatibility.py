@@ -8,12 +8,9 @@ from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
-from daimon.core._models import AgentBackendRevisionRecord
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.channel_backend import AgentBackendRefused, set_channel_backend
 from daimon.core.config import load_settings
-from daimon.core.fleet_configuration import is_default_fleet
-from daimon.core.neutral_resources import WorkerSpecRefused
 from daimon.core.stores.access_policy import (
     clear_access_policy,
     load_access_policy,
@@ -23,26 +20,16 @@ from daimon.core.turn.admission import admit_impl
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.core.turn.prepare import bind_session_impl
 from daimon.core.turn.run import run_prepared_turn
-from daimon.core.turn.runtime_manifest import read_agent_fleet_grant, read_frozen_root
 from daimon.core.turn_hold import RequesterOrg
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.config import BackendConfig
 from pydantic import ValidationError
-from sqlalchemy import delete
 
 from ..turn_path_support import TurnIOSpy
 from .native_counterpart_support import db_preflight as db_preflight
-from .test_backend_selection import (
-    initial_backend as initial_backend,
-)
-from .test_backend_selection import (
-    preference_for,
-)
-from .test_backend_selection import (
-    selector_host as selector_host,
-)
-from .test_frozen_root import freeze
-from .test_frozen_root import root_turn as root_turn
+from .test_backend_selection import initial_backend as initial_backend
+from .test_backend_selection import preference_for
+from .test_backend_selection import selector_host as selector_host
 from .test_provider_dispatch import ACCOUNT, PROFILE, REVISION, TENANT
 
 
@@ -53,7 +40,6 @@ def pinned_provider_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DAIMON_TURN__PATH", "legacy")
     monkeypatch.setenv("DAIMON_TURN__CHANNEL_BACKENDS", "false")
     monkeypatch.setenv("DAIMON_TURN__AGENT_BACKENDS", "false")
-    monkeypatch.setenv("DAIMON_FLEET__ENABLED", "false")
     monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "synthetic-key")
     monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://offline:offline@localhost/db")
 
@@ -64,14 +50,12 @@ def _legacy_deps(host):
         settings.turn.path,
         settings.turn.channel_backends,
         settings.turn.agent_backends,
-        settings.fleet.enabled,
-    ) == ("legacy", False, False, False), "the deployment pins should load as legacy/off"
+    ) == ("legacy", False, False), "the deployment pins should load as legacy/off"
     return replace(
         host.deps,
         turn_path=settings.turn.path,
         channel_backends=settings.turn.channel_backends,
         agent_backends=settings.turn.agent_backends,
-        fleet_enabled=settings.fleet.enabled,
     )
 
 
@@ -282,29 +266,3 @@ async def test_explicit_native_allowlist_still_runs_the_legacy_provider(
 def test_explicit_empty_allowlist_is_rejected_by_policy_validation() -> None:
     with pytest.raises(ValidationError, match="requires Anthropic"):
         TenantAccessPolicy(enabled_backends=())
-
-
-@pytest.mark.parametrize("keys", [(), ("openai", "gemini")])
-async def test_fleet_off_pin_refuses_an_admitted_root_whatever_the_keys(
-    root_turn, monkeypatch: pytest.MonkeyPatch, keys: tuple[str, ...]
-) -> None:
-    """The fleet-off pin alone refuses a real Discord root that fleet-on admits."""
-    for provider in keys:
-        monkeypatch.setenv(f"DAIMON_CHANNEL_{provider.upper()}_KEY", "synthetic-key")
-    deps, prepared, _, intent, _, scope, *_ = root_turn
-    assert deps.fleet_enabled, "the fixture's root is built with fleet on"
-    pinned = replace(deps, fleet_enabled=load_settings(_env_file=None).fleet.enabled)
-    assert not pinned.fleet_enabled, "the deployment pin should load fleet off"
-    async with deps.sessionmaker.begin() as db:
-        await db.execute(delete(AgentBackendRevisionRecord))
-    now = datetime.now(UTC)
-    on_grant = await read_agent_fleet_grant(deps, prepared.admission, now=now)
-    assert on_grant is not None and is_default_fleet(on_grant), "fleet on resolves the default"
-    assert await read_agent_fleet_grant(pinned, prepared.admission, now=now) is None, (
-        "the fleet-off pin must refuse the grant"
-    )
-    await freeze(root_turn)
-    with pytest.raises(WorkerSpecRefused):
-        await read_frozen_root(pinned, scope, intent_id=intent.id, now=datetime.now(UTC))
-    parent, _ = await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
-    assert parent.fleet.depth == 0, "the same frozen root is readable with fleet on"

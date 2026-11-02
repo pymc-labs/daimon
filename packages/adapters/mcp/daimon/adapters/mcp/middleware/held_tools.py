@@ -26,12 +26,6 @@ from fastmcp.server.transforms.visibility import disable_components, enable_comp
 #: where `held_tool_refusal` judges it.
 HELD_PROXY_TOOLS: Final = frozenset({"search_tools", "call_tool"})
 
-#: Every tool a held credential may see or call, each with the reason it is safe
-#: there. Names are the tools' own, not their module's. Anything not listed is
-#: refused: administration, every directory read (agents, skills, environments,
-#: tenant summary), routines, direct messages, `publish_report`, credential, key and OAuth
-#: requests, GitHub and repository tools, agent create/update/fork, fleet,
-#: budgets, rules, `get_cli_token`, `delete_report` and skill uploads.
 HELD_TOOL_ALLOWLIST: Final[Mapping[str, str]] = MappingProxyType(
     {
         # Channel tools: they authorize against the channel policy, which applies

@@ -6,6 +6,7 @@ import asyncio
 import dataclasses
 import json
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -19,8 +20,10 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, ScopeContext
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.agent_notices import take_agent_notices
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.turn.agent_notices import HANDED_OVER_NOTICE
 from daimon.core.turn.errors import SessionAgentMismatch
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from daimon.testing.ma_models import ma_agent
@@ -52,9 +55,12 @@ TENANT = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
 _DEFAULT = DeploymentDefault(agent_name="daimon", environment_name="default")
 
 
+_OFFER = "This channel now answers with research-bot."
+
+
 def _click() -> dict[str, object]:
     """A Hand over click on the notice, a reply in a channel thread."""
-    invoke = make_card_action(VERB, "hand_over", agent="ag_research")
+    invoke = make_card_action(VERB, "hand_over", agent="ag_research", offer=_OFFER)
     invoke["conversation"] = {
         "id": THREAD_ID,
         "conversationType": "channel",
@@ -153,9 +159,20 @@ async def test_a_click_hands_the_thread_to_the_channels_agent(
 ) -> None:
     answer, responder = await _hand_over(db_session_factory, teams_api_fake)
 
-    assert "handed this conversation over" in json.dumps(answer), "everyone sees who did it"
+    assert _OFFER in json.dumps(answer), "the offer keeps its words"
+    assert "handed this conversation over" not in json.dumps(answer), "Daimon posts no success line"
     assert '"verb"' not in json.dumps(answer), "the replaced card loses its button"
     assert responder == "ag_research", "later messages go to research-bot"
+    async with db_session_factory.begin() as session:
+        notices = await take_agent_notices(
+            session,
+            tenant_id=TENANT,
+            platform="teams",
+            thread_id=THREAD_ID,
+            agent_id="ag_research",
+            since=datetime.now(UTC) - timedelta(hours=1),
+        )
+    assert notices == [HANDED_OVER_NOTICE], "research-bot hears of the hand-over instead"
 
 
 async def test_a_refused_click_answers_privately_and_writes_nothing(
@@ -169,12 +186,22 @@ async def test_a_refused_click_answers_privately_and_writes_nothing(
 
     assert "Nothing was changed" in json.dumps(answer), "only the clicker is told why"
     assert responder is None, "no binding was written"
+    async with db_session_factory.begin() as session:
+        notices = await take_agent_notices(
+            session,
+            tenant_id=TENANT,
+            platform="teams",
+            thread_id=THREAD_ID,
+            agent_id="ag_research",
+            since=datetime.now(UTC) - timedelta(hours=1),
+        )
+    assert notices == [], "a refused click tells the agent nothing"
 
 
 async def test_a_click_in_a_1_1_chat_hands_over_the_chat(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
-    _, responder = await _hand_over(
+    answer, responder = await _hand_over(
         db_session_factory,
         teams_api_fake,
         click=make_card_action(VERB, "hand_over", agent="ag_research"),
@@ -183,6 +210,7 @@ async def test_a_click_in_a_1_1_chat_hands_over_the_chat(
     )
 
     assert responder == "ag_research", "the chat itself is the conversation handed over"
+    assert "answers in this conversation" in json.dumps(answer), "a card with no offer: a pop-up"
 
 
 async def test_a_channel_click_without_its_notice_writes_nothing(

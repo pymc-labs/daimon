@@ -36,7 +36,7 @@ jobs:
     env:
       AR_HOST: ${{ vars.GCP_REGION }}-docker.pkg.dev
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           fetch-depth: 0
 
@@ -58,13 +58,13 @@ jobs:
             || { echo "SHA $SHA is not an ancestor of origin/main — refusing to promote" >&2; exit 1; }
 
       - id: auth
-        uses: google-github-actions/auth@v2
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_DEPLOY_SA }}
 
       # The runner image ships gcloud; installing another copy cost ~20s.
-      - uses: google-github-actions/setup-gcloud@v2
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
         with:
           skip_install: true
 

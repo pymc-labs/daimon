@@ -26,6 +26,7 @@ from daimon.testing.db import build_test_engine
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.pool import NullPool
 
+from .conftest import shown_text
 from .harness import build_slack_runtime
 from .test_feedback import (
     _CHANNEL_ID,
@@ -144,4 +145,4 @@ async def test_a_protection_committed_while_the_vote_waits_refuses_it(
     assert await _rows(factory) == [], "the vote is decided on the committed protection"
     if submit:
         (ephemeral,) = _calls(fake_slack_web_client, _EPHEMERAL_URL)
-        assert ephemeral["text"] == "You can't leave feedback on this answer."
+        assert shown_text(ephemeral) == "You can't leave feedback on this answer."

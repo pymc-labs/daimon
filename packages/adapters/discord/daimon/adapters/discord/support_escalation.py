@@ -47,6 +47,7 @@ from typing import Any, Self, cast
 
 import structlog
 from daimon.adapters.discord.bot import DaimonBot
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.split import split_for_discord_safe
 from daimon.core.config import SupportSettings
@@ -216,14 +217,14 @@ class SupportModal(discord.ui.Modal, title=ASK_THE_TEAM):
         await interaction.response.defer(ephemeral=True, thinking=True)
         note = str(self.note_input.value or "")
         if not note.strip():
-            await interaction.followup.send(_EMPTY_NOTE, ephemeral=True)
+            await interaction.followup.send(embed=build_notice_embed(_EMPTY_NOTE), ephemeral=True)
             return
 
         settings = self._runtime.settings
         channel_id = discord_channel(settings.support)
         if channel_id is None:
             # Disabled between the reaction and the submit. Nothing is spent.
-            await interaction.followup.send(_MALFORMED, ephemeral=True)
+            await interaction.followup.send(embed=build_notice_embed(_MALFORMED), ephemeral=True)
             return
         # The button arrives by direct message, so `interaction.guild_id` is
         # None and the originating guild comes from the custom_id instead.
@@ -259,7 +260,9 @@ class SupportModal(discord.ui.Modal, title=ASK_THE_TEAM):
 
         if row is None:
             _log.info("support.out_of_credits", tenant_id=str(tenant_id))
-            await interaction.followup.send(_OUT_OF_CREDITS, ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(_OUT_OF_CREDITS), ephemeral=True
+            )
             return
 
         # Decided again at submit, as Slack does: the rule may have changed
@@ -290,12 +293,17 @@ class SupportModal(discord.ui.Modal, title=ASK_THE_TEAM):
             delivered=delivered,
         )
         if not delivered:
-            await interaction.followup.send(_RECORDED_UNDELIVERED, ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(_RECORDED_UNDELIVERED), ephemeral=True
+            )
             return
         remaining = max(
             settings.support.credits_per_user - (await self._used(tenant_id, user_id)), 0
         )
-        await interaction.followup.send(received_text(remaining=remaining), ephemeral=True)
+        await interaction.followup.send(
+            embed=build_notice_embed(received_text(remaining=remaining), neutral=True),
+            ephemeral=True,
+        )
 
     async def _used(self, tenant_id: uuid.UUID, user_id: str) -> int:
         from daimon.core.stores.support_escalation import count_escalations_for_user
@@ -334,9 +342,13 @@ class SupportModal(discord.ui.Modal, title=ASK_THE_TEAM):
         """Adapter boundary: discord.py routes on_submit failures here, not to a dispatcher."""
         _log.exception("support_modal.on_error", err_type=type(error).__name__)
         if interaction.response.is_done():
-            await interaction.followup.send(_SUBMIT_FAILED, ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(_SUBMIT_FAILED), ephemeral=True
+            )
         else:
-            await interaction.response.send_message(_SUBMIT_FAILED, ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed(_SUBMIT_FAILED), ephemeral=True
+            )
 
 
 class SupportEscalateButton(
@@ -403,6 +415,10 @@ class SupportEscalateButton(
             # anything raised here
             _log.exception("support_button.callback_failed", err_type=type(err).__name__)
             if interaction.response.is_done():
-                await interaction.followup.send(_CALLBACK_FAILED, ephemeral=True)
+                await interaction.followup.send(
+                    embed=build_notice_embed(_CALLBACK_FAILED), ephemeral=True
+                )
             else:
-                await interaction.response.send_message(_CALLBACK_FAILED, ephemeral=True)
+                await interaction.response.send_message(
+                    embed=build_notice_embed(_CALLBACK_FAILED), ephemeral=True
+                )

@@ -430,35 +430,6 @@ async def test_an_interrupted_create_keeps_its_hold_and_the_next_attempt_runs(po
     assert any(row["interaction_id"] == "second" for row in rows)
 
 
-async def test_default_gemini_holds_admit_a_root_and_three_workers_on_postgres(
-    postgres_state, monkeypatch
-):
-    from daimon.core.turn.gemini_deployment import GeminiPlan
-    from daimon.core.turn.runtime_manifest import select_runtime_manifest
-
-    from .test_runtime_defaults import request
-
-    sessions, scope, _, _ = postgres_state
-    monkeypatch.delenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", raising=False)
-    monkeypatch.setenv("DAIMON_CHANNEL_GEMINI_KEY", "set")
-    model = ModelRef(provider="gemini", id=FLASH_PRIMARY)
-    root = select_runtime_manifest(request("gemini.inline_reuse", FLASH_PRIMARY), GeminiPlan)
-    worker = select_runtime_manifest(
-        request("gemini.inline_reuse", FLASH_PRIMARY, worker=True), GeminiPlan
-    )
-
-    def owner(plan):
-        return holds(sessions, scope, hold=str(plan.hold_usd), cap=str(plan.cap_usd))
-
-    await accepted(owner(root), model, "root")
-    for index in range(3):
-        await accepted(owner(worker), model, f"worker-{index}")
-    with pytest.raises(AdmissionDenied, match="provider_hold_cap_reached"):
-        await owner(worker).before_attempt(model=model, attempt=1)
-    summary = outstanding_holds(json.dumps(await ledger(sessions)))
-    assert summary["open_holds"] == 4 and summary["held_usd"] == "1.72"
-
-
 @pytest.mark.parametrize("last", ["503", "accepted"])
 async def test_a_503_storm_across_the_flash_chain_strands_no_hold(postgres_state, last):
     from mux.drivers.gemini.flash import FLASH_MODELS, FlashTransport

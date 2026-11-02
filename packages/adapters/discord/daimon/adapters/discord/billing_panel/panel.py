@@ -45,6 +45,7 @@ from daimon.adapters.discord.billing_panel.state import (
 )
 from daimon.adapters.discord.checks import refuse_if_not_platform_admin
 from daimon.adapters.discord.errors import generate_request_id, render_error
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.billing_panel import (
     ADD_CREDIT,
@@ -312,13 +313,16 @@ class _TopUpSelect(discord.ui.Select["BillingPanelView"]):
                 amount=amount,
             )
             await interaction.response.send_message(
-                f"Top up ${amount}: complete payment here (link is private):\n{url}",
+                embed=build_notice_embed(
+                    f"Top up ${amount}: complete payment here (link is private):\n{url}",
+                    neutral=True,
+                ),
                 ephemeral=True,
             )
         except (DaimonError, discord.HTTPException, httpx.HTTPStatusError) as exc:
             rid = generate_request_id()
             await interaction.response.send_message(
-                render_error(exc, request_id=rid), ephemeral=True
+                embed=build_notice_embed(render_error(exc, request_id=rid)), ephemeral=True
             )
 
 
@@ -382,7 +386,7 @@ class _MemberLookupSelect(discord.ui.UserSelect["BillingPanelView"]):
         except (DaimonError, discord.HTTPException) as exc:
             rid = generate_request_id()
             await interaction.response.send_message(
-                render_error(exc, request_id=rid), ephemeral=True
+                embed=build_notice_embed(render_error(exc, request_id=rid)), ephemeral=True
             )
 
 
@@ -397,7 +401,7 @@ class _InvokerOnly(discord.ui.LayoutView):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:  # type: ignore[override]  # base uses broader Interaction[Client] type
         if interaction.user.id != self.allowed_user_id:
             await interaction.response.send_message(
-                "Only the command invoker can use these buttons.",
+                embed=build_notice_embed("Only the command invoker can use these buttons."),
                 ephemeral=True,
             )
             return False

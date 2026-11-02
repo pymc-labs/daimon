@@ -101,7 +101,10 @@ async def test_unprovisioned_organisation_is_told_no_turn_runs(
         await post_activity(service, make_message_activity())
         await finish_turns(service.turns)
     assert turns == []
-    assert [r.body.get("text") for r in teams_api_fake.activity_requests] == [DENIED]
+    assert [
+        r.body["attachments"][0]["content"]["fallbackText"]
+        for r in teams_api_fake.activity_requests
+    ] == [DENIED]
 
 
 @pytest.mark.usefixtures("provisioned_tenant")

@@ -926,7 +926,7 @@ async def test_unrelated_manifest_failure_preserves_ordinary_source_capture(
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
-@pytest.mark.parametrize("surface", ["other_channel", "dm", "routine", "anthropic", "worker"])
+@pytest.mark.parametrize("surface", ["other_channel", "dm", "routine", "anthropic"])
 async def test_full_mode_row_does_not_affect_unrelated_source_capture(full, monkeypatch, surface):
     request, _, _, _, _, posts, _, archives, *_ = full
     from mux.profiles import backend_selection
@@ -948,8 +948,6 @@ async def test_full_mode_row_does_not_affect_unrelated_source_capture(full, monk
             admission,
             backend_revision=ConfigRevision.create(old.channel, 3, backend_selection("anthropic")),
         )
-    else:
-        request = replace(request, worker=object())
     request = replace(request, admission=admission)
     captured = await capture_preparation_source(request, fresh=True)
     assert not captured.representations
@@ -1140,7 +1138,17 @@ async def test_registered_chat_catalogue_matches_source_without_expanding_agent_
     request, plan, _, _, _, posts, runtime_token, *_ = full
     secret = request.deps.mcp.jwt_secret.get_secret_value().encode()
     now = request.now()
+    from daimon.core.stores.agent_owners import set_owner
+
     async with request.deps.sessionmaker.begin() as db:
+        # An external agent key is held to its maker owning the agent (or being an admin).
+        await set_owner(
+            db,
+            tenant_id=request.tenant_id,
+            agent_id=plan.source_agent_id,
+            owner_account_id=request.admission.account_id,
+            source="admin_assigned",
+        )
         external = await mint_agent_mcp_token(
             db,
             account_id=request.admission.account_id,

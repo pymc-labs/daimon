@@ -50,11 +50,13 @@ import logging
 import re
 import sys
 import traceback
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Literal, cast
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 import sentry_sdk
 import structlog
+from daimon.core.release import current_release
 from sentry_sdk.scrubber import DEFAULT_DENYLIST, EventScrubber
 
 if TYPE_CHECKING:
@@ -159,6 +161,18 @@ _FREE_TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # Fernet tokens and keys.
     (re.compile(_TOKEN_START + r"()gAAAAA[A-Za-z0-9_-]{20,}={0,2}"), r"\1"),
     (re.compile(r"()\b[A-Za-z0-9_-]{43}=(?![A-Za-z0-9_-])"), r"\1"),
+    # AWS access key ids (long-lived and temporary).
+    (re.compile(_TOKEN_START + r"()(?:AKIA|ASIA)[0-9A-Z]{16}(?![0-9A-Za-z])"), r"\1"),
+    # A long opaque run mixing upper case, lower case and digits (an unlabelled
+    # base64 secret). Hex digests and git SHAs are single-case, so they stay.
+    (
+        re.compile(
+            _TOKEN_START
+            + r"()(?=[A-Za-z0-9+_-]*[a-z])(?=[A-Za-z0-9+_-]*[A-Z])(?=[A-Za-z0-9+_-]*\d)"
+            r"[A-Za-z0-9+_-]{48,}={0,2}"
+        ),
+        r"\1",
+    ),
 )
 # Any `name = value` / `name: value` / `name%3Dvalue`. The value sits in a
 # lookahead so a non-secret pair never swallows the pair after it
@@ -920,6 +934,26 @@ def _redacted_for_output(record: logging.LogRecord) -> logging.LogRecord:
     return out
 
 
+class JsonLineFormatter(structlog.stdlib.ProcessorFormatter):
+    """Renders each stdlib record as one JSON line (see `logging_setup`).
+
+    Its processor chain ends in `redact_rendered`, so a handler using it needs
+    no second text pass over the line, and it keeps `exc_info` to render the
+    exception as structured data instead of the traceback text that
+    `_redacted_for_output` folds into the message.
+    """
+
+
+def _redacted_for_json(record: logging.LogRecord) -> logging.LogRecord:
+    """A copy for a `JsonLineFormatter` handler: message and stack text
+    redacted, `exc_info` kept for the formatter's exception renderer."""
+    out = copy.copy(record)
+    _redact_record_text(out)
+    if out.stack_info:
+        out.stack_info = _redact_secret_text(out.stack_info)
+    return out
+
+
 class LogRedactionFilter(logging.Filter):
     """For callers that attach it explicitly: the record continues as a
     redacted copy (message, cached traceback text and stack text)."""
@@ -944,10 +978,17 @@ def _redacting_format(self: logging.Handler, record: logging.LogRecord) -> str:
 
     Never raises: a formatting or redaction failure yields a fixed marker
     (the failing scrubber isn't retried)."""
+    json_line = isinstance(self.formatter, JsonLineFormatter)
     try:
-        return _redact_secret_text(_handler_format(self, record))
+        rendered = _handler_format(self, record)
+        # A JSON line was redacted field by field; scanning its text would
+        # also eat the quotes around a redacted value.
+        return rendered if json_line else _redact_secret_text(rendered)
     except Exception as exc:
-        return _failure_marker(exc, record)
+        marker = _failure_marker(exc, record)
+        if json_line:
+            return json.dumps({"event": marker, "level": "error", "severity": "ERROR"})
+        return marker
 
 
 def redact_rendered(logger: WrappedLogger, method_name: str, event_dict: EventDict) -> EventDict:
@@ -997,13 +1038,33 @@ def _redacting_handle(self: logging.Handler, record: logging.LogRecord) -> bool 
     if type(self).__module__.startswith("sentry_sdk"):
         return _handler_handle(self, record)
     try:
-        redacted = _redacted_for_output(record)
+        redacted = (
+            _redacted_for_json(record)
+            if isinstance(self.formatter, JsonLineFormatter)
+            else _redacted_for_output(record)
+        )
     except Exception as exc:
         redacted = _safe_record(record, exc)
     return _handler_handle(self, redacted)
 
 
+_unraisable_logger: Callable[[sys.UnraisableHookArgs], None] | None = None
+
+
+def set_unraisable_logger(logger: Callable[[sys.UnraisableHookArgs], None] | None) -> None:
+    """Have the unraisable-exception hook hand the exception to `logger` (the JSON
+    chain's) instead of printing redacted text; `None` restores the text."""
+    global _unraisable_logger
+    _unraisable_logger = logger
+
+
 def _redacting_unraisablehook(unraisable: sys.UnraisableHookArgs) -> None:
+    if _unraisable_logger is not None:
+        try:
+            _unraisable_logger(unraisable)
+            return
+        except Exception:
+            pass
     exc = unraisable.exc_value
     trace = (
         "".join(traceback.format_exception(type(exc), exc, unraisable.exc_traceback))
@@ -1014,7 +1075,7 @@ def _redacting_unraisablehook(unraisable: sys.UnraisableHookArgs) -> None:
     sys.stderr.write(_redact_secret_text(f"{where}: {unraisable.object!r}\n{trace}"))
 
 
-def install_log_redaction() -> None:
+def install_log_redaction(*, formatter: logging.Formatter | None = None) -> None:
     """Redact all stdlib log output in this process; idempotent.
 
     Every `logging.Handler` emits a redacted copy of each record (including
@@ -1022,6 +1083,7 @@ def install_log_redaction() -> None:
     a stderr handler when it has none (so library warnings go through a
     redacting handler instead of the bare last-resort path), warnings are
     routed through logging, and unraisable exceptions print redacted.
+    `formatter` renders the root handler this adds (default: plain text).
     """
     global _installed
     if not _installed:
@@ -1034,6 +1096,8 @@ def install_log_redaction() -> None:
     if not root.handlers:
         fallback = logging.StreamHandler(sys.stderr)
         fallback.setLevel(logging.WARNING)
+        if formatter is not None:
+            fallback.setFormatter(formatter)
         root.addHandler(fallback)
     access = logging.getLogger(_ACCESS_LOGGER)
     if not any(isinstance(f, LogRedactionFilter) for f in access.filters):
@@ -1118,7 +1182,7 @@ def init_sentry(
     *,
     dsn: str | None,
     environment: str,
-    process: Literal["discord", "mcp", "scheduler", "slack", "teams"],
+    process: Literal["discord", "mcp", "scheduler", "slack", "teams", "web"],
     release: str | None,
     traces_sample_rate: float,
     integrations: list[Integration],
@@ -1132,7 +1196,7 @@ def init_sentry(
         dsn: Sentry DSN string. None = Sentry disabled.
         environment: Sentry environment tag (e.g. "production", "staging").
         process: Process group name — set as a Sentry tag post-init.
-        release: Optional release identifier (e.g. git SHA).
+        release: Release identifier; defaults to `current_release()` (the image's git SHA).
         traces_sample_rate: Fraction of transactions to sample for tracing.
             0.0 disables tracing while still capturing errors.
         integrations: SDK integrations to enable (e.g. AsyncioIntegration).
@@ -1144,7 +1208,7 @@ def init_sentry(
     sentry_sdk.init(
         dsn=dsn,
         environment=environment,
-        release=release,
+        release=release if release is not None else current_release(),
         send_default_pii=False,
         include_local_variables=False,
         max_breadcrumbs=0,

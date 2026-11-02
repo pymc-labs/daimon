@@ -21,7 +21,6 @@ import structlog
 from daimon.adapters.discord.lifecycle import SendFn
 from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.core.channel_tidy import record_turn_post
-from daimon.core.stores.agent_posts import AgentPostRow
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
@@ -103,16 +102,3 @@ async def archive_thread_quietly(thread: discord.Thread) -> None:
         log.warning(
             "turn.thread_archive_failed", thread_id=thread.id, error_type=type(exc).__name__
         )
-
-
-async def record_replacement_post(
-    sessionmaker: async_sessionmaker[AsyncSession],
-    post: AgentPostRow,
-    replacement: discord.Message,
-) -> None:
-    """Carry the captured post's attribution to an acknowledged replacement.
-
-    Recovery knows the stored agent UUID, not an invented native agent ID.
-    The bot verifies the post/root destination before handing it here.
-    """
-    await record_turn_post(sessionmaker, recorded_post=post, message_id=str(replacement.id))

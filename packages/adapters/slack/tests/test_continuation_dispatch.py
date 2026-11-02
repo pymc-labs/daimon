@@ -34,6 +34,8 @@ from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .conftest import shown_text
+
 _TARGET_AGENT_ID = "agent_continuation_target"
 
 
@@ -462,9 +464,7 @@ async def test_a_timer_refused_for_a_changed_responder_posts_why_and_settles_ski
     posts = fake_slack_web_client.mock.requests.get(
         ("POST", yarl.URL("https://slack.com/api/chat.postMessage")), []
     )
-    texts = [
-        str((p.kwargs.get("json") or p.kwargs.get("data") or {}).get("text") or "") for p in posts
-    ]
+    texts = [shown_text(p.kwargs.get("json") or p.kwargs.get("data") or {}) for p in posts]
     assert any("other-agent answers here now" in text for text in texts), texts
 
 

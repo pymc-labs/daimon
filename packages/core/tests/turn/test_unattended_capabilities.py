@@ -402,7 +402,7 @@ async def test_decider_lets_builtins_through_only_for_an_opted_in_routine(
 
 @pytest.mark.parametrize(
     ("origin", "entry_point"),
-    [("worker", "fleet_worker"), ("routine", "routine"), ("chat", "wake"), ("relay", "wake")],
+    [("routine", "routine"), ("chat", "wake"), ("relay", "wake")],
 )
 def test_prepared_origin_maps_to_entry_point(origin: Any, entry_point: str) -> None:
     assert unattended_entry_point(origin) == entry_point

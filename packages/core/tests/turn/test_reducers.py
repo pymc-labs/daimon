@@ -757,6 +757,63 @@ def test_apply_routes_terminal_mcp_error_to_turn_error() -> None:
     assert state.mcp_failures == (), "a terminal error is not a degradation"
 
 
+def _unknown_error(message: str, *, retry: str = "exhausted"):  # SDK union member, inlined
+    from anthropic.types.beta.sessions.beta_managed_agents_unknown_error import (
+        BetaManagedAgentsUnknownError,
+    )
+
+    status = {
+        "exhausted": BetaManagedAgentsRetryStatusExhausted(type="exhausted"),
+        "terminal": BetaManagedAgentsRetryStatusTerminal(type="terminal"),
+        "retrying": BetaManagedAgentsRetryStatusRetrying(type="retrying"),
+    }[retry]
+    return BetaManagedAgentsUnknownError(type="unknown_error", message=message, retry_status=status)
+
+
+_PACKAGE_MESSAGE = "Package installation failed: pip ran out of time before installing typst."
+
+
+def test_apply_keeps_exhausted_package_install_failure_aside_without_setting_error() -> None:
+    """The 2026-10-26 incident: MA carries on without the sandbox packages."""
+    state = apply(
+        TurnState(), make_session_error(event_id="e_1", error=_unknown_error(_PACKAGE_MESSAGE))
+    )
+    assert state.error is None, "the session survives a package install timeout"
+    assert state.package_install_error is not None
+    assert state.package_install_error.kind == "upstream"
+    assert state.package_install_error.message == _PACKAGE_MESSAGE
+    assert "e_1" in state.seen_event_ids
+
+
+@pytest.mark.parametrize(
+    ("message", "retry"),
+    [
+        (_PACKAGE_MESSAGE, "terminal"),
+        ("Something else went wrong", "exhausted"),
+        ("The package installation failed", "exhausted"),
+    ],
+)
+def test_apply_leaves_every_other_unknown_error_as_the_turn_error(message: str, retry: str) -> None:
+    state = apply(
+        TurnState(),
+        make_session_error(event_id="e_1", error=_unknown_error(message, retry=retry)),
+    )
+    assert state.error is not None and state.error.message == message
+    assert state.package_install_error is None
+
+
+def test_apply_does_not_pair_retrying_package_failure_with_the_aside_slot() -> None:
+    """`retrying` keeps today's handling: the settled copy decides."""
+    state = apply(
+        TurnState(),
+        make_session_error(
+            event_id="e_1", error=_unknown_error(_PACKAGE_MESSAGE, retry="retrying")
+        ),
+    )
+    assert state.error is None and state.package_install_error is None
+    assert state.retrying_error is not None
+
+
 def test_apply_ignores_retrying_model_error_until_it_settles() -> None:
     """A `retrying` copy of a model error is MA saying wait; the settled copy
     (`exhausted`/`terminal`) is the one that fails the turn."""

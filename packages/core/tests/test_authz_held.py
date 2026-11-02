@@ -65,7 +65,6 @@ CLIENT_REFUSED = [
     Action.SET_AGENT_TOOL_RULE,
     Action.SET_CHANNEL_AGENT_TOOL_RULE,
     Action.ARCHIVE_CHANNEL_COPY,
-    Action.SPAWN_WORKER,
 ]
 
 
@@ -95,9 +94,7 @@ def test_a_client_changes_no_shared_agent_in_any_family(family: str) -> None:
 
 @pytest.mark.parametrize("policy", POLICIES)
 @pytest.mark.parametrize("action", [Action.START_TURN, Action.RUN_AGENT])
-@pytest.mark.parametrize(
-    "surface", [Surface.DM, Surface.HUB, Surface.AGENT_CHAT, Surface.ROUTINE, Surface.FLEET]
-)
+@pytest.mark.parametrize("surface", [Surface.DM, Surface.HUB, Surface.AGENT_CHAT, Surface.ROUTINE])
 def test_a_client_starts_nothing_outside_a_channel(
     policy: TenantAccessPolicy, action: Action, surface: Surface
 ) -> None:
@@ -181,8 +178,7 @@ def test_a_held_turn_reads_and_posts_only_inside_its_channel(
 
 @pytest.mark.parametrize("policy", POLICIES)
 @pytest.mark.parametrize(
-    "action",
-    [Action.DIRECT_MESSAGE, Action.SAVE_ROUTINE, Action.CREATE_AGENT, Action.SPAWN_WORKER],
+    "action", [Action.DIRECT_MESSAGE, Action.SAVE_ROUTINE, Action.CREATE_AGENT]
 )
 def test_a_held_turn_never_messages_saves_routines_or_creates_agents(
     policy: TenantAccessPolicy, action: Action

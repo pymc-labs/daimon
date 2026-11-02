@@ -11,6 +11,7 @@ import anthropic
 import structlog
 from cryptography.fernet import InvalidToken
 from daimon.adapters.slack.agent_post import post_as_agent
+from daimon.adapters.slack.blockkit import notice_fields
 from daimon.adapters.slack.errors import bound_request_id, render_error
 from daimon.adapters.slack.gating import is_slack_connect_external
 from daimon.adapters.slack.interactions import resolve_web_client
@@ -165,9 +166,10 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
             client, user_id=user_id, team_id=team_id, require_im_scopes=action != "disable"
         )
         tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+        reply = refusal = None
         if action in {"enable", "disable"}:
             if role is not Role.ADMIN:
-                reply = "Only a workspace admin can turn Daimon DMs on or off here."
+                refusal = "Only a workspace admin can turn Daimon DMs on or off here."
             else:
                 async with runtime.sessionmaker.begin() as session:
                     await set_dm_enabled(session, tenant_id=tenant_id, enabled=action == "enable")
@@ -238,20 +240,26 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
             )
             await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                 channel=dm_channel,
-                text=(
+                **notice_fields(
                     f"Continuing from <#{channel_id}>.\n\nSend your next message here. "
-                    "To start a new private conversation, run /dm-me in a channel."
+                    "To start a new private conversation, run /dm-me in a channel.",
+                    neutral=True,
                 ),
                 unfurl_links=False,
             )
             reply = "Ready in your DMs."
         else:
-            reply = (
+            refusal = (
                 "That option isn't recognized.\n\n"
                 "Run `/dm-me` in a channel to continue privately. "
                 "Admins: `/dm-me enable` or `/dm-me disable`."
             )
-        await client.chat_postEphemeral(channel=channel_id, user=user_id, text=reply)  # pyright: ignore[reportUnknownMemberType]
+        fields: dict[str, Any] = (
+            notice_fields(refusal) if refusal else notice_fields(reply or "", neutral=True)
+        )
+        await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+            channel=channel_id, user=user_id, **fields
+        )
     except _ERRORS as exc:
         log.warning("slack.dm.command_failed", error_type=type(exc).__name__)
         if client is not None:
@@ -259,7 +267,9 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel_id,
                     user=user_id,
-                    text=_error_message(exc, settings=runtime.settings, team_id=team_id),
+                    **notice_fields(
+                        _error_message(exc, settings=runtime.settings, team_id=team_id)
+                    ),
                 )
 
 
@@ -276,7 +286,7 @@ async def _explain_no_private_chat(
         return
     try:
         await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-            channel=channel_id, text=cold_dm_text("slack", dms_on=dms_on)
+            channel=channel_id, **notice_fields(cold_dm_text("slack", dms_on=dms_on))
         )
     except (SlackApiError, aiohttp.ClientError, TimeoutError) as exc:
         _COLD_DM_NOTICES.forget(person)
@@ -354,6 +364,7 @@ async def handle_direct_message(
             route_key=route_key,
             external_user_id=user_id,
             message_id=message_id,
+            platform_channel_id=channel_id,
             expected_scope_id=conversation.scope_id,
             text=content,
             role=role,
@@ -376,6 +387,8 @@ async def handle_direct_message(
             with contextlib.suppress(SlackApiError, aiohttp.ClientError, TimeoutError):
                 await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel_id,
-                    text=_error_message(exc, settings=runtime.settings, team_id=team_id),
+                    **notice_fields(
+                        _error_message(exc, settings=runtime.settings, team_id=team_id)
+                    ),
                     **thread_kwargs,
                 )

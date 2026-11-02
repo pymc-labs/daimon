@@ -51,6 +51,7 @@ from daimon.core.config import GithubAppSettings, McpSettings
 from daimon.core.credential_env import assemble_env_bytes, upload_env_file
 from daimon.core.errors import DaimonError
 from daimon.core.github_app_session import rotate_live_app_tokens
+from daimon.core.mcp_identity import identity_relay_urls
 from daimon.core.mcp_vault import refresh_mounted_mcp_vaults
 from daimon.core.session_compat import (
     ChangeReason,
@@ -271,8 +272,12 @@ async def apply_update_ops(
         and mcp.public_url is not None
         and mcp.jwt_secret is not None
     ):
+        relay_urls = identity_relay_urls(
+            (server.url for server in agent.mcp_servers), public_url=str(mcp.public_url)
+        )
         mounted_vaults = (snapshot.vault_id,)
-        if snapshot.github_mode == "app" or snapshot.chat_session_id is not None:
+        # A session's relay vault is mounted beside its Daimon one, never recorded.
+        if snapshot.github_mode == "app" or snapshot.chat_session_id is not None or relay_urls:
             live = await retrieve_session_record(anthropic, session_id, scope=scope)
             mounted_vaults = tuple(dict.fromkeys(live.vault_ids))
         await refresh_mounted_mcp_vaults(
@@ -285,6 +290,7 @@ async def apply_update_ops(
             now=now,
             session_factory=sessionmaker,
             scope=scope,
+            relay_urls=relay_urls,
         )
 
     for op in ops:

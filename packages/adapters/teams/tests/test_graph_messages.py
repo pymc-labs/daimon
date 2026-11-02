@@ -36,6 +36,7 @@ from .conftest import (
     bot_token,
     build_teams_runtime,
     make_channel_activity,
+    shown_text,
 )
 
 pytestmark = pytest.mark.usefixtures("provisioned_tenant")
@@ -241,7 +242,7 @@ async def test_while_draining_a_message_is_held_and_the_next_boot_runs_it_once(
     await draining.graph(message)
     await draining.graph(chatter)
     assert draining.paths == [], "nothing runs while draining"
-    assert [a.text for _, a, _ in sender.sent] == [HOLDING], "the asker is told it is held"
+    assert [shown_text(a) for _, a, _ in sender.sent] == [HOLDING], "the asker is told it is held"
 
     successor = Routed(_app(db_session_factory))
     await successor.boot()
@@ -302,7 +303,7 @@ async def test_a_refusal_from_graph_is_sent_once(
     )
     for _ in range(2):
         await teams.handle_graph_message(message, CHANNEL)
-    assert [(conversation, activity.text) for conversation, activity, _ in sender.sent] == [
+    assert [(conversation, shown_text(activity)) for conversation, activity, _ in sender.sent] == [
         (f"{PRIVATE};messageid={ROOT}", DENIED)
     ], "one refusal, in the message's thread"
 

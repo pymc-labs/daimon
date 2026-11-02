@@ -48,6 +48,7 @@ from typing import Any, Self, cast
 
 import structlog
 from daimon.adapters.discord.bot import DaimonBot
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.wizard_render import build_wizard_view
 from daimon.core.stores.domain import WizardSessionRow
 from daimon.core.stores.wizard_session import get_wizard_session, update_wizard_state
@@ -141,10 +142,11 @@ async def _authorize_tap(row: WizardSessionRow | None, interaction: discord.Inte
 async def _reply_or_followup(interaction: discord.Interaction, message: str) -> None:
     """Send `message` ephemerally, via the response if it is still open or
     via the followup once it has already been used (deferred or replied)."""
+    card = build_notice_embed(message)
     if interaction.response.is_done():
-        await interaction.followup.send(message, ephemeral=True)
+        await interaction.followup.send(embed=card, ephemeral=True)
     else:
-        await interaction.response.send_message(message, ephemeral=True)
+        await interaction.response.send_message(embed=card, ephemeral=True)
 
 
 async def _reconstruct_row(
@@ -207,7 +209,7 @@ async def _apply_and_render(
         # The row changed under this tap (expired, erased, submitted, or
         # written by a tap that landed first) -- leave the message alone
         # rather than re-rendering a screen that no longer matches the row.
-        await interaction.followup.send(_STALE, ephemeral=True)
+        await interaction.followup.send(embed=build_notice_embed(_STALE), ephemeral=True)
         return
     # A re-render carries the agent-authored prompt and question verbatim in
     # its head text; nothing in a form legitimately needs to mention anyone.
@@ -489,7 +491,9 @@ class WizardCustomTextModal(discord.ui.Modal):
             await interaction.response.defer()
             row = await _load_row(self._bot, self._row.id)
             if row is None:
-                await interaction.followup.send(_NOT_AVAILABLE, ephemeral=True)
+                await interaction.followup.send(
+                    embed=build_notice_embed(_NOT_AVAILABLE), ephemeral=True
+                )
                 return
             text = str(self.answer_input.value or "")
             action = f"s{self._step_index}_custom"
@@ -500,7 +504,9 @@ class WizardCustomTextModal(discord.ui.Modal):
             except ValueError:
                 # The pure transition already refuses empty/whitespace text
                 # -- surface that as an ephemeral notice, not a state change.
-                await interaction.followup.send(_EMPTY_TEXT, ephemeral=True)
+                await interaction.followup.send(
+                    embed=build_notice_embed(_EMPTY_TEXT), ephemeral=True
+                )
         except Exception as err:
             # dynamic-item dispatch is an adapter boundary (see module docstring); discord.py's own
             # dispatcher swallows anything raised here

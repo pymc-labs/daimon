@@ -20,6 +20,7 @@ import pytest
 from aioresponses import CallbackResult
 from aioresponses import aioresponses as AioResponsesMock
 from anthropic.types.beta import FileMetadata
+from daimon.adapters.slack.blockkit import ERROR_COLOR
 from daimon.adapters.slack.output_delivery import (
     SLACK_MAX_BYTES_PER_FILE,
     deliver_provider_output,
@@ -41,6 +42,16 @@ _POST_MESSAGE_KEY = ("POST", URL("https://slack.com/api/chat.postMessage"))
 
 def _post_message_calls(mock: Any) -> list[Any]:
     return list(mock.requests.get(_POST_MESSAGE_KEY, []))
+
+
+def _notice_text(call: Any) -> str:
+    """The words of a notice posted as a red-barred attachment, and nothing above it."""
+    body = call.kwargs["json"]
+    assert "text" not in body, "no top-level text: Slack would print it above the bar"
+    (attachment,) = body["attachments"]
+    assert attachment["color"] == ERROR_COLOR, "the bar is error red"
+    (section,) = attachment["blocks"]
+    return section["text"]["text"]
 
 
 async def test_delivery_uploads_via_three_request_flow_without_content_type(
@@ -189,7 +200,7 @@ async def test_delivery_posts_scope_notice_and_deletes_nothing_on_missing_scope(
 
     notices = _post_message_calls(mock)
     assert len(notices) == 1, "exactly one in-thread notice must be posted"
-    assert notices[0].kwargs["json"]["text"] == (
+    assert _notice_text(notices[0]) == (
         "I couldn't attach the file.\n\n"
         "Ask a workspace admin to allow file uploads and reinstall Daimon."
     ), "plain words, a blank line between the two lines"
@@ -256,7 +267,7 @@ async def test_delivery_posts_storage_notice_and_deletes_nothing_on_storage_limi
 
     notices = _post_message_calls(mock)
     assert len(notices) == 1, "exactly one in-thread notice must be posted"
-    assert notices[0].kwargs["json"]["text"] == (
+    assert _notice_text(notices[0]) == (
         "I couldn't attach the file. This Slack workspace is out of file space.\n\n"
         "Ask a workspace admin to free some up."
     ), "the storage notice is about file space, not scopes"
@@ -556,7 +567,7 @@ async def test_delivery_posts_one_oversize_notice_and_keeps_entry_without_upload
 
     notices = _post_message_calls(mock)
     assert len(notices) == 1, "exactly one oversize notice across both sweeps"
-    notice_text = str(notices[0].kwargs)
+    notice_text = _notice_text(notices[0])
     assert "big_data.bin" in notice_text, "the notice must name the sanitized file"
     assert "200 MB upload limit" in notice_text, "the notice must quote the delivery limit"
     assert "still saved" in notice_text, "the notice must say the file was kept"

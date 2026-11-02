@@ -661,7 +661,7 @@ Final table rendering belongs to the platform adapter. The host's existing
 `DAIMON_TABLE_RENDERING` tenant UUID map opts into Discord PNGs and Slack native
 tables for Anthropic, OpenAI and Gemini alike; missing/false stays plain text.
 Codecs and journals retain the provider's original text. See
-[`docs/mux.md`](../../docs/mux.md#opt-in-table-rendering) for configuration.
+[`DAIMON_TABLE_RENDERING`](../../docs/configuration.md#daimon_table_rendering).
 Host adapters may consume normalized Events through an optional local lifecycle tap. Discord uses authoritative snapshots and ordered preview fragments for drafts, without granting previews terminal or history authority. ProviderUsageTotals retain observation provenance and are never reconstructed into Anthropic display meters.
 
 Slack folds normalized message Events into local progress drafts through the optional lifecycle tap. The existing host terminal state owns answer delivery and control retirement; ProviderUsageTotals are never turned into Anthropic display meters.
@@ -756,8 +756,7 @@ create (including existing Flash fallbacks). Unknown native authentication
 carriers and unsupported policies refuse before provider I/O. The default
 callback remains None. Anonymous MCP also requires a clean HTTPS destination;
 userinfo, query/fragment carriers and invalid server names refuse at compilation
-and the SDK edge before I/O or logging. See [the driver contract](../../docs/mux.md#gemini-scoped-mcp-authentication)
-for admission, DEBUG redaction, continuation and offline proof limits.
+and the SDK edge before I/O or logging.
 OpenAI explicit worker session budgets use integer USD cents and require the
 sent cap to appear unchanged in native session responses before host input.
 Ordinary deployment-level caps preserve existing readback behavior; the

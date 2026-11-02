@@ -6,13 +6,18 @@ back to a fresh id when it is absent. A client resending a cached id grew one
 key without bound, and two identities sharing an id shared visibility: a member
 saw admin tools after an admin request. Without the header every request gets
 its own key.
+
+The signed-identity relay is exempt: the id belongs to the server it forwards
+to, which may keep a session under it.
 """
 
 from __future__ import annotations
 
+from daimon.core.mcp_identity import RELAY_PATH
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 _SESSION_HEADER = b"mcp-session-id"
+_RELAY_PREFIX = RELAY_PATH + "/"
 
 
 class StripSessionIdMiddleware:
@@ -20,7 +25,7 @@ class StripSessionIdMiddleware:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] == "http":
+        if scope["type"] == "http" and not str(scope["path"]).startswith(_RELAY_PREFIX):
             headers: list[tuple[bytes, bytes]] = scope["headers"]
             scope = {
                 **scope,

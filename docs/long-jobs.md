@@ -96,7 +96,9 @@ After a scheduler restart, expired leases can be reclaimed. An existing worker i
 reattached by event replay. A session created before its ID was saved is recovered
 from its job metadata. The initial send checks the current lease, generation,
 terminal state, cancellation and deadline at the provider send boundary, holding
-a database fence against reclaim through the send. A durable send intent is
+a database fence against reclaim through the send.
+
+A durable send intent is
 committed first. Recovery replays an accepted user event; if an attempted send has
 no observable user event, it fails closed as `lost` and interrupts and archives the
 worker instead of retrying an uncertain POST. Missing sessions or missing
@@ -114,7 +116,9 @@ Completion and its single `job_finished` wake are saved atomically. Duplicate
 completion attempts do not enqueue another wake. Discord consumes the wake
 unattended with built-ins off and only `get_long_job` available, after freshly
 verifying the owner’s destination permissions and private-thread membership by
-REST. It repeats that verification before provider sends and output. Slack and
+REST. It repeats that verification before provider sends and output.
+
+Slack and
 Teams cancel completion delivery before preparation or output because their
 continuation paths do not yet prove current owner access to the destination;
 the owner can still inspect the job with the status tools. The

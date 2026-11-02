@@ -18,6 +18,3 @@ class SessionControls(Contract):
     multi_agent_enabled: Literal[False] | None = None
     container_size: Literal["small", "medium", "large"] | None = None
     spend_limit_usd_cents: int | None = Field(default=None, gt=0, strict=True)
-    require_spend_control_echo: bool = Field(
-        default=False, strict=True, exclude_if=lambda value: not value
-    )

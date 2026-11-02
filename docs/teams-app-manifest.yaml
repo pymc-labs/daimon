@@ -1,7 +1,7 @@
 # Teams app registration for a daimon deployment.
 #
 # The full walkthrough, portal by portal, with troubleshooting, is in
-# docs/self-hosting.md under "Microsoft Teams (optional)". Below is the short
+# docs/teams.md under "Connect Teams". Below is the short
 # version.
 #
 # Teams has no manifest-paste equivalent of Slack's app creator that also

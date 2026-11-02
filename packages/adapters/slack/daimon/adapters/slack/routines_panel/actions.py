@@ -25,6 +25,7 @@ import anthropic
 import structlog
 from cryptography.fernet import InvalidToken
 from daimon.adapters.slack.admin import resolve_is_admin
+from daimon.adapters.slack.blockkit import notice_fields
 from daimon.adapters.slack.errors import generate_request_id, surface_command_error
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.routines_panel.read import load_routines, routines_viewer
@@ -216,7 +217,7 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
                     await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                         channel=channel_id or user_id,
                         user=user_id,
-                        text=text,
+                        **notice_fields(text),
                     )
                     return
 
@@ -252,7 +253,7 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel_id or user_id,
                     user=user_id,
-                    text="This routine no longer exists.",
+                    **notice_fields("This routine no longer exists."),
                 )
                 return
             # Authority gate before showing the confirm modal (re-checked at
@@ -264,7 +265,7 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel_id or user_id,
                     user=user_id,
-                    text=(
+                    **notice_fields(
                         "Only the routine's creator or a workspace admin can delete this routine."
                     ),
                 )
@@ -304,7 +305,7 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel_id or user_id,
                     user=user_id,
-                    text=(
+                    **notice_fields(
                         "Only the routine's creator or a workspace admin "
                         "can read this routine's output."
                     ),
@@ -357,7 +358,7 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel_id or user_id,
                     user=user_id,
-                    text=":x: Only a workspace admin can create routines.",
+                    **notice_fields("Only a workspace admin can create routines."),
                 )
                 return
 

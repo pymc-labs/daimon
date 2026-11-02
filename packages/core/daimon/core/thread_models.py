@@ -11,11 +11,6 @@ Only the Anthropic backend can take it: a Managed Agents session override names
 a model (and speed), never an effort, so there is no effort choice. A choice
 that is no longer allowed, or a channel that runs another backend, falls back
 to the agent's own model and the turn says so (`MODEL_FALLBACK_NOTICE`).
-
-The choice is for the conversation's own turns only. A fleet root (an agent
-holding a fleet grant) and every worker run the model the agent's owner
-approved: `bind_session_impl` drops the choice before such a session is
-prepared, so it is never frozen into a root or handed to a worker.
 """
 
 from __future__ import annotations
@@ -23,7 +18,6 @@ from __future__ import annotations
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Final
 
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsModelConfig
@@ -221,48 +215,3 @@ async def apply_thread_model(
         model_override=model_id,
         fell_back=False,
     )
-
-
-FLEET_ROOT_NOTE: Final = (
-    " This conversation's agent runs worker fleets, and a fleet always runs the model "
-    "the agent's owner approved, so the choice doesn't apply to its replies here."
-)
-
-
-async def thread_runs_fleet(
-    sessionmaker: async_sessionmaker[AsyncSession],
-    *,
-    fleet_enabled: bool,
-    tenant_id: uuid.UUID,
-    platform: str,
-    thread_id: str,
-    ma_agent_id: str | None = None,
-    now: datetime,
-) -> bool:
-    """Whether the agent answering here holds a fleet grant, so turns here are fleet roots.
-
-    `ma_agent_id` is the responder when the caller knows it (an agent tool's
-    verified origin); otherwise the thread's newest live session names it, and
-    a thread with no session yet reads as no fleet.
-    """
-    from daimon.core.channel_backend import AgentBackendService
-    from daimon.core.ma_identity import derive_agent_uuid
-    from daimon.core.stores.thread_sessions import get_latest_thread_session
-
-    if not fleet_enabled:
-        return False
-    if ma_agent_id is None:
-        async with sessionmaker() as session:
-            row = await get_latest_thread_session(
-                session, tenant_id=tenant_id, platform=platform, thread_id=thread_id
-            )
-        if row is not None:
-            ma_agent_id = row.ma_agent_id or (
-                row.effective_config.ma_agent_id if row.effective_config is not None else None
-            )
-    if ma_agent_id is None:
-        return False
-    grant = await AgentBackendService(sessionmaker, enabled=True).read_fleet_grant(
-        tenant_id, derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id), now=now
-    )
-    return grant is not None

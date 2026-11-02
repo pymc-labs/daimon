@@ -18,6 +18,7 @@ from typing import Any, cast
 
 import aiohttp
 import structlog
+from daimon.adapters.slack.blockkit import notice_fields
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
@@ -83,20 +84,23 @@ async def post_ephemeral(
     message_ts: str,
     text: str,
     blocks: list[dict[str, Any]] | None = None,
+    error: bool = False,
 ) -> None:
     """A message only ``user_id`` sees, beside the answer at ``message_ts``.
 
     ``thread_ts`` is the answer's place key, which falls back to the answer's
     own ts; it names a thread only when it differs from ``message_ts``.
+    Always a notice card: red for an ``error`` (a refusal or failure), blurple
+    otherwise; ``blocks`` replace its one section, for a notice with a button.
     """
     in_thread = bool(thread_ts) and thread_ts != message_ts
+    fields = notice_fields(text, neutral=not error, blocks=blocks)
     try:
         await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
             channel=channel_id,
             user=user_id,
             thread_ts=thread_ts if in_thread else None,
-            text=text,
-            blocks=blocks,
+            **fields,
         )
     except CLICK_REPLY_ERRORS as err:
         log.info("slack.ephemeral_failed", error=error_name(err))

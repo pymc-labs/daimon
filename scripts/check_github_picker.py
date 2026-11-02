@@ -416,6 +416,10 @@ def check_roles(page: Page) -> None:
     remove = ".gh-agent-row:not(.gh-removed-row) .gh-remove-action"
     assert page.locator(remove).first.inner_text() == "Remove"
     assert has_icon(page, remove, "trash-2")
+    settle(page)  # Undo replaces the clicked Remove, so the pointer would hover it.
+    for prop in ("color", "fontWeight", "fontSize"):
+        assert computed(page, undo, prop) == computed(page, remove, prop), f"undo vs remove {prop}"
+    check_chips_follow_name(page)
     badge = ".gh-agent-row .gh-working-badge"
     assert computed(page, badge, "backgroundColor") == TEAL_BG, "working: teal"
     assert computed(page, badge, "color") == TEAL_FG and has_icon(page, badge, "pin")
@@ -432,6 +436,60 @@ def check_roles(page: Page) -> None:
         assert computed(page, chip, "backgroundColor") == background, chip
         assert computed(page, chip, "color") == color, chip
     check_contrast(page, EDITOR_CONTRAST)
+
+
+def check_chips_follow_name(page: Page) -> None:
+    """State chips sit right after the repo name, on its line, not beside the action."""
+    gaps = page.evaluate(
+        """() => [...document.querySelectorAll(
+          '.gh-agent-row:not([hidden]) .gh-working-badge:not([hidden]), ' +
+          '.gh-agent-row:not([hidden]) .gh-pending-label:not([hidden])'
+        )].filter(chip => chip.getClientRects().length).map(chip => {
+          const name = chip.closest('.gh-agent-row').querySelector('.gh-row-name');
+          const [chipBox, nameBox] = [chip, name].map(el => el.getBoundingClientRect());
+          return {gap: chipBox.left - nameBox.right,
+            dy: (chipBox.top + chipBox.bottom) / 2 - (nameBox.top + nameBox.bottom) / 2};
+        })"""
+    )
+    assert gaps, "no state chips to measure"
+    for gap in gaps:
+        assert 0 <= gap["gap"] <= 16 and abs(gap["dy"]) <= 2, gap
+
+
+def check_dock(page: Page) -> None:
+    """On a phone Save takes the width Discard leaves; on a desktop it keeps its own width."""
+    box = lambda selector: page.locator(selector).bounding_box()  # noqa: E731
+    inner, save = box(".gh-editor-footer-inner"), box("#save-repos")
+    padding = page.locator(".gh-editor-footer-inner").evaluate(
+        "el => parseFloat(getComputedStyle(el).paddingRight)"
+    )
+    if page.viewport_size["width"] <= 600:
+        assert abs((save["x"] + save["width"]) - (inner["x"] + inner["width"] - padding)) <= 1, save
+        discard = box("#discard-repos")
+        assert abs(save["x"] - (discard["x"] + discard["width"] + 11)) <= 1, (save, discard)
+    else:
+        assert save["width"] < inner["width"] / 4, save
+
+
+def check_saved_layout(page: Page) -> None:
+    """Saved page: centred check, title and line with a full-width button on a phone."""
+    width = page.viewport_size["width"]
+    phone = width <= 600
+    rect = lambda selector: page.locator(selector).first.bounding_box()  # noqa: E731
+    centre = lambda box: box["x"] + box["width"] / 2  # noqa: E731
+    line = ".gh-status-line"
+    back, groups = rect(".gh-back-discord"), rect(".gh-saved-groups")
+    if phone:
+        for selector in (".gh-status-icon .web-icon", ".gh-flow--saved h1", line):
+            assert abs(centre(rect(selector)) - groups["x"] - groups["width"] / 2) <= 1, selector
+        assert abs(back["width"] - groups["width"]) <= 1 and abs(back["x"] - groups["x"]) <= 1
+        assert computed(page, line, "fontWeight") == "400"
+        assert computed(page, line, "color") == MUTED
+        assert computed(page, ".gh-saved-name", "textAlign") in ("left", "start")
+    else:
+        assert back["width"] < groups["width"] / 2, back
+        assert abs(rect(".gh-flow--saved h1")["x"] - groups["x"]) <= 1
+        assert computed(page, line, "fontWeight") == "650"
 
 
 def check_sheet_roles(page: Page) -> None:
@@ -533,6 +591,7 @@ def capture(width: int) -> None:
         expect(page.locator('.gh-agent-row[data-repo-id="7701"] .gh-undo-action')).to_be_visible()
         check_rows(page)
         check_roles(page)
+        check_dock(page)
         shot("unsaved", full_page=False)
 
         page.get_by_role("button", name="Add repos", exact=True).click()
@@ -566,6 +625,7 @@ def capture(width: int) -> None:
         assert computed(page, ".gh-saved-row .gh-working-badge", "backgroundColor") == TEAL_BG
         assert has_icon(page, ".gh-saved-row .gh-working-badge", "pin")
         assert computed(page, ".gh-back-discord", "backgroundColor") == NAVY_FILL
+        check_saved_layout(page)
         check_contrast(
             page,
             [

@@ -34,12 +34,10 @@ from mux.contracts.events import (
     UserMessagePayload,
 )
 from mux.errors import ScopeViolation, UnsupportedCapability
-from mux.profiles.openai import CONVERSATION_ONLY
 from pydantic import JsonValue
 
 PROFILE = "openai.persistent_workspace"
-CONVERSATION_PROFILE = CONVERSATION_ONLY.profile_id
-PROFILES = (PROFILE, CONVERSATION_PROFILE)
+PROFILES = (PROFILE,)
 type DisplayEvent = (
     BetaManagedAgentsAgentMessageEvent
     | BetaManagedAgentsAgentToolUseEvent

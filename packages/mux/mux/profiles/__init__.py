@@ -17,7 +17,7 @@ from mux.contracts.ids import Provider
 from mux.contracts.profile import SUPPORTED, AccountingMode, Profile
 from mux.contracts.resources import AgentSpec, ToolSpec
 from mux.profiles.anthropic import MANAGED_AGENTS
-from mux.profiles.gemini import ARGON_MODEL, INLINE_REUSE, WORKER_MODEL
+from mux.profiles.gemini import ARGON_MODEL, INLINE_REUSE
 from mux.profiles.openai import ASTRA_MODEL, CONVERSATION_ONLY, LUNA_MODEL, PERSISTENT_WORKSPACE
 from mux.profiles.selfhosted import LOOP
 
@@ -34,26 +34,6 @@ def get_profile(profile_id: str) -> Profile:
         raise InvalidConfig(f"unknown profile {profile_id!r}") from None
 
 
-def worker_token_limits_supported(
-    profile: Profile,
-    *,
-    max_input_tokens: int | None,
-    max_output_tokens: int | None,
-    max_turns: int,
-) -> bool:
-    """Profile-specific envelope shape; capability admission stays with the caller."""
-    if profile.profile_id != INLINE_REUSE.profile_id or (
-        max_input_tokens is None and max_output_tokens is None
-    ):
-        return True
-    return (
-        max_input_tokens is not None
-        and max_output_tokens is not None
-        and max_turns == 1
-        and max_output_tokens <= 65_536
-    )
-
-
 def emits_legacy_events_for(provider: Provider) -> bool:
     """Read rendering policy for an event or resource without a profile id.
 
@@ -66,6 +46,10 @@ def emits_legacy_events_for(provider: Provider) -> bool:
     if len(declarations) != 1:
         raise InvalidConfig("events require an unambiguous declared profile rendering policy")
     return declarations.pop()
+
+
+# This transport profile is available only to callers that name it explicitly.
+_EXPLICIT_CATALOG_PROFILES = {CONVERSATION_ONLY.profile_id}
 
 
 def neutral_catalog_profile_for(provider: str, *, profile_id: str | None = None) -> Profile | None:
@@ -81,12 +65,7 @@ def neutral_catalog_profile_for(provider: str, *, profile_id: str | None = None)
         and (
             profile.profile_id == profile_id
             if profile_id is not None
-            else profile.profile_id
-            not in {
-                explicit
-                for selection in _BACKEND_SELECTIONS.values()
-                for explicit in selection.profiles
-            }
+            else profile.profile_id not in _EXPLICIT_CATALOG_PROFILES
         )
         and profile.support_for("neutral_catalog") in SUPPORTED
     )
@@ -162,6 +141,18 @@ def accounting_mode_for(provider: Provider) -> AccountingMode:
     return modes.pop()
 
 
+def meters_cache_writes_for(provider: Provider) -> bool:
+    """Whether the provider's usage meter counts cache writes, read like
+    `accounting_mode_for`: all its profiles must agree; a provider with no profile
+    declares nothing and is taken as metered."""
+    declared = {
+        profile.meters_cache_writes for profile in PROFILES.values() if profile.provider == provider
+    }
+    if len(declared) > 1:
+        raise InvalidConfig("usage requires an unambiguous declared cache-write meter")
+    return declared.pop() if declared else True
+
+
 __all__ = [
     "CONVERSATION_ONLY",
     "PROVIDER_ALIASES",
@@ -171,13 +162,11 @@ __all__ = [
     "PERSISTENT_WORKSPACE",
     "PROFILES",
     "get_profile",
-    "worker_token_limits_supported",
+    "meters_cache_writes_for",
     "emits_legacy_events_for",
     "native_agent_tools",
     "neutral_catalog_profile_for",
     "accounting_mode_for",
-    "as_worker",
-    "worker_selection",
 ]
 
 
@@ -186,16 +175,8 @@ class BackendSelection:
     config: BackendConfig
     thread_modes: tuple[ThreadMode, ...]
     allowed_models: tuple[str, ...] | None = None
-    profiles: tuple[str, ...] = ()
-    # Allowed models that only a channel may select, never a fleet worker.
-    channel_only_models: tuple[str, ...] = ()
     # Allowed models admitted only while the host holds a current dated tariff.
     tariff_gated_models: tuple[str, ...] = ()
-    # Allowed models only a bounded fleet worker runs; an agent or channel never picks them.
-    worker_only_models: tuple[str, ...] = ()
-    # The profile a fleet worker runs on, when it differs from an agent's own:
-    # a worker answers one task, so it needs no persistent workspace.
-    worker_profile: str | None = None
 
 
 #: Everyday names for a provider beyond its id, display name and model family.
@@ -207,8 +188,6 @@ _BACKEND_SELECTIONS: Mapping[Provider, BackendSelection] = {
         BackendConfig(backend="openai", profile="openai.persistent_workspace", model=LUNA_MODEL),
         ("per_caller",),
         allowed_models=(ASTRA_MODEL,),
-        profiles=(CONVERSATION_ONLY.profile_id,),
-        worker_profile=CONVERSATION_ONLY.profile_id,
     ),
     "selfhosted": BackendSelection(
         BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-6.1-sol"),
@@ -217,18 +196,14 @@ _BACKEND_SELECTIONS: Mapping[Provider, BackendSelection] = {
     "gemini": BackendSelection(
         BackendConfig(backend="gemini", profile="gemini.inline_reuse", model="gemini-3.8-flash"),
         ("per_caller",),
-        allowed_models=(WORKER_MODEL, ARGON_MODEL),
-        # Argon runs fleet workers only on the bounded token envelope
-        # (`FleetOrchestration._bounded_gemini`); the host refuses it unbounded.
+        allowed_models=(ARGON_MODEL,),
         tariff_gated_models=(ARGON_MODEL,),
-        # The host runs Flash-Lite only token-capped (`turn.gemini._runtime_model`).
-        worker_only_models=(WORKER_MODEL,),
     ),
 }
 RUNNABLE_PROFILES: frozenset[str] = frozenset(
     profile
     for selection in _BACKEND_SELECTIONS.values()
-    for profile in (resolve_default(selection.config).profile, *selection.profiles)
+    for profile in (resolve_default(selection.config).profile,)
 )
 
 
@@ -242,47 +217,12 @@ def backend_selection(backend: Provider) -> ResolvedBackend:
 
 
 def selectable_models(backend: Provider) -> tuple[str, ...]:
-    """The models an admin may select for an agent on `backend`, its default first.
-
-    Worker-only models (Flash-Lite) are left out: the host runs them only for a
-    token-capped fleet worker, never for an agent's or channel's own turn.
-    """
+    """The models an admin may select for an agent on `backend`, its default first."""
     declared = _BACKEND_SELECTIONS[backend]
     default = resolve_default(declared.config).model
     return tuple(
         dict.fromkeys(
-            model
-            for model in (default, *(declared.allowed_models or ()))
-            if model is not None and model not in declared.worker_only_models
-        )
-    )
-
-
-def worker_selection(backend: Provider) -> ResolvedBackend:
-    """The backend a fleet worker on `backend` runs on: OpenAI workers are conversation-only."""
-    return as_worker(backend_selection(backend))
-
-
-def as_worker(selection: ResolvedBackend) -> ResolvedBackend:
-    """`selection` with its provider's worker profile, so stored grants read the same way."""
-    declared = _BACKEND_SELECTIONS.get(selection.backend)
-    if declared is None or declared.worker_profile in (None, selection.profile):
-        return selection
-    return selection.model_copy(update={"profile": declared.worker_profile})
-
-
-def worker_models(backend: Provider) -> tuple[str, ...]:
-    """The models a fleet worker on `backend` may run, its default first.
-
-    Worker-only models are included; channel-only models are left out.
-    """
-    declared = _BACKEND_SELECTIONS[backend]
-    default = resolve_default(declared.config).model
-    return tuple(
-        dict.fromkeys(
-            model
-            for model in (default, *(declared.allowed_models or ()))
-            if model is not None and model not in declared.channel_only_models
+            model for model in (default, *(declared.allowed_models or ())) if model is not None
         )
     )
 
@@ -297,7 +237,7 @@ def runnable_selection(selection: ResolvedBackend) -> bool:
     declared = _BACKEND_SELECTIONS[selection.backend]
     resolved = resolve_default(declared.config)
     return (
-        selection.profile in (resolved.profile, *declared.profiles)
+        selection.profile == resolved.profile
         and (
             selection.model == resolved.model
             or selection.model in (declared.allowed_models or ())
@@ -305,12 +245,6 @@ def runnable_selection(selection: ResolvedBackend) -> bool:
         )
         and selection.thread_mode in declared.thread_modes
     )
-
-
-def worker_selection_allowed(selection: ResolvedBackend) -> bool:
-    """Whether a fleet worker may run this selection; channel-only models refuse."""
-    declared = _BACKEND_SELECTIONS[selection.backend]
-    return selection.model not in declared.channel_only_models
 
 
 def tariff_gated(selection: ResolvedBackend) -> bool:

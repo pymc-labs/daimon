@@ -382,6 +382,7 @@ async def handle_ask_human_click(runtime: SlackRuntime, payload: dict[str, Any])
             thread_ts=thread_ts,
             message_ts=message_ts,
             text=UNAVAILABLE,
+            error=True,
         )
         return
 
@@ -403,6 +404,7 @@ async def handle_ask_human_click(runtime: SlackRuntime, payload: dict[str, Any])
             thread_ts=thread_ts,
             message_ts=message_ts,
             text=text,
+            error=True,
         )
 
     try:
@@ -434,6 +436,7 @@ async def handle_ask_human_click(runtime: SlackRuntime, payload: dict[str, Any])
         thread_ts=thread_ts,
         message_ts=message_ts,
         text=FORM_DID_NOT_OPEN,
+        error=True,
     )
 
 
@@ -449,7 +452,7 @@ async def run_support_submission(runtime: SlackRuntime, submission: SupportSubmi
     if client is None:
         return
 
-    async def reply(text: str) -> None:
+    async def reply(text: str, *, error: bool = True) -> None:
         await post_ephemeral(
             client,
             channel_id=s.channel_id,
@@ -457,6 +460,7 @@ async def run_support_submission(runtime: SlackRuntime, submission: SupportSubmi
             thread_ts=s.thread_ts,
             message_ts=s.message_ts,
             text=text,
+            error=error,
         )
 
     support = runtime.settings.support
@@ -521,7 +525,7 @@ async def run_support_submission(runtime: SlackRuntime, submission: SupportSubmi
         return
     if outcome.status == "duplicate":
         log.info("support.duplicate_request", tenant_id=str(tenant_id))
-        await reply(ALREADY_REQUESTED)
+        await reply(ALREADY_REQUESTED, error=False)
         return
     if outcome.row is None:
         log.info("support.out_of_credits", tenant_id=str(tenant_id))
@@ -556,7 +560,10 @@ async def run_support_submission(runtime: SlackRuntime, submission: SupportSubmi
         tenant_id=str(tenant_id),
         delivered=delivered,
     )
-    await reply(received_text(remaining=outcome.remaining) if delivered else RECORDED_UNDELIVERED)
+    await reply(
+        received_text(remaining=outcome.remaining) if delivered else RECORDED_UNDELIVERED,
+        error=False,
+    )
 
 
 async def _permalink(client: AsyncWebClient, *, channel_id: str, message_ts: str) -> str | None:

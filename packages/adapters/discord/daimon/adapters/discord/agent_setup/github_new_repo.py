@@ -9,6 +9,7 @@ import httpx
 from daimon.adapters.discord.agent_setup.github_card_ui import github_embed
 from daimon.adapters.discord.agent_setup.github_home import GitHubLinkView, connect_button_view
 from daimon.adapters.discord.checks import is_member_guild_admin, is_platform_admin
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.github_notice_visibility import new_repo_notice_copy, visible_new_repo_names
@@ -42,18 +43,24 @@ async def handle_dm_notice(interaction: discord.Interaction, runtime: DiscordRun
             raise ValueError("invalid notice")
         tenant_id = uuid.UUID(parts[1])
     except ValueError:
-        await interaction.response.send_message("This card is unavailable.", ephemeral=True)
+        await interaction.response.send_message(
+            embed=build_notice_embed("This card is unavailable."), ephemeral=True
+        )
         return True
     await interaction.response.defer(ephemeral=True, thinking=True)
     async with runtime.sessionmaker() as session:
         tenant = await get_tenant(session, tenant_id)
         group = await notices_for_day(session, tenant_id=tenant_id, day=parts[2])
     if tenant is None or group is None:
-        await interaction.followup.send("This card is unavailable.", ephemeral=True)
+        await interaction.followup.send(
+            embed=build_notice_embed("This card is unavailable."), ephemeral=True
+        )
         return True
     guild = interaction.client.get_guild(int(tenant.external_id))
     if guild is None:
-        await interaction.followup.send("This card is unavailable.", ephemeral=True)
+        await interaction.followup.send(
+            embed=build_notice_embed("This card is unavailable."), ephemeral=True
+        )
         return True
     try:
         member = guild.get_member(interaction.user.id) or await guild.fetch_member(
@@ -61,8 +68,10 @@ async def handle_dm_notice(interaction: discord.Interaction, runtime: DiscordRun
         )
     except discord.HTTPException:
         member = None
-    if member is None or not is_member_guild_admin(member, guild_owner_id=member.guild.owner_id):
-        await interaction.followup.send("Only a server admin can connect repos.", ephemeral=True)
+    if member is None or not is_member_guild_admin(member, guild_owner_id=guild.owner_id):
+        await interaction.followup.send(
+            embed=build_notice_embed("Only a server admin can connect repos."), ephemeral=True
+        )
         return True
     async with runtime.sessionmaker.begin() as session:
         await sync_connect_admin(
@@ -105,7 +114,10 @@ async def handle_dm_notice(interaction: discord.Interaction, runtime: DiscordRun
                         now=datetime.now(UTC),
                     )
         await interaction.followup.send(
-            "Connect later: /github home → Connect more repos.", ephemeral=True
+            embed=build_notice_embed(
+                "Connect later: /github home → Connect more repos.", neutral=True
+            ),
+            ephemeral=True,
         )
         return True
     try:
@@ -136,7 +148,9 @@ async def handle_dm_notice(interaction: discord.Interaction, runtime: DiscordRun
                 origin_followup_expires_at=datetime.now(UTC) + timedelta(minutes=15),
             )
     except ValueError as error:
-        await interaction.followup.send(safe_github_error(error), ephemeral=True)
+        await interaction.followup.send(
+            embed=build_notice_embed(safe_github_error(error)), ephemeral=True
+        )
         return True
     from daimon.adapters.discord.agent_setup.github_connect_card import connect_embed
     from daimon.core.github_connect_cards import resolve_connect_card
@@ -206,7 +220,10 @@ class NewRepoCard(discord.ui.View):
             or not is_platform_admin(interaction)  # pyright: ignore[reportArgumentType]
         ):
             await interaction.response.send_message(
-                "Only the server admin who received this card can use it.", ephemeral=True
+                embed=build_notice_embed(
+                    "Only the server admin who received this card can use it."
+                ),
+                ephemeral=True,
             )
             return False
         return True
@@ -237,7 +254,9 @@ class NewRepoCard(discord.ui.View):
                     origin_followup_expires_at=datetime.now(UTC) + timedelta(minutes=15),
                 )
         except ValueError:
-            await interaction.followup.send("GitHub connection is unavailable.", ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed("GitHub connection is unavailable."), ephemeral=True
+            )
             return
         from daimon.adapters.discord.agent_setup.github_connect_card import connect_embed
         from daimon.core.github_connect_cards import resolve_connect_card
@@ -289,7 +308,8 @@ class NewRepoCard(discord.ui.View):
                 )
         except ValueError:
             await interaction.response.send_message(
-                "Only a server admin can dismiss this card.", ephemeral=True
+                embed=build_notice_embed("Only a server admin can dismiss this card."),
+                ephemeral=True,
             )
             return
         await interaction.response.edit_message(
@@ -342,7 +362,7 @@ async def send_pending_notice(
     copy = new_repo_notice_copy(visible_names)
     try:
         await interaction.followup.send(
-            copy.text,
+            embed=build_notice_embed(copy.text, neutral=True),
             view=NewRepoCard(runtime, group, interaction.user.id, visible_names=visible_names),
             ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),

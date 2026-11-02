@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from typing import Any, Literal, cast
 
 from daimon.core._models import (
@@ -86,6 +87,27 @@ async def get_or_create_platform_principal(
         # Only the named uniqueness conflict is ignored; other errors propagate.
         orm = (await session.execute(lookup)).scalar_one()
     return PlatformPrincipalRow.model_validate(orm)
+
+
+async def create_platform_principal(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    external_id: str,
+    account_id: uuid.UUID,
+) -> PlatformPrincipalRow:
+    """Record `(platform, external_id)` as an existing account's.
+
+    For a platform id proven by sign-in before the platform ever saw it, so its first
+    message there runs as the account that signed in.
+    """
+    principal = PlatformPrincipal(
+        tenant_id=tenant_id, platform=platform, external_id=external_id, account_id=account_id
+    )
+    session.add(principal)
+    await session.flush()
+    return PlatformPrincipalRow.model_validate(principal)
 
 
 async def mark_principal_foreign(
@@ -216,6 +238,19 @@ async def list_platform_principals_for_account(
     return [PlatformPrincipalRow.model_validate(r) for r in rows]
 
 
+async def list_principals_by_external_ids(
+    session: AsyncSession, *, tenant_id: uuid.UUID, external_ids: Collection[str]
+) -> list[PlatformPrincipalRow]:
+    """The tenant's platform principals whose external id is one of `external_ids`."""
+    if not external_ids:
+        return []
+    stmt = select(PlatformPrincipal).where(
+        PlatformPrincipal.tenant_id == tenant_id,
+        PlatformPrincipal.external_id.in_(list(external_ids)),
+    )
+    return [PlatformPrincipalRow.model_validate(r) for r in (await session.execute(stmt)).scalars()]
+
+
 async def get_discord_principal_for_account(
     session: AsyncSession,
     *,
@@ -269,3 +304,23 @@ async def get_teams_principal_for_account(
     )
     result = await session.execute(stmt)
     return result.scalar_one_or_none()
+
+
+async def platform_external_ids(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    account_ids: Collection[uuid.UUID],
+) -> dict[uuid.UUID, str]:
+    """Each account's user id on `platform` in this tenant; accounts with none are left out."""
+    if not account_ids:
+        return {}
+    rows = await session.execute(
+        select(PlatformPrincipal.account_id, PlatformPrincipal.external_id).where(
+            PlatformPrincipal.tenant_id == tenant_id,
+            PlatformPrincipal.platform == platform,
+            PlatformPrincipal.account_id.in_(list(account_ids)),
+        )
+    )
+    return {account_id: external_id for account_id, external_id in rows.all()}

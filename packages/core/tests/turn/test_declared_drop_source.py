@@ -15,12 +15,12 @@ from mux.contracts.resources import MCPConnection, ResourceBinding, ToolSpec, Wo
 from mux.errors import UnsupportedCapability
 from pydantic import ValidationError
 
-from ..test_fleet_permissions import captured_worker_source, parent
+from .source_projection_support import captured_source
 
 
 @pytest.fixture
 def captured():
-    _, source = captured_worker_source(parent())
+    source = captured_source()
     spec = source.effective_spec.model_copy(update={"tools": (), "skills": (), "mcp_servers": ()})
     return source.model_copy(update={"effective_spec": spec, "asks_before_publishing": False})
 

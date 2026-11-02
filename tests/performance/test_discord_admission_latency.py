@@ -30,6 +30,7 @@ import httpx
 import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
+from daimon.core import spend_gate as spend_gate_module
 from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.config import McpSettings
 from daimon.core.ma_resolver import ResolverCache, new_resolver_cache
@@ -319,9 +320,8 @@ async def _run_batch(
         )
         event.listen(factory.kw["bind"].sync_engine, "before_cursor_execute", statement)
         for name in timed_names:
-            stack.enter_context(
-                patch.object(admission_module, name, _timed(name, getattr(admission_module, name)))
-            )
+            owner = spend_gate_module if name.startswith("is_over_") else admission_module
+            stack.enter_context(patch.object(owner, name, _timed(name, getattr(owner, name))))
         sampler = asyncio.create_task(sample_waits())
         loop_sampler = asyncio.create_task(sample_loop())
         tasks = [

@@ -10,6 +10,7 @@ dependencies = [
     "anthropic>=0.117",
     "cachetools>=7,<8",
     "croniter>=6.0,<7",
+    "anyio>=4",
     "httpx>=0.27",
     "httpx-sse>=0.4",
     "sqlalchemy[asyncio]>=2.0",
@@ -42,6 +43,5 @@ packages = ["daimon"]
 
 [project.entry-points."daimon.turn_runtimes"]
 "openai.persistent_workspace" = "daimon.core.turn.openai_deployment:register_runtime"
-"openai.conversation_only" = "daimon.core.turn.openai_deployment:register_runtime"
 "gemini.inline_reuse" = "daimon.core.turn.gemini_deployment:register_runtime"
 "selfhosted.loop" = "daimon.core.turn.selfhosted_deployment:register_runtime"

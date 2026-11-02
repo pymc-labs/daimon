@@ -37,12 +37,10 @@ __all__ = [
     "render_fresh_start",
     "render_handoff_acknowledged",
     "render_preparation_failed",
-    "render_replacement_summary",
     "render_responder_changed_without_handoff",
     "render_timer_seed",
     "render_timer_target_changed",
     "render_wake_target_changed",
-    "render_unexpected_loss",
     "render_unsaved_work_question",
 ]
 
@@ -517,22 +515,6 @@ def render_preparation_failed(target_name: str) -> str:
     )
 
 
-def render_unexpected_loss(transfer_kind: Literal["transcript", "history"]) -> str:
-    """Tell the person their workspace was lost and describe what was recovered."""
-    if transfer_kind == "transcript":
-        recovered_line = "I have this conversation and the files that were saved to your task."
-    else:
-        recovered_line = "I have what was posted here, but not the earlier conversation."
-    return "\n".join(
-        [
-            "I lost this task's working files and started with new ones.",
-            recovered_line,
-            "Anything unsaved there is gone, and nothing that was running came across.",
-            "Tell me what to re-check and I'll go from there.",
-        ]
-    )
-
-
 def render_current_work_must_finish(target_name: str, *, handoff: bool) -> str:
     """Tell the person the in-flight message finishes before their change/handoff applies."""
     if handoff:
@@ -577,24 +559,6 @@ def render_responder_changed_without_handoff(
     del channel, offer_button
     first = f"{new_responder} answers new conversations here. {owner} is still handling this one."
     return "\n".join([first, f"New thread → {new_responder}"]) if new_thread_hint else first
-
-
-def render_replacement_summary(transfer_kind: TransferKind, lost: Sequence[str]) -> str:
-    """Say what a planned replacement carried across, or, when it lost something, only that.
-
-    Shown only when `ContinuityOutcome.announces_replacement` says the person
-    would notice the replacement, so a lossy transfer says briefly what is gone.
-    """
-    if transfer_kind == "full":
-        base = "Your conversation, decisions and working files came across."
-    elif transfer_kind == "transcript":
-        base = "Your working files from before could not be carried over."
-    else:
-        base = "Your working files and earlier conversation could not be carried over."
-    lines = [base]
-    if lost:
-        lines.append("Not carried: " + ", ".join(lost) + ".")
-    return "\n".join(lines)
 
 
 def render_timer_seed(note: str, *, set_at: datetime) -> str:

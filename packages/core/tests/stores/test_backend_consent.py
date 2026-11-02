@@ -498,14 +498,13 @@ async def test_expand_downgrade_keeps_legacy_columns_and_rows_readable(
             old = (
                 await session.execute(
                     text(
-                        "SELECT agent_name, local, backend, previous_local, digest, preview_digest, fleet_grant "
+                        "SELECT agent_name, local, backend, previous_local, digest, preview_digest "
                         "FROM agent_backend_revision WHERE agent_id = :agent"
                     ),
                     {"agent": agent_id},
                 )
             ).one()
             assert old.agent_name == "source" and old.backend == "openai" and old.local == 1
-            assert old.fleet_grant is None
             retained = (
                 await session.execute(text("SELECT revision, origin FROM channel_config_revision"))
             ).one()

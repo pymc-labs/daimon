@@ -79,6 +79,7 @@ _HOST_PEOPLE = "someone in the workspace that added Daimon"
 _FOREIGN_REFUSALS: dict[AdmissionDenialReason, tuple[str | None, str]] = {
     "balance_depleted": ("Daimon's credit has run out.", f"Ask {_HOST_PEOPLE} to top it up."),
     "channel_budget_exceeded": (None, f"Ask {_HOST_PEOPLE} to raise it."),
+    "allowance_exhausted": (None, f"Ask {_HOST_PEOPLE} to add more."),
     "invoker_not_allowed": (None, f"Ask {_HOST_PEOPLE} to add you."),
     "own_agents_only": (None, f"Ask {_HOST_PEOPLE} to pick one."),
     "backend_unsupported": (None, f"Ask {_HOST_PEOPLE} to fix the agent's model provider."),

@@ -1,23 +1,3 @@
-# Re-export the most commonly used symbols.
-# For module-specific imports, use daimon.testing.ma / .db / .factories directly.
-# Mux's own fakes (`MARouter`, `build_fake_anthropic`, `ma_session`, ...) live in
-# `mux.testing.drivers.anthropic` and are imported from there.
-#
-# `ma` (and `ma_sessions` / `turn_router`, which import from it) declare
-# pytest fixtures at module scope, so importing them requires pytest. The
-# deployed image runs `--no-dev` (no pytest) but still needs to import
-# modules living in this package, e.g. `daimon.testing.fleet_export` for the
-# fleet evidence exporter — and importing *any* submodule here first runs
-# this `__init__.py`. Keep those symbols out of the eager imports below and
-# resolve them lazily through `__getattr__` so plain `import daimon.testing`
-# (or any of its non-`ma`-dependent submodules) never requires pytest; only
-# actually touching an `ma`-backed name does.
-#
-# `factories` and `ma_models` are lazy for a different reason: speed. They pull in
-# the ORM schema and the Anthropic SDK models (about a second of imports), and the
-# pytest plugin entry point imports this package into every pytest process. A child
-# interpreter that never builds a tenant or an MA fixture (a shard collection, a
-# plugin-load probe, a `-O` conformance replay) should not pay for them.
 from typing import TYPE_CHECKING
 
 from daimon.testing.archives import make_tarball
@@ -48,6 +28,7 @@ if TYPE_CHECKING:
         make_tenant_user_cap,
         make_thread_session,
         make_usage_event,
+        make_web_person,
         make_wizard_session,
     )
     from daimon.testing.ma import (
@@ -93,6 +74,7 @@ _LAZY_MODULES_BY_NAME = {
     "make_tenant_user_cap": "daimon.testing.factories",
     "make_thread_session": "daimon.testing.factories",
     "make_usage_event": "daimon.testing.factories",
+    "make_web_person": "daimon.testing.factories",
     "make_wizard_session": "daimon.testing.factories",
     "ma_agent": "daimon.testing.ma_models",
     "ma_environment": "daimon.testing.ma_models",
@@ -160,6 +142,7 @@ __all__ = [
     "make_tenant_user_cap",
     "make_thread_session",
     "make_usage_event",
+    "make_web_person",
     "make_wizard_session",
     "mcp_session",
     "parse_jsonrpc_response",

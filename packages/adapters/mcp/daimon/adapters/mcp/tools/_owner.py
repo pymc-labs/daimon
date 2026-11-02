@@ -1,8 +1,10 @@
-"""Whether the MCP caller is the recorded owner of an agent (`daimon.core.stores.agent_owners`).
+"""Whether the MCP caller is an owner of an agent (`daimon.core.stores.agent_owners`).
+
+The primary owner and every co-owner count.
 
 Only a person's chat credential can be an owner: an agent-scoped key, a
 client requester from another organisation and a credential with no person
-behind it never are. The owner is read at each check, so a change of owner
+behind it never are. Owners are read at each check, so a change of owner
 applies to the next call.
 """
 
@@ -26,8 +28,7 @@ async def caller_owns_agent(runtime: McpRuntime, auth: AuthIdentity, ma_agent_id
         return False
     agent_id = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=ma_agent_id)
     async with runtime.session_factory() as session:
-        owner = await agent_owners.owner_of(session, auth.tenant_id, agent_id)
-    return owner is not None and owner == auth.account_id
+        return await agent_owners.is_owner(session, auth.tenant_id, agent_id, auth.account_id)
 
 
 async def caller_owned_ids(runtime: McpRuntime, auth: AuthIdentity) -> frozenset[str]:

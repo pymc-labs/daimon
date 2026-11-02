@@ -19,39 +19,33 @@ import structlog
 from daimon.core.channel_backend import load_backend_agent
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.mcp_auth import resolve_agent_mcp_credential
-from daimon.core.neutral_resources import NeutralResourceHost, ResolvedWorkerSpec
+from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.pricing import provider_prices
-from daimon.core.sessions import native_session_budget_cents
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.neutral_catalog import AgentRevision
 from daimon.core.turn.errors import AdmissionDenied
-from daimon.core.turn.openai_codec import CONVERSATION_PROFILE, PROFILE, PROFILES
+from daimon.core.turn.openai_codec import PROFILE, PROFILES
 from daimon.core.turn.openai_environment import EnvironmentPort
 from daimon.core.turn.openai_host import OpenAIHostRuntime, driver, register_host
 from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevisions
-from daimon.core.turn.persistence import TurnPersistence
 from daimon.core.turn.prepare import ProviderPreparationRequest
 from daimon.core.turn.runtime_manifest import (
     ApiKeyEnvironment,
     ConfigurationGrant,
     SourceCapabilities,
     fixed_plan_origin_allowed,
-    materialize_counterpart,
     materialize_root_counterpart,
     read_counterpart,
     represented_source,
     root_counterpart_catalog_id,
     select_runtime_manifest,
-    template_source,
     validate_counterpart_pins,
     validate_counterpart_request,
 )
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ResourceRef, Revision, Scope
-from mux.contracts.resources import EnvironmentSpec, SessionSpec
+from mux.contracts.resources import AgentSpec, EnvironmentSpec, SessionSpec
 from mux.drivers.openai import SessionControls, Transport
-from mux.drivers.openai.mcp_auth import KEY as MCP_METADATA_KEY
-from mux.drivers.openai.skill_bindings import reserved as skill_metadata_key
 from mux.errors import ScopeViolation
 from mux.profiles import get_profile, selectable_models
 from mux.profiles.openai import NATIVE_MODELS
@@ -76,7 +70,7 @@ class OpenAIDeployment(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    profile: Literal["openai.persistent_workspace", "openai.conversation_only"]
+    profile: Literal["openai.persistent_workspace"]
     tenant_id: Nonblank
     platform: Nonblank
     channel_id: Nonblank
@@ -92,9 +86,6 @@ class OpenAIDeployment(BaseModel):
     api_key_env: ApiKeyEnvironment
     spend_limit_usd_cents: Annotated[int, Field(gt=0, strict=True)] | None = None
     skill_ids: tuple[Nonblank, ...] = ()
-    worker_materialization: bool = Field(
-        default=False, strict=True, exclude_if=lambda value: not value
-    )
     # A tenant-wide agent template: each admitted agent version's counterpart is
     # published on its first turn (`materialize_root_counterpart`).
     root_materialization: bool = Field(
@@ -104,37 +95,38 @@ class OpenAIDeployment(BaseModel):
     source_agent_version: Annotated[int, Field(gt=0, strict=True)] | None = None
     counterpart_catalog_id: Nonblank | None = None
     counterpart_catalog_revision: Annotated[int, Field(gt=0, strict=True)] | None = None
+    # A template's capability: "mcp" represents the source's Daimon MCP toolset
+    # (its live catalogue) with a per-turn caller credential; skills stay dropped.
+    template_capabilities: Literal["mcp"] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     source_capabilities: SourceCapabilities | None = None
     mcp_credential_file: Path | None = Field(default=None, repr=False)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _any_source(cls, data: object) -> object:
-        # "*" (any granted agent of the tenant, at its live version): a worker template.
-        return template_source(data)
 
     @model_validator(mode="after")
     def _configuration_authorization(self) -> OpenAIDeployment:
         if self.config_digest is None and self.configuration_grant is None:
             raise ValueError("a deployment requires exact or bounded configuration authorization")
-        if self.profile == CONVERSATION_PROFILE:
-            if self.environment_id is not None or self.skill_ids:
-                raise ValueError(
-                    "conversation-only deployments cannot authorize environments or skills"
-                )
-        elif self.environment_id is None:
+        if self.environment_id is None:
             raise ValueError("persistent-workspace deployments require an environment identity")
-        validate_counterpart_pins(self, worker_materialization=self.worker_materialization)
+        validate_counterpart_pins(
+            self,
+        )
         if self.root_materialization:
             if self.source_capabilities is not None or self.skill_ids:
                 # Skills on a template would attach to every agent version it publishes.
                 raise ValueError("an agent template carries no operator capability inputs")
             if self.spend_limit_usd_cents is None:
                 raise ValueError("an agent template serves every switched agent: cap its spend")
+        if self.template_capabilities is not None and (
+            not self.root_materialization
+            or self.profile != PROFILE
+            or self.mcp_credential_file is not None
+        ):
+            raise ValueError("template capabilities belong to a persistent-workspace template")
         if self.source_capabilities is not None:
             if (
                 self.profile != PROFILE
-                or self.worker_materialization
                 or self.source_agent_id is None
                 or self.mcp_credential_file is None
                 or not self.mcp_credential_file.is_absolute()
@@ -147,11 +139,7 @@ class OpenAIDeployment(BaseModel):
                 raise ValueError("full source deployment requires exact skills and caller binding")
         elif self.mcp_credential_file is not None:
             raise ValueError("MCP credential requires captured source capabilities")
-        if (
-            not self.worker_materialization
-            and not self.root_materialization
-            and self.agent_id is None
-        ):
+        if not self.root_materialization and self.agent_id is None:
             raise ValueError("a fixed deployment requires a native agent identity")
         return self
 
@@ -163,14 +151,11 @@ class OpenAIDeployment(BaseModel):
         resources: NeutralResourceHost,
     ) -> AgentRevision:
         """Read the operator-pinned catalog component; complete source proof remains separate."""
-
-        worker = request.worker
-        expected = self.worker_environment(request, worker) if worker is not None else None
+        expected = None
         if self.source_capabilities is not None:
             proof = represented_source(source, request.target_spec)
             if (
-                worker is not None
-                or proof is None
+                proof is None
                 or proof.source_pin != self.source_capabilities.source_pin
                 or proof.target.model != self.source_capabilities.model
                 or proof.target.skills
@@ -182,21 +167,6 @@ class OpenAIDeployment(BaseModel):
             expected = proof.environment
 
         async def verify_native(checked: AgentRevision) -> None:
-            if worker is not None:
-                if checked.agent.spec != worker.spec:
-                    raise AdmissionDenied(reason="backend_unsupported")
-                # The catalog verifies compiled tools, pins and instructions;
-                # independently retain every authored metadata stamp as well.
-                native = await resources.backend.agents.retrieve(request.scope, checked.agent.ref)
-                metadata = {
-                    key: value
-                    for key, value in (native.spec.metadata or {}).items()
-                    if key != "mux_tenant"
-                    and key != MCP_METADATA_KEY
-                    and not skill_metadata_key(key)
-                }
-                if metadata != dict(worker.spec.metadata or {}):
-                    raise AdmissionDenied(reason="backend_unsupported")
             await self.verify_environment(request, resources=resources, expected=expected)
 
         return await read_counterpart(
@@ -205,7 +175,6 @@ class OpenAIDeployment(BaseModel):
             source=source,
             resources=resources,
             verify_native=verify_native,
-            worker_materialization=self.worker_materialization,
         )
 
     async def verify_environment(
@@ -215,10 +184,6 @@ class OpenAIDeployment(BaseModel):
         resources: NeutralResourceHost,
         expected: EnvironmentSpec | None,
     ) -> None:
-        if self.profile == CONVERSATION_PROFILE:
-            if expected is not None or self.environment_id is not None:
-                raise AdmissionDenied(reason="backend_unsupported")
-            return
         if self.environment_id is None:
             raise AdmissionDenied(reason="backend_unsupported")
         scope = request.scope
@@ -257,89 +222,29 @@ class OpenAIDeployment(BaseModel):
         ):
             raise AdmissionDenied(reason="backend_unsupported")
 
-    def worker_environment(
-        self, request: ProviderPreparationRequest, worker: ResolvedWorkerSpec
-    ) -> EnvironmentSpec | None:
-        """Refuse unrepresentable plans before reading or allocating native resources."""
-        revision = request.admission.backend_revision
-        drops, spec, environment = worker.declared_drops, worker.spec, worker.environment
-        if self.profile == CONVERSATION_PROFILE:
-            # A conversation-only worker runs without all of these. Each must be a
-            # declared loss, unless the captured source never had it (an agent with no
-            # skills has none to lose); with no captured source, all five (fail closed).
-            source = request.source.effective_spec if request.source is not None else None
-            carried = {
-                "tools": source is None or bool(source.tools),
-                "mcp": source is None or bool(source.mcp_servers),
-                "skills": source is None or bool(source.skills),
-            }
-            required = {"sandbox", "memory", *(item for item, had in carried.items() if had)}
-            if (
-                revision is None
-                or worker.backend.content_digest() != revision.content_digest()
-                or revision.profile != self.profile
-                or spec.model.provider != "openai"
-                or spec.model.id != revision.model
-                or worker.permissions.fleet.scope != request.scope
-                or not required.issubset(drops)
-                or worker.resources
-                or environment is not None
-                or spec.tools
-                or spec.skills
-                or spec.mcp_servers
-                or spec.extensions
-                or spec.model.options
-                or spec.description is not None
-                or any(
-                    key == "mux_tenant" or key == MCP_METADATA_KEY or skill_metadata_key(key)
-                    for key in spec.metadata or {}
-                )
-            ):
-                raise AdmissionDenied(reason="backend_unsupported")
-            return None
-        if (
-            revision is None
-            or worker.backend.content_digest() != revision.content_digest()
-            or revision.profile != self.profile
-            or worker.spec.model.provider != "openai"
-            or worker.spec.model.id != revision.model
-            or worker.permissions.fleet.scope != request.scope
-            or "memory" not in drops
-            or "sandbox" in drops
-            or "tools" in drops
-            or worker.resources
-            or environment is None
-            or environment.execution != "hosted"
-            or environment.description not in (None, "")
-            or environment.scope is not None
-            or environment.metadata
-            or environment.native_config is not None
-            or environment.network is None
-            or environment.sources != ()
-            or environment.packages is None
-            or set(environment.packages) - {"python", "npm", "system"}
-            or spec.extensions
-            or spec.model.options
-            or spec.description is not None
-            or any(
-                key == "mux_tenant" or key == MCP_METADATA_KEY or skill_metadata_key(key)
-                for key in spec.metadata or {}
-            )
-            or not any(tool.kind == "builtin" and tool.name == "bash" for tool in spec.tools or ())
-            or any(tool.permission != "auto" for tool in spec.tools or ())
-            or any(tool.kind == "custom" for tool in spec.tools or ())
-            or ("skills" in drops and spec.skills)
-            or (
-                "mcp" in drops
-                and (
-                    spec.mcp_servers or any(tool.kind == "mcp_toolset" for tool in spec.tools or ())
-                )
-            )
-            or any(connection.credential_ref is not None for connection in spec.mcp_servers or ())
-        ):
-            # Never substitute a hosted container for a no-execution declaration.
-            raise AdmissionDenied(reason="backend_unsupported")
-        return environment
+
+#: Registry label of a per-turn credential minted for an OpenAI agent-template turn
+#: (readability only; what the server refuses follows the row's `provider_turn` surface).
+OPENAI_TEMPLATE_MCP_LABEL = "openai-agent-turn"
+
+
+def template_mcp_matches(request: ProviderPreparationRequest, target: AgentSpec) -> bool:
+    """The target's MCP is exactly the captured Daimon MCP representation, nothing more.
+
+    Its other tools are exactly the represented execution tools (the hosted
+    environment's bash), never a custom tool.
+    """
+    from daimon.core.turn.runtime_manifest import represented_source
+
+    source = request.source
+    represented = represented_source(source, target) if source is not None else None
+    return (
+        represented is not None
+        and target.mcp_servers == represented.target.mcp_servers
+        and not target.skills
+        and tuple(target.tools or ()) == tuple(represented.target.tools or ())
+        and all(tool.kind == "builtin" for tool in target.tools or ())
+    )
 
 
 def load_deployment(request: ProviderPreparationRequest) -> OpenAIDeployment:
@@ -353,7 +258,8 @@ def load_deployment(request: ProviderPreparationRequest) -> OpenAIDeployment:
         raise AdmissionDenied(reason="backend_unsupported")
     deployment = _manifest_deployment(request)
     validate_counterpart_request(
-        deployment, request, worker_materialization=deployment.worker_materialization
+        deployment,
+        request,
     )
     return deployment
 
@@ -398,42 +304,23 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
     if (
         revision is None
         or revision.model not in NATIVE_MODELS
-        # A worker-only model never runs an agent's or channel's own turn.
-        or (request.worker is None and revision.model not in selectable_models(revision.backend))
+        or revision.model not in selectable_models(revision.backend)
     ):
         raise AdmissionDenied(reason="backend_unsupported")
     deployment = load_deployment(request)
-    if deployment.worker_materialization and request.worker is None:
-        raise AdmissionDenied(reason="backend_unsupported")
     spend_limit = deployment.spend_limit_usd_cents
-    native_budget_usd = request.native_budget_usd
-    if request.worker is not None and native_budget_usd is not None:
-        raise AdmissionDenied(reason="backend_unsupported")
-    budget = (
-        request.worker.limits.native_budget_usd if request.worker is not None else native_budget_usd
-    )
     # Whether this project honours a native session cap: the profile says it doesn't
     # (OpenAI answers `spend_control` with HTTP 400), so nothing below may count on one.
     native_cap = get_profile(deployment.profile).support_for("session_spend_control") == "native"
-    if budget is not None and not native_cap:
-        # Admission and the fleet ceilings refuse a native budget here first; never drop it.
-        raise AdmissionDenied(reason="backend_unsupported")
-    if budget is not None:
-        if request.worker is not None:
-            request.worker.limits.require_native_dispatch(request.now())
-        try:
-            requested = native_session_budget_cents(budget)
-        except ValueError:
-            raise AdmissionDenied(reason="backend_unsupported") from None
-        if spend_limit is not None and spend_limit != requested:
-            raise AdmissionDenied(reason="backend_unsupported")
-        spend_limit = requested
     scope = request.scope
-    worker_agent: ResourceRef | None = None
     # A template's counterpart for this agent version, once its catalog entry is known.
     root_agent: ResourceRef | None = None
     allocating = False
     counterpart_verified = False
+    from daimon.core.turn.template_mcp import TemplateMCPCredential, template_mcp_kept
+
+    mcp_template = deployment.template_capabilities == "mcp"
+    template_mcp = TemplateMCPCredential(request, scope, label=OPENAI_TEMPLATE_MCP_LABEL)
 
     def check(config: ConfigRevision, authorized: Scope) -> None:
         if config != revision or authorized != scope:
@@ -455,8 +342,8 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
                 account_id=scope.account_id,
             )
 
-        agent = root_agent if deployment.root_materialization else worker_agent
-        if not deployment.worker_materialization and not deployment.root_materialization:
+        agent = root_agent if deployment.root_materialization else None
+        if not deployment.root_materialization:
             if deployment.agent_id is None:
                 raise AdmissionDenied(reason="backend_unsupported")
             agent = ref(deployment.agent_id, "agent")
@@ -467,13 +354,10 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
             if not preparation.deps.agent_backends or checked is None:
                 raise AdmissionDenied(reason="backend_unsupported")
             validate_counterpart_request(
-                deployment, preparation, worker_materialization=deployment.worker_materialization
+                deployment,
+                preparation,
             )
-            worker = preparation.worker
-            if deployment.worker_materialization and worker is not None:
-                if worker_agent is None or checked.agent.ref != worker_agent:
-                    raise AdmissionDenied(reason="backend_unsupported")
-            elif deployment.root_materialization:
+            if deployment.root_materialization:
                 if (
                     checked.catalog_id != root_counterpart_catalog_id(preparation)
                     or checked.agent.ref != root_agent
@@ -486,10 +370,6 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
                 or checked.agent.ref != agent
             ):
                 raise AdmissionDenied(reason="backend_unsupported")
-            if worker is not None:
-                deployment.worker_environment(preparation, worker)
-                if checked.agent.spec != worker.spec:
-                    raise AdmissionDenied(reason="backend_unsupported")
             agent = checked.agent.ref
         return SessionSpec(
             agent=agent,
@@ -509,11 +389,6 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
             # The host driver obtains existing sessions from its persisted scoped
             # binding; creation publishes the acknowledged native identity there.
             return True
-        if kind == "agent" and deployment.worker_materialization:
-            if allocating and id_ is None:
-                return True
-            if worker_agent is not None and id_ == worker_agent.id:
-                return True
         if kind == "agent" and deployment.root_materialization:
             if allocating and id_ is None:
                 return True
@@ -541,16 +416,13 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
     async def read(preparation: ProviderPreparationRequest) -> AgentRevision:
         nonlocal counterpart_verified
         counterpart_verified = False
+        template_mcp.catalogue = None
         validate_counterpart_request(
-            deployment, preparation, worker_materialization=deployment.worker_materialization
+            deployment,
+            preparation,
         )
-        worker = preparation.worker
-        if worker is not None:
-            deployment.worker_environment(preparation, worker)
         source = preparation.source
         if source is None:
-            if worker is not None and deployment.worker_materialization:
-                raise AdmissionDenied(reason="backend_unsupported")
             source = await load_backend_agent(
                 preparation.deps.anthropic,
                 preparation.deps.sessionmaker,
@@ -569,6 +441,12 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
             operation_key="counterpart-read",
         )
         checked = await deployment.read_counterpart(preparation, source=source, resources=resources)
+        # A template that keeps the agent's MCP serves one whose switch dropped it
+        # (or could not represent it) with none: never more than the consent allows.
+        if mcp_template and template_mcp_kept(preparation.target_spec):
+            from daimon.core.turn.template_mcp import consented_catalogue
+
+            template_mcp.catalogue = consented_catalogue(source, preparation.target_spec)
         counterpart_verified = True
         return checked
 
@@ -609,13 +487,12 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
     async def materialize_root(preparation: ProviderPreparationRequest) -> AgentRevision:
         nonlocal allocating, root_agent
         target = preparation.target_spec
-        if (
-            target is None
-            or any(tool.kind == "custom" for tool in target.tools or ())
-            or target.mcp_servers
-        ):
-            # Nothing executes a template's custom tools, and a template has no
-            # caller MCP credential: refuse before any native write.
+        if target is None or any(tool.kind == "custom" for tool in target.tools or ()):
+            # Nothing executes a template's custom tools: refuse before any native write.
+            raise AdmissionDenied(reason="backend_unsupported")
+        if target.mcp_servers and not template_mcp_matches(preparation, target):
+            # Only the source's own Daimon MCP, exactly as captured, with the per-turn
+            # caller credential; any other server would have no credential.
             raise AdmissionDenied(reason="backend_unsupported")
         resources = NeutralResourceHost(
             driver(runtime, revision, scope),
@@ -633,30 +510,6 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
         root_agent = row.agent.ref
         return row
 
-    async def materialize(preparation: ProviderPreparationRequest) -> AgentRevision:
-        nonlocal allocating, worker_agent
-
-        async def host(active: TurnPersistence, worker: ResolvedWorkerSpec) -> NeutralResourceHost:
-            nonlocal allocating
-            expected = deployment.worker_environment(preparation, worker)
-            resources = NeutralResourceHost(
-                driver(runtime, revision, scope),
-                preparation.deps.sessionmaker,
-                scope=scope,
-                account_scope_id=deployment.project,
-                operation_key=active.operation_key,
-            )
-            await deployment.verify_environment(preparation, resources=resources, expected=expected)
-            allocating = True
-            return resources
-
-        try:
-            row = await materialize_counterpart(deployment, preparation, request, resources=host)
-        finally:
-            allocating = False
-        worker_agent = row.agent.ref
-        return row
-
     # A row's limit compiles to `spend_control` only where the project honours it. Without
     # it, a turn is bounded by admission (balance, user and channel caps), the per-model
     # daily cap (`openai_host._check_daily_model_cap`) and its deadline. Astra included.
@@ -664,21 +517,26 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
     runtime = OpenAIHostRuntime(
         transport_factory=transport,
         read_agent_counterpart=read,
-        materialize_worker=materialize if deployment.worker_materialization else None,
         materialize_root=materialize_root if deployment.root_materialization else None,
         journal=OpenAIRecoveryJournal(),
         usage_store=OpenAIUsageRevisions(),
         account_scope_id=deployment.project,
         price=provider_prices(deployment.profile).get((revision.backend, revision.model)),
+        # A conversation-only session runs no container: its usage settles at $0
+        # infrastructure. A persistent workspace's container cost stays unknown.
         session_plan=plan,
         authorization=authorize,
-        mcp_secrets=resolve_mcp if deployment.source_capabilities is not None else None,
+        mcp_secrets=resolve_mcp
+        if deployment.source_capabilities is not None
+        else template_mcp.resolve
+        if mcp_template
+        else None,
+        end_of_turn=template_mcp.finalize if mcp_template else None,
         controls=SessionControls(
             model=revision.model,
             multi_agent_enabled=False,
             container_size="small" if deployment.profile == PROFILE else None,
             spend_limit_usd_cents=native_limit,
-            require_spend_control_echo=budget is not None and native_limit is not None,
         ),
     )
 
@@ -727,7 +585,6 @@ async def prepare_tenant_environment(
     if (
         revision is None
         or revision.profile != PROFILE
-        or request.worker is not None
         or request.openai_environment_id is not None
         or store is None
         or not key

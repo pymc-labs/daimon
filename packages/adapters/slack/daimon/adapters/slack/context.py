@@ -77,6 +77,23 @@ def _replayed(messages: list[dict[str, Any]], *, status_ts: str | None) -> list[
     return [m for m in messages if not ("bot_id" in m and m.get("ts") == status_ts)]
 
 
+def _message_text(msg: dict[str, Any]) -> str:
+    """``msg``'s text plus, for a bot post, its notice cards' words.
+
+    Daimon's own notices are attachments with no message text; without them the
+    agent would see its setup questions and reminders as empty messages.
+    """
+    parts = [str(msg.get("text") or "")]
+    if "bot_id" in msg:
+        attachments = cast(list[Any], msg.get("attachments") or [])
+        parts += [
+            str(cast(dict[str, Any], a).get("fallback") or "")
+            for a in attachments
+            if isinstance(a, dict)
+        ]
+    return "\n".join(part for part in parts if part)
+
+
 def _render_message(msg: dict[str, Any], *, proxy: ProxyUrlContext | None) -> list[str]:
     """Render a single Slack message dict as XML lines.
 
@@ -89,7 +106,7 @@ def _render_message(msg: dict[str, Any], *, proxy: ProxyUrlContext | None) -> li
     username = str(msg.get("username", "") or msg.get("user", ""))
     ts = str(msg.get("ts", ""))
     is_bot = "true" if "bot_id" in msg else "false"
-    text = escape(str(msg.get("text", "")))
+    text = escape(_message_text(msg))
 
     attrs = (
         f" user_id={quoteattr(user_id)}"

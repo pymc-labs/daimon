@@ -43,6 +43,13 @@ organisation a Teams deployment serves), daimon stores:
 - **Agent credentials** — any bound external credentials (e.g. a GitHub
   personal access token used by `get_cli_token`), encrypted at rest.
 
+With per-turn context on (`DAIMON_MCP_CONTEXT__ENABLED`, the default), each chat
+message addressed to the agent is also sent, without mentions and with an
+opaque id for its thread, to the agent's MCP servers that were connected with a
+shared token and offer a context tool. Discord messages queued while the agent
+was busy go together, each with its author's display name when there are several.
+Their answers go into the message the agent receives, like a tool result.
+
 Conversation content lives in Anthropic's Managed Agents service. When an admin
 enables DM conversations, daimon also stores the selected workspace, an
 excerpt from the conversation (up to 12 messages / 16,000 characters), and the
@@ -68,6 +75,15 @@ account in this copy of Daimon. Daimon also tries to delete conversations
 linked to your account from Anthropic. The shared agents and their memory stay.
 Chat transcript deletion at Anthropic can fail. If Daimon reports a failure,
 ask the person who runs it to check and help remove the remaining transcripts.
+
+Account deletion also removes Daimon's own copy of your private conversations
+(Daimon keeps these on its provider-neutral turn path, which runs agents on other
+providers, and on Claude when an operator turns that path on): the stored messages, tool results and conversation state, and the
+routing and retry records behind them. A conversation shared with other people in
+a thread, and the requests you made in it, stay for the people still using it, so
+messages you wrote there may remain. The privacy panel says how many shared
+conversations that is before you confirm. After deletion nothing can write to
+your account again.
 
 Deletion does not remove usage and billing records. These records can still
 contain your chat platform user ID and conversation ID. Uploaded skill files at

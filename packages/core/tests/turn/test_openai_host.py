@@ -1361,17 +1361,6 @@ async def test_prechange_binding_reuses_native_session_without_replacement(prech
     assert not any(request.method == "POST" for request in wire.requests)
     assert all(request.method == "GET" for request in wire.requests)
 
-    changed = replace(
-        runtime, controls=runtime.controls.model_copy(update={"require_spend_control_echo": True})
-    )
-    changed_application = replace(
-        application, deps=replace(application.deps, turn_runtimes={PROFILE: changed})
-    )
-    before = len(wire.requests)
-    with pytest.raises(ContinuityLost, match="configuration changed"):
-        await prepare_openai(changed_application)
-    assert len(wire.requests) == before
-
 
 async def test_prechange_processed_creation_receipt_recovers_same_key_and_session(
     prechange_controls,

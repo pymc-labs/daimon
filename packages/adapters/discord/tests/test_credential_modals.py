@@ -201,7 +201,7 @@ def _sent_message(interaction: MagicMock) -> str:
     """Return the ephemeral text sent, on whichever half of the response fired."""
     if interaction.response.send_message.called:
         return str(interaction.response.send_message.call_args.args[0])
-    return str(interaction.followup.send.call_args.args[0])
+    return str(interaction.followup.send.call_args.kwargs["embed"].description)
 
 
 def _assert_secret_absent_from_every_reply(interaction: MagicMock, secret: str) -> None:
@@ -538,7 +538,7 @@ async def test_env_modal_double_submit_writes_exactly_one_row(
     assert len(rows) == 1, "a resubmission on an already-consumed token must write nothing new"
     assert rows[0].content == "first-value", "only the first submission's value is stored"
 
-    message = second_interaction.followup.send.call_args.args[0]
+    message = second_interaction.followup.send.call_args.kwargs["embed"].description
     assert "no longer valid" in message, "the second submission must report the request is dead"
 
 
@@ -576,7 +576,7 @@ async def test_env_modal_empty_value_writes_nothing_and_does_not_consume(
 
     rows = await list_agent_files(db_session, tenant_id=row.tenant_id, agent_id=row.agent_id)
     assert rows == [], "a blank value must never produce a write"
-    message = interaction.followup.send.call_args.args[0]
+    message = interaction.followup.send.call_args.kwargs["embed"].description
     assert "empty" in message.lower(), "the toast must ask the user to try again"
 
     # The token must still be usable -- a fail-fast rejection did not consume it.
@@ -601,7 +601,7 @@ async def test_env_modal_value_over_byte_cap_writes_nothing_and_does_not_consume
 
     rows = await list_agent_files(db_session, tenant_id=row.tenant_id, agent_id=row.agent_id)
     assert rows == [], "an over-cap value must never produce a write"
-    message = interaction.followup.send.call_args.args[0]
+    message = interaction.followup.send.call_args.kwargs["embed"].description
     assert "too large" in message.lower(), "the toast must report the size cap"
 
     retry_modal = EnvCredentialModal(runtime=runtime, request_row=row)
@@ -846,7 +846,7 @@ async def test_mcp_modal_unconfigured_mcp_reports_misconfiguration_no_consume_no
     interaction = _admin_interaction()
     await modal.on_submit(interaction)
 
-    message = interaction.followup.send.call_args.args[0]
+    message = interaction.followup.send.call_args.kwargs["embed"].description
     assert "Ask the operator to finish setup" in message, "must name who can fix setup"
     assert "Nothing was saved" in message, "the guard runs before any value is written"
     assert "public_url" not in message and "jwt_secret" not in message, (
@@ -910,7 +910,7 @@ async def test_mcp_modal_vault_write_failure_keeps_exception_details_private(
     interaction = _interaction()
     await modal.on_submit(interaction)
 
-    message = interaction.followup.send.call_args.args[0]
+    message = interaction.followup.send.call_args.kwargs["embed"].description
     assert "APIConnectionError" not in message, "exception class names stay in operator logs"
     assert "secret=abc123" not in message, (
         "the stringified exception (which can carry the request envelope) must never reach the user"
@@ -957,7 +957,7 @@ async def test_mcp_modal_restores_the_button_when_the_write_below_it_fails(
     assert "Try again" in _card_text(edits[-1]) and _card_buttons(edits[-1]), (
         "a card left on 'Saving…' would describe a save that has already stopped"
     )
-    message = interaction.followup.send.call_args.args[0]
+    message = interaction.followup.send.call_args.kwargs["embed"].description
     assert "Nothing was saved" in message, "the failure must still be reported"
     assert "APIConnectionError" not in message, "exception classes stay in operator logs"
     async with db_session_factory() as session:
@@ -1066,7 +1066,7 @@ async def test_env_submit_rechecks_requester_and_install_before_consuming(
         "an invalid caller must not consume the request"
     )
     assert files == [], "an invalid caller must not write a credential"
-    assert "no longer valid" in interaction.followup.send.call_args.args[0], (
+    assert "no longer valid" in interaction.followup.send.call_args.kwargs["embed"].description, (
         "submission must honestly refuse changed authority"
     )
 
@@ -1097,7 +1097,7 @@ async def test_env_submit_never_saves_to_a_deleted_target_or_recreated_namesake(
         "missing identity must not consume the request"
     )
     assert files == [], "a namesake must not receive the old target's credential"
-    assert "no longer exists" in interaction.followup.send.call_args.args[0], (
+    assert "no longer exists" in interaction.followup.send.call_args.kwargs["embed"].description, (
         "missing target needs a specific explanation"
     )
 
@@ -1839,7 +1839,7 @@ async def test_mcp_modal_refuses_a_token_the_server_rejects_before_any_write(
         spent = await peek_credential_request(session, token=row.token)
     assert spent is not None and spent.outcome == "token_rejected"
     if failure == "rejection":
-        text = interaction.followup.send.call_args.args[0]
+        text = interaction.followup.send.call_args.kwargs["embed"].description
         assert text == (
             "That token didn't work. Nothing was saved.\n\nCheck the token and try the form again."
         ), "the person learns the token was refused; no sign-in hint for a server without it"
@@ -2139,7 +2139,7 @@ async def test_mcp_modal_repointing_an_existing_server_on_a_shared_agent_needs_a
         assert creds_created == [], "a refused replacement writes no vault token"
         assert agent_updates == [], "and never repoints the server"
         assert spent.outcome == "write_failed"
-        assert "admin" in interaction.followup.send.call_args.args[0]
+        assert "admin" in interaction.followup.send.call_args.kwargs["embed"].description
 
 
 async def test_mcp_modal_member_cannot_overwrite_the_shared_token_of_a_connected_server(
@@ -2208,7 +2208,7 @@ async def test_mcp_modal_member_cannot_overwrite_the_shared_token_of_a_connected
     )
     assert [c.token for c in stored] == ["the-real-token"], "the shared token is unchanged"
     assert creds_created == [] and agent_updates == []
-    assert "admin" in interaction.followup.send.call_args.args[0]
+    assert "admin" in interaction.followup.send.call_args.kwargs["embed"].description
 
 
 async def test_mcp_modal_admin_token_written_after_the_members_decision_is_not_overwritten(
@@ -2273,7 +2273,7 @@ async def test_mcp_modal_admin_token_written_after_the_members_decision_is_not_o
     assert fernet.decrypt(admin_ciphertext).decode() == "admin-token"
     assert creds_created == [], "refused before the personal vault write"
     # The attach of a brand-new server name comes first and stays, token-less.
-    assert "admin" in interaction.followup.send.call_args.args[0]
+    assert "admin" in interaction.followup.send.call_args.kwargs["embed"].description
 
 
 async def _aws_pair_and_secret_request(

@@ -48,18 +48,10 @@ from daimon.core.stores.domain import (
     CredentialRequestRow,
     TaskContinuationRow,
 )
-from daimon.core.stores.task_continuations import (
-    claim_continuation as _claim_continuation_row,
-)
-from daimon.core.stores.task_continuations import (
-    get_continuation as _get_continuation_row,
-)
-from daimon.core.stores.task_continuations import (
-    record_continuation as _record_continuation_row,
-)
-from daimon.core.stores.task_continuations import (
-    settle_continuation as _settle_continuation_row,
-)
+from daimon.core.stores.task_continuations import claim_continuation as _claim_continuation_row
+from daimon.core.stores.task_continuations import get_continuation as _get_continuation_row
+from daimon.core.stores.task_continuations import record_continuation as _record_continuation_row
+from daimon.core.stores.task_continuations import settle_continuation as _settle_continuation_row
 from daimon.core.stores.thread_sessions import get_thread_session_at
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -171,12 +163,8 @@ class ContinuationReasonUnavailable(DaimonError):
 
 
 def require_writable_reason(reason: ContinuationReason) -> None:
-    """Keep new writes closed until every queue reader can ignore unknown reasons.
-
-    The previous release aborts a queue scan on a worker-completion row, hiding
-    unrelated timers. There is deliberately no caller override: enabling this
-    producer requires a compatible-reader release and a proved rollback floor.
-    """
+    """Refuse a reason this release must not write: unknown, or a watch wake while
+    watches are off. There is deliberately no caller override."""
     if reason not in get_args(ContinuationReason):
         raise ContinuationReasonUnavailable("Unknown continuation reason")
     if reason in WATCH_REASONS:
@@ -184,10 +172,6 @@ def require_writable_reason(reason: ContinuationReason) -> None:
 
         if not load_watches_settings().enabled:
             raise ContinuationReasonUnavailable("Watch producers disabled")
-    if reason == "worker_finished":
-        raise ContinuationReasonUnavailable(
-            "Worker completion enqueueing requires a compatible-reader release"
-        )
 
 
 class ResponderChanged(DaimonError):
@@ -534,7 +518,6 @@ def continuation_attended(row: TaskContinuationRow) -> bool:
     """Retain trusted initiation across handoffs; a wake never grants attendance."""
     return row.attended and row.reason not in (
         "timer",
-        "worker_finished",
         "watch_fired",
         "watch_report",
         "job_finished",

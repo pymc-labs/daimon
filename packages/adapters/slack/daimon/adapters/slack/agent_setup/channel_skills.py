@@ -87,7 +87,9 @@ async def run_channel_skills_submission(
     )
 
     async def refuse(text: str) -> None:
-        await post_ephemeral(client, channel_id=meta.channel_id, user_id=user_id, text=text)
+        await post_ephemeral(
+            client, channel_id=meta.channel_id, user_id=user_id, text=text, error=True
+        )
 
     if not await resolve_is_admin(
         client, user_id=user_id, host_team_id=team_id, action=DelegatedAction.SKILLS

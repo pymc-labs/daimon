@@ -10,6 +10,16 @@ RUN awk '/^\[/ { keep = /^\[(project|dependency-groups|tool\.uv)[].]/ } keep' \
     /src/pyproject.toml > /pyproject.toml
 
 # ---------------------------------------------------------------------------
+# Stage: web — the web adapter's single-page app, built once to static files
+# ---------------------------------------------------------------------------
+FROM mirror.gcr.io/library/node:24-slim AS web
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY web/ ./
+RUN DAIMON_WEB_OUT=/web/dist npm run build
+
+# ---------------------------------------------------------------------------
 # Stage 1: builder — install build deps + compile third-party wheels
 # ---------------------------------------------------------------------------
 FROM mirror.gcr.io/library/python:3.12-slim AS builder
@@ -71,6 +81,7 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 
 COPY --chown=daimon:daimon defaults/ ./defaults/
 COPY --chown=daimon:daimon packages/ ./packages/
+COPY --from=web --chown=daimon:daimon /web/dist ./packages/adapters/web/daimon/adapters/web/static/
 COPY --chown=daimon:daimon assets/daimon-face.png ./assets/daimon-face.png
 
 USER daimon
@@ -82,6 +93,11 @@ RUN --mount=type=bind,from=builder,source=/app/uv.lock,target=/app/uv.lock \
     UV_LINK_MODE=copy uv sync --frozen --no-dev --extra billing --no-cache \
     && python -c "import openai; from daimon.core.turn.runtimes import ensure_channel_runtime; assert ensure_channel_runtime('openai.persistent_workspace')" \
     && python -m compileall -q -j 0 packages
+
+# The commit this image was built from; daimon logs it as `release`. Last, so a
+# new commit does not invalidate the layers above.
+ARG DAIMON_RELEASE=""
+ENV DAIMON_RELEASE=${DAIMON_RELEASE}
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 # No CMD — docker-compose services or fly.toml [processes] supply the command.

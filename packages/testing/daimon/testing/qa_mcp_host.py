@@ -468,6 +468,7 @@ async def _build_run(
             secret=shared.secret_text.encode(),
             now=now,
             ttl_days=1,
+            purpose="internal",
         )
     manifest.token_jti = _jti(daimon_token)
 

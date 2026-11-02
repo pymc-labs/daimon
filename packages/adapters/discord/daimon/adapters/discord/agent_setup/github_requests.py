@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from daimon.adapters.discord.agent_setup.github_card_ui import github_embed
 from daimon.adapters.discord.agent_setup.github_connect_card import connect_embed
 from daimon.adapters.discord.checks import admin_caller, is_member_guild_admin
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_reach import load_target_facts
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
@@ -123,12 +124,16 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
         "cancel",
         "link",
     }:
-        await interaction.response.send_message("This request is unavailable.", ephemeral=True)
+        await interaction.response.send_message(
+            embed=build_notice_embed("This request is unavailable."), ephemeral=True
+        )
         return True
     try:
         request_id = uuid.UUID(parts[1])
     except ValueError:
-        await interaction.response.send_message("This request is unavailable.", ephemeral=True)
+        await interaction.response.send_message(
+            embed=build_notice_embed("This request is unavailable."), ephemeral=True
+        )
         return True
     async with runtime.sessionmaker() as session:
         request = await lookup_request(session, request_id=request_id)
@@ -159,7 +164,9 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
         or interaction.message is None
         or str(interaction.channel_id) != request.thread_id
     ):
-        await interaction.response.send_message("This request is unavailable.", ephemeral=True)
+        await interaction.response.send_message(
+            embed=build_notice_embed("This request is unavailable."), ephemeral=True
+        )
         return True
     action = parts[2]
     shared_action = action == "review" or len(parts) == 4
@@ -167,13 +174,15 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
 
     async def reply(text: str, *, view: discord.ui.View | None = None) -> None:
         if deferred and not shared_action:
-            await interaction.followup.send(text, ephemeral=True)
+            await interaction.followup.send(embed=build_notice_embed(text), ephemeral=True)
         elif deferred:
-            await interaction.edit_original_response(content=text, view=view)
+            await interaction.edit_original_response(embed=build_notice_embed(text), view=view)
         elif view is None:
-            await interaction.response.send_message(text, ephemeral=True)
+            await interaction.response.send_message(embed=build_notice_embed(text), ephemeral=True)
         else:
-            await interaction.response.send_message(text, ephemeral=True, view=view)
+            await interaction.response.send_message(
+                embed=build_notice_embed(text), ephemeral=True, view=view
+            )
 
     async def edit_card(*, embed: discord.Embed, view: discord.ui.View | None = None) -> None:
         if deferred:
@@ -187,11 +196,15 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
             or (str(interaction.message.id) if action == "review" else parts[3])
             != request.admin_card_message_id
         ):
-            await interaction.response.send_message("This request is unavailable.", ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed("This request is unavailable."), ephemeral=True
+            )
             return True
         guild = interaction.client.get_guild(int(tenant.external_id))
         if guild is None:
-            await interaction.response.send_message("This request is unavailable.", ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed("This request is unavailable."), ephemeral=True
+            )
             return True
         # Review opens a private response; a decision updates its existing
         # private review card so its buttons cannot be clicked again.
@@ -268,7 +281,9 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
         or delivery.dismissed_at is not None
         or delivery.message_id != str(interaction.message.id)
     ):
-        await interaction.response.send_message("This request is unavailable.", ephemeral=True)
+        await interaction.response.send_message(
+            embed=build_notice_embed("This request is unavailable."), ephemeral=True
+        )
         return True
     if principal is None:
         await reply("This request is unavailable.")

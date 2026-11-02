@@ -29,7 +29,7 @@ from typing import Literal
 
 import structlog
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.stores.agent_posts import AgentPostRow, PostSource, record_post
+from daimon.core.stores.agent_posts import PostSource, record_post
 from daimon.core.stores.security_audit import append_event, count_tidy_events
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -227,7 +227,6 @@ async def record_turn_post(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
     message_id: str,
-    recorded_post: AgentPostRow | None = None,
     tenant_id: uuid.UUID | None = None,
     platform: str | None = None,
     ma_agent_id: str | None = None,
@@ -250,41 +249,15 @@ async def record_turn_post(
     its message), is logged and swallowed; the cost is that this one post
     cannot be tidied.
     """
-    # Recovery carries the canonical stored attribution, never a fabricated
-    # native agent handle. Both inputs share the bounded write policy below.
-    if recorded_post is not None:
-        if ma_agent_id is not None or any(
-            supplied is not None and supplied != stored
-            for supplied, stored in (
-                (tenant_id, recorded_post.tenant_id),
-                (platform, recorded_post.platform),
-                (channel_id, recorded_post.channel_id),
-                (requester_platform_user_id, recorded_post.requester_platform_user_id),
-                (source, recorded_post.source),
-                (turn_card_intent_id, recorded_post.turn_card_intent_id),
-                (parent_channel_id, recorded_post.parent_channel_id),
-                (thread_ts, recorded_post.thread_ts),
-            )
-        ):
-            raise ValueError("a replacement must retain its recorded attribution")
-        tenant_id, platform = recorded_post.tenant_id, recorded_post.platform
-        channel_id = recorded_post.channel_id
-        requester_platform_user_id = recorded_post.requester_platform_user_id
-        source, turn_card_intent_id = recorded_post.source, recorded_post.turn_card_intent_id
-        parent_channel_id, thread_ts = recorded_post.parent_channel_id, recorded_post.thread_ts
     if tenant_id is None or platform is None or channel_id is None or source is None:
         raise ValueError("a turn post must supply its attribution")
-    if recorded_post is None and (ma_agent_id is None or requester_platform_user_id is None):
+    if ma_agent_id is None or requester_platform_user_id is None:
         raise ValueError("a turn post must supply its agent and requester")
     if source == "turn" and turn_card_intent_id is None:
         raise ValueError("a turn post must name its turn (turn_card_intent_id)")
     try:
         async with asyncio.timeout(RECORD_TIMEOUT_S), sessionmaker.begin() as session:
-            if recorded_post is not None:
-                agent_id = recorded_post.agent_id
-            else:
-                assert ma_agent_id is not None
-                agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id)
+            agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id)
             await record_post(
                 session,
                 tenant_id=tenant_id,
@@ -292,13 +265,7 @@ async def record_turn_post(
                 channel_id=channel_id,
                 message_id=message_id,
                 agent_id=agent_id,
-                kind=(
-                    recorded_post.kind
-                    if recorded_post is not None
-                    else "thread"
-                    if source == "auto_thread"
-                    else "message"
-                ),
+                kind="thread" if source == "auto_thread" else "message",
                 parent_channel_id=parent_channel_id,
                 thread_ts=thread_ts,
                 source=source,

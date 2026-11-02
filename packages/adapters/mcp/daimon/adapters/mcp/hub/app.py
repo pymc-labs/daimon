@@ -127,9 +127,14 @@ def mount_hub_apps(
         )
     if fernet is None:
         raise BootstrapError("DAIMON_CRYPTO__KEYS is required when a hub mount is configured")
-    app_root_url = settings.mcp.app_root_url
+    app_root_url = (
+        str(hub.public_url).rstrip("/") if hub.public_url is not None else settings.mcp.app_root_url
+    )
     if app_root_url is None:
-        raise BootstrapError("DAIMON_MCP__PUBLIC_URL is required when a hub mount is configured")
+        raise BootstrapError(
+            "DAIMON_HUB__PUBLIC_URL or DAIMON_MCP__PUBLIC_URL is required when a hub mount "
+            "is configured"
+        )
 
     signing_key = hub.jwt_signing_key.get_secret_value().encode()
     kv_store, hub_kv = build_hub_kv_base(

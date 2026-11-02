@@ -186,6 +186,12 @@ class _OpenAIStream(AsyncIterator[TurnEvent]):
 
 
 class OpenAITurnIO:
+    #: OpenAI's event stream replays nothing: a turn that ended before it connected,
+    #: or between a reconcile and it, is never reported there, and keep-alive frames
+    #: hide the silence (probe 2026-10-23). The driver asks for the session status
+    #: whenever the stream yields nothing for this long (J4 acb5cd66).
+    idle_check_s: float = 15.0
+
     def __init__(
         self,
         backend: ManagedAgents,
@@ -198,7 +204,6 @@ class OpenAITurnIO:
             [ResourceRef, tuple[str, ...]], Awaitable[tuple[tuple[str, ...], bool]]
         ]
         | None = None,
-        initial_input_loader: Callable[[ResourceRef, UserMessage], Awaitable[bool]] | None = None,
     ) -> None:
         if (
             backend.capabilities().profile_id not in PROFILES
@@ -213,7 +218,6 @@ class OpenAITurnIO:
         self._backend, self._scope, self._session = backend, scope, session
         self._persistence = persistence
         self._baseline_loader = baseline_loader
-        self._initial_input_loader = initial_input_loader
         self._resuming = False
         self._root = root_turn_id
         self._prior_roots: set[str] | None = None
@@ -362,13 +366,6 @@ class OpenAITurnIO:
                 json.dumps(sorted(actions), separators=(",", ":")).encode()
             ).hexdigest()[:32]
         )
-
-        if new_turn and self._initial_input_loader is not None:
-            message = next(item for item in inputs if isinstance(item, UserMessage))
-            if await self._initial_input_loader(self._session, message):
-                if len(inputs) != 1:
-                    raise UnsupportedCapability(("host_initial_input_batch",), PROFILE)
-                return
 
         async def deliver(key: str) -> SendReceipt:
             return await self._backend.events.send(self._scope, self._session, inputs, key=key)

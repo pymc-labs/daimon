@@ -98,7 +98,7 @@ async def _refresh_details(
         meta=meta,
         agent_name=meta.agent_name,
         is_admin=True,
-        user_id=user_id,
+        viewer_user_id=user_id,
     )
     if view is not None:
         if notice is not None:

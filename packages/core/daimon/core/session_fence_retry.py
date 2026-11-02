@@ -7,9 +7,13 @@ import random
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 
+import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+log = structlog.get_logger(__name__)
 
 RETRY_MIN_S = 0.025
 RETRY_MAX_S = 0.075
@@ -19,12 +23,18 @@ _acquisitions: ContextVar[dict[str | int, float] | None] = ContextVar(
 )
 
 
+#: Which acquisition failed: the advisory try-lock, a row taken NOWAIT (55P03), no
+#: pooled connection in time, or the acquisition deadline itself.
+FenceReason = Literal["advisory", "row_nowait", "pool_timeout", "deadline"]
+
+
 class FenceUnavailable(Exception):
     """An acquisition failed; the owning transaction must roll back before retry."""
 
-    def __init__(self, deadline: float) -> None:
+    def __init__(self, deadline: float, reason: FenceReason = "advisory") -> None:
         super().__init__()
         self.deadline = deadline
+        self.reason: FenceReason = reason
 
 
 async def try_fence(
@@ -59,9 +69,9 @@ async def try_fence(
                 await db.execute(text(f"SELECT {function}({argument})"), {"key": key})
             ).scalar_one()
     except TimeoutError as error:
-        raise FenceUnavailable(deadline) from error
+        raise FenceUnavailable(deadline, "deadline") from error
     if not acquired:
-        raise FenceUnavailable(deadline)
+        raise FenceUnavailable(deadline, "advisory")
     if acquisitions is not None:
         # Protected MA work and later acquisitions get no part of this budget.
         acquisitions.pop(key, None)
@@ -72,6 +82,7 @@ async def retry_fences[T](
     *,
     busy_error: Callable[[], Exception] | None = None,
     backoff: bool = True,
+    label: str = "session_fence",
 ) -> T:
     """Retry acquisition-only failures after their contexts release resources.
 
@@ -82,16 +93,28 @@ async def retry_fences[T](
     Failed attempts roll back and re-read/re-authorize on the next attempt.
     Set backoff=False for flat short polling when resolving a dispatched write;
     this avoids disadvantaging that waiter against newly arriving acquisitions.
+    `label` (a fixed name, never data) is logged with every failure reason seen
+    when the deadline runs out.
     """
     token = _acquisitions.set({})
     delay = RETRY_MAX_S
+    seen: set[FenceReason] = set()
     try:
         while True:
             try:
                 return await operation()
             except FenceUnavailable as error:
+                seen.add(error.reason)
                 remaining = error.deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
+                    # The last attempt often fails on the deadline itself: every reason
+                    # seen names what actually held the acquisition.
+                    log.warning(
+                        "session_fence.unavailable",
+                        label=label,
+                        reasons=sorted(seen),
+                        last=error.reason,
+                    )
                     if busy_error is not None:
                         raise busy_error() from None
                     from daimon.core.turn.errors import SessionBusyError

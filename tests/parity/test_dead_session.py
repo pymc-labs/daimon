@@ -23,7 +23,6 @@ from typing import Literal
 
 import pytest
 from daimon.core.agent_post_identity import fallback_name_prefix
-from daimon.core.continuity.messages import render_unexpected_loss
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.thread_sessions import (
@@ -35,7 +34,7 @@ from daimon.testing.factories import make_tenant
 from mux.testing.drivers.anthropic.ma import MARouter, not_found_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .conftest import AGENT_ID, build_turn_router
+from .conftest import AGENT_ID, AGENT_TEXT, build_turn_router
 from .drivers.discord_driver import DiscordDriver
 from .drivers.protocol import thread_ids
 from .drivers.slack_driver import SlackDriver
@@ -125,27 +124,12 @@ async def test_dead_session_recreates_marks_old_row_dead_and_bills_new_session(
     )
     assert posted, f"expected the recovered turn's reply to be posted, got: {posted}"
 
-    # A dead-session recovery must tell the person their workspace was lost,
-    # exactly once, and ABOVE the answer it explains -- the answer is an
-    # in-place edit of the embed posted at mention time, so a notice sent as
-    # its own message would always sort below it. This scenario's dead-session
-    # signal is a 404 (deleted session), never the archived-400 signature the
-    # transcript rescue targets, so the history variant is the one that
-    # must appear.
-    expected_notice = render_unexpected_loss("history")
-    carrying = [text for text in posted if expected_notice in text]
-    assert len(carrying) == 1, (
-        f"expected exactly one unexpected-loss notice (history variant), got: {posted}"
+    # A dead-session recovery adds no system line: what was lost is the
+    # agent's to say, so the reply is exactly the agent's text.
+    expected_reply = (
+        fallback_name_prefix("test-agent", AGENT_TEXT) if platform == "discord" else AGENT_TEXT
     )
-    expected_start = expected_notice + "\n\n"
-    if platform == "discord":
-        expected_start = fallback_name_prefix("test-agent", expected_start)
-    assert carrying[0].startswith(expected_start), (
-        f"the loss notice must be the first paragraph of the answer, got: {carrying[0]!r}"
-    )
-    assert carrying[0] != expected_notice, (
-        "the notice must ride the answer, not stand alone as a trailing message"
-    )
+    assert posted == [expected_reply], f"expected only the agent's reply, got: {posted}"
 
     # The stale mapping is marked dead.
     dead_row = await get_thread_session_by_id(db_session, id=old_row.id)
@@ -243,19 +227,9 @@ async def test_dead_session_recreates_marks_old_row_dead_and_bills_new_session_s
     )
     assert posted, f"expected the recovered turn's reply to be posted, got: {posted}"
 
-    # A dead-session recovery must tell the person their workspace was lost,
-    # exactly once and above the answer it explains, matching Discord.
-    expected_notice = render_unexpected_loss("history")
-    carrying = [text for text in posted if expected_notice in text]
-    assert len(carrying) == 1, (
-        f"expected exactly one unexpected-loss notice (history variant), got: {posted}"
-    )
-    assert carrying[0].startswith(expected_notice + "\n\n"), (
-        f"the loss notice must be the first paragraph of the answer, got: {carrying[0]!r}"
-    )
-    assert carrying[0] != expected_notice, (
-        "the notice must ride the answer, not stand alone as a trailing message"
-    )
+    # No system line is added on recovery, matching Discord and Teams.
+    replies = [text for text in posted if text != "Working on it…"]
+    assert replies == [AGENT_TEXT], f"expected only the agent's reply, got: {posted}"
 
     # The stale mapping is marked dead.
     dead_row = await get_thread_session_by_id(db_session, id=old_row.id)

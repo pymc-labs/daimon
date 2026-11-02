@@ -6,6 +6,7 @@ from dataclasses import replace
 from typing import cast
 
 import structlog
+from daimon.adapters.slack.blockkit import notice_fields
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.channel_budget_notice import BudgetNotice, BudgetNotifier
@@ -32,7 +33,7 @@ def slack_budget_notifier(runtime: SlackRuntime) -> BudgetNotifier:
             try:
                 opened = await client.conversations_open(users=user_id)  # pyright: ignore[reportUnknownMemberType]
                 channel = cast("dict[str, str]", opened["channel"])["id"]
-                await client.chat_postMessage(channel=channel, text=text)  # pyright: ignore[reportUnknownMemberType]
+                await client.chat_postMessage(channel=channel, **notice_fields(text))  # pyright: ignore[reportUnknownMemberType]
                 delivered += 1
             except SlackApiError as exc:
                 log.info("channel_budget.notice_undelivered", error=str(exc))

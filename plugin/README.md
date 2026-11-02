@@ -49,7 +49,8 @@ MCP-initiated turns is tracked as a separate piece of work.
 
 ## Self-hosted deployments
 
-By default the plugin points at `https://daimon.decision.ai`. If you run your own daimon
+By default the plugin points at `https://daimon-mcp.pymc-labs.com`, PyMC Labs' hosted
+deployment. If you run your own daimon
 deployment, set `DAIMON_MCP_URL` to your server's origin before starting Claude Code:
 
 ```

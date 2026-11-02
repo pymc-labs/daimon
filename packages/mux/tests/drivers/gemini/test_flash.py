@@ -1,15 +1,13 @@
 """Host model policy: a create HTTP503 alone permits the next Flash model."""
 
 from collections.abc import Mapping
-from datetime import UTC, datetime
 
 import pytest
-from mux.contracts.ids import ModelRef, ResourceRef, Revision
-from mux.contracts.resources import Agent, AgentSpec
-from mux.drivers.gemini.flash import FLASH_MODELS, FLASH_PRIMARY, FlashTransport
+from mux.contracts.ids import ModelRef
+from mux.drivers.gemini.flash import FLASH_MODELS, FlashTransport
 from mux.drivers.gemini.transport import object_value
 from mux.errors import ProviderError
-from mux.profiles.gemini import ARGON_MODEL, WORKER_MAX_TOTAL_TOKENS, WORKER_MODEL
+from mux.profiles.gemini import ARGON_MODEL
 from mux.testing.drivers.gemini.accounting import Accounting
 from mux.testing.drivers.gemini.fake import FakeTransport
 from pydantic import JsonValue
@@ -77,39 +75,6 @@ async def test_unselected_model_refuses_before_accounting_or_provider() -> None:
     assert not source.requests and not accounting.held
 
 
-@pytest.mark.parametrize("overloaded", (False, True))
-async def test_named_cheap_worker_preserves_budget_and_never_falls_back(overloaded: bool) -> None:
-    source, accounting = FakeTransport(), Accounting()
-    agent = Agent(
-        ref=ResourceRef(
-            id="owned-worker", kind="agent", provider="gemini", account_scope_id="project"
-        ),
-        revision=Revision(local=0),
-        spec=AgentSpec(name="worker", model=ModelRef(provider="gemini", id=WORKER_MODEL)),
-        created_at=datetime.now(UTC),
-    )
-    selected: Mapping[str, JsonValue] = {
-        "agent": agent.ref.id,
-        "agent_config": {
-            "type": "antigravity",
-            "model": WORKER_MODEL,
-            "max_total_tokens": WORKER_MAX_TOTAL_TOKENS,
-        },
-        "tools": [],
-    }
-    policy = FlashTransport(source, accounting, native_agent=agent)
-    if overloaded:
-        source.responses.append(ProviderError("overloaded", retryable=True, native_code="503"))
-        with pytest.raises(ProviderError):
-            await policy.create(selected)
-    else:
-        source.responses.append({"id": "owned-interaction", "status": "completed"})
-        await policy.create(selected)
-    assert source.requests == [selected]
-    assert accounting.held == [agent.spec.model]
-    assert len(accounting.receipts) == 1
-
-
 async def test_model_output_cap_survives_the_existing_503_fallback_chain() -> None:
     source, accounting = FakeTransport(), Accounting()
     source.responses.extend(
@@ -167,25 +132,6 @@ async def test_output_cap_is_snapshotted_before_the_accounting_await() -> None:
     assert source.requests[0]["generation_config"] == {"max_output_tokens": 4096}
 
 
-async def test_bounded_worker_pins_counted_model_and_never_falls_back():
-    from .test_core import CountingTransport
-
-    source, accounting = CountingTransport(262144), Accounting()
-    transport = FlashTransport(source, accounting, bounded_worker=True)
-    body = {
-        "model": FLASH_PRIMARY,
-        "tools": [],
-        "generation_config": {"max_output_tokens": 65536},
-        "input": [{"type": "text", "text": "task"}],
-    }
-    assert await transport.count_input_tokens(body) == 262144
-    source.responses.append(ProviderError("overloaded", retryable=True, native_code="503"))
-    with pytest.raises(ProviderError):
-        await transport.create(body)
-    assert len(source.requests) == len(accounting.held) == 1
-    assert accounting.held[0].id == FLASH_PRIMARY
-
-
 def argon_request() -> Mapping[str, JsonValue]:
     return {"agent_config": {"type": "antigravity", "model": ARGON_MODEL}, "input": []}
 
@@ -222,47 +168,12 @@ async def test_argon_and_flash_primaries_refuse_each_others_requests() -> None:
     assert not source.requests and not accounting.held
 
 
-@pytest.mark.parametrize("primary", (WORKER_MODEL, "gemini-4-argon-preview", "gemini-pro"))
+@pytest.mark.parametrize(
+    "primary", ("gemini-3.5-flash-lite", "gemini-4-argon-preview", "gemini-pro")
+)
 def test_transport_primary_is_flash_or_argon_only(primary: str) -> None:
     with pytest.raises(ValueError):
         FlashTransport(FakeTransport(), Accounting(), primary=primary)
-
-
-@pytest.mark.parametrize("overloaded", (False, True))
-async def test_bounded_argon_worker_runs_argon_only_and_never_falls_back(overloaded: bool) -> None:
-    source, accounting = FakeTransport(), Accounting()
-    source.responses.append(
-        ProviderError("overloaded", retryable=True, native_code="503")
-        if overloaded
-        else {"id": "argon", "status": "in_progress"}
-    )
-    capped: Mapping[str, JsonValue] = {
-        "model": ARGON_MODEL,
-        "tools": [],
-        "generation_config": {"max_output_tokens": 4096},
-        "input": [{"type": "text", "text": "task"}],
-    }
-    policy = FlashTransport(source, accounting, bounded_worker=True, primary=ARGON_MODEL)
-    if overloaded:
-        with pytest.raises(ProviderError):
-            await policy.create(capped)
-    else:
-        await policy.create(capped)
-    assert [r["model"] for r in source.requests] == [ARGON_MODEL]
-    assert accounting.held == [ModelRef(provider="gemini", id=ARGON_MODEL)]
-
-
-async def test_bounded_worker_refuses_an_uncapped_argon_request() -> None:
-    source, accounting = FakeTransport(), Accounting()
-    uncapped: Mapping[str, JsonValue] = {
-        "agent_config": {"type": "antigravity", "model": ARGON_MODEL},
-        "input": [],
-    }
-    with pytest.raises(ProviderError):
-        await FlashTransport(source, accounting, bounded_worker=True, primary=ARGON_MODEL).create(
-            uncapped
-        )
-    assert not source.requests and not accounting.held
 
 
 def http(category: str, status: int, *, code: str | None = None) -> ProviderError:

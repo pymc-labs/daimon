@@ -883,6 +883,7 @@ async def test_permission_events_clear_the_back_off(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(bot_module, "clear_webhook_backoff", cleared.append)
     bot = MagicMock()
     bot.user.id = 10
+    bot._member_sync = AsyncMock()  # member lists are test_member_sync's
     guild = MagicMock(spec=discord.Guild)
 
     before_role = MagicMock(permissions=discord.Permissions.none(), guild=guild)

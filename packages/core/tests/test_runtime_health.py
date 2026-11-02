@@ -9,6 +9,7 @@ import httpx
 import pytest
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from daimon.core.config import load_settings
+from daimon.core.release import current_release
 from daimon.core.runtime_health import (
     current_turn_counts,
     log_health_once,
@@ -19,6 +20,7 @@ from daimon.core.runtime_health import (
 )
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from sqlalchemy.ext.asyncio import create_async_engine
+from structlog.testing import capture_logs
 
 
 async def test_sdk_retry_counts_each_attempt_and_window_resets() -> None:
@@ -61,7 +63,8 @@ async def test_health_interval_and_emitted_shape(monkeypatch: pytest.MonkeyPatch
     try:
         async with runtime_health("test", engine, 0):
             await asyncio.sleep(0.03)
-        assert logger.info.call_count == 0
+        # Interval zero disables the heartbeat; only the start marker is logged.
+        assert [call.args[0] for call in logger.info.call_args_list] == ["runtime.started"]
         async with runtime_health("test", engine, 0.02, lambda: (2, 1)):
             await asyncio.sleep(0.06)
         assert logger.info.call_count >= 1
@@ -87,6 +90,31 @@ async def test_health_interval_and_emitted_shape(monkeypatch: pytest.MonkeyPatch
         assert logger.info.call_args.kwargs["loop_lag_ms"] == {"max": 8.0, "p95": 8.0}
     finally:
         await engine.dispose()
+
+
+@pytest.mark.parametrize("interval_s", [0, 0.02])
+async def test_runtime_started_is_logged_once_per_entry_with_process_and_release(
+    monkeypatch: pytest.MonkeyPatch, interval_s: float
+) -> None:
+    monkeypatch.setenv("DAIMON_RELEASE", "abc123")
+    current_release.cache_clear()
+    engine = create_async_engine("postgresql+asyncpg://test:test@localhost/test")
+    try:
+        with capture_logs() as logs:
+            async with runtime_health("scheduler", engine, interval_s):
+                await asyncio.sleep(0.05)
+    finally:
+        await engine.dispose()
+    current_release.cache_clear()
+    started = [entry for entry in logs if entry["event"] == "runtime.started"]
+    assert started == [
+        {
+            "event": "runtime.started",
+            "log_level": "info",
+            "process": "scheduler",
+            "release": "abc123",
+        }
+    ]
 
 
 async def test_discord_429_routes_and_window_reset(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -7,11 +7,9 @@ Run inside a conversation thread. With no choice it names the thread's model;
 with one it keeps that choice for every later reply (`daimon.core.thread_models`).
 Anyone who may start a turn in the thread may switch it, decided by the same
 access policy check admission makes. Asking in words reaches the same setting
-through the agent's `set_thread_model` tool. Where the thread's agent runs
-worker fleets the reply says the choice doesn't reach them.
+through the agent's `set_thread_model` tool.
 """
 
-from datetime import UTC, datetime
 from typing import cast
 
 from daimon.adapters.discord.checks import (
@@ -25,11 +23,9 @@ from daimon.core.admin_actions import DelegatedAction
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.platform_words import DESCRIPTIONS
 from daimon.core.thread_models import (
-    FLEET_ROOT_NOTE,
     choose_thread_model,
     describe_thread_model,
     may_choose_thread_model,
-    thread_runs_fleet,
 )
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -103,15 +99,6 @@ class ModelCog(commands.Cog):
                     choice=choice.value,
                 )
                 text = change.note
-            if await thread_runs_fleet(
-                runtime.sessionmaker,
-                fleet_enabled=runtime.turn_deps.fleet_enabled,
-                tenant_id=tenant_id,
-                platform="discord",
-                thread_id=str(thread.id),
-                now=datetime.now(UTC),
-            ):
-                text += FLEET_ROOT_NOTE
             await interaction.edit_original_response(
                 content=text, allowed_mentions=discord.AllowedMentions.none()
             )

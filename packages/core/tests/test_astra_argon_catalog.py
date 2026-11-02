@@ -5,22 +5,11 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
-from daimon.core.channel_backend import agent_selection, check_backend
-from daimon.core.neutral_resources import WorkerSpecRefused, resolve_worker_spec
 from daimon.core.pricing import PROVIDER_PRICING_SOURCES, provider_cost_of, provider_prices
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.ids import ChannelRef, ModelRef, ResourceRef
 from mux.contracts.usage import UsageObservation
-from mux.profiles import (
-    backend_selection,
-    runnable_selection,
-    selectable_models,
-    worker_selection_allowed,
-)
-from mux.profiles.gemini import ARGON_MODEL
-from mux.profiles.openai import CONVERSATION_ONLY, PERSISTENT_WORKSPACE
-
-from .test_fleet_permissions import NOW, POLICY, parent
+from mux.profiles.openai import PERSISTENT_WORKSPACE
 
 ASTRA = "gpt-6-astra"
 CHANNEL = ChannelRef(tenant_id="t", platform="discord", channel_id="c")
@@ -30,27 +19,6 @@ def astra(profile: str = PERSISTENT_WORKSPACE.profile_id) -> ConfigRevision:
     return ConfigRevision.create(
         CHANNEL, 1, resolve_default(BackendConfig(backend="openai", profile=profile, model=ASTRA))
     )
-
-
-def test_astra_is_an_agent_config_model_that_also_runs_fleet_workers() -> None:
-    # An agent's config picks its model; a fleet then runs that agent as a worker.
-    assert selectable_models("openai") == ("gpt-6-luna", ASTRA)
-    assert agent_selection("openai", ASTRA).model == ASTRA
-    for profile in (PERSISTENT_WORKSPACE.profile_id, CONVERSATION_ONLY.profile_id):
-        revision = astra(profile)
-        assert runnable_selection(revision) and worker_selection_allowed(revision)
-        check_backend(revision)
-        check_backend(revision, worker=True)
-
-
-def test_argon_is_an_agent_config_model_that_also_runs_fleet_workers() -> None:
-    assert ARGON_MODEL in selectable_models("gemini")
-    selection = agent_selection("gemini", ARGON_MODEL)
-    revision = ConfigRevision.create(CHANNEL, 1, selection)
-    # No longer channel-only: a worker running an Argon agent is admitted (bounded).
-    assert worker_selection_allowed(revision)
-    check_backend(revision)
-    check_backend(revision, worker=True)
 
 
 def test_astra_has_a_dated_verified_price_row() -> None:
@@ -116,25 +84,3 @@ def test_long_context_multipliers_need_a_threshold() -> None:
             provider_prices(PERSISTENT_WORKSPACE.profile_id)[("openai", ASTRA)],
             max_priced_input_tokens=None,
         )
-
-
-@pytest.mark.parametrize("granted", (True, False))
-def test_astra_worker_spec_resolves_only_when_granted(granted: bool) -> None:
-    root = parent("openai")
-    model = ModelRef(provider="openai", id=ASTRA)
-    selection = backend_selection("openai").model_copy(update={"model": ASTRA})
-    if granted:
-        root = replace(
-            root,
-            models=(*root.models, model),
-            backend_grants=(*root.backend_grants, selection),
-        )
-    spec = root.spec.model_copy(update={"model": model})
-    backend = BackendConfig(backend="openai", profile=selection.profile, model=ASTRA)
-    if granted:
-        resolved = resolve_worker_spec(root, spec, backend=backend, policy=POLICY, now=NOW)
-        assert resolved.backend.model == ASTRA and resolved.spec.model == model
-    else:
-        with pytest.raises(WorkerSpecRefused) as refused:
-            resolve_worker_spec(root, spec, backend=backend, policy=POLICY, now=NOW)
-        assert (refused.value.field, refused.value.reason) == ("backend", "not_subset")

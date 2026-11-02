@@ -44,7 +44,7 @@ from daimon.core.stores.turn_outcomes import OutcomeRecord, list_for_tenant
 from daimon.core.teams_threads import new_setup_thread_id
 from daimon.core.turn.admission import AdmissionDenied
 from daimon.core.turn.errors import AdmissionDenialReason, MissingTurnConfigError
-from daimon.core.turn.outcomes import drain_outcomes
+from daimon.core.turn.outcomes import current_outcome, drain_outcomes
 from daimon.core.turn.run import RunOutcome
 from daimon.core.turn.slots import holding, wait_for_slot
 from daimon.core.turn.state import TextBlock, TurnState
@@ -72,6 +72,7 @@ from .conftest import (
     patched_admission,
     patched_turns,
     settle,
+    shown_text,
 )
 
 TENANT = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
@@ -440,7 +441,7 @@ async def test_messages_still_queued_when_the_turn_ends_early_are_told_why(
             await asyncio.gather(first, return_exceptions=True)
 
     expected = HOLDING if draining else app_module._FAILED
-    assert [a.text for a in sender.activities] == [expected], (
+    assert [shown_text(a) for a in sender.activities] == [expected], (
         "the queued message is answered once, with the notice that matches the cause"
     )
 
@@ -488,7 +489,7 @@ async def test_a_failing_command_is_answered(
         bot_token=bot_token,
     )
     await teams._handle(make_inbound("new"))
-    assert [a.text for a in sender.activities] == [app_module._FAILED]
+    assert [shown_text(a) for a in sender.activities] == [app_module._FAILED]
 
 
 @pytest.mark.usefixtures("provisioned_tenant")
@@ -510,7 +511,7 @@ async def test_a_failing_channel_command_is_answered_to_its_sender_alone(
     )
     await teams._handle(inbound)
     [failed] = sender.activities
-    assert failed.text == app_module._FAILED
+    assert shown_text(failed) == app_module._FAILED
     assert failed.recipient is not None and failed.recipient.is_targeted, "for the sender only"
 
 
@@ -557,11 +558,11 @@ async def test_a_channel_command_is_answered_in_the_senders_1_1_chat(
     [(where, reply, _)] = sender.sent
     assert where == THREAD_ID and direct.looked_up == [(CHANNEL_ID, AAD_OBJECT_ID)]
     if present:
-        assert reply.text == ANSWERED_IN_CHAT.format(name="memory")
+        assert shown_text(reply) == ANSWERED_IN_CHAT.format(name="memory")
         [moved] = seen
         assert (moved.kind, moved.conversation_id, moved.team_id) == ("dm", "a:direct", None)
     else:
-        assert reply.text == CHANNEL_POINTER.format(name="memory") and seen == []
+        assert shown_text(reply) == CHANNEL_POINTER.format(name="memory") and seen == []
 
 
 @pytest.mark.usefixtures("provisioned_tenant")
@@ -584,7 +585,9 @@ async def test_a_channel_command_from_another_organisation_is_not_sent_to_a_1_1_
     )
     await teams._handle(inbound)
     [(_, reply, _)] = sender.sent
-    assert reply.text == NO_CHAT_ACROSS_ORGS.format(name="support"), "no pointer they can't use"
+    assert shown_text(reply) == NO_CHAT_ACROSS_ORGS.format(name="support"), (
+        "no pointer they can't use"
+    )
     assert direct.looked_up == [] and run.await_count == 0, "no 1:1 chat is attempted"
 
 
@@ -662,7 +665,9 @@ async def test_a_full_queue_at_the_tenant_cap_sheds_a_new_thread(
         release.set()
         await first
 
-    assert [(c, a.text) for c, a, _ in sender.sent] == [("a:conversation-2", app_module._SHED)]
+    assert [(c, shown_text(a)) for c, a, _ in sender.sent] == [
+        ("a:conversation-2", app_module._SHED)
+    ]
     [shed] = await _outcomes(db_session_factory)
     assert (shed.reason, shed.thread_id) == (
         TerminationReason.ADMISSION_CONCURRENCY_SHED,
@@ -693,7 +698,9 @@ async def test_a_tenant_turn_cap_override_beats_the_deployment_cap(
         release.set()
         await first
 
-    assert [(c, a.text) for c, a, _ in sender.sent] == [("a:conversation-2", app_module._SHED)]
+    assert [(c, shown_text(a)) for c, a, _ in sender.sent] == [
+        ("a:conversation-2", app_module._SHED)
+    ]
 
 
 def test_every_admission_denial_has_a_reply() -> None:
@@ -999,7 +1006,7 @@ async def test_a_denied_turn_says_why_without_a_card(
     denied = AsyncMock(side_effect=AdmissionDenied(reason="balance_depleted"))
     with patch.object(app_module, "admit", denied):
         await teams._run_turn(make_inbound(), TENANT)
-    assert [a.text for a in sender.activities] == [
+    assert [shown_text(a) for a in sender.activities] == [
         "Your team's Daimon credit has run out.\n\nAn admin can top up with `billing` in a 1:1 chat with me."
     ], "the refusal says why, in the organisation's nouns"
     assert await _open_intents(db_session_factory) == [], "no card, so no intent"
@@ -1029,7 +1036,7 @@ async def test_a_refusal_that_sends_the_person_to_an_admin_says_who_the_admins_a
     )  # pyright: ignore[reportArgumentType]
     with patch.object(app_module, "admit", AsyncMock(side_effect=err)):
         await teams._run_turn(make_inbound(), TENANT)
-    [notice] = [a.text for a in sender.activities]
+    [notice] = [shown_text(a) for a in sender.activities]
     assert notice.startswith("Daimon isn't set up in this channel yet.\n\nAsk an admin to ")
     assert notice.endswith("\n\nAdmins are the owners of the Leads team.") is named
 
@@ -1075,6 +1082,30 @@ async def test_an_unprompted_turn_stays_silent_when_refused_or_without_its_threa
     with patch.object(TeamsApp, "_history", AsyncMock(return_value=None)), patched_turns() as turns:
         await teams._participate(_unprompted_reply(), TENANT)
     assert sender.activities == [] and turns == []
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_only_a_turn_somebody_asked_for_logs_a_user_failure(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    teams = _app(db_session_factory, FakeSender())
+
+    async def _fails(
+        self: TeamsApp, inbound: TeamsInbound, tenant_id: uuid.UUID, **_: object
+    ) -> None:
+        outcome = current_outcome.get()
+        assert outcome is not None
+        outcome.finish(reason=TerminationReason.UPSTREAM)
+
+    with patch.object(TeamsApp, "_run_turn_observed", _fails):
+        with structlog.testing.capture_logs() as unprompted_logs:
+            await teams._participate(_unprompted_reply(), TENANT)
+        with structlog.testing.capture_logs() as mention_logs:
+            await teams._orchestrate(make_inbound(), TENANT)
+    await drain_outcomes()
+
+    assert [e for e in unprompted_logs if e["event"] == "turn.user_failure"] == []
+    assert [e["reason"] for e in mention_logs if e["event"] == "turn.user_failure"] == ["upstream"]
 
 
 async def test_an_owner_of_the_admin_team_gets_the_admin_role(
@@ -1141,6 +1172,18 @@ async def test_a_turn_while_the_owners_cannot_be_read_keeps_a_stored_admin_role(
     assert account is not None and account.role is Role.ADMIN, "the stored role stands"
 
 
+def _balance_gone_after_admission(depleted: bool) -> AsyncMock:
+    """The balance check: fine at admission (its first call), `depleted` at the re-check."""
+    calls = 0
+
+    async def check(**_kwargs: Any) -> bool:
+        nonlocal calls
+        calls += 1
+        return depleted and calls > 1
+
+    return AsyncMock(side_effect=check)
+
+
 @pytest.mark.usefixtures("provisioned_tenant")
 @pytest.mark.parametrize(
     "outcome", ["starts-on-free-slot", "stopped-while-queued", "balance-ran-out-while-queued"]
@@ -1171,7 +1214,7 @@ async def test_a_queued_turn_posts_its_card_then_waits_behind_it(
         patched_admission(),
         patch("daimon.core.turn.run.run_turn", run),
         # Admission passed before the wait; the re-check after it decides.
-        patch("daimon.core.turn.slots.is_over_balance", AsyncMock(return_value=depleted)),
+        patch("daimon.core.spend_gate.is_over_balance", _balance_gone_after_admission(depleted)),
     ):
         task = asyncio.create_task(turn())
         async with asyncio.timeout(5):
@@ -1307,7 +1350,7 @@ async def test_an_oversize_typed_bot_name_gets_the_notice_only_when_the_switch_i
     reply.assert_not_awaited()
     if on:
         (notice,) = send.await_args.args
-        assert notice.text == INPUT_TOO_LONG
+        assert shown_text(notice) == INPUT_TOO_LONG
         assert notice.recipient.is_targeted, "only the sender sees a refusal in a channel"
     else:
         send.assert_not_awaited()

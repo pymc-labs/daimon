@@ -317,7 +317,7 @@ async def handle_make_confidential(runtime: SlackRuntime, payload: dict[str, Any
     ):
         text = RULE_NEED_ADMIN_MESSAGE
     else:
-        text = await change_rule(
+        text, _failed = await change_rule(
             runtime,
             client,
             tenant_id=derive_tenant_uuid(platform="slack", workspace_id=team_id),

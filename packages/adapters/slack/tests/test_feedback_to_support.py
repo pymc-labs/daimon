@@ -36,6 +36,7 @@ from daimon.testing.factories import make_tenant, make_thread_session
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .conftest import shown_text
 from .harness import build_slack_runtime
 
 pytestmark = pytest.mark.asyncio
@@ -118,7 +119,7 @@ def _posts(fake: Any) -> list[dict[str, Any]]:
 
 
 def _ephemeral_texts(fake: Any) -> list[str]:
-    return [c.kwargs["json"]["text"] for c in fake.mock.requests.get(_EPHEMERAL, [])]
+    return [shown_text(c.kwargs["json"]) for c in fake.mock.requests.get(_EPHEMERAL, [])]
 
 
 async def _feedback_rows(factory: async_sessionmaker[AsyncSession]) -> list[Any]:

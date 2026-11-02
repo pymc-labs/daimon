@@ -190,7 +190,7 @@ async def test_the_panel_never_mints_the_deployment_promo_scope(
     view = await _view(db_session_factory)
     admin = _interaction(admin=True)
     await _modal(view, ["promo:create"]).on_submit(admin)
-    assert "can't be granted from here" in admin.followup.send.call_args.args[0]
+    assert "can't be granted from here" in admin.followup.send.call_args.kwargs["embed"].description
     async with db_session_factory() as session:
         assert await list_mcp_tokens(session, now=dt.datetime.now(dt.UTC)) == []
 

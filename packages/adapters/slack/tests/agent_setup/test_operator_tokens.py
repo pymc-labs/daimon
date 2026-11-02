@@ -26,6 +26,7 @@ from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
 from daimon.core.stores.mcp_tokens import list_mcp_tokens
 from daimon.core.stores.security_audit import list_events
+from daimon.testing.adapters.slack.notices import shown_text
 from daimon.testing.factories import make_platform_principal, make_tenant
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -164,9 +165,8 @@ async def test_a_forged_deployment_scope_is_refused(
         _runtime(db_session_factory), client, team_id=TEAM, user_id=USER, submission=submission
     )
     tokens, _ = await _state(db_session_factory)
-    assert (
-        tokens == []
-        and "can't be granted from here" in client.chat_postEphemeral.call_args.kwargs["text"]
+    assert tokens == [] and "can't be granted from here" in shown_text(
+        client.chat_postEphemeral.call_args.kwargs
     )
 
 

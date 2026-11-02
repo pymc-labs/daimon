@@ -258,9 +258,10 @@ async def test_a_full_tenant_queue_refuses_with_the_plain_notice(queued_bot: Dai
 
     await queued_bot.on_message(message)
 
-    message.channel.send.assert_awaited_once_with(  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+    message.channel.send.assert_awaited_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+    assert message.channel.send.await_args.kwargs["embed"].description == (  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         "This server has too many chats at once right now — try again in a moment."
-    )
+    ), "the full queue refuses on the error card"
 
 
 @pytest.mark.asyncio
@@ -315,7 +316,10 @@ async def test_a_full_queue_at_the_global_cap_refuses_with_the_global_notice(
 
     await queued_bot.on_message(message)
 
-    message.channel.send.assert_awaited_once_with(GLOBAL_CAP_NOTICE)  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+    message.channel.send.assert_awaited_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+    assert message.channel.send.await_args.kwargs["embed"].description == GLOBAL_CAP_NOTICE, (  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        "the global cap refuses on the error card"
+    )
 
 
 @pytest.mark.asyncio
@@ -613,7 +617,7 @@ async def test_handle_mention_catches_sqlalchemy_error_from_orchestrate(
     await bot._handle_mention(message, "123456", tenant_id)  # pyright: ignore[reportPrivateUsage]
 
     message.channel.send.assert_called_once()  # type: ignore[attr-defined]
-    error_text: str = message.channel.send.call_args[0][0]  # type: ignore[attr-defined]
+    error_text: str = message.channel.send.call_args.kwargs["embed"].description  # type: ignore[attr-defined]
     assert "rid:" not in error_text, "trace ids stay in logs"
 
 
@@ -642,7 +646,7 @@ async def test_handle_mention_catches_unexpected_exception_from_orchestrate(
     await bot._handle_mention(message, "123456", tenant_id)  # pyright: ignore[reportPrivateUsage]
 
     message.channel.send.assert_called_once()  # type: ignore[attr-defined]
-    error_text: str = message.channel.send.call_args[0][0]  # type: ignore[attr-defined]
+    error_text: str = message.channel.send.call_args.kwargs["embed"].description  # type: ignore[attr-defined]
     assert "rid:" not in error_text, "trace ids stay in logs"
 
 
@@ -675,7 +679,7 @@ async def test_handle_mention_renders_a_neutral_provider_error_as_a_provider_car
     events = [entry["event"] for entry in logs]
     assert "turn.failed" in events and "turn.failed.unexpected" not in events
     message.channel.send.assert_called_once()  # type: ignore[attr-defined]
-    error_text: str = message.channel.send.call_args[0][0]  # type: ignore[attr-defined]
+    error_text: str = message.channel.send.call_args.kwargs["embed"].description  # type: ignore[attr-defined]
     assert error_text.startswith("Daimon's AI service couldn't accept the request.")
     assert "gcs_token_echo" not in error_text
 
@@ -704,7 +708,7 @@ async def test_on_message_prologue_failure_never_escapes_and_sends_error(
     await bot.on_message(message)  # must not raise
 
     message.channel.send.assert_called_once()  # type: ignore[attr-defined]
-    error_text: str = message.channel.send.call_args[0][0]  # type: ignore[attr-defined]
+    error_text: str = message.channel.send.call_args.kwargs["embed"].description  # type: ignore[attr-defined]
     assert "rid:" not in error_text, "trace ids stay in logs"
 
 

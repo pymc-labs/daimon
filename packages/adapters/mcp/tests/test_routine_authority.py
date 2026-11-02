@@ -28,7 +28,6 @@ from daimon.adapters.mcp.tools.channel_budgets import (
     _list_channel_budgets_impl,
     _set_channel_budget_impl,
 )
-from daimon.adapters.mcp.tools.fleet_config import _request_fleet_config_impl
 from daimon.adapters.mcp.tools.promo_codes import _redeem_promo_code_impl
 from daimon.adapters.mcp.tools.promo_issuing import (
     _create_promo_code_impl,
@@ -186,7 +185,6 @@ async def test_routine_runs_as_editor_and_execution_never_has_human_money_author
             with pytest.raises(ToolError, match="personal user credential"):
                 await change_admin(runtime, auth, subject_id=TARGET, revoke=revoke)
         calls = [
-            _request_fleet_config_impl(runtime, auth, agent_name="daimon"),
             _get_channel_budget_impl(runtime, auth, "chan"),
             _list_channel_budgets_impl(runtime, auth),
             _set_channel_budget_impl(

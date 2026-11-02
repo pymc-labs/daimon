@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime
+from decimal import Decimal
 
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
@@ -14,15 +15,14 @@ from daimon.adapters.mcp.tools._words import admin_noun, space_noun
 from daimon.core.access_policy import agent_invoker_roles
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Action, AgentRef, Surface, authorize
-from daimon.core.billing import BillingConfig, is_over_cap
-from daimon.core.channel_budget import is_over_channel_budget
+from daimon.core.billing import BillingConfig
 from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.permissions import agent_permissions, any_agent_rules, any_own_readers
 from daimon.core.security_audit import record_authz_denial
+from daimon.core.spend_gate import SpendBlock, SpendRequest, spend_gate
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
-from daimon.core.tenant_balance import is_over_balance
 from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.termination import TerminationReason, denial_termination_reason
@@ -291,6 +291,20 @@ def _admission_recheck(  # pyright: ignore[reportUnusedFunction]
     return recheck
 
 
+_GATE_LOG: dict[SpendBlock, str] = {
+    "balance_depleted": "balance",
+    "cap_exceeded": "cap",
+    "budget_exceeded": "channel_budget",
+    "allowance_exhausted": "allowance",
+}
+_BLOCK_REASON: dict[SpendBlock, TerminationReason] = {
+    "balance_depleted": TerminationReason.ADMISSION_BALANCE_DEPLETED,
+    "cap_exceeded": TerminationReason.ADMISSION_CAP_EXCEEDED,
+    "budget_exceeded": TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED,
+    "allowance_exhausted": TerminationReason.ADMISSION_DENIED,
+}
+
+
 async def _admit(  # pyright: ignore[reportUnusedFunction]
     auth: AuthIdentity,
     *,
@@ -298,10 +312,12 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
     membership_resolver: MembershipResolver | None = None,
     billing_config: BillingConfig | None,
     tool_name: str,
+    markup: Decimal,
     agent_names: Callable[[], Awaitable[tuple[str | None, ...]]] | None = None,
     pin_exempt: bool = False,
+    agent_id: str | None = None,
 ) -> AuthIdentity:
-    """Balance and cap gate for an already-resolved identity.
+    """Spend gate for an already-resolved identity.
 
     ``_check_admission`` wraps this for tools whose identity is the request's
     own; the hub mounts call it directly because their identity is chosen per
@@ -329,9 +345,11 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
       membership and admin evidence for Discord); its reply reaches only them.
       ``agent_names`` is called only when a pin exists, so the agent lookup it
       may need costs nothing on unpinned tenants.
-    - Then runs ``is_over_balance`` then ``is_over_cap``, then the channel
-      budget of the isolated channel whose own agent this is (an exempt
-      caller's hub or DM run included), else of a key's bound channel;
+    - Then runs the one spend gate (``daimon.core.spend_gate``): balance, cap,
+      the channel budget of the isolated channel whose own agent this is (an
+      exempt caller's hub or DM run included, else a key's bound channel),
+      then the person's spend allowances, on ``agent_id`` when the caller
+      knows the agent (a derived id on a key does not name it);
       each denial raises a ``TERMINAL ERROR:`` ``ToolError`` and logs a deny
       event carrying only ids (tenant/user/tool/gate) — never prompt content
       or raw Gemini text (Pitfall 9).
@@ -354,61 +372,93 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
     if auth.platform_user_id is None:
         return auth
 
-    if await is_over_balance(sessionmaker=sessionmaker, tenant_id=auth.tenant_id):
-        log.info(
-            "mcp.admission_denied",
-            tenant_id=str(auth.tenant_id),
-            platform_user_id=auth.platform_user_id,
-            tool=tool_name,
-            gate="balance",
+    async with sessionmaker() as session:
+        block = await spend_gate(
+            session,
+            billing_config=billing_config,
+            request=SpendRequest(
+                tenant_id=auth.tenant_id,
+                platform_user_id=auth.platform_user_id,
+                platform=auth.platform or "",
+                channel_id=owner or token_channel_id(auth),
+                agent_id=agent_id,
+            ),
+            markup=markup,
+            now=datetime.now(UTC),
         )
-        refused(TerminationReason.ADMISSION_BALANCE_DEPLETED)
-        nouns = _refusal_nouns(auth)
+    if block is None:
+        return auth
+    log.info(
+        "mcp.admission_denied",
+        tenant_id=str(auth.tenant_id),
+        platform_user_id=auth.platform_user_id,
+        tool=tool_name,
+        gate=_GATE_LOG[block],
+    )
+    refused(_BLOCK_REASON[block])
+    nouns = _refusal_nouns(auth)
+    if block == "balance_depleted":
         raise ToolError(
             f"TERMINAL ERROR: This {nouns.scope}'s daimon credit is depleted. "
             f"An admin can top up with {nouns.billing}."
         )
+    if block == "cap_exceeded":
+        raise ToolError(f"TERMINAL ERROR: {admission_refusal_text('cap_exceeded', nouns)}")
+    if block == "allowance_exhausted":
+        raise ToolError(f"TERMINAL ERROR: {admission_refusal_text('allowance_exhausted', nouns)}")
+    raise ToolError(
+        "TERMINAL ERROR: This channel has used its spending budget. An admin can raise or clear it."
+    )
 
-    if await is_over_cap(
-        billing_config=billing_config,
-        sessionmaker=sessionmaker,
-        tenant_id=auth.tenant_id,
-        user_id=auth.platform_user_id,
-        now=datetime.now(UTC),
-    ):
-        log.info(
-            "mcp.admission_denied",
-            tenant_id=str(auth.tenant_id),
-            platform_user_id=auth.platform_user_id,
-            tool=tool_name,
-            gate="cap",
+
+async def _gate_origin_spend(  # pyright: ignore[reportUnusedFunction]
+    auth: AuthIdentity,
+    *,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    markup: Decimal,
+    tool_name: str,
+    channel_id: str | None,
+    agent_id: str | None,
+    budget_message: str,
+) -> None:
+    """The spend gate for a tool whose channel and agent are known only after admission.
+
+    Runs the checks admission could not: the budget of the channel the spend counts
+    toward and the person's allowance on the agent it counts toward. Balance and cap
+    were decided by ``_admit``. No-ops for the unbilled path (no platform user).
+    """
+    if auth.platform_user_id is None:
+        return
+    async with sessionmaker() as session:
+        block = await spend_gate(
+            session,
+            billing_config=None,
+            request=SpendRequest(
+                tenant_id=auth.tenant_id,
+                platform_user_id=auth.platform_user_id,
+                platform=auth.platform or "",
+                channel_id=channel_id,
+                agent_id=agent_id,
+            ),
+            markup=markup,
+            now=datetime.now(UTC),
+            checks=frozenset({"budget_exceeded", "allowance_exhausted"}),
         )
-        refused(TerminationReason.ADMISSION_CAP_EXCEEDED)
+    if block is None:
+        return
+    log.info(
+        "mcp.admission_denied",
+        tenant_id=str(auth.tenant_id),
+        platform_user_id=auth.platform_user_id,
+        tool=tool_name,
+        gate=_GATE_LOG[block],
+    )
+    _refused(sessionmaker, auth, tool_name, _BLOCK_REASON[block])
+    if block == "allowance_exhausted":
         raise ToolError(
-            f"TERMINAL ERROR: {admission_refusal_text('cap_exceeded', _refusal_nouns(auth))}"
+            f"TERMINAL ERROR: {admission_refusal_text('allowance_exhausted', _refusal_nouns(auth))}"
         )
-
-    if await is_over_channel_budget(
-        sessionmaker=sessionmaker,
-        tenant_id=auth.tenant_id,
-        platform=auth.platform or "",
-        channel_id=owner or token_channel_id(auth),
-        now=datetime.now(UTC),
-    ):
-        log.info(
-            "mcp.admission_denied",
-            tenant_id=str(auth.tenant_id),
-            platform_user_id=auth.platform_user_id,
-            tool=tool_name,
-            gate="channel_budget",
-        )
-        refused(TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED)
-        raise ToolError(
-            "TERMINAL ERROR: This channel has used its spending budget. "
-            "An admin can raise or clear it."
-        )
-
-    return auth
+    raise ToolError(budget_message)
 
 
 async def _check_admission(  # pyright: ignore[reportUnusedFunction]
@@ -417,6 +467,7 @@ async def _check_admission(  # pyright: ignore[reportUnusedFunction]
     sessionmaker: async_sessionmaker[AsyncSession],
     membership_resolver: MembershipResolver | None = None,
     billing_config: BillingConfig | None,
+    markup: Decimal,
     tool_name: str,
     agent_names: Callable[[AuthIdentity], Awaitable[tuple[str | None, ...]]] | None = None,
 ) -> AuthIdentity:
@@ -432,6 +483,7 @@ async def _check_admission(  # pyright: ignore[reportUnusedFunction]
         sessionmaker=sessionmaker,
         membership_resolver=membership_resolver,
         billing_config=billing_config,
+        markup=markup,
         tool_name=tool_name,
         agent_names=None if agent_names is None else names,
     )

@@ -16,6 +16,7 @@ import dataclasses
 import uuid
 from collections.abc import Awaitable, Callable
 
+from daimon.adapters.teams.card import notice_card
 from daimon.adapters.teams.card_actions import Actor
 from daimon.adapters.teams.commands import CommandContext, fresh_start
 from daimon.adapters.teams.identity import TeamsInbound
@@ -140,7 +141,7 @@ async def new_command(context: CommandContext) -> None:
         chat_id=inbound.channel_id,
         thread_id=inbound.setup_thread_id,
     )
-    await context.send(MessageActivityInput(text=ENDED))
+    await context.send(notice_card(ENDED, error=False))
 
 
 async def _mark_ended(

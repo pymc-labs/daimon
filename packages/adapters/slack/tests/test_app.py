@@ -37,7 +37,6 @@ from daimon.adapters.slack.admin import SlackRequester
 from daimon.adapters.slack.app import SlackApp
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.continuity.messages import render_unexpected_loss
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import build_multifernet, encrypt_token
@@ -75,6 +74,7 @@ from slack_sdk.socket_mode.response import SocketModeResponse
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from yarl import URL
 
+from .conftest import shown_text
 from .harness import make_orchestrate_app
 
 
@@ -1005,12 +1005,13 @@ async def test_handle_app_mention_failure_posts_error_into_thread(
     body = posts[0].kwargs["json"]
     assert body["channel"] == "C_TEST"
     assert body["thread_ts"] == "1000000000.000001", "the error must land in the mention's thread"
-    assert "agent config is broken" not in body["text"], "exception text stays in the logs"
-    assert body["text"].startswith(
+    assert "agent config is broken" not in shown_text(body), "exception text stays in the logs"
+    assert shown_text(body).startswith(
         "Something went wrong on our side.\n\nTry again. If it keeps happening, tell an admin."
     )
-    assert body["blocks"][-1]["type"] == "context", "the ref is drawn small"
-    assert body["blocks"][-1]["elements"][0]["text"].startswith("Ref ")
+    card = body["attachments"][0]["blocks"]
+    assert card[-1]["type"] == "context", "the ref is drawn small"
+    assert card[-1]["elements"][0]["text"].startswith("Ref ")
 
 
 async def test_handle_app_mention_failure_uses_event_ts_as_thread_for_root_mention(
@@ -1322,6 +1323,10 @@ async def test_initial_card_post_failure_keeps_prepared_intent(
         "text": "<@U_BOT> hello",
     }
     admission = MagicMock()
+    # What the turn controls read: on the default provider, no move (M03).
+    admission.backend_revision = None
+    admission.backend_follow = None
+    admission.agent.model.id = "claude-haiku-5-5"
     admission.agent.name = "test-agent"
     admission.agent.model.id = "claude-sonnet-4-6"
 
@@ -1372,6 +1377,10 @@ async def test_initial_card_timestamp_write_failure_prevents_turn_and_preserves_
         "text": "<@U_BOT> hello",
     }
     admission = MagicMock()
+    # What the turn controls read: on the default provider, no move (M03).
+    admission.backend_revision = None
+    admission.backend_follow = None
+    admission.agent.model.id = "claude-haiku-5-5"
     admission.agent.name = "test-agent"
     admission.agent.model.id = "claude-sonnet-4-6"
     with (
@@ -1427,6 +1436,10 @@ async def test_terminal_render_followed_by_raise_still_retires_card_intent(
         "text": "<@U_BOT> hello",
     }
     admission = MagicMock()
+    # What the turn controls read: on the default provider, no move (M03).
+    admission.backend_revision = None
+    admission.backend_follow = None
+    admission.agent.model.id = "claude-haiku-5-5"
     admission.account_id = tenant.account_id
     admission.agent.id = "agent_test_id"
     admission.agent.name = "test-agent"
@@ -1530,6 +1543,10 @@ async def test_cancelled_initial_card_post_keeps_prepared_intent(
         "text": "<@U_BOT> hello",
     }
     admission = MagicMock()
+    # What the turn controls read: on the default provider, no move (M03).
+    admission.backend_revision = None
+    admission.backend_follow = None
+    admission.agent.model.id = "claude-haiku-5-5"
     admission.agent.name = "test-agent"
     admission.agent.model.id = "claude-sonnet-4-6"
     with (
@@ -2373,7 +2390,7 @@ async def test_drain_runs_remaining_authors_when_one_authors_turn_raises(
         for req in reqs
     ]
 
-    assert any("something went wrong" in str(r.kwargs) for r in posts), (
+    assert any("Something went wrong" in str(r.kwargs) for r in posts), (
         "the author whose turn raised must be told, not silently dropped"
     )
 
@@ -2784,7 +2801,7 @@ async def test_failed_pending_reaction_removal_leaves_the_drained_turn_intact(
         if method == "POST" and url.path == "/api/chat.postMessage"
         for req in reqs
     ]
-    assert not any("something went wrong" in str(r.kwargs) for r in posts), (
+    assert not any("Something went wrong" in str(r.kwargs) for r in posts), (
         "a cosmetic cleanup failure must not surface as a turn failure"
     )
 
@@ -3558,7 +3575,7 @@ async def test_orchestrate_first_turn_when_no_agent_configured_posts_guidance_an
         if url == post_url
         for req in reqs
     ]
-    guidance = [b for b in post_bodies if "agent-setup" in str(b.get("text", ""))]
+    guidance = [b for b in post_bodies if "agent-setup" in shown_text(b)]
     assert guidance, (
         f"expected a chat.postMessage mentioning /agent-setup, got bodies: {post_bodies}"
     )
@@ -3608,7 +3625,7 @@ async def test_run_thread_turn_when_over_balance_blocks_before_session_create(
             "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
         ) as mock_resolve_env,
         patch(
-            "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
+            "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
         patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock) as mock_create,
         patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as mock_run_turn,
@@ -3643,7 +3660,7 @@ async def test_run_thread_turn_when_over_balance_blocks_before_session_create(
     depleted = [
         b
         for b in post_bodies
-        if str(b.get("text", ""))
+        if shown_text(b)
         == "Your team has no Daimon credit yet.\n\nAn admin can add some with `/billing`."
     ]
     assert depleted, (
@@ -3688,9 +3705,9 @@ async def test_run_thread_turn_when_over_cap_blocks_before_session_create(
             "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
         ) as mock_resolve_env,
         patch(
-            "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
+            "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
+        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock) as mock_create,
         patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as mock_run_turn,
     ):
@@ -3727,7 +3744,7 @@ async def test_run_thread_turn_when_over_cap_blocks_before_session_create(
     cap_msgs = [
         b
         for b in post_bodies
-        if str(b.get("text", ""))
+        if shown_text(b)
         == "You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
     ]
     assert cap_msgs, (
@@ -3762,11 +3779,9 @@ async def test_run_thread_turn_when_over_channel_budget_blocks_before_session_cr
     with (
         patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock) as agent,
         patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock) as env,
-        patch("daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock) as balance,
-        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as cap,
-        patch(
-            "daimon.core.turn.admission.is_over_channel_budget", new_callable=AsyncMock
-        ) as budget,
+        patch("daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock) as balance,
+        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as cap,
+        patch("daimon.core.spend_gate.is_over_channel_budget", new_callable=AsyncMock) as budget,
         patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock) as mock_create,
     ):
         agent.return_value = "agent_test_id"
@@ -3790,7 +3805,7 @@ async def test_run_thread_turn_when_over_channel_budget_blocks_before_session_cr
 
     post_url = URL("https://slack.com/api/chat.postMessage")
     texts = [
-        str((req.kwargs.get("json") or json.loads(req.kwargs.get("data") or "{}")).get("text"))
+        shown_text(req.kwargs.get("json") or json.loads(req.kwargs.get("data") or "{}"))
         for (_, url), reqs in fake_slack_web_client.mock.requests.items()
         if url == post_url
         for req in reqs
@@ -3862,9 +3877,9 @@ async def test_run_thread_turn_when_unblocked_writes_usage_event_and_ledger_debi
             "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
         ) as mock_resolve_env,
         patch(
-            "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
+            "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
+        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch(
             "daimon.core.turn.prepare.create_session", new_callable=AsyncMock
         ) as mock_create_session,
@@ -3963,7 +3978,7 @@ async def test_run_thread_turn_reused_session_over_balance_blocks_and_skips_run_
             "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
         ) as mock_resolve_env,
         patch(
-            "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
+            "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
         patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock) as mock_create,
         patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as mock_run_turn,
@@ -3995,7 +4010,7 @@ async def test_run_thread_turn_reused_session_over_balance_blocks_and_skips_run_
     depleted = [
         b
         for b in post_bodies
-        if str(b.get("text", ""))
+        if shown_text(b)
         == "Your team has no Daimon credit yet.\n\nAn admin can add some with `/billing`."
     ]
     assert depleted, (
@@ -4060,9 +4075,9 @@ async def test_run_thread_turn_reused_session_over_cap_blocks_and_skips_run_turn
             "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
         ) as mock_resolve_env,
         patch(
-            "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
+            "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
+        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock) as mock_create,
         patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as mock_run_turn,
     ):
@@ -4097,7 +4112,7 @@ async def test_run_thread_turn_reused_session_over_cap_blocks_and_skips_run_turn
     cap_msgs = [
         b
         for b in post_bodies
-        if str(b.get("text", ""))
+        if shown_text(b)
         == "You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
     ]
     assert cap_msgs, f"expected the exact over-cap copy via chat.postMessage, got: {post_bodies}"
@@ -4189,9 +4204,9 @@ async def test_run_thread_turn_reused_session_unblocked_writes_usage_event_and_l
             "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
         ) as mock_resolve_env,
         patch(
-            "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
+            "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
+        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock) as mock_create,
         patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as mock_run_turn,
     ):
@@ -4298,9 +4313,9 @@ async def test_run_thread_turn_passes_one_shared_deadline_to_bind_and_run(
             "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
         ) as mock_resolve_env,
         patch(
-            "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
+            "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
+        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch(
             "daimon.core.turn.prepare.create_session", new_callable=AsyncMock
         ) as mock_create_session,
@@ -4414,9 +4429,9 @@ async def test_run_thread_turn_bind_phase_ceiling_does_not_escape_handle_app_men
             "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
         ) as mock_resolve_env,
         patch(
-            "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
+            "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
+        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch(
             "daimon.adapters.slack.app.bind_session", new_callable=AsyncMock
         ) as mock_bind_session,
@@ -4440,10 +4455,10 @@ async def test_run_thread_turn_bind_phase_ceiling_does_not_escape_handle_app_men
         "breach must leave exactly two posts -- the card, then the failure notice"
     )
     first_body = posts[0].kwargs["json"]
-    assert "_Ref " not in first_body.get("text", ""), (
+    assert "Ref " not in shown_text(first_body), (
         "the FIRST post must be the pre-bind status card, not the failure notice"
     )
-    failure_posts = [p for p in posts if "_Ref " in p.kwargs["json"].get("text", "")]
+    failure_posts = [p for p in posts if "Ref " in shown_text(p.kwargs["json"])]
     assert len(failure_posts) == 1, "exactly one post must be the boundary's failure notice"
     body = failure_posts[0].kwargs["json"]
     assert body["channel"] == channel
@@ -4648,9 +4663,9 @@ async def test_bind_phase_failure_leaves_no_cancel_registry_entry(
             "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
         ) as mock_resolve_env,
         patch(
-            "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
+            "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
+        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch(
             "daimon.adapters.slack.app.bind_session", new_callable=AsyncMock
         ) as mock_bind_session,
@@ -5156,9 +5171,8 @@ async def test_a_recovered_turn_keeps_editing_the_card_the_marker_points_at(
         "recovered turn must not post a second card before anything else runs"
     )
     assert _post_count() == 1, (
-        "a recovered turn must not post a second status card, and the "
-        "unexpected-loss notice is edited in above the answer rather than "
-        "posted as its own message -- so the card is the only post"
+        "a recovered turn must not post a second status card, and no "
+        "loss notice is posted as its own message -- so the card is the only post"
     )
 
     # 2. The marker addresses the live card.
@@ -5206,30 +5220,11 @@ async def test_a_recovered_turn_keeps_editing_the_card_the_marker_points_at(
         "the registry entry must no longer be bound to the first attempt's Event"
     )
 
-    # 5. The loss notice reaches the reader exactly once, history variant (the
-    # fake transport gives the transcript rescue a real APIError, which
-    # `_replay_previous_session` degrades to None -- logged above as
-    # "turn.recovery_transcript_unavailable"), and it sits ABOVE the answer it
-    # explains rather than under it: the answer replaced the status card, and
-    # Slack orders by the original ts, so a later message always reads below.
-    notice = render_unexpected_loss("history")
-    post_calls = [
-        req
-        for (_, url), reqs in fake_slack_web_client.mock.requests.items()
-        if url == post_url
-        for req in reqs
-    ]
-    posted_texts = [req.kwargs["json"].get("text") for req in post_calls]
-    assert notice not in posted_texts, (
-        f"the loss notice must not arrive as its own message, got {posted_texts}"
-    )
-    final_blocks = json.dumps(last_update_body.get("blocks", []))
-    assert json.dumps(notice)[1:-1] in final_blocks, (
-        f"the loss notice must be rendered into the answer card, got {final_blocks}"
-    )
+    # 5. No system line is added: the answer card carries exactly the agent's
+    # text (what was lost is the agent's to say), and nothing else is posted.
     answer_body = last_update_body["blocks"][0]["text"]
-    assert answer_body.startswith(notice + "\n\n"), (
-        f"the loss notice must be the answer's first paragraph, got {answer_body!r}"
+    assert answer_body == _ANSWER, (
+        f"the recovered answer must be exactly the agent's text, got {answer_body!r}"
     )
     assert rebound_author == "U_TEST_RECOVER", "the rebind must not change who is allowed to cancel"
 
@@ -5517,7 +5512,9 @@ async def test_handle_block_action_when_non_author_clicks_cancel_event_unset(
     assert body["channel"] == "C_TEST"
     assert body["user"] == "U_OTHER"
     assert "thread_ts" not in body
-    assert body["text"] == "Only the person who asked, or a workspace admin, can stop this reply."
+    assert (
+        shown_text(body) == "Only the person who asked, or a workspace admin, can stop this reply."
+    )
 
 
 @pytest.mark.parametrize("lookup", ["admin", "failed"])
@@ -5559,7 +5556,7 @@ async def test_handle_block_action_when_another_person_clicks_cancel_checks_thei
         "host_team_id": "T_TEST",
     }
     notices = [
-        req.kwargs["json"]["text"]
+        shown_text(req.kwargs["json"])
         for (_, url), reqs in fake_slack_web_client.mock.requests.items()
         if url == URL("https://slack.com/api/chat.postEphemeral")
         for req in reqs
@@ -5600,7 +5597,7 @@ async def test_handle_block_action_when_status_ts_not_in_registry_tells_clicker_
     assert len(notices) == 1
     body = notices[0].kwargs["json"]
     assert body["user"] == "U_AUTHOR"
-    assert "already finished" in body["text"]
+    assert "already finished" in shown_text(body)
 
 
 async def test_finished_cancel_button_refusal_stays_in_its_parent_thread() -> None:
@@ -6530,7 +6527,7 @@ class TestPerTurnRoleUpsert:
                 "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
             ) as mock_resolve_env,
             patch(
-                "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
+                "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
             ) as mock_over_balance,
             patch(
                 "daimon.core.turn.prepare.create_session", new_callable=AsyncMock
@@ -6619,9 +6616,7 @@ async def test_mention_from_a_user_outside_the_allowlist_is_refused_with_a_notic
         if url == post_url
         for req in reqs
     ]
-    refusals = [
-        b for b in post_bodies if "can't accept your request here" in str(b.get("text", ""))
-    ]
+    refusals = [b for b in post_bodies if "can't accept your request here" in shown_text(b)]
     assert refusals, f"expected the invoker refusal notice in-thread, got: {post_bodies}"
     assert refusals[0].get("thread_ts") == thread_ts
 
@@ -7315,7 +7310,7 @@ async def test_orchestrate_with_a_stale_setup_posts_the_out_of_date_notice(
     posts = fake_slack_web_client.mock.requests[
         ("POST", URL("https://slack.com/api/chat.postMessage"))
     ]
-    assert posts[-1].kwargs["json"]["text"] == (
+    assert shown_text(posts[-1].kwargs["json"]) == (
         "This channel's setup is out of date.\n\nAsk an admin to check `/agent-setup`."
     )
 

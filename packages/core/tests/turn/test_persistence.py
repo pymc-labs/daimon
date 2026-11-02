@@ -869,122 +869,6 @@ async def test_bulk_snapshot_rolls_back_all_records_and_cursor_on_a_late_invalid
     await persistence.run(publish)
 
 
-async def _worker_result_context():
-    from daimon.core.fleet import worker_slot
-
-    from ..test_fleet import _plain_run, _status_worker
-
-    run = _plain_run()
-    worker = _status_worker("running", run_id=run.id, tenant_id=run.tenant_id)
-    scope = Scope(
-        tenant_id=str(run.tenant_id),
-        account_id=str(run.orchestrator_account_id),
-        principal_id="host",
-        authorization_id="root-worker",
-    )
-    session = ResourceRef(
-        id="owned-worker-session",
-        kind="session",
-        provider="openai",
-        tenant_id=scope.tenant_id,
-        account_id=scope.account_id,
-        account_scope_id="owned-workspace",
-    )
-    binding = ProviderBinding(
-        id="worker-binding",
-        thread=worker_slot(run, worker).thread,
-        provider="openai",
-        profile="openai.persistent_workspace",
-        native_refs={"session": session.id},
-        legacy_account_id=scope.account_id,
-        generation=1,
-        config_revision=1,
-    )
-    store = MemoryStateStore()
-    await store.put_binding(binding, expected_generation=0)
-    return (
-        store,
-        TurnPersistence(store, binding, scope, operation_key="worker-op", now=lambda: NOW),
-        run,
-        worker,
-        session,
-    )
-
-
-async def test_worker_result_uses_only_accepted_durable_message_and_is_replay_safe():
-    from ..test_fleet import _final_message
-
-    store, persistence, run, worker, session = await _worker_result_context()
-    final = _final_message(session.id, "retained answer")
-    ignored = final.model_copy(
-        update={
-            "id": "other-root",
-            "payload": {
-                **final.payload,
-                "item_id": "other",
-                "content": [{"type": "text", "text": "unaccepted"}],
-            },
-        }
-    )
-    results = []
-
-    async def pump():
-        await persistence.record(session, final)
-        await persistence.record(session, ignored)
-        for _ in range(2):
-            results.append(
-                await persistence.publish_worker_result(
-                    run, worker, session, accepted_event_ids=frozenset({final.id})
-                )
-            )
-
-    await persistence.run(pump)
-    assert results[0] == results[1]
-    assert results[0].excerpt == "retained answer"
-    events = await store.read_events(session.id)
-    assert len(events) == 3
-    assert events[-1].id == f"fleet:{worker.id}:result"
-    assert events[-1].payload == final.payload
-
-
-@pytest.mark.parametrize("refusal", ["preview", "incomplete", "unaccepted", "foreign_worker"])
-async def test_worker_result_refuses_non_authoritative_or_foreign_evidence(refusal):
-    from dataclasses import replace
-
-    from daimon.core.fleet import FleetConflict
-
-    from ..test_fleet import _final_message
-
-    store, persistence, run, worker, session = await _worker_result_context()
-    final = _final_message(session.id, "must not publish")
-    if refusal == "preview":
-        final = final.model_copy(update={"authority": "preview"})
-    elif refusal == "incomplete":
-        final = final.model_copy(update={"payload": {**final.payload, "complete": False}})
-    elif refusal == "foreign_worker":
-        worker = replace(worker, ordinal=worker.ordinal + 1)
-    accepted = frozenset() if refusal == "unaccepted" else frozenset({final.id})
-
-    async def pump():
-        await persistence.record(session, final)
-        with pytest.raises(FleetConflict):
-            await persistence.publish_worker_result(
-                run, worker, session, accepted_event_ids=accepted
-            )
-
-    await persistence.run(pump)
-    assert len(await store.read_events(session.id)) == 1
-
-
-async def test_worker_result_requires_the_active_lease_before_read_or_append():
-    store, persistence, run, worker, session = await _worker_result_context()
-    with pytest.raises(ScopeViolation, match="lease"):
-        await persistence.publish_worker_result(
-            run, worker, session, accepted_event_ids=frozenset({"not-a-recorded-event"})
-        )
-    assert await store.read_events(session.id) == []
-
-
 @pytest.mark.parametrize("lost_ack", [False, True])
 async def test_unbound_worker_slot_uses_the_same_claim_and_never_recreates_after_lost_ack(lost_ack):
     from anthropic import APIConnectionError
@@ -1036,40 +920,6 @@ async def test_unbound_worker_slot_uses_the_same_claim_and_never_recreates_after
     if not lost_ack:
         assert contexts[0] == contexts[1] and contexts[0].id == "actual-worker"
     assert await store.get_binding(slot) is None
-
-
-async def test_unbound_native_claim_requires_a_fresh_guard_before_send():
-    from anthropic.types.beta import BetaManagedAgentsAgent
-    from daimon.core.fleet import FleetConflict
-
-    store = MemoryStateStore()
-    persistence = TurnPersistence(
-        store, None, SCOPE, slot=binding_slot(BINDING), operation_key="worker", now=lambda: NOW
-    )
-    sent = []
-
-    async def forbidden(key):
-        sent.append(key)
-        raise AssertionError("unfunded native create")
-
-    async def guard():
-        raise FleetConflict("funding refused")
-
-    async def allocate():
-        with pytest.raises(FleetConflict, match="funding refused"):
-            await persistence.mutate(
-                None,
-                "agent-create",
-                {},
-                forbidden,
-                BetaManagedAgentsAgent,
-                lambda _: "processed",
-                guard=guard,
-            )
-
-    await persistence.run(allocate)
-    record = await store.get_operation(SCOPE, "worker:agent-create:0")
-    assert record.operation.status == "pending" and sent == []
 
 
 async def test_worker_allocation_does_not_change_key_after_a_definite_native_refusal():
@@ -1260,3 +1110,67 @@ async def test_cleanup_timeout_preserves_pump_outcome(
         async with asyncio.timeout(1):
             await released.wait()
     assert next(iter(store.data.leases.values())).active is None
+
+
+class BlippingStore(MemoryStateStore):
+    """A store whose lease renewals fail with a dropped connection `blips` times."""
+
+    def __init__(self, blips: int) -> None:
+        super().__init__()
+        self.blips = blips
+        self.renewal_attempts = 0
+
+    async def renew_lease(self, lease: Lease, *, now: datetime, ttl: timedelta) -> Lease:
+        self.renewal_attempts += 1
+        if self.blips > 0:
+            self.blips -= 1
+            raise ConnectionError("database connection dropped")
+        return await super().renew_lease(lease, now=now, ttl=ttl)
+
+
+async def _run_through_renewals(store: BlippingStore, *, ttl: timedelta, hold_s: float) -> None:
+    await store.put_binding(BINDING, expected_generation=0)
+    persistence = TurnPersistence(
+        store,
+        BINDING,
+        SCOPE,
+        operation_key="root",
+        ttl=ttl,
+        send_timeout_s=0.1,
+        renew_interval_s=0.01,
+    )
+
+    async def pump() -> None:
+        await asyncio.sleep(hold_s)
+
+    await persistence.run(pump)
+
+
+async def test_a_database_blip_inside_the_lease_ttl_does_not_end_the_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("daimon.core.turn.persistence._RENEW_RETRY_INITIAL_S", 0.01)
+    store = BlippingStore(blips=3)
+    await _run_through_renewals(store, ttl=timedelta(seconds=30), hold_s=0.3)
+    assert store.renewal_attempts > 3, "the failed renewals were retried and then succeeded"
+
+
+async def test_a_database_outage_longer_than_the_lease_ends_the_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("daimon.core.turn.persistence._RENEW_RETRY_INITIAL_S", 0.01)
+    monkeypatch.setattr("daimon.core.turn.persistence._RENEW_RETRY_MAX_S", 0.02)
+    monkeypatch.setattr("daimon.core.turn.persistence._RENEW_GIVE_UP_MARGIN_S", 0.0)
+    store = BlippingStore(blips=10**6)
+    with pytest.raises(ConnectionError):
+        await _run_through_renewals(store, ttl=timedelta(seconds=1), hold_s=30)
+    assert store.renewal_attempts > 5, "it kept trying until shortly before the lease expired"
+
+
+def test_the_default_lease_bounds_a_killed_holders_stranding_to_150_seconds() -> None:
+    from daimon.core.turn.persistence import LEASE_RENEW_INTERVAL_S, LEASE_TTL
+
+    assert timedelta(seconds=150) == LEASE_TTL and LEASE_RENEW_INTERVAL_S == 30.0
+    persistence = context(MemoryStateStore())
+    assert persistence._ttl == LEASE_TTL  # pyright: ignore[reportPrivateUsage]
+    assert persistence._send_timeout_s < LEASE_TTL.total_seconds()  # pyright: ignore[reportPrivateUsage]

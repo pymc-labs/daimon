@@ -324,7 +324,6 @@
 .gh-row-action { display: inline-flex; align-items: center; gap: 5px; min-height: 44px; padding: 0 8px; border: 0; border-radius: 6px; background: transparent; color: var(--muted-foreground); font-size: 13px; font-weight: 500; white-space: nowrap; cursor: pointer; }
 .gh-row-action:hover, .gh-row-action:focus-visible { background: var(--muted); color: var(--foreground); }
 .gh-remove-action:hover, .gh-remove-action:focus-visible { background: var(--destructive-bg); color: var(--destructive); }
-.gh-undo-action { color: var(--foreground); }
 .gh-row-meta { margin: 0 0 0 32px; line-height: 24px; }
 .gh-row-meta:empty { display: none; }
 
@@ -455,6 +454,12 @@
   .gh-editor-footer-inner { flex-wrap: wrap; padding: 10px 16px calc(10px + env(safe-area-inset-bottom)); }
   .gh-editor-footer strong { font-size: 13px; }
   .gh-editor-footer-actions .gh-primary { padding: 0 14px; font-size: 14px; }
+  .gh-editor-footer-actions { width: 100%; }
+  .gh-editor-footer-actions .gh-primary { flex: 1; }
+  .gh-flow--saved { align-items: center; text-align: center; }
+  .gh-flow--saved .gh-status-line { color: var(--muted-foreground); font-weight: 400; }
+  .gh-flow--saved .gh-saved-groups { text-align: left; }
+  .gh-flow--saved .gh-back-discord { align-self: stretch; }
   .gh-editor .gh-editor-cancel:not([hidden]) { display: inline-flex; }
 }
 .gh-dock-warning { display: flex; align-items: center; gap: 6px; margin: 6px 0 0; padding: 4px 8px; border-radius: 6px; background: var(--warning-bg); color: var(--warning); font-size: 13px; font-weight: 500; line-height: 20px; }

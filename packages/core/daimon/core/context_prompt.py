@@ -7,15 +7,10 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-TurnContext = Literal["chat", "routine", "relay", "handoff", "worker"]
+TurnContext = Literal["chat", "routine", "relay", "handoff"]
 
 DEFAULT_FRAGMENTS: dict[TurnContext, str] = {
     "chat": "",
-    "worker": (
-        "This is an unattended worker turn. Complete only the assigned task under the "
-        "provided restrictions. Return the result or a concrete blocker to the orchestrator; "
-        "do not expand authority or start another worker."
-    ),
     "routine": (
         "This is an unattended routine. Do not ask clarifying questions; use available "
         "evidence and report blockers. Check before claiming nothing happened. "

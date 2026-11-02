@@ -492,3 +492,21 @@ def test_delete_modal_opens_on_what_delete_removes_and_what_stays() -> None:
         "\n\nShared agents and their memory stay, and other people may keep using them."
     ), "the scope comes first, two lines a blank line apart"
     assert "Session transcripts" not in _extract_text(view), "transcripts do not stay"
+
+
+def test_cascade_names_the_conversations_it_deletes_and_the_shared_ones_it_keeps() -> None:
+    preview = _make_preview(
+        mux_slots=PurgePreviewRow(count=1, example=None),
+        retained_shared_conversations=PurgePreviewRow(count=2, example=None),
+    )
+    blocks = _cascade_blocks(preview)
+    assert (
+        "Delete Daimon's copy of *1* saved conversation, with its messages"
+        in (blocks[0]["text"]["text"])
+    )
+    assert (
+        "Your messages in *2* shared conversations stay for the people still using them."
+        in (blocks[2]["text"]["text"])
+    )
+    quiet = _cascade_blocks(_make_preview())
+    assert "shared conversation" not in quiet[2]["text"]["text"]

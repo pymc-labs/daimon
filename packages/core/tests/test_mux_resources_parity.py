@@ -420,7 +420,7 @@ class SkillTransport:
 async def test_skill_multipart_version_walk_and_cleanup_match(operation):
     import io
 
-    from anthropic import APIStatusError
+    from anthropic import APIStatusError, omit
     from daimon.core.ma import delete_skill_and_versions
     from daimon.core.mux_compat import (
         create_skill,
@@ -453,7 +453,16 @@ async def test_skill_multipart_version_walk_and_cleanup_match(operation):
             )
             assert actual.model_dump(mode="json") == expected.model_dump(mode="json")
         elif operation == "download":
-            response = await before.beta.skills.versions.download("v1", skill_id="skill1")
+            # The beta header gets a workspace key refused: the version's id is looked up
+            # and its content read without the header.
+            version_id = ""
+            async for row in before.beta.skills.versions.list(skill_id="skill1", limit=100):
+                if row.version == "v1":
+                    version_id = row.id
+                    break
+            response = await before.beta.skills.versions.download(
+                version_id, skill_id="skill1", extra_headers={"anthropic-beta": omit}
+            )
             try:
                 expected = await response.read()
             finally:
@@ -600,97 +609,6 @@ async def test_skill_walks_keep_sdk_terminal_page_stop_rule(path, stop_case):
     assert actual == expected
     assert_transport_equal(old, new)
     assert len(new.requests) == 1
-
-
-@pytest.mark.parametrize("clone", [False, True])
-async def test_canonical_worker_agent_create_preserves_actual_sdk_bytes(clone):
-    from dataclasses import replace
-
-    from mux.contracts.ids import ResourceRef, Revision, SkillRef
-    from mux.contracts.resources import Agent, AgentSpec, ToolSpec
-
-    from .test_fleet_permissions import parent, resolve
-
-    root = parent()
-    payload = {
-        "name": "worker",
-        "model": root.spec.model.id,
-        "system": root.base_system + "\n\nDo the delegated task.",
-        "description": "Full authored description",
-        "tools": [
-            {
-                "type": "custom",
-                "name": "helper",
-                "description": "",
-                "input_schema": {"type": "object", "properties": {}},
-            }
-        ],
-        "skills": [{"type": "anthropic", "skill_id": "xlsx", "version": "1"}],
-        "mcp_servers": [],
-        "metadata": {"daimon_tenant": root.fleet.scope.tenant_id},
-    }
-    requested = AgentSpec(
-        name="worker",
-        model=root.spec.model,
-        system=root.base_system + "\n\nDo the delegated task.",
-        description="Full authored description",
-        tools=(
-            ToolSpec(
-                name="helper",
-                kind="custom",
-                description="",
-                input_schema={"type": "object", "properties": {}},
-            ),
-        ),
-        skills=(SkillRef(id="xlsx", source="anthropic", version="1"),),
-        mcp_servers=(),
-        metadata={"daimon_tenant": root.fleet.scope.tenant_id},
-    )
-    root = replace(root, spec=requested)
-    source = Agent(
-        ref=ResourceRef(
-            id="source",
-            kind="agent",
-            provider="anthropic",
-            account_scope_id="workspace",
-            tenant_id=root.fleet.scope.tenant_id,
-            account_id=root.fleet.scope.account_id,
-        ),
-        revision=Revision(local=7),
-        created_at=datetime(2026, 1, 1, tzinfo=UTC),
-        spec=requested,
-    )
-    if clone:
-        root = replace(
-            root, source_agents=(source.ref,), source_revisions=((source.ref, source.revision),)
-        )
-    worker = resolve(root, source if clone else requested)
-    before, after = ScriptedTransport(), ScriptedTransport()
-    native = ma_agent(
-        id="actual-worker",
-        name="worker",
-        model=root.spec.model.id,
-        system=requested.system,
-        description=requested.description,
-        tools=payload["tools"],
-        skills=payload["skills"],
-        metadata=payload["metadata"],
-    ).model_dump(mode="json")
-    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply
-
-    before.queue(ScriptedReply("POST", "/v1/agents", httpx.Response(200, json=native)))
-    after.queue(ScriptedReply("POST", "/v1/agents", httpx.Response(200, json=native)))
-    async with before.client() as old, after.client() as new:
-        expected = await old.beta.agents.create(**payload)
-        actual = await create_agent(
-            new, worker.spec, scope=worker.permissions.fleet.scope, key="claimed-worker"
-        )
-        assert actual.id == "actual-worker"
-        assert actual.model_dump(mode="json") == expected.model_dump(mode="json")
-    before.assert_consumed()
-    after.assert_consumed()
-    assert before.requests[0].body == after.requests[0].body
-    assert before.requests[0].protocol_headers == after.requests[0].protocol_headers
 
 
 async def test_claimed_agent_create_disables_sdk_retry_without_changing_shared_client():

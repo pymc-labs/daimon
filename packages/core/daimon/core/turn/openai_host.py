@@ -15,6 +15,7 @@ from decimal import Decimal
 from typing import cast
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
+import structlog
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import native_mcp_session
 from daimon.core.mux_backend import (
@@ -30,12 +31,11 @@ from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn.admission import reauthorize
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.io import TurnCodecRequest, TurnIO, register_turn_codec
-from daimon.core.turn.openai_codec import CONVERSATION_PROFILE, PROFILE, PROFILES
+from daimon.core.turn.openai_codec import PROFILE, PROFILES
 from daimon.core.turn.openai_io import OpenAITurnIO
 from daimon.core.turn.openai_state import (
     OpenAIRecoveryJournal,
     OpenAIUsageRevisions,
-    initial_input_consumed,
     invocation_baseline,
 )
 from daimon.core.turn.persistence import UncertainSend, current_persistence
@@ -47,7 +47,6 @@ from daimon.core.turn.prepare import (
 from daimon.core.usage_recording import record_provider_usage
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ResourceRef, Scope, ThreadRef
-from mux.contracts.receipts import DeletionReceipt
 from mux.contracts.resources import ProviderBinding, Session, SessionSpec
 from mux.contracts.usage import UsageObservation
 from mux.drivers.openai import (
@@ -172,17 +171,12 @@ def _codec(request: TurnCodecRequest) -> TurnIO:
         request.session,
         persistence=active,
         baseline_loader=invocation_baseline,
-        initial_input_loader=initial_input_consumed,
     )
 
 
 def _check_spec(
     spec: SessionSpec, runtime: OpenAIHostRuntime, scope: Scope, revision: ConfigRevision
 ) -> None:
-    if revision.profile == CONVERSATION_PROFILE and (
-        spec.environment is not None or spec.resources or spec.extensions
-    ):
-        raise UnsupportedCapability(("conversation_only_workspace",), revision.profile)
     refs = (spec.agent,) + ((spec.environment,) if spec.environment is not None else ())
     if spec.config_revision != revision.local or spec.state_mode != "continue":
         raise ScopeViolation("preparation", "OpenAI plan differs from admitted revision")
@@ -210,63 +204,6 @@ async def _create(
     spec: SessionSpec,
     runtime: OpenAIHostRuntime,
 ) -> Session:
-    if request.worker is not None or request.native_budget_usd is not None:
-        active = current_persistence.get()
-        if (
-            active is None
-            or active.store is not store
-            or active.scope != request.scope
-            or active.slot != slot
-            or request.before_native is None
-        ):
-            raise AdmissionDenied(reason="backend_unsupported")
-        active.check_session(request.scope, None)
-
-        initial = (
-            request.initial_input
-            if backend.capabilities().profile_id == CONVERSATION_PROFILE
-            else None
-        )
-        if backend.capabilities().profile_id == CONVERSATION_PROFILE and initial is None:
-            raise AdmissionDenied(reason="backend_unsupported")
-
-        async def create(native_key: str) -> Session:
-            native = await backend.sessions.create(
-                request.scope, spec, key=native_key, initial=initial
-            )
-            if initial is not None:
-                native = native.model_copy(
-                    update={
-                        "binding": native.binding.model_copy(
-                            update={
-                                "native_refs": {
-                                    **native.binding.native_refs,
-                                    "initial_input_operation": native_key,
-                                    "initial_input_turn": active.operation_key,
-                                    "initial_input_digest": request_digest(
-                                        initial.model_dump(mode="json")
-                                    ),
-                                }
-                            }
-                        )
-                    }
-                )
-            return native
-
-        return await active.mutate(
-            None,
-            "send" if initial is not None else "session_create",
-            {
-                "spec": spec.model_dump(mode="json"),
-                "controls": runtime.controls.model_dump(mode="json"),
-                **({"initial": initial.model_dump(mode="json")} if initial is not None else {}),
-            },
-            create,
-            Session,
-            lambda _: "processed",
-            guard=request.before_native,
-            retry_failed=False,
-        )
     # Stable per empty slot, including after a crash. Changed config/plan gets a
     # digest conflict, not a fresh operation which might create a second session.
     # A released slot's era suffix keeps an earlier era's creation from replaying.
@@ -304,8 +241,7 @@ async def _create(
             raise AdmissionDenied(reason="backend_unsupported")
         await store.claim_send(request.scope, key, now=request.now(), fence=lease)
         try:
-            # Bounds this one create call (inside the 5 min lease), not the worker's
-            # runtime, which is the deadline.
+            # Bound this create call within the lease and the turn deadline.
             async with asyncio.timeout(
                 min(120, (request.deadline - request.now()).total_seconds())
             ):
@@ -389,6 +325,25 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
     runtime = runtime_for(
         request.deps.turn_runtimes.get(revision.profile) if revision is not None else None, revision
     )
+    try:
+        return await _prepare_with_runtime(request, runtime)
+    except BaseException:
+        # A per-turn MCP credential minted before the turn existed (a template's
+        # session create) is revoked now, not left to its TTL.
+        if runtime.end_of_turn is not None:
+            try:
+                await runtime.end_of_turn()
+            except Exception:
+                structlog.get_logger(__name__).warning(
+                    "turn.mcp_credential_revoke_failed", exc_info=True
+                )
+        raise
+
+
+async def _prepare_with_runtime(
+    request: ProviderPreparationRequest, runtime: OpenAIHostRuntime
+) -> PreparedTurn:
+    revision = request.admission.backend_revision
     if revision is None or not request.deps.channel_backends or request.deps.turn_path != "mux":
         raise AdmissionDenied(reason="backend_unsupported")
     if (
@@ -404,19 +359,9 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
         or request.scope.account_id != str(request.session_account_id)
     ):
         raise ScopeViolation("preparation", "OpenAI thread differs from admitted scope")
-    if revision.profile == CONVERSATION_PROFILE and request.worker is None:
-        raise AdmissionDenied(reason="backend_unsupported")
     current = await reauthorize(request.deps, request.admission)
     if (
-        (
-            current.memory_read_only
-            and not (
-                revision.profile == CONVERSATION_PROFILE
-                and request.worker is not None
-                and "memory" in request.worker.declared_drops
-                and not request.worker.resources
-            )
-        )
+        current.memory_read_only
         or current.origin_seal_ids
         or current.source_sealed
         or current.asks_before_publishing
@@ -435,7 +380,7 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
     spec = await runtime.session_plan(request)
     _check_spec(spec, runtime, request.scope, revision)
     store = request.deps.state_store or PostgresStateStore(request.deps.sessionmaker)
-    if request.worker is None and current.backend_revision_origin == "agent":
+    if current.backend_revision_origin == "agent":
         # Admission retained this exact source consent; a generic StateStore
         # write has no agent-origin association and cannot recreate that proof.
         async with request.deps.sessionmaker.begin() as session:
@@ -495,41 +440,7 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
         # An acknowledged cached create may predate a process restart. Validate
         # actual provider ownership/model/environment before publishing it.
         verifying = driver(runtime, revision, request.scope, native.binding)
-        try:
-            verifying.sessions.validate_spend_control(native)
-            native = await verifying.sessions.retrieve(request.scope, native.ref)
-        except (ContinuityLost, ProviderError, ScopeViolation):
-            if runtime.controls.require_spend_control_echo:
-                from daimon.core.turn.run import (
-                    _archive_orphaned_session,  # pyright: ignore[reportPrivateUsage]
-                )
-
-                async def cleanup() -> DeletionReceipt:
-                    active = current_persistence.get()
-                    if active is not None:
-                        return await active.mutate(
-                            None,
-                            "session_delete",
-                            {"session": native.ref.model_dump(mode="json")},
-                            lambda key: verifying.sessions.delete(
-                                request.scope, native.ref, key=key
-                            ),
-                            DeletionReceipt,
-                            lambda _: "processed",
-                            retry_failed=False,
-                        )
-                    return await verifying.sessions.delete(
-                        request.scope,
-                        native.ref,
-                        key=f"openai:rejected:{native.ref.id}",
-                    )
-
-                await _archive_orphaned_session(
-                    request.deps.anthropic,
-                    session_id=native.ref.id,
-                    archive=cleanup,
-                )
-            raise
+        native = await verifying.sessions.retrieve(request.scope, native.ref)
         if (
             native.ref.provider != "openai"
             or native.ref.account_scope_id != runtime.account_scope_id
@@ -609,6 +520,7 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
             model_id=model_id,
             markup=request.deps.markup,
             channel_id=revision.channel.channel_id,
+            agent_id=current.agent.id,
         )
 
         if footer_cost is not None:
@@ -634,6 +546,8 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
         session_ref=ref,
         native_footer_cost=footer_cost,
         native_chat_session_id=binding.native_refs.get("daimon_chat_session_id"),
+        # Revokes a template turn's per-turn MCP credential however the turn ends.
+        _finalize=runtime.end_of_turn,
     )
 
 

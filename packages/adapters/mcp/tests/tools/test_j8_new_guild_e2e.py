@@ -1,17 +1,4 @@
-"""J8 end to end, offline: Daimon joins a server it has never seen.
-
-The server is provisioned by the real join path (`DaimonBot._provision_joined_guild`,
-what `on_guild_join` runs), with this deployment's default settings: a brand-new
-tenant, nothing installed, no access policy, no fleet grant, no runtime rows. Only
-code defaults apply. A member there, in a fresh public channel and in a private one:
-1. asks a plain question and is answered;
-2. says "fork yourself across opus, astra and argon and compare X": three workers run
-   under the default fleet and the card settles;
-3. says "make a copy of yourself on GPT": the copy is made (an admin's call) and the
-   switch to GPT is offered.
-A private Discord channel takes the same path as a public one: nothing in core
-treats it differently until an admin seals it (`sealed_channel_ids`).
-"""
+"""Ordinary agent operation and configuration paths, using offline providers."""
 
 from __future__ import annotations
 
@@ -32,11 +19,9 @@ from daimon.core import agent_fork
 from daimon.core.channel_backend import load_backend_agent, make_backend_service
 from daimon.core.config import McpSettings, Settings, TurnSettings
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
-from daimon.core.fleet_configuration import default_fleet_grant
 from daimon.core.provider_keys import DEFAULT_KEY_ENV
 from daimon.core.scope import DeploymentDefault
-from daimon.core.stores import tenant_ledger, tenants
-from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores import tenants
 from daimon.core.stores.domain import AccountRow, TenantRow
 from daimon.core.tenant_balance import is_over_balance
 from daimon.testing.db import db_committing_engine as db_committing_engine
@@ -45,13 +30,9 @@ from daimon.testing.db import require_owned_sessionmaker
 from daimon.testing.factories import make_platform_principal
 from daimon.testing.ma_models import ma_agent
 from daimon.testing.pytest_plugin import db_preflight as db_preflight
-from daimon.testing.turn_fakes import RecordingLifecycle
 from fastmcp.exceptions import ToolError
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from sqlalchemy.ext.asyncio import async_sessionmaker
-
-from packages.adapters.mcp.tests.tools.test_j10_fork_e2e import root_turn_harness, run_j10
-from packages.core.tests.turn.test_frozen_root import run_root_input
 
 #: This deployment's settings, as the bot reads them on a join (defaults only).
 SETTINGS = Settings(
@@ -109,33 +90,6 @@ async def joined(db_preflight, db_committing_engine, keyed):
     return sm, tenant_id, account_id
 
 
-async def test_a_new_server_starts_on_trial_credit_with_every_keyed_provider(joined):
-    sm, tenant_id, _ = joined
-    async with sm() as db:
-        balance = await tenant_ledger.get_balance(db, tenant_id=tenant_id)
-        policy = await load_access_policy(db, tenant_id=tenant_id)
-        tenant = await tenants.get_tenant(db, tenant_id)
-    # The join seeds this deployment's signup credit: a new server can chat at once.
-    assert balance == SETTINGS.billing.signup_credit == Decimal("10.00")
-    assert tenant is not None and tenant.funding_mode == "prepaid"
-    assert not await is_over_balance(sessionmaker=sm, tenant_id=tenant_id)
-    # No access policy was written: every provider this deployment keys is enabled.
-    assert policy.enabled_backends == ("anthropic", "openai", "gemini")
-    assert not policy.backends_explicit
-    # So the default fleet offers Opus, Astra and Argon, and its run fits the credit.
-    from daimon.core.stores.domain import TenantBackendPolicy
-
-    grant = default_fleet_grant(
-        TenantBackendPolicy(
-            tenant_id=tenant_id, revision="r", enabled_backends=policy.enabled_backends
-        )
-    )
-    assert grant is not None
-    models = {model.id for model in grant.models}
-    assert {"claude-opus-5-5", "gpt-6-astra", "gemini-4-argon"} <= models
-    assert grant.limits.budget_usd <= balance
-
-
 async def test_a_server_joined_without_signup_credit_is_refused_in_plain_words(
     db_preflight, db_committing_engine
 ):
@@ -149,59 +103,6 @@ async def test_a_server_joined_without_signup_credit_is_refused_in_plain_words(
     said = admission_refusal_message("balance_depleted", unfunded)
     assert said.startswith("Your team's Daimon credit has run out.")
     assert "/billing" in said
-
-
-@pytest.mark.parametrize("channel", sorted(CHANNELS))
-async def test_a_member_asks_then_forks_across_opus_astra_and_argon(joined, monkeypatch, channel):
-    sm, tenant_id, account_id = joined
-    channel_id, thread_id = CHANNELS[channel]
-    async for value in root_turn_harness(
-        sm,
-        tenant_id,
-        account_id,
-        channel_id=channel_id,
-        thread_id=thread_id,
-        root_answer="X is the answer.",
-    ):
-        # 1. A plain question, answered.
-        asked = RecordingLifecycle()
-        from daimon.core.stores import turn_card_intents
-
-        async with sm.begin() as db:
-            question = await turn_card_intents.create_turn_card_intent(
-                db,
-                tenant_id=tenant_id,
-                platform="discord",
-                channel_id=channel_id,
-                thread_id=thread_id,
-                turn_token=uuid4(),
-            )
-        await run_root_input(value, intent_id=question.id, lifecycle=asked, message="What is X?")
-        assert not asked.terminal_failures
-        (done,) = asked.terminal_success
-        assert "X is the answer." in "".join(getattr(block, "text", "") for block in done.content)
-        # 2. "fork yourself across opus, astra and argon and compare X".
-        seen = await run_j10(
-            value,
-            monkeypatch,
-            "argon",
-            message="Fork yourself across opus, astra and argon and compare X.",
-        )
-        assert [reply["status"] for reply in seen.replies] == ["pending"] * 3
-        assert [(row.backend, row.model, row.status) for row in seen.settled] == [
-            ("anthropic", "claude-opus-5-5", "succeeded"),
-            ("openai", "gpt-6-astra", "succeeded"),
-            ("gemini", "gemini-4-argon", "succeeded"),
-        ]
-        # The root runs as the member, never an admin, in this channel.
-        assert not seen.root.subject.is_admin
-        assert seen.root.fleet.root.channel.channel_id == channel_id
-        assert seen.collected["status"] == "ready"
-        assert seen.gate == (True, None)
-        assert seen.card[0] == "**Fleet — collected**" and seen.run_status == "completed"
-        # The trial credit paid for it and is not used up.
-        assert not await is_over_balance(sessionmaker=sm, tenant_id=tenant_id)
-        break
 
 
 def _copy_router(tenant_id, created):

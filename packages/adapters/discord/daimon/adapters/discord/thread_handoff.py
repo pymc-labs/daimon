@@ -28,6 +28,7 @@ import structlog
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.button_message import ButtonMessage
 from daimon.adapters.discord.checks import admin_caller
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.thread_handoff import handover_seed, switch_thread_on_request
@@ -78,16 +79,18 @@ class HandOverButton(
             # Dynamic-item dispatch is an adapter boundary: discord.py swallows
             # anything raised here, so log it and tell the clicker.
             _log.exception("thread_handoff.callback_failed", err_type=type(err).__name__)
+            card = build_notice_embed(_FAILED)
             if interaction.response.is_done():
-                await interaction.followup.send(_FAILED, ephemeral=True)
+                await interaction.followup.send(embed=card, ephemeral=True)
             else:
-                await interaction.response.send_message(_FAILED, ephemeral=True)
+                await interaction.response.send_message(embed=card, ephemeral=True)
 
     async def _hand_over(self, interaction: discord.Interaction[commands.Bot]) -> None:
         thread, notice = interaction.channel, interaction.message
         if interaction.guild_id is None or not isinstance(thread, discord.Thread) or notice is None:
             await interaction.response.send_message(
-                "This button only works in a conversation thread.", ephemeral=True
+                embed=build_notice_embed("This button only works in a conversation thread."),
+                ephemeral=True,
             )
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -123,7 +126,7 @@ class HandOverButton(
             agent_id=self.agent_id,
         )
         if not outcome.switched:
-            await interaction.followup.send(outcome.text, ephemeral=True)
+            await interaction.followup.send(embed=build_notice_embed(outcome.text), ephemeral=True)
             return
         message = ButtonMessage(
             notice,
@@ -132,10 +135,7 @@ class HandOverButton(
             text=handover_seed(seed, agent_name=outcome.destination_name or ""),
         )
         bot._spawn(bot.on_message(message))  # pyright: ignore[reportPrivateUsage]  # normal mention ingress outlives the click
-        await thread.send(
-            f"{interaction.user.mention} handed this conversation over. {outcome.text}",
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+        # The agent now answering is told (`switch_thread_on_request`); nothing is posted.
         # The notice's button has done its job.
         transport = DiscordPostTransport(
             bot,
@@ -145,7 +145,7 @@ class HandOverButton(
             builtin=False,
         )
         await transport.edit(notice, view=None)
-        # The public post above is the answer; drop the private "thinking".
+        # The retired button is the answer; drop the private "thinking".
         await interaction.delete_original_response()
 
 

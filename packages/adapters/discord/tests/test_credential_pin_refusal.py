@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from daimon.adapters.discord.credential_origin import resolve_credential_target
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_pins import PIN_WRITE_REFUSAL
 from daimon.core.ma_identity import derive_agent_uuid
@@ -71,7 +72,9 @@ async def test_a_pinned_target_is_refused_before_the_form_is_consumed(
     )
 
     assert target is None
-    interaction.followup.send.assert_awaited_once_with(PIN_WRITE_REFUSAL, ephemeral=True)
+    interaction.followup.send.assert_awaited_once_with(
+        embed=build_notice_embed(PIN_WRITE_REFUSAL), ephemeral=True
+    )
 
 
 async def test_a_pin_after_the_early_check_is_decided_inside_the_consume(
@@ -143,7 +146,9 @@ async def test_a_pin_after_the_early_check_is_decided_inside_the_consume(
         row=row,
     )
 
-    interaction.followup.send.assert_awaited_once_with(PIN_WRITE_REFUSAL, ephemeral=True)
+    interaction.followup.send.assert_awaited_once_with(
+        embed=build_notice_embed(PIN_WRITE_REFUSAL), ephemeral=True
+    )
     async with db_session_factory() as session:
         live = await peek_credential_request(session, token="tok-late-pin")
     assert live is not None and live.used_at is None, "the refused form was not spent"

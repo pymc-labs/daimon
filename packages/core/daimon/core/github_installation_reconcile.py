@@ -119,6 +119,11 @@ async def drain_github_installation_reconciliations(
                     suspended_at=(
                         installation_state.suspended_at if installation_state is not None else None
                     ),
+                    repository_selection=(
+                        installation_state.repository_selection
+                        if installation_state is not None
+                        else None
+                    ),
                     now=finished_at,
                 )
                 owner_before = (

@@ -2,8 +2,8 @@
 
 Native OpenAI and Gemini usage reaches no ledger debit today, so the balance,
 user and channel gates can't see it. This cap is the guard: checked before any
-native call of an agent turn or a fleet worker, from today's (UTC) observed usage
-at list price plus running workers' reservations (`stores.model_spend`).
+native call of an agent turn, from today's (UTC) observed usage
+at list price (`stores.model_spend`).
 """
 
 from __future__ import annotations
@@ -35,9 +35,8 @@ async def check_daily_model_cap(
 ) -> None:
     """Refuse once the tenant's spend today on `model` reaches `cap`.
 
-    A worker's own reservation already counts toward today's spend, so it may use
-    the cap up exactly; an agent turn starts only while some of it remains. With no
-    current tariff the spend can't be known, so the turn is refused (fail closed).
+    An agent turn starts only while some of the cap remains. With no current
+    tariff the spend can't be known, so the turn is refused (fail closed).
     """
     from daimon.core.stores.model_spend import SpendUnpriced, model_spend_today
 
@@ -52,12 +51,11 @@ async def check_daily_model_cap(
                 model=model,
                 now=request.now(),
                 rates=price,
-                markup=request.deps.markup,
             )
     except SpendUnpriced:
         log.warning("turn.daily_model_cap_unpriced", tenant_id=str(request.tenant_id), model=model)
         raise AdmissionDenied(reason="provider_price_unavailable", provider=model) from None
-    if spent > cap if request.worker is not None else spent >= cap:
+    if spent >= cap:
         log.warning(
             "turn.daily_model_cap_reached",
             tenant_id=str(request.tenant_id),

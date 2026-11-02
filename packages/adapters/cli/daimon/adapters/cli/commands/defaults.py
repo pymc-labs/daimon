@@ -90,8 +90,8 @@ async def defaults_apply(
     defaults_root: Path,
 ) -> None:
     if rt.settings.anthropic.api_key is None:
-        # OpenAI-only deployment (see docs/self-hosting.md's "Self-host on
-        # OpenAI"): there is no Anthropic-backed default agent/environment/
+        # OpenAI-only deployment (see docs/providers.md's "Run on OpenAI"):
+        # there is no Anthropic-backed default agent/environment/
         # skill set to reconcile. `daimon openai init` seeds the OpenAI
         # equivalent separately, once the operator has a project and model.
         console.print(
