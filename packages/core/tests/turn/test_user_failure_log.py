@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 import structlog
@@ -280,6 +281,7 @@ async def test_a_routine_fire_that_returns_without_finishing_logs_nothing(
     monkeypatch.setattr(scheduler, "advance_stale", nothing)
     monkeypatch.setattr(scheduler, "claim_due_fireable", claim)
     monkeypatch.setattr(scheduler, "skip_slots_during_fire", nothing)
+    monkeypatch.setattr(scheduler, "configured_routines", AsyncMock(return_value=set()))
     with capture_logs() as logs:
         await run_one_tick(
             now=datetime(2026, 1, 1, tzinfo=UTC),
