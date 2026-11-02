@@ -283,8 +283,10 @@ class LegacyTurnTransport:
                 return getattr(stop_reason, "type", None) != "requires_action"
             return False
 
-    async def replay(self) -> list[BetaManagedAgentsSessionEvent]:
-        async with asyncio.timeout(READ_TIMEOUT_S):
+    async def replay(
+        self, *, timeout_s: float | None = None
+    ) -> list[BetaManagedAgentsSessionEvent]:
+        async with asyncio.timeout(READ_TIMEOUT_S if timeout_s is None else timeout_s):
             events: list[BetaManagedAgentsSessionEvent] = []
             # Every reconnect walks the whole session log; the SDK default page size
             # would multiply the round trips on a long session fivefold.

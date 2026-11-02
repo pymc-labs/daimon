@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import anthropic
@@ -899,3 +899,75 @@ async def test_stop_during_a_retried_read_interrupts_the_turn(
         ev["type"] for _sid, payload in fa.beta.sessions.events.sent_events for ev in payload
     ]
     assert "user.interrupt" in sent_types
+
+
+class _BudgetRecordingIO:
+    """The legacy IO, recording the budget the driver gives each replay."""
+
+    def __init__(self, fake: FakeAnthropic) -> None:
+        self.source = LegacyTurnIO(cast(AsyncAnthropic, fake), "sess_1")
+        self.replay_budgets: list[float] = []
+
+    async def open_stream(self, *, read_timeout_s: float) -> TurnStream:
+        return await self.source.open_stream(read_timeout_s=read_timeout_s)
+
+    async def send(self, events: Sequence[BetaManagedAgentsEventParams]) -> None:
+        await self.source.send(events)
+
+    async def status(self) -> str:
+        return await self.source.status()
+
+    async def replay(self, *, timeout_s: float = 30) -> list[BetaManagedAgentsSessionEvent]:
+        self.replay_budgets.append(timeout_s)
+        return await self.source.replay(timeout_s=timeout_s)
+
+    async def interrupt(self, *, timeout_s: float) -> StopObservation | None:
+        return await self.source.interrupt(timeout_s=timeout_s)
+
+    async def archive(self) -> None:
+        await self.source.archive()
+
+
+@pytest.mark.parametrize(
+    ("turn_left_s", "expected_budget_s"),
+    [(None, 60.0), (45 * 60.0, 45 * 60.0 - 30.0), (40.0, 60.0)],
+)
+async def test_a_reconnect_replay_gets_what_the_turn_ceiling_leaves(
+    monkeypatch: pytest.MonkeyPatch, turn_left_s: float | None, expected_budget_s: float
+) -> None:
+    from daimon.core.turn import driver
+    from daimon.core.turn.ceiling import current_turn_deadline
+
+    fa = FakeAnthropic()
+    pre = make_agent_message(event_id="sevt_1", text="hello ")
+    mid = make_agent_message(event_id="sevt_2", text="world")
+    done = make_status_idle(event_id="sevt_3", stop_reason=make_end_turn())
+    fa.beta.sessions.events.stream_scripts = [
+        [YieldEvent(pre), RaiseReadError()],
+        [YieldEvent(mid), YieldEvent(done)],
+    ]
+    fa.beta.sessions.events.replay_events = [pre, mid]
+    io = _BudgetRecordingIO(fa)
+
+    def factory(*args: object, **kwargs: object) -> _BudgetRecordingIO:
+        return io
+
+    monkeypatch.setattr(driver, "turn_io", factory)
+    deadline = None if turn_left_s is None else _FROZEN_NOW + timedelta(seconds=turn_left_s)
+    token = current_turn_deadline.set(deadline)
+    try:
+        final = await driver.run_turn(
+            anthropic=_cast(fa),
+            session_id="sess_1",
+            user_message="hi",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            render_interval_s=0.001,
+            now=_now,
+            billing=_EXEMPT,
+        )
+    finally:
+        current_turn_deadline.reset(token)
+
+    assert final.content == [TextBlock(kind="text", text="hello world")]
+    assert io.replay_budgets == [expected_budget_s]

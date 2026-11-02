@@ -96,8 +96,8 @@ async def replay_events(
     """
 
     try:
-        return await asyncio.wait_for(
-            LegacyTurnTransport(anthropic, session_id, scope=scope).replay(), timeout=timeout_s
+        return await LegacyTurnTransport(anthropic, session_id, scope=scope).replay(
+            timeout_s=timeout_s
         )
     except TimeoutError as err:
         raise TurnError(
