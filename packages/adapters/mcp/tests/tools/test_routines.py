@@ -27,6 +27,7 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.server import create_mcp_app
+from daimon.core import routine_service
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
@@ -52,7 +53,6 @@ _delete_routine_impl = _routines_mod._delete_routine_impl  # pyright: ignore[rep
 _get_routine_impl = _routines_mod._get_routine_impl  # pyright: ignore[reportPrivateUsage]
 _list_routines_impl = _routines_mod._list_routines_impl  # pyright: ignore[reportPrivateUsage]
 _update_routine_impl = _routines_mod._update_routine_impl  # pyright: ignore[reportPrivateUsage]
-_require_platform_user_id = _routines_mod._require_platform_user_id  # pyright: ignore[reportPrivateUsage]
 
 
 def _ma_agent(*, agent_id: str, name: str, tenant_id: uuid.UUID) -> dict[str, object]:
@@ -524,10 +524,18 @@ async def test_create_routine_stamps_created_by_user_id_from_auth_platform_user_
     )
 
 
-async def test_require_platform_user_id_raises_with_exact_error_string_when_missing() -> None:
-    auth = _auth_identity(platform_user_id=None)
+async def test_create_routine_without_a_platform_user_is_refused(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
     with pytest.raises(ToolError) as exc_info:
-        _require_platform_user_id(auth)
+        await _create_routine_impl(
+            _runtime(committing_sessionmaker),
+            _auth_identity(platform_user_id=None),
+            agent_name="daimon",
+            cron_expr="* * * * *",
+            timezone="UTC",
+            trigger_message="hi",
+        )
     assert str(exc_info.value) == _EXPECTED_PLATFORM_USER_ID_ERROR, (
         "missing platform_user_id (e.g. CLI session) must be rejected at create_routine "
         "so the scheduler never sees an unfireable row"
@@ -1751,7 +1759,7 @@ async def test_required_destination_refuses_before_database_and_agent_lookup(
 ) -> None:
     factory = MagicMock(side_effect=AssertionError("must not open a database session"))
     lookup = AsyncMock(side_effect=AssertionError("must not look up an agent"))
-    monkeypatch.setattr(_routines_mod, "find_agent_by_daimon_tag", lookup)
+    monkeypatch.setattr(routine_service, "find_agent_by_daimon_tag", lookup)
     runtime = _runtime(factory, require_destination=True)
 
     with pytest.raises(ToolError) as refused:
@@ -1819,7 +1827,7 @@ async def test_required_destination_on_authenticated_public_mcp_surface(
     )
     await db_session.commit()
     lookup = AsyncMock(side_effect=AssertionError("must not look up an agent"))
-    monkeypatch.setattr(_routines_mod, "find_agent_by_daimon_tag", lookup)
+    monkeypatch.setattr(routine_service, "find_agent_by_daimon_tag", lookup)
     requests: list[httpx.Request] = []
 
     def unexpected_native(request: httpx.Request) -> httpx.Response:
@@ -1888,3 +1896,27 @@ async def test_required_destination_on_authenticated_public_mcp_surface(
     assert requests == []
     async with committing_sessionmaker() as session:
         assert await list_routines_for_tenant(session, tenant_id=tenant.id) == []
+
+
+async def test_routine_tools_go_through_the_routine_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The chat tools hold no checks of their own: a service refusal reaches the caller as is."""
+
+    async def refuse(*_args: object, **_kwargs: object) -> RoutineRow:
+        raise routine_service.RoutineRefused("service said no")
+
+    monkeypatch.setattr(routine_service, "create_routine", refuse)
+    monkeypatch.setattr(routine_service, "get_routine", refuse)
+    runtime = _runtime(MagicMock())
+    with pytest.raises(ToolError, match="service said no"):
+        await _create_routine_impl(
+            runtime,
+            _auth_identity(),
+            agent_name="daimon",
+            cron_expr="* * * * *",
+            timezone="UTC",
+            trigger_message="hi",
+        )
+    with pytest.raises(ToolError, match="service said no"):
+        await _get_routine_impl(runtime, _auth_identity(), routine_id=uuid.uuid4())
