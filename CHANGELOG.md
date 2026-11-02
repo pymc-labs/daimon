@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- **New conversation**, **Switch server** and `/new` in a Discord DM answer straight away while Daimon is still replying there, saying to try again once it's done. Before, they waited for the reply and Discord showed the interaction as failed.
+
 - Stopping a Discord DM turn no longer posts its partial answer again under the card, or "The reply finished without text." when it stopped before any text. A DM turn that ends with no text and no tools shows only its card too.
 
 - Files an agent saves during a Discord DM turn are sent in the DM, attached to the answer as in a server thread. Before, a DM turn never collected them, so the agent said a file was ready when none arrived, and it stayed only in the session. A DM is held to Discord's default 10 MB upload limit; a larger file stays in the session with a notice, as in a thread. Each file first checks that the person may still receive the answer.
