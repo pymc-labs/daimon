@@ -4,9 +4,7 @@ A channel is listed when it has its own agent or environment setting, a
 budget or only its own agents running there. The private channels DM conversations
 run in are left out. The MCP `get_tenant_summary` tool and `daimon channels
 list` both read it, as a server admin sees each channel
-(`daimon.core.channel_overview`): its `readers` and `writers` are filled
-only for a caller that can already read the access policy (the CLI); for
-everyone else they are omitted.
+(`daimon.core.channel_overview`), readers and writers included.
 """
 
 from __future__ import annotations
@@ -59,9 +57,9 @@ class ChannelSummary:
     """Only its own agents run there (readers ``own``)."""
     budget: ChannelBudgetSummary | None
     readers: ChannelReaders | None = Field(default=None, exclude_if=_omitted)
-    """Whose turns read it; omitted unless the caller may read the access policy."""
+    """Whose turns read it."""
     writers: ChannelWriters | None = Field(default=None, exclude_if=_omitted)
-    """Who posts there; omitted unless the caller may read the access policy."""
+    """Who posts there."""
 
 
 @dataclass(frozen=True)
@@ -140,13 +138,9 @@ async def load_tenant_summary(
     tenant_id: uuid.UUID,
     default: DeploymentDefault,
     now: datetime,
-    with_access: bool = False,
 ) -> TenantSummary:
     """The tenant's summary; raises `StoreError` for an unknown tenant and
-    `AccessPolicyUnreadable` when its access policy can't be read.
-
-    ``with_access`` fills each channel's readers and writers: only for a
-    caller that can already read the whole access policy."""
+    `AccessPolicyUnreadable` when its access policy can't be read."""
     tenant = await get_tenant(session, tenant_id)
     if tenant is None:
         raise StoreError(f"no tenant {tenant_id}")
@@ -171,7 +165,7 @@ async def load_tenant_summary(
             budgets=budgets,
             dm_channel_ids=dm_channel_ids,
             policy=policy,
-            viewer=ChannelViewer(is_server_admin=True, reads_access_policy=with_access),
+            viewer=ChannelViewer(is_server_admin=True),
         ),
         timed_credit=[
             TimedCreditSummary(
