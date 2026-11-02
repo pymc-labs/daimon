@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 from daimon.core import workspace_settings as ws
 from daimon.core.access_policy import OPEN_ACCESS_POLICY
 from daimon.core.authz import Action, Subject, authorize
+from daimon.core.stores.domain import TenantRow, WebPersonRow
 from daimon.core.workspace_settings import SettingRefused
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import (
+    make_account,
+    make_platform_principal,
+    make_tenant,
+    make_web_person,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 ADMIN = Subject(is_admin=True, platform_user_id="1" * 17)
@@ -116,4 +124,83 @@ async def test_settings_a_platform_lacks_are_refused(db_session: AsyncSession) -
     with pytest.raises(SettingRefused, match="Typed mentions"):
         await ws.set_plain_text_mentions(
             db_session, tenant_id=tenant.id, subject=ADMIN, platform="web", enabled=True
+        )
+
+
+async def _person(
+    session: AsyncSession, tenant: TenantRow, *, name: str, chat_id: str | None = None
+) -> WebPersonRow:
+    account = await make_account(session, tenant=tenant)
+    if chat_id is not None:
+        await make_platform_principal(
+            session, tenant=tenant, account=account, platform="discord", external_id=chat_id
+        )
+    return await make_web_person(session, tenant=tenant, account=account, display_name=name)
+
+
+async def test_the_allowlist_lists_a_person_by_every_id_they_run_as(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    ada = await _person(db_session, tenant, name="Ada", chat_id=DISCORD_ID)
+    await _person(db_session, tenant, name="Bo")
+
+    named = await ws.set_invoker_people(
+        db_session, tenant_id=tenant.id, subject=ADMIN, person_ids=[ada.id]
+    )
+
+    assert [p.display_name for p in named.people] == ["Ada"]
+    stored = (await ws.load_access(db_session, tenant_id=tenant.id)).invoker_user_ids
+    assert set(stored) == {str(ada.id), DISCORD_ID}
+    assert (await ws.load_invoker_people(db_session, tenant_id=tenant.id)).limited
+
+
+async def test_ids_of_people_the_web_app_lacks_survive_a_change(db_session: AsyncSession) -> None:
+    tenant = await make_tenant(db_session)
+    ada = await _person(db_session, tenant, name="Ada")
+    bo = await _person(db_session, tenant, name="Bo")
+    await ws.set_invokers(
+        db_session,
+        tenant_id=tenant.id,
+        subject=ADMIN,
+        platform="discord",
+        user_ids=[DISCORD_ID, str(ada.id)],
+        trusted={str(ada.id)},
+    )
+
+    named = await ws.set_invoker_people(
+        db_session, tenant_id=tenant.id, subject=ADMIN, person_ids=[bo.id]
+    )
+
+    assert [p.display_name for p in named.people] == ["Bo"]
+    assert named.others == 1
+    stored = (await ws.load_access(db_session, tenant_id=tenant.id)).invoker_user_ids
+    assert set(stored) == {DISCORD_ID, str(bo.id)}
+
+
+async def test_no_one_listed_means_everyone_and_none_picked_is_refused(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    ada = await _person(db_session, tenant, name="Ada")
+    await ws.set_invoker_people(db_session, tenant_id=tenant.id, subject=ADMIN, person_ids=[ada.id])
+
+    with pytest.raises(SettingRefused, match="at least one"):
+        await ws.set_invoker_people(db_session, tenant_id=tenant.id, subject=ADMIN, person_ids=[])
+    with pytest.raises(SettingRefused, match="from this workspace"):
+        await ws.set_invoker_people(
+            db_session, tenant_id=tenant.id, subject=ADMIN, person_ids=[uuid.uuid4()]
+        )
+    named = await ws.set_invoker_people(
+        db_session, tenant_id=tenant.id, subject=ADMIN, person_ids=None
+    )
+    assert not named.limited
+
+
+async def test_a_person_of_another_workspace_cannot_be_listed(db_session: AsyncSession) -> None:
+    tenant, other = await make_tenant(db_session), await make_tenant(db_session)
+    stranger = await _person(db_session, other, name="Stranger")
+    with pytest.raises(SettingRefused, match="from this workspace"):
+        await ws.set_invoker_people(
+            db_session, tenant_id=tenant.id, subject=ADMIN, person_ids=[stranger.id]
         )

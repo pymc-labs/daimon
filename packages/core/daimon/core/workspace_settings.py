@@ -16,20 +16,21 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Collection, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from typing import Final
 
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Subject, authorize
 from daimon.core.errors import UserFacingError
-from daimon.core.stores import direct_messages, tenants
+from daimon.core.stores import direct_messages, identity, tenants, web_people
 from daimon.core.stores.access_policy import (
     load_access_policy,
     lock_access_policy,
     lock_policy_writes_exclusive,
     set_access_policy,
 )
+from daimon.core.stores.domain import WebPersonRow
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -104,15 +105,19 @@ async def _mentions_on(session: AsyncSession, tenant_id: uuid.UUID) -> bool:
 
 
 async def _change_policy(
-    session: AsyncSession, *, tenant_id: uuid.UUID, subject: Subject, **changes: object
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    subject: Subject,
+    build: Callable[[TenantAccessPolicy], dict[str, object]],
 ) -> TenantAccessPolicy:
-    """Merge `changes` into the stored policy under the policy lock, as an admin."""
+    """Merge what `build` returns for the stored policy, under the policy lock, as an admin."""
     await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
     await lock_access_policy(session, tenant_id=tenant_id)
     current = await load_access_policy(session, tenant_id=tenant_id)
     _require_admin(current, subject)
     try:
-        updated = TenantAccessPolicy.model_validate(current.model_dump() | changes)
+        updated = TenantAccessPolicy.model_validate(current.model_dump() | build(current))
     except ValidationError as exc:
         raise SettingRefused("That value isn't allowed. Nothing changed.") from exc
     if updated != current:
@@ -132,7 +137,7 @@ async def set_invokers(
     """Replace who may start turns; an empty list lets everyone. Returns the stored list."""
     parsed = parse_invokers(user_ids, platform=platform, trusted=trusted)
     policy = await _change_policy(
-        session, tenant_id=tenant_id, subject=subject, invoker_user_ids=parsed
+        session, tenant_id=tenant_id, subject=subject, build=lambda _: {"invoker_user_ids": parsed}
     )
     return policy.invoker_user_ids
 
@@ -142,7 +147,10 @@ async def set_dm_memory_read_only(
 ) -> bool:
     """Give turns started from a DM read-only memory (or not)."""
     policy = await _change_policy(
-        session, tenant_id=tenant_id, subject=subject, dm_memory_read_only=enabled
+        session,
+        tenant_id=tenant_id,
+        subject=subject,
+        build=lambda _: {"dm_memory_read_only": enabled},
     )
     return policy.dm_memory_read_only
 
@@ -175,3 +183,82 @@ async def set_plain_text_mentions(
         raise SettingRefused("Typed mentions aren't available here. Nothing changed.")
     _require_admin(await load_access_policy(session, tenant_id=tenant_id), subject)
     await tenants.set_plain_text_mentions(session, tenant_id=tenant_id, enabled=enabled)
+
+
+@dataclass(frozen=True)
+class InvokerPeople:
+    """The invoker allowlist as people: who it names, and how many ids name nobody here."""
+
+    people: tuple[WebPersonRow, ...]
+    others: int
+    """Ids of people who never signed in to the web app; the web app keeps them."""
+
+    @property
+    def limited(self) -> bool:
+        return bool(self.people) or self.others > 0
+
+
+async def _ids_by_person(
+    session: AsyncSession, *, tenant_id: uuid.UUID
+) -> dict[uuid.UUID, tuple[WebPersonRow, frozenset[str]]]:
+    """Every id a person's turns can run as: their own, and each linked chat account."""
+    people = await web_people.list_people(session, tenant_id=tenant_id)
+    linked = await identity.list_platform_principals_for_accounts(
+        session, tenant_id=tenant_id, account_ids={p.account_id for p in people}
+    )
+    ids: dict[uuid.UUID, set[str]] = {p.account_id: set() for p in people}
+    for principal in linked:
+        ids[principal.account_id].add(principal.external_id)
+    return {p.id: (p, frozenset({str(p.id), *ids[p.account_id]})) for p in people}
+
+
+def _covered(known: dict[uuid.UUID, tuple[WebPersonRow, frozenset[str]]]) -> set[str]:
+    return {i for _, ids in known.values() for i in ids}
+
+
+def _named(
+    invokers: Collection[str], known: dict[uuid.UUID, tuple[WebPersonRow, frozenset[str]]]
+) -> InvokerPeople:
+    listed = set(invokers)
+    named = tuple(person for person, ids in known.values() if ids & listed)
+    covered = _covered(known)
+    return InvokerPeople(people=named, others=len(listed - covered))
+
+
+async def load_invoker_people(session: AsyncSession, *, tenant_id: uuid.UUID) -> InvokerPeople:
+    """Who the invoker allowlist names, among the workspace's web people."""
+    policy = await load_access_policy(session, tenant_id=tenant_id)
+    known = await _ids_by_person(session, tenant_id=tenant_id)
+    return _named(policy.invoker_user_ids, known)
+
+
+async def set_invoker_people(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    subject: Subject,
+    person_ids: Sequence[uuid.UUID] | None,
+) -> InvokerPeople:
+    """Limit who may start turns to these people; None lets everyone.
+
+    Each person is listed by every id their turns can run as, so the limit holds in
+    the web app and in chat. Ids of people the web app doesn't know stay listed.
+    """
+    known = await _ids_by_person(session, tenant_id=tenant_id)
+    chosen = list(dict.fromkeys(person_ids or ()))
+    if any(person_id not in known for person_id in chosen):
+        raise SettingRefused("Pick people from this workspace. Nothing changed.")
+
+    def build(current: TenantAccessPolicy) -> dict[str, object]:
+        if person_ids is None:
+            return {"invoker_user_ids": ()}
+        covered = _covered(known)
+        kept = [i for i in current.invoker_user_ids if i not in covered]
+        added = sorted(i for person_id in chosen for i in known[person_id][1])
+        listed = tuple(dict.fromkeys([*kept, *added]))
+        if not listed:
+            raise SettingRefused("Pick at least one person, or let everyone. Nothing changed.")
+        return {"invoker_user_ids": listed}
+
+    policy = await _change_policy(session, tenant_id=tenant_id, subject=subject, build=build)
+    return _named(policy.invoker_user_ids, known)
