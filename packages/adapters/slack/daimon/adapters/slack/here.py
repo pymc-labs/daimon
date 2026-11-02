@@ -298,6 +298,7 @@ async def handle_here_command(runtime: SlackRuntime, payload: dict[str, Any]) ->
 async def handle_make_confidential(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
     """Use Slack's signed channel context and re-check the current workspace admin."""
     from daimon.adapters.slack.agent_setup.rules import RULE_NEED_ADMIN_MESSAGE, change_rule
+    from daimon.adapters.slack.credential_submissions import post_ephemeral
 
     team = cast(dict[str, Any], payload.get("team") or {})
     channel = cast(dict[str, Any], payload.get("channel") or {})
@@ -315,9 +316,9 @@ async def handle_make_confidential(runtime: SlackRuntime, payload: dict[str, Any
     if not await resolve_is_admin(
         client, user_id=user_id, host_team_id=team_id, action=DelegatedAction.CHANNEL_PERMISSIONS
     ):
-        text = RULE_NEED_ADMIN_MESSAGE
+        text, failed = RULE_NEED_ADMIN_MESSAGE, True
     else:
-        text, _failed = await change_rule(
+        text, failed = await change_rule(
             runtime,
             client,
             tenant_id=derive_tenant_uuid(platform="slack", workspace_id=team_id),
@@ -325,12 +326,7 @@ async def handle_make_confidential(runtime: SlackRuntime, payload: dict[str, Any
             channel_id=channel_id,
             readers="own",
         )
-    await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
-        channel=channel_id,
-        user=user_id,
-        text=text,
-        parse="none",
-    )
+    await post_ephemeral(client, channel_id=channel_id, user_id=user_id, text=text, error=failed)
 
 
 async def handle_here_approvals(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
