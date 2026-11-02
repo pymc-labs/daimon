@@ -40,7 +40,7 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_NAME,
 )
-from daimon.core.errors import DaimonError
+from daimon.core.errors import DaimonError, StaleChannelValue
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_agent
 from daimon.core.neutral_resources import NeutralResourceHost
@@ -66,9 +66,10 @@ from daimon.core.stores.access_policy import (
     set_access_policy,
 )
 from daimon.core.stores.scoped_config_read import get_scope, list_propagations_for_tenant
-from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.stores.channel_changes import record_change, write_channel_default
+from daimon.core.stores.domain import ChangeSurface
 from mux.errors import ScopeViolation
-from pydantic import ValidationError
+from pydantic import JsonValue, ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -469,6 +470,9 @@ class _Ask:
     writers: ChannelWriters | None
     release_agents: bool
     subject: Subject
+    actor_account_id: uuid.UUID | None = None
+    surface: ChangeSurface = "chat"
+    expected: ChannelRule | None = None
 
 
 async def _write_rule(
@@ -494,6 +498,8 @@ async def _write_rule(
     ):
         raise ChannelRuleRefused("admin_required")
     before = channel_rule(policy, ask.channel_id)
+    if ask.expected is not None and ask.expected != before:
+        raise StaleChannelValue("access", rule_json(before))
     rule = resolve_rule(before, readers=ask.readers, writers=ask.writers)
     try:
         check_channel_rule(ask.channel_id, rule)
@@ -524,6 +530,14 @@ async def _write_rule(
             updated, released = release_agents_of(updated, ask.channel_id)
     if updated != policy:
         await set_access_policy(session, tenant_id=tenant_id, policy=updated)
+        await _record_rule_change(
+            session,
+            ask,
+            tenant_id=tenant_id,
+            platform=platform,
+            before=policy,
+            after=updated,
+        )
     change = RuleChange(
         ask.channel_id,
         before,
@@ -536,6 +550,81 @@ async def _write_rule(
         else (),
     )
     return change, found
+
+
+def rule_json(rule: ChannelRule) -> dict[str, JsonValue]:
+    """A rule as a change record and the web carry it. Pure."""
+    return {"readers": rule.readers, "writers": rule.writers}
+
+
+def _kept_by_channel(
+    before: TenantAccessPolicy, after: TenantAccessPolicy, channel_ids: Collection[str]
+) -> dict[str, tuple[tuple[str, ...], tuple[str, ...]]]:
+    """Each of `channel_ids` whose kept agents differ, with the lists before and after."""
+    changed: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {}
+    for channel_id in sorted(set(channel_ids) - {WEB_PLACE_ID}):
+        was, now = sorted(runs_only_in(before, channel_id)), sorted(runs_only_in(after, channel_id))
+        if was != now:
+            changed[channel_id] = (tuple(was), tuple(now))
+    return changed
+
+
+async def record_kept_changes(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    before: TenantAccessPolicy,
+    after: TenantAccessPolicy,
+    channel_ids: Collection[str],
+    actor_account_id: uuid.UUID | None,
+    surface: ChangeSurface,
+) -> None:
+    """Record a kept-agents change on each of `channel_ids` whose list differs."""
+    for channel_id, (was, now) in _kept_by_channel(before, after, channel_ids).items():
+        await record_change(
+            session,
+            tenant_id=tenant_id,
+            platform=platform,
+            channel_id=channel_id,
+            setting="kept_agents",
+            before=list(was),
+            after=list(now),
+            actor_account_id=actor_account_id,
+            surface=surface,
+        )
+
+
+async def _record_rule_change(
+    session: AsyncSession,
+    ask: _Ask,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    before: TenantAccessPolicy,
+    after: TenantAccessPolicy,
+) -> None:
+    await record_change(
+        session,
+        tenant_id=tenant_id,
+        platform=platform,
+        channel_id=ask.channel_id,
+        setting="access",
+        before=rule_json(channel_rule(before, ask.channel_id)),
+        after=rule_json(channel_rule(after, ask.channel_id)),
+        actor_account_id=ask.actor_account_id,
+        surface=ask.surface,
+    )
+    await record_kept_changes(
+        session,
+        tenant_id=tenant_id,
+        platform=platform,
+        before=before,
+        after=after,
+        channel_ids=(ask.channel_id,),
+        actor_account_id=ask.actor_account_id,
+        surface=ask.surface,
+    )
 
 
 async def _archive_unused_copy(
@@ -652,8 +741,14 @@ async def set_channel_rule(
     release_agents: bool = False,
     resource_host: NeutralResourceHost | None = None,
     start_copy: Callable[[str, str, str, str], Awaitable[None]] | None = None,
+    surface: ChangeSurface = "chat",
+    expected_rule: ChannelRule | None = None,
 ) -> RuleChange:
     """Set `channel_id`'s rule; raise `ChannelRuleRefused` if refused. None keeps a side.
+
+    `expected_rule`, when given, is the rule the caller read: if the channel's rule
+    differs under the lock, `StaleChannelValue` is raised and nothing is written. The
+    change, and any agents it keeps or releases, is recorded as made on `surface`.
 
     `start_copy(source_name, source_ma_agent_id, copy_name, copy_ma_agent_id)` starts
     a copy of an agent on another provider there too (the MCP layer's switch path,
@@ -674,7 +769,16 @@ async def set_channel_rule(
         or resource_host.scope.account_id != str(actor_account_id)
     ):
         raise ScopeViolation(channel_id, "channel has a foreign resource host or actor")
-    ask = _Ask(channel_id, readers, writers, release_agents, subject)
+    ask = _Ask(
+        channel_id,
+        readers,
+        writers,
+        release_agents,
+        subject,
+        actor_account_id=actor_account_id,
+        surface=surface,
+        expected=expected_rule,
+    )
     wants_own = readers == "own" or (readers is None and writers == "own")
     known = (
         await _lookup_channel_agent(
@@ -780,15 +884,18 @@ async def set_channel_rule(
         async with policy_write_transaction(sessionmaker, tenant_id=tenant_id) as session:
             await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
             await lock_access_policy(session, tenant_id=tenant_id)
-            await set_fields(
+            await write_channel_default(
                 session,
-                scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=channel_id),
                 tenant_id=tenant_id,
+                platform=platform,
+                channel_id=channel_id,
                 agent_name=new_name,
-                mode="agent",
                 actor_account_id=actor_account_id,
+                surface=surface,
                 set_by_admin=subject.is_admin and not subject.via_agent_key,
             )
+            # The copy is the channel's default now; the rule is checked against the
+            # rule the caller read, which this transaction has not changed.
             change, found = await _write_rule(
                 anthropic,
                 session,
@@ -926,8 +1033,15 @@ async def set_agent_rule(
     runs_in: Sequence[str] | None,
     subject: Subject,
     default: DeploymentDefault,
+    actor_account_id: uuid.UUID | None = None,
+    surface: ChangeSurface = "chat",
+    expected_kept: tuple[str, Sequence[str]] | None = None,
 ) -> AgentRuleChange:
     """Set where `agent_name` runs (None: wherever it is set to answer).
+
+    `expected_kept` is `(channel_id, agents kept there)` as the caller read them: if
+    they differ under the lock, `StaleChannelValue` is raised and nothing is written.
+    Each channel whose kept agents change is recorded as changed on `surface`.
 
     The rule replaces any on the agent's other names. A channel's own agent
     keeps its rule until that channel's readers change; a rule naming a
@@ -961,6 +1075,11 @@ async def set_agent_rule(
             raise ChannelRuleRefused("admin_required")
         if agent is None and agent_name not in policy.agent_rules:
             raise ChannelRuleRefused("agent_not_found", agent_name=agent_name)
+        if expected_kept is not None:
+            kept_at, kept = expected_kept
+            current = sorted(runs_only_in(policy, kept_at))
+            if current != sorted(kept):
+                raise StaleChannelValue("kept_agents", current)
         # A missing agent has no channel of its own left to keep.
         home = agent_permissions(policy, names).home if agent is not None else None
         channels = tuple(c for c in target or () if c != WEB_PLACE_ID)
@@ -989,6 +1108,22 @@ async def set_agent_rule(
         updated = with_agent_rule(updated, agent_name, AgentRule(runs_in=target))
         if updated != policy:
             await set_access_policy(session, tenant_id=tenant_id, policy=updated)
+            touched = {
+                c
+                for p in (policy, updated)
+                for rule in agent_permissions(p, names).runs_in
+                for c in rule
+            }
+            await record_kept_changes(
+                session,
+                tenant_id=tenant_id,
+                platform=platform,
+                before=policy,
+                after=updated,
+                channel_ids=touched,
+                actor_account_id=actor_account_id,
+                surface=surface,
+            )
         answers_outside = False
         if target is not None and agent is not None:
             reach = await load_agent_reach(
@@ -1016,6 +1151,8 @@ __all__ = [
     "channel_rule_status",
     "copy_name",
     "describe_rule",
+    "record_kept_changes",
+    "rule_json",
     "keep_to_own",
     "release_agents_of",
     "render_rule_refusal",

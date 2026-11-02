@@ -6,7 +6,10 @@ import uuid
 from datetime import datetime
 
 from daimon.core._models import ChannelChange
+from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores.domain import ChangeSurface, ChannelChangeRow, ChannelSetting
+from daimon.core.stores.scoped_config_read import get_scope
+from daimon.core.stores.scoped_config_write import set_fields, unset_fields
 from pydantic import JsonValue
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -59,3 +62,51 @@ async def list_changes(
         .limit(limit)
     )
     return [ChannelChangeRow.model_validate(row) for row in rows]
+
+
+async def write_channel_default(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+    agent_name: str | None,
+    actor_account_id: uuid.UUID | None,
+    surface: ChangeSurface,
+    set_by_admin: bool = False,
+) -> str | None:
+    """Set (None: clear) the channel's own default agent and record it; return the prior one.
+
+    Every surface that changes a channel's default writes through here, so each change
+    is recorded. The caller has authorized it and holds the transaction.
+    """
+    scope = ChannelScopeRef(tenant_id=tenant_id, channel_id=channel_id)
+    prior_row = await get_scope(session, scope=scope)
+    prior = prior_row.agent_name if prior_row is not None else None
+    if agent_name is None:
+        if prior is not None:
+            await unset_fields(
+                session, scope=scope, fields=["agent_name"], actor_account_id=actor_account_id
+            )
+    else:
+        await set_fields(
+            session,
+            scope=scope,
+            tenant_id=tenant_id,
+            agent_name=agent_name,
+            mode="agent",
+            actor_account_id=actor_account_id,
+            set_by_admin=set_by_admin,
+        )
+    await record_change(
+        session,
+        tenant_id=tenant_id,
+        platform=platform,
+        channel_id=channel_id,
+        setting="default_agent",
+        before=prior,
+        after=agent_name,
+        actor_account_id=actor_account_id,
+        surface=surface,
+    )
+    return prior

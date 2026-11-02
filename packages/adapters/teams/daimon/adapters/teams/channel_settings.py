@@ -365,6 +365,7 @@ class ChannelSettingsDialog:
                 writers=None if writers == current.writers else writers,
                 # Only an admin reaches this, re-checked by the caller.
                 subject=build_subject(is_admin=True, platform_user_id=actor.user_id),
+                surface="panel",
                 default=self._runtime.deployment_default,
                 actor_account_id=await get_or_create_account(self._runtime, actor),
                 copy=copy,

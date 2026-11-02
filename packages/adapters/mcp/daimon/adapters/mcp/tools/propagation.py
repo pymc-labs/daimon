@@ -17,6 +17,7 @@ from dataclasses import dataclass
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
@@ -25,23 +26,29 @@ from daimon.adapters.mcp.tools._rule_view import (
     CallerView,
     load_caller_view,
     load_policy_or_refuse,
-    refuse,
     require_bindable,
 )
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.adapters.mcp.tools._words import space_noun
 from daimon.adapters.mcp.tools.reachability import (
+    channel_default_refusal,
     require_admin,
-    require_bindable_as_channel_default,
+    target_names,
 )
 from daimon.adapters.mcp.tools.setup_target import (
     get_chat_origin,
     origin_channel_id,
     resolve_setup_agent,
 )
+from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
+from daimon.core.channel_changes import (
+    ChannelActor,
+    ChannelChangeRefused,
+    clear_default_agent,
+    set_default_agent,
+)
 from daimon.core.channel_environments import build_environment_resolution_note
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.github_connect_cards import repos_come_too_line
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.permissions import any_agent_rules
@@ -50,7 +57,6 @@ from daimon.core.routing_facts import (
     build_resolution_note,
     build_set_default_note,
 )
-from daimon.core.rule_views import clear_refusal
 from daimon.core.scope import (
     ChannelConfigRow,
     ChannelScopeRef,
@@ -58,10 +64,12 @@ from daimon.core.scope import (
     TenantScopeRef,
     merge,
 )
+from daimon.core.stores.access_policy import AccessPolicyUnreadable
 from daimon.core.stores.domain import CHAT_PLATFORMS, ThreadAgentBindingRow
 from daimon.core.stores.github_connected_repos import agent_repo_summary
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields, unset_fields
+from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_agent_bindings import get_binding, list_active_bindings
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -111,6 +119,24 @@ async def _require_scope_admin(
         await require_admin(runtime, auth, channel_id=channel_id)
 
 
+def _channel_actor(auth: AuthIdentity) -> ChannelActor:
+    return ChannelActor(
+        tenant_id=auth.tenant_id,
+        account_id=auth.account_id,
+        subject=mcp_subject(auth, is_admin=auth.is_admin),
+        surface="chat",
+    )
+
+
+async def _tenant_platform(runtime: McpRuntime, auth: AuthIdentity) -> str:
+    """The platform a channel id belongs to: the caller's, else the tenant's."""
+    if auth.platform is not None:
+        return auth.platform
+    async with runtime.session_factory() as session:
+        tenant = await get_tenant(session, auth.tenant_id)
+    return tenant.platform if tenant is not None else "discord"
+
+
 async def _set_agent_default_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -125,17 +151,7 @@ async def _set_agent_default_impl(
         agent = await resolve_setup_agent(
             runtime, auth, name=agent_name, expected_ma_agent_id=expected_ma_agent_id
         )
-    if channel_id is not None:
-        await require_bindable_as_channel_default(
-            runtime,
-            auth,
-            channel_id=channel_id,
-            agent_name=agent_name,
-            agent=agent,
-            is_daimon_managed=agent is not None
-            and agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
-        )
-    else:
+    if channel_id is None:
         # The workspace default answers everywhere, so no pinned agent can be it.
         policy = await load_policy_or_refuse(runtime, auth.tenant_id)
         if any_agent_rules(policy):
@@ -147,37 +163,48 @@ async def _set_agent_default_impl(
 
     tenant_id: uuid.UUID = auth.tenant_id
     space = space_noun(auth.platform)
-    if channel_id is not None:
-        scope: ChannelScopeRef | TenantScopeRef = ChannelScopeRef(
-            tenant_id=tenant_id, channel_id=channel_id
-        )
-        scope_label = note_scope = f"channel:{channel_id}"
-    else:
-        scope = TenantScopeRef(tenant_id=tenant_id)
-        scope_label = "workspace"
-        note_scope = space
-
     if agent is None:
         agent = await find_agent_by_daimon_tag(
             runtime.client, tenant_id=auth.tenant_id, name=agent_name
         )
-    async with runtime.session_factory.begin() as session:
-        prior = await get_scope(session, scope=scope)
-        prior_agent: str | None = prior.agent_name if prior is not None else None
-        # The agent answers in one more place, so its repos reach that place too.
+    if channel_id is not None:
+        scope_label = note_scope = f"channel:{channel_id}"
+        try:
+            change = await set_default_agent(
+                runtime.session_factory,
+                _channel_actor(auth),
+                platform=await _tenant_platform(runtime, auth),
+                channel_id=channel_id,
+                agent_name=agent_name,
+                agent_names=target_names(agent_name, agent),
+            )
+        except AccessPolicyUnreadable as exc:
+            raise ToolError(POLICY_UNREADABLE_REFUSAL) from exc
+        except ChannelChangeRefused as exc:
+            raise channel_default_refusal(auth, exc, agent_name=agent_name) from exc
+        prior_agent = change.before
+    else:
+        scope_label = "workspace"
+        note_scope = space
+        async with runtime.session_factory.begin() as session:
+            scope = TenantScopeRef(tenant_id=tenant_id)
+            prior = await get_scope(session, scope=scope)
+            prior_agent = prior.agent_name if prior is not None else None
+            await set_fields(
+                session,
+                scope=scope,
+                tenant_id=tenant_id,
+                agent_name=agent_name,
+                mode="agent",
+                actor_account_id=auth.account_id,
+                set_by_admin=auth.is_admin and auth.agent_id is None,
+            )
+    # The agent answers in one more place, so its repos reach that place too.
+    async with runtime.session_factory() as session:
         brings_repos = agent is not None and bool(
             (await agent_repo_summary(session, tenant_id=tenant_id)).by_agent.get(
                 derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(agent.id))
             )
-        )
-        await set_fields(
-            session,
-            scope=scope,
-            tenant_id=tenant_id,
-            agent_name=agent_name,
-            mode="agent",
-            actor_account_id=auth.account_id,
-            set_by_admin=auth.is_admin and auth.agent_id is None,
         )
 
     return SetDefaultResult(
@@ -198,32 +225,37 @@ async def _clear_agent_default_impl(
 ) -> ClearDefaultResult:
     require_scope(auth, "channels:write")
     await _require_scope_admin(runtime, auth, channel_id)
-    if channel_id is not None:
-        policy = await load_policy_or_refuse(runtime, auth.tenant_id)
-        refuse(clear_refusal(policy, channel_id=channel_id), agent_name=None)
-
-    tenant_id: uuid.UUID = auth.tenant_id
     space = space_noun(auth.platform)
     if channel_id is not None:
-        scope: ChannelScopeRef | TenantScopeRef = ChannelScopeRef(
-            tenant_id=tenant_id, channel_id=channel_id
-        )
         scope_label = note_scope = f"channel:{channel_id}"
+        try:
+            change = await clear_default_agent(
+                runtime.session_factory,
+                _channel_actor(auth),
+                platform=await _tenant_platform(runtime, auth),
+                channel_id=channel_id,
+            )
+        except AccessPolicyUnreadable as exc:
+            raise ToolError(POLICY_UNREADABLE_REFUSAL) from exc
+        except ChannelChangeRefused as exc:
+            if exc.reason == "keeps_own":
+                raise ToolError(f"{exc}") from exc
+            raise channel_default_refusal(auth, exc, agent_name=None) from exc
+        had_default = change.before is not None
     else:
-        scope = TenantScopeRef(tenant_id=tenant_id)
+        scope = TenantScopeRef(tenant_id=auth.tenant_id)
         scope_label = "workspace"
         note_scope = space
-
-    async with runtime.session_factory.begin() as session:
-        prior = await get_scope(session, scope=scope)
-        had_default = prior is not None and prior.agent_name is not None
-        if had_default:
-            await unset_fields(
-                session,
-                scope=scope,
-                fields=["agent_name"],
-                actor_account_id=auth.account_id,
-            )
+        async with runtime.session_factory.begin() as session:
+            prior = await get_scope(session, scope=scope)
+            had_default = prior is not None and prior.agent_name is not None
+            if had_default:
+                await unset_fields(
+                    session,
+                    scope=scope,
+                    fields=["agent_name"],
+                    actor_account_id=auth.account_id,
+                )
 
     return ClearDefaultResult(
         scope=scope_label,

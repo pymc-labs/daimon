@@ -112,3 +112,15 @@ class SessionRetired(UserFacingError):
 
     Every raise carries a sentence written for the person in the thread.
     """
+
+
+class StaleChannelValue(DaimonError):
+    """A channel setting changed since the caller read it; nothing was written.
+
+    `setting` names it and `current` is its value now, as JSON.
+    """
+
+    def __init__(self, setting: str, current: object) -> None:
+        super().__init__("This changed since you opened it. Reload and try again.")
+        self.setting = setting
+        self.current = current
