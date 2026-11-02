@@ -320,6 +320,19 @@ def upgrade() -> None:
         END $audit$;"""
             )
         )
+    # Handing the ingress functions to their owner below needs the right to SET
+    # ROLE to it. Since PostgreSQL 16 a CREATEROLE migrator that is not a superuser,
+    # as on Cloud SQL, holds only ADMIN on the roles it creates, without SET, so it
+    # grants itself the role (SET defaults to true). A pg_has_role MEMBER check
+    # would see the ADMIN-only row and skip this. The owner role itself stays a
+    # member of nothing.
+    op.execute(
+        sa.text("""DO $member$ BEGIN
+          IF NOT (SELECT rolsuper FROM pg_roles WHERE rolname=current_user) THEN
+            GRANT daimon_watch_ingress_owner TO CURRENT_USER;
+          END IF;
+        END $member$;""")
+    )
     op.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public")
     op.execute("REVOKE CREATE ON SCHEMA public FROM PUBLIC")
     op.execute(f"REVOKE CREATE ON SCHEMA {schema} FROM PUBLIC,daimon_sidecar")

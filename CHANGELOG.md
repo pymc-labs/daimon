@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Upgrading through `0142_watches` works when the migrator is not a superuser, as on Cloud SQL and other managed Postgres 16 and later. It failed with "must be able to SET ROLE daimon_watch_ingress_owner", because such a migrator only administers the roles it creates. The migration now grants the migrator that role first.
+
 - A routine with no destination and no channel reads its owner's personal memory again, read-only, as it did before DM routines. Only the owner can read its saved output and errors; admins can still manage it.
 
 - A turn that finished and delivered its answer is no longer reported as failed when Daimon cannot save which repository memory it sent. The failed save is logged, and the next turn sends that memory again.
