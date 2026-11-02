@@ -175,7 +175,7 @@ async def _attest(
             settings.discord.bot_token.get_secret_value()
         ).resolve(tenant.id, tenant.external_id, platform_user_id, require_fresh=True)
         if facts.is_member is None:
-            raise LookupError("discord membership unavailable")
+            raise LookupError("membership unavailable")
         if facts.is_member is not True:
             return None
         return _Attestation(facts.is_admin, (*facts.role_ids, tenant.external_id))
@@ -197,7 +197,7 @@ async def _attest(
         if data.get("ok") is not True:
             if data.get("error") == "user_not_found":
                 return None
-            raise LookupError(f"slack users.info unavailable: {data.get('error')}")
+            raise LookupError(f"user lookup unavailable: {data.get('error')}")
         raw_user: object = data.get("user")
         user = cast("dict[str, object]", raw_user) if isinstance(raw_user, dict) else {}
         if (
@@ -206,7 +206,7 @@ async def _attest(
             or not isinstance(user.get("deleted"), bool)
             or not isinstance(user.get("is_bot"), bool)
         ):
-            raise LookupError("slack users.info answer is malformed")
+            raise LookupError("user lookup answer is malformed")
         if (
             user["team_id"] != tenant.external_id
             or user["deleted"] is not False
