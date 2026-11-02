@@ -14,7 +14,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import httpx
 from daimon.core.discord_membership import DiscordRestMembershipResolver
@@ -194,13 +194,23 @@ async def _attest(
             )
             response.raise_for_status()
             data = response.json()
-        user = data.get("user", {})
+        if data.get("ok") is not True:
+            if data.get("error") == "user_not_found":
+                return None
+            raise LookupError(f"slack users.info unavailable: {data.get('error')}")
+        raw_user: object = data.get("user")
+        user = cast("dict[str, object]", raw_user) if isinstance(raw_user, dict) else {}
         if (
-            data.get("ok") is not True
-            or user.get("id") != platform_user_id
-            or user.get("team_id") != tenant.external_id
-            or user.get("deleted") is not False
-            or user.get("is_bot") is not False
+            user.get("id") != platform_user_id
+            or not isinstance(user.get("team_id"), str)
+            or not isinstance(user.get("deleted"), bool)
+            or not isinstance(user.get("is_bot"), bool)
+        ):
+            raise LookupError("slack users.info answer is malformed")
+        if (
+            user["team_id"] != tenant.external_id
+            or user["deleted"] is not False
+            or user["is_bot"] is not False
         ):
             return None
         return _Attestation(
