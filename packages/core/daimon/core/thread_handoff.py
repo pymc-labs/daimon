@@ -109,6 +109,7 @@ if TYPE_CHECKING:
     from anthropic import AsyncAnthropic
 
 __all__ = [
+    "HANDOVER_FALLBACK_SEED",
     "HandoffCaller",
     "HandoffDestination",
     "RecordedSession",
@@ -539,12 +540,17 @@ class SwitchOutcome:
     destination_name: str | None = None
 
 
+# The resent turn when the clicker left nothing to resend. The new agent hears
+# of the hand-over once, from HANDED_OVER_NOTICE in front of this, so it says
+# nothing of it.
+HANDOVER_FALLBACK_SEED = "Continue from the latest message here."
+
+
 def handover_seed(text: str | None, *, agent_name: str) -> str:
     """The clicker's bounded work request, without a bare confirmation or name echo."""
-    return (
-        sanitize_requested_work(text, echoes=(agent_name,))
-        or "Pick up this conversation where it left off."
-    )[:MAX_REQUESTED_WORK]
+    return (sanitize_requested_work(text, echoes=(agent_name,)) or HANDOVER_FALLBACK_SEED)[
+        :MAX_REQUESTED_WORK
+    ]
 
 
 def render_switched(name: str) -> str:

@@ -28,6 +28,7 @@ from daimon.core.stores.agent_notices import take_agent_notices
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.thread_agent_bindings import get_binding
+from daimon.core.thread_handoff import HANDOVER_FALLBACK_SEED
 from daimon.core.turn.agent_notices import HANDED_OVER_NOTICE
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from daimon.testing.factories import make_tenant
@@ -433,4 +434,4 @@ async def test_unreadable_seed_history_resends_the_fixed_prompt(
     await HandOverButton(agent_id="ag_research").callback(interaction)
     await asyncio.gather(*interaction.client.tasks)
     resent = interaction.client.on_message.await_args.args[0]
-    assert resent.content == "Pick up this conversation where it left off."
+    assert resent.content == HANDOVER_FALLBACK_SEED
