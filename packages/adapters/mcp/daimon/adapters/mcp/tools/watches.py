@@ -65,6 +65,7 @@ from mux.contracts.profile import SUPPORTED
 from mux.profiles import get_profile
 from mux.state.lease import Slot
 from pydantic import BaseModel, JsonValue, TypeAdapter
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class WatchSummary(BaseModel):
@@ -888,6 +889,31 @@ async def check_edited_mcp_arguments(
         raise SourceChanged("The tool it checks changed on its server. Make a new watch.")
 
 
+async def _apply_edit(
+    db: AsyncSession,
+    auth: AuthIdentity,
+    row: WatchRow,
+    expected_revision: int,
+    edit: watches.WatchEdit,
+    now: datetime,
+    approver: uuid.UUID | None,
+) -> WatchRow:
+    locked = await watches.require_owned_watch(
+        db, row.id, tenant_id=auth.tenant_id, account_id=auth.account_id
+    )
+    require_unchanged_enrollment(row, locked)
+    return await watches.update_watch(
+        db,
+        row.id,
+        tenant_id=auth.tenant_id,
+        owner_account_id=auth.account_id,
+        expected_revision=expected_revision,
+        edit=edit,
+        now=now,
+        admin_account_id=approver,
+    )
+
+
 async def update_watch_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -932,24 +958,15 @@ async def update_watch_impl(
             await require_delivery_allowed(runtime, auth, row, request.delivery)
         if row.source == "mcp_poll" and request.arguments is not None:
             await check_edited_mcp_arguments(runtime, row, request.arguments)
-        await authorize_poll(runtime, row)
+        # Polling waits on the global watch lock, so build the edited watch, release the
+        # lock for the provider checks, then save only if it would come out the same.
+        async with runtime.session_factory() as db, db.begin() as dry_run:
+            planned = await _apply_edit(db, auth, row, expected_revision, edit, now, approver)
+            await dry_run.rollback()
+        await authorize_poll(runtime, planned)
         async with runtime.session_factory.begin() as db:
-            locked = await watches.require_owned_watch(
-                db, row.id, tenant_id=auth.tenant_id, account_id=auth.account_id
-            )
-            require_unchanged_enrollment(row, locked)
-            updated = await watches.update_watch(
-                db,
-                row.id,
-                tenant_id=auth.tenant_id,
-                owner_account_id=auth.account_id,
-                expected_revision=expected_revision,
-                edit=edit,
-                now=now,
-                admin_account_id=approver,
-            )
-            # Current owner/agent/seal policy for what is saved, before it commits.
-            await authorize_poll(runtime, updated)
+            updated = await _apply_edit(db, auth, row, expected_revision, edit, now, approver)
+            require_unchanged_enrollment(planned, updated)
         return summary(updated)
     except PollAccessRevoked:
         raise ToolError(

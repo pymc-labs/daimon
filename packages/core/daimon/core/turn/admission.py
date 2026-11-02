@@ -46,7 +46,6 @@ from daimon.core.authz import (
     build_subject,
     build_turn_place,
 )
-from daimon.core.billing import is_over_cap
 from daimon.core.channel_backend import (
     BackendUnsupported,
     backend_is_enabled,
@@ -55,7 +54,6 @@ from daimon.core.channel_backend import (
     current_backend_and_sharing,
 )
 from daimon.core.channel_backend import log_backend_unsupported as _log_backend_unsupported
-from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.channel_budget_notice import spawn_budget_notice
 from daimon.core.channel_skills import turn_channel_skills, turn_platform_skills
 from daimon.core.config import DirectMessagePolicy
@@ -104,7 +102,6 @@ from daimon.core.stores.scoped_config_read import resolve as resolve_config
 from daimon.core.stores.scoped_config_write import clear_agent_references
 from daimon.core.stores.shared_channels import is_channel_shared, mark_channel_shared
 from daimon.core.stores.thread_sessions import get_thread_session_at
-from daimon.core.tenant_balance import is_over_balance
 from daimon.core.thread_models import apply_thread_model, conversation_key
 from daimon.core.thread_release import apply_thread_release, release_due, release_now
 from daimon.core.turn.approvals import daimon_rule_set_for
@@ -1949,32 +1946,28 @@ async def require_current_spend(
     platform: str,
     external_user_id: str,
     budget_channel_id: str,
+    agent_id: str,
     now: datetime,
 ) -> None:
-    """Fresh balance, member cap and channel budget for a watch send or report."""
+    """The fresh spend gate for a watch send or report."""
     async with deps.sessionmaker() as session:
-        if await is_over_balance(
-            sessionmaker=deps.sessionmaker, tenant_id=tenant_id, session=session
-        ):
-            raise AdmissionDenied(reason="balance_depleted")
-        if await is_over_cap(
+        block = await spend_gate(
+            session,
             billing_config=deps.billing_config,
-            sessionmaker=deps.sessionmaker,
-            tenant_id=tenant_id,
-            user_id=external_user_id,
+            request=SpendRequest(
+                tenant_id=tenant_id,
+                platform_user_id=external_user_id,
+                platform=platform,
+                channel_id=budget_channel_id,
+                agent_id=agent_id,
+            ),
+            markup=deps.markup,
             now=now,
-            session=session,
-        ):
-            raise AdmissionDenied(reason="cap_exceeded")
-        if await is_over_channel_budget(
-            sessionmaker=deps.sessionmaker,
-            tenant_id=tenant_id,
-            platform=platform,
-            channel_id=budget_channel_id,
-            now=now,
-            session=session,
-        ):
-            raise AdmissionDenied(reason="channel_budget_exceeded")
+        )
+    if block == "budget_exceeded":
+        raise AdmissionDenied(reason="channel_budget_exceeded")
+    if block is not None:
+        raise AdmissionDenied(reason=block)
 
 
 def decide_before_send(
