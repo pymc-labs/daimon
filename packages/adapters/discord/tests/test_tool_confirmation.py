@@ -883,7 +883,7 @@ async def test_lead_details_send_max_escape_heavy_evidence_in_bounded_pages() ->
     click = _interaction(222)
     await _buttons(_lead_view(prompt))[-1].callback(click)
     click.response.defer.assert_awaited_once()
-    pages = [sent.args[0] for sent in click.followup.send.await_args_list]
+    pages = [sent.kwargs["embed"].description for sent in click.followup.send.await_args_list]
     assert 1 < len(pages) <= confirmation_module.DETAILS_MAX_PAGES
     assert all(len(page) <= confirmation_module.DETAILS_PAGE_LIMIT for page in pages)
     assert all(not page.endswith("\\") or page.endswith("\\\\") for page in pages)
@@ -904,7 +904,7 @@ async def test_lead_details_are_refused_to_a_clicker_who_cannot_read_the_lead() 
     prompt = _lead_prompt("Private enquirer evidence that must stay hidden.")
     click = _interaction(333)
     await _buttons(_lead_view(prompt, allowed=False))[-1].callback(click)
-    sent = [call.args[0] for call in click.followup.send.await_args_list]
+    sent = [call.kwargs["embed"].description for call in click.followup.send.await_args_list]
     assert sent == [confirmation_module.LEAD_DETAILS_REFUSED_MESSAGE]
     click.response.send_message.assert_not_awaited()
 
@@ -914,7 +914,7 @@ async def test_lead_details_without_a_reader_check_are_refused() -> None:
     card = build_confirmation_card(prompt, state="pending", token="tok_abcdefgh")
     click = _interaction(333)
     await _buttons(build_confirmation_view(card, prompt))[-1].callback(click)
-    sent = [call.args[0] for call in click.followup.send.await_args_list]
+    sent = [call.kwargs["embed"].description for call in click.followup.send.await_args_list]
     assert sent == [confirmation_module.LEAD_DETAILS_REFUSED_MESSAGE]
 
 
@@ -941,7 +941,9 @@ async def test_lead_details_reload_on_every_click_and_ignore_cached_prompt_lines
     for version in (1, 2):
         click = _interaction(222)
         await _buttons(view)[-1].callback(click)
-        assert click.followup.send.await_args.args[0] == f"live evidence v{version}"
+        assert click.followup.send.await_args.kwargs["embed"].description == (
+            f"live evidence v{version}"
+        )
     assert load.await_count == 2
 
 
@@ -1052,9 +1054,18 @@ async def test_dm_admin_card_checks_the_tenants_server_live(
     member.roles = []
     member.guild_permissions = discord.Permissions(manage_guild=True)
     guild.fetch_member = AsyncMock(return_value=member)
+    callers = []
+
+    async def live_subject(_session, *, caller, **_kwargs):  # type: ignore[no-untyped-def]
+        # No Daimon admin grants: only the live server role counts.
+        callers.append(caller)
+        return SimpleNamespace(is_admin=caller.is_server_admin)
+
+    monkeypatch.setattr(confirmation_module, "load_live_subject", live_subject)
     factory, lookup = _dm_runtime_hook(monkeypatch, client=MagicMock(), guild=guild)
     check = factory.call_args.kwargs["current_admin"]
     assert await check("111") is True
+    assert callers[-1].platform_user_id == "111"
     member.guild_permissions = discord.Permissions.none()
     assert await check("111") is False
     assert guild.fetch_member.await_count == 2

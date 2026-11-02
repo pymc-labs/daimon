@@ -67,7 +67,12 @@ async def test_member_update_remove_and_guild_unavailability_revoke_cached_grant
     )
     resolver = GatewayMembershipResolver(client)
     tenant = derive_tenant_uuid(platform="discord", workspace_id="1")
-    host = SimpleNamespace(membership_resolver=resolver, _allows_guild=lambda _: True, user=None)
+    host = SimpleNamespace(
+        membership_resolver=resolver,
+        _allows_guild=lambda _: True,
+        user=None,
+        _member_sync=SimpleNamespace(joined=AsyncMock(), left=AsyncMock()),
+    )
     resolver.observe(tenant, "1", "2", Membership(is_member=True, role_ids=("123",)))
     member.roles = []
     await DaimonBot.on_member_update(host, _member(), member)  # type: ignore[arg-type]
@@ -124,4 +129,7 @@ async def test_queued_member_snapshot_cannot_restore_a_removed_role(
     await bot._orchestrate(message, "123456", tenant.id)  # pyright: ignore[reportPrivateUsage]
     config.assert_not_awaited()
     message.channel.send.assert_awaited_once()
-    assert "can't accept your request here" in message.channel.send.await_args.args[0]
+    assert (
+        "can't accept your request here"
+        in message.channel.send.await_args.kwargs["embed"].description
+    )

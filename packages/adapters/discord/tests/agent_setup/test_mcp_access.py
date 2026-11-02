@@ -785,8 +785,8 @@ async def test_on_coding_tools_binds_a_token_minted_in_a_sealed_channel(
     )
 
     if not platform_admin:
-        refusal = interaction.response.send_message.call_args.args[0]
-        assert "Only platform admins" in refusal
+        refusal = interaction.response.send_message.call_args.kwargs["embed"].description
+        assert refusal == mcp_access_mod.CODING_TOOLS_REFUSAL
         assert await count_tokens_for_account(db_session, account_id=account_id) == 0
         return
     content: str = interaction.response.send_message.call_args.kwargs["content"]

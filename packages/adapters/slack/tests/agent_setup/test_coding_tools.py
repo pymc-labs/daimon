@@ -51,7 +51,6 @@ from daimon.testing.ma_models import ma_agent
 from daimon.testing.turn_fakes import deps_for
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from pydantic import SecretStr
-from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _TEAM_ID = "T_CODING_TOOLS"
@@ -67,11 +66,11 @@ _USERS_INFO_PATTERN = re.compile(r"https://slack\.com/api/users\.info.*")
 _EPHEMERAL_KEY = ("POST", yarl.URL(f"{_SLACK_API_BASE}/chat.postEphemeral"))
 
 
-def _users_info_payload(*, is_admin: bool) -> dict[str, Any]:
+def _users_info_payload(*, is_admin: bool, user_id: str = _USER_ID) -> dict[str, Any]:
     return {
         "ok": True,
         "user": {
-            "id": _USER_ID,
+            "id": user_id,
             "team_id": _TEAM_ID,
             "deleted": False,
             "is_bot": False,
@@ -250,7 +249,6 @@ async def test_coding_tools_click_by_a_member_refuses_and_mints_nothing(
         posted = _ephemerals(mock)
 
     assert await list_mcp_tokens(db_session, now=datetime.now(UTC), tenant_id=tenant.id) == []
-    assert "Only platform admins" in posted[0]["text"]
     assert len(posted) == 1, "a refused click is explained, never silent"
     assert shown_text(posted[0]) == NEEDS_ADMIN_MESSAGE, "the refusal names the way round it"
     assert posted[0]["attachments"][0]["color"] == ERROR_COLOR, "a refusal is a red card"
@@ -463,7 +461,7 @@ async def _click_as(
         mock.post(f"{_SLACK_API_BASE}/chat.postEphemeral", payload={"ok": True}, repeat=True)  # pyright: ignore[reportUnknownMemberType]
         await handle_coding_tools_click(
             runtime,
-            AsyncWebClient(token="xoxb-test"),
+            WorkspaceWebClient(token="xoxb-test").bind_workspace(runtime, _TEAM_ID),
             team_id=_TEAM_ID,
             tenant_id=tenant_id,
             agent_name=_AGENT_NAME,
