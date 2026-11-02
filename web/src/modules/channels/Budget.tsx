@@ -98,13 +98,13 @@ function BudgetForm({ c }: { c: ChannelDetail }) {
       <div className="flex flex-wrap items-center gap-2">
         <Button size="sm" disabled={save.pending || !limit || !changed} onClick={() => void setIt()}>Save</Button>
         {b && <Button size="sm" variant="outline" className="text-destructive" disabled={save.pending} onClick={() => void clear()}>Remove</Button>}
-        {b && (
-          <span className="ml-auto flex items-center gap-2">
-            <Input className="h-7 w-20" inputMode="decimal" aria-label="Raise by" placeholder="Raise by" value={more} onChange={(e) => setMore(e.target.value)} />
-            <Button size="sm" variant="outline" disabled={save.pending || !(Number(more) > 0)} onClick={() => void raise()}>Raise</Button>
-          </span>
-        )}
       </div>
+      {b && (
+        <div className="flex items-end gap-2 border-t pt-3">
+          <Field label="Raise by"><Input className="w-28" inputMode="decimal" value={more} onChange={(e) => setMore(e.target.value)} placeholder="5.00" /></Field>
+          <Button size="sm" variant="outline" className="mb-0.5" disabled={save.pending || !(Number(more) > 0)} onClick={() => void raise()}>Raise</Button>
+        </div>
+      )}
       <Notice out={out} />
     </div>
   )

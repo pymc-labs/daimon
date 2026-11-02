@@ -31,7 +31,7 @@ function Budget({ c }: { c: Channel }) {
 
 function Defaults({ list }: { list: ChannelList }) {
   return (
-    <div className="flex flex-wrap gap-x-8 gap-y-1 px-4 pb-3 text-sm lg:px-6">
+    <div className="flex flex-wrap gap-x-8 gap-y-1 px-4 pt-4 pb-3 text-sm lg:px-6">
       {([["Default agent", sourcedLabel(list.default_agent)], ["Sandbox", sourcedLabel(list.default_environment)]] as const).map(([k, v]) => (
         <div key={k} className="flex gap-2"><span className="text-muted-foreground">{k}</span><span className="font-medium">{v}</span></div>
       ))}
@@ -55,7 +55,8 @@ export function Channels() {
 
   return (
     <Page crumbs={[{ label: "Channels" }]} flush>
-      <FilterBar>
+      {query.data && <Defaults list={query.data} />}
+      <FilterBar className="pt-0">
         <SearchInput value={q} onChange={(v) => setQ(v || null)} className="w-56" />
         {platformNames.length > 1 && (
           <Facet label="Platform" value={platforms} onChange={setPlatforms} options={platformNames.map((p) => ({ value: p, label: platformLabel(p), icon: <PlatformIcon platform={p} className="size-3.5" /> }))} />
@@ -65,9 +66,8 @@ export function Channels() {
         <Facet label="Agent" value={agents} onChange={setAgents} options={agentsOf(all).map((a) => ({ value: a, label: a }))} />
         <span className="ml-auto text-xs text-muted-foreground tabular">{plural(rows.length, "channel")}</span>
       </FilterBar>
-      <QueryState query={query} className="px-6">{(list) => (
+      <QueryState query={query} className="px-6">{() => (
         <>
-          <Defaults list={list} />
           {!rows.length ? <div className="py-16 text-center text-sm text-muted-foreground">No channels</div> : (
             <Table>
               <TableHeader>
@@ -93,7 +93,10 @@ export function Channels() {
                         <TableCell className="pl-4 lg:pl-6">
                           <span className="flex min-w-0 items-center gap-2.5">
                             <PlatformIcon platform={c.platform} className="size-4 shrink-0 text-muted-foreground" />
-                            <span className="truncate font-medium">{nameOf(c)}</span>
+                            <span className="min-w-0">
+                              <span className="block truncate font-medium">{nameOf(c)}</span>
+                              <span className="block truncate text-xs text-muted-foreground md:hidden">{c.agent.value ?? "None"}</span>
+                            </span>
                           </span>
                         </TableCell>
                         <TableCell className="max-md:hidden">
