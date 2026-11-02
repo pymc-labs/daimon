@@ -973,6 +973,14 @@ async def _sweep_headless_usage(
         log.exception("scheduler.usage_sweep.failed")
 
 
+async def _sweep_long_jobs(long_jobs: LongJobExecutor) -> None:
+    """Claim and start due long jobs; database errors retry on the next tick."""
+    try:
+        await long_jobs.sweep()
+    except SQLAlchemyError:
+        log.exception("scheduler.long_jobs_sweep.failed")
+
+
 async def _sweep_wizard_sessions(sm: async_sessionmaker[AsyncSession]) -> None:
     """Abandon expired open wizard_session rows once. Boundary catch: a sweep
     failure must not kill the scheduler loop — the next tick retries.
@@ -1844,7 +1852,7 @@ async def run(
                 dispatch_timeout_s=scheduler_settings.dispatch_timeout_s,
                 wait_for_completion=True,
             )
-            await long_jobs.sweep()
+            await _sweep_long_jobs(long_jobs)
             await _sweep_compute(compute)
             await _poll_compute_tasks(compute)
             await _drain_pending_usage(sm, markup=settings.billing.markup)
@@ -1890,7 +1898,7 @@ async def run(
                 dispatch_timeout_s=scheduler_settings.dispatch_timeout_s,
                 dispatcher=dispatcher,
             )
-            await long_jobs.sweep()
+            await _sweep_long_jobs(long_jobs)
             await _drain_pending_usage(sm, markup=settings.billing.markup)
             await _sweep_pending_files(client, sm)
             await _sweep_wizard_sessions(sm)
