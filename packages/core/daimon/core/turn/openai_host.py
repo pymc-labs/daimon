@@ -131,6 +131,20 @@ def driver(
             binding if binding is not None and binding.native_refs.get("session") == id_ else None
         )
 
+    # Each turn rewrites the session's MCP bearer in place. It keeps the slot grant
+    # the session was created with, so the bearer matches the grant the executing
+    # driver binds to its origin; it never takes the origin's own id.
+    grant = binding.native_refs.get("daimon_chat_session_id") if binding is not None else None
+    mcp_secrets = runtime.mcp_secrets
+    if mcp_secrets is not None and grant is not None:
+        resolve_mcp = mcp_secrets
+
+        async def granted(authorized: Scope, reference: str, destination: str) -> str:
+            with native_mcp_session(scope, grant):
+                return await resolve_mcp(authorized, reference, destination)
+
+        mcp_secrets = granted
+
     return OpenAIDriver(
         cast(Transport, runtime.transport_factory(revision, scope)),
         account_scope_id=runtime.account_scope_id,
@@ -140,7 +154,7 @@ def driver(
         authorization=runtime.authorization,
         binding_lookup=lookup,
         session_controls=runtime.controls,
-        mcp_secrets=runtime.mcp_secrets,
+        mcp_secrets=mcp_secrets,
     )
 
 
