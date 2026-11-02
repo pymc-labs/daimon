@@ -1,5 +1,5 @@
 import { ReactFlowProvider } from "@xyflow/react"
-import { Eye, History as HistoryIcon, MessagesSquare, Plug, Plus, Blocks, Sparkles } from "lucide-react"
+import { Eye, History as HistoryIcon, MessagesSquare, Plug, Plus, Blocks, Sparkles, Users } from "lucide-react"
 import { useMemo } from "react"
 import { Link, useParams } from "react-router"
 
@@ -52,6 +52,7 @@ export function AgentPage() {
                 <DropdownMenuItem onSelect={() => setNode("skills")}><Sparkles />Skill</DropdownMenuItem>
                 <DropdownMenuItem onSelect={() => setNode("mcp:new")}><Plug />MCP server</DropdownMenuItem>
                 <DropdownMenuItem onSelect={() => setNode("places")}><Blocks />Channel</DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => setNode("helpers")}><Users />Helper</DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
           )}
