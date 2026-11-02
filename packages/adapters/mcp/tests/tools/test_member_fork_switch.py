@@ -171,6 +171,7 @@ async def fresh_chat(request, db_preflight, db_nullpool_engine, monkeypatch):
             shared_channel=False,
             now=datetime.now(UTC),
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            chat_session_id="test-session",
         )
     ma = FakeMA(tenant.id)
     daimon = ma_agent(
@@ -215,6 +216,7 @@ async def fresh_chat(request, db_preflight, db_nullpool_engine, monkeypatch):
             platform="discord",
             platform_user_id="123",
             chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_daimon"),
+            chat_session_id="test-session",
         )
         yield Chat(runtime, auth, origin, ma, trace)
 

@@ -58,6 +58,7 @@ async def test_view_and_get_agent_show_the_same_prompt_and_capabilities(
         shared_channel=False,
         now=now,
         expires_at=now + timedelta(minutes=10),
+        chat_session_id="test-session",
     )
     await db_session.commit()
     agent = ma_agent(
@@ -90,6 +91,7 @@ async def test_view_and_get_agent_show_the_same_prompt_and_capabilities(
         platform_user_id=str(caller.id),
         chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_p"),
         is_admin=admin,
+        chat_session_id="test-session",
     )
 
     info = await _get_agent_impl(

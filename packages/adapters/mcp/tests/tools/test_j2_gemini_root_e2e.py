@@ -513,6 +513,7 @@ async def _argon_card(chat: Chat, name: str, preview, **extra):
         tenant_id=chat.auth.tenant_id,
         account_id=chat.auth.account_id,
         current_admin=AsyncMock(return_value=chat.auth.is_admin),
+        current_platform_admin=AsyncMock(return_value=False),
     )
     return await prepare(
         prompt_for_tool_call(
