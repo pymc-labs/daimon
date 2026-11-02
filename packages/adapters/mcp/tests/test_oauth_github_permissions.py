@@ -918,7 +918,7 @@ async def test_an_owner_removed_between_mint_and_save_is_refused(
     async with _editor(committing_sessionmaker, monkeypatch, [org], requester="owner") as editor:
         hidden, _ = await editor.page()
         await _remove_ownership(editor)
-        # Even a platform that still calls them an admin does not make them one here.
+        monkeypatch.setattr(oauth_github, "_attest_native_admin", AsyncMock(return_value=False))
         denied = await editor.save(hidden, repo="101")
         assert denied.status_code == 403
         assert "You can no longer manage this agent." in denied.text
@@ -954,6 +954,7 @@ async def test_a_member_cannot_open_or_save_the_agent_editor(
 ) -> None:
     org = _Org(77, 55, "alpha", WRITE_INSTALLATION, [(101, "admin")])
     async with _editor(committing_sessionmaker, monkeypatch, [org], requester="member") as editor:
+        monkeypatch.setattr(oauth_github, "_attest_native_admin", AsyncMock(return_value=False))
         # The page itself is refused, and so is a save posted without it.
         hidden, refused = await editor.page(status=403)
         assert "You can no longer manage this agent." in refused
@@ -969,6 +970,7 @@ async def test_a_person_from_another_organisation_cannot_save_as_an_owner(
         hidden, _ = await editor.page()
         async with editor.sessionmaker.begin() as session:
             await mark_principal_foreign(session, account_id=editor.account_id)
+        monkeypatch.setattr(oauth_github, "_attest_native_admin", AsyncMock(return_value=False))
         denied = await editor.save(hidden, repo="101")
         assert denied.status_code == 403
         assert await editor.grants() == {}

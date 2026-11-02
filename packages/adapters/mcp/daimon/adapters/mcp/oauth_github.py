@@ -2067,6 +2067,9 @@ def build_oauth_github_routes(
             return False
         if live is None or requester.tenant_id != invitation.tenant_id:
             return False
+        # A current owner manages their own agent without platform authority.
+        if await requester_owns_agent(session, invitation, live):
+            return True
         # Only platform authority enters account roles. Preserve the existing
         # native snapshot for viewing this link; every save separately attests
         # live authority below. Delegates need a fresh check even to view it.
