@@ -340,7 +340,11 @@ class World:
             waiting.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await waiting
-            return [str(sent.args[0]) for sent in click.followup.send.await_args_list]
+            # Details and their refusals arrive as notice cards.
+            return [
+                str(sent.kwargs["embed"].description)
+                for sent in click.followup.send.await_args_list
+            ]
 
 
 async def _world(
