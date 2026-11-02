@@ -25,7 +25,7 @@ async def admins_view(
         grants = await list_admins(session, tenant_id=tenant_id)
     listing = (
         "\n".join(
-            f"<@{g.subject_id}> · by {g.granted_by or 'erased'} · {g.granted_at:%Y-%m-%d}"
+            f"<@{g.subject_id}>, added by {g.granted_by or 'erased'} on {g.granted_at:%Y-%m-%d}"
             for g in grants[:30]
         )
         or "No explicit grants."
