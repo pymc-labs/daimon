@@ -1,7 +1,7 @@
 // Admin: people, invites, agent web access, audit log and workspace settings.
 import { http, HttpResponse, type HttpHandler } from "msw"
 
-import type { AdminPerson, AgentAccess, AuditEntry, Invite, WorkspaceSettings } from "@/modules/admin/types"
+import type { AdminPerson, AgentAccess, AuditEntry, Invite, SettingsPatch, WorkspaceSettings } from "@/modules/admin/types"
 import { forbidden, notFound, paged, wait } from "./util"
 import { agent, AGENTS, DOMAIN, me } from "./world"
 import { face } from "./face"
@@ -56,12 +56,18 @@ const audit: AuditEntry[] = [
   { id: "a6", at: ago(30), who: "Maya Lindqvist", action: "Topped up", target: "Balance", detail: "$500.00" },
   { id: "a7", at: ago(51), who: "Jonas Weber", action: "Turned off web chat", target: "Code Reviewer" },
   { id: "a8", at: ago(74), who: "Maya Lindqvist", action: "Changed role", target: "Jonas Weber", detail: "Member to Admin" },
-  { id: "a9", at: ago(98), who: "Jonas Weber", action: "Changed setting", target: "Default agent", detail: "Daimon" },
+  { id: "a9", at: ago(98), who: "Jonas Weber", action: "Changed setting", target: "Web chat agent", detail: "Daimon" },
 ]
 
 const settings: WorkspaceSettings = {
   modules: { chat: true, agents: true, channels: true, routines: true, credits: true },
   default_agent: "ag_daimon",
+  access: { people: null, others: 0, dm_enabled: false, dm_memory_read_only: false, plain_text_mentions: false },
+  providers: {
+    offered: [{ id: "anthropic", label: "Anthropic" }, { id: "openai", label: "OpenAI" }, { id: "gemini", label: "Google" }],
+    allowed: ["anthropic"],
+    followed: true,
+  },
 }
 
 const admin = () => me()?.capabilities.includes("people.manage")
@@ -133,8 +139,24 @@ export const adminHandlers: HttpHandler[] = [
   http.get("/api/admin/audit", ({ request }) => paged(request, audit)),
   http.get("/api/admin/settings", () => HttpResponse.json(settings)),
   http.patch("/api/admin/settings", async ({ request }) => {
-    Object.assign(settings, (await request.json()) as Partial<WorkspaceSettings>)
-    log("Changed setting", "Workspace")
+    const b = (await request.json()) as SettingsPatch
+    if (b.modules) { settings.modules = b.modules; log("Changed setting", "Modules") }
+    if (b.default_agent) { settings.default_agent = b.default_agent; log("Changed setting", "Web chat agent") }
+    if (b.invokers) {
+      if (b.invokers.everyone) settings.access.people = null
+      else if (!b.invokers.people.length && !settings.access.others) return HttpResponse.json({ detail: "Pick at least one person, or let everyone. Nothing changed." }, { status: 422 })
+      else settings.access.people = b.invokers.people.map((id) => ({ id, name: people.find((p) => p.id === id)?.name ?? "Unknown person" }))
+      log("Changed setting", "Who can use the agents")
+    }
+    const flags = { dm_enabled: "Direct messages", dm_memory_read_only: "Read-only memory in direct messages", plain_text_mentions: "Typed mentions" } as const
+    for (const k of Object.keys(flags) as (keyof typeof flags)[]) {
+      if (b[k] !== undefined) { settings.access[k] = b[k]; log("Changed setting", flags[k], b[k] ? "On" : "Off") }
+    }
+    if (b.providers && settings.providers) {
+      settings.providers.followed = b.providers === "default"
+      settings.providers.allowed = b.providers === "default" ? ["anthropic"] : b.providers
+      log("Changed setting", "Providers")
+    }
     return HttpResponse.json(settings)
   }),
 ]

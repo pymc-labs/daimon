@@ -14,7 +14,8 @@ import httpx
 import pytest
 from daimon.adapters.web import directory
 from daimon.core.access_policy import AgentRule, TenantAccessPolicy
-from daimon.core.stores import platform_names, web_audit
+from daimon.core.config import Settings, TurnSettings
+from daimon.core.stores import platform_names, security_audit, web_audit
 from daimon.core.stores import web_identities as identities_store
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores import web_roles as roles_store
@@ -23,7 +24,7 @@ from daimon.core.stores.domain import WebPersonRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.testing.turn_router import AGENT_ID, build_turn_router
 from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME
-from sqlalchemy import event
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from .chat_support import Workspace, build_turns, funded_workspace, shown_trail, signed_in
@@ -56,7 +57,16 @@ _ROUTES: list[tuple[str, str, dict[str, Any] | None]] = [
     ("GET", "/api/admin/audit", None),
     ("GET", "/api/admin/settings", None),
     ("PATCH", "/api/admin/settings", {"modules": {"agents": False}}),
+    ("PATCH", "/api/admin/settings", {"plain_text_mentions": True}),
+    ("PATCH", "/api/admin/settings", {"providers": "default"}),
 ]
+
+
+_SETTINGS = Settings(
+    _env_file=None,  # pyright: ignore[reportCallIssue]
+    database={"url": "postgresql+asyncpg://u:p@h/db"},  # pyright: ignore[reportArgumentType]
+    turn=TurnSettings(path="mux", channel_backends=True),
+)
 
 
 @dataclass
@@ -112,7 +122,9 @@ async def signed_in_admin(
     owner_token = await signed_in(factory, ws.person)
     member_token = await signed_in(factory, member)
     turns = build_turns(factory, build_turn_router(str(ws.tenant_id)), tmp_path)
-    async with web_client(web_settings(), sessionmaker=factory, turns=turns) as client:
+    async with web_client(
+        web_settings(), sessionmaker=factory, turns=turns, settings=_SETTINGS
+    ) as client:
         client.headers.update(_OWN)
         client.cookies.set(COOKIE, owner_token, domain="web.example.com")
         yield Admin(client, ws, member, member_token)
@@ -339,7 +351,7 @@ async def test_settings_are_read_and_changed_with_an_audit_row(
         admin.as_member()
         me = (await admin.client.get("/api/me")).json()
 
-    assert set(before) == {"modules", "default_agent"}, before
+    assert set(before) == {"modules", "default_agent", "access", "providers"}, before
     assert before["modules"] == {
         "chat": True,
         "agents": True,
@@ -351,6 +363,127 @@ async def test_settings_are_read_and_changed_with_an_audit_row(
     assert changed.json()["modules"]["agents"] is False, changed.text
     assert "agents" not in me["modules"], "a module turned off is gone for the workspace"
     assert await admin.trail(db_session_factory) == [("Changed setting", "Modules", "Agents off")]
+
+
+async def test_access_settings_start_open_and_name_what_the_workspace_has(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    async with _admin(web_client, db_session_factory, tmp_path) as admin:
+        got = (await admin.client.get("/api/admin/settings")).json()
+
+    assert got["access"] == {
+        "people": None,
+        "others": 0,
+        "dm_enabled": False,
+        "dm_memory_read_only": False,
+        "plain_text_mentions": False,
+    }
+    assert "anthropic" in got["providers"]["allowed"]
+    assert {"id": "anthropic", "label": "Anthropic"} in got["providers"]["offered"]
+
+
+async def test_access_settings_change_one_by_one_and_leave_an_audit_row_each(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    async with _admin(web_client, db_session_factory, tmp_path) as admin:
+        url = "/api/admin/settings"
+        await admin.client.patch(url, json={"dm_enabled": True})
+        await admin.client.patch(url, json={"dm_memory_read_only": True})
+        await admin.client.patch(url, json={"plain_text_mentions": True})
+        limited = await admin.client.patch(
+            url, json={"invokers": {"people": [str(admin.member.id)]}}
+        )
+        opened = await admin.client.patch(url, json={"invokers": {"everyone": True}})
+
+    assert limited.json()["access"]["people"] == [{"id": str(admin.member.id), "name": "Mia"}]
+    assert opened.json()["access"] == {
+        "people": None,
+        "others": 0,
+        "dm_enabled": True,
+        "dm_memory_read_only": True,
+        "plain_text_mentions": True,
+    }
+    assert await admin.trail(db_session_factory) == [
+        ("Changed setting", "Direct messages", "On"),
+        ("Changed setting", "Read-only memory in direct messages", "On"),
+        ("Changed setting", "Typed mentions", "On"),
+        ("Changed setting", "Who can use the agents", "1 people"),
+        ("Changed setting", "Who can use the agents", "Everyone"),
+    ]
+
+
+async def test_a_bad_access_change_is_refused_whole(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    async with _admin(web_client, db_session_factory, tmp_path) as admin:
+        url = "/api/admin/settings"
+        nobody = await admin.client.patch(
+            url, json={"dm_enabled": True, "invokers": {"people": []}}
+        )
+        stranger = await admin.client.patch(url, json={"invokers": {"people": [str(uuid.uuid4())]}})
+        after = (await admin.client.get(url)).json()
+
+    assert (nobody.status_code, stranger.status_code) == (422, 422)
+    assert "at least one" in nobody.json()["detail"]
+    assert after["access"]["dm_enabled"] is False, "nothing in a refused change is kept"
+    assert await admin.trail(db_session_factory) == []
+
+
+async def test_settings_a_chat_platform_lacks_are_hidden_and_refused(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    async with _admin(web_client, db_session_factory, tmp_path) as admin:
+        async with db_session_factory.begin() as db:
+            await db.execute(
+                text("UPDATE tenants SET platform = 'teams' WHERE id = :id"),
+                {"id": admin.ws.tenant_id},
+            )
+        got = (await admin.client.get("/api/admin/settings")).json()["access"]
+        refused = await admin.client.patch("/api/admin/settings", json={"dm_enabled": True})
+
+    assert (got["dm_enabled"], got["dm_memory_read_only"]) == (None, None)
+    assert got["plain_text_mentions"] is False, "typed mentions work on Teams"
+    assert refused.status_code == 422
+
+
+async def test_providers_are_set_through_the_allowlist_service_and_audited_twice(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    async with _admin(web_client, db_session_factory, tmp_path) as admin:
+        url = "/api/admin/settings"
+        offered = [p["id"] for p in (await admin.client.get(url)).json()["providers"]["offered"]]
+        set_ = await admin.client.patch(url, json={"providers": ["anthropic", "gemini"]})
+        again = await admin.client.patch(url, json={"providers": ["anthropic", "gemini"]})
+        without = await admin.client.patch(url, json={"providers": ["gemini"]})
+        unknown = await admin.client.patch(url, json={"providers": ["anthropic", "nope"]})
+        followed = await admin.client.patch(url, json={"providers": "default"})
+
+    assert "anthropic" in offered
+    assert set_.json()["providers"]["allowed"] == ["anthropic", "gemini"]
+    assert set_.json()["providers"]["followed"] is False
+    assert again.status_code == 200
+    assert (without.status_code, unknown.status_code) == (422, 422)
+    assert "Anthropic" in without.json()["detail"]
+    assert followed.json()["providers"]["followed"] is True
+    assert await admin.trail(db_session_factory) == [
+        ("Changed setting", "Providers", "Anthropic, Google"),
+        ("Changed setting", "Providers", "Use the default providers"),
+    ]
+    async with db_session_factory() as db:
+        events = await security_audit.list_events(
+            db, tenant_id=admin.ws.tenant_id, tool_name="agent_backend"
+        )
+    assert [(e.operation, e.outcome) for e in events] == [("allowlist", "allowed")] * 2
 
 
 async def test_the_audit_log_names_who_acted(
