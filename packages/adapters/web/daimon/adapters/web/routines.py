@@ -166,7 +166,12 @@ def routines_router(runtime: WebRuntime) -> APIRouter:
         platform what the person may see, so their own use stands in for it.
         """
         tenant_id = caller.person.tenant_id
-        known = await names_store.list_channel_names(db, tenant_id=tenant_id, platform=platform)
+        known = {
+            row.channel_id: row.name
+            for row in await names_store.list_channel_names(
+                db, tenant_id=tenant_id, platform=platform
+            )
+        }
         principal = await caller.principal(db)
         policy = await load_access_policy(db, tenant_id=tenant_id)
         if not is_admin(caller.role):
