@@ -27,6 +27,7 @@ from daimon.testing.factories import make_platform_principal
 from daimon.testing.turn_router import AGENT_ID, build_turn_router
 from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME, ma_model_usage
 from pydantic import SecretStr
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .chat_support import (
@@ -119,11 +120,13 @@ async def _spend(
     factory: async_sessionmaker[AsyncSession],
     tenant_id: uuid.UUID,
     *,
-    user: str,
+    user: str | None,
     agent: str | None = AGENT_ID,
     n: int,
+    channel: str | None = None,
+    days_ago: int = 0,
 ) -> None:
-    """One $5 Opus call (a million input tokens) for `user` on `agent`."""
+    """One $5 Opus call (a million input tokens) for `user` on `agent`, `days_ago` days back."""
     async with factory.begin() as session:
         await usage_events.record(
             session,
@@ -134,7 +137,13 @@ async def _spend(
             model_usage=ma_model_usage(input_tokens=1_000_000, output_tokens=0),
             event_id=f"evt-{n}",
             agent_id=agent,
+            channel_id=channel,
         )
+        if days_ago:
+            await session.execute(
+                text("update usage_events set occurred_at = :at where managed_session_id = :s"),
+                {"at": datetime.now(UTC) - timedelta(days=days_ago), "s": f"s-{tenant_id}-{n}"},
+            )
 
 
 class Rig:
@@ -245,12 +254,12 @@ async def test_overview_has_the_shape_the_app_reads(
             )
         body = (await client.get("/api/credits/overview")).json()
     assert set(body) == {
-        "balance_usd", "spent_month_usd", "projected_month_usd", "turns_month",
+        "balance_usd", "spent_usd", "turns", "spent_month_usd", "projected_month_usd",
         "daily", "ledger", "topup",
     }  # fmt: skip
     assert body["balance_usd"] == 125.0, "the $100 welcome credit plus the $25 grant"
-    assert (body["spent_month_usd"], body["turns_month"]) == (10.0, 1), "billed, at the markup"
-    assert {"day", "usd"} == set(body["daily"][0]) and len(body["daily"]) >= 28
+    assert (body["spent_usd"], body["turns"]) == (10.0, 1), "billed, at the markup"
+    assert {"day", "usd"} == set(body["daily"][0]) and len(body["daily"]) == 30
     kinds = {(e["kind"], e["by"], e["note"], e["amount_usd"]) for e in body["ledger"]}
     assert kinds == {
         ("promo", "Daimon", "Welcome credit", 100.0),
@@ -285,6 +294,7 @@ async def test_spend_lists_billed_rows_by_person_agent_and_channel(
         await _spend(db_session_factory, ws.tenant_id, user=str(ws.person.id), n=1)
         await _spend(db_session_factory, ws.tenant_id, user=str(ws.person.id), n=2)
         await _spend(db_session_factory, ws.tenant_id, user=str(member.id), agent=None, n=3)
+        await _spend(db_session_factory, ws.tenant_id, user=None, channel="c1", n=4)
         people = (await client.get("/api/credits/spend?by=person")).json()
         agents = (await client.get("/api/credits/spend?by=agent&period=this")).json()
         channels = (await client.get("/api/credits/spend?by=channel")).json()
@@ -292,12 +302,18 @@ async def test_spend_lists_billed_rows_by_person_agent_and_channel(
     assert people == [
         {"id": str(ws.person.id), "name": "Ada", "turns": 2, "usd": 20.0},
         {"id": str(member.id), "name": "Mia", "turns": 1, "usd": 10.0},
-    ], "people are named from their web profile, biggest spender first"
+        {"id": "none", "name": "No person", "turns": 1, "usd": 10.0},
+    ], "people are named from their web profile, biggest spender first, then spend with none"
     assert agents == [
-        {"id": AGENT_ID, "name": DEFAULT_AGENT_NAME, "avatar": "", "turns": 2, "usd": 20.0},
+        {"id": AGENT_ID, "name": DEFAULT_AGENT_NAME, "avatar": "", "turns": 3, "usd": 30.0},
         {"id": "other", "name": "Other", "avatar": "", "turns": 1, "usd": 10.0},
     ], "spend with no agent recorded stays visible"
-    assert channels == [], "no turn has finished, so no channel has spend"
+    assert [(c["id"], c["name"], c["usd"]) for c in channels] == [
+        ("none", "No channel", 30.0),
+        ("discord:c1", "Unnamed channel", 10.0),
+    ], "channels read the same usage, with a row for spend that has no channel"
+    for rows in (people, agents, channels):
+        assert sum(r["usd"] for r in rows) == 40.0, "every breakdown adds up to the total"
     assert bad.status_code == 422, "an unknown grouping is refused"
 
 
@@ -313,6 +329,29 @@ async def test_spend_last_month_leaves_out_this_months_spend(
         this = (await client.get("/api/credits/spend?by=person&period=this")).json()
     assert last.json() == [], "what is spent now is not last month's"
     assert [(r["name"], r["usd"]) for r in this] == [("Ada", 5.0)], "it is this month's"
+
+
+async def test_last_thirty_days_is_the_default_and_reaches_back_past_the_month_start(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    rig = Rig(db_session_factory, tmp_path, web_client)
+    async with rig.open(settings=_settings("2")) as (client, ws, _):
+        user = str(ws.person.id)
+        await _spend(db_session_factory, ws.tenant_id, user=user, n=1, days_ago=10)
+        await _spend(db_session_factory, ws.tenant_id, user=user, n=2, days_ago=40)
+        default = (await client.get("/api/credits/spend?by=person")).json()
+        explicit = (await client.get("/api/credits/spend?by=person&period=30d")).json()
+        mine = (await client.get("/api/credits/mine")).json()
+        overview = (await client.get("/api/credits/overview")).json()
+    assert default == explicit and [r["usd"] for r in default] == [10.0], (
+        "the default window holds the call 10 days back and not the one 40 days back"
+    )
+    assert mine["spent_usd"] == 10.0, "my spend counts the same window"
+    assert overview["spent_usd"] == 10.0 and sum(d["usd"] for d in overview["daily"]) == 10.0, (
+        "the overview and its chart count the same days"
+    )
 
 
 async def test_allowances_are_added_listed_and_removed(
@@ -594,6 +633,6 @@ async def test_one_turn_is_the_same_charge_in_the_reply_the_meter_and_every_tota
     assert [m["cost_usd"] for m in saved] == [streamed["cost_usd"]], "and keeps it once saved"
     assert mine["turns"][0]["usd"] == 3.7, "recent turns show it to the cent"
     assert (mine["spent_usd"], mine["by_agent"][0]["usd"]) == (3.7, 3.7)
-    assert overview["spent_month_usd"] == 3.7, "the month total"
+    assert (overview["spent_usd"], overview["spent_month_usd"]) == (3.7, 3.7), "the totals"
     assert sum(d["usd"] for d in overview["daily"]) == 3.7, "the chart adds up to the total"
     assert meter["left_usd"] == pytest.approx(20 - 3.703701), "the meter counts the same turn"

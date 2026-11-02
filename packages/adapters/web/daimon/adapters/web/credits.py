@@ -37,7 +37,6 @@ from daimon.core.billing import (
     CheckoutAmountUnavailable,
     create_checkout_session,
     manual_credit,
-    month_start,
 )
 from daimon.core.ma_resolver import retrieve_agent_cached
 from daimon.core.platform_names import UNNAMED_CHANNEL
@@ -63,6 +62,8 @@ _LEDGER_LIMIT = 50
 _RECENT_TURNS = 12
 _CENT = Decimal("0.01")
 _NO_AGENT = "other"
+_NO_PERSON = "none"
+_NO_CHANNEL = "none"
 
 
 def _omit_none(value: object) -> bool:
@@ -121,9 +122,11 @@ class DailySpend(BaseModel):
 
 class Overview(BaseModel):
     balance_usd: float
+    spent_usd: float
+    """The last 30 days."""
+    turns: int
     spent_month_usd: float
     projected_month_usd: float
-    turns_month: int
     daily: list[DailySpend]
     ledger: list[LedgerEntry]
     topup: Literal["checkout", "manual"] | None
@@ -290,8 +293,11 @@ def credits_router(runtime: WebRuntime) -> APIRouter:
         return await credit_meter(runtime, caller)
 
     @router.get("/mine")
-    async def mine(caller: Member) -> Mine:  # pyright: ignore[reportUnusedFunction]
+    async def mine(  # pyright: ignore[reportUnusedFunction]
+        caller: Member, period: credit_views.Period = "30d"
+    ) -> Mine:
         now, tenant_id = runtime.now(), caller.person.tenant_id
+        since, until = credit_views.period_window(period, now=now)
         async with runtime.sessionmaker() as db:
             _, user_id = await linked_identity(db, caller.person)
             spend = await credit_views.spend_by_agent_for_user(
@@ -299,7 +305,8 @@ def credits_router(runtime: WebRuntime) -> APIRouter:
                 tenant_id=tenant_id,
                 platform_user_id=user_id,
                 markup=markup,
-                since=month_start(now),
+                since=since,
+                until=until,
             )
             charges = await credit_views.recent_turns(
                 db,
@@ -332,7 +339,7 @@ def credits_router(runtime: WebRuntime) -> APIRouter:
     async def overview(caller: Admin) -> Overview:  # pyright: ignore[reportUnusedFunction]
         now, tenant_id = runtime.now(), caller.person.tenant_id
         async with runtime.sessionmaker() as db:
-            month = await credit_views.month_overview(
+            recent = await credit_views.spend_overview(
                 db, tenant_id=tenant_id, now=now, markup=markup
             )
             lines = await credit_views.ledger_history(db, tenant_id=tenant_id, limit=_LEDGER_LIMIT)
@@ -356,11 +363,12 @@ def credits_router(runtime: WebRuntime) -> APIRouter:
                 )
             )
         return Overview(
-            balance_usd=_usd(month.balance_usd),
-            spent_month_usd=_usd(month.spent_usd),
-            projected_month_usd=_usd(credit_views.projected_month(month.spent_usd, now=now)),
-            turns_month=month.turns,
-            daily=[DailySpend(day=d.day.isoformat(), usd=_usd(d.usd)) for d in month.daily],
+            balance_usd=_usd(recent.balance_usd),
+            spent_usd=_usd(recent.spent_usd),
+            turns=recent.turns,
+            spent_month_usd=_usd(recent.month_usd),
+            projected_month_usd=_usd(credit_views.projected_month(recent.month_usd, now=now)),
+            daily=[DailySpend(day=d.day.isoformat(), usd=_usd(d.usd)) for d in recent.daily],
             ledger=ledger,
             topup=topup_mode(),
         )
@@ -369,7 +377,7 @@ def credits_router(runtime: WebRuntime) -> APIRouter:
     async def spend(  # pyright: ignore[reportUnusedFunction]
         caller: Admin,
         by: Literal["person", "agent", "channel"] = "person",
-        period: credit_views.Period = "this",
+        period: credit_views.Period = "30d",
     ) -> list[SpendRow]:
         tenant_id = caller.person.tenant_id
         since, until = credit_views.period_window(period, now=runtime.now())
@@ -397,10 +405,17 @@ def credits_router(runtime: WebRuntime) -> APIRouter:
                 db, tenant_id=tenant_id, markup=markup, since=since, until=until
             )
             labels = await credit_views.label_people(
-                db, tenant_id=tenant_id, user_ids=[p.user_id for p in people]
+                db, tenant_id=tenant_id, user_ids=[p.user_id for p in people if p.user_id]
             )
         rows: list[SpendRow] = []
         for person in people:
+            if person.user_id is None:
+                rows.append(
+                    SpendRow(
+                        id=_NO_PERSON, name="No person", turns=person.turns, usd=_usd(person.usd)
+                    )
+                )
+                continue
             label = labels.get(person.user_id)
             rows.append(
                 SpendRow(
@@ -644,6 +659,8 @@ def _channel_row(spend: credit_views.ChannelSpend, names: dict[tuple[str, str], 
         row_id, name, kind = "routines", "Routines", "routine"
     elif credit_views.is_web_spend(spend.platform, spend.channel_id):
         row_id, name, kind = "web", "Web", "web"
+    elif spend.channel_id is None:
+        row_id, name, kind = _NO_CHANNEL, "No channel", None
     else:
         row_id = f"{spend.platform}:{spend.channel_id}"
         name = names.get((spend.platform, spend.channel_id or ""), UNNAMED_CHANNEL)
