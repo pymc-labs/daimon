@@ -62,7 +62,7 @@ function BudgetForm({ c }: { c: ChannelDetail }) {
 
   const stop = async (amount: number) => {
     if (!budgetStops(amount, spentFor(c, window))) return true
-    return confirm({ title: "Stop new turns now?", body: `${usd(amount)} is at or below ${usd(spentFor(c, window))} spent.`, action: "Save", destructive: true })
+    return confirm({ title: "Stop replies now?", body: `${usd(amount)} is at or below ${usd(spentFor(c, window))} spent.`, action: "Save", destructive: true })
   }
   const setIt = async () => {
     if (!(await stop(Number(limit)))) return

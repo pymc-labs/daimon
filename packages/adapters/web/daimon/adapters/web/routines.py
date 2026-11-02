@@ -16,6 +16,7 @@ from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.web.access import is_admin
 from daimon.adapters.web.audit import audit
 from daimon.adapters.web.caller import WebCaller, requires
+from daimon.adapters.web.channel_visibility import readable_channels
 from daimon.adapters.web.directory import chattable
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core import credit_views, routine_service
@@ -37,7 +38,6 @@ from daimon.core.routine_service import (
     UnknownAgent,
 )
 from daimon.core.stores import platform_names as names_store
-from daimon.core.stores import usage_events
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import CatchUpPolicy, RoutineDestinationKind, RoutineRow
 from daimon.core.stores.tenants import get_tenant
@@ -162,8 +162,8 @@ def routines_router(runtime: WebRuntime) -> APIRouter:
         """The channels a routine of this person may deliver to, by id.
 
         Every channel the workspace knows that the rules let people write in; for a
-        member, only those they have had replies in. This process cannot ask the chat
-        platform what the person may see, so their own use stands in for it.
+        member, only those their chat platform shows them, and never one kept to its own
+        agents (the same check the Channels module makes).
         """
         tenant_id = caller.person.tenant_id
         known = {
@@ -175,10 +175,23 @@ def routines_router(runtime: WebRuntime) -> APIRouter:
         principal = await caller.principal(db)
         policy = await load_access_policy(db, tenant_id=tenant_id)
         if not is_admin(caller.role):
-            used = await usage_events.channels_used_by_user(
-                db, tenant_id=tenant_id, platform_user_id=principal.external_id
+            tenant = await get_tenant(db, tenant_id)
+            readable = await readable_channels(
+                runtime,
+                tenant_id=tenant_id,
+                platform=platform,
+                workspace_id=tenant.external_id if tenant is not None else "",
+                user_id=principal.external_id if principal.platform == platform else None,
+                channel_ids=known.keys(),
             )
-            known = {cid: name for cid, name in known.items() if cid in used}
+            confidential = {
+                cid for cid, rule in policy.channel_rules.items() if rule.readers == "own"
+            }
+            known = {
+                cid: name
+                for cid, name in known.items()
+                if cid in readable and cid not in confidential
+            }
         return {
             cid: name
             for cid, name in sorted(known.items(), key=lambda item: item[1].lower())

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Collection
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,17 +11,20 @@ from typing import Any
 
 import httpx
 import pytest
+from daimon.adapters.web import routines as routines_module
+from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.stores import accounts as accounts_store
-from daimon.core.stores import platform_names, usage_events
+from daimon.core.stores import platform_names
 from daimon.core.stores import tenants as tenants_store
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores import web_roles as roles_store_alias
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import WebPersonRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.routines import create_routine, list_routines_for_tenant
 from daimon.testing.factories import make_platform_principal
 from daimon.testing.turn_router import AGENT_ID, build_turn_router
-from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME, ma_model_usage
+from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .chat_support import (
@@ -254,34 +257,45 @@ async def test_bad_input_is_refused_in_plain_words(
     assert (res.status_code, res.json()["detail"]) == (422, detail)
 
 
-async def test_a_member_may_deliver_only_to_a_channel_they_have_used(rig: Rig) -> None:
-    async with rig.open() as (client, ws, member):
+async def test_a_member_may_deliver_only_to_a_channel_their_platform_shows_them(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked: list[tuple[str, frozenset[str]]] = []
+
+    async def shown(
+        _runtime: object, *, user_id: str | None, channel_ids: Collection[str], **_: object
+    ) -> frozenset[str]:
+        asked.append((str(user_id), frozenset(channel_ids)))
+        return frozenset({_CHANNEL, "222", "333"} & set(channel_ids))
+
+    monkeypatch.setattr(routines_module, "readable_channels", shown)
+    async with rig.open() as (client, ws, _):
         async with rig.factory.begin() as db:
             await platform_names.upsert_channel_names(
                 db,
                 tenant_id=ws.tenant_id,
                 platform="discord",
-                names={_CHANNEL: "general", "222": "secret"},
+                names={_CHANNEL: "general", "222": "secret", "333": "board", "444": "hidden"},
             )
-            await usage_events.record(
+            await set_access_policy(
                 db,
                 tenant_id=ws.tenant_id,
-                platform_user_id="m-1",
-                managed_session_id="s-1",
-                model="claude-opus-4-7",
-                model_usage=ma_model_usage(input_tokens=10, output_tokens=0),
-                event_id="e-1",
-                agent_id=AGENT_ID,
-                channel_id=_CHANNEL,
+                policy=TenantAccessPolicy(
+                    channel_rules={"333": ChannelRule(readers="own", writers="own")}
+                ),
             )
         choices = (await client.get("/api/routines/choices")).json()
-        assert choices["destinations"] == [{"id": _CHANNEL, "name": "general"}]
-        refused = await client.post("/api/routines", json=_NEW | {"destination": "222"})
+        refused = await client.post("/api/routines", json=_NEW | {"destination": "444"})
+        locked = await client.post("/api/routines", json=_NEW | {"destination": "333"})
         made = await client.post("/api/routines", json=_NEW | {"destination": _CHANNEL})
         cleared = await client.patch(
             f"/api/routines/{made.json()['id']}", json={"clear_destination": True}
         )
-    assert refused.status_code == 422
+    assert choices["destinations"] == [
+        {"id": _CHANNEL, "name": "general"},
+        {"id": "222", "name": "secret"},
+    ], "what the platform shows them, minus a channel kept to its own agents"
+    assert {user for user, _ in asked} == {"m-1"}
+    assert (refused.status_code, locked.status_code) == (422, 422)
     assert made.json()["destination"] == {"id": _CHANNEL, "name": "general"}
     assert cleared.json()["destination"] is None
-    assert member is not None
