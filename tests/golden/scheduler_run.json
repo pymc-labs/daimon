@@ -54,6 +54,7 @@
             "seal_ids": [],
             "thread_id": null
           },
+          "personal_memory": false,
           "platform": "discord",
           "sandbox": null,
           "session_factory": {
