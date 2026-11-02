@@ -815,16 +815,20 @@ class _AnsweredCard:
         self.authorization = authorization
 
 
-@pytest.mark.parametrize("answered", [True, False], ids=["card-answered", "recovered"])
-async def test_answer_is_sent_as_text_only_when_the_card_did_not_answer(
-    db_session_factory, monkeypatch, answered
+@pytest.mark.parametrize(
+    ("answered", "ended"),
+    [(True, True), (False, True), (False, False)],
+    ids=["card-answered", "card-stopped", "recovered"],
+)
+async def test_answer_is_sent_as_text_only_when_the_card_shows_no_outcome(
+    db_session_factory, monkeypatch, answered, ended
 ):
     cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
     await cog.on_message(message())
     monkeypatch.setattr(
         module,
         "DiscordTurnLifecycle",
-        lambda **kwargs: _AnsweredCard(answered=answered, ended=answered),
+        lambda **kwargs: _AnsweredCard(answered=answered, ended=ended),
     )
 
     async def answer(deps, **kwargs):
@@ -843,8 +847,8 @@ async def test_answer_is_sent_as_text_only_when_the_card_did_not_answer(
     msg = message(102)
     await cog.on_message(msg)
     sent = [call.args[0] for call in msg.channel.send.await_args_list if call.args]
-    assert ("the answer" in sent) is not answered, (
-        "the card delivers its own answer; text goes out only when it did not"
+    assert ("the answer" in sent) is not ended, (
+        "a card that answered or shows the stop is the outcome; text goes out only without one"
     )
 
 

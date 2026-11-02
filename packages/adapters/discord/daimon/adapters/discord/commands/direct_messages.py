@@ -986,8 +986,8 @@ class DirectMessageCog(commands.Cog):
                     )
             finally:
                 ticket.release()
-            if reply is not None and not (cards and cards[-1].was_answered):
-                # The card answered unless a recovery replaced it; then the text goes here.
+            if reply is not None and not (cards and (cards[-1].was_answered or cards[-1].ended)):
+                # The card shows the outcome unless a recovery replaced it; then the text goes here.
                 answer = reply.text
                 for start in range(0, len(answer), 1900):
                     # Each transport await is another opportunity for revocation.
