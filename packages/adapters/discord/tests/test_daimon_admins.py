@@ -293,10 +293,12 @@ async def test_explicit_action_admits_delegate_without_promoting_account(
 async def test_delegate_github_connect_button_refuses_at_adapter(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import uuid
+    from types import SimpleNamespace
 
-    from daimon.adapters.discord.github_connect_button import GitHubConnectButton
+    from daimon.adapters.discord import github_connect_button as button_module
 
     tenant = await make_tenant(db_session, workspace_id=str(GUILD))
     await change_grant(
@@ -309,13 +311,29 @@ async def test_delegate_github_connect_button_refuses_at_adapter(
         is_platform_admin=True,
     )
     await db_session.commit()
+    bind = AsyncMock()
+    monkeypatch.setattr(button_module, "bind_discord_connect_click", bind)
+    monkeypatch.setattr(
+        button_module, "connect_intent_agent", AsyncMock(return_value=("ResearchBot", "ma-agent"))
+    )
+    monkeypatch.setattr(
+        button_module,
+        "find_agent_by_derived_uuid",
+        AsyncMock(return_value=SimpleNamespace(name="ResearchBot", metadata={})),
+    )
     click = interaction(db_session_factory)
+    click.channel_id = 789
+    click.response.defer = AsyncMock()
+    click.guild.fetch_member = AsyncMock(return_value=click.user)
     assert await is_guild_admin(click, action=DelegatedAction.AGENT_SETTINGS)
-    button = GitHubConnectButton(requester_id=str(USER), intent_id=uuid.uuid4())
-    await button._reveal(click)
-    click.response.send_message.assert_awaited_once()
-    assert "platform admin" in click.response.send_message.call_args.args[0]
-    click.response.defer.assert_not_called()
+    # The delegate asked for the card, so only the requester's manager check stands
+    # between them and the link: a Daimon admin is neither a platform admin nor an owner.
+    button = button_module.GitHubConnectButton(requester_id=str(USER), intent_id=uuid.uuid4())
+    await button._reveal(click)  # pyright: ignore[reportPrivateUsage]
+    bind.assert_not_awaited()
+    kwargs = click.followup.send.await_args.kwargs
+    assert kwargs["embed"].description == "Ask whoever manages ResearchBot to add repos."
+    assert "view" not in kwargs
 
 
 async def test_delegate_cannot_open_operator_token_panel(
@@ -341,5 +359,5 @@ async def test_delegate_cannot_open_operator_token_panel(
     panel.swap_to = AsyncMock()
     await RoutingView._on_operator_tokens(panel, click)  # pyright: ignore[reportPrivateUsage]
     click.response.send_message.assert_awaited_once()
-    assert "platform admin" in click.response.send_message.call_args.args[0]
+    assert "platform admin" in click.response.send_message.call_args.kwargs["embed"].description
     panel.swap_to.assert_not_awaited()

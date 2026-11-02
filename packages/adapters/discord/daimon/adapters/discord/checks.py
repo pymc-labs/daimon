@@ -241,9 +241,9 @@ async def refuse_if_not_platform_admin(interaction: discord.Interaction) -> bool
     """Money controls must never consume the delegated Daimon admin check."""
     if is_platform_admin(interaction):
         return False
-    message = "That action needs Manage Server — ask a platform admin to do it."
+    embed = build_notice_embed("That action needs Manage Server — ask a platform admin to do it.")
     if interaction.response.is_done():
-        await interaction.followup.send(message, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
     else:
-        await interaction.response.send_message(message, ephemeral=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
     return True
