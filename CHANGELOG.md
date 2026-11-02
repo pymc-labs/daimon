@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- A turn that finished and delivered its answer is no longer reported as failed when Daimon cannot save which repository memory it sent. The failed save is logged, and the next turn sends that memory again.
+
 - A long-lived thread whose stream drops mid-turn reconnects instead of failing. Reconnecting reads the session's whole history, and that read had 60 seconds however long the thread; a thread with a long history ran out and the turn ended as an upstream error. The read may now use what is left of the 45-minute turn ceiling, less 30 seconds, and never less than 60 seconds.
 
 - Files an agent saves during a Discord DM turn are sent in the DM, attached to the answer as in a server thread. Before, a DM turn never collected them, so the agent said a file was ready when none arrived, and it stayed only in the session. A DM is held to Discord's default 10 MB upload limit; a larger file stays in the session with a notice, as in a thread. Each file first checks that the person may still receive the answer.

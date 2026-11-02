@@ -1291,6 +1291,31 @@ async def _repo_memory_state(
     )
 
 
+async def _record_memory_state(
+    deps: TurnDeps,
+    *,
+    tenant_id: uuid.UUID,
+    session_id: str,
+    session_provider: str,
+    prefix: str,
+) -> None:
+    """Record the state a completed turn sent; a miss only sends it again next turn."""
+    try:
+        await record_memory_prefix(
+            deps.sessionmaker,
+            tenant_id=tenant_id,
+            session_id=session_id,
+            session_provider=session_provider,
+            prefix=prefix,
+        )
+    except Exception as error:  # the turn already delivered; never fail it here
+        log.warning(
+            "turn.memory_state_record_failed",
+            session_id=session_id,
+            error=type(error).__name__,
+        )
+
+
 async def run_prepared_turn_impl(
     deps: TurnDeps,
     prepared: PreparedTurn,
@@ -2050,8 +2075,8 @@ async def run_prepared_turn_impl(
                             ),
                         )
                         if state.error is None and state.termination == TerminationReason.COMPLETED:
-                            await record_memory_prefix(
-                                deps.sessionmaker,
+                            await _record_memory_state(
+                                deps,
                                 tenant_id=tenant_id,
                                 session_id=ma_session_id,
                                 session_provider=prepared.session_ref.provider
@@ -2268,8 +2293,8 @@ async def run_prepared_turn_impl(
                         recovered_state.error is None
                         and recovered_state.termination == TerminationReason.COMPLETED
                     ):
-                        await record_memory_prefix(
-                            deps.sessionmaker,
+                        await _record_memory_state(
+                            deps,
                             tenant_id=tenant_id,
                             session_id=new_session_id,
                             session_provider=MANAGED_AGENTS.provider,

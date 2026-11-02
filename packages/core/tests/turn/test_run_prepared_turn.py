@@ -390,6 +390,73 @@ async def test_happy_path_runs_once_and_returns_recovered_false(
     assert len(session_bodies) == 0, "no create_session call on the happy path"
 
 
+@pytest.mark.parametrize("recovers", [False, True])
+async def test_a_failed_memory_state_record_never_fails_a_completed_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    recovers: bool,
+) -> None:
+    from daimon.core.turn import run as run_module
+    from sqlalchemy.exc import OperationalError
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-memory-record",
+        ma_session_id="sess_old",
+    )
+    await db_session.commit()
+
+    attempts: list[str] = []
+
+    async def failing_record(*args: object, session_id: str, **kwargs: object) -> None:
+        attempts.append(session_id)
+        raise OperationalError("upsert repo_memory_sessions", {}, Exception("connection lost"))
+
+    monkeypatch.setattr(run_module, "record_memory_prefix", failing_record)
+    router = _router(session_bodies=[], dead_session_ids={"sess_old"} if recovers else set())
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
+    admission = _admission(account_id=account.id, agent=agent, env=env)
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_old",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+
+    lifecycle = RecordingLifecycle()
+    outcome = await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-memory-record",
+        external_user_id="user-1",
+        user_message="hello",
+        lifecycle=lifecycle,
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+    )
+
+    assert attempts == [outcome.ma_session_id]
+    assert outcome.recovered is recovers
+    assert outcome.state.error is None
+    assert outcome.termination is TerminationReason.COMPLETED
+    assert lifecycle.terminal_failures == []
+
+
 async def test_every_log_line_of_a_turn_names_its_backend(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
