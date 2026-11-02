@@ -7,11 +7,15 @@ import { agent, AGENTS, me, SESSIONS } from "./world"
 import { face } from "./face"
 
 const day = (d: number) => new Date(Date.UTC(2026, 9, d)).toISOString()
+const midnight = (back: number) => {
+  const t = new Date()
+  return new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), t.getUTCDate() - back)).toISOString()
+}
 const ago = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString()
 
-// Deterministic daily spend for October.
-const DAILY = Array.from({ length: 31 }, (_, i) => ({
-  day: day(i + 1), usd: i < 30 ? Math.round((9 + 7 * Math.sin(i * 1.7) + (i % 7 < 5 ? 6 : -4) + i * 0.25) * 100) / 100 : 0,
+// Deterministic daily spend for the last 30 days, today last.
+const DAILY = Array.from({ length: 30 }, (_, i) => ({
+  day: midnight(29 - i), usd: Math.round((9 + 7 * Math.sin(i * 1.7) + (i % 7 < 5 ? 6 : -4) + i * 0.25) * 100) / 100,
 }))
 
 let balance = 1240.5
@@ -31,6 +35,7 @@ const PERSON: SpendRow[] = [
   { id: "p_rafael", name: "Rafael Costa", turns: 61, usd: 9.4 },
   { id: "p_owen", name: "Owen Brooks", turns: 33, usd: 4.85 },
   { id: "p_jordan", name: "Jordan Ellis", kind: "Visitor", turns: 9, usd: 1.15 },
+  { id: "none", name: "No person", turns: 4, usd: 0.6 },
 ]
 const AGENT_ROWS: SpendRow[] = [
   { id: "ag_mmm", name: "MMM Analyst", avatar: agent("ag_mmm").avatar, turns: 241, usd: 140.2 },
@@ -48,6 +53,7 @@ const CHANNEL: SpendRow[] = [
   { id: "c5", name: "Web", kind: "web", turns: 211, usd: 41.6 },
   { id: "c6", name: "Routines", kind: "routine", turns: 146, usd: 33.9 },
   { id: "c7", name: "#eng-review", kind: "discord", turns: 40, usd: 22.65 },
+  { id: "none", name: "No channel", turns: 6, usd: 1.1 },
 ]
 
 const MEMBERS = 10
@@ -64,6 +70,7 @@ const MY_TURNS = (uid: string): Turn[] => (SESSIONS[uid] ?? SESSIONS.p_maya!).fl
   usd: Math.round((0.18 + ((i * 7 + k * 3) % 9) * 0.21) * 100) / 100,
 }))).slice(0, 12)
 
+const PERIOD_SCALE: Record<string, number> = { "30d": 1, this: 0.4, last: 1.18 }
 const scale = (rows: SpendRow[], f: number) => rows.map((r) => ({ ...r, usd: Math.round(r.usd * f * 100) / 100, turns: Math.round(r.turns * f) }))
 
 const admin = () => me()?.capabilities.includes("credits.manage")
@@ -74,12 +81,12 @@ export const creditsHandlers: HttpHandler[] = [
     const m = me()
     return m ? HttpResponse.json(m.credit) : unauthorized()
   }),
-  http.get("/api/credits/mine", async () => {
+  http.get("/api/credits/mine", async ({ request }) => {
     await wait()
     const m = me()
     if (!m) return unauthorized()
     const turns = MY_TURNS(m.id)
-    const spent = m.credit ? m.credit.total_usd - m.credit.left_usd : 0
+    const spent = (m.credit ? m.credit.total_usd - m.credit.left_usd : 0) * PERIOD_SCALE[new URL(request.url).searchParams.get("period") ?? "30d"]!
     const raw = AGENTS.map((a) => ({ a, n: turns.filter((x) => x.agent.id === a.id).reduce((s, x) => s + x.usd, 0) })).filter((r) => r.n > 0)
     const sum = raw.reduce((s, r) => s + r.n, 0)
     const by = raw.map(({ a, n }) => ({ id: a.id, name: a.name, avatar: a.avatar, turns: Math.round((n / sum) * 60), usd: Math.round((n / sum) * spent * 100) / 100 }))
@@ -91,8 +98,12 @@ export const creditsHandlers: HttpHandler[] = [
     await wait()
     if (!admin()) return forbidden()
     const spent = DAILY.reduce((s, d) => s + d.usd, 0)
+    const month = DAILY.filter((d) => d.day.slice(0, 7) === midnight(0).slice(0, 7)).reduce((s, d) => s + d.usd, 0)
+    const now = new Date()
+    const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()
     return HttpResponse.json({
-      balance_usd: balance, spent_month_usd: spent, projected_month_usd: (spent / 30) * 31, turns_month: 1002, daily: DAILY, ledger, topup: "manual",
+      balance_usd: balance, spent_usd: spent, turns: 1002, spent_month_usd: month, projected_month_usd: (month / now.getDate()) * daysInMonth,
+      daily: DAILY, ledger, topup: "manual",
     })
   }),
   http.post("/api/credits/topup", async ({ request }) => {
@@ -107,7 +118,7 @@ export const creditsHandlers: HttpHandler[] = [
     await wait()
     if (!admin()) return forbidden()
     const u = new URL(request.url)
-    const f = u.searchParams.get("period") === "last" ? 1.18 : 1
+    const f = PERIOD_SCALE[u.searchParams.get("period") ?? "30d"] ?? 1
     const rows = { person: PERSON, agent: AGENT_ROWS, channel: CHANNEL }[u.searchParams.get("by") ?? "person"] ?? PERSON
     return HttpResponse.json(scale(rows, f))
   }),

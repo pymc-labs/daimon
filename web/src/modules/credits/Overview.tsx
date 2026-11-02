@@ -19,11 +19,12 @@ function OverviewBody({ data }: { data: Overview }) {
     <div className="mx-auto max-w-[1040px]">
       <StatStrip stats={[
         { label: "Balance", value: <Money usd={data.balance_usd} /> },
+        { label: "Spent, last 30 days", value: <Money usd={data.spent_usd} /> },
+        { label: "Replies, last 30 days", value: data.turns.toLocaleString("en") },
         { label: `Spent in ${month}`, value: <Money usd={data.spent_month_usd} /> },
         { label: "Projected month", value: <Money usd={data.projected_month_usd} /> },
-        { label: "Replies", value: data.turns_month.toLocaleString("en") },
       ]} />
-      <Section title="Daily spend" aside={month}>
+      <Section title="Daily spend" aside="Last 30 days">
         <DailyChart data={data.daily} />
       </Section>
       <Section title="Balance history">

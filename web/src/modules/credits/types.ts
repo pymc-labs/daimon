@@ -18,11 +18,15 @@ export type Allowance = {
 
 export type LedgerEntry = { id: string; at: string; kind: "topup" | "promo" | "adjustment"; amount_usd: number; by: string; note: string }
 
+export type Period = "30d" | "this" | "last"
+
 export type Overview = {
   balance_usd: number
+  /** The last 30 days. */
+  spent_usd: number
+  turns: number
   spent_month_usd: number
   projected_month_usd: number
-  turns_month: number
   daily: { day: string; usd: number }[]
   ledger: LedgerEntry[]
   /** How admins add credit: card checkout, a recorded grant, or not at all. */

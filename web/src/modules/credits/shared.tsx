@@ -1,5 +1,18 @@
 import { Label } from "@/components/ui/label"
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
+import { monthName } from "@/lib/format"
 import { cn } from "@/lib/utils"
+import type { Period } from "./types"
+
+export function PeriodToggle({ value, onChange }: { value: Period; onChange: (p: Period) => void }) {
+  return (
+    <ToggleGroup type="single" value={value} onValueChange={(v) => v && onChange(v as Period)} variant="segmented" size="sm">
+      <ToggleGroupItem value="30d" className="px-3 text-xs">Last 30 days</ToggleGroupItem>
+      <ToggleGroupItem value="this" className="px-3 text-xs">{monthName()}</ToggleGroupItem>
+      <ToggleGroupItem value="last" className="px-3 text-xs">{monthName(1)}</ToggleGroupItem>
+    </ToggleGroup>
+  )
+}
 
 export function Section({ title, aside, children, className }: { title: string; aside?: React.ReactNode; children: React.ReactNode; className?: string }) {
   return (
