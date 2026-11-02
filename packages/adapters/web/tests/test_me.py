@@ -93,13 +93,14 @@ async def test_me_has_the_shape_the_app_reads(
     }
     assert me["workspaces"] == [me["workspace"]]
     assert (me["role"], me["credit"], me["dev"]) == ("member", None, False)
-    assert me["modules"] == ["chat", "agents", "routines", "credits"]
+    assert me["modules"] == ["chat", "agents", "channels", "routines", "credits"]
     assert me["capabilities"] == sorted(
         [
             "chat.use",
             "agents.view",
             "agents.edit",
             "agents.create",
+            "channels.view",
             "routines.view",
             "routines.manage",
             "credits.view_own",
@@ -136,7 +137,7 @@ async def test_roles_are_read_from_grants_held_now(
             me = (await _get_me(client, token)).json()
             got = (me["role"], me["workspace"]["role"], "people.manage" in me["capabilities"])
             assert got == (role, role, True), person.id
-            assert me["modules"] == ["chat", "agents", "routines", "credits", "admin"]
+            assert me["modules"] == ["chat", "agents", "channels", "routines", "credits", "admin"]
         # Revoking the grant takes effect on the next request, not at next sign-in.
         async with db_session_factory() as db, db.begin():
             await db.execute(text("delete from workspace_admins"))

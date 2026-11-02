@@ -11,7 +11,7 @@ import type { WorkspaceSettings } from "./types"
 
 // Workspace
 
-const MODULE_LABEL = { chat: "Chat", agents: "Agents", routines: "Routines", credits: "Credits" }
+const MODULE_LABEL = { chat: "Chat", agents: "Agents", channels: "Channels", routines: "Routines", credits: "Credits" }
 
 export function Workspace() {
   const q = useQuery({ queryKey: KEY, queryFn: () => api.get<WorkspaceSettings>("/api/admin/settings") })

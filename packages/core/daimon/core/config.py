@@ -1072,8 +1072,15 @@ def origin_of(url: str) -> str:
 
 
 WebProvider = Literal["discord"]
-WebModuleKey = Literal["chat", "agents", "routines", "credits", "admin"]
-_WEB_MODULES: tuple[WebModuleKey, ...] = ("chat", "agents", "routines", "credits", "admin")
+WebModuleKey = Literal["chat", "agents", "channels", "routines", "credits", "admin"]
+_WEB_MODULES: tuple[WebModuleKey, ...] = (
+    "chat",
+    "agents",
+    "channels",
+    "routines",
+    "credits",
+    "admin",
+)
 
 
 def _split_csv(value: object) -> object:
@@ -1167,7 +1174,7 @@ class WebSettings(BaseModel):
         default=_WEB_MODULES,
         description=(
             "Sections of the web app that are on, comma-separated: "
-            "chat, agents, routines, credits, admin."
+            "chat, agents, channels, routines, credits, admin."
         ),
     )
     nodes: WebNodesSettings = Field(

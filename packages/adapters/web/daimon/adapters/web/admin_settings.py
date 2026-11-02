@@ -12,16 +12,17 @@ from daimon.core.stores import web_workspace_settings as workspace_settings
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-_SWITCHABLE: tuple[Literal["chat", "agents", "routines", "credits"], ...] = (
+_SWITCHABLE: tuple[Literal["chat", "agents", "channels", "routines", "credits"], ...] = (
     "chat",
     "agents",
+    "channels",
     "routines",
     "credits",
 )
 
 
 class SettingsChange(BaseModel):
-    modules: dict[Literal["chat", "agents", "routines", "credits"], bool] | None = None
+    modules: dict[Literal["chat", "agents", "channels", "routines", "credits"], bool] | None = None
     default_agent: str | None = None
 
 
