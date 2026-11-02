@@ -1,4 +1,10 @@
-"""Exercise the canonical migration chain through real Alembic and PostgreSQL."""
+"""Exercise the canonical migration chain through real Alembic and PostgreSQL.
+
+Main's branch (0132..0158) and the preview branch (0134..0167) both descend from
+0131_usage_obs_tenant_idx; 0168 joins them and 0169 is the single head. The ORM
+describes the head, so below the merge the preview branch is compared without
+the objects main's branch changes.
+"""
 
 from __future__ import annotations
 
@@ -116,9 +122,60 @@ AGENT_TOOLS_HEAD = "0165_agent_daimon_tools"
 NOTICE_REFUSED_HEAD = "0166_watch_notice_refused"
 
 
-HEAD = "0167_cost_footer"
+PREVIEW_HEAD = "0167_cost_footer"
 
 
+MERGE = "0168_merge_main_preview"
+
+
+HEAD = "0169_continuation_reasons"
+
+
+# Main's branch after MAIN_HEAD, oldest first; it ends at one parent of MERGE.
+MAIN_BRANCH = [
+    "0132_thread_handoff_summary",
+    "0133_backend_switch_cards",
+    "0134_thread_binding_owner_kind",
+    "0135_mcp_token_skill_bytes",
+    "0139_tenant_ledger_estimate",
+    "0140_fleet_run_cost_owed",
+    "0141_remove_fleet",
+    "0142_mux_account_erasure",
+    "0143_agent_co_owners",
+    "0144_mcp_token_purpose",
+    "0145_turn_origin_message",
+    "0146_isolated_fresh_start",
+    "0147_agent_notices",
+    "0148_web_people",
+    "0149_web_chat",
+    "0150_usage_agent_allowances",
+    "0151_agent_drafts",
+    "0152_web_invites",
+    "0153_web_workspace_settings",
+    "0154_web_audit_targets",
+    "0155_web_oidc_tokens",
+    "0156_workspace_members",
+    "0157_web_node_tokens",
+    "0158_usage_agent_backfill",
+]
+
+
+# Objects in the compared tables that main's branch adds or drops. The preview
+# branch below MERGE has not run it, so its heads skip these.
+MAIN_BRANCH_COLUMNS = {
+    ("agent_backend_revision", "fleet_grant"),
+    ("mcp_tokens", "skill_bytes_read"),
+    ("mcp_tokens", "skill_calls"),
+    ("mcp_tokens", "purpose"),
+    ("turn_origins", "platform_channel_id"),
+    ("turn_origins", "platform_message_id"),
+}
+
+
+MAIN_BRANCH_OBJECTS = {"ix_platform_principals_account_id", "usage_observation_binding_id_fkey"}
+
+
+# The preview branch from FORK to PREVIEW_HEAD, the other parent of MERGE.
 CHAIN = [
     MAIN,
     *MAIN_SUCCESSORS,
@@ -153,8 +210,12 @@ CHAIN = [
     LIFETIME_CAPS_HEAD,
     AGENT_TOOLS_HEAD,
     NOTICE_REFUSED_HEAD,
-    HEAD,
+    PREVIEW_HEAD,
 ]
+
+
+# Heads at which every compared table and column exists.
+TOP = (PREVIEW_HEAD, HEAD)
 
 
 SANDBOX_COLUMNS = {
@@ -240,13 +301,13 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             REMOVAL_HEAD,
             LONG_JOBS_HEAD,
             ADMINS_HEAD,
-            HEAD,
+            *TOP,
         )
         else {name for name in TABLES if not name.startswith("lead_")}
     )
-    if expected not in (LONG_JOBS_HEAD, ADMINS_HEAD, HEAD):
+    if expected not in (LONG_JOBS_HEAD, ADMINS_HEAD, *TOP):
         compared_tables = {name for name in compared_tables if not name.startswith("long_job")}
-    if expected != HEAD:
+    if expected not in TOP:
         compared_tables = compared_tables - {
             "agent_daimon_tool_allowlists",
             "context_provider_bindings",
@@ -257,7 +318,7 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             "watch_notice_receipts",
             "watch_credentials",
         }
-    if expected not in (ADMINS_HEAD, HEAD):
+    if expected not in (ADMINS_HEAD, *TOP):
         compared_tables = compared_tables - {"daimon_admins"}
     if expected not in (
         SANDBOX_HEAD,
@@ -265,7 +326,7 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
         REMOVAL_HEAD,
         LONG_JOBS_HEAD,
         ADMINS_HEAD,
-        HEAD,
+        *TOP,
     ):
         compared_tables = compared_tables - {"routine_sandbox_history"}
 
@@ -294,15 +355,21 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
                 "internal_routine_id",
                 "cost_footer",
             }
-            and expected != HEAD
+            and expected not in TOP
         ):
             return False
         if (
             kind == "unique_constraint"
             and name in {"uq_routines_tenant_source_id", "uq_routines_tenant_internal_id"}
-            and expected != HEAD
+            and expected not in TOP
         ):
             return False
+        if expected != HEAD:
+            table = getattr(getattr(obj, "table", None), "name", None)
+            if kind == "column" and (table, name) in MAIN_BRANCH_COLUMNS:
+                return False
+            if name in MAIN_BRANCH_OBJECTS:
+                return False
         # Historical main retains these two objects for older readers, while
         # its ORM intentionally omits them. These retained objects
         # are outside the ORM metadata comparison.
@@ -314,7 +381,7 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             kind == "column"
             and name in {"human_invocation", "memory_read_only"}
             and getattr(getattr(obj, "table", None), "name", None) == "turn_origins"
-            and expected != HEAD
+            and expected not in TOP
         ):
             return False
         if kind == "column" and expected not in (
@@ -323,7 +390,7 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             REMOVAL_HEAD,
             LONG_JOBS_HEAD,
             ADMINS_HEAD,
-            HEAD,
+            *TOP,
         ):
             return name not in SANDBOX_COLUMNS
         return kind != "table" or name in compared_tables
@@ -341,7 +408,7 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
         REMOVAL_HEAD,
         LONG_JOBS_HEAD,
         ADMINS_HEAD,
-        HEAD,
+        *TOP,
     ):
         # compare_metadata does not compare CHECK constraints.
         [via] = [
@@ -363,12 +430,22 @@ def test_authoritative_chain() -> None:
     config = Config(str(ROOT / "alembic.ini"))
     script = ScriptDirectory.from_config(config)
     assert script.get_heads() == [HEAD]
-    parent = FORK
-    for revision in CHAIN:
-        node = script.get_revision(revision)
-        assert node is not None and node.down_revision == parent
-        assert Path(node.path).stem == revision
-        parent = revision
+    for start, branch in ((FORK, CHAIN), (MAIN_HEAD, MAIN_BRANCH)):
+        parent = start
+        for revision in branch:
+            node = script.get_revision(revision)
+            assert node is not None and node.down_revision == parent
+            assert Path(node.path).stem == revision
+            parent = revision
+    head = script.get_revision(HEAD)
+    assert head is not None and head.down_revision == MERGE
+    merge = script.get_revision(MERGE)
+    assert merge is not None
+    assert set(merge.down_revision or ()) == {MAIN_BRANCH[-1], PREVIEW_HEAD}
+    # Both branches are whole and nothing else joins them.
+    below = {revision.revision for revision in script.iterate_revisions(MERGE, MAIN_HEAD)}
+    preview = CHAIN[CHAIN.index(MAIN_HEAD) + 1 :]
+    assert below == {MERGE, *MAIN_BRANCH, *preview}
 
 
 @pytest.fixture
@@ -533,11 +610,30 @@ async def test_deployed_upgrade_and_downgrade_paths(
             # 0158 keeps watch history: no downgrade past it.
             with pytest.raises(NotImplementedError, match="Watch evidence"):
                 command.downgrade(config, NOTICE_RECEIPTS_HEAD)
-            command.upgrade(config, HEAD)
-            _assert_head(sync)
+            command.upgrade(config, PREVIEW_HEAD)
+            _assert_head(sync, PREVIEW_HEAD)
             # 0163 and 0164 keep watch history: no downgrade past them.
             with pytest.raises(NotImplementedError, match="Watch evidence"):
                 command.downgrade(config, DELIVERY_HEAD)
+            _assert_head(sync, PREVIEW_HEAD)
+            # A preview deployment takes main's branch and the merge.
+            command.upgrade(config, HEAD)
+            _assert_head(sync)
+
+        await connection.run_sync(exercise)
+
+
+async def test_main_deployment_upgrades_to_the_merged_head(
+    migration_database: AsyncEngine,
+) -> None:
+    async with migration_database.connect() as connection:
+
+        def exercise(sync: Connection) -> None:
+            config = _config(SCRIPTS, sync)
+            command.upgrade(config, MAIN_BRANCH[-1])
+            assert sync.scalar(text("SELECT version_num FROM alembic_version")) == MAIN_BRANCH[-1]
+            sync.commit()
+            command.upgrade(config, HEAD)
             _assert_head(sync)
 
         await connection.run_sync(exercise)
