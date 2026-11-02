@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -371,7 +372,8 @@ async def test_confidential_click_rechecks_admin(admin: bool) -> None:
         patch("daimon.adapters.slack.here.resolve_web_client", AsyncMock(return_value=client)),
         patch("daimon.adapters.slack.here.resolve_is_admin", AsyncMock(return_value=admin)),
         patch(
-            "daimon.adapters.slack.agent_setup.rules.change_rule", AsyncMock(return_value="saved")
+            "daimon.adapters.slack.agent_setup.rules.change_rule",
+            AsyncMock(return_value=("saved", False)),
         ) as change,
     ):
         await handle_make_confidential(
@@ -384,11 +386,13 @@ async def test_confidential_click_rechecks_admin(admin: bool) -> None:
             },
         )
     assert change.await_count == int(admin)
+    posted = json.dumps(client.chat_postEphemeral.await_args.kwargs["attachments"])
     if admin:
         assert change.await_args.kwargs["channel_id"] == "C1"
         assert change.await_args.kwargs["readers"] == "own"
+        assert "saved" in posted
     else:
-        assert "Only a workspace admin" in client.chat_postEphemeral.await_args.kwargs["text"]
+        assert "Only a workspace admin" in posted
 
 
 def _review_runtime(db_session_factory: async_sessionmaker[AsyncSession]) -> MagicMock:
