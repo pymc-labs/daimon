@@ -5,6 +5,7 @@ import { agentsHandlers } from "./agents"
 import { chatHandlers } from "./chat"
 import { coreHandlers } from "./core"
 import { creditsHandlers } from "./credits"
+import { routinesHandlers } from "./routines"
 
 // Module handlers first, so a module can override a core route it owns.
-export const worker = setupWorker(...chatHandlers, ...agentsHandlers, ...creditsHandlers, ...adminHandlers, ...coreHandlers)
+export const worker = setupWorker(...chatHandlers, ...agentsHandlers, ...routinesHandlers, ...creditsHandlers, ...adminHandlers, ...coreHandlers)

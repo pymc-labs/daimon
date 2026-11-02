@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Routines in the web app.** A Routines page lists scheduled prompts with their schedule in
+  words, destination, next run and last result. Members work with their own routines, admins
+  with all, and a person needs a linked chat account on the workspace's platform to add one.
+  Chat, the Slack and Teams panels and the web app share one routine service, so the same
+  checks apply everywhere. The Credits pages open on the last 30 days, so early in a month
+  they no longer read $0.
 - **Web app.** People chat with agents in a browser, signing in with Discord. Shared files
   reach the agent, and files it makes come back as downloads. Key requests show as a form in
   the chat. Admins manage people, invites, credit and settings, and a one-time owner link

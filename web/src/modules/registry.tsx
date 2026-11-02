@@ -3,9 +3,10 @@ import { admin } from "./admin"
 import { agents } from "./agents"
 import { chat } from "./chat"
 import { credits } from "./credits"
+import { routines } from "./routines"
 import type { ModuleDef, NavItem } from "./types"
 
-export const MODULES: ModuleDef[] = [chat, agents, credits, admin]
+export const MODULES: ModuleDef[] = [chat, agents, routines, credits, admin]
 
 const allowed = (me: Me, cap?: Capability) => !cap || me.capabilities.includes(cap)
 const usable = (me: Me, n: NavItem) => allowed(me, n.cap) && (n.show?.(me) ?? true)

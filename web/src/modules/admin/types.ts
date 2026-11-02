@@ -36,6 +36,6 @@ export type AgentAccess = {
 export type AuditEntry = { id: string; at: string; who: string; action: string; target: string; detail?: string }
 
 export type WorkspaceSettings = {
-  modules: Record<"chat" | "agents" | "credits", boolean>
+  modules: Record<"chat" | "agents" | "routines" | "credits", boolean>
   default_agent: string
 }

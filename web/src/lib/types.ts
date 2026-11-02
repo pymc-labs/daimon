@@ -2,9 +2,9 @@
 
 export type Role = "owner" | "admin" | "member" | "visitor"
 export type Platform = "discord" | "slack" | "teams" | "web"
-export type ModuleKey = "chat" | "agents" | "credits" | "admin"
+export type ModuleKey = "chat" | "agents" | "routines" | "credits" | "admin"
 export type Capability =
-  | "chat.use" | "agents.view" | "agents.edit" | "agents.create"
+  | "chat.use" | "agents.view" | "agents.edit" | "agents.create" | "routines.view" | "routines.manage"
   | "credits.view_own" | "credits.manage" | "people.manage" | "audit.view" | "workspace.manage"
 
 export type Workspace = { id: string; name: string; platform: Platform; role: Role; members: number }

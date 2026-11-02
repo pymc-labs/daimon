@@ -60,7 +60,7 @@ const audit: AuditEntry[] = [
 ]
 
 const settings: WorkspaceSettings = {
-  modules: { chat: true, agents: true, credits: true },
+  modules: { chat: true, agents: true, routines: true, credits: true },
   default_agent: "ag_daimon",
 }
 
