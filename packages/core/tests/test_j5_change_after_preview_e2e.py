@@ -50,6 +50,7 @@ async def test_j5_a_change_between_preview_and_confirm_posts_one_fresh_card(owne
         tenant_id=agent.tenant_id,
         account_id=actor.account_id,
         current_admin=AsyncMock(return_value=True),
+        current_platform_admin=AsyncMock(return_value=False),
     )
     posted: list[object] = []
 

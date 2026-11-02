@@ -3096,6 +3096,7 @@ async def test_identity_relay_gets_a_vault_of_the_sessions_own_mounted_first(
         ),
         session_factory=db_session_factory,
         relay_session_key=key,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert bodies[0]["vault_ids"] == ["vlt_relay", "vlt_caller"], (

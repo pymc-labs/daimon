@@ -102,6 +102,7 @@ async def test_j2_a_preparation_that_fails_says_busy_or_failed_never_not_set_up(
             channel_id="channel",
             thread_id="new",
             now=datetime.now(UTC),
+            origin="chat",
         )
     assert (refused.value.cause, refused.value.provider) == (cause, "gemini")
     said = admission_refusal_text(

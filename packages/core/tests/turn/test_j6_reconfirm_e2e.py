@@ -57,6 +57,7 @@ async def test_j6_a_stale_switch_consent_asks_for_a_fresh_card(
             channel_id="channel",
             thread_id="new",
             now=datetime.now(UTC),
+            origin="chat",
         )
     assert (refused.value.cause, refused.value.provider) == ("re_confirm", provider)
     said = admission_refusal_text(
