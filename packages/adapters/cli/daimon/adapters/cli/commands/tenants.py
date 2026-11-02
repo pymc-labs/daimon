@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import uuid
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -47,6 +46,7 @@ from daimon.core.stores.tenants import (
     set_funding_mode,
     set_turn_cap,
 )
+from daimon.core.workspace_settings import SettingRefused, parse_invokers
 from mux.contracts.ids import Provider
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 from rich.console import Console
@@ -233,7 +233,6 @@ async def tenants_backend_policy(
 
 
 _VALID_PLATFORMS = ("discord", "cli", "slack", "teams")
-_ENTRA_OBJECT_ID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 # A Teams channel thread is its channel id plus ";messageid=<root post>".
 _TEAMS_CHANNEL_ID = r"19:[^\s;]+@thread\.[a-z0-9]+(?:;messageid=[0-9]+)?"
 # What a pin or isolation names: a whole team channel, never a thread or group chat.
@@ -754,18 +753,10 @@ def tenants_access_policy_set_command(
 def _parse_invokers(values: list[str], *, platform: str) -> tuple[str, ...]:
     if not values:
         raise typer.BadParameter("invoker_user_ids: pass at least one non-empty id")
-    pattern = (
-        r"[0-9]{15,21}"
-        if platform == "discord"
-        else _ENTRA_OBJECT_ID
-        if platform == "teams"
-        else r"[UW][A-Z0-9]+"
-    )
-    for value in values:
-        cleaned = value.strip()
-        if not cleaned or (platform != "cli" and re.fullmatch(pattern, cleaned) is None):
-            raise typer.BadParameter(f"invoker_user_ids: invalid {platform} id {value!r}")
-    return tuple(dict.fromkeys(value.strip() for value in values))
+    try:
+        return parse_invokers(values, platform=platform)
+    except SettingRefused as exc:
+        raise typer.BadParameter(f"invoker_user_ids: {exc}") from exc
 
 
 async def tenants_access_policy_set(
