@@ -16,6 +16,7 @@ from typing import Any, Literal
 import pytest
 from daimon.core import headless_runner
 from daimon.core.pricing import MODEL_PRICING
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.state import TurnState
 from daimon.core.usage_recording import record_turn_usage
 from daimon.testing.recovery import Process, ledger, record
@@ -63,6 +64,7 @@ async def headless(
         usage_record_factory=usage_factory(process, scenario),
         turn_path=process.path,
         on_state=on_state,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
 
@@ -233,7 +235,7 @@ async def _headless_then_stall(
 async def test_h2x_connection_drops_after_the_provider_accepted_the_input(
     scenario: Scenario,
 ) -> None:
-    """No process dies: the answer to the send is lost and the SDK has retries left."""
+    """No process dies: the answer to the send is lost after the provider took it."""
     scenario.world.send_faults.append("accept_drop")
     reply, error = None, None
     try:
@@ -243,14 +245,8 @@ async def test_h2x_connection_drops_after_the_provider_accepted_the_input(
     after = await ledger(scenario.engine, scenario.tenant_id)
     world = scenario.world
     inputs = [t for _, t in world.accepted_inputs]
-    if scenario.path == "mux":
-        assert inputs == ["only fire"], "mux sends once"
-        assert after.debits == 1
-    else:
-        assert inputs == ["only fire", "only fire"], "legacy's SDK resends the POST"
-        assert len(world.model_calls) == 2 and after.debits == 1, (
-            "the duplicate ran a second model call that nothing bills"
-        )
+    assert inputs == ["only fire"], "a send is one attempt on either path"
+    assert after.debits == 1
     record(
         "headless",
         "H2x connection drop after acceptance (no restart)",
