@@ -1121,6 +1121,9 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # the workspace keeps its record of what changed. A person or invite it is
             # about is an id that clears when they go; the text names no one.
             "web_audit",
+            # Channel setting changes: the only accounts.id FK is the actor, ON DELETE
+            # SET NULL; the values name agents and amounts, never a person.
+            "channel_changes",
             # A workspace's invite links: the only accounts.id FK is the admin who made
             # one, ON DELETE SET NULL. An accepted invite cascades with its person.
             "web_invites",

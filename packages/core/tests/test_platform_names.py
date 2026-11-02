@@ -29,10 +29,12 @@ from daimon.core.privacy import collect_purge_preview
 from daimon.core.purge import purge_account, purge_principal
 from daimon.core.stores.identity import find_platform_principal, get_or_create_platform_principal
 from daimon.core.stores.platform_names import (
+    ChannelSighting,
     count_user_names_for_platform_user,
     delete_user_names_for_platform_user,
     get_channel_names,
     get_user_names,
+    list_channel_names,
     upsert_channel_names,
     upsert_user_names,
 )
@@ -179,6 +181,28 @@ async def test_channel_names_are_replaced_by_the_latest(db_session: AsyncSession
     )
 
     assert names == {"19:a": "Research & Dev"}, "the latest name wins; a blank one is skipped"
+
+
+async def test_a_channel_keeps_its_parent_when_a_later_sighting_lacks_it(
+    db_session: AsyncSession,
+) -> None:
+    """A message names the channel only; the category a gateway sighting gave stays."""
+    tenant = await make_tenant(db_session, platform="discord")
+    sighting = ChannelSighting("support", kind="text", parent_id="cat-1", parent_name="Help")
+    await upsert_channel_names(
+        db_session, tenant_id=tenant.id, platform="discord", names={"c-1": sighting}
+    )
+    await upsert_channel_names(
+        db_session, tenant_id=tenant.id, platform="discord", names={"c-1": "support-2"}
+    )
+
+    [row] = await list_channel_names(db_session, tenant_id=tenant.id, platform="discord")
+
+    assert row.name == "support-2", "the latest name wins"
+    assert (row.kind, row.parent_id, row.parent_name) == ("text", "cat-1", "Help"), (
+        "a sighting without a parent keeps the stored one"
+    )
+    assert row.last_seen_at is not None, "every sighting stamps when it was seen"
 
 
 async def test_deleting_a_tenant_deletes_its_names(db_session: AsyncSession) -> None:

@@ -561,6 +561,42 @@ class ChannelBudgetRow(BaseModel):
     exhausted_notice_key: str | None = None
 
 
+ChangeSurface = Literal["web", "chat", "panel", "cli"]
+"""Where a channel change was made: the web app, a chat tool, a platform panel, the CLI."""
+ChannelSetting = Literal["default_agent", "kept_agents", "access", "budget"]
+
+
+class ChannelChangeRow(BaseModel):
+    """One recorded change to a channel setting; `before` and `after` are JSON values."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: int
+    tenant_id: uuid.UUID
+    platform: str
+    channel_id: str
+    setting: ChannelSetting
+    before: JsonValue
+    after: JsonValue
+    actor_account_id: uuid.UUID | None
+    surface: ChangeSurface
+    at: datetime
+
+
+class ChannelNameRow(BaseModel):
+    """What a platform last called one channel, and where it sits."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    platform: str
+    channel_id: str
+    name: str
+    kind: str | None = None
+    parent_id: str | None = None
+    parent_name: str | None = None
+    last_seen_at: datetime | None = None
+
+
 AllowanceSubjectKind = Literal["person", "group", "invite"]
 AllowanceWindow = Literal["month", "total"]
 

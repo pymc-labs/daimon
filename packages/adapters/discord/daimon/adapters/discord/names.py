@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.platform_names import remember_channel_names, remember_user_name
+from daimon.core.platform_names import ChannelSighting, remember_channel_names, remember_user_name
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
@@ -49,11 +49,17 @@ def remember_guild_channels(
     """
     if guild_id is None:
         return
-    names: dict[str, str] = {}
+    names: dict[str, str | ChannelSighting] = {}
     for channel in channels:
         target = channel.parent if isinstance(channel, discord.Thread) else channel
         if isinstance(target, (discord.TextChannel, discord.ForumChannel)):
-            names[str(target.id)] = target.name
+            category = target.category
+            names[str(target.id)] = ChannelSighting(
+                target.name,
+                kind="forum" if isinstance(target, discord.ForumChannel) else "text",
+                parent_id=str(category.id) if category is not None else None,
+                parent_name=category.name if category is not None else None,
+            )
     if names:
         remember_channel_names(
             sessionmaker,

@@ -3616,6 +3616,45 @@ class PlatformChannelName(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    # What the adapter that saw the channel also knew: its kind (text, forum,
+    # private, shared...) and its Discord category or Teams team.
+    kind: Mapped[str | None] = mapped_column(Text, nullable=True)
+    parent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    parent_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ChannelChange(Base):
+    """One change to a channel setting, from any surface, with its before and after values.
+
+    Keeps its rows when the actor's account is erased: the actor is a SET NULL reference
+    and the values name agents and amounts, never a person.
+    """
+
+    __tablename__ = "channel_changes"
+    __table_args__ = (
+        Index("ix_channel_changes_tenant_channel_at", "tenant_id", "channel_id", "at"),
+        CheckConstraint(
+            "surface IN ('web', 'chat', 'panel', 'cli')", name="ck_channel_changes_surface"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    setting: Mapped[str] = mapped_column(Text, nullable=False)
+    before: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    after: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    actor_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    surface: Mapped[str] = mapped_column(Text, nullable=False)
+    at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
 
 # The provider-neutral state store (`daimon.core.stores.mux_state`, the
