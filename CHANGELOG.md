@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A long-lived thread whose stream drops mid-turn reconnects instead of failing. Reconnecting reads the session's whole history, and that read had 60 seconds however long the thread; a thread with a long history ran out and the turn ended as an upstream error. The read may now use what is left of the 45-minute turn ceiling, less 30 seconds, and never less than 60 seconds.
 
+- A Discord DM answer survives one failed server membership lookup while it is written. Before, a single timed-out or rate-limited lookup closed the progress card for the rest of the turn, so the answer never showed. A person verified as no longer a member still sees no more of it.
+
 - **New conversation**, **Switch server** and `/new` in a Discord DM answer straight away while Daimon is still replying there, saying to try again once it's done. Before, they waited for the reply and Discord showed the interaction as failed.
 
 - Stopping a Discord DM turn no longer posts its partial answer again under the card, or "The reply finished without text." when it stopped before any text. A DM turn that ends with no text and no tools shows only its card too.

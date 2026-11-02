@@ -11,7 +11,8 @@ import discord
 import pytest
 from daimon.adapters.discord.commands import direct_messages as module
 from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core import direct_messages as core_direct_messages
+from daimon.core.access_policy import AgentRule, TenantAccessPolicy
 from daimon.core.authz import AgentRef, Place, Surface, build_subject
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.direct_messages import DirectMessageReply
@@ -807,6 +808,86 @@ async def test_dm_turn_card_rechecks_delivery_access_before_every_write(
     with pytest.raises(AdmissionDenied):
         await card.check_output()
     assert delivery.await_count == 2, "a proved refusal closes the card for the rest of the turn"
+
+
+async def test_unknown_membership_does_not_close_the_dm_turn_card(db_session_factory, monkeypatch):
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    await cog.on_message(message())
+    admission = SimpleNamespace(
+        grant=private_reply(await conversation(db_session_factory)).grant,
+        agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
+        is_admin=False,
+        budget_channel_id=None,
+    )
+    card = await _card_from_turn(cog, message(102), reply, admission)
+    member = fetch.return_value
+    fetch.return_value = Membership()
+    await card.check_output()
+    with pytest.raises(DaimonError) as refused:
+        await card.check_output()
+    assert not isinstance(refused.value, AdmissionDenied), (
+        "a second unknown lookup refuses that write without closing the card"
+    )
+    fetch.return_value = member
+    await card.check_output()
+    fetch.return_value = Membership()
+    await card.check_output()
+    fetch.return_value = Membership(is_member=False)
+    with pytest.raises(AdmissionDenied):
+        await card.check_output()
+    fetch.return_value = member
+    with pytest.raises(AdmissionDenied):
+        await card.check_output()
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        TenantAccessPolicy(invoker_user_ids=("111",)),
+        TenantAccessPolicy(agent_rules={"private": AgentRule(invoker_role_ids=("456",))}),
+    ],
+    ids=["invoker", "agent"],
+)
+async def test_unknown_membership_still_closes_the_card_on_a_proved_denial(
+    db_session_factory, monkeypatch, policy
+):
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    await cog.on_message(message())
+    admission = SimpleNamespace(
+        grant=private_reply(await conversation(db_session_factory)).grant,
+        agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
+        is_admin=False,
+        budget_channel_id=None,
+    )
+    card = await _card_from_turn(cog, message(102), reply, admission)
+    async with db_session_factory.begin() as session:
+        await set_access_policy(session, tenant_id=tenants[0].id, policy=policy)
+    member = fetch.return_value
+    fetch.return_value = Membership()
+    with pytest.raises(AdmissionDenied):
+        await card.check_output()
+    fetch.return_value = member
+    with pytest.raises(AdmissionDenied):
+        await card.check_output()
+
+
+async def test_unknown_membership_refuses_a_write_once_the_source_is_sealed(
+    db_session_factory, monkeypatch
+):
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    await cog.on_message(message())
+    admission = SimpleNamespace(
+        grant=private_reply(await conversation(db_session_factory)).grant,
+        agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
+        is_admin=False,
+        budget_channel_id=None,
+    )
+    card = await _card_from_turn(cog, message(102), reply, admission)
+    monkeypatch.setattr(core_direct_messages, "_source_is_sealed", lambda policy, row: True)
+    fetch.return_value = Membership()
+    with pytest.raises(AdmissionDenied):
+        await card.check_output()
+    assert await conversation(db_session_factory) is None, "the sealed conversation is quarantined"
 
 
 async def test_recipient_policy_closes_the_dm_turn_card(db_session_factory, monkeypatch):
