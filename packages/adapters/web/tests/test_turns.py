@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -11,6 +12,8 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
+import httpx
+import pytest
 from anthropic.types.beta.sessions import (
     BetaManagedAgentsAgentMessageEvent,
     BetaManagedAgentsAgentToolResultEvent,
@@ -19,25 +22,30 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsSessionStatusIdleEvent,
     BetaManagedAgentsTextBlock,
 )
+from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.tools.channel_budgets import OriginSpend, origin_spend
 from daimon.adapters.web.stream import Event
 from daimon.adapters.web.turns import WebTurns
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.errors import TurnError
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores import accounts, spend_allowances, tenants, turn_outcomes, usage_events
 from daimon.core.stores import web_chat as chat_store
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.domain import WebThreadRow
+from daimon.core.stores.domain import Role, WebThreadRow
 from daimon.core.stores.shared_channels import is_channel_shared
 from daimon.core.turn.state import TextBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
+from daimon.core.turn_origin import current_origin_id
 from daimon.core.web_identity import place_of, principal_of
 from daimon.testing.factories import make_platform_principal
-from daimon.testing.turn_router import AGENT_ID, AGENT_TEXT, build_turn_router
+from daimon.testing.turn_router import AGENT_ID, AGENT_TEXT, ENV_ID, build_turn_router
 from mux.testing.drivers.anthropic.ma import MARouter, sse_response
-from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME, ma_model_usage
+from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME, ma_model_usage, ma_session
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .chat_support import (
+    SESSION_ID,
     STREAM,
     Workspace,
     build_turns,
@@ -133,6 +141,76 @@ async def test_a_tool_call_streams_as_a_step(
     assert steps and steps[-1]["id"] == "evt_tool" and steps[-1]["status"] == "done", events
     message = events[-1]["message"]
     assert message["content"] == "Spend rose." and message["steps"][0]["status"] == "done"
+
+
+class _SpendAtToolCall(httpx.AsyncByteStream):
+    """The tool script's stream, which first reads where a Daimon tool call made now
+    would spend: the turn's origin is live only while the turn runs."""
+
+    def __init__(self, spend: Callable[[], Awaitable[OriginSpend]], seen: list[OriginSpend]):
+        self._spend, self._seen = spend, seen
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        self._seen.append(await self._spend())
+        yield sse_response(_tool_script()).content
+
+
+@pytest.mark.parametrize(
+    ("credential_session", "expected"),
+    [
+        ("web-chat-session", "attributed"),
+        ("another-session", "unattributed"),
+    ],
+)
+async def test_a_web_turns_tool_calls_spend_against_its_place_and_agent(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    credential_session: str,
+    expected: str,
+) -> None:
+    ws = await funded_workspace(db_session_factory)
+    seen: list[OriginSpend] = []
+    # The Daimon MCP credential a tool call presents, as the server reads it.
+    auth = AuthIdentity(
+        account_id=ws.person.account_id,
+        tenant_id=ws.tenant_id,
+        role=Role.USER,
+        platform="web",
+        chat_agent_id=derive_agent_uuid(tenant_id=ws.tenant_id, ma_agent_id=AGENT_ID),
+        chat_session_id=credential_session,
+    )
+
+    def stream(_request: Any, _match: Any) -> httpx.Response:
+        origin_id = current_origin_id.get()
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=_SpendAtToolCall(
+                lambda: origin_spend(db_session_factory, auth, str(origin_id)), seen
+            ),
+        )
+
+    router = MARouter()
+    router.add("GET", STREAM, stream)
+    build_turn_router(str(ws.tenant_id), router=router)
+    turns = build_turns(db_session_factory, router, tmp_path)
+    session = ma_session(
+        id=SESSION_ID,
+        agent_id=AGENT_ID,
+        environment_id=ENV_ID,
+        metadata={"daimon_chat_session_id": "web-chat-session"},
+    )
+
+    with patch("daimon.core.turn.prepare.create_session", return_value=session):
+        _, events = await _run(turns, db_session_factory, ws)
+
+    assert events[-1]["message"]["content"] == "Spend rose.", events
+    if expected == "attributed":
+        assert seen == [OriginSpend(channel_id=place_of(ws.person.id), agent_id=AGENT_ID)], (
+            "a tool call from the turn's own session counts toward its web place and agent"
+        )
+    else:
+        assert seen == [OriginSpend()], "another session's credential is not attributed"
 
 
 async def test_a_channel_bound_agent_is_refused_with_a_card(
