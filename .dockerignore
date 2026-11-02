@@ -9,3 +9,5 @@ packages/**/tests/
 *.pyc
 .env*
 docker-compose.yml
+web/node_modules
+web/dist

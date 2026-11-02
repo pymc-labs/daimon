@@ -68,56 +68,136 @@ async def apply_thread_release(
     account_id: uuid.UUID,
     now: datetime,
 ) -> bool:
-    """Apply `slot`'s pending release, if any and still current. True when released."""
+    """Apply `slot`'s pending release, if any and still current. True when released.
+
+    Against the Postgres store the request, the binding and the fresh start are one
+    transaction that takes the account's erasure fence first, so an account erasure
+    waits for it whole (or finds it done) and never meets the request row half-held.
+    Another store keeps the request and the binding write in separate transactions.
+    """
+    from daimon.core.stores import mux_erasure, mux_state
+
     if slot.account_id is None:
         return False
+    in_one_transaction = isinstance(store, mux_state.PostgresStateStore) and store.owns_sessions(
+        sessionmaker
+    )
     async with sessionmaker.begin() as session:
+        if in_one_transaction:
+            await mux_erasure.fence_writers(session, slot.account_id)
         requested = await thread_provider_releases.take_request(session, slot)
         if requested is None:
             return False
-        current = await store.get_binding(slot, include_released=True)
+        if in_one_transaction:
+            current = await mux_state.get_binding(session, slot, include_released=True)
+        else:
+            current = await store.get_binding(slot, include_released=True)
         generation = current.generation if current is not None else 0
-        # The binding write commits on its own; if this transaction then failed, the
-        # request is still here with the slot one generation on: finish it, don't redo it.
+        # A binding written by a separate transaction may have committed before this one
+        # failed: the request is still here with the slot one generation on. Finish it,
+        # don't redo it.
         finishing = is_released(current) and generation == requested + 1
         if generation != requested and not finishing:
             log.info("thread_release_stale", requested=requested, current=generation)
             return False
-        if not finishing and not is_released(current):
-            if current is None:
-                # Pinned only by an older Managed Agents session: a released first generation.
-                released = ProviderBinding(
-                    id=str(
-                        uuid.uuid5(
-                            uuid.NAMESPACE_URL, f"daimon.turn.binding:{slot.model_dump_json()}"
-                        )
-                    ),
-                    thread=slot.thread,
-                    provider=MANAGED_AGENTS.provider,
-                    profile=MANAGED_AGENTS.profile_id,
-                    native_refs={RELEASED_REF: "1"},
-                    generation=1,
-                    config_revision=0,
-                    legacy_account_id=slot.account_id,
-                )
-                expected = 0
-            else:
-                released, expected = released_successor(current), current.generation
-            try:
-                await store.put_binding(released, expected_generation=expected)
-            except BindingConflict:
-                log.info("thread_release_lost_race", generation=expected)
-                return False
-        live = await get_live_thread_session(
-            session,
-            tenant_id=tenant_id,
-            platform=slot.thread.channel.platform,
-            thread_id=slot.thread.thread_id,
-            account_id=account_id,
-        )
-        if live is not None:
-            await request_fresh_start(session, id=live.id, at=now)
+        if (
+            not finishing
+            and not is_released(current)
+            and not await _write_release(
+                store, slot, current, session if in_one_transaction else None
+            )
+        ):
+            return False
+        await _fresh_start(session, slot, tenant_id=tenant_id, account_id=account_id, now=now)
     return True
+
+
+async def release_now(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    store: StateStore,
+    slot: Slot,
+    *,
+    generation: int,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    now: datetime,
+) -> bool:
+    """Release `slot` now if it is still at `generation`: a conversation following its
+    agent's switch (M03), once the message that moves it is admitted.
+
+    No request row: nothing is left behind if that message is refused, and a card's
+    pending request is never touched. A slot that moved meanwhile (another message,
+    a card, a later switch) is left alone. True when released.
+    """
+    if slot.account_id is None:
+        return False
+    current = await store.get_binding(slot, include_released=True)
+    if is_released(current) or (current.generation if current is not None else 0) != generation:
+        log.info("thread_follow_stale", requested=generation)
+        return False
+    if not await _write_release(store, slot, current):
+        return False
+    async with sessionmaker.begin() as session:
+        await _fresh_start(session, slot, tenant_id=tenant_id, account_id=account_id, now=now)
+    return True
+
+
+async def _write_release(
+    store: StateStore,
+    slot: Slot,
+    current: ProviderBinding | None,
+    session: AsyncSession | None = None,
+) -> bool:
+    """Mark `slot` released at its next generation; False when another write won.
+
+    With a `session`, the write joins that transaction (Postgres store only).
+    """
+    if current is None:
+        # Pinned only by an older Managed Agents session: a released first generation.
+        released = ProviderBinding(
+            id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"daimon.turn.binding:{slot.model_dump_json()}")),
+            thread=slot.thread,
+            provider=MANAGED_AGENTS.provider,
+            profile=MANAGED_AGENTS.profile_id,
+            native_refs={RELEASED_REF: "1"},
+            generation=1,
+            config_revision=0,
+            legacy_account_id=slot.account_id,
+        )
+        expected = 0
+    else:
+        released, expected = released_successor(current), current.generation
+    try:
+        if session is not None:
+            from daimon.core.stores import mux_state
+
+            await mux_state.put_binding(session, released, expected_generation=expected)
+        else:
+            await store.put_binding(released, expected_generation=expected)
+    except BindingConflict:
+        log.info("thread_release_lost_race", generation=expected)
+        return False
+    return True
+
+
+async def _fresh_start(
+    session: AsyncSession,
+    slot: Slot,
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    now: datetime,
+) -> None:
+    """The slot's live Managed Agents session (if any) starts afresh on its next turn."""
+    live = await get_live_thread_session(
+        session,
+        tenant_id=tenant_id,
+        platform=slot.thread.channel.platform,
+        thread_id=slot.thread.thread_id,
+        account_id=account_id,
+    )
+    if live is not None:
+        await request_fresh_start(session, id=live.id, at=now)
 
 
 async def release_due(

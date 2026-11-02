@@ -7,9 +7,9 @@ shown exactly once: it is never logged, never written to channel history, and
 never leaves the ephemeral.
 
 Who may mint is `authorize(MINT_CODING_TOKEN)`'s call, re-resolved after the
-ack and never read from the rendered view: a workspace admin. The button is
-visible to every member (hiding is not gating) and
-a refused click gets an explanation instead of silence. Revoking is limited
+ack and never read from the rendered view: a workspace admin, or the owner of
+this agent (whose key then acts as that owner, never as an admin). A refused
+click gets an explanation instead of silence. Revoking is limited
 to the account that minted the token. Pressed in a sealed channel, or in one
 the agent is pinned to, the token is bound to that channel
 (`coding_token_channel`) and its calls run there.
@@ -31,14 +31,17 @@ from daimon.adapters.slack.agent_setup.read import (
     load_panel_roster,
     public_mcp_url,
 )
+from daimon.adapters.slack.blockkit import notice_fields, notice_update_fields
 from daimon.adapters.slack.credential_submissions import post_ephemeral
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.agent_ownership import owns_agent
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
-from daimon.core.authz import AgentRef, Decision, build_agent_ref
+from daimon.core.authz import AgentRef, Decision, Subject, build_agent_ref
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import (
     authorize_coding_token,
+    coding_key_ttl_days,
     coding_tool_config,
     mint_agent_mcp_token,
     token_jti,
@@ -68,17 +71,17 @@ NOT_CONFIGURED_MESSAGE: Final[str] = (
     "setup, then try again. Nothing was saved."
 )
 
-REVOKE_BUTTON_LABEL: Final[str] = "🗑 Revoke this token"
+REVOKE_BUTTON_LABEL: Final[str] = "🗑 Revoke this key"
 
-COPY_NOW_LINE: Final[str] = "Copy the setup below now. The token is shown only once."
+COPY_NOW_LINE: Final[str] = "Copy this now: the key is shown only once. It acts as you."
 
-TOKEN_REVOKED_MESSAGE: Final[str] = "Token revoked."
+TOKEN_REVOKED_MESSAGE: Final[str] = "Key revoked. It stops working now."
 
 
 #: Minting requires a workspace admin.
 NEEDS_ADMIN_MESSAGE: Final[str] = (
-    "Only platform admins can create coding-tool keys, including channel-bound keys.\n\n"
-    'Ask a platform admin to open this agent\'s Details and press "Use from your coding tools".'
+    "Only an admin or this agent's owner can make a coding key.\n\n"
+    'Ask one of them to open this agent\'s Details and press "Use from your coding tools".'
 )
 
 
@@ -169,6 +172,7 @@ async def handle_coding_tools_click(
             channel_id=channel_id or user_id,
             user_id=user_id,
             text=NOT_CONFIGURED_MESSAGE,
+            error=True,
         )
         return
 
@@ -193,15 +197,18 @@ async def handle_coding_tools_click(
                 f"`{agent_name}` is no longer available — it may have been deleted. "
                 "Reopen /agent-setup for the current list."
             ),
+            error=True,
         )
         return
 
+    account_id = await _resolve_actor_account_id(runtime, tenant_id=tenant_id, user_id=user_id)
     try:
-        decision, bound_channel_id = await _authorize_mint(
+        decision, bound_channel_id, subject = await _authorize_mint(
             runtime,
             tenant_id=tenant_id,
             channel_id=channel_id or None,
             target=target,
+            account_id=account_id,
             caller=await admin_caller(client, user_id=user_id),
         )
     except AccessPolicyUnreadable:
@@ -210,6 +217,7 @@ async def handle_coding_tools_click(
             channel_id=channel_id or user_id,
             user_id=user_id,
             text=POLICY_UNREADABLE_REFUSAL,
+            error=True,
         )
         return
     if not decision:
@@ -224,6 +232,7 @@ async def handle_coding_tools_click(
             channel_id=channel_id or user_id,
             user_id=user_id,
             text=NEEDS_ADMIN_MESSAGE,
+            error=True,
         )
         await _audit(
             runtime,
@@ -234,7 +243,6 @@ async def handle_coding_tools_click(
             reason=f"authz:{decision.reason}",
         )
         return
-    account_id = await _resolve_actor_account_id(runtime, tenant_id=tenant_id, user_id=user_id)
     agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=target.ma_agent_id)
     async with runtime.sessionmaker() as session, session.begin():
         token = await mint_agent_mcp_token(
@@ -245,8 +253,10 @@ async def handle_coding_tools_click(
             label=agent_name,
             secret=jwt_secret.get_secret_value().encode(),
             now=dt.datetime.now(dt.UTC),
+            ttl_days=coding_key_ttl_days(subject),
             platform="slack" if bound_channel_id is not None else None,
             channel_id=bound_channel_id,
+            purpose="coding",
         )
     jti = token_jti(token)
     log.info(
@@ -312,6 +322,7 @@ async def handle_revoke_token_click(
             response_url,
             text="Only the person who minted this token can revoke it.",
             replace_original=False,
+            error=True,
         )
         await audit(outcome="denied", reason="not_minter")
         return
@@ -324,12 +335,15 @@ async def handle_revoke_token_click(
             response_url,
             text="That token was already revoked.",
             replace_original=True,
+            error=True,
         )
         await audit(outcome="error", reason="already_revoked")
         return
     log.info("slack.coding_tools.revoked", jti=str(jti))
     await audit(outcome="allowed", reason="completed")
-    await _respond(runtime, response_url, text=TOKEN_REVOKED_MESSAGE, replace_original=True)
+    await _respond(
+        runtime, response_url, text=TOKEN_REVOKED_MESSAGE, replace_original=True, error=False
+    )
 
 
 async def _audit(
@@ -361,11 +375,13 @@ async def _authorize_mint(
     tenant_id: uuid.UUID,
     channel_id: str | None,
     target: RosterAgent,
+    account_id: uuid.UUID,
     caller: AdminCaller,
-) -> tuple[Decision, str | None]:
-    """Whether the caller may mint here, and the channel the token is bound to.
+) -> tuple[Decision, str | None, Subject]:
+    """Whether the caller may mint here, the channel the token is bound to, and who they are.
 
-    The agent is read only under a pin.
+    The caller is an admin, or the live owner of this agent. The agent is read
+    from the provider only under a pin.
     """
     async with runtime.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=tenant_id)
@@ -376,24 +392,34 @@ async def _authorize_mint(
             caller=caller,
             action=None,
         )
+        owned = not subject.is_admin and await owns_agent(
+            session,
+            tenant_id=tenant_id,
+            ma_agent_id=target.ma_agent_id,
+            account_id=account_id,
+        )
     agent = AgentRef.of(target.name)
     if channel_id is not None and any_agent_rules(policy):
         ma_agent = await retrieve_agent(
             runtime.anthropic, target.ma_agent_id, scope=resource_scope(tenant_id=str(tenant_id))
         )
         agent = build_agent_ref(ma_agent.name, ma_agent.metadata, target.name)
-    return authorize_coding_token(policy, subject=subject, agent=agent, channel_id=channel_id)
+    decision, bound_channel_id = authorize_coding_token(
+        policy, subject=subject, agent=agent, channel_id=channel_id, owned_by_caller=owned
+    )
+    return decision, bound_channel_id, subject
 
 
 async def _respond(
-    runtime: SlackRuntime, response_url: str, *, text: str, replace_original: bool
+    runtime: SlackRuntime, response_url: str, *, text: str, replace_original: bool, error: bool
 ) -> None:
-    """Answer the click on its own message via Slack's response_url."""
+    """Answer the click on its own message via Slack's response_url, as a notice card."""
     if not response_url:
         return
+    fields = (notice_update_fields if replace_original else notice_fields)(text, neutral=not error)
     await runtime.http_client.post(
         response_url,
-        json={"replace_original": replace_original, "text": text},
+        json={"replace_original": replace_original, **fields},
     )
 
 

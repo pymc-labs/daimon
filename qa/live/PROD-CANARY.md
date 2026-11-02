@@ -51,7 +51,7 @@ ownership/cleanup contract; it is not enabled by this implementation.
 Use the same shared daily ledger across staging and production. Review one
 manual run before copying the staging timer to a separate production service.
 Scenario B limits each environment to one two-turn Haiku canary per UTC hour and
-the entire fleet to one catalog invocation per UTC day, with a fixed $10 daily
+all deployed workers to one catalog invocation per UTC day, with a fixed $10 daily
 ledger cap. The planned canaries and configured daily catalog allocation must
 fit that cap before any run. Only the two internal guilds are eligible; a real
 Sonnet/Opus production agent is never an eligible canary target.

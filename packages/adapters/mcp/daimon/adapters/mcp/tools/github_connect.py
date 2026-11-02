@@ -10,6 +10,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._admin import current_admin
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._owner import may_own
 from daimon.adapters.mcp.tools._words import space_noun
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
@@ -22,6 +23,7 @@ from daimon.adapters.mcp.tools.setup_target import (
 )
 from daimon.adapters.mcp.tools.slack._client import slack_web_client
 from daimon.adapters.mcp.tools.teams._direct import send_card_to_caller
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
 from daimon.core.github_connect_cards import (
     CONNECT_GITHUB_EMOJI,
     connect_attachment,
@@ -30,6 +32,7 @@ from daimon.core.github_connect_cards import (
     teams_connect_card,
 )
 from daimon.core.github_credentials import encrypt_token
+from daimon.core.github_panel import requester_manages_agent
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.github_access import (
@@ -216,7 +219,20 @@ async def _github_connect_impl(
         if account is None or account.tenant_id != auth.tenant_id:
             raise ToolError("GitHub setup is unavailable for this account.")
         is_admin = await current_admin(session, auth)
-        if not is_admin:
+        manages = is_admin or await requester_manages_agent(
+            session,
+            tenant_id=auth.tenant_id,
+            account_id=auth.account_id,
+            platform=auth.platform,
+            platform_user_id=auth.platform_user_id if auth.agent_id is None else None,
+            agent_name=agent.name,
+            other_names=(target_name, str(agent.metadata.get(MA_METADATA_KEY_NAME) or "")),
+            ma_agent_id=str(agent.id),
+            default=runtime.deployment_default,
+            is_daimon_managed=agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
+            allow_owner=may_own(auth),
+        )
+        if not manages:
             await record_connect_request(
                 session,
                 tenant_id=auth.tenant_id,
@@ -240,8 +256,9 @@ async def _github_connect_impl(
             return ConnectResult(
                 status="ask_admin",
                 message=(
-                    f"Only an admin can connect repos to {agent.name}. Tell the person in one "
-                    f"line to ask an admin to say here: connect {repo_label} to {agent.name}."
+                    f"Only an admin or an owner of {agent.name} can connect repos to it. Tell "
+                    f"the person in one line to ask an admin or an owner to say here: connect "
+                    f"{repo_label} to {agent.name}."
                 ),
             )
         if repo_name is not None:
@@ -453,9 +470,9 @@ def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         Use this when someone asks to let an agent read a private repository
         at github.com/owner/repo. Show a single-use
-        connection button bound to the selected agent to an admin; repos
-        connected this way are for that agent only. Other members get Ask an
-        admin and a recorded request. The card may go to the requester's
+        connection button bound to the selected agent to an admin or to an owner
+        of that agent; repos connected this way are for that agent only. Other
+        members get Ask an admin and a recorded request. The card may go to the requester's
         private chat instead; the result says so. Never repeat a private link in a
         shared reply. For a setup
         target, pass its current name and MA id from turn_controls; otherwise

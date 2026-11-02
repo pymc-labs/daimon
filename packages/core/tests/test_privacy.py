@@ -503,6 +503,133 @@ async def test_preview_and_purge_agree_on_microsoft_user_tokens(
     assert left == 0, "no refresh token may survive the purge"
 
 
+async def test_preview_and_purge_agree_on_web_people_and_their_sessions(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The web profile, its sign-in rows and admin grant are previewed and erased together."""
+    from datetime import UTC, datetime, timedelta
+
+    from daimon.core.stores import web_identities as identities_store
+    from daimon.core.stores import web_node_tokens as node_tokens_store
+    from daimon.core.stores import web_roles as roles_store
+    from daimon.core.stores import web_sessions as sessions_store
+    from daimon.testing import make_web_person
+
+    tenant = await make_tenant(db_session, workspace_id="PV_WEB")
+    account = await make_account(db_session, tenant=tenant)
+    person = await make_web_person(db_session, tenant=tenant, account=account)
+    await identities_store.link_identity(
+        db_session,
+        tenant_id=tenant.id,
+        person_id=person.id,
+        provider="oidc",
+        issuer="https://id.example.com",
+        subject="sub-1",
+        label="Example",
+        groups=(),
+    )
+    await roles_store.set_workspace_role(
+        db_session,
+        tenant_id=tenant.id,
+        account_id=account.id,
+        role="owner",
+        granted_by_account_id=None,
+    )
+    await sessions_store.create_session(
+        db_session,
+        token_sha256=b"x" * 32,
+        provider="oidc",
+        issuer="https://id.example.com",
+        subject="sub-1",
+        people=[person],
+        ttl=timedelta(days=1),
+        now=datetime.now(tz=UTC),
+    )
+    await node_tokens_store.upsert_node_token(
+        db_session,
+        tenant_id=tenant.id,
+        person_id=person.id,
+        token_key="issuer-1#data",
+        access_token_enc=b"a",
+        expires_at=datetime.now(tz=UTC),
+    )
+    await db_session.commit()
+
+    preview = await collect_purge_preview(sm=db_session_factory, account_id=account.id)
+    assert preview.web_people.count == 1, "must count the web profile"
+    assert preview.web_admin_grants.count == 1, "must count the admin grant"
+    assert "1 web app profile" in summary_line(preview), "the privacy card must list it"
+    report = await purge_account(sm=db_session_factory, account_id=account.id)
+    assert report.db.web_people == 1, "purge must delete the profile it previewed"
+    assert report.db.web_admin_grants == 1, "purge must delete the grant it previewed"
+    async with db_session_factory() as session:
+        live = await sessions_store.get_live_session(
+            session, token_sha256=b"x" * 32, now=datetime.now(tz=UTC)
+        )
+        identities = await identities_store.find_identity(
+            session, provider="oidc", issuer="https://id.example.com", subject="sub-1"
+        )
+        token = await node_tokens_store.get_node_token(
+            session, person_id=person.id, token_key="issuer-1#data"
+        )
+    assert token is None, "the exchanged tokens must go with the person"
+    assert live is None, "the browser session must go with the person"
+    assert identities == [], "the sign-in identity must go with the person"
+
+
+async def test_purge_leaves_no_name_or_email_in_the_web_audit_trail(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Audit rows about an erased person or their invite stay, with no name or address."""
+    from daimon.core.stores import web_audit as audit_store
+    from daimon.core.stores import web_invites as invites_store
+    from daimon.testing import make_web_person
+
+    tenant = await make_tenant(db_session, workspace_id="PV_AUDIT")
+    account = await make_account(db_session, tenant=tenant)
+    person = await make_web_person(
+        db_session,
+        tenant=tenant,
+        account=account,
+        display_name="Grace Hopper",
+        email="g@example.com",
+    )
+    now = datetime.now(tz=UTC)
+    invite = await invites_store.create_invite(
+        db_session,
+        tenant_id=tenant.id,
+        token_sha256=b"i" * 32,
+        kind="invite",
+        expires_at=now + timedelta(days=1),
+        email="g@example.com",
+    )
+    await invites_store.set_accepted_by(db_session, invite_id=invite.id, person_id=person.id)
+    for action, kwargs in (
+        ("Suspended", {"target": "A person", "target_person_id": person.id}),
+        ("Created invite", {"target": "An invite", "target_invite_id": invite.id}),
+    ):
+        await audit_store.record(
+            db_session, tenant_id=tenant.id, actor_account_id=None, action=action, at=now, **kwargs
+        )
+    await db_session.commit()
+
+    await purge_account(sm=db_session_factory, account_id=account.id)
+
+    async with db_session_factory() as session:
+        rows = await audit_store.list_recent(session, tenant_id=tenant.id)
+    assert {r.action for r in rows} == {"Suspended", "Created invite"}, (
+        "the workspace keeps its record of what changed"
+    )
+    assert {r.target for r in rows} == {"A person", "An invite"}, "targets fall back to a label"
+    assert all(r.target_person_id is None and r.target_invite_id is None for r in rows), (
+        "the ids of erased people and invites are cleared"
+    )
+    text = " ".join(f"{r.target} {r.detail}" for r in rows)
+    assert "Grace" not in text and "example.com" not in text, "no name or email stays as text"
+
+
 async def test_collect_purge_preview_credential_requests_matches_purge_account(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -828,6 +955,15 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "platform_user_names": "platform_user_names",
         "teams_messages": "teams_messages",
         "microsoft_user_tokens": "microsoft_user_tokens",
+        "web_people": "web_people",
+        "web_admin_grants": "web_admin_grants",
+        "mux_slots": "mux_slots",
+        "mux_binding_generations": "mux_binding_generations",
+        "mux_journal_sessions": "mux_journal_sessions",
+        "mux_journal_events": "mux_journal_events",
+        "mux_leases": "mux_leases",
+        "mux_release_requests": "mux_release_requests",
+        "mux_operations": "mux_operations",
     }
 
     uncovered = report_fields - set(mapping.keys())
@@ -881,9 +1017,16 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         "message_feedback": "account_id FK -> accounts.id",
         "support_escalations": "account_id FK -> accounts.id",
         "direct_message_conversations": "account_id FK -> accounts.id",
+        # The web app: a person, with their identities, tokens and browser sessions, and
+        # the admin grants of the account.
+        "web_people": "account_id FK -> accounts.id",
+        "workspace_admins": "account_id FK -> accounts.id",
         # The person's user id leaves every grant; updated_by is SET NULL.
         "daimon_admins": "subject_id and granted_by are erased by platform principal",
         "channel_admins": "user_ids + updated_by_account_id FK -> accounts.id",
+        # Text account_id / principal_id with no FK: erased by `stores.mux_erasure`,
+        # except operations against a shared slot, which are counted as retained.
+        "operation": "text account_id and principal_id (mux erasure)",
     }
     # Intentional exclusions, each justified inline.
     allowlist: frozenset[str] = frozenset(
@@ -916,12 +1059,26 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # Who may edit an agent: no content, and ON DELETE CASCADE with
             # accounts.id, after which the agent is admin-only again.
             "agent_owner",
+            # Same shape for co-owners: the person's own row is ON DELETE CASCADE with
+            # accounts.id, and the admin who added them is ON DELETE SET NULL, so erasing
+            # either account never leaves an identifier behind. Covered by
+            # test_agent_co_owners.py.
+            "agent_co_owners",
+            # A person's unsaved web edit of an agent: ON DELETE CASCADE with
+            # accounts.id, so erasing the account drops it.
+            "agent_drafts",
+            # The tenant agent's applied versions; the author is ON DELETE SET NULL.
+            "agent_versions",
             # Same shape: a previewed skill add waits at most 15 minutes for its
             # person's reply, holds only a content hash, and cascades with accounts.id.
             "pending_skill_adds",
             # A tenant-wide channel budget; the only accounts.id FK is the admin
             # who set it, set_by_account_id with ON DELETE SET NULL.
             "channel_budgets",
+            # Same shape: a tenant-wide spend allowance (created_by_account_id) and a
+            # ledger entry (actor_account_id), each with ON DELETE SET NULL.
+            "spend_allowances",
+            "tenant_ledger",
             # A tenant-wide channel skill; the only accounts.id FK is the admin
             # who added it, added_by_account_id with ON DELETE SET NULL.
             "channel_skills",
@@ -976,14 +1133,20 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # FK; the scheduler then retires the orphaned session and vault
             # instead of renewing its tokens as a headless requester.
             "github_app_session_vaults",
-            # The provider-neutral operation log (`stores.mux_state`). Nothing
-            # writes it until the mux turn path lands; a row holds an
-            # operation key, request digest and status, no content. The lane
-            # that first writes it wires the purge.
-            "operation",
+            # The erasure fence's tombstone of a principal: a bare id with no content,
+            # kept on purpose so a stale writer naming an erased principal is refused.
+            "erased_principal",
             # A pending chat grant lives 15 minutes and both account references
             # are ON DELETE CASCADE, so erasing the account removes it.
             "github_grant_proposals",
+            # The web app's admin audit trail: the only accounts.id FK is the actor,
+            # actor_account_id with ON DELETE SET NULL, so erasure severs who acted while
+            # the workspace keeps its record of what changed. A person or invite it is
+            # about is an id that clears when they go; the text names no one.
+            "web_audit",
+            # A workspace's invite links: the only accounts.id FK is the admin who made
+            # one, ON DELETE SET NULL. An accepted invite cascades with its person.
+            "web_invites",
         }
     )
 
@@ -1006,6 +1169,65 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         f"into purge.py (+ PurgeReport/PurgePreview) or add the table to the allowlist "
         f"in this test with a justification. In-scope because: {uncovered}"
     )
+
+
+async def test_every_mux_table_and_text_account_column_has_a_disposition() -> None:
+    """Each provider-neutral table says what account erasure does with it.
+
+    The account FK / principal_id drift guard above cannot see these tables' ownership:
+    their account is plain text with no foreign key. The reflected schema finds every
+    table that hangs off a slot, binding or journal head, or carries a text account or
+    principal column, and each must have an explicit disposition in `stores.mux_erasure`
+    (or be one of the tables another test covers).
+    """
+    from daimon.core.stores.mux_erasure import JSON_OWNERSHIP_FIELDS, TABLE_DISPOSITIONS
+    from sqlalchemy import Text
+
+    parents = {"provider_binding_slot", "provider_binding", "journal_session"}
+    hanging_off_a_slot = {
+        name
+        for name, table in Base.metadata.tables.items()
+        if any(fk.column.table.name in parents for fk in table.foreign_keys)
+    }
+    text_account_columns = {
+        name
+        for name, table in Base.metadata.tables.items()
+        if any(
+            column.name in {"account_id", "principal_id", "legacy_account_id"}
+            and isinstance(column.type, Text)
+            for column in table.columns
+        )
+    }
+    # Text principal columns that also carry an accounts.id FK, or an account-keyed
+    # receipt table; each is deleted by the purge and listed in the test above.
+    purged_elsewhere = {
+        "neutral_agent_revisions",
+        "neutral_skill_versions",
+        "selfhosted_resource_operations",
+    }
+    undisposed = (
+        (parents | hanging_off_a_slot | text_account_columns)
+        - set(TABLE_DISPOSITIONS)
+        - purged_elsewhere
+    )
+    assert not undisposed, f"mux table(s) {sorted(undisposed)} have no erasure disposition"
+    assert set(TABLE_DISPOSITIONS) <= set(Base.metadata.tables), "disposition for a removed table"
+    assert all(TABLE_DISPOSITIONS.values()), "every disposition must say what happens"
+    for path, why in JSON_OWNERSHIP_FIELDS.items():
+        table = path.split(".")[0].split(" ")[0]
+        assert table in TABLE_DISPOSITIONS and why, f"{path} names a table with no disposition"
+    assert {
+        "provider_binding_slot",
+        "provider_binding",
+        "thread_lease",
+        "thread_provider_release",
+        "operation",
+        "journal_session",
+        "journal",
+        "usage_observation",
+        "accounting_outbox",
+        "channel_config_revision",
+    } <= set(TABLE_DISPOSITIONS), "a mux table lost its disposition"
 
 
 async def test_account_purge_removes_selfhosted_receipts_and_keeps_shared_resources(

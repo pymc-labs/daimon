@@ -18,6 +18,7 @@ from daimon.adapters.discord.agent_setup.navigation import PanelViewBase
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.checks import refuse_if_not_admin
 from daimon.adapters.discord.layout import hairline, header
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.channel_skills import REFUSALS, add_skill_to_channel
@@ -212,11 +213,15 @@ class AddChannelSkillModal(discord.ui.Modal):
                     platform_skills=view.runtime.turn_deps.platform_skills,
                 )
         except (SkillsListTruncatedError, anthropic.APIError):
-            await interaction.response.send_message(UNREADABLE, ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed(UNREADABLE), ephemeral=True
+            )
             await audit(outcome="error", reason="skills_unreadable")
             return
         if isinstance(added, str):
-            await interaction.response.send_message(REFUSALS[added], ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed(REFUSALS[added]), ephemeral=True
+            )
             await audit(outcome="denied", reason=added)
             return
         await audit(outcome="allowed", reason="completed")

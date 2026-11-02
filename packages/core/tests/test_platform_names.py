@@ -622,6 +622,142 @@ async def test_a_lookup_that_raises_falls_back_to_the_stored_name() -> None:
     assert labels == {"a": "Ann"} and found == {}
 
 
+# ---- channel names asked for once ----
+
+
+async def test_a_channel_name_is_asked_for_once_and_remembered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    remembered: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        platform_names,
+        "remember_channel_names",
+        lambda _sm, *, tenant_id, platform, names: remembered.append(names),  # type: ignore[reportUnknownLambdaType]
+    )
+    platform_names.forget_all()
+    tenant, asked = uuid.uuid4(), list[str]()
+
+    async def lookup(_guild: str, channel_id: str) -> str | None:
+        asked.append(channel_id)
+        return {"c1": " general "}.get(channel_id)
+
+    first = await platform_names.lookup_channel_names(
+        MagicMock(),
+        tenant_id=tenant,
+        platform="discord",
+        external_id="g1",
+        channel_ids=["c1", "c2"],
+        lookup=lookup,
+    )
+    again = await platform_names.lookup_channel_names(
+        MagicMock(),
+        tenant_id=tenant,
+        platform="discord",
+        external_id="g1",
+        channel_ids=["c2"],
+        lookup=lookup,
+    )
+
+    assert first.names == {"c1": "general"} and remembered == [{"c1": "general"}]
+    assert asked == ["c1", "c2"], "a channel the platform could not name is not asked again"
+    assert again.labels() == {}, "an unanswered channel stays unnamed"
+
+
+async def test_a_deleted_channel_is_answered_from_memory_and_never_stored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A channel the platform calls gone keeps its label without asking again."""
+    remembered: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        platform_names,
+        "remember_channel_names",
+        lambda _sm, *, tenant_id, platform, names: remembered.append(names),  # type: ignore[reportUnknownLambdaType]
+    )
+    platform_names.forget_all()
+    tenant, asked = uuid.uuid4(), list[str]()
+
+    async def lookup(_guild: str, channel_id: str) -> str | platform_names.ChannelStatus | None:
+        asked.append(channel_id)
+        return {
+            "gone": platform_names.ChannelStatus.GONE,
+            "dm": platform_names.ChannelStatus.DIRECT,
+        }.get(channel_id)
+
+    async def ask() -> platform_names.LookedUpChannels:
+        return await platform_names.lookup_channel_names(
+            MagicMock(),
+            tenant_id=tenant,
+            platform="discord",
+            external_id="g1",
+            channel_ids=["gone", "dm"],
+            lookup=lookup,
+        )
+
+    first, again = await ask(), await ask()
+
+    for found in (first, again):
+        assert found.labels() == {"gone": "Deleted channel", "dm": "Direct message"}, (
+            "a deleted channel and a direct message are labelled, on every load"
+        )
+        assert found.gone == {"gone"}, "only the deleted channel counts as gone"
+    assert asked == ["gone", "dm"], "the platform is asked once"
+    assert remembered == [], "a status is not stored as a name"
+
+
+async def test_a_channel_not_answered_in_time_is_asked_again_a_minute_later(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(platform_names, "_LOOKUP_TIMEOUT_S", 0.05)
+    platform_names.forget_all()
+    asked: list[str] = []
+    slow = True
+
+    async def lookup(_guild: str, channel_id: str) -> platform_names.ChannelStatus:
+        asked.append(channel_id)
+        if slow:
+            await asyncio.sleep(10)
+        return platform_names.ChannelStatus.GONE
+
+    async def ask() -> platform_names.LookedUpChannels:
+        return await platform_names.lookup_channel_names(
+            MagicMock(),
+            tenant_id=tenant,
+            platform="discord",
+            external_id="g1",
+            channel_ids=["c1"],
+            lookup=lookup,
+        )
+
+    tenant = uuid.uuid4()
+    first = await ask()
+    slow = False
+    soon = await ask()
+    memo = platform_names._missed  # pyright: ignore[reportPrivateUsage]
+    at, answer = memo[(tenant, "discord", "c1")]
+    memo[(tenant, "discord", "c1")] = (at - platform_names._TIMEOUT_RETRY_S, answer)  # pyright: ignore[reportPrivateUsage]
+    later = await ask()
+    assert first.labels() == soon.labels() == {}, "a lookup cut off by the timeout names nothing"
+    assert later.labels() == {"c1": "Deleted channel"}, "and is asked again a minute later"
+    assert asked == ["c1", "c1"], "not on every call in between"
+
+
+async def test_a_channel_lookup_that_raises_names_nothing() -> None:
+    platform_names.forget_all()
+
+    async def broken(_guild: str, _channel_id: str) -> str | None:
+        raise RuntimeError("boom")
+
+    found = await platform_names.lookup_channel_names(
+        MagicMock(),
+        tenant_id=uuid.uuid4(),
+        platform="discord",
+        external_id="g1",
+        channel_ids=["c1"],
+        lookup=broken,
+    )
+    assert found.labels() == {}, "a failed lookup names nothing"
+
+
 # ---- the migration ----
 
 
@@ -667,3 +803,32 @@ async def test_the_migration_round_trips(db_session: AsyncSession) -> None:
         db_session, tenant_id=tenant.id, platform="slack", names={"U1": KnownName("Ann")}
     )
     assert stored == {"U1"}, "the upgraded table takes a name"
+
+
+async def test_a_channel_lookup_asks_for_a_capped_number_at_a_bounded_pace() -> None:
+    """A page with many unnamed channels asks at most 20, five at a time, in the tenant's server."""
+    platform_names.forget_all()
+    running = peak = 0
+    asked: list[tuple[str, str]] = []
+
+    async def lookup(guild: str, channel_id: str) -> str | None:
+        nonlocal running, peak
+        running += 1
+        peak = max(peak, running)
+        await asyncio.sleep(0)
+        asked.append((guild, channel_id))
+        running -= 1
+        return None
+
+    await platform_names.lookup_channel_names(
+        MagicMock(),
+        tenant_id=uuid.uuid4(),
+        platform="discord",
+        external_id="g1",
+        channel_ids=[f"c{n}" for n in range(50)],
+        lookup=lookup,
+    )
+
+    assert len(asked) == 20, "no more than 20 channels are asked about per call"
+    assert {guild for guild, _ in asked} == {"g1"}, "every ask carries the tenant's server"
+    assert peak <= 5, "no more than five asks run at once"

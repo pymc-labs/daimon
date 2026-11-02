@@ -8,6 +8,7 @@ import pytest
 from daimon.core._models import GitHubAppInstallation
 from daimon.core.stores import github_app_installations as store
 from daimon.core.stores.domain import GitHubAppInstallationRow
+from daimon.core.stores.github_installation_coverage import installation_covers_repo
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -184,3 +185,161 @@ async def test_connect_upsert_preserves_reconciled_suspension(db_session: AsyncS
         suspended_at=None,
     )
     assert updated.suspended_at == suspended_at
+
+
+@pytest.mark.asyncio
+async def test_connect_upsert_merges_verified_repos_into_existing_snapshot(
+    db_session: AsyncSession,
+) -> None:
+    await store.upsert_github_app(
+        db_session,
+        installation_id=6005,
+        account_id=17,
+        account_login="org",
+        account_type="Organization",
+        repository_selection="selected",
+        suspended_at=None,
+    )
+    installation = await db_session.get(GitHubAppInstallation, 6005)
+    assert installation is not None
+    refreshed_at = datetime(2026, 10, 16, tzinfo=UTC)
+    installation.github_repo_full_names = ["org/hidden"]
+    installation.github_refreshed_at = refreshed_at
+    await db_session.flush()
+
+    updated = await store.upsert_github_app(
+        db_session,
+        installation_id=6005,
+        account_id=17,
+        account_login="org",
+        account_type="Organization",
+        repository_selection="selected",
+        suspended_at=None,
+        freshly_verified_repos=store.VerifiedInstallationRepos(
+            names=["org/new", "org/new"], refreshed_at=refreshed_at
+        ),
+    )
+
+    assert updated.github_repo_full_names == ("org/hidden", "org/new")
+    # Coverage also requires tenant confirmation, modeled independently here.
+    covered = updated.model_copy(
+        update={"repo_full_names": ("org/hidden", "org/new", "org/unverified")}
+    )
+    assert installation_covers_repo(covered, "org/hidden")
+    assert installation_covers_repo(covered, "org/new")
+    assert not installation_covers_repo(covered, "org/unverified")
+
+
+@pytest.mark.asyncio
+async def test_connect_upsert_does_not_replace_unknown_snapshot(
+    db_session: AsyncSession,
+) -> None:
+    await store.upsert_github_app(
+        db_session,
+        installation_id=6006,
+        account_id=17,
+        account_login="org",
+        account_type="Organization",
+        repository_selection="selected",
+        suspended_at=None,
+        freshly_verified_repos=store.VerifiedInstallationRepos(
+            names=["org/new"], refreshed_at=None
+        ),
+    )
+    updated = await store.upsert_github_app(
+        db_session,
+        installation_id=6006,
+        account_id=17,
+        account_login="org",
+        account_type="Organization",
+        repository_selection="selected",
+        suspended_at=None,
+        freshly_verified_repos=store.VerifiedInstallationRepos(
+            names=["org/new"], refreshed_at=None
+        ),
+    )
+
+    assert updated.github_repo_full_names is None
+
+
+@pytest.mark.asyncio
+async def test_connect_upsert_verified_repos_preserves_removal_and_suspension(
+    db_session: AsyncSession,
+) -> None:
+    await store.upsert_github_app(
+        db_session,
+        installation_id=6007,
+        account_id=17,
+        account_login="org",
+        account_type="Organization",
+        repository_selection="selected",
+        suspended_at=None,
+    )
+    installation = await db_session.get(GitHubAppInstallation, 6007)
+    assert installation is not None
+    flagged_at = datetime(2026, 10, 16, tzinfo=UTC)
+    installation.repo_full_names = ["org/new"]
+    installation.github_repo_full_names = []
+    installation.suspended_at = flagged_at
+    installation.github_removed_at = flagged_at
+    await db_session.flush()
+
+    updated = await store.upsert_github_app(
+        db_session,
+        installation_id=6007,
+        account_id=17,
+        account_login="org",
+        account_type="Organization",
+        repository_selection="selected",
+        suspended_at=None,
+        freshly_verified_repos=store.VerifiedInstallationRepos(
+            names=["org/new"], refreshed_at=None
+        ),
+    )
+
+    assert updated.github_repo_full_names == ("org/new",)
+    assert updated.suspended_at == flagged_at
+    assert updated.github_removed_at == flagged_at
+    assert not installation_covers_repo(updated, "org/new")
+
+
+@pytest.mark.asyncio
+async def test_connect_upsert_rejects_evidence_after_newer_reconciliation(
+    db_session: AsyncSession,
+) -> None:
+    await store.upsert_github_app(
+        db_session,
+        installation_id=6008,
+        account_id=17,
+        account_login="org",
+        account_type="Organization",
+        repository_selection="selected",
+        suspended_at=None,
+    )
+    installation = await db_session.get(GitHubAppInstallation, 6008)
+    assert installation is not None
+    old_refresh = datetime(2026, 10, 16, tzinfo=UTC)
+    installation.github_repo_full_names = ["org/old"]
+    installation.github_refreshed_at = old_refresh
+    await db_session.flush()
+    evidence = store.VerifiedInstallationRepos(names=["org/removed"], refreshed_at=old_refresh)
+
+    new_refresh = datetime(2026, 10, 17, tzinfo=UTC)
+    installation.github_repo_full_names = ["org/new"]
+    installation.github_refreshed_at = new_refresh
+    await db_session.flush()
+
+    with pytest.raises(store.StaleInstallationSnapshotError):
+        await store.upsert_github_app(
+            db_session,
+            installation_id=6008,
+            account_id=17,
+            account_login="org",
+            account_type="Organization",
+            repository_selection="selected",
+            suspended_at=None,
+            freshly_verified_repos=evidence,
+        )
+
+    assert installation.github_repo_full_names == ["org/new"]
+    assert installation.github_refreshed_at == new_refresh

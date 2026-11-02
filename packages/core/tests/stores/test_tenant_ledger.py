@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from daimon.core.stores import tenant_ledger
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_ledger_entry, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -241,3 +242,34 @@ async def test_get_clawed_back_total_scoped_by_payment_intent(
     )
     total_a = await tenant_ledger.get_clawed_back_total(db_session, payment_intent="pi_a")
     assert total_a == Decimal("5.00"), "clawbacks on a different payment_intent must not be counted"
+
+
+async def test_list_entries_excluding_reasons_is_newest_first_and_limited(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    other = await make_tenant(db_session, workspace_id="other")
+    now = datetime(2026, 3, 1, tzinfo=UTC)
+    for key, reason, days, owner in (
+        ("a", "topup", 1, tenant),
+        ("b", "turn_debit", 2, tenant),
+        ("c", "manual_credit", 3, tenant),
+        ("d", "topup", 4, other),
+    ):
+        await make_ledger_entry(
+            db_session,
+            tenant=owner,
+            reason=reason,
+            idempotency_key=key,
+            occurred_at=now + timedelta(days=days),
+        )
+
+    rows = await tenant_ledger.list_entries_excluding_reasons(
+        db_session, tenant_id=tenant.id, reasons=["turn_debit"], limit=10
+    )
+    limited = await tenant_ledger.list_entries_excluding_reasons(
+        db_session, tenant_id=tenant.id, reasons=["turn_debit"], limit=1
+    )
+
+    assert [r.reason for r in rows] == ["manual_credit", "topup"], "no spend, no other tenant"
+    assert [r.reason for r in limited] == ["manual_credit"], "the limit keeps the newest"

@@ -7,6 +7,7 @@ queries re-keyed on tenant_id.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from typing import Any, cast
 
 from daimon.core._models import (
@@ -38,6 +39,18 @@ async def get_tenant(session: AsyncSession, tenant_id: uuid.UUID) -> TenantRow |
     if row is None:
         return None
     return TenantRow.model_validate(row)
+
+
+async def list_platforms(
+    session: AsyncSession, tenant_ids: Collection[uuid.UUID]
+) -> dict[uuid.UUID, Platform]:
+    """Each known tenant's platform, in one read."""
+    if not tenant_ids:
+        return {}
+    rows = await session.execute(
+        select(Tenant.id, Tenant.platform).where(Tenant.id.in_(tenant_ids))
+    )
+    return {tenant_id: cast(Platform, platform) for tenant_id, platform in rows.tuples()}
 
 
 async def list_all_tenant_ids(session: AsyncSession) -> set[uuid.UUID]:

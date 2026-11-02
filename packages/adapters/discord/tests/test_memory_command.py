@@ -142,7 +142,7 @@ async def test_memory_empty_state(db_session, db_session_factory) -> None:
     await cog.memory.callback(cog, interaction, path=None)
 
     sent = interaction.followup.send.call_args
-    text = sent.args[0] if sent.args else sent.kwargs.get("content", "")
+    text = sent.kwargs["embed"].description
     assert "no memory to show here." in text.lower()
 
 
@@ -163,7 +163,7 @@ async def test_memory_hides_an_agent_isolation_keeps_out(db_session, db_session_
 
     await cog.memory.callback(cog, interaction, path=None)
 
-    text = interaction.followup.send.call_args.args[0]
+    text = interaction.followup.send.call_args.kwargs["embed"].description
     assert "no memory to show here." in text.lower(), "the deployment default answers elsewhere too"
 
 
@@ -207,7 +207,8 @@ async def _say(runtime, *, user_id: int, path: str | None) -> str:
     await cog.memory.callback(cog, interaction, path=path)
     sent = interaction.followup.send.call_args
     assert sent.kwargs.get("ephemeral") is True
-    return sent.args[0]
+    # Memory itself is plain text; Daimon's own words come as a card.
+    return sent.args[0] if sent.args else sent.kwargs["embed"].description
 
 
 async def test_memory_mine_shows_only_the_invokers_own_personal_memory(
@@ -284,7 +285,8 @@ async def _hold_channel(db_session, runtime, *, shared_files: dict[str, str]) ->
 
 def _sent_text(interaction: MagicMock) -> str:
     sent = interaction.followup.send.call_args
-    return sent.args[0] if sent.args else sent.kwargs.get("content", "")
+    embed = sent.kwargs.get("embed")
+    return embed.description if embed is not None else sent.args[0]
 
 
 async def test_memory_in_a_shared_channel_shows_the_channel_store_not_the_agent_wide_one(

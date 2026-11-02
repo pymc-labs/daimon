@@ -389,8 +389,22 @@
           "content-type": "application/json;charset=utf-8"
         },
         "json": {
+          "attachments": [
+            {
+              "blocks": [
+                {
+                  "text": {
+                    "text": "You've used your monthly limit.\n\nAsk the team running Daimon to raise it.",
+                    "type": "mrkdwn"
+                  },
+                  "type": "section"
+                }
+              ],
+              "color": "#ED4245",
+              "fallback": "You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
+            }
+          ],
           "channel": "100002",
-          "text": "You've used your monthly limit.\n\nAsk the team running Daimon to raise it.",
           "thread_ts": "1791504000.000000"
         },
         "method": "POST",

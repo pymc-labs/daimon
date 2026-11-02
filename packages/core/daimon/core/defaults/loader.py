@@ -49,7 +49,8 @@ def _load_yaml(path: Path) -> dict[str, object]:
     return cast(dict[str, object], loaded)
 
 
-def load_agent_specs(root: Path) -> list[AgentSpec]:
+def load_agent_specs(root: Path, *, templates: bool = False) -> list[AgentSpec]:
+    """The agents under ``root``; a ``template: true`` file is one only when ``templates``."""
     specs: list[AgentSpec] = []
     for path in sorted(root.glob("*.yaml")):
         data = _load_yaml(path)
@@ -61,8 +62,22 @@ def load_agent_specs(root: Path) -> list[AgentSpec]:
             raise DefaultsError(
                 f"{path}: filename stem {path.stem!r} must equal name {spec.name!r}"
             )
-        specs.append(spec)
+        if spec.template == templates:
+            specs.append(spec)
     return specs
+
+
+def load_agent_templates(root: Path) -> list[AgentSpec]:
+    """The ``template: true`` agents under ``root``: starting points, never provisioned."""
+    return load_agent_specs(root, templates=True)
+
+
+def load_skill_descriptions(root: Path) -> dict[str, str]:
+    """Each shipped skill's frontmatter description by name, from the skills under ``root``."""
+    return {
+        spec.name: spec.description
+        for spec, _body in (load_skill_spec(path) for path in load_skill_paths(root))
+    }
 
 
 def load_platform_skills(
@@ -157,13 +172,20 @@ def parse_skill_frontmatter(path: Path) -> tuple[SkillSpec, str]:
     return parse_skill_markdown(path.read_text(), source=str(path))
 
 
+def split_frontmatter(content: str) -> tuple[str, str] | None:
+    """`(frontmatter, body)` of a SKILL.md, or None without a closed `---` block."""
+    match = _FRONTMATTER_RE.match(content)
+    return None if match is None else (match.group("frontmatter"), match.group("body"))
+
+
 def parse_skill_markdown(content: str, *, source: str) -> tuple[SkillSpec, str]:
     """`parse_skill_frontmatter` for text already in hand; `source` names it in errors."""
-    match = _FRONTMATTER_RE.match(content)
-    if match is None:
+    parts = split_frontmatter(content)
+    if parts is None:
         raise DefaultsError(f"{source}: missing YAML frontmatter (expected leading '---')")
+    block, body = parts
     try:
-        frontmatter = yaml.safe_load(match.group("frontmatter"))
+        frontmatter = yaml.safe_load(block)
     except yaml.YAMLError as err:
         raise DefaultsError(f"{source}: frontmatter YAML parse error: {err}") from err
     if not isinstance(frontmatter, dict):
@@ -172,7 +194,7 @@ def parse_skill_markdown(content: str, *, source: str) -> tuple[SkillSpec, str]:
         spec = SkillSpec.model_validate(frontmatter)
     except ValidationError as err:
         raise DefaultsError(f"{source}: {err}") from err
-    return spec, match.group("body")
+    return spec, body
 
 
 def load_skill_spec(skill_dir: Path) -> tuple[SkillSpec, str]:

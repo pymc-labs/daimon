@@ -45,6 +45,7 @@ from daimon.adapters.slack.billing_panel.views import (
     build_expiry_view,
     build_loading_view,
 )
+from daimon.adapters.slack.blockkit import notice_fields
 from daimon.adapters.slack.errors import generate_request_id, surface_command_error
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
@@ -244,7 +245,7 @@ async def handle_topup_select(
         await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
             channel=channel,
             user=user_id,
-            text=f"<{url}|Complete payment>",
+            **notice_fields(f"<{url}|Complete payment>", neutral=True),
         )
 
     except (DaimonError, httpx.HTTPStatusError, SlackApiError) as exc:

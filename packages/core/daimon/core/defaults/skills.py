@@ -13,6 +13,7 @@ and nowhere else.
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Callable, Sequence
 from typing import Any
@@ -31,6 +32,8 @@ from daimon.core.defaults.ma_index import (
 from daimon.core.defaults.metadata import strip_tenant_prefix, tenant_scoped_display_title
 from daimon.core.errors import DefaultsError
 from daimon.core.specs import SkillRef
+
+_TENANT_PREFIX = re.compile(r"[0-9a-f]{8}-")
 
 
 async def resolve_refs(
@@ -177,14 +180,17 @@ async def resolve_custom_skill_titles(
     skipped entirely -- and the truncation flag reported as False -- when no
     agent references a custom skill.
 
-    Only skills whose display_title strips to a non-None bare name for
-    ``tenant_id`` are included, so foreign-tenant and legacy titles never reach
-    a rendered name; a caller displaying an id it cannot find falls back to the
-    id itself. The second element is True when the skills listing hit the MA
-    page ceiling, which a caller rendering "these are the skills" must say out
-    loud rather than present a partial list as complete.
+    A skill whose display_title carries ``tenant_id``'s prefix maps to the bare
+    name. A skill attached to ``agents`` whose title carries no tenant prefix at
+    all maps to its last ``/`` segment. Other titles, including any that look
+    like another tenant's, never reach a rendered name; a caller displaying an
+    id it cannot find falls back to the id itself. The second element is True
+    when the skills listing hit the MA page ceiling, which a caller rendering
+    "these are the skills" must say out loud rather than present a partial list
+    as complete.
     """
-    if not any(sk.type == "custom" for agent in agents for sk in agent.skills):
+    attached = {sk.skill_id for agent in agents for sk in agent.skills if sk.type == "custom"}
+    if not attached:
         return {}, False
     rows, truncated = await list_skills_lenient(client)
     titles: dict[str, str] = {}
@@ -194,4 +200,6 @@ async def resolve_custom_skill_titles(
         bare = strip_tenant_prefix(tenant_id=tenant_id, display_title=sk.display_title)
         if bare is not None:
             titles[sk.id] = bare
+        elif sk.id in attached and not _TENANT_PREFIX.match(sk.display_title):
+            titles[sk.id] = sk.display_title.rpartition("/")[2] or sk.display_title
     return titles, truncated

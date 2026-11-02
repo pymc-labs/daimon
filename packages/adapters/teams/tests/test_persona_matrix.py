@@ -525,7 +525,6 @@ async def test_thread_handoff_persona_matrix(
             default=runtime.deployment_default,
         )
     assert route.responder_ma_agent_id == "ag_research", answer
-    assert "handed this conversation over" in json.dumps(answer)
 
 
 @pytest.mark.parametrize("persona", PERSONAS, ids=lambda persona: persona.name)

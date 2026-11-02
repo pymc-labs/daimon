@@ -95,11 +95,11 @@ class Response:
         self.messages: list[str] = []
         self.deferred = 0
 
-    async def send_message(self, content: str, **kwargs: object) -> None:
+    async def send_message(self, *, embed: discord.Embed, **kwargs: object) -> None:
         assert kwargs["ephemeral"] is True
         mentions = cast(discord.AllowedMentions, kwargs["allowed_mentions"])
         assert mentions.to_dict() == {"parse": []}
-        self.messages.append(content)
+        self.messages.append(str(embed.description))
 
     async def defer(self) -> None:
         self.deferred += 1

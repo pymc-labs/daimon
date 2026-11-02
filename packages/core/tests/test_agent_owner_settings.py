@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
 
 import pytest
 from daimon.core.authz import Subject
@@ -86,10 +85,8 @@ def test_unset_settings_keep_the_backend_selection_and_its_digest() -> None:
         agent_selection("openai", None, AgentSettings(profile="gemini.inline_reuse"))
     with pytest.raises(AgentBackendRefused, match="profile not selectable"):
         agent_selection("openai", None, AgentSettings(profile="openai.nonexistent"))
-    conversation = agent_selection(
-        "openai", None, AgentSettings(profile="openai.conversation_only")
-    )
-    assert conversation.profile == "openai.conversation_only"
+    with pytest.raises(AgentBackendRefused, match="profile not selectable"):
+        agent_selection("openai", None, AgentSettings(profile="openai.conversation_only"))
 
 
 def test_a_profile_is_dropped_only_when_the_provider_changes() -> None:
@@ -97,59 +94,6 @@ def test_a_profile_is_dropped_only_when_the_provider_changes() -> None:
     assert settings.for_backend("openai") == settings
     moved = settings.for_backend("gemini")
     assert moved.profile is None and moved.thread_mode == "shared" and moved.requires
-
-
-async def test_the_owner_edits_settings_backend_and_fleet_and_a_member_cannot(people) -> None:
-    service, agent, actors, _ = people
-    settings = AgentSettings(thread_mode="shared")
-    preview = await service.preview(agent, None, settings=settings)
-    assert preview.target_settings == {"thread_mode": "shared"}
-    with pytest.raises(AgentBackendRefused, match="owner or admin required"):
-        await service.set_settings(
-            agent, settings, 0, actors["member"], expected_preview_digest=preview.digest
-        )
-    assert await service.current(agent) is None
-    # Sharing threads stays an admin's call: the owner is refused, an admin is not.
-    with pytest.raises(AgentBackendRefused, match="admin required for shared threads"):
-        await service.set_settings(
-            agent, settings, 0, actors["owner"], expected_preview_digest=preview.digest
-        )
-    assert await service.current(agent) is None
-    revision = await service.set_settings(
-        agent, settings, 0, actors["admin"], expected_preview_digest=preview.digest
-    )
-    assert revision.thread_mode == "shared" and revision.backend is None
-    assert revision_selection(revision) == agent_selection("anthropic", None, settings)
-
-    # Shared threads don't run on OpenAI: the switch is refused, never silently per caller.
-    with pytest.raises(BackendUnsupported):
-        await service.set_backend(agent, "openai", 1, actors["owner"])
-    await service.set_settings(agent, AgentSettings(requires=REQUIRES_TOOLS), 1, actors["owner"])
-    switched = await service.set_backend(agent, "openai", 2, actors["owner"])
-    assert switched.backend == "openai" and switched.requires == REQUIRES_TOOLS
-    reverted = await service.revert(agent, actors["owner"], expected_revision=3)
-    assert reverted.backend is None and reverted.requires == REQUIRES_TOOLS
-
-    now = datetime.now(UTC)
-    grant_preview = await service.preview_fleet_grant(agent, None, now=now)
-    with pytest.raises(AgentBackendRefused, match="owner or admin required"):
-        await service.revoke_fleet_grant(
-            agent, 4, actors["member"], expected_preview_digest=grant_preview.digest, now=now
-        )
-    with pytest.raises(AgentBackendRefused, match="admin required"):
-        await service.revoke_fleet_grant(
-            agent, 4, actors["owner"], expected_preview_digest=grant_preview.digest, now=now
-        )
-    revoked = await service.revoke_fleet_grant(
-        agent, 4, actors["admin"], expected_preview_digest=grant_preview.digest, now=now
-    )
-    assert revoked.requires == REQUIRES_TOOLS
-    rows = await service.audit(agent.tenant_id, agent_id=agent.agent_id)
-    assert {row.operation for row in rows} >= {"settings", "set", "revert", "fleet_grant_revoke"}
-    assert {row.account_id for row in rows if row.operation == "settings"} == {
-        actors["admin"].account_id,
-        actors["owner"].account_id,
-    }
 
 
 async def test_an_owner_can_not_make_or_restore_shared_threads(people) -> None:
@@ -295,3 +239,42 @@ async def test_old_revisions_keep_their_digest(people) -> None:
     from daimon.core.channel_backend import _revision_digest
 
     assert revision.digest == _revision_digest(agent, "openai", None, None, None)
+
+
+async def test_the_owner_edits_settings_and_backend_and_a_member_cannot(people) -> None:
+    service, agent, actors, _ = people
+    settings = AgentSettings(thread_mode="shared")
+    preview = await service.preview(agent, None, settings=settings)
+    assert preview.target_settings == {"thread_mode": "shared"}
+    with pytest.raises(AgentBackendRefused, match="owner or admin required"):
+        await service.set_settings(
+            agent, settings, 0, actors["member"], expected_preview_digest=preview.digest
+        )
+    assert await service.current(agent) is None
+    # Sharing threads stays an admin's call: the owner is refused, an admin is not.
+    with pytest.raises(AgentBackendRefused, match="admin required for shared threads"):
+        await service.set_settings(
+            agent, settings, 0, actors["owner"], expected_preview_digest=preview.digest
+        )
+    assert await service.current(agent) is None
+    revision = await service.set_settings(
+        agent, settings, 0, actors["admin"], expected_preview_digest=preview.digest
+    )
+    assert revision.thread_mode == "shared" and revision.backend is None
+    assert revision_selection(revision) == agent_selection("anthropic", None, settings)
+
+    # Shared threads don't run on OpenAI: the switch is refused, never silently per caller.
+    with pytest.raises(BackendUnsupported):
+        await service.set_backend(agent, "openai", 1, actors["owner"])
+    await service.set_settings(agent, AgentSettings(requires=REQUIRES_TOOLS), 1, actors["owner"])
+    switched = await service.set_backend(agent, "openai", 2, actors["owner"])
+    assert switched.backend == "openai" and switched.requires == REQUIRES_TOOLS
+    reverted = await service.revert(agent, actors["owner"], expected_revision=3)
+    assert reverted.backend is None and reverted.requires == REQUIRES_TOOLS
+
+    rows = await service.audit(agent.tenant_id, agent_id=agent.agent_id)
+    assert {row.operation for row in rows} >= {"settings", "set", "revert"}
+    assert {row.account_id for row in rows if row.operation == "settings"} == {
+        actors["admin"].account_id,
+        actors["owner"].account_id,
+    }

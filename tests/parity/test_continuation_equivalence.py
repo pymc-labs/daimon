@@ -174,6 +174,11 @@ async def test_dispatch_matches_main(db_session_factory, monkeypatch, platform, 
             )
 
         async def post(*args, **kwargs):
+            # A notice is a card now; the equivalence is in what it says.
+            if embed := kwargs.pop("embed", None):
+                args = (embed.description, *args)
+            if attachments := kwargs.pop("attachments", None):
+                kwargs["text"] = attachments[0]["fallback"]
             events.append(("post", args, kwargs, await snapshot()))
             if scenario in {"post_failure", "changed_post_failure"}:
                 raise RuntimeError("post failed")

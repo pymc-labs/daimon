@@ -1,5 +1,6 @@
 """Private /github connect link for one selected agent."""
 
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import cast
 
@@ -8,14 +9,18 @@ from daimon.adapters.discord.agent_setup.github_connect_card import connect_embe
 from daimon.adapters.discord.agent_setup.github_home import connect_button_view, load_home
 from daimon.adapters.discord.agent_setup.hydrate import load_roster_state
 from daimon.adapters.discord.checks import (
+    admin_caller,
     is_platform_admin,
     require_registered_guild,
     resolve_tenant_for_interaction,
 )
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.defaults.ma_index import list_agents_by_tenant
+from daimon.core.defaults.ma_index import find_agent_by_derived_uuid, list_agents_by_tenant
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.github_connect_cards import resolve_connect_card
 from daimon.core.github_credentials import build_multifernet, encrypt_token
+from daimon.core.github_panel import can_manage_agent_github
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.platform_words import DESCRIPTIONS
 from daimon.core.stores.accounts import set_role
@@ -57,14 +62,16 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
     async def home(self, interaction: BotInteraction) -> None:
         if interaction.guild_id is None:
             await interaction.response.send_message(
-                "GitHub only works in a server channel.", ephemeral=True
+                embed=build_notice_embed("GitHub only works in a server channel."), ephemeral=True
             )
             return
         runtime = cast(DiscordRuntime, interaction.client.runtime)  # type: ignore[attr-defined]
         await interaction.response.defer(ephemeral=True, thinking=True)
         tenant_id = await resolve_tenant_for_interaction(interaction.client, interaction)
         if tenant_id is None:
-            await interaction.followup.send("GitHub is unavailable here.", ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed("GitHub is unavailable here."), ephemeral=True
+            )
             return
         state = await load_roster_state(
             runtime,
@@ -95,11 +102,7 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
     @require_registered_guild
     async def connect(self, interaction: BotInteraction, agent: str | None = None) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
-        if not is_platform_admin(interaction):
-            await interaction.followup.send(
-                "Only an admin can connect repos. Ask one to run /github.", ephemeral=True
-            )
-            return
+        admin = is_platform_admin(interaction)  # pyright: ignore[reportArgumentType]
         runtime = cast(DiscordRuntime, interaction.client.runtime)  # type: ignore[attr-defined]
         root = runtime.settings.mcp.app_root_url
         config = runtime.settings.github_app
@@ -112,21 +115,28 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
                 config.client_secret,
             )
         ):
-            await interaction.followup.send("GitHub setup is unavailable.", ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed("GitHub setup is unavailable."), ephemeral=True
+            )
             return
         tenant_id = await resolve_tenant_for_interaction(interaction.client, interaction)
         if tenant_id is None:
-            await interaction.followup.send("This server is not set up yet.", ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed("This server is not set up yet."), ephemeral=True
+            )
             return
         try:
             if agent is None:
                 state = await load_roster_state(
-                    runtime, interaction, tenant_id=tenant_id, is_admin=True
+                    runtime, interaction, tenant_id=tenant_id, is_admin=admin
                 )
                 selected = state.selected_agent
                 if selected is None:
                     await interaction.followup.send(
-                        "Choose an agent with /github connect.", ephemeral=True
+                        embed=build_notice_embed(
+                            "Choose an agent with /github connect.", neutral=True
+                        ),
+                        ephemeral=True,
                     )
                     return
                 target_name, target_ma_id = selected.name, selected.ma_agent_id
@@ -134,9 +144,22 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
                 agents = await list_agents_by_tenant(runtime.anthropic, tenant_id=tenant_id)
                 matches = [row for row in agents if row.name.casefold() == agent.casefold()]
                 if len(matches) != 1:
-                    await interaction.followup.send("Choose one current agent.", ephemeral=True)
+                    await interaction.followup.send(
+                        embed=build_notice_embed("Choose one current agent."), ephemeral=True
+                    )
                     return
                 target_name, target_ma_id = matches[0].name, str(matches[0].id)
+            if not admin and not await self._owns_target(
+                runtime, interaction, tenant_id=tenant_id, ma_agent_id=target_ma_id
+            ):
+                await interaction.followup.send(
+                    embed=build_notice_embed(
+                        "Only an admin or an owner of this agent can connect repos. "
+                        "Ask one to run /github."
+                    ),
+                    ephemeral=True,
+                )
+                return
             agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=target_ma_id)
             async with runtime.sessionmaker() as session:
                 await require_app_eligible_agent(
@@ -152,11 +175,8 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
                     platform="discord",
                     external_id=str(interaction.user.id),
                 )
-                await set_role(
-                    session,
-                    principal.account_id,
-                    Role.ADMIN if is_platform_admin(interaction) else Role.USER,
-                )
+                if admin:
+                    await set_role(session, principal.account_id, Role.ADMIN)
                 token = await mint_invitation(
                     session,
                     tenant_id=tenant_id,
@@ -164,9 +184,11 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
                     requester_label=str(interaction.user.id),
                     requester_platform_user_id=str(interaction.user.id),
                     agent_id=agent_id,
-                    agent_manager_verified=True,
                     agent_name=target_name,
                     agent_ma_id=target_ma_id,
+                    # An owner is never promoted: the link is for this one agent and
+                    # the owner is checked again when it is saved.
+                    agent_manager_verified=not admin,
                     origin_platform="discord",
                     origin_parent_channel_id=str(interaction.channel_id),
                     origin_thread_id=str(interaction.channel_id),
@@ -188,7 +210,7 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
                     tool_name="github_connect",
                     operation="github_connect",
                     outcome="allowed",
-                    reason="admin link minted",
+                    reason="admin link minted" if admin else "owner link minted",
                 )
             card = await resolve_connect_card(
                 runtime.sessionmaker,
@@ -205,8 +227,41 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         except PinnedAgentConnectionError as exc:
-            await interaction.followup.send(str(exc), ephemeral=True)
+            await interaction.followup.send(embed=build_notice_embed(str(exc)), ephemeral=True)
         except (anthropic.APIError, discord.HTTPException, ValueError):
             await interaction.followup.send(
-                "GitHub setup is unavailable. Try again.", ephemeral=True
+                embed=build_notice_embed("GitHub setup is unavailable. Try again."), ephemeral=True
+            )
+
+    @staticmethod
+    async def _owns_target(
+        runtime: DiscordRuntime,
+        interaction: BotInteraction,
+        *,
+        tenant_id: uuid.UUID,
+        ma_agent_id: str,
+    ) -> bool:
+        """Whether a caller who is not an admin owns the agent right now.
+
+        A defaults-managed agent has no owner who counts, and an agent that can't be
+        read is not one to connect.
+        """
+        live = await find_agent_by_derived_uuid(
+            runtime.anthropic,
+            tenant_id=tenant_id,
+            agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id),
+        )
+        if live is None or live.id != ma_agent_id:
+            return False
+        managed = live.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
+        async with runtime.sessionmaker() as session:
+            return await can_manage_agent_github(
+                session,
+                tenant_id=tenant_id,
+                platform="discord",
+                caller=admin_caller(interaction.user),
+                agent_names=(),
+                ma_agent_id=ma_agent_id,
+                is_daimon_managed=managed,
+                default=runtime.deployment_default,
             )

@@ -289,7 +289,9 @@ async def test_real_gate_and_adapter_denial_have_no_native_sends_or_provider_roo
                     VisibleText(
                         evidence_id=entry.evidence_id,
                         message_id=entry.message.message_id,
-                        text=entry.message.content,
+                        text="\n".join(
+                            t for t in (entry.message.content, *entry.message.embed_texts) if t
+                        ),
                         order=i,
                         observed_s=entry.message.observed_s,
                     )

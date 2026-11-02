@@ -64,10 +64,11 @@ from daimon.adapters.slack.agent_policy import (
     refuse_unless_allowed_for_agent_name,
     refuse_unless_pin_allows,
 )
-from daimon.adapters.slack.agent_setup import github_repos as github_repos_view
 from daimon.adapters.slack.agent_setup import (
+    coding_keys,
     panel_views,
 )
+from daimon.adapters.slack.agent_setup import github_repos as github_repos_view
 from daimon.adapters.slack.agent_setup.channel_environment import (
     ENVIRONMENT_NEED_ADMIN_MESSAGE,
     load_environment_picker,
@@ -110,7 +111,7 @@ from daimon.adapters.slack.agent_setup.state import (
     encode_panel_metadata,
 )
 from daimon.adapters.slack.credential_submissions import post_ephemeral
-from daimon.adapters.slack.errors import render_error
+from daimon.adapters.slack.errors import render_error_notice
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.modal_limits import fit_title
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
@@ -128,6 +129,7 @@ from daimon.core.agent_identity import (
     identity_enabled_for,
     resolve_agent_identity,
 )
+from daimon.core.agent_ownership import owns_agent
 from daimon.core.answering_map import AnsweringMap, routed_agent_names
 from daimon.core.authz import build_subject
 from daimon.core.channel_rules import as_readers, as_writers, channel_rule_status
@@ -439,6 +441,9 @@ PANEL_ACTION_IDS: frozenset[str] = frozenset(
         github_repos_view.ACTION_BACK,
         github_repos_view.ACTION_CONNECT_LINK,
         panel_views.ACTION_CODING_TOOLS,
+        panel_views.ACTION_CODING_KEYS,
+        panel_views.ACTION_REVOKE_CODING_KEY,
+        coding_keys.ACTION_BACK,
         panel_views.ACTION_ADD_SKILL,
         panel_views.ACTION_BACKEND_SELECT,
         panel_views.ACTION_BACKEND_CONFIRM,
@@ -671,14 +676,19 @@ async def load_details_view(
     meta: PanelMetadata,
     agent_name: str,
     is_admin: bool,
-    user_id: str | None = None,
+    viewer_user_id: str | None = None,
 ) -> dict[str, Any] | None:
-    """Build the Details view for `agent_name`, or None when it is gone."""
+    """Build the Details view for `agent_name`, or None when it is gone.
+
+    `viewer_user_id` is the reader, when known: an owner of the agent is offered the
+    coding-tool buttons a platform admin is. It only decides what to offer; every
+    click checks again.
+    """
     platform_admin = False
-    if user_id is not None:
+    if viewer_user_id is not None:
         client = await resolve_web_client(runtime, team_id=meta.team_id)
         if client is not None:
-            platform_admin = await resolve_is_platform_admin(client, user_id=user_id)
+            platform_admin = await resolve_is_platform_admin(client, user_id=viewer_user_id)
     async with runtime.sessionmaker() as session:
         roster = await load_panel_roster(
             session,
@@ -706,6 +716,17 @@ async def load_details_view(
             session,
             tenant_id=tenant_id,
             account_ids=[details.created_by_account_id] if details.created_by_account_id else [],
+        )
+        viewer_owns = (
+            not platform_admin
+            and viewer_user_id is not None
+            and await owns_agent(
+                session,
+                tenant_id=tenant_id,
+                ma_agent_id=details.ma_agent_id,
+                platform="slack",
+                platform_user_id=viewer_user_id,
+            )
         )
         avatar_url: str | None = None
         if (
@@ -753,6 +774,7 @@ async def load_details_view(
         ),
         backend_options=backend_options,
         backend_selection=backend_selection,
+        viewer_owns=viewer_owns,
     )
     return view
 
@@ -867,6 +889,7 @@ async def _dispatch_panel_action(
                 channel_id=meta.channel_id or user_id,
                 user_id=user_id,
                 text="Model provider wasn't changed. Ask a workspace admin to open the panel.",
+                error=True,
             )
             return
         if action_id == panel_views.ACTION_BACKEND_CANCEL:
@@ -876,7 +899,7 @@ async def _dispatch_panel_action(
                 meta=meta.with_view("details", agent_name=name),
                 agent_name=name,
                 is_admin=True,
-                user_id=user_id,
+                viewer_user_id=user_id,
             )
             if view is not None:
                 await client.views_update(  # pyright: ignore[reportUnknownMemberType]
@@ -894,6 +917,7 @@ async def _dispatch_panel_action(
                 channel_id=meta.channel_id or user_id,
                 user_id=user_id,
                 text="That preview is no longer available. Choose a model provider again.",
+                error=True,
             )
             return
         if action_id == panel_views.ACTION_BACKEND_SELECT:
@@ -923,6 +947,7 @@ async def _dispatch_panel_action(
                 channel_id=meta.channel_id or user_id,
                 user_id=user_id,
                 text="That preview isn't available. Nothing was changed; choose again.",
+                error=True,
             )
             return
         preview = selection.preview
@@ -992,7 +1017,11 @@ async def _dispatch_panel_action(
                 agent_name=name,
             )
             await post_ephemeral(
-                client, channel_id=meta.channel_id or user_id, user_id=user_id, text=str(exc)
+                client,
+                channel_id=meta.channel_id or user_id,
+                user_id=user_id,
+                text=str(exc),
+                error=True,
             )
         else:
             await record_panel_write(
@@ -1011,7 +1040,7 @@ async def _dispatch_panel_action(
             meta=meta.with_view("details", agent_name=name),
             agent_name=name,
             is_admin=is_admin,
-            user_id=user_id,
+            viewer_user_id=user_id,
         )
         if view is not None:
             await client.views_update(  # pyright: ignore[reportUnknownMemberType]
@@ -1046,9 +1075,6 @@ async def _dispatch_panel_action(
         panel_views.ACTION_GITHUB_CONNECT,
         panel_views.ACTION_GITHUB_BACK,
         panel_views.ACTION_GITHUB_PERSONAL_LINK,
-        github_repos_view.ACTION_OPEN,
-        github_repos_view.ACTION_BACK,
-        github_repos_view.ACTION_CONNECT_LINK,
     }:
         is_admin = await resolve_is_platform_admin(client, user_id=user_id)
         if not is_admin:
@@ -1059,6 +1085,17 @@ async def _dispatch_panel_action(
                 text="Only a platform admin can configure GitHub.",
             )
             return
+
+    if await coding_keys.handle(
+        runtime,
+        client,
+        payload,
+        action=action,
+        meta=meta,
+        team_id=team_id,
+        user_id=user_id,
+    ):
+        return
 
     if await handle_github_repos(
         runtime,
@@ -1078,6 +1115,7 @@ async def _dispatch_panel_action(
                 channel_id=meta.channel_id or user_id,
                 user_id=user_id,
                 text="Ask a workspace admin to connect GitHub.",
+                error=True,
             )
             return
         try:
@@ -1105,6 +1143,7 @@ async def _dispatch_panel_action(
                 channel_id=meta.channel_id or user_id,
                 user_id=user_id,
                 text=safe_github_error(error),
+                error=True,
             )
             return
         await send_link(
@@ -1124,6 +1163,7 @@ async def _dispatch_panel_action(
                 channel_id=meta.channel_id or user_id,
                 user_id=user_id,
                 text="Only a workspace admin can connect GitHub.",
+                error=True,
             )
             return
         await client.views_push(  # pyright: ignore[reportUnknownMemberType]
@@ -1153,7 +1193,7 @@ async def _dispatch_panel_action(
             meta=meta,
             agent_name=agent_name,
             is_admin=is_admin,
-            user_id=user_id,
+            viewer_user_id=user_id,
         )
         if details_view is None:
             stale_view = await load_agents_view(
@@ -1214,7 +1254,7 @@ async def _dispatch_panel_action(
             meta=meta.toggled(expansion),
             agent_name=agent_name,
             is_admin=is_admin,
-            user_id=user_id,
+            viewer_user_id=user_id,
         )
         if details_view is None:
             stale_view = await load_agents_view(
@@ -1268,6 +1308,7 @@ async def _dispatch_panel_action(
                 channel_id=meta.channel_id or user_id,
                 user_id=user_id,
                 text=CHANNEL_SKILLS_NEED_ADMIN_MESSAGE,
+                error=True,
             )
             return
         async with runtime.sessionmaker() as session:
@@ -1299,6 +1340,7 @@ async def _dispatch_panel_action(
                 channel_id=meta.channel_id or user_id,
                 user_id=user_id,
                 text=OPERATOR_TOKENS_NEED_ADMIN_MESSAGE,
+                error=True,
             )
             return
         await client.views_push(  # pyright: ignore[reportUnknownMemberType]
@@ -1339,6 +1381,7 @@ async def _dispatch_panel_action(
                 channel_id=meta.channel_id,
                 user_id=user_id,
                 text=ENVIRONMENT_NEED_ADMIN_MESSAGE,
+                error=True,
             )
             await record_panel_write(
                 runtime.sessionmaker,
@@ -1364,14 +1407,21 @@ async def _dispatch_panel_action(
                 runtime, client, tenant_id=tenant_id, meta=meta, is_admin=is_admin, user_id=user_id
             ),
         )
-        await post_ephemeral(client, channel_id=meta.channel_id, user_id=user_id, text=note)
+        # A saved or cleared pick names the channel; a refusal does not.
+        await post_ephemeral(
+            client,
+            channel_id=meta.channel_id,
+            user_id=user_id,
+            text=note,
+            error=f"<#{meta.channel_id}>" not in note,
+        )
         return
 
     if action_id in _RULE_ACTIONS:
         option = cast("Mapping[str, object]", action.get("selected_option") or {})
         value = str(option.get("value") or "")
         if not is_admin or not meta.channel_id:
-            text = RULE_NEED_ADMIN_MESSAGE
+            text, failed = RULE_NEED_ADMIN_MESSAGE, True
             await record_panel_write(
                 runtime.sessionmaker,
                 tenant_id=tenant_id,
@@ -1382,7 +1432,7 @@ async def _dispatch_panel_action(
                 reason="needs_admin",
             )
         else:
-            text = await change_rule(
+            text, failed = await change_rule(
                 runtime,
                 client,
                 tenant_id=tenant_id,
@@ -1398,7 +1448,7 @@ async def _dispatch_panel_action(
                 release=action_id == panel_views.ACTION_RULE_RELEASE,
             )
         await post_ephemeral(
-            client, channel_id=meta.channel_id or user_id, user_id=user_id, text=text
+            client, channel_id=meta.channel_id or user_id, user_id=user_id, text=text, error=failed
         )
         if is_admin and view_id:
             await client.views_update(  # pyright: ignore[reportUnknownMemberType]
@@ -1609,6 +1659,7 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
             channel_id=channel_id or user_id,
             user_id=user_id,
             text="That setup control is no longer available. Reopen setup.",
+            error=True,
         )
 
     except (
@@ -1643,5 +1694,5 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
                     channel=channel_id or user_id,
                     user=user_id,
-                    text=render_error(exc, request_id=request_id),
+                    **render_error_notice(exc, request_id=request_id),
                 )

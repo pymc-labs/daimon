@@ -14,19 +14,13 @@ a conversation's people chose.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Literal
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
-from daimon.core.thread_models import (
-    FLEET_ROOT_NOTE,
-    ThreadModelRefused,
-    choose_thread_model,
-    thread_runs_fleet,
-)
+from daimon.core.thread_models import ThreadModelRefused, choose_thread_model
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -66,18 +60,7 @@ async def _set_thread_model_impl(
         )
     except ThreadModelRefused as exc:
         raise ToolError(str(exc)) from exc
-    note = change.note
-    if await thread_runs_fleet(
-        runtime.session_factory,
-        fleet_enabled=runtime.settings.fleet.enabled,
-        tenant_id=auth.tenant_id,
-        platform=origin.platform,
-        thread_id=origin.thread_id,
-        ma_agent_id=origin.responder_ma_agent_id,
-        now=datetime.now(UTC),
-    ):
-        note += FLEET_ROOT_NOTE
-    return ThreadModelResult(model=change.model_id or "default", note=note)
+    return ThreadModelResult(model=change.model_id or "default", note=change.note)
 
 
 def register_thread_model_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
@@ -94,9 +77,7 @@ def register_thread_model_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         "think as hard as you can" means ``opus``; ``default`` goes back to the
         agent's own model. There is no effort setting. The conversation keeps
         the choice for every later reply until someone changes it; the reply
-        in progress keeps its model. Other conversations are unaffected, and
-        a worker fleet (its root and every worker) always runs the agent's
-        approved model.
+        in progress keeps its model. Other conversations are unaffected.
 
         ``origin_context_id`` must name this execution's attended origin;
         routines and other unattended runs are refused. Read the returned

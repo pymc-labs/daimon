@@ -76,6 +76,7 @@ def _run_remote(
     *,
     budget: int = 20,
     failing_ps: str | None = None,
+    services: str = "discord slack teams",
 ) -> subprocess.CompletedProcess[str]:
     fake = tmp_path / "fake"
     bin_dir = tmp_path / "bin"
@@ -111,7 +112,7 @@ def _run_remote(
     )
     script = _remote_script().replace("cd /etc/daimon", f'cd "{tmp_path}"')
     return subprocess.run(
-        ["sh", "-c", f"budget={budget} image={_IMAGE}\n{script}"],
+        ["sh", "-c", f'budget={budget} image={_IMAGE} services="{services}"\n{script}'],
         env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "FAKE": str(fake)},
         capture_output=True,
         text=True,
@@ -239,6 +240,13 @@ def test_unexpected_state_falls_back(
     assert message in result.stdout
 
 
+def test_only_the_restarted_services_are_waited_on(tmp_path: Path) -> None:
+    # Discord was not restarted, so its older image and missing event are fine.
+    containers = {"discord": [_container(image="example.test/old:abc1234")], "slack": [_SLACK_DONE]}
+    result = _run_remote(tmp_path, containers, services="slack")
+    assert result.returncode == 0, result.stdout
+
+
 # --- the runner half -------------------------------------------------------
 
 
@@ -249,6 +257,7 @@ def _run_step(
     ssh_rc: int = 0,
     ssh_takes: int = 0,
     image: str = _IMAGE,
+    services: str = "discord slack teams",
 ) -> subprocess.CompletedProcess[str]:
     fake = tmp_path / "fake"
     bin_dir = tmp_path / "bin"
@@ -281,6 +290,7 @@ def _run_step(
             "RUNNER_TEMP": str(tmp_path),
             "ZONE": "offline",
             "DAIMON_IMAGE": image,
+            "SERVICES": services,
             "SSH_RC": str(ssh_rc),
             "SSH_TAKES": str(ssh_takes),
         },
@@ -301,7 +311,9 @@ def test_reported_completion_skips_the_rest_of_the_floor(tmp_path: Path) -> None
     remaining = _DEADLINE - _START
     assert int((tmp_path / "fake" / "timeout").read_text()) == remaining
     payload = (tmp_path / "fake" / "payload").read_text()
-    assert payload.startswith(f"budget={remaining - 10} image={_IMAGE}\n")
+    assert payload.startswith(
+        f'budget={remaining - 10} image={_IMAGE} services="discord slack teams"\n'
+    )
     assert payload.endswith(_remote_script())
 
 
@@ -341,3 +353,10 @@ def test_short_or_skipped_waits_never_pass_the_deadline(
         assert _clock(tmp_path) == _START
     else:
         assert _clock(tmp_path) == max(_START, _START - refreshed_ago + 90)
+
+
+def test_an_unexpected_service_list_is_never_interpolated(tmp_path: Path) -> None:
+    result = _run_step(tmp_path, services="slack; true")
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "fake" / "payload").exists()
+    assert _clock(tmp_path) == _DEADLINE

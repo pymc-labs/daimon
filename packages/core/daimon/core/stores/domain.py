@@ -7,14 +7,12 @@ these models before returning (`Row.model_validate(orm, from_attributes=True)`).
 from __future__ import annotations
 
 import enum
-import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Annotated, Any, Literal, cast
 
-import structlog
 from daimon.core.session_snapshot import SessionSnapshot
 from mux.contracts.config import CapabilityRequirement, ThreadMode
 from mux.contracts.ids import PROVIDERS, Provider, Scope
@@ -27,20 +25,14 @@ from mux.contracts.resources import (
     ResourceBinding,
     WorkspaceSource,
 )
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    JsonValue,
-    TypeAdapter,
-    field_validator,
-    model_validator,
-)
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, field_validator
 
 # NOTE: Adding a platform requires updating this Literal AND the DB column
 # (currently untyped Text). If mismatched, Pydantic model_validate raises
-# ValidationError on read — keep in sync.
-Platform = Literal["discord", "cli", "slack", "teams"]
+# ValidationError on read — keep in sync. "web" is a principal platform only
+# (people who sign in to the web app with no chat account); it has no chat
+# conversations, so `ChatPlatform` below leaves it out.
+Platform = Literal["discord", "cli", "slack", "teams", "web"]
 # Platforms whose turns run in a conversation and carry a turn origin.
 ChatPlatform = Literal["discord", "slack", "teams"]
 CHAT_PLATFORMS: tuple[ChatPlatform, ...] = ("discord", "slack", "teams")
@@ -60,7 +52,6 @@ ContinuationReason = Literal[
     "private_input_applied",
     "timer",
     "github_access_ready",
-    "worker_finished",
     "watch_fired",
     "job_finished",
     "watch_report",
@@ -584,6 +575,7 @@ class UsageEventRow(BaseModel):
     event_id: str
     observation_revision: int | None = None
     channel_id: str | None = None
+    agent_id: str | None = None
 
 
 BudgetWindow = Literal["monthly", "total", "fixed"]
@@ -606,6 +598,28 @@ class ChannelBudgetRow(BaseModel):
     created_at: datetime
     updated_at: datetime
     exhausted_notice_key: str | None = None
+
+
+AllowanceSubjectKind = Literal["person", "group", "invite"]
+AllowanceWindow = Literal["month", "total"]
+
+
+class SpendAllowanceRow(BaseModel):
+    """One spend allowance: a per-person limit in billed dollars (see `SpendAllowance`)."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    subject_kind: AllowanceSubjectKind
+    subject_id: str
+    agent_id: str | None
+    amount_usd: Decimal
+    window: AllowanceWindow
+    starts_at: datetime
+    expires_at: datetime | None
+    created_by_account_id: uuid.UUID | None
+    created_at: datetime
 
 
 class TenantUserCapRow(BaseModel):
@@ -645,6 +659,15 @@ class PendingPaymentClawbackRow(BaseModel):
     received_at: datetime
 
 
+LedgerEstimate = Literal["cache_writes_unreported"]
+"""How a debit priced from incomplete provider counts was reached (`tenant_ledger.estimate`).
+
+`cache_writes_unreported`: the tariff bills cache writes but the meter has no
+write count (OpenAI Agents API turns), so the turn is priced as writing none.
+Column is Text + CHECK; keep this literal closed with it.
+"""
+
+
 class TenantLedgerRow(BaseModel):
     """Append-only ledger row. Balance = SUM(delta_usd). TOPUP-01."""
 
@@ -659,6 +682,8 @@ class TenantLedgerRow(BaseModel):
     payment_intent: str | None
     occurred_at: datetime
     channel_id: str | None = None
+    estimate: LedgerEstimate | None = None
+    actor_account_id: uuid.UUID | None = None
 
 
 # `credit` codes add credit that never expires; `timed` codes add credit that
@@ -1062,6 +1087,10 @@ class WizardSessionRow(BaseModel):
 McpTokenKind = Literal["agent", "operator", "cli"]
 #: What a registered credential runs on, when not an ordinary chat/CLI/operator token.
 McpTokenSurface = Literal["provider_turn"]
+#: What an agent-kind credential was made for: a key a person made from an agent's
+#: "coding tools" button, a published report's seam token, or a short-lived internal
+#: credential (an in-session chat credential, a provider turn's).
+McpTokenPurpose = Literal["coding", "report", "internal"]
 """An agent-scoped key, a scoped operator token, or a CLI token."""
 
 
@@ -1092,6 +1121,8 @@ class McpTokenRow(BaseModel):
     channel_id: str | None = None
     # `provider_turn`: minted for an OpenAI/Gemini turn, which has no confirmation card.
     surface: McpTokenSurface | None = None
+    # What the credential was made for (see `McpToken.purpose`); None for operator and CLI tokens.
+    purpose: McpTokenPurpose | None = None
 
 
 class FileUploadRow(BaseModel):
@@ -1106,6 +1137,7 @@ class FileUploadRow(BaseModel):
 
     id: str
     tenant_id: uuid.UUID
+    person_id: uuid.UUID | None = None
     title: str
     display_filename: str
     content_type: str
@@ -1152,7 +1184,7 @@ class ThreadAgentBindingRow(BaseModel):
     platform: str
     parent_channel_id: str
     thread_id: str
-    kind: Literal["setup", "handoff"] = "setup"
+    kind: Literal["setup", "handoff", "owner", "web"] = "setup"
     responder_ma_agent_id: str
     responder_name: str
     configuration_target_ma_agent_id: str | None
@@ -1188,6 +1220,8 @@ class TurnOriginRow(BaseModel):
     expires_at: datetime
     sender_foreign: bool = False
     shared_channel: bool = False
+    platform_channel_id: str | None = None
+    platform_message_id: str | None = None
 
 
 class _Facts(BaseModel):
@@ -1276,11 +1310,6 @@ class _BackendConsentFacts(_Facts):
         return self.drop_consent.declared_drops if self.drop_consent is not None else ()
 
 
-#: Stored in `fleet_grant` when an owner or admin turned fleet off. Without it a
-#: revision with no grant reads as the deployment's default fleet (on).
-FLEET_OFF: dict[str, JsonValue] = {"disabled": True}
-
-
 class AgentBackendRevision(_BackendConsentFacts):
     tenant_id: uuid.UUID
     agent_id: uuid.UUID
@@ -1296,34 +1325,6 @@ class AgentBackendRevision(_BackendConsentFacts):
     digest: str
     previous_local: int | None
     created_at: datetime
-    fleet_grant: JsonValue | None = Field(default=None, exclude_if=lambda value: value is None)
-    fleet_grant_invalid: bool = Field(default=False, exclude=True, repr=False)
-
-    @model_validator(mode="after")
-    def _read_fleet_grant(self) -> AgentBackendRevision:
-        if self.fleet_grant is None or self.fleet_off:
-            return self
-        from daimon.core.neutral_resources import AgentFleetGrant
-
-        try:
-            grant = AgentFleetGrant.model_validate_json(json.dumps(self.fleet_grant))
-            if not 0 < grant.epoch <= self.local:
-                raise ValueError("invalid grant epoch")
-        except ValueError:
-            object.__setattr__(self, "fleet_grant", None)
-            object.__setattr__(self, "fleet_grant_invalid", True)
-            structlog.get_logger(__name__).warning(
-                "fleet.grant_invalid",
-                tenant_id=self.tenant_id,
-                agent_id=self.agent_id,
-                revision=self.local,
-            )
-        return self
-
-    @property
-    def fleet_off(self) -> bool:
-        """Fleet was turned off explicitly; the default never applies to it."""
-        return self.fleet_grant == FLEET_OFF
 
 
 class CompatibilityPreview(_BackendConsentFacts):
@@ -1345,7 +1346,6 @@ class CompatibilityPreview(_BackendConsentFacts):
     target_settings: dict[str, JsonValue] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
-    fleet_grant: JsonValue | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class WatchRow(BaseModel):
@@ -1406,3 +1406,278 @@ class WatchFiringRow(BaseModel):
     created_at: datetime
     delivery_thread_id: str | None = None
     delivery_session_id: str | None = None
+
+
+WebPersonKind = Literal["member", "visitor"]
+WebPersonStatus = Literal["active", "suspended"]
+WebRoleGrant = Literal["owner", "admin"]
+
+
+class WebPersonRow(BaseModel):
+    """One person in one workspace, as the web app knows them."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    account_id: uuid.UUID
+    kind: WebPersonKind
+    display_name: str
+    workspace_name: str
+    email: str | None
+    status: WebPersonStatus
+    invite_id: uuid.UUID | None
+    invited_by_account_id: uuid.UUID | None
+    last_seen_at: datetime
+    created_at: datetime
+
+
+class WebIdentityRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    person_id: uuid.UUID
+    provider: str
+    issuer: str
+    subject: str
+    label: str
+    groups: tuple[str, ...]
+    linked_at: datetime
+
+    @field_validator("groups", mode="before")
+    @classmethod
+    def _groups_tuple(cls, value: object) -> object:
+        return tuple(cast("list[str]", value)) if isinstance(value, list) else value
+
+
+class WebSessionRow(BaseModel):
+    """A live browser sign-in. The cookie token itself is never stored."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    provider: str
+    issuer: str
+    subject: str
+    current_person_id: uuid.UUID
+    tenant_id: uuid.UUID
+    created_at: datetime
+    last_seen_at: datetime
+    expires_at: datetime
+    roles_checked_at: datetime
+
+
+class ChatStandingRow(BaseModel):
+    """The chat account a person's account has in one workspace, against its member list."""
+
+    model_config = ConfigDict(frozen=True)
+
+    tenant_id: uuid.UUID
+    account_id: uuid.UUID
+    platform: str
+    platform_user_id: str
+    # The workspace's member list was loaded in full at least once.
+    synced: bool
+    member: bool
+    is_admin: bool
+
+    @property
+    def admitted(self) -> bool:
+        """Still in the workspace. An unsynced list knows nothing, so the sign-in's proof stands."""
+        return self.member or not self.synced
+
+
+class WebNodeTokenRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    person_id: uuid.UUID
+    token_key: str
+    tenant_id: uuid.UUID
+    access_token_enc: bytes
+    expires_at: datetime
+
+
+WebInviteKind = Literal["invite", "sign_in", "owner"]
+WebInviteRole = Literal["visitor", "member"]
+WebAgentWho = Literal["everyone", "groups", "invites"]
+
+
+class WebInviteRow(BaseModel):
+    """A link into a workspace (see `WebInvite`), with the agents it opens."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    kind: WebInviteKind
+    email: str
+    role: WebInviteRole
+    credit_usd: Decimal
+    person_id: uuid.UUID | None
+    created_by_account_id: uuid.UUID | None
+    created_at: datetime
+    expires_at: datetime
+    accepted_at: datetime | None
+    accepted_by_person_id: uuid.UUID | None
+    revoked_at: datetime | None
+    agent_ids: tuple[str, ...] = ()
+
+
+class WebAgentGrantRow(BaseModel):
+    """Whether an agent chats on the web and with whom (see `WebAgentGrant`)."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    agent_id: str
+    web: bool = True
+    who: WebAgentWho = "everyone"
+    groups: tuple[str, ...] = ()
+
+
+class WebWorkspaceSettingsRow(BaseModel):
+    """A workspace's web app choices (see `WebWorkspaceSettings`); defaults when unset."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    modules_off: tuple[str, ...] = ()
+    default_agent: str | None = None
+
+
+class WebAuditRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    at: datetime
+    actor_account_id: uuid.UUID | None
+    action: str
+    target: str
+    target_person_id: uuid.UUID | None
+    target_invite_id: uuid.UUID | None
+    detail: str | None
+
+
+class WebStep(BaseModel):
+    """One tool call of a reply, as the web chat lists it."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    label: str
+    detail: str | None = None
+    status: Literal["running", "done", "error"]
+    ms: int | None = None
+
+
+class WebAttachment(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    name: str
+    size: int
+
+
+class WebOutputFile(BaseModel):
+    """A file a turn made, kept as a `file_uploads` row; `kind` picks its icon."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    name: str
+    size: int
+    kind: Literal["csv", "xlsx", "pdf", "png"]
+
+
+class WebApprovalCard(BaseModel):
+    """A write waiting on its requester's approval."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    kind: Literal["approval"] = "approval"
+    # An expired or stopped card reads as denied; its footer says why.
+    state: Literal["pending", "approved", "always", "denied"]
+    title: str
+    consequence: str | None = None
+    details: tuple[str, ...] = ()
+    footer: str | None = None
+    always_allowed: bool = False
+
+
+class WebRefusalCard(BaseModel):
+    """Why a turn did not run, and who can help."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    kind: Literal["refusal"] = "refusal"
+    title: str
+    body: str
+    help: str
+
+
+class WebCredentialCard(BaseModel):
+    """A key an agent asked its requester for; the value goes to the vault only."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str  # the credential request's idempotency key, never its token
+    kind: Literal["credential"] = "credential"
+    state: Literal["pending", "saved", "skipped"]
+    headline: str
+    fact: str
+    key: str
+
+
+WebCard = Annotated[
+    WebApprovalCard | WebCredentialCard | WebRefusalCard, Field(discriminator="kind")
+]
+
+
+class WebMessageBlocks(BaseModel):
+    """What a web message carries beside its text (`web_messages.blocks`)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    steps: tuple[WebStep, ...] = ()
+    files: tuple[WebOutputFile, ...] = ()
+    attachments: tuple[WebAttachment, ...] = ()
+    card: WebCard | None = None
+
+
+WebMessageStatus = Literal["running", "done", "stopped", "interrupted"]
+
+
+class WebThreadRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    person_id: uuid.UUID
+    agent_id: str
+    agent_name: str
+    title: str
+    created_at: datetime
+    updated_at: datetime
+    deleted_at: datetime | None
+
+
+class WebMessageRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    thread_id: uuid.UUID
+    role: Literal["user", "assistant"]
+    content: str
+    blocks: WebMessageBlocks
+    turn_id: uuid.UUID | None
+    status: WebMessageStatus
+    cost_usd: Decimal | None
+    duration_ms: int | None
+    feedback: Literal["up", "down"] | None
+    seq: int
+    created_at: datetime

@@ -10,6 +10,7 @@ from typing import cast
 
 import aiohttp
 import structlog
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.channel_budget_notice import BudgetNotice, BudgetNotifier
 from daimon.core.config import DirectMessagePolicy
@@ -112,7 +113,9 @@ async def send_member_notice(
         return False
     try:
         dm = await open_dm(int(workspace_id), int(recipient_id))
-        await dm.send(text, allowed_mentions=discord.AllowedMentions.none())
+        await dm.send(
+            embed=build_notice_embed(text), allowed_mentions=discord.AllowedMentions.none()
+        )
         return True
     except (discord.HTTPException, LookupError, ValueError):
         return False

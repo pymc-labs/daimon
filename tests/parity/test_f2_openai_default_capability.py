@@ -203,6 +203,16 @@ class _ScopedTranscript(OpenAIDefaultCapabilityTransport):
 
     context: Context | None = None
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        if not kwargs.get("replay"):
+            # A session with its own MCP vault reads its agent (named by the
+            # binding) before the turn's input, to put this turn's bearer in the
+            # vault in place.
+            steps = self._steps  # pyright: ignore[reportPrivateUsage]
+            at = steps.index(("POST", "/agents/sessions")) + 1
+            steps[at:at] = [("GET", "/agents/agent")]
+
     @property
     def deployed_agent(self) -> AgentSpec:
         if self._agent is None:  # pyright: ignore[reportPrivateUsage]
@@ -235,6 +245,7 @@ class _HostServedMcp:
         self.gate_statuses: list[int] = []
         self.vaults: dict[str, Object] = {}
         self.vault_credentials: dict[str, Object] = {}
+        self.rotations: list[str] = []
 
     async def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -249,6 +260,15 @@ class _HostServedMcp:
             return httpx.Response(200, json=raw)
         if path.startswith("/v1/vaults/"):
             identity = path.split("/")[3]
+            if "/credentials/" in path and request.method == "POST":
+                # The in-place rotation: same credential id, only the secret changes.
+                body = object_json(json.loads(request.content))
+                current = self.vault_credentials[identity]
+                assert path.endswith("/" + str(current["id"])) and set(body) == {"auth"}
+                auth = object_json(body["auth"])
+                self.rotations.append(str(auth["token"]))
+                current["auth"] = {**object_json(current["auth"]), "token": auth["token"]}
+                return httpx.Response(200, json=current)
             if path.endswith("/credentials"):
                 raw = {
                     "id": "qa-mcp-credential",
@@ -420,7 +440,10 @@ async def test_f2_default_skills_builtins_and_authenticated_mcp_on_openai(
             # one attached, caller-scoped vault for the captured MCP destination.
             assert served.posted_mcp == [("daimon-mcp", None)]
             assert qa.bearer.token not in "".join(served.posted_bodies)
-            assert f2.resolutions == [(SCOPE, CREDENTIAL, MCP_URL)]
+            # Once at session create, once as the turn's input writes the same
+            # bearer into the session's vault credential in place.
+            assert f2.resolutions == [(SCOPE, CREDENTIAL, MCP_URL)] * 2
+            assert served.rotations == [qa.bearer.token]
             assert "qa-agent" in json.dumps(served.results["describe_agent"])
             assert QA_SESSION_ID in json.dumps(served.results["list_my_sessions"])
             # The turn the provider streamed carries those real results, not a placeholder.

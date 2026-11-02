@@ -489,7 +489,6 @@ async def test_agent_role_gate_denies_missing_resolver_on_new_turn(
         ("chat", False),  # timer continuation retains the chat rendering origin
         ("watch_fired", True),
         ("job_finished", True),
-        ("worker_finished", True),
         ("routine", True),
         ("long_job", True),
         ("cli", True),

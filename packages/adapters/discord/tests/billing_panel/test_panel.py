@@ -396,7 +396,7 @@ async def test_topup_select_callback_posts_to_mcp_checkout_and_sends_ephemeral_u
     interaction.response.send_message.assert_awaited_once()
     call_args = interaction.response.send_message.call_args
     assert call_args.kwargs.get("ephemeral") is True, "top-up URL must be sent ephemerally"
-    sent_text = call_args.args[0] if call_args.args else ""
+    sent_text = call_args.kwargs["embed"].description
     assert checkout_url in sent_text, "the Stripe checkout URL must be forwarded to the admin"
     assert "10" in sent_text, "the amount must appear in the ephemeral message"
 
@@ -539,7 +539,7 @@ async def test_topup_select_renders_an_error_when_the_checkout_call_returns_a_no
     interaction.response.send_message.assert_awaited_once()
     call_args = interaction.response.send_message.call_args
     assert call_args.kwargs.get("ephemeral") is True, "the failure notice must be ephemeral"
-    sent_text = call_args.args[0] if call_args.args else ""
+    sent_text = call_args.kwargs["embed"].description
     assert "rid: " not in sent_text, "a failed checkout must not expose trace ids"
     assert "checkout.stripe.com" not in sent_text, "no checkout URL may be sent on a failure"
     assert db_session is not None
@@ -580,7 +580,7 @@ async def test_topup_select_refuses_a_demoted_admin_without_creating_a_checkout(
     await topup_select.callback(interaction)
 
     interaction.response.send_message.assert_awaited_once()
-    sent_text = interaction.response.send_message.call_args.args[0]
+    sent_text = interaction.response.send_message.call_args.kwargs["embed"].description
     assert "Manage Server" in sent_text, (
         f"the refusal must tell the member what permission is missing; got: {sent_text!r}"
     )
@@ -637,7 +637,7 @@ async def test_member_lookup_select_refuses_a_demoted_admin_without_reading_usag
 
     interaction.response.send_message.assert_awaited_once()
     call_args = interaction.response.send_message.call_args
-    sent_text = call_args.args[0]
+    sent_text = call_args.kwargs["embed"].description
     assert "Manage Server" in sent_text, (
         f"the refusal must tell the member what permission is missing; got: {sent_text!r}"
     )

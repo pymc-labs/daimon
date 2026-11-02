@@ -46,6 +46,7 @@ from .conftest import (
     make_channel_activity,
     make_group_activity,
     make_message_activity,
+    shown_text,
 )
 
 pytestmark = pytest.mark.usefixtures("provisioned_tenant")
@@ -497,7 +498,7 @@ async def test_a_refused_mention_is_answered_once(
     sender = FakeSender()
     await Boot(db_session_factory, graph, sender=sender).boot()
     await Boot(db_session_factory, graph, sender=sender).boot()
-    assert [(c, a.text) for c, a, _ in sender.sent] == [(GROUP_CHAT_ID, DENIED)], (
+    assert [(c, shown_text(a)) for c, a, _ in sender.sent] == [(GROUP_CHAT_ID, DENIED)], (
         "answered in the chat, and not again by the next boot"
     )
 

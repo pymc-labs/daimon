@@ -17,12 +17,7 @@ from daimon.core.platform_system import system_for_platform
 from daimon.core.pricing import ProviderPrice, provider_cost_of
 from daimon.core.turn.admission import reauthorize
 from daimon.core.turn.errors import AdmissionDenied
-from daimon.core.turn.gemini import (
-    PROFILE,
-    GeminiJournal,
-    GeminiUsageRuntime,
-    gemini_backend,
-)
+from daimon.core.turn.gemini import PROFILE, GeminiJournal, GeminiUsageRuntime, gemini_backend
 from daimon.core.turn.gemini_state import HoldSettlement, interaction_of
 from daimon.core.turn.prepare import PreparedTurn, ProviderPreparationRequest
 from daimon.core.usage_recording import record_provider_usage
@@ -62,7 +57,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         # Daimon tool rules need an approval pause this backend does not have.
         # Refused before any key, transport or journal is touched.
         raise UnsupportedCapability(("daimon_tool_rules",), PROFILE)
-    target = request.worker.spec if request.worker is not None else request.target_spec
+    target = request.target_spec
     # Shared ownership, seals, mounts and transfer require a separate complete
     # deployment adapter. Never silently drop those obligations in this slice.
     if (
@@ -96,7 +91,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         cap=request.deps.gemini_daily_model_cap_usd,
     )
     deployment = journal.deployment
-    if request.worker is not None or admission.backend_revision_origin == "agent":
+    if admission.backend_revision_origin == "agent":
         from daimon.core.turn.gemini_deployment import load_gemini_deployment
         from daimon.core.turn.runtime_manifest import root_counterpart_catalog_id
 
@@ -114,8 +109,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
                 and checked.catalog_id != root_counterpart_catalog_id(request)
             )
             or (
-                not plan.worker_materialization
-                and not plan.root_materialization
+                not plan.root_materialization
                 and (
                     checked.catalog_id != plan.counterpart_catalog_id
                     or checked.local_revision != plan.counterpart_catalog_revision
@@ -126,9 +120,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
             != ("gemini", "agent", request.scope.tenant_id, request.scope.account_id, plan.project)
         ):
             raise AdmissionDenied(reason="backend_unsupported")
-        if (plan.worker_materialization or request.worker is None) and (
-            request.verified_counterpart != checked
-        ):
+        if request.verified_counterpart != checked:
             raise AdmissionDenied(reason="backend_unsupported")
         deployment = replace(deployment, native_agent=request.counterpart.agent)
         journal = replace(journal, deployment=deployment)
@@ -286,6 +278,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
             billing_grain="turn",
             markup=request.deps.markup,
             channel_id=current.budget_channel_id or current.origin_channel_id,
+            agent_id=current.agent.id,
         )
 
         if footer_cost is not None:
@@ -309,9 +302,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         backend=backend,
         session_ref=session_ref,
         native_footer_cost=footer_cost,
-        runtime=runtime
-        if request.worker is not None or admission.backend_revision_origin == "agent"
-        else None,
+        runtime=runtime if admission.backend_revision_origin == "agent" else None,
         # Revokes a per-turn MCP credential however the turn ends.
         _finalize=runtime.end_of_turn,
     )

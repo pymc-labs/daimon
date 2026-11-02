@@ -622,3 +622,14 @@ async def test_build_context_xml_renders_author_name_on_user_query() -> None:
         )  # fmt: skip
 
     assert '<user_query author_id="U1" is_admin="false" author_name="Dee">hi</user_query>' in xml
+
+
+def test_render_message_keeps_the_words_of_daimons_notice_cards() -> None:
+    """A notice card has no message text; the agent still reads what it said."""
+    card = {"fallback": "Which repo should I use?", "color": "#5865F2"}
+    msg = {"user": "U1", "bot_id": "B1", "ts": "1.0", "text": "<@U2>", "attachments": [card]}
+    assert "&lt;@U2&gt;\nWhich repo should I use?</message>" in "\n".join(
+        _render_message(msg, proxy=None)
+    )
+    unfurl = {"user": "U3", "ts": "2.0", "text": "see", "attachments": [{"fallback": "a link"}]}
+    assert "a link" not in "\n".join(_render_message(unfurl, proxy=None)), "only bot cards"

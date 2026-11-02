@@ -192,6 +192,7 @@ async def test_live_writer_and_sweep_wait_on_same_usage_unique_key(
         model_usage: BetaManagedAgentsSpanModelUsage,
         event_id: str,
         channel_id: str | None = None,
+        agent_id: str | None = None,
     ) -> None:
         nonlocal call_count, sweep_backend
         call_count += 1
@@ -207,6 +208,7 @@ async def test_live_writer_and_sweep_wait_on_same_usage_unique_key(
                 model_usage=model_usage,
                 event_id=event_id,
                 channel_id=channel_id,
+                agent_id=agent_id,
             )
             live_inserted.set()
             await release_live.wait()
@@ -222,6 +224,7 @@ async def test_live_writer_and_sweep_wait_on_same_usage_unique_key(
             model_usage=model_usage,
             event_id=event_id,
             channel_id=channel_id,
+            agent_id=agent_id,
         )
 
     monkeypatch.setattr(usage_events, "record", hold_live_insert)

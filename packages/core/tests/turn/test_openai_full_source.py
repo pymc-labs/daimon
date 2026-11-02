@@ -82,6 +82,8 @@ class FullWire(Wire):
         self.posts = []
         self.vault = None
         self.vault_credential = None
+        # Each later turn replaces the session credential's secret in place.
+        self.rotations = []
         config = RECORDED_ENVIRONMENT["config"]
         self.template = {
             "id": "native-template",
@@ -119,6 +121,12 @@ class FullWire(Wire):
         if path == "/vaults/caller-session-vault":
             self.requests.append(request)
             return httpx.Response(200, json=self.vault)
+        if path == "/vaults/caller-session-vault/credentials/caller-mcp-credential":
+            self.requests.append(request)
+            body = json.loads(request.content)
+            self.rotations.append(body)
+            self.vault_credential = {**self.vault_credential, "auth": body["auth"]}
+            return httpx.Response(200, json=self.vault_credential)
         if path == "/vaults/caller-session-vault/credentials":
             self.requests.append(request)
             self.vault_credential = {

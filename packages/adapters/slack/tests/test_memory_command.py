@@ -10,6 +10,7 @@ from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.agent_memory_stores import insert_memory_store
+from daimon.testing.adapters.slack.notices import shown_text
 from daimon.testing.factories import make_tenant
 from mux.testing.drivers.anthropic.ma import (
     FakeMemoryStoreState,
@@ -116,7 +117,7 @@ async def test_memory_empty_state(db_session, db_session_factory) -> None:
     with patch("daimon.adapters.slack.memory.resolve_web_client", AsyncMock(return_value=web)):
         await handle_memory_command(runtime, _payload())
     kwargs = web.chat_postEphemeral.call_args.kwargs
-    assert "no memory to show here." in kwargs["text"].lower()
+    assert "no memory to show here." in shown_text(kwargs).lower()
 
 
 async def test_memory_missing_agent_surfaces_ephemeral_error(
@@ -130,8 +131,8 @@ async def test_memory_missing_agent_surfaces_ephemeral_error(
     with patch("daimon.adapters.slack.memory.resolve_web_client", AsyncMock(return_value=web)):
         await handle_memory_command(runtime, _payload())
     kwargs = web.chat_postEphemeral.call_args.kwargs
-    assert "ghost" in kwargs["text"]
-    assert "not found" in kwargs["text"].lower()
+    assert "ghost" in shown_text(kwargs)
+    assert "not found" in shown_text(kwargs).lower()
 
 
 async def test_memory_hides_an_agent_isolation_keeps_out(db_session, db_session_factory) -> None:
@@ -148,7 +149,7 @@ async def test_memory_hides_an_agent_isolation_keeps_out(db_session, db_session_
     await db_session.commit()
     with patch("daimon.adapters.slack.memory.resolve_web_client", AsyncMock(return_value=web)):
         await handle_memory_command(runtime, _payload())
-    text = web.chat_postEphemeral.call_args.kwargs["text"]
+    text = shown_text(web.chat_postEphemeral.call_args.kwargs)
     assert "no memory to show here." in text.lower(), "the deployment default answers elsewhere too"
 
 
@@ -195,7 +196,7 @@ async def test_memory_mine_and_forget_act_only_on_the_invokers_own_store(
             await handle_memory_command(runtime, payload)
         kwargs = web.chat_postEphemeral.call_args.kwargs
         assert kwargs["user"] == user_id, "ephemeral, to the invoker only"
-        return kwargs["text"]
+        return shown_text(kwargs)
 
     async def paths(store_id: str) -> list[str]:
         page = await runtime.anthropic.beta.memory_stores.memories.list(store_id, path_prefix="/")
@@ -255,7 +256,9 @@ async def test_memory_in_a_shared_channel_shows_the_channel_store_not_the_agent_
         await handle_memory_command(runtime, _payload())
         await handle_memory_command(runtime, _payload("/channel.md"))
         await handle_memory_command(runtime, _payload("/wide.md"))
-    listing, shown, wide = (call.kwargs["text"] for call in web.chat_postEphemeral.call_args_list)
+    listing, shown, wide = (
+        shown_text(call.kwargs) for call in web.chat_postEphemeral.call_args_list
+    )
     assert "/channel.md" in listing and "/wide.md" not in listing
     assert "agreed here" in shown
     assert "No memory file called" in wide, "agent-wide files are not reachable from here"
@@ -270,7 +273,7 @@ async def test_personal_memory_commands_say_it_is_not_used_in_a_shared_channel(
         for text in ("mine", "mine /a.md", "forget-mine", "forget-mine abc123"):
             await handle_memory_command(runtime, _payload(text))
     for call in web.chat_postEphemeral.call_args_list:
-        assert "Personal memory isn't used in this channel." in call.kwargs["text"]
+        assert "Personal memory isn't used in this channel." in shown_text(call.kwargs)
 
 
 def _lookup_failure() -> SlackApiError:
@@ -300,7 +303,7 @@ async def test_memory_for_an_asker_not_proven_a_member_never_shows_agent_wide_me
     with patch("daimon.adapters.slack.memory.resolve_web_client", AsyncMock(return_value=web)):
         await handle_memory_command(runtime, _payload())
         await handle_memory_command(runtime, _payload("mine"))
-    listing, mine = (call.kwargs["text"] for call in web.chat_postEphemeral.call_args_list)
+    listing, mine = (shown_text(call.kwargs) for call in web.chat_postEphemeral.call_args_list)
     assert "/channel.md" in listing and "/wide.md" not in listing
     assert "Personal memory isn't used in this channel." in mine
 

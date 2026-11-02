@@ -1,15 +1,16 @@
 """Usage observations preserve attribution without changing billing."""
 
+import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
 from anthropic.types.beta.sessions import BetaManagedAgentsSpanModelRequestEndEvent
-from daimon.core.stores import tenant_ledger, usage_events
+from daimon.core.stores import tenant_ledger, turn_outcomes, usage_events
 from daimon.core.stores.turn_usage import list_turn_usage, usage_by_channel
 from daimon.core.turn.outcomes import TurnObservation, drain_outcomes
 from daimon.core.turn.termination import TerminationReason
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_account, make_tenant
 from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -102,3 +103,54 @@ async def test_queries_scope_and_unknown_costs(
         assert await list_turn_usage(session, tenant_id=tenant.id, since=datetime.now(UTC)) == []
         with pytest.raises(ValueError, match="limit"):
             await list_turn_usage(session, tenant_id=tenant.id, since=since, limit=1001)
+
+
+async def test_reads_narrow_to_an_account_priced_turns_and_a_window(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    ann = await make_account(db_session, tenant=tenant)
+    bob = await make_account(db_session, tenant=tenant)
+    now = datetime.now(UTC)
+    for account, cost, age in (
+        (ann.id, Decimal("1"), 1),
+        (ann.id, None, 2),
+        (bob.id, Decimal("2"), 3),
+        (ann.id, Decimal("4"), 40),
+    ):
+        await turn_outcomes.record(
+            db_session,
+            turn_outcomes.OutcomeRecord(
+                id=uuid.uuid4(),
+                tenant_id=tenant.id,
+                account_id=account,
+                platform="discord",
+                channel_id="c",
+                thread_id=None,
+                agent_id=None,
+                session_id=None,
+                origin="chat",
+                reason=TerminationReason.COMPLETED,
+                started_at=now - timedelta(days=age),
+                ended_at=now - timedelta(days=age),
+                duration_ms=1,
+                recovered=False,
+                error_class=None,
+                release="test",
+                usage_refs=[],
+                cost_usd=cost,
+            ),
+        )
+    since = now - timedelta(days=30)
+
+    anns = await list_turn_usage(db_session, tenant_id=tenant.id, since=since, account_id=ann.id)
+    priced = await list_turn_usage(
+        db_session, tenant_id=tenant.id, since=since, account_id=ann.id, priced_only=True
+    )
+    old = await usage_by_channel(
+        db_session, tenant_id=tenant.id, since=now - timedelta(days=60), until=since
+    )
+
+    assert len(anns) == 2, "only the account's turns inside the window"
+    assert [r.cost_usd for r in priced] == [Decimal("1")], "unpriced turns are left out"
+    assert [(g.turns, g.known_cost_usd) for g in old] == [(1, Decimal("4"))], "`until` ends it"

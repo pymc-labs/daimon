@@ -250,7 +250,6 @@ def test_role_gated_agent_refuses_routine_save_even_for_live_admin() -> None:
         ("timer", True, False),
         ("watch_fired", True, False),
         ("job_finished", True, False),
-        ("worker_finished", True, False),
         ("routine", True, False),
         ("long_job", True, False),
         ("cli", True, False),
@@ -265,27 +264,3 @@ def test_human_principal_origins_fail_closed(
     from daimon.core.turn.invocation import human_invocation
 
     assert human_invocation(origin, attended) is expected
-
-
-@pytest.mark.parametrize("root_human", [False, True])
-def test_workers_inherit_frozen_principal_independently_of_attendance(root_human: bool) -> None:
-    from uuid import uuid4
-
-    from daimon.core.turn.admission import AdmissionGrant
-    from daimon.core.turn.invocation import human_invocation
-
-    grant = AdmissionGrant(
-        tenant_id=uuid4(),
-        subject=MEMBER,
-        surface=Surface.CHANNEL,
-        turn_place=Place(),
-        run_place=Place(),
-        agent=AgentRef.of("restricted"),
-        channel_id="channel",
-        thread_id="thread",
-        is_dm=False,
-        human_invocation=root_human,
-    )
-    assert human_invocation("worker", False, grant) is root_human
-    assert human_invocation("worker", True, grant) is root_human
-    assert not human_invocation("unknown", True, grant)

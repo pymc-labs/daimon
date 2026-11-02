@@ -16,14 +16,15 @@ the policy lock.
 
 from __future__ import annotations
 
+import asyncio
 import re
 import uuid
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Literal, Protocol
 
 import structlog
-from anthropic import APIError, AsyncAnthropic
+from anthropic import AsyncAnthropic
 from daimon.core.access_policy import ChannelReaders, ChannelWriters, TenantAccessPolicy
 from daimon.core.agent_fork import fork_agent, fork_host_agent
 from daimon.core.agent_pins import agent_aliases, agent_pin_names
@@ -44,6 +45,7 @@ from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_agent
 from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.permissions import (
+    WEB_PLACE_ID,
     AgentRule,
     ChannelRule,
     RuleRefused,
@@ -63,10 +65,9 @@ from daimon.core.stores.access_policy import (
     policy_write_transaction,
     set_access_policy,
 )
-from daimon.core.stores.neutral_catalog import CatalogConflict
 from daimon.core.stores.scoped_config_read import get_scope, list_propagations_for_tenant
 from daimon.core.stores.scoped_config_write import set_fields
-from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
+from mux.errors import ScopeViolation
 from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -379,7 +380,7 @@ async def _own_agent_refusal(
         return "managed_channel_agent"
     names = tuple(n for n in (name, *agent_pin_names(agent.name, agent.metadata)) if n)
     rules = () if replacing_rule else agent_permissions(policy, names).runs_in
-    if any(rule - {channel_id} for rule in rules):
+    if any(rule - {channel_id, WEB_PLACE_ID} for rule in rules):
         return "agent_runs_elsewhere"
     reach = await load_agent_reach(
         session,
@@ -559,36 +560,68 @@ async def _archive_unused_copy(
     name: str,
     agent_id: str,
     resource_host: NeutralResourceHost | None = None,
-) -> None:
-    """Archive a copy whose write failed, unless the channel may point at it.
+    named_impossible: bool = False,
+) -> bool:
+    """Archive a copy whose write failed, unless the channel may point at it; True when
+    it was archived.
 
     A commit can fail after the database applied it, so the channel is read
     again first; a copy it names, or one when that read fails, is kept and
-    logged. A failed archive is logged too: the caller re-raises the write's
-    own error.
+    logged. With `named_impossible` (the copy failed before the channel could name it)
+    the read is skipped and it is always archived. A failed archive is logged at
+    error: the caller re-raises the write's own error, or says the copy may remain.
     """
     log_fields = {"tenant_id": str(tenant_id), "channel_id": channel_id, "agent_id": agent_id}
-    try:
-        async with sessionmaker() as session:
-            scope = await get_scope(
-                session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=channel_id)
+    if not named_impossible:
+        try:
+            async with sessionmaker() as session:
+                scope = await get_scope(
+                    session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=channel_id)
+                )
+        except (SQLAlchemyError, OSError):
+            _log.warning(
+                "channel_rules.copy_kept", reason="unreadable", exc_info=True, **log_fields
             )
-    except (SQLAlchemyError, OSError):
-        _log.warning("channel_rules.copy_kept", reason="unreadable", exc_info=True, **log_fields)
-        return
-    if isinstance(scope, ChannelConfigRow) and scope.agent_name == name:
-        _log.warning("channel_rules.copy_kept", reason="channel_points_at_it", **log_fields)
-        return
+            return False
+        if isinstance(scope, ChannelConfigRow) and scope.agent_name == name:
+            _log.warning("channel_rules.copy_kept", reason="channel_points_at_it", **log_fields)
+            return False
     try:
         if resource_host is None:
             await archive_agent(anthropic, agent_id, scope=resource_scope(tenant_id=str(tenant_id)))
         else:
             made = await resource_host.find(name)
             if made is None or made.id != agent_id:
-                return
+                return False
             await resource_host.retire(made.revision.catalog_id)
-    except (APIError, ProviderError, CatalogConflict, UnsupportedCapability):
-        _log.warning("channel_rules.copy_archive_failed", exc_info=True, **log_fields)
+    except Exception:
+        # Any failure (not only the provider's): the caller says the copy may remain,
+        # never lets a raw error reach the person.
+        _log.error("channel_rules.copy_archive_failed", exc_info=True, **log_fields)
+        return False
+    return True
+
+
+async def _despite_cancellation[T](work: Awaitable[T]) -> T:
+    """Run `work` to the end even if this task is cancelled meanwhile, then let that
+    cancellation go on. An anyio scope (the MCP server's) re-cancels every await, so
+    the wait is shielded from it; a native one-shot `task.cancel()` is absorbed by
+    `asyncio.shield` and re-raised once `work` is done. One wait, no loop per tick."""
+    import anyio
+
+    task = asyncio.ensure_future(work)
+    cancelled: asyncio.CancelledError | None = None
+    with anyio.CancelScope(shield=True):
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            if task.cancelled():
+                raise
+            cancelled = exc
+            await asyncio.wait({task})
+    if cancelled is not None:
+        raise cancelled
+    return task.result()
 
 
 async def _with_network_warning(
@@ -631,8 +664,14 @@ async def set_channel_rule(
     public_url: str | None = None,
     release_agents: bool = False,
     resource_host: NeutralResourceHost | None = None,
+    start_copy: Callable[[str, str, str, str], Awaitable[None]] | None = None,
 ) -> RuleChange:
     """Set `channel_id`'s rule; raise `ChannelRuleRefused` if refused. None keeps a side.
+
+    `start_copy(source_name, source_ma_agent_id, copy_name, copy_ma_agent_id)` starts
+    a copy of an agent on another provider there too (the MCP layer's switch path,
+    which owns the source capture). Without it, such an agent isn't copied at all: a
+    copy would answer on Claude.
 
     A copy is made only when `copy` is set, readers become own and the
     channel has no agent that may be its own, so repeating a request never
@@ -686,12 +725,28 @@ async def set_channel_rule(
         raise ChannelRuleRefused(found.refusal, agent_name=found.name or source)
     async with sessionmaker() as session:
         ruled = (await load_access_policy(session, tenant_id=tenant_id)).agent_rules.keys()
+    source_agent: _PolicyAgent | None = None
     if resource_host is None:
         taken = {
             agent.metadata.get(MA_METADATA_KEY_NAME) or agent.name
             for agent in await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
         }
         new_name = copy_name(channel_label, channel_id, taken=taken, ruled=ruled)
+        # The agent looked up before the lock (`known`) when it's there.
+        source_agent = known.get(source) or await find_agent_by_daimon_tag(
+            anthropic, tenant_id=tenant_id, name=source
+        )
+        if start_copy is None:
+            if source_agent is None:
+                # Gone or renamed since it was named here: refuse rather than copy an
+                # agent whose provider was never read.
+                raise DaimonError(
+                    f"I couldn't find {source} just now, so nothing was copied. Try again "
+                    "in a moment. Nothing was changed."
+                )
+            await _refuse_a_copy_off_claude(
+                sessionmaker, tenant_id=tenant_id, source_name=source, source_agent=source_agent
+            )
         made = await fork_agent(
             anthropic,
             sessionmaker,
@@ -722,7 +777,19 @@ async def set_channel_rule(
             extra_metadata={MA_METADATA_KEY_CHANNEL_COPY: channel_id},
         )
 
+    start_failed = False
     try:
+        if start_copy is not None and resource_host is None:
+            # Before the channel names it: a copy that can't start on its source's
+            # provider is archived below with any other refused copy.
+            start_failed = True
+            if source_agent is None:
+                raise DaimonError(
+                    f"I couldn't read {source}'s model provider, so its copy wasn't kept. "
+                    "Try again in a moment."
+                )
+            await start_copy(source, source_agent.id, new_name, made.agent.id)
+            start_failed = False
         async with policy_write_transaction(sessionmaker, tenant_id=tenant_id) as session:
             await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
             await lock_access_policy(session, tenant_id=tenant_id)
@@ -747,17 +814,28 @@ async def set_channel_rule(
             )
             if found is not None and found.refusal is not None:
                 raise ChannelRuleRefused(found.refusal, agent_name=new_name)
-    except Exception:
-        # Re-raised: a copy no channel got, refused or not, must not linger.
-        await _archive_unused_copy(
-            anthropic,
-            sessionmaker,
-            tenant_id=tenant_id,
-            channel_id=channel_id,
-            name=new_name,
-            agent_id=made.agent.id,
-            resource_host=resource_host,
+    except BaseException as exc:
+        # Re-raised: a copy no channel got, refused or not, must not linger; nor may a
+        # cancellation stop its removal (`_despite_cancellation`).
+        removed = await _despite_cancellation(
+            _archive_unused_copy(
+                anthropic,
+                sessionmaker,
+                tenant_id=tenant_id,
+                channel_id=channel_id,
+                name=new_name,
+                agent_id=made.agent.id,
+                resource_host=resource_host,
+                # The channel is named only after the start, so it can't name this one.
+                named_impossible=start_failed,
+            )
         )
+        if start_failed and not removed and isinstance(exc, Exception):
+            raise DaimonError(
+                f"{new_name} couldn't start on its source's model provider, and removing "
+                "it failed too, so it may still exist on Claude. Ask an admin to archive "
+                f"{new_name}."
+            ) from exc
         raise
     change = replace(change, copied_from=source, dropped_skills=made.dropped_skills)
     return await _with_network_warning(
@@ -768,6 +846,36 @@ async def set_channel_rule(
         default=default,
         resource_host=resource_host,
     )
+
+
+async def _refuse_a_copy_off_claude(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    source_name: str,
+    source_agent: _PolicyAgent,
+) -> None:
+    """A setup panel or the CLI can't start a copy on another provider (that needs the
+    chat path's source capture), so it refuses before copying an agent on GPT or
+    Gemini rather than make one that answers on Claude."""
+    from daimon.core.errors import UserFacingError
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores import agent_backends
+    from daimon.core.turn.notices import provider_name
+    from mux.contracts.config import DEFAULT_BACKEND
+
+    source = source_agent
+    async with sessionmaker() as session:
+        revision = await agent_backends.current(
+            session, tenant_id, derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=source.id)
+        )
+    backend = revision.backend if revision is not None else None
+    if backend is not None and backend != DEFAULT_BACKEND:
+        raise UserFacingError(
+            f"{source_name} runs on {provider_name(backend)}, so this channel's own copy of it "
+            "has to be made by asking Daimon in chat, where the copy starts on "
+            f"{provider_name(backend)} too. Nothing was changed."
+        )
 
 
 async def set_category_rule(
@@ -868,10 +976,11 @@ async def set_agent_rule(
             raise ChannelRuleRefused("agent_not_found", agent_name=agent_name)
         # A missing agent has no channel of its own left to keep.
         home = agent_permissions(policy, names).home if agent is not None else None
-        if home is not None and target != (home,):
+        channels = tuple(c for c in target or () if c != WEB_PLACE_ID)
+        if home is not None and channels != (home,):
             raise ChannelRuleRefused("agent_has_home", agent_name=agent_name, channel_id=home)
-        own = [c for c in target or () if channel_rule(policy, c).readers == "own"]
-        if own and len(target or ()) > 1:
+        own = [c for c in channels if channel_rule(policy, c).readers == "own"]
+        if own and len(channels) > 1:
             raise ChannelRuleRefused("own_channel_alone", channel_id=own[0])
         if own and home is None and agent is not None:
             refusal = await _own_agent_refusal(

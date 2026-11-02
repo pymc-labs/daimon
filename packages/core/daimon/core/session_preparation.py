@@ -259,6 +259,7 @@ class RecorderFactory(Protocol):
         ma_session_id: str,
         model_id: str,
         channel_id: str | None = None,
+        agent_id: str | None = None,
     ) -> UsageRecorder: ...
 
 
@@ -312,7 +313,7 @@ async def _handoff_authorizes(deps: TurnDeps, admission: Admission) -> bool:
         binding = await get_binding_by_id(session, id=binding_id)
     return (
         binding is not None
-        and binding.kind == "handoff"
+        and binding.kind in ("handoff", "owner")
         and binding.responder_ma_agent_id == admission.agent.id
     )
 
@@ -769,6 +770,7 @@ async def _prepare_session_for_turn_locked(
                 ma_session_id=ma_session_id,
                 model_id=model_id,
                 channel_id=current.budget_channel_id,
+                agent_id=current.agent.id,
             ),
             continuity=continuity,
             session_model_id=model_id,

@@ -63,6 +63,7 @@ from mux.drivers.anthropic.resources.skills import (
     AnthropicSkills,
     AnthropicSkillVersions,
     NativeSkillVersions,
+    names_skill_version,
 )
 from mux.drivers.anthropic.resources.vaults import AnthropicVaults, Vaults
 from mux.drivers.anthropic.resources.walk import AnthropicResourceWalk, ResourceWalk
@@ -316,6 +317,7 @@ __all__ = [
     "environment_payload",
     "environment_record",
     "mcp_permissions",
+    "names_skill_version",
     "native_tools_match",
     "object_json",
     "observation_from_event",

@@ -249,8 +249,12 @@ async def add_agent_skill(
     origin: str,
     added_by_account_id: uuid.UUID | None,
     recheck: AgentRecheck,
+    attach: bool = True,
 ) -> SkillAddResult:
     """Upload `bundle` as `agent`'s own skill and attach it. Re-adding updates it.
+
+    With ``attach=False`` the upload and its ledger row are written but the agent is left
+    alone: the caller pins the returned version itself.
 
     Everything that can refuse runs before the upload, so a refusal changes
     nothing. `recheck` runs on the agent as it is right before the upload and
@@ -269,6 +273,7 @@ async def add_agent_skill(
             origin=origin,
             added_by_account_id=added_by_account_id,
             recheck=recheck,
+            attach=attach,
         ),
         agent=agent,
         agent_name=agent_name,
@@ -327,7 +332,9 @@ class _AnthropicSkillAddHost:
         origin: str,
         added_by_account_id: uuid.UUID | None,
         recheck: AgentRecheck,
+        attach: bool = True,
     ) -> None:
+        self._attach_on_add = attach
         self.client = client
         self.sessionmaker = sessionmaker
         self.tenant_id = tenant_id
@@ -441,6 +448,8 @@ class _AnthropicSkillAddHost:
             )
 
     async def attach(self, skill_id: str) -> bool:
+        if not self._attach_on_add:
+            return False
         return await _attach(
             self.client,
             tenant_id=self.tenant_id,

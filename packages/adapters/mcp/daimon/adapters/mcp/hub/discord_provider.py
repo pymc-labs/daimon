@@ -20,25 +20,12 @@ from typing import Any
 import httpx
 from daimon.adapters.mcp.hub.claims import encode_hub_claims
 from daimon.core.hub_identity import resolve_hub_tenants
+from daimon.core.platform_sign_in import fetch_discord_workspaces
 from fastmcp.server.auth.providers.discord import DiscordProvider
 from key_value.aio.protocols import AsyncKeyValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-DISCORD_API = "https://discord.com/api/v10"
 _SCOPES = ["identify", "guilds"]
-
-
-async def fetch_discord_workspaces(
-    http: httpx.AsyncClient, *, access_token: str
-) -> tuple[str, list[tuple[str, str]]]:
-    """Return ``(user_id, [(guild_id, guild_name), ...])`` for the token's user."""
-    headers = {"Authorization": f"Bearer {access_token}"}
-    me = await http.get(f"{DISCORD_API}/users/@me", headers=headers)
-    me.raise_for_status()
-    guilds = await http.get(f"{DISCORD_API}/users/@me/guilds", headers=headers)
-    guilds.raise_for_status()
-    user_id = str(me.json()["id"])
-    return user_id, [(str(g["id"]), str(g["name"])) for g in guilds.json()]
 
 
 class DaimonDiscordProvider(DiscordProvider):

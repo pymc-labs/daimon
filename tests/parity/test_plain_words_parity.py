@@ -29,8 +29,13 @@ SHARED_SKILLS = (
     "Ask me to draft a request for an admin, or to make you a new agent."
 )
 CODING_TOOLS = (
-    "Only platform admins can create coding-tool keys, including channel-bound keys.\n\n"
-    'Ask a platform admin to open this agent\'s Details and press "Use from your coding tools".'
+    "Only an admin or this agent's owner can make a coding key.\n\n"
+    'Ask one of them to open this agent\'s Details and press "Use from your coding tools".'
+)
+#: Teams has no owner coding keys yet, so its panel names only an admin.
+TEAMS_CODING_TOOLS = (
+    "Only an admin can make a coding key here.\n\n"
+    'Ask an admin to open this agent\'s Details and press "Use from your coding tools".'
 )
 
 
@@ -56,4 +61,5 @@ def test_shared_agent_refusals_are_the_same_everywhere() -> None:
 
 
 def test_coding_tools_refusal_is_the_same_everywhere() -> None:
-    assert {CODING_TOOLS_REFUSAL, NEEDS_ADMIN_MESSAGE, teams_setup.NEEDS_ADMIN} == {CODING_TOOLS}
+    assert {CODING_TOOLS_REFUSAL, NEEDS_ADMIN_MESSAGE} == {CODING_TOOLS}
+    assert teams_setup.NEEDS_ADMIN == TEAMS_CODING_TOOLS

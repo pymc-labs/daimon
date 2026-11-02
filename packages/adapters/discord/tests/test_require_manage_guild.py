@@ -89,7 +89,7 @@ async def test_require_manage_guild_rejects_member_without_perms() -> None:
         if call_args.kwargs.get("ephemeral") is None
         else call_args.kwargs.get("ephemeral") is True
     ), "non-admin member rejected ephemerally"
-    sent_msg = call_args.args[0] if call_args.args else call_args.kwargs.get("content", "")
+    sent_msg = call_args.kwargs["embed"].description
     assert _ROUTINES_HANDOVER in sent_msg, "rejection message must be sent on rejection"
     assert not interaction._inner_called, (
         "non-admin member rejected ephemerally — inner fn not called"

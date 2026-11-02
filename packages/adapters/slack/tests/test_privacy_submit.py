@@ -68,6 +68,40 @@ async def test_paused_background_handler_does_not_purge(
     )
 
 
+async def test_a_purge_that_rolled_back_says_nothing_was_deleted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.core.purge import AccountPurgeFailed
+
+    account_id = uuid.uuid4()
+    runtime = MagicMock()
+    runtime.settings.privacy.delete_enabled = True
+    session = MagicMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=None)
+    runtime.sessionmaker = MagicMock(return_value=session)
+    web_client = MagicMock()
+    web_client.views_update = AsyncMock()
+    monkeypatch.setattr(
+        "daimon.adapters.slack.privacy_panel.submit.resolve_privacy_account",
+        AsyncMock(return_value=account_id),
+    )
+    monkeypatch.setattr(
+        "daimon.adapters.slack.privacy_panel.submit.purge_account",
+        AsyncMock(side_effect=AccountPurgeFailed("Nothing was deleted. Try again in a minute.")),
+    )
+    await run_purge_and_update(
+        runtime,
+        web_client,
+        account_id=account_id,
+        tenant_id=uuid.uuid4(),
+        platform_user_id="U1",
+        view_id="V1",
+    )
+    view = web_client.views_update.await_args.kwargs["view"]
+    assert view["blocks"][0]["text"]["text"] == "Nothing was deleted. Try again in a minute."
+
+
 # ---------------------------------------------------------------------------
 # Payload helpers
 # ---------------------------------------------------------------------------

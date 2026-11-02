@@ -41,6 +41,7 @@ import structlog
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.feedback_button import FeedbackButton
 from daimon.adapters.discord.feedback_modal import support_channel_for
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.post_transport import DiscordPostTransport, known_webhook_ids
 from daimon.adapters.discord.support_escalation import SupportEscalateButton, discord_channel
 from daimon.core.agent_post_identity import is_our_discord_webhook
@@ -410,7 +411,7 @@ class FeedbackReactionCog(commands.Cog):
             if user is None:
                 user = await self._bot.fetch_user(payload.user_id)
             if not has_credit(allowance=allowance, used=used):
-                await user.send(OUT_OF_CREDITS)
+                await user.send(embed=build_notice_embed(OUT_OF_CREDITS))
                 return
             left = remaining_credits(allowance=allowance, used=used)
             view: discord.ui.View = discord.ui.View(timeout=None)

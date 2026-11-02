@@ -307,6 +307,12 @@ def _apply_tool_result(
 
 _MCP_FAILURE_TYPES = ("mcp_connection_failed_error", "mcp_authentication_failed_error")
 
+# MA has no error variant for a sandbox package install that ran out of time
+# (the environment's `pip` list): it arrives as an `unknown_error` whose only
+# identifier is this message prefix. The session keeps running without those
+# packages, so this one message is told apart and no other `unknown_error`.
+PACKAGE_INSTALL_FAILURE_PREFIX = "Package installation failed"
+
 
 class _StopDetails(BaseModel):
     type: object = None
@@ -339,8 +345,10 @@ def _apply_session_error(
     `terminal` is the degraded case: MA drops that server and keeps the
     session running, the model answers with the rest of its tools, and the
     session idles cleanly — so it lands in `mcp_failures`, newest status per
-    server, and never in `error`. Everything else is the turn's error, as
-    before.
+    server, and never in `error`. An `exhausted` package-installation failure
+    is kept aside in `package_install_error` the same way: the session goes on
+    without the packages, and the finalizer decides whether the turn answered.
+    Everything else is the turn's error, as before.
     """
     retry_status = sdk_error.retry_status.type
     if sdk_error.type in _MCP_FAILURE_TYPES and retry_status != "terminal":
@@ -357,6 +365,10 @@ def _apply_session_error(
         )
         kept = tuple(f for f in state.mcp_failures if f.server_name != failure.server_name)
         return dataclasses.replace(state, mcp_failures=(*kept, failure), seen_event_ids=seen)
+    if retry_status == "exhausted" and _is_package_install_failure(sdk_error):
+        return dataclasses.replace(
+            state, package_install_error=_to_turn_error(sdk_error), seen_event_ids=seen
+        )
     if retry_status == "retrying":
         # Kept aside, not dropped: should the stream end with no settled
         # copy and no output, the finalizer surfaces it rather than a blank.
@@ -364,6 +376,15 @@ def _apply_session_error(
             state, retrying_error=_to_turn_error(sdk_error), seen_event_ids=seen
         )
     return dataclasses.replace(state, error=_to_turn_error(sdk_error), seen_event_ids=seen)
+
+
+def _is_package_install_failure(sdk_error: SessionError) -> bool:
+    message = getattr(sdk_error, "message", None)
+    return (
+        sdk_error.type == "unknown_error"
+        and isinstance(message, str)
+        and message.startswith(PACKAGE_INSTALL_FAILURE_PREFIX)
+    )
 
 
 def _to_turn_error(sdk_error: SessionError) -> TurnError:

@@ -1,4 +1,4 @@
-"""A never-configured tenant gets Gemini agent turns and Gemini/OpenAI workers from code."""
+"""A never-configured tenant gets Gemini and OpenAI agent turns from code."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from daimon.core.turn.runtime_defaults import (
     OPENAI_SPEND_LIMIT_CENTS,
     default_rows,
 )
-from daimon.core.turn.runtime_manifest import manifest_hold_usd, select_runtime_manifest
+from daimon.core.turn.runtime_manifest import select_runtime_manifest
 
 TENANT = uuid.uuid4()
 OTHER = uuid.uuid4()
@@ -48,12 +48,9 @@ def request(
     profile: str,
     model: str,
     *,
-    worker: bool = False,
-    budget: Decimal | None = None,
     origin: str = "agent",
     environment: str | None = None,
 ) -> Any:
-    limits = SimpleNamespace(native_budget_usd=budget)
     return SimpleNamespace(
         tenant_id=TENANT,
         admission=SimpleNamespace(
@@ -61,8 +58,6 @@ def request(
             backend_revision_origin=origin,
             agent=SimpleNamespace(id="agent_ma_1", version=3),
         ),
-        worker=SimpleNamespace(limits=limits) if worker else None,
-        native_budget_usd=None,
         openai_environment_id=environment,
         scope=SimpleNamespace(tenant_id=str(TENANT), account_id="any-account"),
     )
@@ -82,52 +77,10 @@ def test_a_gemini_agent_turn_runs_from_the_code_template(
 
     plan = select_runtime_manifest(request("gemini.inline_reuse", model), GeminiPlan)
 
-    assert plan.root_materialization and not plan.worker_materialization
+    assert plan.root_materialization
     assert plan.tenant_id == str(TENANT) and plan.channel_id == "never-set-up"
     assert plan.template_capabilities == "mcp", "the agent keeps its Daimon tools"
     assert (plan.hold_usd, plan.cap_usd) == (Decimal("0.25"), Decimal("1.75"))
-
-
-@pytest.mark.parametrize("model", ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-4-argon"])
-def test_a_gemini_worker_runs_from_the_code_template(
-    monkeypatch: pytest.MonkeyPatch, model: str
-) -> None:
-    monkeypatch.setenv("DAIMON_CHANNEL_GEMINI_KEY", "set")
-
-    plan = select_runtime_manifest(request("gemini.inline_reuse", model, worker=True), GeminiPlan)
-
-    assert plan.worker_materialization and not plan.root_materialization
-    assert manifest_hold_usd(
-        revision("gemini.inline_reuse", model), tenant_id=str(TENANT), account_id="any-account"
-    ) == Decimal("0.49"), "the hold agrees with the row selection picks"
-
-
-@pytest.mark.parametrize("model", ["gpt-6-luna", "gpt-6-astra"])
-def test_an_openai_worker_is_capped_and_needs_no_project(
-    monkeypatch: pytest.MonkeyPatch, model: str
-) -> None:
-    monkeypatch.setenv("DAIMON_CHANNEL_OPENAI_KEY", "set")
-
-    plan = select_runtime_manifest(
-        request("openai.conversation_only", model, worker=True), OpenAIDeployment
-    )
-
-    assert plan.worker_materialization
-    assert plan.spend_limit_usd_cents == OPENAI_SPEND_LIMIT_CENTS, "Astra is never uncapped"
-    assert plan.project == DEFAULT_PROJECT and plan.project_header is False
-
-
-def test_a_budgeted_openai_worker_is_capped_by_its_own_budget(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("DAIMON_CHANNEL_OPENAI_KEY", "set")
-
-    plan = select_runtime_manifest(
-        request("openai.conversation_only", "gpt-6-astra", worker=True, budget=Decimal("0.20")),
-        OpenAIDeployment,
-    )
-
-    assert plan.spend_limit_usd_cents is None, "the worker's native budget sets the cap"
 
 
 def test_an_openai_agent_turn_waits_for_its_tenants_environment(
@@ -148,6 +101,49 @@ def test_an_openai_agent_turn_waits_for_its_tenants_environment(
     assert plan.root_materialization and plan.environment_id == "envtmpl_1"
     assert plan.spend_limit_usd_cents == OPENAI_SPEND_LIMIT_CENTS
     assert plan.project_header is False
+    assert plan.template_capabilities == "mcp", "the agent keeps its Daimon tools (J6)"
+
+
+def test_capture_sees_both_agent_templates_before_any_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Source capture reads template capabilities without needing a provider key.
+
+    Capture runs in the MCP server, which may not carry the key the chat host has;
+    its preview must still see the template that keeps MCP (smoke 0eee1b8e J6).
+    """
+    from daimon.core.turn.runtime_defaults import capture_template_rows, default_rows
+
+    for name in ("DAIMON_CHANNEL_OPENAI_KEY", "DAIMON_CHANNEL_GEMINI_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    rows = capture_template_rows(str(TENANT))
+    assert {row["profile"] for row in rows} == {
+        "gemini.inline_reuse",
+        "openai.persistent_workspace",
+    }, "an unkeyed capture process still sees both agent templates"
+    assert default_rows(str(TENANT)) == [], "a turn still refuses without a key"
+    assert all(row["root_materialization"] is True for row in rows)
+    assert all(row["template_capabilities"] == "mcp" for row in rows)
+    assert all(row["tenant_id"] == str(TENANT) for row in rows)
+    assert all("environment_id" not in row for row in rows)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"root_materialization": False, "agent_id": "agent_1"},
+        {"profile": "openai.conversation_only", "environment_id": None},
+        {"mcp_credential_file": "/tmp/credential"},
+    ],
+)
+def test_template_capabilities_belong_to_a_persistent_workspace_template(changes) -> None:
+    from pydantic import ValidationError
+
+    from .test_openai_agent_template import template_row
+
+    OpenAIDeployment.model_validate(template_row("t", template_capabilities="mcp"))
+    with pytest.raises(ValidationError):
+        OpenAIDeployment.model_validate(template_row("t", template_capabilities="mcp", **changes))
 
 
 def test_a_channel_pinned_to_gemini_runs_from_the_code_default(
@@ -159,32 +155,8 @@ def test_a_channel_pinned_to_gemini_runs_from_the_code_default(
         request("gemini.inline_reuse", "gemini-3.8-flash", origin="channel"), GeminiPlan
     )
 
-    assert not plan.root_materialization and not plan.worker_materialization
+    assert not plan.root_materialization
     assert plan.tools == () and plan.template_capabilities is None
-
-
-def test_an_operator_row_narrower_than_the_turn_never_widens_to_defaults(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Workers the operator scoped to one channel stay there: other channels refuse."""
-    monkeypatch.setenv("DAIMON_CHANNEL_GEMINI_KEY", "set")
-    worker = default_rows(str(TENANT))[2]
-    path = tmp_path / "runtime.json"
-    path.write_text(json.dumps([{**worker, "platform": "discord", "channel_id": "only-here"}]))
-    monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(path))
-
-    with pytest.raises(AdmissionDenied):
-        select_runtime_manifest(
-            request("gemini.inline_reuse", "gemini-3.8-flash", worker=True), GeminiPlan
-        )
-    assert (
-        manifest_hold_usd(
-            revision("gemini.inline_reuse", "gemini-3.8-flash"),
-            tenant_id=str(TENANT),
-            account_id="any-account",
-        )
-        is None
-    ), "the hold agrees: no row"
 
 
 def test_a_pro_model_is_never_in_a_default_grant(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -240,14 +212,6 @@ def test_one_tenants_row_never_serves_another(
     assert plan.tenant_id == str(TENANT) and plan.project == DEFAULT_PROJECT
 
 
-def test_an_unconfigured_provider_is_refused_with_its_real_cause() -> None:
-    with pytest.raises(AdmissionDenied) as refused:
-        select_runtime_manifest(
-            request("openai.conversation_only", "gpt-6-luna", worker=True), OpenAIDeployment
-        )
-    assert (refused.value.cause, refused.value.provider) == ("provider_not_configured", "openai")
-
-
 def test_the_refusal_copy_names_no_setting() -> None:
     from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
 
@@ -259,44 +223,3 @@ def test_the_refusal_copy_names_no_setting() -> None:
     )
     assert "OpenAI isn't set up on this Daimon install yet" in text
     assert "DAIMON_" not in text
-
-
-async def test_default_holds_let_a_root_turn_and_three_gemini_workers_run_at_once(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    from daimon.core.turn.gemini_state import SQLiteFlashAccounting
-    from mux.contracts.ids import ModelRef
-    from mux.drivers.gemini.flash import FlashAttempt
-
-    monkeypatch.setenv("DAIMON_CHANNEL_GEMINI_KEY", "set")
-    flash = "gemini-3.8-flash"
-    root = select_runtime_manifest(request("gemini.inline_reuse", flash), GeminiPlan)
-    worker = select_runtime_manifest(request("gemini.inline_reuse", flash, worker=True), GeminiPlan)
-    # One account's root turns and workers share one ledger (the same project).
-    assert root.project == worker.project
-    path = tmp_path / "holds.sqlite3"
-
-    def owner(plan: GeminiPlan) -> SQLiteFlashAccounting:
-        assert plan.hold_usd is not None and plan.cap_usd is not None
-        return SQLiteFlashAccounting(
-            path, namespace="account", hold_usd=plan.hold_usd, cap_usd=plan.cap_usd
-        )
-
-    async def attempt(plan: GeminiPlan, interaction: str) -> None:
-        model = ModelRef(provider="gemini", id=flash)
-        accounting = owner(plan)
-        await accounting.before_attempt(model=model, attempt=1)
-        await accounting.after_attempt(
-            receipt=FlashAttempt(model, 1, "accepted", interaction_id=interaction)
-        )
-
-    # A Gemini root turn is running while it fans out to three Gemini workers.
-    await attempt(root, "root")
-    for index in range(3):
-        await attempt(worker, f"worker-{index}")
-    # A fourth refuses with its plain reason, at once, before any Gemini call.
-    with pytest.raises(AdmissionDenied, match="provider_hold_cap_reached"):
-        await attempt(worker, "worker-3")
-    # The root's next turn still fits while its workers run, once its own settled.
-    assert await owner(root).settle(interaction_id="root", model=flash, actual_usd=Decimal("0.01"))
-    await attempt(root, "root-next")

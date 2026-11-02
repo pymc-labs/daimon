@@ -1,169 +1,26 @@
 """Delegated usage attribution without inventing ancestry, meters or debits.
 
-Native subagent settlement requires authoritative same-session ancestry. Host
-workers retain independent native sessions and original accounting identities;
-their rollup is a read only. Neither path enables delegation or collects native
-records.
+Native subagent settlement requires authoritative same-session ancestry. It
+preserves the original accounting identities without enabling delegation or
+collecting native records.
 """
 
 from __future__ import annotations
 
 import uuid
-from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal, localcontext
 
 from daimon.core.accounting_outbox import record_observation_usage
-from daimon.core.pricing import ModelRates, ProviderPrice, minimum_cost_of, provider_cost_of
+from daimon.core.pricing import ProviderPrice, provider_cost_of
 from daimon.core.stores.accounting_outbox import settled_amount
 from daimon.core.stores.root_usage import lock_root_usage
-from daimon.core.stores.turn_usage import UsageAccountingRows, read_accounting_revisions
-from daimon.core.usage_aggregation import disjoint_observations, replace_observation
 from daimon.core.usage_recording import TurnLedgerReason
-from mux.contracts.ids import ModelRef, ResourceRef, Scope
-from mux.contracts.resources import ProviderBinding
+from mux.contracts.ids import ModelRef, ResourceRef
 from mux.contracts.usage import UsageObservation
 from mux.errors import ScopeViolation
 from mux.profiles import accounting_mode_for
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-
-def root_usage_outcome_id(
-    scope: Scope, session: ResourceRef, *, previous: uuid.UUID | None, fresh: bool
-) -> uuid.UUID | None:
-    """Retain the first observer at its input claim, including an unknown join.
-
-    Caller owns the atomic counted root operation. Replays keep the original
-    id or missing marker, never a fresh observer. This function writes nothing.
-    """
-    if scope.is_platform or scope.is_legacy_host_authorized or session.kind != "session":
-        raise ValueError("root usage requires an admitted tenant session")
-    if (session.tenant_id, session.account_id) != (scope.tenant_id, scope.account_id):
-        raise ValueError("root usage session differs from admission")
-    if not fresh:
-        return previous
-    if previous is not None:
-        raise ValueError("fresh input already has an outcome association")
-    from daimon.core.turn.outcomes import current_outcome
-
-    outcome = current_outcome.get()
-    if outcome is None:
-        return None
-    if (str(outcome.tenant_id), str(outcome.account_id), outcome.session_id) != (
-        scope.tenant_id,
-        scope.account_id,
-        session.id,
-    ):
-        raise ValueError("root usage observer differs from admission")
-    return outcome.id
-
-
-@dataclass(frozen=True)
-class HostUsageBinding:
-    """Host-authorized worker session; native subagent ancestry is independent."""
-
-    binding: ProviderBinding
-    session: ResourceRef
-
-
-@dataclass(frozen=True)
-class DelegatedUsageRead:
-    """An attribution read, never a second root debit or proof of final actual.
-
-    token_floor_usd is a provider list-price floor, excluding markup and
-    unknown prices/runtime. ledger_debit_usd is the original customer debit,
-    including markup and signed corrections. These amounts overlap and must
-    not be added. Pending revisions and zero floors do not prove final actual.
-    """
-
-    observations: tuple[UsageObservation, ...]
-    token_floor_usd: Decimal
-    ledger_debit_usd: Decimal
-    unpriced_observations: int
-    pending_revisions: int
-
-
-async def read_delegated_usage(
-    session: AsyncSession,
-    *,
-    scope: Scope,
-    bindings: tuple[HostUsageBinding, ...],
-    prices: Mapping[tuple[str, str], ModelRates | ProviderPrice],
-    rows: Mapping[str, UsageAccountingRows] | None = None,
-) -> DelegatedUsageRead:
-    """Read distinct host workers through their existing usage/outbox bindings.
-
-    The caller loads bindings from its authorized durable worker graph and owns
-    a coherent read transaction. All worker turns are included, even when a
-    turn ID is missing. Original provider/session/observation IDs stay intact.
-    Revisions replace earlier snapshots; native coverage selects disjoint work.
-    This port performs no claims, debits, settlement, or reservation changes.
-    `rows` are this transaction's `read_accounting_revisions` of some bindings, by
-    binding id; they are used instead of reading those bindings again.
-    """
-    if scope.is_platform or scope.is_legacy_host_authorized or not bindings:
-        raise ValueError("delegated usage requires admitted tenant worker bindings")
-    tenant_id = uuid.UUID(scope.tenant_id)
-    binding_ids: set[str] = set()
-    sessions: set[ResourceRef] = set()
-    for member in bindings:
-        binding, native = member.binding, member.session
-        if (
-            native.kind != "session"
-            or native.tenant_id != scope.tenant_id
-            or native.account_id != scope.account_id
-            or binding.thread.channel.tenant_id != scope.tenant_id
-            or binding.legacy_account_id not in (None, scope.account_id)
-            or binding.provider != native.provider
-            or binding.native_refs.get("session") != native.id
-        ):
-            raise ScopeViolation(binding.id, "worker usage differs from its admitted session")
-        if binding.id in binding_ids or native in sessions:
-            raise ValueError("delegated usage cannot count a worker binding/session twice")
-        binding_ids.add(binding.id)
-        sessions.add(native)
-
-    observations: list[UsageObservation] = []
-    keys: set[str] = set()
-    floor, debits = Decimal(0), Decimal(0)
-    unpriced, pending = 0, 0
-    with localcontext() as arithmetic:
-        arithmetic.prec = 80
-        for member in bindings:
-            read = (
-                rows[member.binding.id]
-                if rows is not None and member.binding.id in rows
-                else await read_accounting_revisions(
-                    session, tenant_id=tenant_id, binding=member.binding
-                )
-            )
-            if read.binding != member.binding:
-                raise ValueError("worker binding changed during usage attribution")
-            latest: tuple[UsageObservation, ...] = ()
-            for revision in read.revisions:
-                value = revision.observation
-                if value.session != member.session or (
-                    value.model is not None and value.model.provider != member.session.provider
-                ):
-                    raise ScopeViolation(value.id, "worker usage contains another session")
-                latest = replace_observation(latest, value)
-            for value in disjoint_observations(latest):
-                observations.append(value)
-                amount = minimum_cost_of(
-                    value,
-                    prices.get((value.model.provider, value.model.id)) if value.model else None,
-                )
-                if amount is None:
-                    unpriced += 1
-                else:
-                    floor += amount
-            pending += sum(not item.settled for item in read.outbox)
-            for row in read.ledger:
-                if row.idempotency_key in keys:
-                    raise ValueError("delegated usage has overlapping monetary identities")
-                keys.add(row.idempotency_key)
-                debits -= row.delta_usd
-    return DelegatedUsageRead(tuple(observations), floor, debits, unpriced, pending)
 
 
 @dataclass(frozen=True)
@@ -307,6 +164,7 @@ async def record_root_usage(
     markup: Decimal = Decimal("1"),
     reason: TurnLedgerReason = "turn_debit",
     channel_id: str | None = None,
+    agent_id: str | None = None,
 ) -> tuple[bool, ...]:
     """Atomically persist/settle all root and child observations, then capture.
 
@@ -385,6 +243,7 @@ async def record_root_usage(
                     markup=markup,
                     reason=reason,
                     channel_id=channel_id,
+                    agent_id=agent_id,
                 )
             )
     if outcome is not None:

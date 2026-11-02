@@ -106,12 +106,15 @@ async def apply_env_submit(
     *,
     row: CredentialRequestRow,
     agent: BetaManagedAgentsAgent,
-    platform: ChatPlatform,
+    platform: ChatPlatform | None,
     value: str,
     plan: EnvSubmitPlan,
     now: datetime,
 ) -> EnvSubmitResult:
-    """Consume, lock, recheck, conditionally write, settle and queue atomically."""
+    """Consume, lock, recheck, conditionally write, settle and queue atomically.
+
+    `platform` None queues nothing: the web chat runs its follow-up itself.
+    """
     state: CardState = "applied"
     outcome: CredentialRequestOutcome = "applied"
     queued = False
@@ -150,7 +153,7 @@ async def apply_env_submit(
         await credential_requests.set_credential_request_outcome(
             session, token=consumed.token, outcome=outcome
         )
-        if platform != "discord" and state == "applied":
+        if platform is not None and platform != "discord" and state == "applied":
             queued = await record_input_continuation(session, consumed, platform=platform)
     return EnvSubmitResult(consumed, state, outcome, queued)
 

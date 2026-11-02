@@ -77,6 +77,7 @@ class Preparation:
         self.secret = "offline-mcp-fixture"
         self.vaults: dict[str, Object] = {}
         self.credentials: dict[str, Object] = {}
+        self.rotations = 0
         self.session_ids = list(dict.fromkeys(t.session_id for t in fixture.turns))
 
     async def resolve(self, scope: Scope, reference: str, destination: str) -> str:
@@ -102,6 +103,14 @@ class Preparation:
         if request.url.path.startswith("/v1/vaults/"):
             identity = request.url.path.split("/")[3]
             assert identity in self.vaults
+            if "/credentials/" in request.url.path:
+                # Each turn writes its bearer into the session's credential in place.
+                assert request.method == "POST" and identity in self.credentials
+                assert request.url.path.endswith("/" + self.credentials[identity]["id"])
+                body = OBJECT.validate_json(request.content)
+                assert body == {"auth": {"type": "static_bearer", "token": self.secret}}
+                self.rotations += 1
+                return httpx.Response(200, json=self.credentials[identity])
             if request.url.path.endswith("/credentials"):
                 assert request.method == "POST" and self.fixture.mcp_binding is not None
                 body = OBJECT.validate_json(request.content)
@@ -258,15 +267,19 @@ async def test_admitted_recipes_prepare_authenticated_sessions_and_decode_native
             events.extend([e async for e in stream])
             await close_iterator(stream)
     wire.assert_consumed()
+    # Every turn's input first put the turn's bearer in its session's vault, in place.
+    assert preparation.rotations == len(fixture.turns)
     assert preparation.agent_posts == 1 and preparation.session_posts == len(
         preparation.session_ids
     )
-    assert preparation.agent_gets == len(preparation.session_ids)
+    # One agent read per session create, and one per turn's in-place vault write.
+    assert preparation.agent_gets == len(preparation.session_ids) + len(fixture.turns)
     assert len(preparation.vaults) == len(preparation.credentials) == len(preparation.session_ids)
     assert fixture.mcp_binding is not None
-    assert len(preparation.resolutions) == len(preparation.session_ids) * len(
-        fixture.mcp_binding.connections
-    )
+    # Resolved at each session create and again at each turn's in-place vault write.
+    assert len(preparation.resolutions) == (
+        len(preparation.session_ids) + len(fixture.turns)
+    ) * len(fixture.mcp_binding.connections)
     assert preparation.secret not in caplog.text
     assert preparation.secret not in json.dumps(preparation.agent)
     calls = {

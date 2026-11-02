@@ -221,7 +221,7 @@ def evaluate_new14(receipt: ForbiddenReceipt) -> New14Checks:
     return New14Checks(
         no_silent_drop=any(
             post.operation == "send"
-            and post.message.content.strip()
+            and (post.message.content.strip() or any(post.message.embed_texts))
             and post.message.observed_s - receipt.started_s <= 20
             for post in receipt.parent_posts
         ),

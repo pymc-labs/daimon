@@ -33,6 +33,7 @@ from daimon.core.setup_conversations import build_setup_opener, setup_thread_nam
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.thread_agent_bindings import get_binding
 from daimon.core.turn.deps import build_turn_deps
+from daimon.testing.adapters.slack.notices import shown_text
 from daimon.testing.factories import make_tenant
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic, list_response
 from pydantic import PostgresDsn, SecretStr
@@ -345,13 +346,13 @@ async def test_setup_root_routes_daimon_and_retains_target_through_archive_and_d
                 for call in calls
             ]
             assert posts[1]["thread_ts"] == "123.456", "welcome belongs inside the setup thread"
-            assert posts[1]["text"] == build_setup_opener(
+            assert shown_text(posts[1]) == build_setup_opener(
                 target_display="specialist",
                 bot_mention="<@U_BOT>",
                 is_admin=is_admin,
                 admin_noun=ADMIN_NOUN,
             ), "the opener is posted as core renders it, with no Slack-only preamble"
-            assert "specialist" in posts[1]["text"] and "<@U_BOT>" in posts[1]["text"], (
+            assert "specialist" in shown_text(posts[1]) and "<@U_BOT>" in shown_text(posts[1]), (
                 "thread opener should name target and actual bot mention"
             )
             assert updates[0]["text"].startswith(setup_thread_name("specialist")), (

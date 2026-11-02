@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 from daimon.adapters.teams.budget_notice import teams_budget_notifier, with_budget_notifier
+from daimon.adapters.teams.card import notice_card
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.channel_budget_notice import BudgetNotice
 from daimon.core.turn.deps import TurnDeps
@@ -36,7 +37,7 @@ async def test_recipients_on_the_roster_get_a_1_1_message() -> None:
     direct = MagicMock()
     direct.member = AsyncMock(side_effect=member)
     direct.open_chat = AsyncMock(side_effect=lambda m: f"chat-{m}")
-    direct.post = AsyncMock()
+    direct.post_card = AsyncMock()
     notice = BudgetNotice(
         tenant_id=_TENANT,
         workspace_id="entra",
@@ -51,13 +52,13 @@ async def test_recipients_on_the_roster_get_a_1_1_message() -> None:
     delivered = await teams_budget_notifier(runtime, direct)(notice)
     assert delivered == 1, "only a DM that landed counts"
 
-    direct.post.assert_awaited_once()
-    chat, text = direct.post.await_args.args
+    direct.post_card.assert_awaited_once()
+    chat, card = direct.post_card.await_args.args
     assert chat == "chat-29:one"
-    assert text == (
+    assert card.model_dump(by_alias=True) == notice_card(
         "Channel `19:chan@thread.tacv2` has used its $1.00 monthly budget.\n\n"
         "Raise the budget to resume now, or wait until next month."
-    ), text
+    ).model_dump(by_alias=True)
 
 
 def test_a_runtime_without_1_1_chats_gets_no_notifier() -> None:

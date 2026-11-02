@@ -245,3 +245,30 @@ async def test_genai_sdk_never_logs_request_options_with_a_credential_at_debug()
         sdk_logger.setLevel(sdk_previous)
     assert not any(canary in record.getMessage() for record in records)
     assert not any("Request options" in record.getMessage() for record in records)
+
+
+@pytest.mark.parametrize(
+    ("text", "secret"),
+    [
+        ("key AKIAABCDEFGHIJKLMNOP in use", "AKIAABCDEFGHIJKLMNOP"),
+        ("temporary ASIAABCDEFGHIJKLMNOP too", "ASIAABCDEFGHIJKLMNOP"),
+        (
+            "a run QWxhZGRpbjpvcGVuIHNlc2FtZQ1234567890abcdefXYZ0QWxhZGRp here",
+            "QWxhZGRpbjpvcGVuIHNlc2FtZQ1234567890abcdefXYZ0QWxhZGRp",
+        ),
+    ],
+    ids=["aws-key-id", "aws-temporary-key-id", "opaque-mixed-case-run"],
+)
+def test_free_text_aws_key_ids_and_opaque_runs_are_redacted(text: str, secret: str) -> None:
+    from daimon.core.observability import redact_text
+
+    redacted = redact_text(text)
+    assert secret not in redacted and "[redacted]" in redacted
+
+
+def test_free_text_hex_digests_and_shas_stay() -> None:
+    """Single-case runs (hex digests, git SHAs) are identifiers diagnostics need."""
+    from daimon.core.observability import redact_text
+
+    text = "commit 6519711d7c4be309f2d7a166af4f2eb836ad8037 digest " + "ab12" * 16
+    assert redact_text(text) == text

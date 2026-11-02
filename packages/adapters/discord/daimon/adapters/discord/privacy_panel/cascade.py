@@ -8,6 +8,7 @@ from __future__ import annotations
 import uuid
 
 from daimon.adapters.discord import layout, theme
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.privacy_panel.modal import DeleteConfirmModal
 from daimon.adapters.discord.privacy_panel.state import PurgePreview
 from daimon.adapters.discord.runtime import DiscordRuntime
@@ -68,8 +69,21 @@ def build_cascade_preview_container(
         will_happen_rows.append(
             f"-# Remove you from {amount(preview.channel_admins.count, 'channel admin list')}"
         )
+    if preview.mux_slots.count > 0:
+        n = amount(preview.mux_slots.count, "saved conversation")
+        will_happen_rows.append(f"-# 💬 Delete Daimon's copy of {n}, with its messages")
     if preview.account.count > 0:
         will_happen_rows.append("-# 🪪 Remove your account")
+
+    shared_conversations = preview.retained_shared_conversations.count
+    shared_rows = (
+        [
+            f"-# Your messages in {amount(shared_conversations, 'shared conversation')}"
+            " stay for the people still using them."
+        ]
+        if shared_conversations > 0
+        else []
+    )
 
     body_rows: list[str] = [
         "⚡ **What will happen**",
@@ -79,6 +93,7 @@ def build_cascade_preview_container(
         "📋 **What is intentionally kept elsewhere**",
         "",
         "-# Usage records are retained for service integrity and cannot be erased on request.",
+        *shared_rows,
         "-# Uploaded skill files stay in Managed Agents; shared agents may keep using them.",
         "-# The GitHub-side OAuth authorization stays on your GitHub account"
         " — revoke it at github.com/settings/applications.",
@@ -143,7 +158,9 @@ class CascadePreviewView(discord.ui.LayoutView):
 
     async def _on_confirm(self, interaction: discord.Interaction) -> None:
         if not self.runtime.settings.privacy.delete_enabled:
-            await interaction.response.send_message(DELETE_PAUSED, ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed(DELETE_PAUSED), ephemeral=True
+            )
             return
         await interaction.response.send_modal(
             DeleteConfirmModal(
@@ -171,7 +188,7 @@ class CascadePreviewView(discord.ui.LayoutView):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:  # type: ignore[override]  # base uses broader Interaction[Client] type
         if interaction.user.id != self.allowed_user_id:
             await interaction.response.send_message(
-                "Only the command invoker can use these buttons.",
+                embed=build_notice_embed("Only the command invoker can use these buttons."),
                 ephemeral=True,
             )
             return False

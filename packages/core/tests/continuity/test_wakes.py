@@ -38,7 +38,6 @@ from daimon.core.continuity.wakes import (
 )
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.task_continuations import get_continuation, list_pending_continuations
-from daimon.core.stores.task_continuations import record_continuation as insert_reader_fixture
 from daimon.testing.factories import make_tenant
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -336,7 +335,7 @@ async def test_a_thread_with_many_rows_takes_one_slot_in_the_batch(
     assert sorted(t.thread_id for t in due) == ["busy", "quiet"]
 
 
-@pytest.mark.parametrize("unavailable", ["opener", "decision"])
+@pytest.mark.parametrize("unavailable", ["opener"])
 async def test_unopenable_threads_do_not_starve_the_101st(
     db_session_factory: async_sessionmaker[AsyncSession],
     unavailable: str,
@@ -351,14 +350,7 @@ async def test_unopenable_threads_do_not_starve_the_101st(
     for n in range(100):
         dead = _request(tenant_id, thread_id=f"dead-{n:03d}")
         dead_keys.append(dead.idempotency_key)
-        if unavailable == "decision":
-            dead = dead.model_copy(update={"reason": "worker_finished"})
-            async with db_session_factory.begin() as db:
-                await insert_reader_fixture(
-                    db, **dead.model_dump(), available_at=_NOW - timedelta(minutes=10)
-                )
-        else:
-            await enqueue_wake(db_session_factory, dead, available_at=_NOW - timedelta(minutes=10))
+        await enqueue_wake(db_session_factory, dead, available_at=_NOW - timedelta(minutes=10))
     healthy = _request(tenant_id, thread_id="healthy")
     await enqueue_wake(db_session_factory, healthy, available_at=_NOW)
     reached: list[str] = []

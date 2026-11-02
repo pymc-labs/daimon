@@ -20,6 +20,7 @@ from daimon.adapters.discord.checks import (
     resolve_tenant_for_interaction,
 )
 from daimon.adapters.discord.errors import generate_request_id, render_error
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_identity import CUSTOM_PICTURES_OFF
@@ -82,7 +83,9 @@ class AgentSetupCog(commands.Cog):
         interaction: BotInteraction,
     ) -> None:
         if _has_stale_picture_options(interaction):
-            await interaction.response.send_message(CUSTOM_PICTURES_OFF, ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed(CUSTOM_PICTURES_OFF), ephemeral=True
+            )
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
         rid = generate_request_id()
@@ -97,7 +100,7 @@ class AgentSetupCog(commands.Cog):
             assert tenant_row is not None, "require_registered_guild guarantees a tenant row"
             if tenant_row.provision_status != "ready":
                 await interaction.edit_original_response(
-                    content=_not_ready_message(tenant_row.provision_status),
+                    embed=build_notice_embed(_not_ready_message(tenant_row.provision_status)),
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
                 return
@@ -116,4 +119,6 @@ class AgentSetupCog(commands.Cog):
                 await send_pending_new_repo_notice(runtime, interaction, tenant_id=tenant_id)
                 await send_pending_removal_notice(runtime, interaction, tenant_id=tenant_id)
         except (DaimonError, anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
-            await interaction.followup.send(render_error(exc, request_id=rid), ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(render_error(exc, request_id=rid)), ephemeral=True
+            )

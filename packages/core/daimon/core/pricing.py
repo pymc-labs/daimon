@@ -10,17 +10,20 @@ Per `guideline:architecture` "Functional core, imperative shell".
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, localcontext
 from types import MappingProxyType
 from typing import Protocol
 
-from mux.contracts.config import ResolvedBackend
-from mux.contracts.ids import ModelRef
 from mux.contracts.usage import UsageObservation
-from mux.profiles import CONVERSATION_ONLY, INLINE_REUSE, PERSISTENT_WORKSPACE, get_profile
+from mux.profiles import (
+    CONVERSATION_ONLY,
+    INLINE_REUSE,
+    PERSISTENT_WORKSPACE,
+    meters_cache_writes_for,
+)
 
 
 class LegacyUsage(Protocol):
@@ -320,6 +323,20 @@ class ProviderPrice:
                 raise ValueError("provider rates must be finite nonnegative Decimals")
 
 
+def unreported_cache_writes(usage: UsageObservation, price: ProviderPrice) -> bool:
+    """True when the tariff bills cache writes the meter never counts.
+
+    Such a turn is priced as if it wrote nothing to the cache (ROOT D2=B): its
+    non-cached input at the uncached rate, never above what its counts prove. The
+    debit is an estimate, marked `cache_writes_unreported` on its ledger row.
+    """
+    return (
+        price.cache_write is not None
+        and usage.input_cache_write_tokens is None
+        and not meters_cache_writes_for(usage.session.provider)
+    )
+
+
 def provider_uncached_input_tokens(usage: UsageObservation, price: ProviderPrice) -> int | None:
     """Validate attribution and project the input stage independently."""
     if usage.model is None or (usage.session.provider, usage.model.provider, usage.model.id) != (
@@ -332,6 +349,8 @@ def provider_uncached_input_tokens(usage: UsageObservation, price: ProviderPrice
     if price.cache_write is None:
         if written not in (None, 0):
             raise ValueError("provider reported an inapplicable cache-write stage")
+        written = 0
+    elif unreported_cache_writes(usage, price):
         written = 0
     if usage.input_tokens is None or usage.input_cached_tokens is None or written is None:
         return None
@@ -381,18 +400,8 @@ def provider_cost_of(
     if above and (usage.input_tokens is None or price.long_context_multipliers is None):
         # An aggregate cannot establish the pricing tier of its requests.
         return None
-    if above and price.long_context_multipliers is not None:
-        # Conservative: the whole aggregate at the long-context rates.
-        incoming_factor, output_factor = price.long_context_multipliers
-        price = replace(
-            price,
-            input=price.input * incoming_factor,
-            cache_read=price.cache_read * incoming_factor,
-            cache_write=(
-                None if price.cache_write is None else price.cache_write * incoming_factor
-            ),
-            output=price.output * output_factor,
-        )
+    if above:
+        price = _long_context_price(price)
     if not infrastructure_usd.is_finite() or infrastructure_usd < 0:
         raise ValueError("actual infrastructure cost must be finite and nonnegative")
     with localcontext() as context:
@@ -407,15 +416,52 @@ def provider_cost_of(
             ):
                 return None
             incoming = Decimal(usage.input_tokens) * price.input
-        else:
-            incoming = (
-                Decimal(tokens.input_tokens) * price.input
-                + Decimal(tokens.cache_read_input_tokens) * price.cache_read
-                + Decimal(tokens.cache_creation_input_tokens) * (price.cache_write or Decimal(0))
-            )
-        return (incoming + Decimal(usage.output_tokens or 0) * price.output) / Decimal(
-            1_000_000
-        ) + infrastructure_usd
+            return (incoming + Decimal(usage.output_tokens or 0) * price.output) / Decimal(
+                1_000_000
+            ) + infrastructure_usd
+        return _token_cost(tokens, price) + infrastructure_usd
+
+
+def _long_context_price(price: ProviderPrice) -> ProviderPrice:
+    """Conservative: the whole aggregate at the long-context rates."""
+    assert price.long_context_multipliers is not None
+    incoming_factor, output_factor = price.long_context_multipliers
+    return replace(
+        price,
+        input=price.input * incoming_factor,
+        cache_read=price.cache_read * incoming_factor,
+        cache_write=None if price.cache_write is None else price.cache_write * incoming_factor,
+        output=price.output * output_factor,
+    )
+
+
+def _token_cost(tokens: UsageCounts, price: ProviderPrice) -> Decimal:
+    """Token cost of disjoint stage counts; the caller sets the Decimal precision."""
+    incoming = (
+        Decimal(tokens.input_tokens) * price.input
+        + Decimal(tokens.cache_read_input_tokens) * price.cache_read
+        + Decimal(tokens.cache_creation_input_tokens) * (price.cache_write or Decimal(0))
+    )
+    return (incoming + Decimal(tokens.output_tokens) * price.output) / Decimal(1_000_000)
+
+
+def provider_cost_of_bucket(
+    usage: UsageCounts, price: ProviderPrice, *, long_prompt: bool
+) -> Decimal | None:
+    """Token cost of stored usage rows, as `provider_cost_of` settled each of them.
+
+    The rows hold `provider_usage_tokens` counts. `long_prompt` says each row's
+    input, cache included, was over the tariff's priced limit: such a row settled
+    at the long-context rates, or never settled without them (None). Excludes
+    infrastructure, which the rows do not record.
+    """
+    if long_prompt and price.max_priced_input_tokens is not None:
+        if price.long_context_multipliers is None:
+            return None
+        price = _long_context_price(price)
+    with localcontext() as context:
+        context.prec = 80
+        return _token_cost(usage, price)
 
 
 def minimum_cost_of(
@@ -546,31 +592,6 @@ def _list_rate_text(rates: ModelRates | ProviderPrice) -> str:
     )
 
 
-def resolved_worker_prices(
-    choices: Sequence[tuple[ResolvedBackend, ModelRef]],
-    *,
-    native_prices: Mapping[tuple[str, str], ProviderPrice],
-) -> Mapping[tuple[str, str], ModelRates | ProviderPrice]:
-    """Resolve host-owned tariffs; missing prices stay missing for admission.
-
-    This context grants no model authority and proves no final provider bill.
-    Native rates come from the registered preparation owners, never tool input.
-    Financial validation remains in the shared admission producer.
-    """
-    prices: dict[tuple[str, str], ModelRates | ProviderPrice] = {}
-    for selection, model in choices:
-        profile = get_profile(selection.profile)
-        key = (model.provider, model.id)
-        rate = (
-            native_prices.get(key)
-            if profile.accounting_mode.settles_natively
-            else MODEL_PRICING.get(model.id)
-        )
-        if rate is not None:
-            prices[key] = rate
-    return MappingProxyType(prices)
-
-
 # Paid Standard direct-API text rates, verified against these official sources.
 # Agents inference follows the underlying model rates; tool/storage/container
 # charges remain separate. Luna's base row is a floor at either context tier;
@@ -633,7 +654,7 @@ _PROVIDER_PRICING: Mapping[str, tuple[ProviderPrice, ...]] = MappingProxyType(
             # price is unpublished here, so from 2026-12-01 Argon is unpriced and
             # refused at admission until a dated row is added. Cached input: 95% off.
             # FOLLOW-UP before 2026-12-01: add the post-intro row, or the daily model
-            # cap also refuses every Argon turn and worker (provider_price_unavailable).
+            # cap also refuses every Argon turn (provider_price_unavailable).
             ProviderPrice(
                 INLINE_REUSE.provider,
                 "gemini-4-argon",
@@ -666,6 +687,14 @@ def provider_price_expired_on(profile: str, provider: str, model: str) -> date |
     return max(price.valid_before for price in rows if price.valid_before) - timedelta(days=1)
 
 
+def _current_price(rows: Iterable[ProviderPrice], on: date) -> dict[tuple[str, str], ProviderPrice]:
+    """The row in force on `on` for each (provider, model); a later row wins an overlap.
+
+    The one selector for settlement and for display, so both always pick the same row.
+    """
+    return {(price.provider, price.model): price for price in rows if price.current_on(on)}
+
+
 def provider_prices(profile: str) -> Mapping[tuple[str, str], ProviderPrice]:
     """Cold immutable native tariffs, shared by admission and usage owners.
 
@@ -675,10 +704,29 @@ def provider_prices(profile: str) -> Mapping[tuple[str, str], ProviderPrice]:
     on = datetime.now(UTC).date()
     if profile == CONVERSATION_ONLY.profile_id:
         profile = PERSISTENT_WORKSPACE.profile_id
-    return MappingProxyType(
-        {
-            (price.provider, price.model): price
-            for price in _PROVIDER_PRICING.get(profile, ())
-            if price.current_on(on)
-        }
-    )
+    return MappingProxyType(_current_price(_PROVIDER_PRICING.get(profile, ()), on))
+
+
+def provider_price_on(model: str, on: date) -> ProviderPrice | None:
+    """The tariff usage of `model` on day `on` settled at, from any profile; None when none.
+
+    Stored usage rows name only the model, and provider model ids are distinct.
+    """
+    rows = (price for profile in _PROVIDER_PRICING.values() for price in profile)
+    current = _current_price((price for price in rows if price.model == model), on)
+    return next(reversed(current.values()), None)
+
+
+def _priced_input_limits() -> Mapping[str, int | None]:
+    limits: dict[str, int | None] = {}
+    for rows in _PROVIDER_PRICING.values():
+        for price in rows:
+            limit = limits.setdefault(price.model, price.max_priced_input_tokens)
+            if limit != price.max_priced_input_tokens:
+                # Stored rows are bucketed by one limit per model before a tariff is chosen.
+                raise ValueError(f"{price.model} tariffs disagree on the priced input limit")
+    return MappingProxyType(limits)
+
+
+#: Every provider-priced model and its tariff's priced input limit (None: no limit).
+PROVIDER_PRICED_INPUT_LIMITS: Mapping[str, int | None] = _priced_input_limits()

@@ -329,6 +329,10 @@ async def test_direct_mcp_uses_preview_and_reread_for_shared_service_cas(seam, b
     )
     assert result["revision"] == 5
     assert result["preview"]["cost_line"] == Preview().cost_line
+    # Each person's own conversation follows the switch on their next message (#1495).
+    assert "Each person's own conversation with analyst moves to " in result["applies"]
+    assert "on their next message; shared threads " in result["applies"]
+    assert "existing threads" not in result["applies"].lower()
 
 
 @pytest.mark.parametrize("admin,agent_key", [(False, False), (True, True)])
@@ -898,7 +902,8 @@ async def test_large_preview_lists_keep_cost_and_thread_limits_visible(seam):
         assert "truncated" in text
         assert "List price: unknown" in text
         assert "per caller only" in text
-        assert "Existing threads keep their provider" in text
+        assert "Existing threads keep" not in text
+        assert "on their next message; shared threads stay on their current provider" in text
 
 
 async def test_missing_actual_sdk_agent_is_a_typed_mcp_refusal(persisted):
@@ -1085,7 +1090,7 @@ async def test_discord_stale_selection_refuses_without_losing_details(seam):
     view.swap_to = AsyncMock()
     await view._on_backend_select(event, select=selected)
     event.followup.send.assert_awaited_once()
-    assert "isn't available" in event.followup.send.await_args.args[0]
+    assert "isn't available" in event.followup.send.await_args.kwargs["embed"].description
     view.swap_to.assert_not_awaited()
     assert seam.calls == []
 

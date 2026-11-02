@@ -205,16 +205,13 @@ async def _recorded_as_gated(
     # A bind sent while the retired chat channel switch was also gated holds
     # that one more gated tool; it still proves every card it gated.
     legacy = confirmed | ({"request_channel_backend_switch"} if selection else set[str]())
-    # Pre-fleet-config sessions prove only the tools that were actually gated.
     before_config = confirmed - {
-        "request_fleet_config",
         "request_provider_allowlist",
         "request_channel_pin_clear",
     }
     before_config_legacy = before_config | (
         {"request_channel_backend_switch"} if selection else set[str]()
     )
-    # Sessions bound after fleet config but before the channel pin clear.
     before_pin_clear = confirmed - {"request_channel_pin_clear"}
     lead_tools = await confirmation_tools(runtime.session_factory, auth.tenant_id)
     for confirmed_tools, pre_watch in dict.fromkeys(

@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 import aiohttp
 import structlog
 from daimon.adapters.slack.agent_post import post_as_agent
+from daimon.adapters.slack.blockkit import notice_attachments, notice_fields
 from daimon.adapters.slack.external_access import host_only_notice
 from daimon.adapters.slack.gating import is_external_interactive
 from daimon.core.admin_actions import DelegatedAction
@@ -287,7 +288,9 @@ class SlackConfirmationCards:
                     identity,
                     channel=channel,
                     thread_ts=thread_ts or card_ts,
-                    text=f"<@{prompt.requester_platform_user_id}> {STILL_WAITING_MESSAGE}",
+                    # The mention stays in `text` so it notifies; the words ride the card.
+                    text=f"<@{prompt.requester_platform_user_id}>",
+                    attachments=notice_attachments(STILL_WAITING_MESSAGE, neutral=True),
                 )
 
             result = await self._controls.confirm(
@@ -334,6 +337,7 @@ class SlackConfirmationCards:
                     details_clicker,
                     _plain_message_text("\n".join(posted.prompt.detail_lines))
                     or "No additional details.",
+                    plain=True,
                 )
             return
         if always_token := parse_always_custom_id(action_id):
@@ -349,7 +353,7 @@ class SlackConfirmationCards:
         if posted is None:
             await _ephemeral_from_payload(payload, clicker, self._controls.missing_message(token))
             return
-        refusal = await check_confirmation_admin(posted.prompt, clicker, posted.check_admin)
+        refusal = await check_confirmation_admin(posted.prompt, clicker, posted.check_admin, answer)
         if refusal is not None:
             await _ephemeral(posted, clicker, refusal)
             return
@@ -465,15 +469,17 @@ def _card_update(
     )
 
 
-async def _ephemeral(posted: _PostedCard, user: str, text: str) -> None:
+async def _ephemeral(posted: _PostedCard, user: str, text: str, *, plain: bool = False) -> None:
+    """A refusal as a red card; ``plain`` is for the tool's own details, shown as content."""
+    fields: dict[str, Any] = (
+        {"text": text, "mrkdwn": False, "parse": "none"} if plain else notice_fields(text)
+    )
     try:
         await posted.client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
             channel=posted.channel,
             user=user,
             thread_ts=posted.thread_ts,
-            text=text,
-            mrkdwn=False,
-            parse="none",
+            **fields,
         )
     except SlackApiError as err:
         log.warning("slack.tool_confirmation.ephemeral_failed", error=str(err))
@@ -487,7 +493,7 @@ async def _ephemeral_from_payload(payload: dict[str, Any], user: str, text: str)
         return
     try:
         await AsyncWebhookClient(response_url).send(
-            text=text, response_type="ephemeral", replace_original=False
+            attachments=notice_attachments(text), response_type="ephemeral", replace_original=False
         )
     except aiohttp.ClientError as err:
         log.warning("slack.tool_confirmation.ephemeral_failed", error=str(err), user=user)

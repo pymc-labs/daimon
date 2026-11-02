@@ -94,6 +94,7 @@ _BALANCE_BLOCKED_TEXT = (
     "Your team has no Daimon credit yet.\n\nAn admin can add some with `/billing`."
 )
 _CAP_BLOCKED_TEXT = "You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
+_ALLOWANCE_BLOCKED_TEXT = "You've used your Daimon credit.\n\nAsk an admin to add more."
 
 #: The message id the faked REST POST hands back for a posted card. The row
 #: records it, and every later edit and validity check is matched against it.
@@ -447,14 +448,22 @@ class DiscordDriver:
         for call in thread.send.call_args_list:
             if call.args and isinstance(call.args[0], str):
                 posted.append(call.args[0])
+            if embed := call.kwargs.get("embed"):
+                posted.append(embed.description)
         for call in message_ref.edit.call_args_list:
             content = call.kwargs.get("content")
             if isinstance(content, str):
                 posted.append(content)
+            if embed := call.kwargs.get("embed"):
+                posted.append(embed.description)
         return posted
 
-    def expected_blocked_text(self, kind: Literal["balance", "cap"]) -> str:
-        return _BALANCE_BLOCKED_TEXT if kind == "balance" else _CAP_BLOCKED_TEXT
+    def expected_blocked_text(self, kind: Literal["balance", "cap", "allowance"]) -> str:
+        return {
+            "balance": _BALANCE_BLOCKED_TEXT,
+            "cap": _CAP_BLOCKED_TEXT,
+            "allowance": _ALLOWANCE_BLOCKED_TEXT,
+        }[kind]
 
     def _agent_tool_context(
         self,
@@ -794,7 +803,7 @@ class DiscordDriver:
             interaction, MagicMock(spec=discord.ui.Item), match
         )
         if not await button.interaction_check(interaction):
-            return str(interaction.response.send_message.call_args.args[0])
+            return str(interaction.response.send_message.call_args.kwargs["embed"].description)
         await button.callback(interaction)
         return None
 

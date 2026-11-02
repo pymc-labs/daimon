@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import io
+import json
 import re
 import time
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
@@ -54,6 +55,15 @@ pytestmark = pytest.mark.usefixtures("provisioned_tenant")
 NOW = datetime(2026, 9, 1, tzinfo=UTC)
 UPLOAD_URL = "https://contoso-my.sharepoint.com/personal/u/_api/v2.0/uploadSession?guid=1"
 CONTENT_URL = "https://contoso-my.sharepoint.com/personal/u/Documents/data.csv"
+
+
+def _notice_text(activity: Any) -> str:
+    """The words on a notice card; the card is Daimon's red error container."""
+    body = json.loads(activity.model_dump_json(by_alias=True))["attachments"][0]["content"]["body"]
+    assert activity.text is None, "no plain text beside the card"
+    (container,) = body
+    assert container["type"] == "Container" and container["style"] == "attention"
+    return container["items"][0]["text"]
 
 
 @dataclasses.dataclass
@@ -297,7 +307,7 @@ async def test_a_staged_file_offer_uploads_for_its_own_person_only(
 
     if user != AAD_OBJECT_ID:
         assert harness.uploads == []
-        assert "expired" in (harness.sender.activities[-1].text or "")
+        assert "expired" in _notice_text(harness.sender.activities[-1])
         return
     [upload] = harness.uploads
     assert (str(upload.url), upload.content) == (UPLOAD_URL, b"png")
@@ -343,7 +353,7 @@ async def test_unknown_token_or_another_person_cannot_claim_an_offer(
     await harness.delivery.handle_consent(_consent("accept", token or real, user=user))
     await harness.settle()
     assert harness.uploads == [] and harness.deletes == [], "nothing happens for a stranger's click"
-    assert "expired" in (harness.sender.activities[-1].text or "")
+    assert "expired" in _notice_text(harness.sender.activities[-1])
 
     await harness.delivery.handle_consent(_consent("accept", real))
     await harness.settle()
@@ -365,7 +375,8 @@ async def test_upload_url_off_sharepoint_is_refused_and_the_file_stays_listed(
 
     assert harness.uploads == [] and harness.deletes == []
     assert (
-        harness.sender.activities[-1].text == "I couldn't upload `data.csv`. Ask me again to retry."
+        _notice_text(harness.sender.activities[-1])
+        == "I couldn't upload `data.csv`. Ask me again to retry."
     )
 
 
@@ -676,7 +687,7 @@ async def test_neutral_consent_replay_wrong_service_and_untrusted_upload_url(
     )
     await harness.settle()
     assert not harness.uploads and not harness.deletes
-    assert "couldn't upload" in (harness.sender.activities[-1].text or "")
+    assert "couldn't upload" in _notice_text(harness.sender.activities[-1])
     await harness.delivery.handle_consent(_consent("accept", token))
     await harness.settle()
     assert not harness.uploads

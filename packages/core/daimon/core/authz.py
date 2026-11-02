@@ -5,8 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
-from typing import Literal, cast
-from uuid import UUID
+from typing import Literal
 
 from daimon.core.access_policy import (
     DM_SCOPE_PREFIX,
@@ -38,7 +37,6 @@ from daimon.core.permissions import (
     session_readable_from,
 )
 from daimon.core.turn_hold import TurnHold
-from mux.contracts.ids import Scope, ThreadRef
 
 
 class Action(StrEnum):
@@ -47,7 +45,6 @@ class Action(StrEnum):
     # A platform turn's caller gates: the reply target's writers, then the
     # invoker allowlist. Runs before the agent is known.
     START_TURN = "start_turn"
-    SPAWN_WORKER = "spawn_worker"
     # Run a resolved agent here (a turn, a routine fire, a handoff binding).
     RUN_AGENT = "run_agent"
     # Save (create or update) a routine for an agent: RUN_AGENT at the
@@ -135,27 +132,12 @@ class Surface(StrEnum):
     AGENT_CHAT = "agent_chat"  # an agent-key or bearer call
     ROUTINE = "routine"  # a scheduled run posting into a channel
     HANDOFF = "handoff"  # a task handed to another agent in a thread
-    FLEET = "fleet"
     CONFIG = "config"  # a configuration write (request tool, form, OAuth, direct tool)
+    WEB = "web"  # the web app's chat: only the person sees it, but in no workspace channel
 
 
 #: Surfaces whose output reaches only the acting admin.
 _ADMIN_ONLY_SURFACES = frozenset({Surface.DM, Surface.HUB})
-
-
-@dataclass(frozen=True)
-class FleetFacts:
-    """Host-attested root execution, never a worker request's identity fields."""
-
-    scope: Scope
-    root: ThreadRef
-    origin_id: UUID
-    account_id: UUID
-    run_id: UUID
-    place: Place
-    depth: int = 0
-    enabled: bool = False
-    active: bool = False
 
 
 @dataclass(frozen=True)
@@ -288,9 +270,6 @@ class AgentReach:
 
 
 DenyReason = Literal[
-    "fleet_origin_required",
-    "worker_spawn_forbidden",
-    "worker_depth_exceeded",
     "writers_none",
     "invoker_not_allowed",
     "runs_elsewhere",
@@ -357,9 +336,14 @@ class Request:
     # PUBLISH: the requester approved this very call on a card, as the caller
     # verified (`daimon.core.publish_gate`).
     approved: bool = False
-    fleet: FleetFacts | None = None
     # The channel the calling turn is held to; None for an unheld call.
     hold: TurnHold | None = None
+    # The agent is the one answering the caller's own chat turn (host-verified from the
+    # turn's credential, never a model-supplied id).
+    answering: bool = False
+    # MINT_CODING_TOKEN: the subject owns the target agent, read live by the caller
+    # (`daimon.core.agent_ownership.owns_agent`), never from a panel snapshot.
+    owned_by_caller: bool = False
 
 
 #: What a client requester may never do, whatever its place or surface.
@@ -382,19 +366,14 @@ _CLIENT_REFUSED_ACTIONS = frozenset(
         Action.SET_AGENT_TOOL_RULE,
         Action.SET_CHANNEL_AGENT_TOOL_RULE,
         Action.ARCHIVE_CHANNEL_COPY,
-        Action.SPAWN_WORKER,
     }
 )
 
 #: Surfaces a client may never start a turn or run an agent on: everything but a channel.
-_CLIENT_REFUSED_SURFACES = frozenset(
-    {Surface.DM, Surface.HUB, Surface.AGENT_CHAT, Surface.ROUTINE, Surface.FLEET}
-)
+_CLIENT_REFUSED_SURFACES = frozenset({Surface.DM, Surface.HUB, Surface.AGENT_CHAT, Surface.ROUTINE})
 
 #: What a held turn may not do at all, client or not.
-_HOLD_REFUSED_ACTIONS = frozenset(
-    {Action.DIRECT_MESSAGE, Action.SAVE_ROUTINE, Action.CREATE_AGENT, Action.SPAWN_WORKER}
-)
+_HOLD_REFUSED_ACTIONS = frozenset({Action.DIRECT_MESSAGE, Action.SAVE_ROUTINE, Action.CREATE_AGENT})
 
 
 #: What a client may do only from a named origin channel, so it needs a hold.
@@ -511,6 +490,19 @@ def _decide_hand_off(policy: TenantAccessPolicy, req: Request) -> Decision:
         return ALLOW
     if subject.is_admin and not subject.via_agent_key:
         return ALLOW
+    # A person may hand this thread to an agent they own (a copy they made), routed
+    # anywhere or nowhere: the binding is this thread only. `reach.owned` is read from
+    # the owner rows by the caller, never claimed.
+    reach = req.reach
+    if (
+        reach is not None
+        and reach.owned
+        and subject.platform_user_id is not None
+        and not subject.via_agent_key
+        and not subject.client
+        and req.hold is None
+    ):
+        return ALLOW
     return _deny("admin_required")
 
 
@@ -545,6 +537,12 @@ def _decide_shared_agent_change(req: Request) -> Decision:
     return _deny("admin_required")
 
 
+def _channel_bound(agent: AgentRef) -> bool:
+    """An agent ruled to channels without the web chat. Naming the web chat in every
+    rule lets it answer there, even as a channel's own agent."""
+    return agent.permissions.keeps_off_web
+
+
 def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
     if req.subject.client or req.hold is not None:
         # No administrator authority applies to a client or a held request.
@@ -554,37 +552,6 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
             return refused
     subject, agent, place = req.subject, req.agent, req.place
     admin_only_surface = req.surface in _ADMIN_ONLY_SURFACES
-
-    if req.action is Action.SPAWN_WORKER:
-        fleet = req.fleet
-        if req.surface is not Surface.FLEET or fleet is None:
-            return _deny("fleet_origin_required")
-        if fleet.enabled is not True or fleet.active is not True or place.setup_thread:
-            return _deny("worker_spawn_forbidden")
-        if type(fleet.depth) is not int or fleet.depth != 0:
-            return _deny("worker_depth_exceeded")
-        if (
-            fleet.scope.is_platform
-            or fleet.scope.is_legacy_host_authorized
-            or not fleet.scope.principal_id.strip()
-            or not fleet.scope.authorization_id.strip()
-            or not isinstance(cast(object, fleet.origin_id), UUID)
-            or not isinstance(cast(object, fleet.run_id), UUID)
-            or str(fleet.account_id) != fleet.scope.account_id
-            or fleet.scope.tenant_id != fleet.root.channel.tenant_id
-            # authorize refreshes the policy-derived permissions. Every other
-            # admission fact must still be the authentic root's complete Place.
-            or replace(place, permissions=fleet.place.permissions) != fleet.place
-            or place.channel_id != fleet.root.thread_id
-            or place.parent_channel_id != fleet.root.channel.channel_id
-            or not agent.present
-            or not agent.resolved
-        ):
-            return _deny("fleet_origin_required")
-        started = _decide(policy, replace(req, action=Action.START_TURN))
-        if not started:
-            return started
-        return _decide(policy, replace(req, action=Action.RUN_AGENT))
 
     if req.action is Action.START_TURN:
         if _writers_none(place):
@@ -626,6 +593,13 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
             )
         ):
             return _deny("invoker_not_allowed")
+        # A web chat is in no channel, so an agent kept to channels never answers there,
+        # whoever asks, unless every rule on it names the web chat.
+        if req.surface is Surface.WEB and agent.resolved:
+            if _channel_bound(agent):
+                return _deny("runs_elsewhere")
+            if agent.permissions.runs_in:
+                return ALLOW
         if (
             subject.is_admin
             and admin_only_surface
@@ -712,7 +686,10 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         return ALLOW if subject.is_admin else _deny("admin_required")
 
     if req.action is Action.MINT_CODING_TOKEN:
-        return ALLOW if subject.is_admin and not subject.via_agent_key else _deny("admin_required")
+        # A server admin, or the owner of this agent (the key then acts as the owner,
+        # never as an admin). Never an agent key, never a client (refused earlier).
+        may_mint = subject.is_admin or req.owned_by_caller
+        return ALLOW if may_mint and not subject.via_agent_key else _deny("admin_required")
 
     if req.action is Action.POST:
         # A caller with no agent (the CLI, an operator token) is input: only
@@ -776,7 +753,11 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         return _decide_hand_off(policy, req)
 
     if req.action is Action.FORK:
-        if not subject.is_admin or subject.via_agent_key:
+        # A person may copy the agent answering their own turn (any member may fork it,
+        # within its default caps); any other agent is an admin's to copy. Never an
+        # agent key, and never from a held turn.
+        own = req.answering and subject.platform_user_id is not None and req.hold is None
+        if subject.via_agent_key or not (subject.is_admin or own):
             return _deny("admin_required")
         if not agent.permissions.may_be_copied:
             return _deny("agent_has_rule")
@@ -967,8 +948,9 @@ def authorize(
     answers_here: bool = False,
     recorded_seal_ids: frozenset[str] = frozenset(),
     approved: bool = False,
-    fleet: FleetFacts | None = None,
     hold: TurnHold | None = None,
+    answering: bool = False,
+    owned_by_caller: bool = False,
 ) -> Decision:
     """Decide one action against the tenant access policy. Pure; see the module docstring."""
     agent = agent if agent is not None else AgentRef.none()
@@ -992,8 +974,9 @@ def authorize(
             answers_here=answers_here,
             recorded_seal_ids=recorded_seal_ids,
             approved=approved,
-            fleet=fleet,
             hold=hold,
+            answering=answering,
+            owned_by_caller=owned_by_caller,
         ),
     )
 
@@ -1001,7 +984,6 @@ def authorize(
 __all__ = [
     "ALLOW",
     "Action",
-    "FleetFacts",
     "AgentReach",
     "AgentRef",
     "Decision",

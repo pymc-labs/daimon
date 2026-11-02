@@ -92,6 +92,7 @@ _LIFECYCLE_USER = str(uuid.UUID(int=0xB0B))
 
 _BALANCE_BLOCKED_TEXT = "Your team has no Daimon credit yet.\n\nAn admin can add some with `billing` in a 1:1 chat with me."
 _CAP_BLOCKED_TEXT = "You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
+_ALLOWANCE_BLOCKED_TEXT = "You've used your Daimon credit.\n\nAsk an admin to add more."
 
 #: The label each `PanelAction` wears on the Teams card, once emoji are stripped.
 #: The Details lists have no Show more on Teams (test_teams_deliberate_gaps.py).
@@ -183,6 +184,18 @@ async def _exchange(
             await service.turns.drain(30.0)
     assert response.status_code == 200, f"{response.status_code}: {response.text}"
     return (response.json() if response.content else {}), fake
+
+
+def _shown_text(body: dict[str, Any]) -> str:
+    """The text a person reads: the activity's text, else its error card's text."""
+    if isinstance(body.get("text"), str):
+        return body["text"]
+    for attachment in body.get("attachments") or []:
+        card = attachment.get("content") or {}
+        for container in card.get("body", []):
+            if container.get("style") == "attention":
+                return str(container["items"][0].get("text", ""))
+    return ""
 
 
 def _activity(
@@ -371,12 +384,14 @@ class TeamsDriver:
         )
         with patch("daimon.core.turn.prepare.create_session", return_value=session):
             _response, fake = await _exchange(runtime, activity)
-        return [
-            body["text"] for _m, body, _id in fake.activities if isinstance(body.get("text"), str)
-        ]
+        return [text for _m, body, _id in fake.activities if (text := _shown_text(body))]
 
-    def expected_blocked_text(self, kind: Literal["balance", "cap"]) -> str:
-        return _BALANCE_BLOCKED_TEXT if kind == "balance" else _CAP_BLOCKED_TEXT
+    def expected_blocked_text(self, kind: Literal["balance", "cap", "allowance"]) -> str:
+        return {
+            "balance": _BALANCE_BLOCKED_TEXT,
+            "cap": _CAP_BLOCKED_TEXT,
+            "allowance": _ALLOWANCE_BLOCKED_TEXT,
+        }[kind]
 
     def _mcp_runtime(
         self,

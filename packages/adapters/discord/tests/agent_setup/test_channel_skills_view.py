@@ -148,7 +148,7 @@ async def test_an_unknown_skill_is_refused_with_its_reason(
     modal.skill._value = "missing"  # pyright: ignore[reportPrivateUsage]
     admin = _interaction(admin=True)
     await modal.on_submit(admin)
-    (message,), _ = admin.response.send_message.await_args
+    message = admin.response.send_message.await_args.kwargs["embed"].description
     assert "No skill here" in message
     async with db_session_factory() as session:
         assert await list_channel_skills(session, tenant_id=tenant_id, platform="discord") == []

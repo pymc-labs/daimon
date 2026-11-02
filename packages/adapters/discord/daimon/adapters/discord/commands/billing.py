@@ -17,6 +17,7 @@ from daimon.adapters.discord.billing_panel.read import (
 )
 from daimon.adapters.discord.checks import require_registered_guild
 from daimon.adapters.discord.errors import generate_request_id, render_error
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -102,6 +103,6 @@ class BillingCog(commands.Cog):
         except (DaimonError, anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
             log.warning("billing.handler.failed", rid=rid, error=str(exc))
             await interaction.followup.send(
-                render_error(exc, request_id=rid),
+                embed=build_notice_embed(render_error(exc, request_id=rid)),
                 ephemeral=True,
             )

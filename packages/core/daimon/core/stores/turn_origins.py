@@ -10,7 +10,7 @@ from daimon.core._models import TurnOrigin
 from daimon.core.stores.domain import Role, TurnOriginRow
 from daimon.core.stores.mux_state import require_lease
 from mux.state.lease import Lease
-from sqlalchemy import CursorResult, delete, func, select, text, update
+from sqlalchemy import CursorResult, delete, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -34,6 +34,8 @@ async def create_origin(
     is_setup: bool = False,
     attended: bool = True,
     chat_session_id: str | None = None,
+    platform_channel_id: str | None = None,
+    platform_message_id: str | None = None,
 ) -> TurnOriginRow:
     await session.execute(delete(TurnOrigin).where(TurnOrigin.expires_at <= now))
     origin = TurnOrigin(
@@ -55,6 +57,8 @@ async def create_origin(
         configuration_target_name=configuration_target_name,
         role=role.value,
         expires_at=expires_at,
+        platform_channel_id=platform_channel_id,
+        platform_message_id=platform_message_id,
     )
     session.add(origin)
     await session.flush()
@@ -108,6 +112,28 @@ async def get_session_origin(
         )
     )
     return TurnOriginRow.model_validate(rows[0]) if len(rows) == 1 else None
+
+
+async def thread_requester_accounts(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    thread_id: str,
+    now: datetime,
+) -> set[uuid.UUID]:
+    """Everyone who took a turn in one thread recently (an origin not yet expired)."""
+    rows = await session.scalars(
+        select(TurnOrigin.account_id)
+        .where(
+            TurnOrigin.tenant_id == tenant_id,
+            TurnOrigin.platform == platform,
+            TurnOrigin.thread_id == thread_id,
+            TurnOrigin.expires_at > now,
+        )
+        .distinct()
+    )
+    return set(rows)
 
 
 async def list_active_origins(
@@ -195,17 +221,7 @@ async def delete_origin(
     session: AsyncSession,
     *,
     origin_id: uuid.UUID,
-    retain_until: datetime | None = None,
 ) -> None:
-    if retain_until is not None:
-        await session.execute(
-            update(TurnOrigin)
-            .where(TurnOrigin.id == origin_id)
-            .values(
-                expires_at=func.least(TurnOrigin.expires_at, retain_until), chat_session_id=None
-            )
-        )
-        return
     await session.execute(delete(TurnOrigin).where(TurnOrigin.id == origin_id))
 
 

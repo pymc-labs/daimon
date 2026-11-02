@@ -12,11 +12,14 @@ import anthropic
 import httpx
 import pytest
 from daimon.adapters.slack import direct_messages as dm_module
+from daimon.adapters.slack.blockkit import ERROR_COLOR, NEUTRAL_COLOR
 from daimon.core.errors import TurnError
 from daimon.core.stores.domain import Role
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.testing.factories import make_account, make_dm_conversation, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from .conftest import shown_text
 
 _TEAM = "T_DM_BUDGET"
 _CHANNEL = "C_SOURCE"
@@ -44,7 +47,10 @@ async def test_dm_policy_replies_use_workspace_words(
         runtime,
         {"team_id": _TEAM, "user_id": "U1", "channel_id": _CHANNEL, "text": action},
     )
-    assert client.chat_postEphemeral.await_args.kwargs["text"] == expected
+    sent = client.chat_postEphemeral.await_args.kwargs
+    assert shown_text(sent) == expected
+    colour = sent["attachments"][0]["color"]
+    assert colour == (ERROR_COLOR if role is Role.USER else NEUTRAL_COLOR)
     assert save.await_count == (1 if role is Role.ADMIN else 0)
 
 
@@ -169,7 +175,7 @@ async def test_dm_admits_and_records_the_channel_it_ran_in(
     assert (call["is_dm"], call["dm_source_channel_id"]) == (True, _CHANNEL), (
         "admitted against the channel /dm-me ran in"
     )
-    reply = client.chat_postEphemeral.await_args.kwargs["text"]
+    reply = shown_text(client.chat_postEphemeral.await_args.kwargs)
     if over_budget:
         assert reply.startswith("This channel's budget is used up."), reply
         client.conversations_open.assert_not_awaited()
@@ -214,7 +220,7 @@ async def test_a_later_dm_turn_over_its_source_budget_tells_the_member(
         runtime, {**event, "ts": "1.1", "text": "hi"}, team_id=_TEAM
     )
 
-    reply = client.chat_postMessage.await_args.kwargs["text"]
+    reply = shown_text(client.chat_postMessage.await_args.kwargs)
     assert reply.startswith("This channel's budget is used up."), reply
     assert "thread_ts" not in client.chat_postMessage.await_args.kwargs
 
@@ -316,7 +322,7 @@ async def test_a_failed_dm_turn_never_shows_the_provider_text(
         team_id=_TEAM,
     )
 
-    text = client.chat_postMessage.await_args.kwargs["text"]
+    text = shown_text(client.chat_postMessage.await_args.kwargs)
     assert text.startswith(
         "Daimon couldn't reach its AI service.\n\nTry again in a minute.\n\n_Ref "
     )

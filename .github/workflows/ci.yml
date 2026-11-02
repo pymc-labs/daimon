@@ -25,14 +25,36 @@ concurrency:
 # wait, and a split run names the failing area in the job list.
 
 jobs:
+  # Which jobs and suites this change needs (scripts/ci/plan.py). A pull request
+  # selects by the files it changes; main and manual runs select everything.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      jobs: ${{ steps.plan.outputs.jobs }}
+      suites: ${{ steps.plan.outputs.suites }}
+      pytest-db: ${{ steps.plan.outputs.pytest-db }}
+      pytest-mux-leg: ${{ steps.plan.outputs.pytest-mux-leg }}
+      pytest-light: ${{ steps.plan.outputs.pytest-light }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 2
+      - id: plan
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || '' }}
+        run: python3 scripts/ci/plan.py tests --base "$BASE"
+
   lint:
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.jobs), 'lint')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
       # Silences pyright-python's "newer version available" nag in the log.
       PYRIGHT_PYTHON_IGNORE_WARNINGS: "1"
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/setup-daimon
 
       - name: ruff
@@ -73,7 +95,7 @@ jobs:
       - name: mcp tool catalogue check
         run: uv run python scripts/generate_mcp_tool_catalogue.py --check
 
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: ~/.cache/daimon-web
           key: tailwindcss-v4.3.3-linux-x64-dc61b3ac6b8c9ca8
@@ -87,25 +109,39 @@ jobs:
   # (scripts/generate_ci_durations.py refreshes it); add legs and raise
   # `shards` together to rebalance.
   # The shard-check job proves the legs of a suite cover it exactly once.
+  web:
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.jobs), 'web')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: web
+      - run: npm run lint
+        working-directory: web
+      - run: npm run typecheck
+        working-directory: web
+      - run: npm test
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+
   pytest-db:
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.jobs), 'pytest-db')
     name: pytest-${{ matrix.suite }}${{ matrix.shards > 1 && format(' ({0}/{1})', matrix.shard, matrix.shards) || '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - { suite: core, shard: 0, shards: 6, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/adapters/sidecar packages/testing tests/integration tests/platform_contract tests/test_*.py tests/performance" }
-          - { suite: core, shard: 1, shards: 6, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/adapters/sidecar packages/testing tests/integration tests/platform_contract tests/test_*.py tests/performance" }
-          - { suite: core, shard: 2, shards: 6, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/adapters/sidecar packages/testing tests/integration tests/platform_contract tests/test_*.py tests/performance" }
-          - { suite: core, shard: 3, shards: 6, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/adapters/sidecar packages/testing tests/integration tests/platform_contract tests/test_*.py tests/performance" }
-          - { suite: core, shard: 4, shards: 6, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/adapters/sidecar packages/testing tests/integration tests/platform_contract tests/test_*.py tests/performance" }
-          - { suite: core, shard: 5, shards: 6, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/adapters/sidecar packages/testing tests/integration tests/platform_contract tests/test_*.py tests/performance" }
-          - { suite: mcp, shard: 0, shards: 2, fetch-depth: 1, paths: packages/adapters/mcp }
-          - { suite: mcp, shard: 1, shards: 2, fetch-depth: 1, paths: packages/adapters/mcp }
-          - { suite: slack, shard: 0, shards: 1, fetch-depth: 1, paths: packages/adapters/slack }
-          - { suite: teams, shard: 0, shards: 1, fetch-depth: 1, paths: packages/adapters/teams }
-          - { suite: parity, shard: 0, shards: 1, fetch-depth: 1, paths: tests/parity }
+      # Legs: MATRICES in scripts/ci/plan.py, trimmed to the selected suites.
+      matrix: ${{ fromJSON(needs.changes.outputs.pytest-db) }}
     services:
       postgres:
         image: mirror.gcr.io/library/postgres:18-alpine
@@ -126,7 +162,7 @@ jobs:
       # overrun latch spend most of their time waiting on the runner's disk.
       TMPDIR: /dev/shm
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           fetch-depth: ${{ matrix.fetch-depth }}  # Some core tests read other commits (origin/integration/neutral-core, pinned base commits), so core fetches full history.
       - uses: ./.github/actions/setup-daimon
@@ -140,7 +176,7 @@ jobs:
           --ci-shard-index=${{ matrix.shard }}
           --ci-shard-count=${{ matrix.shards }} --durations=20
           --junitxml=${{ matrix.suite }}-shard-${{ matrix.shard }}.xml
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         if: always()
         with:
           name: ${{ matrix.suite }}-shard-${{ matrix.shard }}-junit
@@ -164,39 +200,15 @@ jobs:
   # turns (headless, routines, smoke, CLI run, workspace transfer, session
   # preparation) and the Teams adapter on mux.
   pytest-mux-leg:
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.jobs), 'pytest-mux-leg')
     name: pytest-${{ matrix.suite }}${{ matrix.shards > 1 && format(' ({0}/{1})', matrix.shard, matrix.shards) || '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - { suite: turn-mux, shard: 0, shards: 1, paths: packages/core/tests/turn }
-          - { suite: parity-mux, shard: 0, shards: 1, paths: tests/parity }
-          - { suite: slack-mux, shard: 0, shards: 1, paths: packages/adapters/slack }
-          - { suite: discord-mux, shard: 0, shards: 2, paths: packages/adapters/discord }
-          - { suite: discord-mux, shard: 1, shards: 2, paths: packages/adapters/discord }
-          - { suite: teams-mux, shard: 0, shards: 1, paths: packages/adapters/teams }
-          - { suite: sidecar-mux, shard: 0, shards: 1, paths: packages/adapters/sidecar }
-          - { suite: scheduler-mux, shard: 0, shards: 1, paths: packages/adapters/scheduler }
-          - { suite: cli-run-mux, shard: 0, shards: 1, paths: packages/adapters/cli/tests/run }
-          - suite: nonchat-mux
-            shard: 0
-            shards: 1
-            paths: >-
-              packages/core/tests/test_headless_runner.py
-              packages/core/tests/test_headless_ports.py
-              packages/core/tests/test_headless_tool_safety.py
-              packages/core/tests/test_routine_delivery_headless.py
-              packages/core/tests/test_scheduler_dispatch.py
-              packages/core/tests/test_smoke.py
-              packages/core/tests/test_workspace_transfer.py
-              packages/core/tests/test_transfer_checkpoint_paths.py
-              packages/core/tests/test_session_preparation.py
-              packages/core/tests/test_channel_backend.py
-              packages/core/tests/test_shared_threads.py
-              tests/integration/test_routines_end_to_end.py
-              tests/integration/test_direct_messages.py
+      # Legs: MATRICES in scripts/ci/plan.py, trimmed to the selected suites.
+      matrix: ${{ fromJSON(needs.changes.outputs.pytest-mux-leg) }}
     services:
       postgres:
         image: mirror.gcr.io/library/postgres:18-alpine
@@ -217,7 +229,7 @@ jobs:
       DAIMON_TURN__CHANNEL_BACKENDS: "true"
       TMPDIR: /dev/shm
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/setup-daimon
         with:
           database: "true"
@@ -230,7 +242,7 @@ jobs:
           --ci-shard-index=${{ matrix.shard }}
           --ci-shard-count=${{ matrix.shards }} --durations=20
           --junitxml=${{ matrix.suite }}-shard-${{ matrix.shard }}.xml
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         if: always()
         with:
           name: ${{ matrix.suite }}-shard-${{ matrix.shard }}-junit
@@ -238,9 +250,11 @@ jobs:
           if-no-files-found: ignore
 
   # Exercise the staging switches together, and the default/off path, through
-  # real turn, native agent, and fleet entry points. This blocks staging even
+  # real turn and native agent entry points. This blocks staging even
   # while the broader mux ratchet above still has known failures.
   pytest-staging-config:
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.jobs), 'pytest-staging-config')
     name: pytest-staging-config (${{ matrix.configuration }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -248,8 +262,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { configuration: enabled, path: mux, channel_backends: "true", agent_backends: "true", fleet_enabled: "true" }
-          - { configuration: legacy-off, path: legacy, channel_backends: "false", agent_backends: "false", fleet_enabled: "false" }
+          - { configuration: enabled, path: mux, channel_backends: "true", agent_backends: "true" }
+          - { configuration: mux-only, path: mux, channel_backends: "false", agent_backends: "false" }
+          - { configuration: legacy-off, path: legacy, channel_backends: "false", agent_backends: "false" }
     services:
       postgres:
         image: mirror.gcr.io/library/postgres:18-alpine
@@ -270,11 +285,10 @@ jobs:
       DAIMON_TURN__PATH: ${{ matrix.path }}
       DAIMON_TURN__CHANNEL_BACKENDS: ${{ matrix.channel_backends }}
       DAIMON_TURN__AGENT_BACKENDS: ${{ matrix.agent_backends }}
-      DAIMON_FLEET__ENABLED: ${{ matrix.fleet_enabled }}
       DAIMON_CI_CONFIGURATION: ${{ matrix.configuration }}
       TMPDIR: /dev/shm
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/setup-daimon
         with:
           database: "true"
@@ -285,7 +299,7 @@ jobs:
           packages/core/tests/turn/test_staging_configuration_paths.py
           -n 2 --timeout=300 --durations=20
           --junitxml=staging-config-${{ matrix.configuration }}.xml
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         if: always()
         with:
           name: staging-config-${{ matrix.configuration }}-junit
@@ -302,6 +316,7 @@ jobs:
   # job; none found fails.
   journeys-offline:
     name: journeys-offline (${{ matrix.leg }})
+    needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -328,11 +343,14 @@ jobs:
       DAIMON_DATABASE__TEST_URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon_test
       TMPDIR: /dev/shm
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        if: contains(fromJSON(needs.changes.outputs.suites), 'journeys')
       - uses: ./.github/actions/setup-daimon
+        if: contains(fromJSON(needs.changes.outputs.suites), 'journeys')
         with:
           database: "true"
       - name: pytest (journeys, ${{ matrix.leg }} leg)
+        if: contains(fromJSON(needs.changes.outputs.suites), 'journeys')
         env:
           # The mux leg is the production default; the stop leg leaves both unset
           # (daimon.testing.stop_leg_default), as the other pytest jobs do.
@@ -351,8 +369,8 @@ jobs:
           printf 'journey file: %s\n' "${journeys[@]}"
           uv run pytest "${journeys[@]}" -n 2 --timeout=300 -rfE --tb=short --durations=20 \
             --junitxml=journeys-${{ matrix.leg }}.xml
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: always()
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        if: always() && contains(fromJSON(needs.changes.outputs.suites), 'journeys')
         with:
           name: journeys-${{ matrix.leg }}-junit
           path: journeys-${{ matrix.leg }}.xml
@@ -362,6 +380,8 @@ jobs:
   # shard-check), but with two xdist workers per leg and the hang diagnostics
   # on every leg.
   pytest-discord:
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.jobs), 'pytest-discord')
     name: pytest-${{ matrix.suite }} (${{ matrix.shard }}/${{ matrix.shards }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -391,7 +411,7 @@ jobs:
       # overrun latch spend most of their time waiting on the runner's disk.
       TMPDIR: /dev/shm
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/setup-daimon
         with:
           database: "true"
@@ -406,7 +426,7 @@ jobs:
           diagnostic_pid=$!
           trap 'kill "$diagnostic_pid" 2>/dev/null || true' EXIT
           uv run pytest ${{ matrix.paths }} -n 2 --timeout=300 -rfE --tb=short -o faulthandler_timeout=300 -p daimon.testing.ci_shard --ci-shard-by=file --ci-shard-suite=${{ matrix.suite }} --ci-shard-index=${{ matrix.shard }} --ci-shard-count=${{ matrix.shards }} --durations=20 --junitxml=${{ matrix.suite }}-shard-${{ matrix.shard }}.xml
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         if: always()
         with:
           name: ${{ matrix.suite }}-shard-${{ matrix.shard }}-junit
@@ -438,19 +458,17 @@ jobs:
 
   # Suites that need no database.
   pytest-light:
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.jobs), 'pytest-light')
     name: pytest-${{ matrix.suite }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - { suite: report-host, paths: apps/report-host }
-          - { suite: harness, paths: apps/harness }
-          - { suite: mux, paths: packages/mux }
-          - { suite: harness-conformance, paths: tests/harness_conformance }
+      # Legs: MATRICES in scripts/ci/plan.py, trimmed to the selected suites.
+      matrix: ${{ fromJSON(needs.changes.outputs.pytest-light) }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/setup-daimon
       - name: Install pinned Codex controller (harness)
         if: matrix.suite == 'harness' || matrix.suite == 'harness-conformance'
@@ -468,7 +486,7 @@ jobs:
         run: >-
           uv run pytest ${{ matrix.paths }} -n 4 --dist worksteal --timeout=300
           --durations=20 --junitxml=${{ matrix.suite }}.xml
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         if: always()
         with:
           name: ${{ matrix.suite }}-junit
@@ -479,10 +497,12 @@ jobs:
   # extras and the test tools, so a stray `daimon` import in mux or its tests fails
   # here. Versions come from uv.lock; nothing is resolved fresh.
   mux-standalone:
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.jobs), 'mux-standalone')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: false
@@ -509,7 +529,7 @@ jobs:
           "$RUNNER_TEMP/mux-venv/bin/python" -m pytest
           -c packages/mux/pytest-standalone.ini --rootdir . packages/mux/tests
           -n 4 --dist worksteal --timeout=300 --durations=20 --junitxml=mux-standalone.xml
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         if: always()
         with:
           name: mux-standalone-junit
@@ -517,10 +537,12 @@ jobs:
           if-no-files-found: ignore
 
   pytest-notebook-host:
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.jobs), 'pytest-notebook-host')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/setup-daimon
       - name: pytest (notebook-host)
         run: >-
@@ -536,7 +558,7 @@ jobs:
           uv run --with playwright==1.63.0 pytest
           apps/notebook-host/tests/test_notebook_origin_browser.py -m slow
           --durations=20 --junitxml=notebook-host-browser.xml
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         if: always()
         with:
           name: notebook-host-junit
@@ -548,10 +570,12 @@ jobs:
   # exactly one leg. Reads the matrices of every job that loads the shard
   # plugin (pytest-db, pytest-discord, pytest-mux-leg), so a new leg is checked as added.
   shard-check:
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.jobs), 'shard-check')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/setup-daimon
       - name: shards cover each suite exactly once
         run: uv run python scripts/check_ci_shards.py
@@ -560,43 +584,49 @@ jobs:
   # three Dockerfiles without publishing images or staging credentials. Hosted
   # main runs build the same Dockerfiles in docker-publish-candidate instead.
   docker-build:
-    if: github.event_name != 'push' || github.ref != 'refs/heads/main' || vars.GCP_WIF_PROVIDER == ''
+    needs: changes
+    if: (github.event_name != 'push' || github.ref != 'refs/heads/main' || vars.GCP_WIF_PROVIDER == '') && contains(fromJSON(needs.changes.outputs.jobs), 'docker-build')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           driver-opts: image=docker.io/moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
       - name: daimon
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        if: contains(fromJSON(needs.changes.outputs.suites), 'image-daimon')
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: Dockerfile
           cache-from: type=gha,scope=daimon
       - name: notebook-host
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        if: contains(fromJSON(needs.changes.outputs.suites), 'image-notebook-host')
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: apps/notebook-host/Dockerfile
           cache-from: type=gha,scope=notebook-host
       - name: report-host
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        if: contains(fromJSON(needs.changes.outputs.suites), 'image-report-host')
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: apps/report-host/Dockerfile
           cache-from: type=gha,scope=report-host
 
   harness-image:
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.jobs), 'harness-image')
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           driver-opts: image=docker.io/moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
       - name: harness
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: apps/harness/Dockerfile
@@ -649,16 +679,21 @@ jobs:
       AR_HOST: ${{ vars.GCP_REGION }}-docker.pkg.dev
       REPO: ${{ vars.GCP_AR_REPO }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_DEPLOY_SA }}
-      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
         with:
           skip_install: true
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker "$AR_HOST" --quiet
+      # Images unchanged since the last staging deploy are not rebuilt; deploy.yml
+      # plans again once it holds the deploy slot and builds anything still missing.
+      - name: Plan the images to build
+        id: plan
+        run: bash scripts/ci/deploy_plan.sh "$REPO-workers" "${{ vars.GCP_ZONE }}"
       - name: Compute candidate tags
         id: tags
         run: |
@@ -667,24 +702,28 @@ jobs:
           echo "daimon=$BASE/daimon:$TAG" >> "$GITHUB_OUTPUT"
           echo "notebook=$BASE/notebook-host:$TAG" >> "$GITHUB_OUTPUT"
           echo "report=$BASE/report-host:$TAG" >> "$GITHUB_OUTPUT"
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        if: steps.plan.outputs.daimon_image == 'true' || steps.plan.outputs.notebook_image == 'true' || steps.plan.outputs.report_image == 'true'
         with:
           driver-opts: image=docker.io/moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
       - name: Build + push candidate daimon
         id: daimon
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        if: steps.plan.outputs.daimon_image == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: Dockerfile
           tags: ${{ steps.tags.outputs.daimon }}
           push: true
+          build-args: DAIMON_RELEASE=${{ github.sha }}
           provenance: false
           sbom: false
           cache-from: type=gha,scope=daimon
           cache-to: type=gha,mode=max,scope=daimon,ignore-error=true
       - name: Build + push candidate notebook-host
         id: notebook
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        if: steps.plan.outputs.notebook_image == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: apps/notebook-host/Dockerfile
@@ -696,7 +735,8 @@ jobs:
           cache-to: type=gha,mode=max,scope=notebook-host,ignore-error=true
       - name: Build + push candidate report-host
         id: report
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        if: steps.plan.outputs.report_image == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: apps/report-host/Dockerfile
@@ -730,3 +770,4 @@ jobs:
       daimon_digest: ${{ needs.docker-publish-candidate.outputs.daimon-digest }}
       notebook_digest: ${{ needs.docker-publish-candidate.outputs.notebook-digest }}
       report_digest: ${{ needs.docker-publish-candidate.outputs.report-digest }}
+      selective: true

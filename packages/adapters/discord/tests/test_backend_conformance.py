@@ -25,7 +25,6 @@ from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
     DiscordSettings,
-    FleetSettings,
     Settings,
     ThreadNamingSettings,
     TurnSettings,
@@ -60,7 +59,7 @@ from .test_orchestration import (  # pyright: ignore[reportPrivateUsage]
     _AsyncIter,  # pyright: ignore[reportPrivateUsage]
     _make_channel_message,  # pyright: ignore[reportPrivateUsage]
     _make_runtime,  # pyright: ignore[reportPrivateUsage]
-    _make_thread_message,  # pyright: ignore[reportPrivateUsage]
+    _make_thread_message,
 )
 
 WORKSPACE, CHANNEL, USER, THREAD = "123456", "789", "111", "5555"
@@ -163,7 +162,6 @@ async def setup(
         # existing thread keeps its bound backend after a channel change; that is
         # test_retained_anthropic_thread_replies_after_channel_switches_to_selfhosted.
         turn=TurnSettings(path="legacy", channel_backends=True, agent_backends=False),
-        fleet=FleetSettings(enabled=False),
     )
     runtime = dataclasses.replace(
         runtime,

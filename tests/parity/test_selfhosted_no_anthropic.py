@@ -225,8 +225,8 @@ async def test_selfhosted_timer_dispatch_never_resolves_at_anthropic(
             require_anthropic_allowed()
         seeds.append(str(decision))
 
-    async def post(text: str) -> None:
-        notices.append(text)
+    async def post(text: str | None = None, *, embed: discord.Embed | None = None) -> None:
+        notices.append(str(embed.description if embed is not None else text))
 
     client = cast(AsyncAnthropic, NoAnthropic())
     if platform == "discord":

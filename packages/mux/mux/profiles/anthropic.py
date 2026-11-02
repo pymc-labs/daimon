@@ -6,6 +6,9 @@ from mux.contracts.extensions import ANTHROPIC_EXTENSIONS, ExtensionRef
 from mux.contracts.ids import SkillRef
 from mux.contracts.profile import AccountingMode, Profile
 
+#: The Managed Agents model object (id, speed) carried as an agent extension.
+MODEL_CONFIG_NAMESPACE = "anthropic.model_config"
+
 MANAGED_AGENTS = Profile(
     provider="anthropic",
     profile_id="anthropic.managed_agents",
@@ -43,7 +46,7 @@ MANAGED_AGENTS = Profile(
         "session_spend_control": "native",
         "workspace_export_import": "native",
     },
-    extensions=(*ANTHROPIC_EXTENSIONS, ExtensionRef(namespace="anthropic.model_config", version=1)),
+    extensions=(*ANTHROPIC_EXTENSIONS, ExtensionRef(namespace=MODEL_CONFIG_NAMESPACE, version=1)),
 )
 
 

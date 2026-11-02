@@ -24,7 +24,9 @@ Configuration contains the executing `agent_id` (the tenant-derived agent UUID),
 optional `routine_id`, notifier and resolver **user** IDs, pipeline, stage and
 optional `deal_fields` mappings and `attribution_property`. Set `deal_fields` to
 the HubSpot property/value pairs required by your deployment, such as deal type
-and source channel. Set `attribution_property` to the HubSpot deal property that
+and source channel.
+
+Set `attribution_property` to the HubSpot deal property that
 records how the enquirer heard about your organization. With this configured,
 attribution submissions need `attribution_value` and a verbatim
 `attribution_evidence` quote supporting it. Attribution without a verbatim
@@ -32,6 +34,7 @@ supporting quote is dropped. Daimon checks the property's visible
 HubSpot options before recording a deal creation intent; a missing property,
 hidden option or invalid value requires review. An empty `attribution_property`
 disables attribution; supplied attribution is ignored.
+
 `reconciliation_start` is a timezone-aware cutover
 checkpoint; choose the current time to start without historical import. Names,
 addresses, portal IDs and CRM field mappings are deployment-specific.
@@ -209,7 +212,9 @@ Human resolution requires the requester's approval card, even when third-party
 tool safety is disabled. The card shows the intake ID, each selected company,
 contact, deal and starter ID and both confirmations in every state, so the
 approved selections stay visible after the answer; a selection too long to show
-denies the call. Details loads the live record after authorizing the clicker on every click and
+denies the call.
+
+Details loads the live record after authorizing the clicker on every click and
 sends it privately in pages. The card caches no evidence. Erased, expired or
 missing records show “no longer available”. Resolution evidence is supplied with
 the tool call; review the live record before approving the visible selections. The resolver must also be able to read the

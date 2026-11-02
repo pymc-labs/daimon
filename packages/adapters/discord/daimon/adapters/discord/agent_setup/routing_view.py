@@ -52,6 +52,7 @@ from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.checks import refuse_if_not_admin, refuse_if_not_platform_admin
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.layout import hairline, header
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.answering_map import AnsweringMap
@@ -470,7 +471,9 @@ class RoutingView(PanelViewBase):
         )
         user_id = str(interaction.user.id)
         if not await may_pick_environment(subject, runtime=self.runtime, state=self.state):
-            await interaction.response.send_message(REFUSED_MESSAGE, ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed(REFUSED_MESSAGE), ephemeral=True
+            )
             await audit_environment_pick(
                 runtime=self.runtime,
                 state=self.state,
@@ -508,12 +511,17 @@ class RoutingView(PanelViewBase):
                 actor_account_id=str(self.state.account_id),
             )
             await interaction.followup.send(
-                render_error(error, request_id=request_id), ephemeral=True
+                embed=build_notice_embed(render_error(error, request_id=request_id)), ephemeral=True
             )
             return
         await self.swap_to(interaction, routing)
+        # A saved pick, or one awaiting confirmation, names the channel; a refusal does not.
+        channel = self.state.channel_name
+        named = f"<#{self.state.channel_id}>" in note or bool(channel and f"#{channel}" in note)
         await interaction.followup.send(
-            note, ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
+            embed=build_notice_embed(note, neutral=named),
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
         )
 
     async def _on_permissions(self, interaction: discord.Interaction) -> None:

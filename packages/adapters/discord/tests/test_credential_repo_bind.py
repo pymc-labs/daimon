@@ -179,7 +179,7 @@ def _repo_probe_transport(
 def _sent_message(interaction: MagicMock) -> Any:
     """Return the ephemeral message text an interaction was sent, on whichever half fired."""
     if interaction.response.send_message.called:
-        return interaction.response.send_message.call_args.args[0]
+        return interaction.response.send_message.call_args.kwargs["embed"].description
     return interaction.followup.send.call_args.args[0]
 
 

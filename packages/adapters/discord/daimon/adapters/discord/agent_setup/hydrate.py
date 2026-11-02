@@ -35,6 +35,7 @@ from daimon.core.agent_identity import (
     is_builtin_agent,
     resolve_agent_identity,
 )
+from daimon.core.agent_ownership import owns_agent
 from daimon.core.answering_map import AnsweringMap, load_answering_map
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
@@ -359,7 +360,7 @@ async def load_roster_state(
 
     thread_context: ThreadContext | None = None
     selected = roster.answering
-    if binding is not None:
+    if binding is not None and binding.kind != "web":  # a web chat is never a Discord thread
         thread_context = ThreadContext(
             kind=binding.kind,
             responder_name=binding.responder_name,
@@ -422,6 +423,8 @@ async def load_details_for(
             channel_label=_channel_label(state),
         )
         state.avatar_urls[agent.name] = None
+        if not state.is_admin:
+            await _record_ownership(session, state=state, agent=agent)
         if identity_enabled_for(
             runtime.settings, "discord", state.guild_id
         ) and not is_builtin_agent(
@@ -452,6 +455,24 @@ async def load_details_for(
                 selection.revision.backend if selection.revision is not None else None
             )
     return details
+
+
+async def _record_ownership(
+    session: AsyncSession, *, state: PanelState, agent: RosterAgent
+) -> None:
+    """Note whether the panel's user owns `agent`, for the buttons only an owner is shown.
+
+    Display only: every click that acts on the answer reads ownership again.
+    """
+    if await owns_agent(
+        session,
+        tenant_id=_tenant_id(state),
+        ma_agent_id=agent.ma_agent_id,
+        account_id=state.account_id,
+    ):
+        state.owned_agent_ids.add(agent.ma_agent_id)
+    else:
+        state.owned_agent_ids.discard(agent.ma_agent_id)
 
 
 async def load_answering_map_for(runtime: DiscordRuntime, *, state: PanelState) -> AnsweringMap:

@@ -10,6 +10,8 @@ on a notebook workspace to publish, it uploads on demand via the
 
 from __future__ import annotations
 
+from daimon.core.media.attachments import AttachedFile, attachment_lines
+
 import discord
 
 
@@ -31,10 +33,16 @@ def build_attachment_url_prefix(attachments: list[discord.Attachment]) -> str:
     notebook), it owns that decision: it curls the URL to disk, then mints an upload
     URL via the ``create_attachment_upload_url`` MCP tool and PUTs the bytes.
     """
-    return "\n".join(
-        f"[attachment] `{attachment.filename}` ({attachment.size} bytes), uploaded by the "
-        f"user with this message. Signed Discord CDN URL, expires ~24h: {attachment.url} "
-        f"— curl it to disk, then read it. To use it in a notebook you publish, upload it "
-        f"via the create_attachment_upload_url tool."
+    return attachment_lines(
+        AttachedFile(
+            attachment.filename,
+            url=attachment.url,
+            size=attachment.size,
+            expires="about 24 hours",
+            hint=(
+                "To use it in a notebook you publish, upload it via the "
+                "create_attachment_upload_url tool."
+            ),
+        )
         for attachment in attachments
     )

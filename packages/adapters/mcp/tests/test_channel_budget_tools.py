@@ -24,6 +24,7 @@ from daimon.adapters.mcp.tools.channel_budgets import (
     _list_channel_budgets_impl,  # pyright: ignore[reportPrivateUsage]
     _set_channel_budget_impl,  # pyright: ignore[reportPrivateUsage]
     origin_budget_channel,
+    origin_spend,
 )
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
 from daimon.core.ma_identity import derive_agent_uuid
@@ -142,6 +143,7 @@ async def _origin(
     *,
     parent_channel_id: str,
     thread_id: str,
+    platform: str = "discord",
 ) -> str:
     now = datetime.now(UTC)
     async with sessionmaker.begin() as session:
@@ -149,7 +151,7 @@ async def _origin(
             session,
             tenant_id=tenant.id,
             account_id=account_id,
-            platform="discord",
+            platform=platform,
             parent_channel_id=parent_channel_id,
             thread_id=thread_id,
             responder_ma_agent_id="agent_x",
@@ -357,6 +359,33 @@ async def test_origin_budget_channel_is_the_turns_channel_or_none(
     bound = dataclasses.replace(other_agent, bound_channel_id="c-key")
     assert await channel(bound, None) == "c-key", "a key minted in a channel spends there"
     assert await channel(bound, here) == "c-key", "whatever origin it names"
+
+
+async def test_a_web_chat_turn_is_attributed_to_its_place_and_agent(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A tool call from a web chat counts toward the web place and the agent that answered,
+    whether the person runs as their own web id or as a linked chat account."""
+    tenant, account_id = await _seed(committing_sessionmaker)
+    web_origin = await _origin(
+        committing_sessionmaker,
+        tenant,
+        account_id,
+        parent_channel_id="web",
+        thread_id="web:t1",
+        platform="web",
+    )
+    for platform in ("web", "discord"):
+        auth = _auth(tenant, account_id, admin=False, platform=platform)
+        spend = await origin_spend(committing_sessionmaker, auth, web_origin)
+        assert (spend.channel_id, spend.agent_id) == ("web", "agent_x"), (
+            f"a web turn run as a {platform} principal is attributed to the web place and agent"
+        )
+    stranger, stranger_account = await _seed(committing_sessionmaker)
+    outsider = _auth(stranger, stranger_account, admin=False, platform="web")
+    assert (await origin_spend(committing_sessionmaker, outsider, web_origin)).channel_id is None, (
+        "another account's web origin is not attributed"
+    )
 
 
 async def test_a_teams_clear_takes_the_threads_channel(

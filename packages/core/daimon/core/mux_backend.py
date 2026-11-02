@@ -47,9 +47,6 @@ class TurnRuntime:
     read_agent_counterpart: (
         Callable[[ProviderPreparationRequest], Awaitable[AgentRevision]] | None
     ) = field(default=None, kw_only=True)
-    materialize_worker: Callable[[ProviderPreparationRequest], Awaitable[AgentRevision]] | None = (
-        field(default=None, kw_only=True)
-    )
     # Runs once when the turn ends (success, failure, cancel or deadline): revokes
     # per-turn credentials the runtime minted.
     end_of_turn: Callable[[], Awaitable[None]] | None = field(default=None, kw_only=True)

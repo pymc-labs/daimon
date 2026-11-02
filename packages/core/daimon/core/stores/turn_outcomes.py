@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -13,7 +14,7 @@ from daimon.core.context_prompt import TurnContext
 
 if TYPE_CHECKING:
     from daimon.core.turn.termination import TerminationReason
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -86,3 +87,28 @@ async def session_ids_for_platform(session: AsyncSession, platform: str) -> list
         .order_by(TurnOutcome.session_id)
     )
     return [sid for sid in rows.scalars() if sid is not None]
+
+
+async def last_started_at_many(
+    session: AsyncSession, tenant_id: UUID, agent_ids: Collection[str]
+) -> dict[str, datetime]:
+    """`last_started_at` for many agents in one read; an agent that never started is absent."""
+    if not agent_ids:
+        return {}
+    rows = await session.execute(
+        select(TurnOutcome.agent_id, func.max(TurnOutcome.started_at))
+        .where(TurnOutcome.tenant_id == tenant_id, TurnOutcome.agent_id.in_(list(agent_ids)))
+        .group_by(TurnOutcome.agent_id)
+    )
+    return {agent_id: at for agent_id, at in rows if at is not None}
+
+
+async def last_started_at(session: AsyncSession, tenant_id: UUID, agent_id: str) -> datetime | None:
+    """When ``agent_id`` last started a turn, or None when it never has."""
+    return (
+        await session.execute(
+            select(func.max(TurnOutcome.started_at)).where(
+                TurnOutcome.tenant_id == tenant_id, TurnOutcome.agent_id == agent_id
+            )
+        )
+    ).scalar_one()

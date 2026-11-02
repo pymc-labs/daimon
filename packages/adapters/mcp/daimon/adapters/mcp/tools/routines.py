@@ -1158,8 +1158,8 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         once either changes, runs go without built-ins and the opt-in is cleared. Each
         change records who made it and when, and ``get_routine``/``list_routines`` show it
         as ``sandbox_tools_enabled``. It takes effect from the routine's next run. Setting
-        the value a routine already has changes nothing. Timers, watches, agent chat, fleet
-        workers, ``daimon run`` and checkpoints cannot be opted in.
+        the value a routine already has changes nothing. Timers, watches, agent chat,
+        ``daimon run`` and checkpoints cannot be opted in.
         """
         return await _set_routine_sandbox_tools_impl(
             runtime, await _auth(ctx), routine_id=routine_id, enabled=enabled

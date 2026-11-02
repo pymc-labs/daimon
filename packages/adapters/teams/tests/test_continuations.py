@@ -49,6 +49,7 @@ from .conftest import (
     build_teams_runtime,
     make_inbound,
     patched_admission,
+    shown_text,
     teams_settings,
 )
 
@@ -225,7 +226,7 @@ async def test_a_refused_turn_tells_only_a_live_person_then_raises(
     )
     with patch.object(app_module, "admit", denied), pytest.raises(AdmissionDenied):
         await teams._run_turn(make_inbound("w"), TENANT, reraise=True, continuation=queued)
-    assert [a.text for a in sender.activities] == [copy], "queued work settles silently"
+    assert [shown_text(a) for a in sender.activities] == [copy], "queued work settles silently"
 
 
 @pytest.mark.usefixtures("provisioned_tenant")
@@ -356,7 +357,7 @@ async def test_a_timer_whose_chat_changed_responder_says_so_and_never_runs(
         await _poll(db_session_factory, teams)
 
     notice = ResponderChanged(target_name="stats-bot", current_name="daimon").message
-    assert [a.text for a in sender.activities] == [notice], "the notice, and no status card"
+    assert [shown_text(a) for a in sender.activities] == [notice], "the notice, and no status card"
     assert await _status(db_session_factory, key) == ("skipped", "skip_target_changed")
 
 

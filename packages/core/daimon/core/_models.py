@@ -12,7 +12,9 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
+from daimon.core import _erasure_guards
 from sqlalchemy import (
+    DDL,
     BigInteger,
     Boolean,
     CheckConstraint,
@@ -29,6 +31,7 @@ from sqlalchemy import (
     SmallInteger,
     Text,
     UniqueConstraint,
+    event,
     func,
     text,
 )
@@ -179,6 +182,8 @@ class PlatformPrincipal(Base):
             name="uq_platform_principal",
         ),
         Index("ix_platform_principals_tenant_id", "tenant_id"),
+        # Who an account runs as, read on every web request.
+        Index("ix_platform_principals_account_id", "account_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -976,6 +981,8 @@ class UsageEvent(Base):
         ),
         Index("usage_events_occurred_idx", "occurred_at"),
         Index("usage_events_tenant_idx", "tenant_id"),
+        # The per-agent spend reads (a person's month by agent, a tenant's by agent).
+        Index("usage_events_tenant_agent_occurred_idx", "tenant_id", "agent_id", "occurred_at"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -1004,6 +1011,9 @@ class UsageEvent(Base):
     observation_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Parent channel of the turn or tool call that spent it; NULL when unknown.
     channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The agent whose turn or tool call spent it; NULL when unknown, and on rows
+    # written before spend was attributed to agents.
+    agent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class TenantUserCap(Base):
@@ -1109,6 +1119,10 @@ class TenantLedger(Base):
             "occurred_at",
             postgresql_where=text("channel_id IS NOT NULL"),
         ),
+        CheckConstraint(
+            "estimate IS NULL OR estimate IN ('cache_writes_unreported')",
+            name="ck_tenant_ledger_estimate",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -1124,6 +1138,10 @@ class TenantLedger(Base):
     # see billing.md
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     idempotency_key: Mapped[str] = mapped_column(Text, nullable=False)
+    # Who made a manual credit from the web; NULL for every other row.
+    actor_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
+    )
     payment_event_id: Mapped[str | None] = mapped_column(
         Text, ForeignKey("payment_events.id", ondelete="SET NULL"), nullable=True
     )
@@ -1134,6 +1152,9 @@ class TenantLedger(Base):
     # On a debit: the parent channel whose budget the spend counts against. On a
     # channel promo credit: the channel it was redeemed for (budgets read debits only).
     channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # A debit priced from incomplete provider counts (a `LedgerEstimate`); NULL when
+    # fully metered. Never changes the amount: it says how the amount was reached.
+    estimate: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class ChannelSkill(Base):
@@ -1199,6 +1220,49 @@ class AgentCreationChannel(Base):
     ma_agent_id: Mapped[str] = mapped_column(Text)
     platform: Mapped[str] = mapped_column(Text, nullable=False)
     channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class SpendAllowance(Base):
+    """What one person, a group or an invite may spend on agents, per person.
+
+    `subject_kind` names whose it is: a `person` (their platform user id), a `group`
+    (a group name; `everyone` is built in) or an `invite` (a visitor's invite id).
+    `agent_id` narrows it to one agent, else it covers every agent. The amount is each
+    person's own limit, counted in billed dollars inside the window: `month` is the
+    current UTC calendar month, `total` everything since `starts_at`.
+    """
+
+    __tablename__ = "spend_allowances"
+    __table_args__ = (
+        CheckConstraint(
+            "subject_kind IN ('person', 'group', 'invite')", name="ck_spend_allowances_subject"
+        ),
+        CheckConstraint("\"window\" IN ('month', 'total')", name="ck_spend_allowances_window"),
+        CheckConstraint("amount_usd >= 0", name="ck_spend_allowances_amount"),
+        Index("ix_spend_allowances_tenant_subject", "tenant_id", "subject_kind", "subject_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    subject_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    subject_id: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    amount_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    window: Mapped[str] = mapped_column(Text, nullable=False)
+    starts_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -1742,6 +1806,17 @@ class McpToken(Base):
             "surface IS NULL OR (surface = 'provider_turn' AND kind = 'agent')",
             name="ck_mcp_tokens_surface",
         ),
+        CheckConstraint(
+            "skill_bytes_read >= 0 AND skill_calls >= 0", name="ck_mcp_tokens_skill_reads"
+        ),
+        CheckConstraint(
+            "purpose IS NULL OR purpose IN ('coding', 'report', 'internal')",
+            name="ck_mcp_tokens_purpose",
+        ),
+        CheckConstraint(
+            "purpose IS DISTINCT FROM 'coding' OR (kind = 'agent' AND surface IS NULL)",
+            name="ck_mcp_tokens_coding_purpose",
+        ),
     )
 
     jti: Mapped[uuid.UUID] = mapped_column(
@@ -1773,12 +1848,26 @@ class McpToken(Base):
     issued_usd: Mapped[Decimal] = mapped_column(
         Numeric(12, 2), nullable=False, server_default=text("0")
     )
+    # A provider turn's skill calls and the bytes `skill_read` returned, against
+    # its budget (`daimon.adapters.mcp.tools.skill_reads`).
+    skill_bytes_read: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    skill_calls: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     # The channel the token was minted in, whose calls then run inside it; both
     # NULL for a token bound to no channel.
     platform: Mapped[str | None] = mapped_column(Text, nullable=True)
     channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     # `provider_turn`: a chat-execution credential with no confirmation surface.
     surface: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # What an agent-kind credential was made for. 'coding': a key a person made from
+    # the agent's "coding tools" button; 'report': a published report's seam token;
+    # 'internal': a short-lived in-session or provider-turn credential. Not a secret
+    # and not in the JWT: the verifier reads it from the row to hold a coding key to
+    # its holder's current role or ownership on every request. NULL for operator and
+    # CLI tokens, and for an agent row an older process wrote (read as 'coding' unless
+    # it is plainly internal; see the verifier).
+    purpose: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class SlackBotToken(Base):
@@ -2343,11 +2432,16 @@ class FileUpload(Base):
     __table_args__ = (
         Index("ix_file_uploads_upload_token", "upload_token", unique=True),
         Index("ix_file_uploads_created_at", "created_at"),
+        Index("ix_file_uploads_person_id", "person_id"),
     )
 
     id: Mapped[str] = mapped_column(Text, primary_key=True)
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    # The web person a file belongs to; erasing the person erases the file.
+    person_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("web_people.id", ondelete="CASCADE"), nullable=True
     )
     upload_token: Mapped[str | None] = mapped_column(Text, nullable=True)
     title: Mapped[str] = mapped_column(Text, nullable=False)
@@ -2583,7 +2677,9 @@ class ThreadAgentBinding(Base):
             "thread_id",
             name="uq_thread_agent_bindings_location",
         ),
-        CheckConstraint("kind IN ('setup', 'handoff')", name="ck_thread_agent_bindings_kind"),
+        CheckConstraint(
+            "kind IN ('setup', 'handoff', 'owner', 'web')", name="ck_thread_agent_bindings_kind"
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -2610,6 +2706,40 @@ class ThreadAgentBinding(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    # A cross-provider hand-off's summary (JSON: from, summary), taken once by the
+    # destination's first turn here; cleared when the binding is replaced or released.
+    handoff_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class AgentNotice(Base):
+    """A failure the agent hears of on its next turn in the thread (`turn.agent_notices`)."""
+
+    __tablename__ = "agent_notices"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "platform",
+            "thread_id",
+            "agent_id",
+            "text",
+            name="uq_agent_notices_thread_agent_text",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # The provider's agent id: a hand-off must not pass one agent's notices to another.
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
@@ -2657,6 +2787,9 @@ class TurnOrigin(Base):
     shared_channel: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
     )
+    # The platform's ids for the turn's message: where it can be read, and the message.
+    platform_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    platform_message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class SharedChannel(Base):
@@ -2801,8 +2934,7 @@ class TaskContinuation(Base):
     __table_args__ = (
         CheckConstraint(
             "reason IN ('task_handoff', 'private_input_applied', 'timer', "
-            "'github_access_ready', 'worker_finished', 'watch_fired', 'job_finished', "
-            "'watch_report')",
+            "'github_access_ready', 'watch_fired', 'job_finished', 'watch_report')",
             name="ck_task_continuations_reason",
         ),
         CheckConstraint(
@@ -2876,7 +3008,7 @@ class TurnOutcome(Base):
     __tablename__ = "turn_outcomes"
     __table_args__ = (
         CheckConstraint(
-            "origin IN ('chat', 'routine', 'relay', 'handoff', 'worker')",
+            "origin IN ('chat', 'routine', 'relay', 'handoff')",
             name="ck_turn_outcomes_origin",
         ),
         CheckConstraint(
@@ -3771,6 +3903,47 @@ class ThreadProviderRelease(Base):
     requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class BackendSwitchCard(Base):
+    """A provider switch waiting on its requester's Confirm card (`daimon.core.switch_cards`).
+
+    Posted by Daimon itself for a turn whose provider shows no confirmation
+    card (OpenAI, Gemini). The click re-verifies the reference before applying;
+    the status moves pending -> claimed -> applied/refused exactly once.
+    """
+
+    __tablename__ = "backend_switch_cards"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'claimed', 'applied', 'refused', 'cancelled')",
+            name="ck_backend_switch_cards_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
+    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
+    setup_thread: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    requester_platform_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # The requester is from another organisation: never an admin at the press.
+    client: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    answering_agent_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reference: Mapped[Any] = mapped_column(JSONB, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'pending'"))
+    outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
+    message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class MuxOperation(Base):
     """An idempotent operation: found by (tenant, account, key), owned by a principal.
 
@@ -3844,9 +4017,9 @@ class UsageObservation(Base):
         Index("ix_usage_observation_tenant_id", "tenant_id"),
     )
 
-    binding_id: Mapped[str] = mapped_column(
-        Text, ForeignKey("provider_binding_slot.binding_id", ondelete="CASCADE"), nullable=False
-    )
+    # No foreign key to the slot: erasing a private slot must leave these rows
+    # (see `AccountingBindingContext`).
+    binding_id: Mapped[str] = mapped_column(Text, nullable=False)
     observation_id: Mapped[str] = mapped_column(Text, nullable=False)
     revision: Mapped[int] = mapped_column(Integer, nullable=False)
     tenant_id: Mapped[uuid.UUID] = _tenant_fk()
@@ -3867,9 +4040,9 @@ class AccountingOutbox(Base):
         ),
     )
 
-    binding_id: Mapped[str] = mapped_column(
-        Text, ForeignKey("provider_binding_slot.binding_id", ondelete="CASCADE"), nullable=False
-    )
+    # No foreign key to the slot: erasing a private slot must leave these rows
+    # (see `AccountingBindingContext`).
+    binding_id: Mapped[str] = mapped_column(Text, nullable=False)
     observation_id: Mapped[str] = mapped_column(Text, nullable=False)
     revision: Mapped[int] = mapped_column(Integer, nullable=False)
     prior_applied_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -3880,6 +4053,62 @@ class AccountingOutbox(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AccountingBindingContext(Base):
+    """What settling a binding's usage rows needs once its slot has been erased.
+
+    Account erasure deletes a private slot, its binding generations and its journal,
+    but the slot's `usage_observation` and `accounting_outbox` rows are financial
+    evidence the tenant still settles from (pending rows) and replays against (applied
+    rows). Those rows no longer hang off the slot, so the erasure copies the two facts
+    the host reads from the binding when it settles them: the profile (to price) and the
+    channel (to attribute the debit). It holds no thread, account, session or content.
+    """
+
+    __tablename__ = "accounting_binding_context"
+
+    binding_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # The newest generation's profile, and every profile the binding ever had: the
+    # pending-usage drain settles only bindings that never left its profiles.
+    profile: Mapped[str] = mapped_column(Text, nullable=False)
+    profiles: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+
+
+class ErasedPrincipal(Base):
+    """A principal of an erased account: the fence for operations keyed by principal.
+
+    An operation is found by account but owned by a principal, and erasure removes the
+    ones owned by the account's principals, so a stale scope naming such a principal is
+    refused as well (see `ErasedAccount`).
+    """
+
+    __tablename__ = "erased_principal"
+
+    principal_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    erased_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class ErasedAccount(Base):
+    """An account that was erased: the durable half of the mux writer fence.
+
+    A mux writer holds a shared lock on its account while it writes, and purge holds the
+    exclusive one, so a write either finishes before the erasure or finds this row after
+    it. The account id is a bare identifier; nothing else about the account is kept.
+    """
+
+    __tablename__ = "erased_account"
+
+    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    erased_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
 
 class NeutralAgentRevision(Base):
@@ -4026,7 +4255,6 @@ class AgentBackendRevisionRecord(Base):
     preview_digest: Mapped[str] = mapped_column(Text, nullable=False)
     digest: Mapped[str] = mapped_column(Text, nullable=False)
     previous_local: Mapped[int | None] = mapped_column(Integer)
-    fleet_grant: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     drop_consent: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -4070,162 +4298,35 @@ class AgentOwner(Base):
     )
 
 
-class FleetRun(Base):
-    """One orchestrator's fan-out: its budget, deadline and status.
+class AgentCoOwner(Base):
+    """An additional account that may edit an agent, beside its one primary owner.
 
-    Workers are `FleetWorker` rows. Each worker's session, lease and journal
-    live in the neutral state store under its own private binding slot; these
-    two tables hold only what the store cannot: the run graph, budgets,
-    deadlines, status and a pointer to each worker's result.
+    Added and removed by an admin only. The primary owner stays in `agent_owner`;
+    a person in both places is simply an owner. Deleting the account deletes the
+    row.
     """
 
-    __tablename__ = "fleet_run"
+    __tablename__ = "agent_co_owners"
     __table_args__ = (
-        UniqueConstraint("tenant_id", "id", name="uq_fleet_run_tenant_id"),
-        UniqueConstraint("tenant_id", "operation_key", name="uq_fleet_run_operation"),
-        CheckConstraint(
-            "status IN ('running', 'collecting', 'completed', 'cancelled', 'failed')",
-            name="ck_fleet_run_status",
-        ),
-        CheckConstraint("max_workers > 0", name="ck_fleet_run_max_workers"),
-        CheckConstraint(
-            "quorum IS NULL OR (quorum > 0 AND quorum <= max_workers)", name="ck_fleet_run_quorum"
-        ),
-        CheckConstraint(
-            "total_budget_usd >= 0 AND reserved_usd >= 0 AND observed_usd >= 0",
-            name="ck_fleet_run_amounts",
-        ),
-        CheckConstraint(
-            "end_notice IS NULL OR end_notice IN ('owed', 'shown', 'given_up')",
-            name="ck_fleet_run_end_notice",
-        ),
-        Index(
-            "ix_fleet_run_end_notice_owed",
-            "platform",
-            "end_notice_due_at",
-            postgresql_where=text("end_notice = 'owed'"),
-        ),
+        PrimaryKeyConstraint("tenant_id", "agent_id", "account_id", name="pk_agent_co_owners"),
+        Index("ix_agent_co_owners_account", "account_id"),
     )
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
-    orchestrator_account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    orchestrator_session_id: Mapped[str] = mapped_column(Text, nullable=False)
-    orchestrator_binding_id: Mapped[str] = mapped_column(Text, nullable=False)
-    platform: Mapped[str] = mapped_column(Text, nullable=False)
-    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
-    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
-    operation_key: Mapped[str] = mapped_column(Text, nullable=False)
-    status: Mapped[str] = mapped_column(Text, nullable=False)
-    total_budget_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
-    reserved_usd: Mapped[Decimal] = mapped_column(
-        Numeric(12, 6), nullable=False, server_default=text("0")
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE", name="fk_agent_co_owners_tenants"),
+        nullable=False,
     )
-    observed_usd: Mapped[Decimal] = mapped_column(
-        Numeric(12, 6), nullable=False, server_default=text("0")
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("accounts.id", ondelete="CASCADE", name="fk_agent_co_owners_accounts"),
+        nullable=False,
     )
-    deadline_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    max_workers: Mapped[int] = mapped_column(Integer, nullable=False)
-    quorum: Mapped[int | None] = mapped_column(Integer)
-    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
-    created_by: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
+    added_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("accounts.id", ondelete="SET NULL", name="fk_agent_co_owners_added_by"),
     )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # Whether the thread was told the run ended: "owed" from the end until a
-    # terminal card is rendered ("shown"), or the poller gives up ("given_up").
-    end_notice: Mapped[str | None] = mapped_column(Text)
-    end_notice_attempts: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("0")
-    )
-    end_notice_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # The run's live card, so a later render edits it instead of posting another.
-    card_message_id: Mapped[str | None] = mapped_column(Text)
-
-
-class FleetWorker(Base):
-    """One worker turn of a fleet run; its result stays in the journal."""
-
-    __tablename__ = "fleet_worker"
-    __table_args__ = (
-        UniqueConstraint("run_id", "ordinal", name="uq_fleet_worker_ordinal"),
-        UniqueConstraint("run_id", "id", name="uq_fleet_worker_run_id"),
-        ForeignKeyConstraint(
-            ["tenant_id", "run_id"],
-            ["fleet_run.tenant_id", "fleet_run.id"],
-            name="fk_fleet_worker_run",
-            ondelete="CASCADE",
-        ),
-        ForeignKeyConstraint(
-            ["run_id", "reviewer_of"],
-            ["fleet_worker.run_id", "fleet_worker.id"],
-            name="fk_fleet_worker_reviewer",
-        ),
-        CheckConstraint(
-            "status IN ('pending', 'starting', 'running', 'succeeded', 'failed', "
-            "'cancelled', 'timed_out', 'budget_exceeded')",
-            name="ck_fleet_worker_status",
-        ),
-        CheckConstraint(
-            "backend IN ('anthropic', 'openai', 'gemini')", name="ck_fleet_worker_backend"
-        ),
-        CheckConstraint("ordinal >= 0", name="ck_fleet_worker_ordinal"),
-        CheckConstraint("reviewer_of IS NULL OR reviewer_of <> id", name="ck_fleet_worker_review"),
-        CheckConstraint(
-            "max_turns > 0 AND turns_used >= 0 AND turns_used <= max_turns AND attempts >= 0",
-            name="ck_fleet_worker_counts",
-        ),
-        CheckConstraint("budget_usd >= 0 AND reserved_usd >= 0", name="ck_fleet_worker_amounts"),
-        CheckConstraint(
-            "(result_session_id IS NULL) = (result_sequence IS NULL) "
-            "AND (result_session_id IS NULL) = (result_digest IS NULL) "
-            "AND (result_excerpt IS NULL OR char_length(result_excerpt) <= 4096)",
-            name="ck_fleet_worker_result",
-        ),
-        Index(
-            "ix_fleet_worker_active",
-            "tenant_id",
-            postgresql_where=text("status IN ('starting', 'running')"),
-        ),
-        Index("ix_fleet_worker_run_status", "run_id", "status"),
-    )
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
-    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
-    role: Mapped[str] = mapped_column(Text, nullable=False)
-    spec: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    spec_digest: Mapped[str] = mapped_column(Text, nullable=False)
-    backend: Mapped[str] = mapped_column(Text, nullable=False)
-    profile: Mapped[str] = mapped_column(Text, nullable=False)
-    model: Mapped[str] = mapped_column(Text, nullable=False)
-    binding_id: Mapped[str | None] = mapped_column(Text)
-    status: Mapped[str] = mapped_column(Text, nullable=False)
-    budget_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
-    reserved_usd: Mapped[Decimal] = mapped_column(
-        Numeric(12, 6), nullable=False, server_default=text("0")
-    )
-    deadline_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    max_turns: Mapped[int] = mapped_column(Integer, nullable=False)
-    turns_used: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
-    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
-    reviewer_of: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
-    result_contract: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
-    result_session_id: Mapped[str | None] = mapped_column(Text)
-    result_sequence: Mapped[int | None] = mapped_column(Integer)
-    result_digest: Mapped[str | None] = mapped_column(Text)
-    result_excerpt: Mapped[str | None] = mapped_column(Text)
-    error_code: Mapped[str | None] = mapped_column(Text)
-    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    updated_at: Mapped[datetime] = mapped_column(
+    added_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
@@ -5014,3 +5115,494 @@ class AgentDaimonToolAllowlist(Base):
     # derive_agent_uuid(tenant, MA agent id): the chat credential's chat_agent_id.
     agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     tool_names: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+
+
+class WebPerson(Base):
+    """One person in one workspace, as the web app knows them.
+
+    Tenant-scoped: someone who belongs to two workspaces has two rows, so a purge
+    stays per tenant. `account_id` is the account their turns, memory and spend belong
+    to. Erasing the account cascades here, and from here to identities, sessions and
+    tokens.
+    """
+
+    __tablename__ = "web_people"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "account_id", name="uq_web_people_tenant_account"),
+        CheckConstraint("kind IN ('member', 'visitor')", name="ck_web_people_kind"),
+        CheckConstraint("status IN ('active', 'suspended')", name="ck_web_people_status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    display_name: Mapped[str] = mapped_column(Text, nullable=False)
+    workspace_name: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    email: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="active")
+    invite_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    invited_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class WebIdentity(Base):
+    """A way a person signs in: an OIDC subject, a Discord id, a Slack or Microsoft id.
+
+    `issuer` is the OIDC `iss` and is empty for the other providers. Looked up across
+    tenants at sign-in, so one login reaches every workspace it belongs to.
+    """
+
+    __tablename__ = "web_identities"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "provider", "issuer", "subject", name="uq_web_identities_subject"
+        ),
+        Index("ix_web_identities_lookup", "provider", "issuer", "subject"),
+        Index("ix_web_identities_person", "person_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    person_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("web_people.id", ondelete="CASCADE"), nullable=False
+    )
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    issuer: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    subject: Mapped[str] = mapped_column(Text, nullable=False)
+    label: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    groups: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'")
+    )
+    linked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class WebSession(Base):
+    """A browser sign-in. Only the SHA-256 of the cookie token is stored.
+
+    Spans the person rows one sign-in reached (`WebSessionPerson`); the current one
+    decides the workspace. Deleted with the current person.
+    """
+
+    __tablename__ = "web_sessions"
+    __table_args__ = (Index("ix_web_sessions_expires_at", "expires_at"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    token_sha256: Mapped[bytes] = mapped_column(LargeBinary, nullable=False, unique=True)
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    issuer: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    subject: Mapped[str] = mapped_column(Text, nullable=False)
+    current_person_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("web_people.id", ondelete="CASCADE"), nullable=False
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    roles_checked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class WebSessionPerson(Base):
+    """A person row a browser session may switch to."""
+
+    __tablename__ = "web_session_people"
+
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("web_sessions.id", ondelete="CASCADE"), primary_key=True
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    person_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("web_people.id", ondelete="CASCADE"), primary_key=True
+    )
+
+
+class WebNodeToken(Base):
+    """A person's access token at a connection node's server, Fernet-encrypted.
+
+    Got by token exchange and exchanged again once spent; `token_key` is
+    `<issuer>#<server>`.
+    """
+
+    __tablename__ = "web_node_tokens"
+
+    person_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("web_people.id", ondelete="CASCADE"), primary_key=True
+    )
+    token_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    access_token_enc: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class WorkspaceMember(Base):
+    """Who is a member of a chat workspace Daimon is installed in, as its platform says.
+
+    A mirror the chat adapters keep from the platform (a full reload, then join, leave
+    and role events), so the web app can tell who still belongs without asking the
+    platform per request. Not erased with an account: it holds only what the platform
+    shows every member, and the next sync would write it back.
+    """
+
+    __tablename__ = "workspace_members"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    platform_user_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class WorkspaceMemberSync(Base):
+    """A workspace whose member list was loaded in full at least once.
+
+    Without a row the list is incomplete, so sign-in falls back to what the
+    platform's own sign-in proves.
+    """
+
+    __tablename__ = "workspace_member_syncs"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    workspace_name: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class WorkspaceAdmin(Base):
+    """Who administers a workspace in the web app, beyond platform admins."""
+
+    __tablename__ = "workspace_admins"
+    __table_args__ = (
+        CheckConstraint("role IN ('owner', 'admin')", name="ck_workspace_admins_role"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True
+    )
+    role: Mapped[str] = mapped_column(Text, nullable=False)
+    granted_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    granted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class WebAudit(Base):
+    """What admins did in the web app. Keeps its rows when an actor's account is erased.
+
+    A person or invite a row is about is an id, shown by its current name or email, so
+    erasing them leaves `target` as a generic label and no name or address behind.
+    """
+
+    __tablename__ = "web_audit"
+    __table_args__ = (Index("ix_web_audit_tenant_at", "tenant_id", "at"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    actor_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    action: Mapped[str] = mapped_column(Text, nullable=False)
+    target: Mapped[str] = mapped_column(Text, nullable=False)
+    target_person_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("web_people.id", ondelete="SET NULL"), nullable=True
+    )
+    target_invite_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("web_invites.id", ondelete="SET NULL"), nullable=True
+    )
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class WebInvite(Base):
+    """A link into a workspace: an invite, a person's one-time sign-in, or the owner's.
+
+    Only the SHA-256 of the token is stored. An accepted invite goes with the person
+    who accepted it, so erasing them also erases the email it was sent to.
+    """
+
+    __tablename__ = "web_invites"
+    __table_args__ = (
+        Index("ix_web_invites_tenant_created", "tenant_id", "created_at"),
+        CheckConstraint("kind IN ('invite', 'sign_in', 'owner')", name="ck_web_invites_kind"),
+        CheckConstraint("role IN ('visitor', 'member')", name="ck_web_invites_role"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    token_sha256: Mapped[bytes] = mapped_column(LargeBinary, nullable=False, unique=True)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    email: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    role: Mapped[str] = mapped_column(Text, nullable=False, server_default="visitor")
+    credit_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, server_default="0")
+    # The person a sign-in link signs in.
+    person_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("web_people.id", ondelete="CASCADE"), nullable=True
+    )
+    created_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    accepted_by_person_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("web_people.id", ondelete="CASCADE"), nullable=True
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WebInviteAgent(Base):
+    """An agent an invite opens to the person who accepts it."""
+
+    __tablename__ = "web_invite_agents"
+
+    invite_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("web_invites.id", ondelete="CASCADE"), primary_key=True
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    agent_id: Mapped[str] = mapped_column(Text, primary_key=True)
+
+
+class WebAgentGrant(Base):
+    """Whether an agent chats on the web, and with whom. No row: on, for everyone."""
+
+    __tablename__ = "web_agent_grants"
+    __table_args__ = (
+        CheckConstraint("who IN ('everyone', 'groups', 'invites')", name="ck_web_agent_grants_who"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    agent_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    web: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    who: Mapped[str] = mapped_column(Text, nullable=False, server_default="everyone")
+    groups: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class WebWorkspaceSettings(Base):
+    """What a workspace's admins switched off in the web app. No row: all on."""
+
+    __tablename__ = "web_workspace_settings"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    modules_off: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'")
+    )
+    default_agent: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class WebThread(Base):
+    """One web chat: a person's conversation with the agent it was started with."""
+
+    __tablename__ = "web_threads"
+    __table_args__ = (Index("ix_web_threads_person_updated", "person_id", "updated_at"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    person_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("web_people.id", ondelete="CASCADE"), nullable=False
+    )
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_name: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WebMessage(Base):
+    """One message of a web chat. A user message keeps the id its browser chose."""
+
+    __tablename__ = "web_messages"
+    __table_args__ = (
+        Index("ix_web_messages_thread_seq", "thread_id", "seq"),
+        # Finds the messages carrying a file (`blocks @> ...`) when an upload is swept.
+        Index(
+            "ix_web_messages_blocks",
+            "blocks",
+            postgresql_using="gin",
+            postgresql_ops={"blocks": "jsonb_path_ops"},
+        ),
+        CheckConstraint("role IN ('user', 'assistant')", name="ck_web_messages_role"),
+        CheckConstraint(
+            "status IN ('running', 'done', 'stopped', 'interrupted')", name="ck_web_messages_status"
+        ),
+        CheckConstraint("feedback IN ('up', 'down')", name="ck_web_messages_feedback"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    thread_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("web_threads.id", ondelete="CASCADE"), nullable=False
+    )
+    role: Mapped[str] = mapped_column(Text, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    blocks: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    turn_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="done")
+    cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    feedback: Mapped[str | None] = mapped_column(Text, nullable=True)
+    seq: Mapped[int] = mapped_column(BigInteger, Identity(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class AgentDraft(Base):
+    """One person's unsaved web edit of an agent: the whole config, and the
+    version it began from. Deleting the account deletes the draft."""
+
+    __tablename__ = "agent_drafts"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "agent_id", "account_id", name="pk_agent_drafts"),
+        Index("ix_agent_drafts_account", "account_id"),
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE", name="fk_agent_drafts_tenants"),
+        nullable=False,
+    )
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("accounts.id", ondelete="CASCADE", name="fk_agent_drafts_accounts"),
+        nullable=False,
+    )
+    base_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    # The agent as the draft began, kept so an apply can tell that places or tool rules
+    # (which live outside the provider's agent, and so outside its version) moved.
+    base_config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class AgentVersion(Base):
+    """An agent's config at one provider version, as the web app recorded it.
+
+    Written when a draft begins (the base, no author) and by each apply or revert
+    (author, note and the changes from the version before). An apply that touches only
+    places or tool rules leaves the provider's version where it was and adds its changes
+    to the row already there. The author is SET NULL
+    when their account is erased; the history belongs to the tenant's agent.
+    """
+
+    __tablename__ = "agent_versions"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "agent_id", "version", name="pk_agent_versions"),
+        Index("ix_agent_versions_account", "account_id"),
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE", name="fk_agent_versions_tenants"),
+        nullable=False,
+    )
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("accounts.id", ondelete="SET NULL", name="fk_agent_versions_accounts"),
+        nullable=True,
+    )
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    changes: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+def _install_erased_account_guards() -> None:
+    """Create the guards (`_erasure_guards`) wherever the schema is built from the models.
+
+    Production gets the same statements from migration 0142; this keeps a schema built
+    by `create_all` (the test schemas) behaving the same.
+    """
+    for table_name in _erasure_guards.GUARDED_TABLES:
+        table = Base.metadata.tables[table_name]
+        for statement in (*_erasure_guards.FUNCTIONS, _erasure_guards.create_trigger(table_name)):
+            event.listen(table, "after_create", DDL(statement))
+
+
+_install_erased_account_guards()

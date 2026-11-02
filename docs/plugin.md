@@ -1,79 +1,87 @@
 # Claude Code plugin
 
-`plugin/` is a Claude Code plugin that lets you ask the daimons in your Slack
-workspaces and Discord servers a question from inside Claude Code. Teams has
-no login mount yet, so the plugin can't reach daimons on Teams.
-[`plugin/README.md`](https://github.com/pymc-labs/daimon/blob/main/plugin/README.md) is the user-facing doc: what the
-plugin ships, how to install it, and how to log in. This page is the part you
-want before you install — what has to be true on the server side for any of
-it to work.
+Let people ask the daimons in your Slack workspaces and Discord servers a
+question from inside Claude Code. Read this before you install the plugin: it
+covers what the server side needs. Teams has no login mount, so the plugin
+cannot reach daimons on Teams.
 
-## What it is
+## What the plugin is
 
 The plugin declares two HTTP MCP servers, `daimon-slack` and `daimon-discord`,
-and carries no credentials of its own. It adds one skill, `daimon-context`,
-which routes a question about team context to the right daimons and merges
-their answers, and one command, `/daimon:daimon-status`, which lists what is
-connected without asking anything. Both are built from the eight tools
-registered by
-`packages/adapters/mcp/daimon/adapters/mcp/tools/hub.py`, catalogued in
-[mcp-tools.md](mcp-tools.md#hub-login-mounts-hub) — a surface separate from
-the main MCP tool set.
-
-## The hub login mounts
-
-Those two URLs only exist if the deployment you point at has the hub login
-mounts configured, and "mount" here means a URL path, not a file or a volume.
-`packages/adapters/mcp/daimon/adapters/mcp/hub/app.py` builds one `FastMCP`
-sub-app per platform and mounts it on the MCP server's ASGI app at `/slack`
-and `/discord`, each with **its own OAuth proxy**, so a Slack login token is
-never evaluated by the Discord proxy. The plugin then talks to
-`<origin>/slack/mcp` and `<origin>/discord/mcp`.
-
-A platform's mount appears only when both that platform's client id and secret
-are set, so a deployment can offer one, both or neither, and one that sets
-neither behaves exactly as it did before the mounts existed. Beyond the
-`DAIMON_HUB__*` pair, the mounts need `DAIMON_CRYPTO__KEYS` (login state is
-encrypted at rest) and `DAIMON_MCP__PUBLIC_URL` (they derive their public base
-URL from it); the server refuses to boot if a mount is configured without
-them. The operator side — OAuth apps, redirect URIs, the scopes each platform
-asks for — is in
-[self-hosting.md](self-hosting.md#claude-code-login-mounts), and the settings
-themselves are in [configuration.md](configuration.md#hub).
+and carries no credentials. It adds one skill, `daimon-context`, which routes a
+question about team context to the right daimons and merges their answers, and
+one command, `/daimon:daimon-status`, which lists what is connected. They use
+the hub tools in [mcp-tools](mcp-tools.md#hub-login-mounts-hub), a surface
+separate from the main MCP tool set. Install steps and login are in the
+[plugin README](https://github.com/pymc-labs/daimon/blob/main/plugin/README.md).
 
 ## What a login gets you
 
-Logging in proves one platform identity and the workspaces it belongs to.
-`packages/core/daimon/core/hub_identity.py` intersects that set with the
-tenants where Daimon is actually installed and ready, and looks up or
-provisions your account in each one exactly as the chat adapters do on first
-contact — so a turn you start from Claude Code is permission-checked and
-billed as you, in that workspace, not as some shared service identity. The
-intersection is recomputed on every call, and Slack reads run with your own
-Slack visibility.
+A login proves one platform identity and its workspaces. Daimon intersects
+those with the workspaces where it is installed and ready, on every call. It
+then finds or creates your account in each, as in chat. A turn started from
+Claude Code is permission-checked and billed as you in that workspace. Slack
+reads run with your own Slack visibility.
 
-That also means the answer to "why do I see no daimons" is usually not the
-plugin. Either you have not authenticated that server with `/mcp` yet, or
-Daimon is not installed in any workspace you belong to, or the deployment has
-no mount for that platform.
+If you see no daimons, the plugin is rarely the cause. You may not have
+authenticated that server with `/mcp`, Daimon may not be installed in any of
+your workspaces, or the deployment may have no mount for that platform.
 
 ## Before you install
 
-- **Point it somewhere.** It defaults to the hosted deployment. For your own,
-  set `DAIMON_MCP_URL` to the origin — scheme and host only, since the plugin
-  appends the platform paths itself.
-- **Log in per server.** Installing the plugin authenticates nothing; you run
-  `/mcp` and authenticate each platform you want.
-- **Know the billing behaviour.** A turn started through the hub runs the same
-  balance and cap admission checks as any other MCP turn, so a workspace out
-  of credit refuses it up front. As with those tools today, it does not record
-  a metered debit when it completes. See [billing.md](billing.md).
-- **Installing from a marketplace is not available yet.** Until the plugin is
-  published, the working path is `claude --plugin-dir ./plugin` from a
-  checkout, as [`plugin/README.md`](https://github.com/pymc-labs/daimon/blob/main/plugin/README.md) describes.
+- **Point it at your deployment.** It defaults to the hosted one. Set
+  `DAIMON_MCP_URL` to your origin, scheme and host only.
+- **Log in per server.** Installing authenticates nothing. Run `/mcp` and
+  authenticate each platform you want.
+- **Expect normal billing checks.** A turn started through the hub runs the same
+  balance and cap checks as any MCP turn, so a workspace out of credit refuses it
+  up front. Its cost is debited when a later read or the scheduler's usage
+  sweep settles the session, as for any MCP turn. See [billing](billing.md).
+- **Install from a checkout.** Run `claude --plugin-dir ./plugin`. The plugin is
+  not published to a marketplace.
 
-One operational note for self-hosters: the hub keeps short-lived login state
-in a table that is pruned by a sweep on the scheduler's tick
-(`packages/core/daimon/core/hub_oauth_kv_sweep.py`). The store honours
-expiry on read but never deletes, so a deployment that runs the mounts
-without a scheduler grows that table by a row per login attempt.
+## Set up the login mounts
+
+The plugin talks to `<origin>/slack/mcp` and `<origin>/discord/mcp`. Each is a
+URL path on the MCP server with its own OAuth proxy, so a Slack login token is
+never checked by the Discord proxy. A platform's mount appears only when you set
+that platform's client ID and secret in the
+[`DAIMON_HUB__*` settings](configuration.md#hub). You can offer one platform,
+both or neither.
+
+Each mount needs its own OAuth app, plus:
+
+- `DAIMON_CRYPTO__KEYS`, because login state is encrypted at rest.
+- [`DAIMON_MCP__PUBLIC_URL`](configuration.md#daimon_mcp__public_url) or
+  [`DAIMON_HUB__PUBLIC_URL`](configuration.md#daimon_hub__public_url), the origin
+  the mounts are served from. The server refuses to boot if a mount is
+  configured without them.
+
+Set `DAIMON_HUB__PUBLIC_URL` when coding agents reach the mounts on a different
+hostname from `DAIMON_MCP__PUBLIC_URL`. Changing `DAIMON_MCP__PUBLIC_URL`
+instead re-points every agent's stored MCP credential.
+
+Register these redirect URIs on the OAuth apps, where `{origin}` is
+`DAIMON_HUB__PUBLIC_URL`, or `DAIMON_MCP__PUBLIC_URL` without the trailing
+`/mcp` when that is unset:
+
+- Slack: `{origin}/slack/auth/callback`
+- Discord: `{origin}/discord/auth/callback`
+
+The Discord app requests the `identify` and `guilds` scopes. The Slack app
+requests user scopes (`users:read`, `channels:history`, `groups:history`,
+`channels:read`, `groups:read`, `im:history`, `mpim:history`, `im:read`,
+`mpim:read`, `search:read`), so Daimon reads Slack as the person asking and
+never sees a channel they cannot.
+
+A login reaches only workspaces where Daimon is installed and ready, checked on
+every call. Membership is re-read when a login token is issued or refreshed. A
+Slack token stops working as soon as its user leaves the workspace. Someone
+removed from a Discord server keeps that server's daimons until their Discord
+token expires.
+[`DAIMON_HUB__ALLOWED_CLIENT_REDIRECT_URIS`](configuration.md#daimon_hub__allowed_client_redirect_uris)
+limits which clients may complete a login. The default covers coding agents on
+loopback and claude.ai.
+
+Run the scheduler alongside the mounts. It prunes expired login state, and
+without it the table grows by a row per login attempt.

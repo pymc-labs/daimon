@@ -38,7 +38,6 @@ from daimon.adapters.discord.errors import (
     bound_request_id,
     generate_request_id,
     render_error,
-    render_wake_refused,
 )
 from daimon.adapters.discord.feedback_seed import seed_feedback_reactions
 from daimon.adapters.discord.gating import (
@@ -50,13 +49,13 @@ from daimon.adapters.discord.gating import (
 )
 from daimon.adapters.discord.lifecycle import (
     DiscordTurnLifecycle,
-    EditFn,
-    SendFn,
     drain_retained_card_tasks,
     edit_recovered_card,
 )
+from daimon.adapters.discord.member_sync import MemberSync
 from daimon.adapters.discord.membership import GatewayMembershipResolver, member_facts
-from daimon.adapters.discord.names import remember_guild_user
+from daimon.adapters.discord.names import remember_guild_channels, remember_guild_user
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.output_delivery import Conversation, deliver_session_outputs
 from daimon.adapters.discord.permissions import check_missing_permissions
 from daimon.adapters.discord.post_transport import (
@@ -74,11 +73,7 @@ from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.startup_replay import completed_orphan_text
 from daimon.adapters.discord.tables import tables_enabled
-from daimon.adapters.discord.thread_gone import (
-    ThreadStops,
-    TurnThreadWatch,
-    stop_reason_of,
-)
+from daimon.adapters.discord.thread_gone import ThreadStops, TurnThreadWatch, stop_reason_of
 from daimon.adapters.discord.thread_naming import generate_thread_name
 from daimon.adapters.discord.thread_participation import ThreadParticipant
 from daimon.adapters.discord.thread_send import safe_thread_send
@@ -91,11 +86,7 @@ from daimon.adapters.discord.turn_card_recovery import (
     reconcile_turn_card_intent,
     retire_terminal_turn_card,
 )
-from daimon.adapters.discord.turn_posts import (
-    TurnPostRecorder,
-    archive_thread_quietly,
-    record_replacement_post,
-)
+from daimon.adapters.discord.turn_posts import TurnPostRecorder, archive_thread_quietly
 from daimon.adapters.discord.typed_stop import (
     ALREADY_STOPPING,
     STOPPED,
@@ -127,18 +118,8 @@ from daimon.core.continuity.messages import (
     render_access_changed_try_again,
     render_current_work_must_finish,
     render_preparation_failed,
-    render_replacement_summary,
-    render_unexpected_loss,
 )
-from daimon.core.continuity.wakes import (
-    FrozenWorkerBatch,
-    WakeThread,
-    WorkerFinishedRootChanged,
-    decide_worker_finished,
-    require_worker_finished_root,
-    run_wake_poller,
-    skip_thread_wakes,
-)
+from daimon.core.continuity.wakes import WakeThread, run_wake_poller, skip_thread_wakes
 from daimon.core.continuity.watch_notices import poll_watch_notices
 from daimon.core.continuity.watch_reports import run_watch_report_poller
 from daimon.core.credential_form_expiry import run_credential_form_expiry_poller
@@ -147,7 +128,6 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import provision_tenant, reconcile_tenant_defaults
 from daimon.core.defaults.report import compose_failure_reason
 from daimon.core.errors import DaimonError, TurnError, UserFacingError
-from daimon.core.fleet_run_end import run_run_end_poller
 from daimon.core.github_connect_delivery import run_connect_notice_poller
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.github_request_expiry import run_request_expiry_poller
@@ -219,7 +199,7 @@ from daimon.core.thread_naming import (
     strip_mentions,
 )
 from daimon.core.thread_participation import ParticipationMode
-from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit
+from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit, backend_facts
 from daimon.core.turn.bookkeeping import release_turn_markers
 from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.errors import (
@@ -241,12 +221,7 @@ from daimon.core.turn.protection import (
     protection_state,
 )
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
-from daimon.core.turn.slots import (
-    QUEUE_TIMED_OUT_TEXT,
-    holding,
-    release_turn_slot,
-    wait_for_slot,
-)
+from daimon.core.turn.slots import QUEUE_TIMED_OUT_TEXT, holding, release_turn_slot, wait_for_slot
 from daimon.core.turn.state import ToolUseBlock
 from daimon.core.turn.thread_queue import (
     QUEUE_NOTICE,
@@ -259,12 +234,7 @@ from daimon.core.turn.thread_queue import (
 )
 from daimon.core.turn_hold import RequesterOrg
 from daimon.core.turn_keys import list_mounted_key_names
-from daimon.core.turn_origin import (
-    HandoffNotice,
-    SessionState,
-    render_turn_origin,
-    turn_origin,
-)
+from daimon.core.turn_origin import HandoffNotice, SessionState, render_turn_origin, turn_origin
 from daimon.core.turn_queue import TurnQueue
 from mux.contracts.ids import Scope
 from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
@@ -279,10 +249,7 @@ from discord.ext import commands
 from discord.http import HTTPClient
 
 if TYPE_CHECKING:
-    from daimon.adapters.discord.posted_controls.fleet import DiscordFleetCard
-    from daimon.core.fleet_run_end import EndOutcome
-    from daimon.core.stores.agent_posts import AgentPostRow
-    from daimon.core.stores.fleet import EndNotice
+    pass
 
 log = structlog.get_logger()
 
@@ -443,7 +410,9 @@ class _ThreadOpenFailed(Exception):
 async def _explain_thread_open_failure(message: discord.Message) -> None:
     """The one reply a mention gets when its thread could not be created."""
     try:
-        await message.reply(THREAD_OPEN_FAILED_NOTICE, mention_author=False)
+        await message.reply(
+            embed=build_notice_embed(THREAD_OPEN_FAILED_NOTICE), mention_author=False
+        )
     except discord.HTTPException as exc:
         log.warning("discord.thread_open_failed_notice_failed", error=str(exc))
 
@@ -741,7 +710,8 @@ class DaimonBot(commands.Bot):
         http_client: HTTPClient | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
-        super().__init__(command_prefix=[], intents=intents)  # type: ignore[arg-type]  # discord.py expects Iterable but [] is valid
+        # Member lists load in the background (MemberSync), so ready is never held for them.
+        super().__init__(command_prefix=[], intents=intents, chunk_guilds_at_startup=False)  # type: ignore[arg-type]  # discord.py expects Iterable but [] is valid
         # Explicit in-process ingress only; normal gateway/HTTP and time remain
         # untouched when neither dependency is supplied.
         if http_client is not None:
@@ -876,6 +846,8 @@ class DaimonBot(commands.Bot):
         # cleanup DB await while the completed turn still owns its thread.
         self._committed_message_ids: set[str] = set()
         self._orphans_retired: bool = False
+        self._member_sync = MemberSync(self.runtime.sessionmaker)
+        self._member_reload: asyncio.Task[None] | None = None
         self._orphan_sweep_lock = asyncio.Lock()
         self._orphan_retry_rows: list[ThreadSessionRow] = []
         self._boot_turn_card_intents: list[TurnCardIntentRow] | None = None
@@ -961,137 +933,6 @@ class DaimonBot(commands.Bot):
                 thread_id=thread.id,
                 error=str(exc)[:300],
             )
-
-    def fleet_card_for(
-        self,
-        *,
-        thread: discord.abc.Messageable,
-        requester_id: int,
-        send: Callable[[], SendFn],
-        edit: EditFn,
-        run_id: uuid.UUID | None = None,
-        turn_card_intent_id: uuid.UUID | None = None,
-        recorded_post: AgentPostRow | None = None,
-        on_replacement: Callable[[discord.Message], Awaitable[None]] | None = None,
-        wake_id: uuid.UUID | None = None,
-    ) -> DiscordFleetCard | None:
-        factory = getattr(self.runtime, "fleet_card_factory", None)
-        settings = getattr(self.runtime.settings, "fleet", None)
-        if factory is None or getattr(settings, "enabled", False) is not True:
-            return None
-        return factory(
-            thread,
-            requester_id,
-            send(),
-            edit,
-            run_id=run_id,
-            turn_card_intent_id=turn_card_intent_id,
-            recorded_post=recorded_post,
-            on_replacement=on_replacement,
-            wake_id=wake_id,
-        )
-
-    async def recover_fleet_card(
-        self, interaction: discord.Interaction, *, run_id: uuid.UUID
-    ) -> DiscordFleetCard | None:
-        """Rebuild through the captured post and the same transport owner."""
-        thread, message = interaction.channel, interaction.message
-        if not isinstance(thread, discord.Thread) or message is None:
-            return None
-        return await self._fleet_card_from_post(thread, message, run_id=run_id)
-
-    async def _live_fleet_card(
-        self, thread: discord.Thread, *, author_id: int, is_admin: bool
-    ) -> tuple[DiscordFleetCard, discord.Message] | Literal["not_allowed"] | None:
-        """The card of this thread's still-running fleet run, rebuilt from its post.
-
-        "not_allowed" when the author neither started it nor is a server admin: read
-        from the stored card post, before any Discord call. The card's own control
-        path still proves authority for the rest.
-        """
-        from daimon.core.stores import fleet as fleet_store
-
-        if self.runtime.fleet_card_factory is None or not self.runtime.settings.fleet.enabled:
-            return None
-        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(thread.guild.id))
-        live = await fleet_store.live_run_card(
-            self.runtime.sessionmaker,
-            tenant_id=tenant_id,
-            platform="discord",
-            thread_id=str(thread.id),
-        )
-        if live is None:
-            return None
-        run_id, message_id = live
-        async with self.runtime.sessionmaker() as session:
-            post = await get_post(
-                session,
-                tenant_id=tenant_id,
-                platform="discord",
-                channel_id=str(thread.id),
-                message_id=message_id,
-            )
-        if post is None:
-            return None
-        if post.requester_platform_user_id != str(author_id) and not is_admin:
-            return "not_allowed"
-        try:
-            message = await thread.fetch_message(int(message_id))
-        except discord.HTTPException:
-            return None
-        card = await self._fleet_card_from_post(thread, message, run_id=run_id)
-        return None if card is None or card.run_id != run_id else (card, message)
-
-    async def _fleet_card_from_post(
-        self, thread: discord.Thread, message: discord.Message, *, run_id: uuid.UUID
-    ) -> DiscordFleetCard | None:
-        if self.runtime.fleet_card_factory is None or not self.runtime.settings.fleet.enabled:
-            return None
-        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(thread.guild.id))
-        async with self.runtime.sessionmaker() as session:
-            post = await get_post(
-                session,
-                tenant_id=tenant_id,
-                platform="discord",
-                channel_id=str(thread.id),
-                message_id=str(message.id),
-            )
-        if (
-            post is None
-            or post.source != "turn"
-            or post.kind != "message"
-            or post.turn_card_intent_id is None
-            or post.parent_channel_id != str(thread.parent_id)
-            or post.requester_platform_user_id is None
-            or not post.requester_platform_user_id.isdecimal()
-        ):
-            return None
-        transport = DiscordPostTransport(
-            self,
-            thread,
-            name=message.author.name,
-            avatar_url=None,
-            builtin=message.webhook_id is None,
-        )
-
-        async def record(replacement: discord.Message) -> None:
-            await record_replacement_post(self.runtime.sessionmaker, post, replacement)
-
-        async def send(*args: Any, **kwargs: Any) -> discord.Message:  # noqa: ANN401
-            sent = await transport.send(*args, **kwargs)
-            await record(sent)
-            return sent
-
-        return self.fleet_card_for(
-            thread=thread,
-            requester_id=int(post.requester_platform_user_id),
-            send=lambda: send,
-            edit=transport.edit,
-            run_id=run_id,
-            turn_card_intent_id=post.turn_card_intent_id,
-            recorded_post=post,
-            on_replacement=record,
-        )
 
     async def _archive_requested(self, origin_id: uuid.UUID) -> bool:
         """Whether the agent asked, during this turn, to archive its own thread.
@@ -1343,16 +1184,6 @@ class DaimonBot(commands.Bot):
                     should_stop=lambda: self.draining or self.is_closed(),
                 )
             )
-            if self.runtime.turn_deps.fleet_enabled:
-                # An ended fleet no turn rendered the end of: settle its card, say so.
-                self._spawn(
-                    run_run_end_poller(
-                        self.runtime.sessionmaker,
-                        platform="discord",
-                        post=self._post_fleet_run_end,
-                        should_stop=lambda: self.draining or self.is_closed(),
-                    )
-                )
             # Post routine results to their destinations. Same
             # switch as the wake poller: one process per platform posts.
             self._spawn(
@@ -1432,10 +1263,11 @@ class DaimonBot(commands.Bot):
         from daimon.adapters.discord.credential_button import CredentialRequestButton
 
         self.add_dynamic_items(CredentialRequestButton)
-        if getattr(getattr(self.runtime.settings, "fleet", None), "enabled", False) is True:
-            from daimon.adapters.discord.posted_controls.fleet import FleetControl
+        # The provider switch card the MCP process posts for an OpenAI or Gemini
+        # turn (no card of its own); its presses dispatch here for the same reason.
+        from daimon.adapters.discord.posted_controls.switch_card import SwitchCardControl
 
-            self.add_dynamic_items(FleetControl)
+        self.add_dynamic_items(SwitchCardControl)
 
         # Same rationale as CredentialRequestButton above: the wizard's
         # first screen is posted by the MCP process, and every tap on it
@@ -2316,7 +2148,18 @@ class DaimonBot(commands.Bot):
         )
         if non_production and not command_guild_ids:
             log.warning("discord_command_allowlist_empty", environment=environment_name)
+        for guild in self.guilds:
+            if self._allows_guild(guild.id):
+                remember_guild_channels(
+                    self.runtime.sessionmaker, guild_id=guild.id, channels=guild.channels
+                )
         await self._retire_orphaned_turns()
+        # Every ready: events missed while disconnected are not replayed. Without the
+        # members intent there is no list to load.
+        if self.intents.members and (self._member_reload is None or self._member_reload.done()):
+            self._member_reload = self._spawn(
+                self._member_sync.reload_all([g for g in self.guilds if self._allows_guild(g.id)])
+            )
         if not self._startup_replay_started:
             self._startup_replay_started = True
             self._spawn(self._replay_missed_messages())
@@ -2663,6 +2506,8 @@ class DaimonBot(commands.Bot):
             return
         # Background seed → flips status + posts the ✅/⚠️ follow-up.
         self._spawn(self._seed_tenant_defaults(tenant_id=tenant_id, guild=guild, was_ready=False))
+        if self.intents.members:
+            self._spawn(self._member_sync.reload_all([guild]))
 
     async def on_guild_remove(self, guild: discord.Guild) -> None:
         """Soft-archive: stamp archived_at=now(). NO row delete."""
@@ -2678,6 +2523,7 @@ class DaimonBot(commands.Bot):
                 log.info("stale_guild_remove_skipped", guild_id=guild_id, guild_name=guild.name)
                 return
             await set_provision_status(self.runtime.sessionmaker, tenant_id=tenant_id, archive=True)
+            await self._member_sync.removed(guild.id)
         log.warning("guild_removed", guild_id=guild_id, guild_name=guild.name)
 
     def _cancel_participation_batch(self, thread_id: int) -> None:
@@ -2721,7 +2567,6 @@ class DaimonBot(commands.Bot):
             return
         thread = message.channel
         thread_id = thread.id
-        # A typed stop from someone allowed stops the running reply or fleet.
         if await self._typed_stop(message, thread, mentioned=False):
             return
         if thread_id in self._processing:
@@ -2855,6 +2700,7 @@ class DaimonBot(commands.Bot):
                     platform="discord",
                     channel_id=str(thread_id),
                     thread_id=str(thread_id),
+                    alertable=False,
                 )
                 log.info(
                     "turn.skipped.concurrency_shed",
@@ -3059,7 +2905,11 @@ class DaimonBot(commands.Bot):
             )
         dm_sent = False
         try:
-            await message.author.send(protected_channel_notice(protection, channel_id=channel_id))
+            await message.author.send(
+                embed=build_notice_embed(
+                    protected_channel_notice(protection, channel_id=channel_id)
+                )
+            )
             dm_sent = True
         except Exception as exc:  # DMs closed, or the author is a bot
             log.info(
@@ -3083,6 +2933,9 @@ class DaimonBot(commands.Bot):
             return
         remember_guild_user(
             self.runtime.sessionmaker, guild_id=interaction.guild_id, user=interaction.user
+        )
+        remember_guild_channels(
+            self.runtime.sessionmaker, guild_id=interaction.guild_id, channels=[interaction.channel]
         )
 
     async def _notice_writers_none(self, message: discord.Message, tenant_id: uuid.UUID) -> None:
@@ -3309,6 +3162,9 @@ class DaimonBot(commands.Bot):
         bot_display_name = _resolve_bot_display_name(self.runtime.settings)
         # For /billing's top spenders; in the background, never failing the turn.
         remember_guild_user(self.runtime.sessionmaker, guild_id=guild.id, user=message.author)
+        remember_guild_channels(
+            self.runtime.sessionmaker, guild_id=guild.id, channels=[message.channel]
+        )
 
         # --- Unified non-ready self-heal gate through turn completion,
         # guarded end-to-end. A DB hiccup or an unclassified bug
@@ -3374,17 +3230,23 @@ class DaimonBot(commands.Bot):
             claimed_message = True
 
             if needs_provisioning:
-                await message.channel.send(_setting_up_message(bot_display_name))
+                await message.channel.send(
+                    embed=build_notice_embed(_setting_up_message(bot_display_name))
+                )
                 return
             if tr.provision_status == "failed":
                 # Self-heal: re-seed if idle (in-flight guard). NEVER show "failed" to the user.
                 self._spawn(
                     self._seed_tenant_defaults(tenant_id=tr.id, guild=guild, was_ready=False)
                 )
-                await message.channel.send(_setting_up_message(bot_display_name))
+                await message.channel.send(
+                    embed=build_notice_embed(_setting_up_message(bot_display_name))
+                )
                 return
             if tr.provision_status == "pending":
-                await message.channel.send(_setting_up_message(bot_display_name))
+                await message.channel.send(
+                    embed=build_notice_embed(_setting_up_message(bot_display_name))
+                )
                 return
             # Only 'ready' proceeds.
 
@@ -3409,7 +3271,6 @@ class DaimonBot(commands.Bot):
             # Per-thread mention queueing. Check before claiming an in-flight slot
             # so that queued mentions never consume a slot they won't use.
             thread_id = message.channel.id
-            # "@Daimon stop" stops the running reply or fleet instead of waiting behind it.
             if isinstance(message.channel, discord.Thread) and await self._typed_stop(
                 message, message.channel, mentioned=True
             ):
@@ -3455,7 +3316,7 @@ class DaimonBot(commands.Bot):
                         cap=cap,
                         reason="queue_full",
                     )
-                    await message.channel.send(TENANT_CAP_NOTICE)
+                    await message.channel.send(embed=build_notice_embed(TENANT_CAP_NOTICE))
                     return
                 log.info(
                     "turn.skipped.global_concurrency_shed",
@@ -3464,7 +3325,7 @@ class DaimonBot(commands.Bot):
                     channel_id=str(thread_id),
                     reason="queue_full",
                 )
-                await message.channel.send(GLOBAL_CAP_NOTICE)
+                await message.channel.send(embed=build_notice_embed(GLOBAL_CAP_NOTICE))
                 return
 
             with (
@@ -3563,63 +3424,15 @@ class DaimonBot(commands.Bot):
     async def _typed_stop(
         self, message: discord.Message, thread: discord.Thread, *, mentioned: bool
     ) -> bool:
-        """A typed stop phrase in a thread: the Stop buttons' paths. True when answered.
-
-        - Addressed to the bot (an @mention, a typed-name mention, or a reply to one
-          of its posts: see `typed_stop`), with a still-running fleet run in the
-          thread: the fleet card's Stop-all (its starter or a server admin, as the
-          button), and the author's own running reply too. Refused there, the
-          author can still stop a reply they may stop.
-        - Otherwise the running reply's Stop: its asker or a server admin. An
-          unmentioned stop phrase never touches a fleet, and one from someone who
-          may not stop the reply is left alone; an @-mentioned one is told who can.
-        """
+        """Stop a running reply for its requester or a current server admin."""
         bot_id = self.user.id if self.user is not None else None
         if not is_stop_request(message.content, bot_id=bot_id):
             return False
-        from daimon.adapters.discord.posted_controls.fleet import (
-            FLEET_STOP_NOT_ALLOWED,
-            FLEET_STOPPING,
-            TypedPresser,
-        )
 
         thread_id, author_id = thread.id, message.author.id
         is_admin = isinstance(message.author, discord.Member) and (
             admin_caller(message.author).is_server_admin
         )
-        fleet = (
-            await self._live_fleet_card(thread, author_id=author_id, is_admin=is_admin)
-            if mentioned
-            else None
-        )
-        if fleet is not None:
-            if fleet == "not_allowed":
-                text = FLEET_STOP_NOT_ALLOWED
-            else:
-                card, card_message = fleet
-                text = await card.stop_typed(
-                    TypedPresser(
-                        user=message.author, guild_id=thread.guild.id, channel_id=thread_id
-                    ),
-                    message=card_message,
-                )
-            reply_outcome = self._typed_stops.stop(
-                thread_id, author_id=author_id, is_admin=is_admin
-            )
-            fleet_stopped = text == FLEET_STOPPING
-            log.info(
-                "turn.stop_typed",
-                platform="discord",
-                thread_id=str(thread_id),
-                pressed_by=str(author_id),
-                outcome="fleet_stopped" if fleet_stopped else "fleet_refused",
-                reply_outcome=reply_outcome,
-            )
-            if not fleet_stopped and reply_outcome in ("stopped", "already_stopping"):
-                # Not their fleet to stop, but their own reply: that much stops.
-                text = STOPPED if reply_outcome == "stopped" else ALREADY_STOPPING
-            await self._reply_quietly(message, text)
-            return True
         if thread_id not in self._processing:
             return False
         outcome = self._typed_stops.stop(thread_id, author_id=author_id, is_admin=is_admin)
@@ -3637,12 +3450,16 @@ class DaimonBot(commands.Bot):
             "already_stopping": ALREADY_STOPPING,
             "not_allowed": STOP_NOT_ALLOWED,
         }[outcome]
-        await self._reply_quietly(message, reply)
+        await self._reply_quietly(message, reply, neutral=outcome != "not_allowed")
         return True
 
-    async def _reply_quietly(self, message: discord.Message, text: str) -> None:
+    async def _reply_quietly(
+        self, message: discord.Message, text: str, *, neutral: bool = False
+    ) -> None:
         try:
-            await message.reply(text, mention_author=False)
+            await message.reply(
+                embed=build_notice_embed(text, neutral=neutral), mention_author=False
+            )
         except discord.HTTPException as exc:
             log.warning("turn.stop_typed_reply_failed", message_id=str(message.id), error=str(exc))
 
@@ -3784,7 +3601,7 @@ class DaimonBot(commands.Bot):
             return
         rid = generate_request_id()
         try:
-            await message.channel.send(render_error(exc, request_id=rid))
+            await message.channel.send(embed=build_notice_embed(render_error(exc, request_id=rid)))
         except discord.HTTPException:
             log.exception("mention_prologue_error_send_failed", guild_id=guild_id)
 
@@ -4004,9 +3821,11 @@ class DaimonBot(commands.Bot):
                 builtin=True,
             )
             if isinstance(target, discord.Thread):
-                await safe_thread_send(target, error_text, transport=transport)
+                await safe_thread_send(
+                    target, embed=build_notice_embed(error_text), transport=transport
+                )
             else:
-                await transport.send(error_text)
+                await transport.send(embed=build_notice_embed(error_text))
         except Exception as post_exc:  # the error post is the last resort; never raise from it
             if thread is not None and (stop := stop_reason_of(post_exc, write="send")) is not None:
                 self._thread_stops.signal(thread.id, reason=stop[0], code=stop[1], phase="failure")
@@ -4040,11 +3859,6 @@ class DaimonBot(commands.Bot):
             client=self,
             public_base_url=self.runtime.settings.mcp.app_root_url,
             identity_enabled=identity_enabled_for(self.runtime.settings, "discord", guild_id),
-            worker_finished_decision=(
-                functools.partial(decide_worker_finished, self.runtime.sessionmaker)
-                if self.runtime.turn_deps.fleet_enabled
-                else None
-            ),
         )
 
     async def _may_post_in(self, *, tenant_id: uuid.UUID, channel: object) -> bool:
@@ -4083,36 +3897,13 @@ class DaimonBot(commands.Bot):
         """Cached channel, else a REST fetch (raises NotFound/Forbidden)."""
         return self.get_channel(channel_id) or await self.fetch_channel(channel_id)
 
-    async def _post_fleet_run_end(self, notice: EndNotice) -> EndOutcome:
-        """Settle an ended run's card and post its line in the run's own thread."""
-        from daimon.adapters.discord.posted_controls.fleet import record_card, show_fleet_ended
-        from daimon.core.fleet_orchestration import FleetRefused
-
-        run = notice.run
-        try:
-            channel = await self._channel_by_id(int(run.thread_id))
-            if (
-                not isinstance(channel, discord.Thread)
-                or derive_tenant_uuid(platform="discord", workspace_id=str(channel.guild.id))
-                != run.tenant_id
-                or not await self._may_post_in(tenant_id=run.tenant_id, channel=channel)
-            ):
-                return "give_up"
-            await show_fleet_ended(channel, notice, record_card(self.runtime.sessionmaker))
-            return "shown"
-        except (ValueError, FleetRefused):
-            return "give_up"
-        except discord.HTTPException as exc:
-            # A gone, locked or forbidden thread never takes the post; 429/5xx may.
-            return "retry" if exc.status == 429 or exc.status >= 500 else "give_up"
-
     async def _post_github_request_expiry(self, request: AccessRequest) -> bool:
         try:
             channel = await self._channel_by_id(int(request.thread_id))
             if not isinstance(channel, discord.abc.Messageable):
                 return True
             await channel.send(
-                "Stopped waiting for GitHub access. Ask again any time.",
+                embed=build_notice_embed("Stopped waiting for GitHub access. Ask again any time."),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             return True
@@ -4145,7 +3936,7 @@ class DaimonBot(commands.Bot):
                     client.post(
                         f"https://discord.com/api/v10/webhooks/{application_id}/{interaction_token}",
                         json={
-                            "content": notice.text,
+                            "embeds": [build_notice_embed(notice.text, neutral=True).to_dict()],
                             "flags": 64,
                             "allowed_mentions": {"parse": []},
                         },
@@ -4404,20 +4195,13 @@ class DaimonBot(commands.Bot):
         self, row: TaskContinuationRow, exc: Exception, surface: _TurnFailureSurface
     ) -> None:
         """Turn a failed continuation's still-pending card into plain copy; never raises."""
-        from daimon.core.neutral_resources import WorkerSpecRefused
 
         if surface.end_card is None or (
             surface.thread is not None and self._thread_stops.get(surface.thread.id) is not None
         ):
             return
         rid = bound_request_id()
-        if row.reason == "worker_finished" and isinstance(
-            exc, (WorkerSpecRefused, WorkerFinishedRootChanged)
-        ):
-            log.warning("fleet.wake_card_refused", error_type=type(exc).__name__, rid=rid)
-            text = render_wake_refused(request_id=rid)
-        else:
-            text = render_error(exc, request_id=rid)
+        text = render_error(exc, request_id=rid)
         try:
             await surface.end_card(text)
         except Exception as card_exc:  # best effort: the row is settled either way
@@ -4521,19 +4305,6 @@ class DaimonBot(commands.Bot):
             admitted_name=admission.agent.name,
             asking_ma_agent_id=asking_ma_agent_id,
         )
-        completion_batch = None
-        if row.reason == "worker_finished":
-            if not self.runtime.turn_deps.fleet_enabled:
-                raise WorkerFinishedRootChanged("Fleet completion is disabled")
-            completion_batch = FrozenWorkerBatch.model_validate_json(row.requested_work or "")
-            await require_worker_finished_root(
-                self.runtime.sessionmaker,
-                row,
-                session_id=completion_batch.session_id,
-                account_id=admission.account_id,
-                agent_id=admission.agent.id,
-                now=datetime.now(UTC),
-            )
         turn_deadline_at = turn_deadline(now=datetime.now(UTC))
         agent = admission.agent
         try:
@@ -4624,19 +4395,6 @@ class DaimonBot(commands.Bot):
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
                 render_tables=tables_enabled(self.runtime.settings.table_rendering, tenant_id),
-                fleet_card=self.fleet_card_for(
-                    thread=thread,
-                    requester_id=int(row.requester_external_user_id),
-                    send=lambda: recorder.sender(
-                        thread, turn_card_intent_id=turn_id, transport=transport
-                    ),
-                    edit=_edit_message,
-                    turn_card_intent_id=turn_id,
-                    on_replacement=lambda msg: recorder.message(
-                        thread, msg, turn_card_intent_id=turn_id
-                    ),
-                    wake_id=row.id if row.reason == "worker_finished" else None,
-                ),
                 send=recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport),
                 edit=_edit_message,
                 urgent_edit=_urgent_edit_message,
@@ -4681,7 +4439,7 @@ class DaimonBot(commands.Bot):
             if current.message_ref is not None:
                 await current.end_card(text)
             else:
-                await transport.send(text)
+                await transport.send(embed=build_notice_embed(text))
             shown_on = current.message_ref
             if shown_on is not None and str(shown_on.id) != current.card_message_id:
                 return  # an earlier card still shows its Stop button; recovery retires it
@@ -4702,6 +4460,7 @@ class DaimonBot(commands.Bot):
             attended=continuation_attended(row),
             parent_channel_id=row.parent_channel_id,
             thread_id=row.thread_id,
+            platform_channel_id=row.thread_id,
             responder_ma_agent_id=str(agent.id),
             responder_name=admission.config.agent_name or agent.name,
             configuration_target_ma_agent_id=admission.config.configuration_target_ma_agent_id,
@@ -4710,19 +4469,8 @@ class DaimonBot(commands.Bot):
             sender_foreign=admission.hold is not None and admission.hold.client,
             shared_channel=admission.shared_channel,
             is_setup=admission.config.thread_binding_kind == "setup",
-            keep_fleet_root=self.runtime.turn_deps.fleet_enabled,
         )
         prepared_origin = None
-        if self.runtime.turn_deps.fleet_enabled:
-            from daimon.core.turn.runtime_manifest import read_agent_fleet_grant_or_off
-
-            # As on a mention: the origin opens before the session binds, so a
-            # fleet root (a wake included) captures its source while preparing.
-            grant = await read_agent_fleet_grant_or_off(
-                self.runtime.turn_deps, admission, now=datetime.now(UTC)
-            )
-            if grant is not None:
-                prepared_origin = await origins.enter_async_context(origin_context)
 
         session_account_id = admission.account_id
         prepared = await bind_session(
@@ -4737,20 +4485,6 @@ class DaimonBot(commands.Bot):
             deadline=turn_deadline_at,
         )
 
-        async def completion_root() -> None:
-            if prepared.session_account_id != prepared.admission.account_id:
-                raise WorkerFinishedRootChanged("Prepared fleet account differs from admission")
-            await require_worker_finished_root(
-                self.runtime.sessionmaker,
-                row,
-                session_id=prepared.ma_session_id,
-                account_id=prepared.admission.account_id,
-                agent_id=prepared.admission.agent.id,
-                now=datetime.now(UTC),
-            )
-
-        if completion_batch is not None:
-            await completion_root()
         watch.session_id = prepared.ma_session_id
 
         marked_message_id: str | None = None
@@ -4813,6 +4547,7 @@ class DaimonBot(commands.Bot):
             return (
                 render_turn_origin(
                     recovery_origin,
+                    **backend_facts(admission),
                     responder_handle=_responder_handle(self.runtime.settings),
                     session_state=session_state,
                     handoff=handoff_notice,
@@ -4892,6 +4627,7 @@ class DaimonBot(commands.Bot):
                     user_message=(
                         render_turn_origin(
                             origin,
+                            **backend_facts(admission),
                             responder_handle=_responder_handle(self.runtime.settings),
                             session_state=session_state,
                             handoff=handoff_notice,
@@ -4913,16 +4649,14 @@ class DaimonBot(commands.Bot):
                         tenant_id=tenant_id,
                         account_id=admission.account_id,
                         admission=admission,
+                        client=self,
                     ),
                     active_turn_message_id=marked_message_id,
                     before_send=(
                         watch_binding
                         if row.reason in ("watch_fired", "watch_report", "job_finished")
-                        else completion_root
-                        if completion_batch is not None
                         else None
                     ),
-                    worker_finished=row if completion_batch is not None else None,
                     **provider_action_options(
                         prepared,
                         lambda: discord_provider_action_hook(
@@ -4954,7 +4688,6 @@ class DaimonBot(commands.Bot):
                     intent_id=turn_card_intent.id,
                     expected_message_id=lifecycle_holder[0].card_message_id,
                     allow_prepared_without_message=not lifecycle_holder[0].first_post_attempted,
-                    keep_fleet_root=self.runtime.turn_deps.fleet_enabled,
                 )
 
         assert outcome is not None
@@ -5002,11 +4735,30 @@ class DaimonBot(commands.Bot):
             return
         if before.permissions != after.permissions:
             clear_webhook_backoff(after.guild)
+            await self._member_sync.admins_changed(after.guild, after.members)
+
+    async def on_guild_role_delete(self, role: discord.Role) -> None:
+        # A new role has no members, so only a delete and an update move admin flags.
+        if self._allows_guild(role.guild.id):
+            await self._member_sync.admins_changed(role.guild, role.guild.members)
+
+    async def on_guild_update(self, before: discord.Guild, after: discord.Guild) -> None:
+        if not self._allows_guild(after.id) or before.owner_id == after.owner_id:
+            return
+        owners = {before.owner_id, after.owner_id}
+        await self._member_sync.admins_changed(after, [m for m in after.members if m.id in owners])
+
+    async def on_member_join(self, member: discord.Member) -> None:
+        if self._allows_guild(member.guild.id):
+            await self._member_sync.joined(member)
 
     async def on_raw_member_remove(self, payload: discord.RawMemberRemoveEvent) -> None:
         guild_id = str(payload.guild_id)
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
         self.membership_resolver.invalidate(tenant_id, guild_id, str(payload.user.id))
+        # Raw, so a member missing from the cache still leaves the list.
+        if self._allows_guild(payload.guild_id):
+            await self._member_sync.left(payload.guild_id, payload.user.id)
 
     async def on_member_remove(self, member: discord.Member) -> None:
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(member.guild.id))
@@ -5024,12 +4776,17 @@ class DaimonBot(commands.Bot):
             return
         if self.user is not None and after.id == self.user.id and before.roles != after.roles:
             clear_webhook_backoff(after.guild)
+        if before.roles != after.roles:
+            await self._member_sync.joined(after)
 
     async def on_guild_channel_update(
         self, before: discord.abc.GuildChannel, after: discord.abc.GuildChannel
     ) -> None:
         if not self._allows_guild(after.guild.id):
             return
+        remember_guild_channels(
+            self.runtime.sessionmaker, guild_id=after.guild.id, channels=[after]
+        )
         if before.overwrites != after.overwrites:
             clear_webhook_backoff(after.guild)
 
@@ -5225,6 +4982,7 @@ class DaimonBot(commands.Bot):
             tenant_id=tenant_id,
             platform="discord",
             channel_id=str(message.channel.id),
+            alertable=not unprompted,
         ):
             async with contextlib.AsyncExitStack() as origins:
                 return await self._orchestrate_observed(
@@ -5388,7 +5146,7 @@ class DaimonBot(commands.Bot):
             if unprompted:
                 return  # nobody asked; a notice per quiet burst would spam the thread
             target = thread or message.channel
-            await target.send(NOT_SET_UP_NOTICE)
+            await target.send(embed=build_notice_embed(NOT_SET_UP_NOTICE))
             return
         except MAResolverMissError as err:
             log.warning(
@@ -5400,7 +5158,7 @@ class DaimonBot(commands.Bot):
             if unprompted:
                 return
             target = thread or message.channel
-            await target.send(SETUP_OUT_OF_DATE_NOTICE)
+            await target.send(embed=build_notice_embed(SETUP_OUT_OF_DATE_NOTICE))
             return
         except AdmissionDenied as err:
             if unprompted:
@@ -5468,6 +5226,12 @@ class DaimonBot(commands.Bot):
                     guild_id=guild_id,
                     channel_id=parent_channel_id,
                 )
+            elif err.reason == "allowance_exhausted":
+                log.info(
+                    "turn.skipped.allowance_exhausted",
+                    guild_id=guild_id,
+                    user_id=str(message.author.id),
+                )
             else:
                 log.info(
                     "turn.skipped.over_cap",
@@ -5476,8 +5240,13 @@ class DaimonBot(commands.Bot):
                 )
             if err.reason != "writers_none":
                 await target.send(
-                    admission_refusal_message(
-                        err.reason, self.runtime.settings, cause=err.cause, provider=err.provider
+                    embed=build_notice_embed(
+                        admission_refusal_message(
+                            err.reason,
+                            self.runtime.settings,
+                            cause=err.cause,
+                            provider=err.provider,
+                        )
                     )
                 )
             return
@@ -5657,18 +5426,6 @@ class DaimonBot(commands.Bot):
                 trigger_message=message,
                 acknowledgment_managed=True,
                 render_tables=tables_enabled(self.runtime.settings.table_rendering, tenant_id),
-                fleet_card=self.fleet_card_for(
-                    thread=thread,
-                    requester_id=message.author.id,
-                    send=lambda: recorder.sender(
-                        thread, turn_card_intent_id=turn_id, transport=transport
-                    ),
-                    edit=_edit_message,
-                    turn_card_intent_id=turn_id,
-                    on_replacement=lambda msg: recorder.message(
-                        thread, msg, turn_card_intent_id=turn_id
-                    ),
-                ),
                 send=recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport),
                 edit=_edit_message,
                 urgent_edit=_urgent_edit_message,
@@ -5725,7 +5482,7 @@ class DaimonBot(commands.Bot):
                 # when the card itself now shows the error.
                 await current.end_card(text)
             else:
-                await turn_send(text)
+                await turn_send(embed=build_notice_embed(text))
             shown_on = current.message_ref
             if shown_on is not None and str(shown_on.id) != current.card_message_id:
                 # An earlier edit replaced the card; the original may still show
@@ -5773,17 +5530,23 @@ class DaimonBot(commands.Bot):
                 self._spawn(_unmark_queued(added))
         if slot != "started":
             ended = {
-                "cancelled": "Stopped.\nSend a message to start again.",
+                "cancelled": "Send a message to start again.",
                 "timed_out": QUEUE_TIMED_OUT_TEXT,
                 "balance_depleted": admission_refusal_message(
                     "balance_depleted", self.runtime.settings
                 ),
+                "allowance_exhausted": admission_refusal_message(
+                    "allowance_exhausted", self.runtime.settings
+                ),
                 "queue_full": TENANT_CAP_NOTICE,
             }[slot]
+            ended_embed = build_notice_embed(
+                ended, title="Stopped." if slot == "cancelled" else None
+            )
             if lifecycle.message_ref is not None:
-                await lifecycle.edit_card(content=ended, embed=None, view=None)
+                await lifecycle.edit_card(content=None, embed=ended_embed, view=None)
             else:
-                await turn_send(ended)
+                await turn_send(embed=ended_embed)
             await retire_terminal_turn_card(
                 self.runtime.sessionmaker,
                 intent_id=turn_card_intent.id,
@@ -5828,17 +5591,12 @@ class DaimonBot(commands.Bot):
             is_setup=admission.config.thread_binding_kind == "setup",
             message_text=message.content,
             queued_message=content_override is not None,
-            keep_fleet_root=self.runtime.turn_deps.fleet_enabled,
+            # A thread opened from this message lives beside it: the message
+            # stays readable in the channel it was posted in.
+            platform_channel_id=str(message.channel.id),
+            platform_message_id=str(message.id),
         )
         prepared_origin = None
-        if self.runtime.turn_deps.fleet_enabled:
-            from daimon.core.turn.runtime_manifest import read_agent_fleet_grant_or_off
-
-            grant = await read_agent_fleet_grant_or_off(
-                self.runtime.turn_deps, admission, now=datetime.now(UTC)
-            )
-            if grant is not None:
-                prepared_origin = await origins.enter_async_context(origin_context)
 
         bind = bind_session
         if prepared_origin is not None:
@@ -5916,11 +5674,11 @@ class DaimonBot(commands.Bot):
             # Nothing was attempted -- bind_session did not run the turn
             # against a configuration nobody asked for, so no turn to render
             # here either; the copy says what was preserved and asks for a retry.
-            failure_text = render_preparation_failed(agent.name)
+            failure_embed = build_notice_embed(render_preparation_failed(agent.name))
             if lifecycle.message_ref is not None:
-                await lifecycle.edit_card(content=failure_text, embed=None, view=None)
+                await lifecycle.edit_card(content=None, embed=failure_embed, view=None)
             else:
-                await turn_send(failure_text)
+                await turn_send(embed=failure_embed)
             await retire_terminal_turn_card(
                 self.runtime.sessionmaker,
                 intent_id=turn_card_intent.id,
@@ -5937,15 +5695,17 @@ class DaimonBot(commands.Bot):
             # finishes first and the switch applies to their next one. A seal
             # that landed while the turn was prepared defers it the same way;
             # the next message is prepared read-only, so it says to send again.
-            busy_text = (
+            sealed = "seal" in busy.pending_reasons
+            busy_embed = build_notice_embed(
                 render_access_changed_try_again()
-                if "seal" in busy.pending_reasons
-                else render_current_work_must_finish(agent.name, handoff=True)
+                if sealed
+                else render_current_work_must_finish(agent.name, handoff=True),
+                neutral=not sealed,
             )
             if lifecycle.message_ref is not None:
-                await lifecycle.edit_card(content=busy_text, embed=None, view=None)
+                await lifecycle.edit_card(content=None, embed=busy_embed, view=None)
             else:
-                await turn_send(busy_text)
+                await turn_send(embed=busy_embed)
             await retire_terminal_turn_card(
                 self.runtime.sessionmaker,
                 intent_id=turn_card_intent.id,
@@ -5961,47 +5721,11 @@ class DaimonBot(commands.Bot):
             reused=prepared.reused,
         )
         watch.session_id = prepared.ma_session_id
-        # A planned transition the caller didn't necessarily ask to see this
-        # turn: say what happened to the workspace BEFORE the answer, so a
-        # replacement is never discovered only by its side effects.
-        # `prepared.continuity` is the bind's OWN decision, taken before the
-        # turn runs -- it can never be "replaced_after_loss" (that state only
-        # exists on the post-turn `RunOutcome`, set when `run_prepared_turn`'s
-        # recovery cycle recreates the session mid-call). That notice is
-        # posted after the turn instead, once the outcome is known.
-        replacement_summary: str | None = None
-        if (
-            prepared.continuity.announces_replacement()
-            and prepared.continuity.transfer_kind is not None
-        ):
-            # Not a separate message: the answer is an in-place edit of the
-            # embed posted at mention time, so a summary sent at any point
-            # after that lands BELOW the answer it explains ("the file
-            # vanished" above "here is why"). It becomes the answer's first
-            # paragraph instead. The fallback after the turn covers an answer
-            # that never arrives to carry it.
-            #
-            # A `None` transfer_kind here means a fresh start (no prior
-            # session to summarize a transfer from) -- that path already
-            # announces itself elsewhere, so no prefix is rendered.
-            replacement_summary = render_replacement_summary(prepared.continuity.transfer_kind, [])
-            lifecycle.answer_prefix = replacement_summary
-        if prepared.continuity.state == "replaced" and prepared.mapping_id is not None:
-            from daimon.core.stores.thread_sessions import github_key_restart_line
-
-            async with self.runtime.sessionmaker() as notice_session:
-                key_restart = await github_key_restart_line(
-                    notice_session, mapping_id=prepared.mapping_id
-                )
-            if key_restart is not None:
-                replacement_summary = key_restart
-                lifecycle.answer_prefix = key_restart
+        # What happened to the workspace is the agent's to say, from the turn controls.
         session_state = (
             None
             if prepared.continuity.state == "continued"
-            else SessionState(
-                state=prepared.continuity.state, applied=prepared.continuity.applied, lost=()
-            )
+            else prepared.continuity.session_state()
         )
 
         # Flag the turn as in flight. The render loop lives in THIS process, so
@@ -6159,13 +5883,6 @@ class DaimonBot(commands.Bot):
         if synthetic_prefix:
             user_message = synthetic_prefix + "\n" + user_message
 
-        if images_skipped:
-            await turn_send(
-                "Some images couldn't be inlined — I've linked them for the agent to "
-                "fetch instead: "
-                + ", ".join(f"`{att.filename}` ({r})" for att, r in images_skipped)
-            )
-
         # --- Run the turn (run_prepared_turn owns the driver
         # call and the one-shot dead-session recovery cycle). ---
 
@@ -6218,6 +5935,7 @@ class DaimonBot(commands.Bot):
             return (
                 render_turn_origin(
                     recovery_origin,
+                    **backend_facts(admission),
                     responder_handle=_responder_handle(self.runtime.settings),
                     session_state=session_state,
                     effective_is_admin=admission.is_admin,
@@ -6265,10 +5983,6 @@ class DaimonBot(commands.Bot):
                     thread, msg, turn_card_intent_id=turn_card_intent.id
                 ),
             )
-            # The replacement summary belongs to the turn, not to the lifecycle
-            # object that happens to render it -- a recovery cycle swaps the
-            # lifecycle and would otherwise drop it.
-            new_lifecycle.answer_prefix = lifecycle.answer_prefix
             lifecycle_holder[0] = new_lifecycle
             return new_lifecycle
 
@@ -6304,12 +6018,21 @@ class DaimonBot(commands.Bot):
                     user_message=(
                         render_turn_origin(
                             origin,
+                            **backend_facts(admission),
                             responder_handle=_responder_handle(self.runtime.settings),
                             session_state=session_state,
                             effective_is_admin=admission.is_admin,
                         )
                         + "\n"
                         + user_message
+                    ),
+                    # A reply nobody asked for has no request to look up.
+                    request_text=(
+                        None
+                        if unprompted
+                        else content_override
+                        if content_override is not None
+                        else message.content
                     ),
                     lifecycle=lifecycle,
                     turn_card_intent_id=turn_card_intent.id,
@@ -6325,6 +6048,7 @@ class DaimonBot(commands.Bot):
                         tenant_id=tenant_id,
                         account_id=admission.account_id,
                         admission=admission,
+                        client=self,
                     ),
                     active_turn_message_id=marked_message_id,
                     **provider_action_options(
@@ -6368,7 +6092,6 @@ class DaimonBot(commands.Bot):
                     intent_id=turn_card_intent.id,
                     expected_message_id=lifecycle_holder[0].card_message_id,
                     allow_prepared_without_message=not lifecycle_holder[0].first_post_attempted,
-                    keep_fleet_root=self.runtime.turn_deps.fleet_enabled,
                 )
 
         # Reached only on the non-exceptional path -- any raise inside the try
@@ -6387,29 +6110,6 @@ class DaimonBot(commands.Bot):
         state = outcome.state
         mapping_id = outcome.mapping_id
         final_lifecycle = lifecycle_holder[0]
-
-        # The recovery cycle inside run_prepared_turn only learns a session was
-        # lost mid-call, after the turn has already run -- so unlike the
-        # planned-replacement summary above, this notice can only be posted
-        # here, once `outcome.continuity` is known. Posted regardless of
-        # whether the recovered turn itself then answered or errored: the
-        # person needs to know the workspace was lost either way.
-        if outcome.continuity.state == "replaced_after_loss":
-            loss_kind: Literal["transcript", "history"] = (
-                "transcript" if outcome.continuity.transfer_kind == "transcript" else "history"
-            )
-            loss_notice = render_unexpected_loss(loss_kind)
-            # Edited in above the answer rather than sent under it, for the
-            # same ordering reason as the planned summary above. Falls back to
-            # a message when there is no answer to sit above (a tool-only or
-            # failed turn) or it will not fit.
-            if not await final_lifecycle.prepend_revealed_answer(loss_notice):
-                await turn_send(loss_notice)
-        if replacement_summary is not None and not final_lifecycle.answer_prefix_applied:
-            # The turn produced no answer to carry the summary (tool-only,
-            # cancelled, or failed). The person still has to be told what the
-            # replacement carried across, so it goes out on its own.
-            await turn_send(replacement_summary)
 
         if state.error is not None:
             log.warning(
@@ -6444,7 +6144,12 @@ class DaimonBot(commands.Bot):
             # -- said only after the answer, so it never reads as a caveat on
             # work that already finished.
             if prepared.continuity.pending:
-                await turn_send(render_current_work_must_finish(agent.name, handoff=False))
+                await turn_send(
+                    embed=build_notice_embed(
+                        render_current_work_must_finish(agent.name, handoff=False),
+                        neutral=True,
+                    )
+                )
             # Any task handed to another agent in THIS thread, with work to
             # continue, gets its first turn dispatched now -- still inside this
             # turn's concurrency guard, so nothing else can land in the thread

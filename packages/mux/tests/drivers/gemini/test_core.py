@@ -1,5 +1,6 @@
 """Offline Gemini port probes using documented wire records and no provider access."""
 
+import asyncio
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta, timezone
 
@@ -8,7 +9,7 @@ from mux.contracts.actions import NativeInput, UserMessage, UserToolResult
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.events import NativePart, TextPart, ToolResultPayload
 from mux.contracts.extensions import ExtensionConfig
-from mux.contracts.ids import ChannelRef, ModelRef, PageRequest, Scope, ThreadRef
+from mux.contracts.ids import ChannelRef, ModelRef, PageRequest, ResourceRef, Scope, ThreadRef
 from mux.contracts.ports import ManagedAgents, Steering
 from mux.contracts.resources import (
     AgentSpec,
@@ -668,76 +669,7 @@ def test_configured_agent_compiles_only_declared_builtin_custom_and_mcp_tools() 
     ]
 
 
-@pytest.mark.parametrize("ceiling", (False, 0, -1, "4096"))
-def test_agent_worker_budget_requires_a_positive_integer(ceiling) -> None:
-    with pytest.raises(UnsupportedCapability):
-        compile_agent(
-            AgentSpec(name="worker", model=ModelRef(provider="gemini", id="gemini-3.5-flash-lite")),
-            max_total_tokens=ceiling,
-        )
-
-
-async def test_agent_worker_budget_is_in_the_owned_template_and_blocks_another_interaction() -> (
-    None
-):
-    from mux.profiles.gemini import WORKER_MAX_TOTAL_TOKENS, WORKER_MODEL
-
-    transport, storage, state = FakeTransport(), MemoryStorage(), MemoryStateStore()
-    worker = GeminiManagedAgents(
-        transport,
-        storage=storage,
-        state_store=state,
-        account_scope_id="project",
-        max_total_tokens=WORKER_MAX_TOTAL_TOKENS,
-    )
-    agent = await worker.agents.create(
-        SCOPE,
-        AgentSpec(name="worker", model=ModelRef(provider="gemini", id=WORKER_MODEL), system="Kept"),
-        key="agent",
-    )
-    spec = SessionSpec(
-        agent=agent.ref,
-        agent_revision=agent.revision,
-        config_revision=1,
-        extensions={
-            "gemini.session": ExtensionConfig(
-                namespace="gemini.session",
-                version=1,
-                value={
-                    "thread": THREAD.model_dump(mode="json"),
-                    "binding_id": "budget-worker",
-                },
-            )
-        },
-    )
-    session = await worker.sessions.create(SCOPE, spec, key="session")
-    transport.responses.append(native())
-    first = await worker.events.send(SCOPE, session.ref, (MESSAGE,), key="claimed-input")
-    assert transport.requests[0]["agent_config"] == {
-        "type": "antigravity",
-        "model": "gemini-3.5-flash-lite",
-        "max_total_tokens": 65_536,
-    }
-    assert transport.requests[0]["system_instruction"] == "Kept"
-    assert transport.requests[0]["tools"] == [NO_TOOLS_TOOL]
-    assert await worker.events.send(SCOPE, session.ref, (MESSAGE,), key="claimed-input") == first
-    restarted = GeminiManagedAgents(
-        transport,
-        storage=storage,
-        state_store=state,
-        account_scope_id="project",
-        max_total_tokens=WORKER_MAX_TOTAL_TOKENS,
-    )
-    assert await restarted.events.send(SCOPE, session.ref, (MESSAGE,), key="claimed-input") == first
-    with pytest.raises(UnsupportedCapability) as refused:
-        await restarted.events.send(SCOPE, session.ref, (MESSAGE,), key="second-input")
-    assert "worker_single_interaction" in refused.value.missing
-    assert len(transport.requests) == 1
-    operation = await state.get_operation(SCOPE, "claimed-input")
-    assert operation is not None and operation.operation.status == "accepted"
-
-
-def test_worker_model_permission_preserves_default_selections_and_thread_mode() -> None:
+def test_removed_model_preserves_default_selections_and_thread_mode() -> None:
     from mux.profiles import BackendSelection, backend_selection, runnable_selection
 
     assert BackendSelection(BackendConfig(), ("per_caller",)).allowed_models is None
@@ -747,7 +679,7 @@ def test_worker_model_permission_preserves_default_selections_and_thread_mode() 
     cheap = BackendConfig(
         backend="gemini", profile="gemini.inline_reuse", model="gemini-3.5-flash-lite"
     )
-    assert runnable_selection(resolve_default(cheap))
+    assert not runnable_selection(resolve_default(cheap))
     assert not runnable_selection(
         resolve_default(cheap.model_copy(update={"thread_mode": "shared"}))
     )
@@ -774,27 +706,6 @@ def test_model_output_cap_is_strict_and_bounded(ceiling) -> None:
     spec = AgentSpec(name="chat", model=ModelRef(provider="gemini", id="gemini-3.8-flash"))
     with pytest.raises(UnsupportedCapability, match="capped_model_request"):
         compile_agent(spec, max_output_tokens=ceiling)
-
-
-@pytest.mark.parametrize("resource", ("tool", "skill", "mcp", "agent_budget"))
-def test_model_output_cap_cannot_discard_managed_intent(resource: str) -> None:
-    from mux.contracts.ids import SkillRef
-
-    spec = AgentSpec(name="chat", model=ModelRef(provider="gemini", id="gemini-3.8-flash"))
-    if resource == "tool":
-        spec = spec.model_copy(update={"tools": (ToolSpec(name="code_execution", kind="builtin"),)})
-    elif resource == "skill":
-        spec = spec.model_copy(update={"skills": (SkillRef(id="skill"),)})
-    elif resource == "mcp":
-        spec = spec.model_copy(
-            update={"mcp_servers": (MCPConnection(name="server", url="https://example.test/mcp"),)}
-        )
-    with pytest.raises(UnsupportedCapability, match="model_interaction_resources"):
-        compile_agent(
-            spec,
-            max_output_tokens=4096,
-            max_total_tokens=4096 if resource == "agent_budget" else None,
-        )
 
 
 async def test_capped_model_turns_keep_conversation_and_budget_after_restart() -> None:
@@ -856,137 +767,6 @@ async def test_capped_model_turns_keep_conversation_and_budget_after_restart() -
         await restarted.events.send(SCOPE, session.ref, (MESSAGE,), key="tampered")
     assert len(transport.requests) == 2
     assert await state.get_operation(SCOPE, "tampered") is None
-
-
-class CountingTransport(FakeTransport):
-    def __init__(self, count):
-        super().__init__()
-        self.count = count
-        self.counted = []
-
-    async def count_input_tokens(self, request):
-        self.counted.append(dict(request))
-        return self.count
-
-
-async def bounded_worker(transport, *, storage=None, state=None, cap=20):
-    storage = storage or MemoryStorage()
-    state = state or MemoryStateStore()
-    driver = GeminiManagedAgents(
-        transport,
-        storage=storage,
-        state_store=state,
-        account_scope_id="project",
-        max_input_tokens=cap,
-        max_output_tokens=24,
-    )
-    agent = await driver.agents.create(
-        SCOPE,
-        AgentSpec(
-            name="bounded",
-            model=ModelRef(provider="gemini", id="gemini-3.8-flash"),
-            system="Protected source instructions",
-        ),
-        key="bounded-agent",
-    )
-    session = await driver.sessions.create(
-        SCOPE,
-        SessionSpec(
-            agent=agent.ref,
-            agent_revision=agent.revision,
-            config_revision=1,
-            extensions={
-                "gemini.session": ExtensionConfig(
-                    namespace="gemini.session",
-                    version=1,
-                    value={"thread": THREAD.model_dump(mode="json"), "binding_id": "bounded"},
-                )
-            },
-        ),
-        key="bounded-session",
-    )
-    return driver, storage, state, session
-
-
-@pytest.mark.parametrize("count", (21, None, False, 0, -1))
-async def test_worker_refuses_over_cap_or_unknown_input_before_claim_or_dispatch(count):
-    transport = CountingTransport(count)
-    driver, _, state, session = await bounded_worker(transport)
-    with pytest.raises(UnsupportedCapability, match="worker_input_token_limit"):
-        await driver.events.send(SCOPE, session.ref, (MESSAGE,), key="over-cap")
-    assert not transport.requests
-    assert await state.get_operation(SCOPE, "over-cap") is None
-    assert transport.counted[0]["system_instruction"] == "Protected source instructions"
-
-
-async def test_worker_accepts_exact_cap_including_cached_input_and_thinking_then_stops():
-    transport = CountingTransport(20)
-    driver, storage, state, session = await bounded_worker(transport)
-    transport.responses.append(
-        native(
-            usage={
-                "total_input_tokens": 20,
-                "total_cached_tokens": 18,
-                "total_output_tokens": 21,
-                "total_thought_tokens": 3,
-            },
-            environment_id=None,
-        )
-    )
-    receipt = await driver.events.send(SCOPE, session.ref, (MESSAGE,), key="at-cap")
-    observations = await driver.usage.reconcile(SCOPE, session.ref)
-    assert observations[-1].input_tokens == 20
-    assert observations[-1].input_cached_tokens == 18
-    assert observations[-1].output_tokens == 24
-    assert observations[-1].output_reasoning_tokens == 3
-    sent = transport.requests[0]
-    assert sent == transport.counted[0]
-    assert sent["generation_config"] == {"max_output_tokens": 24}
-    assert not {"agent", "agent_config", "previous_interaction_id", "environment"} & sent.keys()
-    restarted, _, _, _ = await bounded_worker(transport, storage=storage, state=state)
-    assert await restarted.events.send(SCOPE, session.ref, (MESSAGE,), key="at-cap") == receipt
-    with pytest.raises(UnsupportedCapability, match="worker_single_interaction"):
-        await restarted.events.send(SCOPE, session.ref, (MESSAGE,), key="next-turn")
-    assert len(transport.requests) == len(transport.counted) == 1
-    assert await state.get_operation(SCOPE, "next-turn") is None
-
-
-async def test_worker_unknown_acceptance_keeps_aggregate_envelope_spent():
-    transport = CountingTransport(20)
-    driver, storage, state, session = await bounded_worker(transport)
-    transport.responses.append(ProviderError("transient_network", retryable=True))
-    receipt = await driver.events.send(SCOPE, session.ref, (MESSAGE,), key="unknown")
-    assert receipt.status == "outcome_unknown"
-    restarted, _, _, _ = await bounded_worker(transport, storage=storage, state=state)
-    with pytest.raises(UnsupportedCapability, match="unreconciled_delivery"):
-        await restarted.events.send(SCOPE, session.ref, (MESSAGE,), key="replacement")
-    assert len(transport.requests) == 1
-
-
-async def test_worker_envelope_cannot_expand_or_disappear_after_restart():
-    transport = CountingTransport(20)
-    _, storage, state, session = await bounded_worker(transport)
-    for cap in (None, 21):
-        changed = GeminiManagedAgents(
-            transport,
-            storage=storage,
-            state_store=state,
-            account_scope_id="project",
-            max_output_tokens=24,
-            max_input_tokens=cap,
-        )
-        with pytest.raises(UnsupportedCapability, match="changed_worker_token_envelope"):
-            await changed.events.send(SCOPE, session.ref, (MESSAGE,), key="changed")
-    assert not transport.requests
-
-
-async def test_worker_without_complete_prompt_counting_refuses_before_dispatch():
-    transport = FakeTransport()
-    driver, _, state, session = await bounded_worker(transport)
-    with pytest.raises(UnsupportedCapability, match="worker_input_token_count"):
-        await driver.events.send(SCOPE, session.ref, (MESSAGE,), key="uncounted")
-    assert not transport.requests
-    assert await state.get_operation(SCOPE, "uncounted") is None
 
 
 def high_demand() -> ProviderError:
@@ -1137,3 +917,209 @@ async def test_usage_reconcile_retries_a_high_demand_read(setup: Setup) -> None:
     t.reads["i1"] = [high_demand(), native()]
     assert await ma.usage.reconcile(SCOPE, s.ref)
     assert t.read_requests == ["i1", "i1"] and len(t.requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reading", ["usage", "events"])
+@pytest.mark.parametrize("change", ["removed", "replaced"])
+async def test_reconcile_never_applies_a_read_to_an_interaction_changed_meanwhile(
+    setup: Setup, reading: str, change: str
+) -> None:
+    """The provider reads run outside the records transaction; the result is applied
+    in a short one afterwards. An interaction removed, or given to another turn, while
+    its read ran must never receive that read."""
+    ma, t, storage, _, s, _ = setup
+    t.responses.append(native(usage=None))
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    before = await ma.usage.list(SCOPE, s.ref, page=PageRequest())
+    t.saved["i1"]["usage"] = {
+        "total_input_tokens": 10,
+        "total_output_tokens": 100,
+        "total_thought_tokens": 0,
+    }
+    t.saved["i1"]["updated"] = datetime.now(UTC).isoformat()
+    real_get = t.get
+
+    async def get_then_change(interaction: str) -> Object:
+        raw = await real_get(interaction)
+        async with storage.transaction() as records:  # another writer, mid-read
+            record = records.sessions[s.ref.id]
+            if change == "removed":
+                del record.interactions[interaction]
+            else:
+                record.interactions[interaction] = "another-turn"
+        return raw
+
+    t.get = get_then_change  # type: ignore[method-assign]
+    if reading == "usage":
+        await asyncio.wait_for(ma.usage.reconcile(SCOPE, s.ref), 5)
+    else:
+        await asyncio.wait_for(ma.events.reconcile(SCOPE, s.ref), 5)
+    assert await ma.usage.list(SCOPE, s.ref, page=PageRequest()) == before
+
+
+@pytest.mark.asyncio
+async def test_a_completed_interactions_events_are_delivered_while_a_writer_holds_records(
+    setup: Setup,
+) -> None:
+    """J6g PAKM6G failed busy right after `interaction.completed`: the stream reconciled,
+    then read the turn's events through the account's write transaction again. Another
+    copy's writer taking the records row the moment the reconcile commits must not stop
+    the events it just committed from being delivered."""
+    ma, t, storage, _, s, _ = setup
+    t.responses.append(native(status="in_progress", steps=[]))
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    t.saved["i1"] = native()
+    t.streams["i1"] = [{"event_type": "interaction.completed"}]
+    real_reconcile = ma.events.reconcile
+    real_transaction = storage.transaction
+    held = False
+
+    async def reconcile_then_a_writer_takes_the_row(scope: Scope, session: ResourceRef):
+        nonlocal held
+        result = await real_reconcile(scope, session)
+        held = True
+        return result
+
+    def transaction(*, after_dispatch: bool = False):
+        if held:
+            raise RuntimeError("records row held by another copy's writer")
+        return real_transaction(after_dispatch=after_dispatch)
+
+    ma.events.reconcile = reconcile_then_a_writer_takes_the_row  # type: ignore[method-assign]
+    storage.transaction = transaction  # type: ignore[method-assign]
+    streamed = [e async for e in ma.events.stream(SCOPE, s.ref)]
+    assert held, "the writer took the row after the reconcile"
+    assert any(e.type == "session.turn_ended" for e in streamed), [e.type for e in streamed]
+
+
+#: Later than any stamp the turn's own send records, so the fresher read is applied.
+_STAMP = (datetime.now(UTC) + timedelta(hours=1)).replace(microsecond=0).isoformat()
+
+
+def _read_at_stamp(status: str, output_tokens: int) -> Object:
+    """A provider read whose `updated` is the same second as the one recorded."""
+    return native(
+        status=status,
+        created=_STAMP,
+        updated=_STAMP,
+        usage={
+            "total_input_tokens": 10,
+            "total_output_tokens": output_tokens,
+            "total_thought_tokens": 0,
+        },
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stale",
+    [
+        pytest.param(_read_at_stamp("in_progress", 120), id="un-finalises"),
+        pytest.param(_read_at_stamp("completed", 100), id="lowers-usage"),
+        pytest.param(_read_at_stamp("in_progress", 200), id="re-opens-the-turn"),
+    ],
+)
+async def test_a_stale_read_with_an_equal_stamp_never_undoes_a_fresher_one(
+    setup: Setup, stale: Object
+) -> None:
+    """#1557 review 1: provider reads run outside the records lock, so an older read can
+    commit after a fresher one with the same seconds-precision stamp. It must never
+    un-finalise usage, lower a count, or re-open the finished turn."""
+    ma, t, _, _, s, _ = setup
+    t.responses.append(native(status="in_progress", steps=[], usage=None))
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    t.saved["i1"] = _read_at_stamp("completed", 120)
+    await ma.usage.reconcile(SCOPE, s.ref)
+    fresher = await ma.usage.list(SCOPE, s.ref, page=PageRequest())
+    assert fresher.data[-1].final and fresher.data[-1].output_tokens == 120
+    assert (await ma.sessions.retrieve(SCOPE, s.ref)).state == "idle"
+
+    t.saved["i1"] = stale
+    await ma.usage.reconcile(SCOPE, s.ref)
+    assert await ma.usage.list(SCOPE, s.ref, page=PageRequest()) == fresher
+    current = await ma.sessions.retrieve(SCOPE, s.ref)
+    assert current.state == "idle" and current.active_root_turn is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("saved_before_fix", [False, True])
+async def test_a_whole_second_read_after_a_sub_second_create_finishes_the_turn(
+    setup: Setup, saved_before_fix: bool
+) -> None:
+    """Staging QTAC78/R4WRRK: the create reply said 23:07:10.142775, every read after it
+    23:07:10. The reads were discarded as older, so the turn never ended and the next
+    message was refused as a steer."""
+    ma, t, storage, _, s, _ = setup
+    second = datetime.now(UTC).replace(microsecond=0)
+    t.responses.append(
+        native(
+            status="in_progress",
+            steps=[],
+            usage=None,
+            created=(second + timedelta(microseconds=142775)).isoformat(),
+            updated=(second + timedelta(microseconds=142775)).isoformat(),
+        )
+    )
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    if saved_before_fix:
+        # A record saved before this fix still holds the sub-second watermark.
+        async with storage.transaction() as records:
+            records.sessions[s.ref.id].native_updated["i1"] = second + timedelta(
+                microseconds=142775
+            )
+    assert (await ma.sessions.retrieve(SCOPE, s.ref)).state == "running"
+
+    t.saved["i1"] = native(created=second.isoformat(), updated=second.isoformat())
+    current = await ma.sessions.retrieve(SCOPE, s.ref)
+    assert current.state == "idle" and current.active_root_turn is None
+    journal = await ma.events.list(SCOPE, s.ref, page=PageRequest())
+    assert any(e.type == "session.turn_ended" for e in journal.data)
+
+
+@pytest.mark.asyncio
+async def test_a_read_from_a_workspace_replaced_meanwhile_is_refused(setup: Setup) -> None:
+    """#1557 review 4: the read is checked against the snapshot's workspace before the
+    lock, and again against the current record when it is applied."""
+    ma, t, storage, _, s, _ = setup
+    t.responses.append(native())
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    real_get = t.get
+
+    async def get_while_the_workspace_changes(interaction: str) -> Object:
+        raw = await real_get(interaction)
+        async with storage.transaction() as records:
+            records.sessions[s.ref.id].environment_id = "e2"
+        return raw
+
+    t.get = get_while_the_workspace_changes  # type: ignore[method-assign]
+    with pytest.raises(ContinuityLost):
+        await asyncio.wait_for(ma.usage.reconcile(SCOPE, s.ref), 5)
+
+
+@pytest.mark.asyncio
+async def test_a_stop_observation_holds_no_lock_while_it_reads_the_provider(
+    setup: Setup,
+) -> None:
+    """#1557 review 2: wait_stopped polls the provider; each read used to hold the
+    account's records row for its whole duration."""
+    ma, t, storage, _, s, _ = setup
+    t.responses.append(native(status="in_progress", steps=[]))
+    sent = await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    assert sent.turn_id is not None
+    receipt = await ma.events.cancel(SCOPE, s.ref, turn_id=sent.turn_id, key="cancel")
+    t.saved["i1"]["status"] = "cancelled"
+    real_get = t.get
+    wrote: list[bool] = []
+
+    async def get_while_another_writer_commits(interaction: str) -> Object:
+        async with storage.transaction():
+            wrote.append(True)
+        return await real_get(interaction)
+
+    t.get = get_while_another_writer_commits  # type: ignore[method-assign]
+    deadline = datetime.now(UTC) + timedelta(seconds=1)
+    stop = await asyncio.wait_for(ma.events.wait_stopped(SCOPE, receipt, deadline=deadline), 5)
+    assert wrote and stop.stopped and stop.outcome == "interrupted"
+    t.get = real_get  # type: ignore[method-assign]  # retrieve still reads under the lock
+    assert (await ma.sessions.retrieve(SCOPE, s.ref)).state == "idle"
