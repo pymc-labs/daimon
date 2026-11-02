@@ -65,9 +65,9 @@ from daimon.core.stores.access_policy import (
     policy_write_transaction,
     set_access_policy,
 )
-from daimon.core.stores.scoped_config_read import get_scope, list_propagations_for_tenant
-from daimon.core.stores.channel_changes import record_change, write_channel_default
+from daimon.core.stores.channel_changes import WriteHook, record_change, write_channel_default
 from daimon.core.stores.domain import ChangeSurface
+from daimon.core.stores.scoped_config_read import get_scope, list_propagations_for_tenant
 from mux.errors import ScopeViolation
 from pydantic import JsonValue, ValidationError
 from sqlalchemy.exc import SQLAlchemyError
@@ -473,6 +473,7 @@ class _Ask:
     actor_account_id: uuid.UUID | None = None
     surface: ChangeSurface = "chat"
     expected: ChannelRule | None = None
+    on_write: WriteHook | None = None
 
 
 async def _write_rule(
@@ -538,6 +539,8 @@ async def _write_rule(
             before=policy,
             after=updated,
         )
+        if ask.on_write is not None:
+            await ask.on_write(session)
     change = RuleChange(
         ask.channel_id,
         before,
@@ -743,12 +746,14 @@ async def set_channel_rule(
     start_copy: Callable[[str, str, str, str], Awaitable[None]] | None = None,
     surface: ChangeSurface = "chat",
     expected_rule: ChannelRule | None = None,
+    on_write: WriteHook | None = None,
 ) -> RuleChange:
     """Set `channel_id`'s rule; raise `ChannelRuleRefused` if refused. None keeps a side.
 
     `expected_rule`, when given, is the rule the caller read: if the channel's rule
     differs under the lock, `StaleChannelValue` is raised and nothing is written. The
-    change, and any agents it keeps or releases, is recorded as made on `surface`.
+    change, and any agents it keeps or releases, is recorded as made on `surface`;
+    `on_write` then runs in the same transaction.
 
     `start_copy(source_name, source_ma_agent_id, copy_name, copy_ma_agent_id)` starts
     a copy of an agent on another provider there too (the MCP layer's switch path,
@@ -778,6 +783,7 @@ async def set_channel_rule(
         actor_account_id=actor_account_id,
         surface=surface,
         expected=expected_rule,
+        on_write=on_write,
     )
     wants_own = readers == "own" or (readers is None and writers == "own")
     known = (
@@ -1036,12 +1042,14 @@ async def set_agent_rule(
     actor_account_id: uuid.UUID | None = None,
     surface: ChangeSurface = "chat",
     expected_kept: tuple[str, Sequence[str]] | None = None,
+    on_write: WriteHook | None = None,
 ) -> AgentRuleChange:
     """Set where `agent_name` runs (None: wherever it is set to answer).
 
     `expected_kept` is `(channel_id, agents kept there)` as the caller read them: if
     they differ under the lock, `StaleChannelValue` is raised and nothing is written.
-    Each channel whose kept agents change is recorded as changed on `surface`.
+    Each channel whose kept agents change is recorded as changed on `surface`, and
+    `on_write` runs in the same transaction.
 
     The rule replaces any on the agent's other names. A channel's own agent
     keeps its rule until that channel's readers change; a rule naming a
@@ -1124,6 +1132,8 @@ async def set_agent_rule(
                 actor_account_id=actor_account_id,
                 surface=surface,
             )
+            if on_write is not None:
+                await on_write(session)
         answers_outside = False
         if target is not None and agent is not None:
             reach = await load_agent_reach(

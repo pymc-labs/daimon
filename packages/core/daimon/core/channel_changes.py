@@ -40,7 +40,7 @@ from daimon.core.rule_views import (
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores import channel_budgets as budget_store
 from daimon.core.stores.access_policy import load_access_policy, lock_access_policy
-from daimon.core.stores.channel_changes import record_change, write_channel_default
+from daimon.core.stores.channel_changes import WriteHook, record_change, write_channel_default
 from daimon.core.stores.domain import BudgetWindow, ChangeSurface, ChannelBudgetRow
 from daimon.core.stores.scoped_config_read import get_scope
 from pydantic import JsonValue
@@ -71,6 +71,13 @@ class ChannelActor:
     account_id: uuid.UUID | None
     subject: Subject
     surface: ChangeSurface
+    on_write: WriteHook | None = None
+    """Runs in each change's transaction once it is written (a surface's audit row)."""
+
+
+async def _wrote(session: AsyncSession, actor: ChannelActor, changed: bool) -> None:
+    if changed and actor.on_write is not None:
+        await actor.on_write(session)
 
 
 @dataclass(frozen=True)
@@ -181,6 +188,7 @@ async def set_default_agent(
             surface=actor.surface,
             set_by_admin=True,
         )
+        await _wrote(session, actor, prior != agent_name)
     return DefaultChange(prior, agent_name)
 
 
@@ -215,6 +223,7 @@ async def clear_default_agent(
             actor_account_id=actor.account_id,
             surface=actor.surface,
         )
+        await _wrote(session, actor, prior is not None)
     return DefaultChange(prior, None)
 
 
@@ -305,6 +314,7 @@ async def _set_kept(
             actor_account_id=actor.account_id,
             surface=actor.surface,
             expected_kept=(channel_id, expected.value) if expected is not None else None,
+            on_write=actor.on_write,
         )
     except ChannelRuleRefused as exc:
         kind: ChannelChangeRefusal = (
@@ -359,6 +369,7 @@ async def set_access(
         resource_host=resource_host,
         surface=actor.surface,
         expected_rule=expected.value if expected is not None else None,
+        on_write=actor.on_write,
     )
 
 
@@ -410,6 +421,7 @@ async def _record_budget(
         actor_account_id=actor.account_id,
         surface=actor.surface,
     )
+    await _wrote(session, actor, before != after)
 
 
 async def set_budget(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 
 from daimon.core._models import ChannelChange
@@ -13,6 +14,9 @@ from daimon.core.stores.scoped_config_write import set_fields, unset_fields
 from pydantic import JsonValue
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+WriteHook = Callable[[AsyncSession], Awaitable[None]]
+"""Run inside a change's transaction once it is written: a surface's own audit row."""
 
 
 async def record_change(

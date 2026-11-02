@@ -46,6 +46,49 @@ class AgentToolRule(BaseModel):
     set_at: datetime
 
 
+class AgentToolRuleChange(BaseModel):
+    """One change to a tool rule, as `agent_tool_rule_history` keeps it."""
+
+    agent_name: str
+    tool_key: str
+    channel_id: str | None
+    set_by: str
+    set_at: datetime
+    before_rule: str | None
+    before_scope: str | None
+    after_rule: str | None
+    after_scope: str | None
+
+
+async def list_channel_rule_history(
+    session: AsyncSession, *, tenant_id: uuid.UUID, channel_id: str, limit: int = 200
+) -> list[AgentToolRuleChange]:
+    """Tool rule changes for one channel, newest first."""
+    rows = await session.scalars(
+        select(AgentToolRuleHistoryRecord)
+        .where(
+            AgentToolRuleHistoryRecord.tenant_id == tenant_id,
+            AgentToolRuleHistoryRecord.channel_id == channel_id,
+        )
+        .order_by(AgentToolRuleHistoryRecord.set_at.desc(), AgentToolRuleHistoryRecord.id.desc())
+        .limit(limit)
+    )
+    return [
+        AgentToolRuleChange(
+            agent_name=row.after_agent_name,
+            tool_key=row.tool_key,
+            channel_id=row.channel_id,
+            set_by=row.set_by,
+            set_at=row.set_at,
+            before_rule=row.before_rule,
+            before_scope=row.before_scope,
+            after_rule=row.after_rule,
+            after_scope=row.after_scope,
+        )
+        for row in rows
+    ]
+
+
 def _view(row: AgentToolRuleRecord) -> AgentToolRule:
     return AgentToolRule(
         tenant_id=row.tenant_id,
