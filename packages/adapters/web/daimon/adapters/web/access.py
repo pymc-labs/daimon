@@ -15,6 +15,8 @@ Capability = Literal[
     "agents.view",
     "agents.edit",
     "agents.create",
+    "routines.view",
+    "routines.manage",
     "credits.view_own",
     "credits.manage",
     "people.manage",
@@ -27,6 +29,8 @@ _ALL: tuple[Capability, ...] = (
     "agents.view",
     "agents.edit",
     "agents.create",
+    "routines.view",
+    "routines.manage",
     "credits.view_own",
     "credits.manage",
     "people.manage",
@@ -37,7 +41,15 @@ _BY_ROLE: dict[Role, frozenset[Capability]] = {
     "owner": frozenset(_ALL),
     "admin": frozenset(_ALL),
     "member": frozenset(
-        {"chat.use", "agents.view", "agents.edit", "agents.create", "credits.view_own"}
+        {
+            "chat.use",
+            "agents.view",
+            "agents.edit",
+            "agents.create",
+            "routines.view",
+            "routines.manage",
+            "credits.view_own",
+        }
     ),
     "visitor": frozenset({"chat.use", "credits.view_own"}),
 }
@@ -47,6 +59,8 @@ _MODULE_OF: dict[Capability, WebModuleKey] = {
     "agents.view": "agents",
     "agents.edit": "agents",
     "agents.create": "agents",
+    "routines.view": "routines",
+    "routines.manage": "routines",
     "credits.view_own": "credits",
     "credits.manage": "credits",
     "people.manage": "admin",
@@ -54,12 +68,12 @@ _MODULE_OF: dict[Capability, WebModuleKey] = {
     "workspace.manage": "admin",
 }
 _MODULES_BY_ROLE: dict[Role, frozenset[WebModuleKey]] = {
-    "owner": frozenset({"chat", "agents", "credits", "admin"}),
-    "admin": frozenset({"chat", "agents", "credits", "admin"}),
-    "member": frozenset({"chat", "agents", "credits"}),
+    "owner": frozenset({"chat", "agents", "routines", "credits", "admin"}),
+    "admin": frozenset({"chat", "agents", "routines", "credits", "admin"}),
+    "member": frozenset({"chat", "agents", "routines", "credits"}),
     "visitor": frozenset({"chat"}),
 }
-_MODULE_ORDER: tuple[WebModuleKey, ...] = ("chat", "agents", "credits", "admin")
+_MODULE_ORDER: tuple[WebModuleKey, ...] = ("chat", "agents", "routines", "credits", "admin")
 
 
 def role_for(

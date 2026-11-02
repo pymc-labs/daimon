@@ -340,7 +340,7 @@ async def test_settings_are_read_and_changed_with_an_audit_row(
         me = (await admin.client.get("/api/me")).json()
 
     assert set(before) == {"modules", "default_agent"}, before
-    assert before["modules"] == {"chat": True, "agents": True, "credits": True}
+    assert before["modules"] == {"chat": True, "agents": True, "routines": True, "credits": True}
     assert before["default_agent"] == AGENT_ID, "the workspace default is offered"
     assert changed.json()["modules"]["agents"] is False, changed.text
     assert "agents" not in me["modules"], "a module turned off is gone for the workspace"

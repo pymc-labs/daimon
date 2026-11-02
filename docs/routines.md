@@ -35,6 +35,8 @@ numbers"). Each platform also has a panel:
 - **Slack** `/routines` and **Teams** `routines` (in a 1:1 chat): workspace
   admins create and delete. The form's schedule field takes cron, such as
   `0 9 * * 1-5`, and the panel shows schedules in words.
+- **Web app** Routines page: members create and manage their own, admins all.
+  Creating needs a linked chat account, which the routine runs as.
 - **Discord** `/routines` is read-mostly: pick a routine, pause or resume it,
   or view its last output. Create one by asking the agent.
 

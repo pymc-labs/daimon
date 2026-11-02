@@ -996,9 +996,10 @@ package, where the image build puts it.
 
 ### `DAIMON_WEB__MODULES`
 
-`tuple['chat' | 'agents' | 'credits' | 'admin', ...]` · optional · default `chat,agents,credits,admin`
+`tuple['chat' | 'agents' | 'routines' | 'credits' | 'admin', ...]` · optional · default `chat,agents,routines,credits,admin`
 
-Sections of the web app that are on, comma-separated: chat, agents, credits, admin.
+Sections of the web app that are on, comma-separated: chat, agents, routines, credits,
+admin.
 
 ### `DAIMON_WEB__NODES__DATA_SERVER__IDENTITY_SERVER`
 

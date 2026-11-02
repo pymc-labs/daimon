@@ -12,6 +12,7 @@ from daimon.adapters.web.credits import credits_router
 from daimon.adapters.web.invites import invites_router
 from daimon.adapters.web.me import me_router
 from daimon.adapters.web.nodes import nodes_router
+from daimon.adapters.web.routines import routines_router
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.adapters.web.security import SecurityMiddleware
 from daimon.adapters.web.static import spa_router
@@ -93,6 +94,7 @@ def create_app(runtime: WebRuntime) -> FastAPI:
     app.include_router(nodes_router(runtime))
     app.include_router(agents_router(runtime))
     app.include_router(chat_router(runtime))
+    app.include_router(routines_router(runtime))
     app.include_router(credits_router(runtime))
     app.include_router(invites_router(runtime))
     app.include_router(admin_router(runtime))
