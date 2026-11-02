@@ -167,6 +167,24 @@ async def test_replay_events_raises_turn_error_when_paginator_stalls_past_timeou
     )
 
 
+async def test_replay_events_honours_a_budget_longer_than_the_default_read_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mux.drivers.anthropic import transport
+
+    monkeypatch.setattr(transport, "READ_TIMEOUT_S", 0.05)
+
+    async def handle_list_slowly(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0.1)
+        return list_response([_idle("sevt_1").model_dump(mode="json")])
+
+    client = build_fake_anthropic(handle_list_slowly)
+
+    result = await replay_events(client, session_id="sesn_test", timeout_s=5.0)
+
+    assert [e.id for e in result] == ["sevt_1"]
+
+
 async def test_send_interrupt_and_wait_sends_user_interrupt_when_invoked() -> None:
     sent_events: list[dict[str, Any]] = []
 
