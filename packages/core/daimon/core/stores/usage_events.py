@@ -426,22 +426,6 @@ async def turn_count_for_tenant_since(
     return int((await session.execute(stmt)).scalar_one())
 
 
-async def channels_used_by_user(
-    session: AsyncSession, *, tenant_id: uuid.UUID, platform_user_id: str
-) -> frozenset[str]:
-    """The channels this person has had replies in, from their recorded usage."""
-    stmt = (
-        select(UsageEvent.channel_id)
-        .where(
-            UsageEvent.tenant_id == tenant_id,
-            UsageEvent.platform_user_id == platform_user_id,
-            UsageEvent.channel_id.is_not(None),
-        )
-        .distinct()
-    )
-    return frozenset(c for c in (await session.execute(stmt)).scalars() if c is not None)
-
-
 def _window(since: datetime, until: datetime | None) -> list[ColumnElement[bool]]:
     """`occurred_at` from `since`, up to but not including `until` when given."""
     window = [UsageEvent.occurred_at >= since]
