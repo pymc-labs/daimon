@@ -140,8 +140,8 @@ lead evidence, Fly machines and watch evidence on its own schedule.
 Two migrations need every old process stopped first:
 
 - `0140_clear_legacy_routine_output` erases saved output on routines with no
-  destination or channel, since older runners could store personal memory
-  there. Stop the old scheduler, adapters and MCP service before applying it,
+  destination or channel. That output can draw on the owner's personal
+  memory, and older versions showed it to admins. Stop the old scheduler, adapters and MCP service before applying it,
   or an old process can write it back. It cannot be undone.
 - `0135_routine_dm_destination` adds DM destinations. Upgrade the scheduler
   and Discord service before anyone creates one. A downgrade is refused while

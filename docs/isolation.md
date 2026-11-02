@@ -106,9 +106,10 @@ An agent has two kinds of memory store:
   depends on the agent following its instructions.
 
 Personal stores are mounted on chat turns on every platform, on the hub's `ask`
-and `start_turn`, and on a routine that reports to its owner's DM. Per-agent
-keys, operator and CLI tokens, `daimon sessions create` and every other routine
-get the shared store alone.
+and `start_turn`, on a routine that reports to its owner's DM, and read-only on
+a routine with no destination or channel. Per-agent keys, operator and CLI
+tokens, `daimon sessions create` and every other routine get the shared store
+alone.
 
 Both mounts are read-only in three cases. This stops a turn from writing; it
 does not hide what others wrote to the shared store.

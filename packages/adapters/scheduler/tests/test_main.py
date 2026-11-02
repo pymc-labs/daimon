@@ -3339,12 +3339,13 @@ async def test_once_usage_pass_honours_the_switch(enabled: bool, expected: int) 
     assert calls == expected, f"usage pass ran {calls} times with enabled={enabled}"
 
 
-async def test_channel_and_destination_free_routines_have_no_personal_memory_option(
+async def test_only_a_routine_answering_its_owner_alone_reads_their_personal_memory(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Headless routine calls have no personal-memory capability."""
+    """A destination-free routine mounts its owner's personal memory; the same
+    routine once it posts to a channel does not."""
     now = datetime(2026, 5, 30, 12, 0, 0, tzinfo=UTC)
     tenant = await make_tenant(db_session)
     await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
@@ -3393,7 +3394,7 @@ async def test_channel_and_destination_free_routines_have_no_personal_memory_opt
         await fire(posting)
     await fake_client.close()
 
-    assert len(calls) == 2 and all("personal_memory" not in call for call in calls)
+    assert [call["personal_memory"] for call in calls] == [True, False]
     assert calls[0]["account_id"] is not None, "owner credentials still use the owner account"
 
 
@@ -3484,7 +3485,7 @@ async def test_routine_fires_into_a_shared_channel_run_held_and_never_unheld(
         None,
         None,
     ], "the unplaceable thread never reached run_turn"
-    assert "personal_memory" not in calls[0]
+    assert calls[0]["personal_memory"] is False
     async with db_session_factory() as session:
         refused = await get_routine(session, row.id, tenant_id=tenant.id)
     assert refused is not None and refused.last_error == "routine_destination_parent_unknown"

@@ -142,9 +142,10 @@ posts the final reply unless the agent does. If the destination is
 get unattended-run framing, which an agent can override with
 [`context_fragments.routine`](defaults.md#add-invocation-context-fragments).
 
-Routine sessions mount the agent's shared memory read-only and never mount
-personal memory. An owner-DM routine is the exception: it runs as a live DM
-turn, with the owner's memory under the DM policy. It is skipped as
+Routine sessions mount the agent's shared memory read-only. A routine with no
+destination or channel also mounts its owner's personal memory read-only. An
+owner-DM routine runs as a live DM turn, with the owner's memory under the DM
+policy. It is skipped as
 `owner_busy` if the owner already has a DM turn running. A routine in a
 channel shared with another organisation runs held to that channel, with only
 that channel's memory and no DM fallback.

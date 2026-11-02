@@ -51,8 +51,19 @@ def can_manage_routine(row: RoutineRow, *, user_id: str | None, is_admin: bool) 
     return is_admin or (user_id is not None and row.created_by_user_id == user_id)
 
 
+def mounts_personal_memory(row: RoutineRow) -> bool:
+    """Whether a headless fire mounts its owner's personal memory, read-only.
+
+    Only a routine whose result reaches nobody but its owner: no destination
+    and no channel. Decided from the row at each fire, so a destination added
+    later stops it at the next run. An owner-DM routine runs as a live DM turn
+    and gets personal memory there, not through this headless decision.
+    """
+    return row.destination_kind is None and row.destination_id is None and row.channel_id is None
+
+
 def has_private_output(row: RoutineRow) -> bool:
-    """Legacy destination-free runs could mount the owner's personal memory."""
+    """DM results and destination-free runs, which mount personal memory."""
     return row.destination_kind == "dm" or (
         row.destination_kind is None and row.destination_id is None and row.channel_id is None
     )

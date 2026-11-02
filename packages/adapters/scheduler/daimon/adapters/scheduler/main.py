@@ -112,6 +112,7 @@ from daimon.core.routine_delivery import (
 from daimon.core.routine_files import collect_routine_files
 from daimon.core.routine_hold import routine_hold
 from daimon.core.routine_sandbox import RoutineSandbox, pin_of
+from daimon.core.routines import mounts_personal_memory
 from daimon.core.rule_views import (
     is_routine_parent_unknown,
     keeps_routine_inside,
@@ -882,6 +883,9 @@ async def _build_fire(
             # Built-in sandbox tools only for a routine an admin opted in, and
             # only while its agent version and environment are the ones approved.
             sandbox=_routine_sandbox(sm, row),
+            # The owner's personal memory, read-only, only for a routine whose
+            # result goes to nobody else; decided again from the row each fire.
+            personal_memory=mounts_personal_memory(row),
             platform=platform,
             **held_fire,
         )

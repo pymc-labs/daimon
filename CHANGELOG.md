@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- A routine with no destination and no channel reads its owner's personal memory again, read-only, as it did before DM routines. Only the owner can read its saved output and errors; admins can still manage it.
+
 - A turn that finished and delivered its answer is no longer reported as failed when Daimon cannot save which repository memory it sent. The failed save is logged, and the next turn sends that memory again.
 
 - A long-lived thread whose stream drops mid-turn reconnects instead of failing. Reconnecting reads the session's whole history, and that read had 60 seconds however long the thread; a thread with a long history ran out and the turn ended as an upstream error. The read may now use what is left of the 45-minute turn ceiling, less 30 seconds, and never less than 60 seconds.
