@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import dataclasses
 import uuid
-from datetime import UTC, datetime
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import anthropic
@@ -30,14 +30,22 @@ from daimon.adapters.slack.routines_panel.read import load_routines, routines_vi
 from daimon.adapters.slack.routines_panel.state import RoutinesPanelState
 from daimon.adapters.slack.routines_panel.views import build_content_view
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.cron import InvalidScheduleError, validated_next_slot
+from daimon.core import routine_service
+from daimon.core.authz import build_subject
 from daimon.core.cron_words import schedule_words
-from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.observability import capture_exception_with_scope
-from daimon.core.routines import can_manage_routine
-from daimon.core.stores.routines import create_routine, delete_routine, get_routine
+from daimon.core.routine_service import (
+    InvalidSchedule,
+    NewRoutine,
+    RoutineCaller,
+    RoutineEnv,
+    RoutineNotFound,
+    RoutineNotOwned,
+    RoutineRefused,
+    UnknownAgent,
+)
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.exc import SQLAlchemyError
@@ -185,6 +193,32 @@ async def _refuse_non_admin(
     return False
 
 
+def _caller(tenant_id: uuid.UUID, *, user_id: str, is_admin: bool) -> RoutineCaller:
+    return RoutineCaller(
+        tenant_id=tenant_id,
+        subject=build_subject(is_admin=is_admin, platform_user_id=user_id),
+        platform="slack",
+        is_admin=is_admin,
+    )
+
+
+def _env(
+    runtime: SlackRuntime,
+    tenant_id: uuid.UUID,
+    *,
+    origin_budget: Callable[[], Awaitable[str | None]] | None = None,
+) -> RoutineEnv:
+    """The panel sets no destination, so it brings no platform lookup."""
+    return RoutineEnv(
+        sessionmaker=runtime.sessionmaker,
+        anthropic=runtime.anthropic,
+        load_view=routine_service.isolation_view_loader(
+            runtime.sessionmaker, runtime.anthropic, tenant_id
+        ),
+        origin_budget_channel=origin_budget,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Background run (post-ack I/O)
 # ---------------------------------------------------------------------------
@@ -222,9 +256,22 @@ async def run_routines_create_submission(
         timezone_ = str(extra.get("timezone") or "")
         trigger_message = str(extra.get("trigger_message") or "")
 
+        async def origin_budget() -> str | None:
+            # No destination: spend counts toward the channel it was made in.
+            return channel_id if channel_id and not channel_id.startswith("D") else None
+
         try:
-            next_fire_at = validated_next_slot(cron_expr, timezone_, datetime.now(UTC))
-        except InvalidScheduleError:
+            await routine_service.create_routine(
+                _env(runtime, tenant_id, origin_budget=origin_budget),
+                _caller(tenant_id, user_id=user_id, is_admin=True),
+                NewRoutine(
+                    agent_name=agent_name,
+                    cron_expr=cron_expr,
+                    timezone=timezone_,
+                    trigger_message=trigger_message,
+                ),
+            )
+        except InvalidSchedule:
             await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                 channel=channel_id,
                 user=user_id,
@@ -233,32 +280,18 @@ async def run_routines_create_submission(
                 ),
             )
             return
-
-        match = await find_agent_by_daimon_tag(
-            runtime.anthropic, tenant_id=tenant_id, name=agent_name
-        )
-        if match is None:
+        except UnknownAgent:
             await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                 channel=channel_id,
                 user=user_id,
                 **notice_fields(f"No agent named `{agent_name}` found for this workspace."),
             )
             return
-
-        async with runtime.sessionmaker() as session, session.begin():
-            await create_routine(
-                session,
-                tenant_id=tenant_id,
-                created_by_user_id=user_id,
-                agent_id=str(match.id),
-                agent_name=agent_name,
-                cron_expr=cron_expr,
-                timezone_=timezone_,
-                trigger_message=trigger_message,
-                next_fire_at=next_fire_at,
-                # No destination: spend counts toward the channel it was made in.
-                channel_id=channel_id if channel_id and not channel_id.startswith("D") else None,
+        except RoutineRefused as refused:
+            await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+                channel=channel_id, user=user_id, **notice_fields(str(refused))
             )
+            return
 
         log.info(
             "slack.routines_create.created",
@@ -311,26 +344,29 @@ async def run_routines_delete_submission(
 
         tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
 
-        async with runtime.sessionmaker() as session, session.begin():
-            row = await get_routine(session, rid, tenant_id=tenant_id)
-            if row is None:
-                await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
-                    channel=channel_id or user_id,
-                    user=user_id,
-                    **notice_fields("This routine no longer exists."),
-                )
-                return
-            is_admin = await resolve_is_admin(web_client, user_id=user_id, host_team_id=team_id)
-            if not can_manage_routine(row, user_id=user_id, is_admin=is_admin):
-                await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
-                    channel=channel_id or user_id,
-                    user=user_id,
-                    **notice_fields(
-                        "Only the routine's creator or a workspace admin can delete this routine."
-                    ),
-                )
-                return
-            await delete_routine(session, rid, tenant_id=tenant_id)
+        is_admin = await resolve_is_admin(web_client, user_id=user_id, host_team_id=team_id)
+        try:
+            await routine_service.delete_routine(
+                _env(runtime, tenant_id),
+                _caller(tenant_id, user_id=user_id, is_admin=is_admin),
+                rid,
+            )
+        except RoutineNotOwned:
+            await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+                channel=channel_id or user_id,
+                user=user_id,
+                **notice_fields(
+                    "Only the routine's creator or a workspace admin can delete this routine."
+                ),
+            )
+            return
+        except RoutineNotFound:
+            await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+                channel=channel_id or user_id,
+                user=user_id,
+                **notice_fields("This routine no longer exists."),
+            )
+            return
 
         # Refresh the underlying panel in place (best-effort — the row is gone).
         async with runtime.sessionmaker() as session:

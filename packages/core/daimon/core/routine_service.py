@@ -19,6 +19,7 @@ from typing import Protocol
 
 from anthropic import AsyncAnthropic
 from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
+from daimon.core.agent_pins import agent_aliases
 from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize, build_agent_ref
 from daimon.core.cron import InvalidScheduleError, validated_next_slot
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
@@ -42,6 +43,26 @@ _TEAMS_THREAD = ";messageid="
 
 class RoutineRefused(UserFacingError):
     """A routine change was refused; the message is plain text for the person."""
+
+
+class InvalidSchedule(RoutineRefused):
+    """The cron expression or time zone cannot be scheduled."""
+
+
+class UnknownAgent(RoutineRefused):
+    """No agent of that name is here for the caller."""
+
+
+class RoutineNotFound(RoutineRefused):
+    """No such routine for the caller."""
+
+    def __init__(self) -> None:
+        super().__init__(NOT_FOUND)
+
+
+class RoutineNotOwned(RoutineNotFound):
+    """Someone else's routine. Reads as `RoutineNotFound` to anyone probing; a panel that
+    already lists the routine to the caller may word it differently."""
 
 
 @dataclass(frozen=True)
@@ -181,6 +202,37 @@ def sees_routine(viewer: RuleViewer, row: RoutineRow) -> bool:
     return viewer.sees(row.agent_name) and place in (None, viewer.inside_channel_id)
 
 
+def isolation_view_loader(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    anthropic: AsyncAnthropic,
+    tenant_id: uuid.UUID,
+    *,
+    location_channel_id: str | None = None,
+) -> Callable[[], Awaitable[CallView]]:
+    """A `RoutineEnv.load_view` for surfaces with no turn of their own (a panel, the web app).
+
+    Channels kept to their own agents hide their agents' routines from anywhere else;
+    with none, everything shows.
+    """
+
+    async def load() -> CallView:
+        async with sessionmaker() as session:
+            policy = await _load_policy(session, tenant_id)
+        if not any_own_readers(policy):
+            return CallView(viewer=RuleViewer(policy=policy))
+        agents = await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
+        return CallView(
+            viewer=RuleViewer(
+                policy,
+                home_of(policy, location_channel_id),
+                agent_aliases(agents),
+                location_channel_id=location_channel_id,
+            )
+        )
+
+    return load
+
+
 async def _view(env: RoutineEnv) -> CallView:
     if env.load_view is None:
         return CallView(viewer=RuleViewer(policy=OPEN_ACCESS_POLICY))
@@ -217,9 +269,9 @@ def _require_owner(caller: RoutineCaller, row: RoutineRow) -> None:
     if caller.is_admin:
         return
     if caller.user_id is None or row.created_by_user_id is None:
-        raise RoutineRefused(NOT_FOUND)
+        raise RoutineNotOwned()
     if caller.user_id != row.created_by_user_id:
-        raise RoutineRefused(NOT_FOUND)
+        raise RoutineNotOwned()
 
 
 def next_fire(env: RoutineEnv, cron_expr: str, timezone: str) -> datetime:
@@ -227,7 +279,7 @@ def next_fire(env: RoutineEnv, cron_expr: str, timezone: str) -> datetime:
     try:
         return validated_next_slot(cron_expr, timezone, env.now())
     except InvalidScheduleError as err:
-        raise RoutineRefused(str(err)) from err
+        raise InvalidSchedule(str(err)) from err
 
 
 async def _load_policy(session: AsyncSession, tenant_id: uuid.UUID) -> TenantAccessPolicy:
@@ -397,7 +449,7 @@ async def create_routine(env: RoutineEnv, caller: RoutineCaller, new: NewRoutine
         env.anthropic, tenant_id=caller.tenant_id, name=new.agent_name
     )
     if match is None or not view.viewer.sees_agent(match):
-        raise RoutineRefused(f"no agent named {new.agent_name!r} found here")
+        raise UnknownAgent(f"no agent named {new.agent_name!r} found here")
     _check_agent_pin(
         policy,
         caller,
@@ -448,9 +500,9 @@ async def get_routine(env: RoutineEnv, caller: RoutineCaller, routine_id: uuid.U
     async with env.sessionmaker() as session:
         row = await routines_store.get_routine(session, routine_id, tenant_id=caller.tenant_id)
     if row is None or not may_read(caller, row):
-        raise RoutineRefused(NOT_FOUND)
+        raise RoutineNotFound()
     if not sees_routine((await _view(env)).viewer, row):
-        raise RoutineRefused(NOT_FOUND)
+        raise RoutineNotFound()
     return row
 
 
@@ -471,7 +523,7 @@ async def update_routine(
     async with env.sessionmaker() as session, session.begin():
         row = await routines_store.get_routine(session, routine_id, tenant_id=tenant_id)
         if row is None or not sees_routine(viewer, row):
-            raise RoutineRefused(NOT_FOUND)
+            raise RoutineNotFound()
         _require_owner(caller, row)
         if change.clear_destination:
             destination_channel_id = None
@@ -481,7 +533,7 @@ async def update_routine(
             destination_channel_id = routine_destination_channel(row)
         wanted = change.agent_name or row.agent_name
         if not viewer.sees(wanted):
-            raise RoutineRefused(f"no agent named {wanted!r} found here")
+            raise UnknownAgent(f"no agent named {wanted!r} found here")
         if change.clear_destination:
             effective_kind, effective_id = None, None
         elif change.destination_kind is not None:
@@ -506,7 +558,7 @@ async def update_routine(
                 env.anthropic, tenant_id=tenant_id, name=change.agent_name
             )
             if match is None:
-                raise RoutineRefused(f"no agent named {change.agent_name!r} found here")
+                raise UnknownAgent(f"no agent named {change.agent_name!r} found here")
             new_agent_id = match.id
         if any_agent_rules(policy) or any_own_readers(policy):
             # Check the agent the routine will run, by all its names.
@@ -568,7 +620,7 @@ async def update_routine(
             channel_id=new_destination_channel_id,
         )
         if updated is None:
-            raise RoutineRefused(NOT_FOUND)
+            raise RoutineNotFound()
         return updated
 
 
@@ -581,7 +633,7 @@ async def set_enabled(
     async with env.sessionmaker() as session, session.begin():
         row = await routines_store.get_routine(session, routine_id, tenant_id=caller.tenant_id)
         if row is None or not sees_routine(viewer, row):
-            raise RoutineRefused(NOT_FOUND)
+            raise RoutineNotFound()
         _require_owner(caller, row)
         changed = (
             await routines_store.resume_routine(
@@ -591,7 +643,7 @@ async def set_enabled(
             else await routines_store.pause_routine(session, routine_id, tenant_id=caller.tenant_id)
         )
         if changed is None:
-            raise RoutineRefused(NOT_FOUND)
+            raise RoutineNotFound()
         return changed
 
 
@@ -601,7 +653,7 @@ async def delete_routine(env: RoutineEnv, caller: RoutineCaller, routine_id: uui
     async with env.sessionmaker() as session, session.begin():
         row = await routines_store.get_routine(session, routine_id, tenant_id=caller.tenant_id)
         if row is None or not sees_routine(viewer, row):
-            raise RoutineRefused(NOT_FOUND)
+            raise RoutineNotFound()
         _require_owner(caller, row)
         if not await routines_store.delete_routine(session, routine_id, tenant_id=caller.tenant_id):
-            raise RoutineRefused(NOT_FOUND)
+            raise RoutineNotFound()
