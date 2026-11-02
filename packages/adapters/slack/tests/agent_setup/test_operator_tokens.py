@@ -182,5 +182,5 @@ async def test_live_admin_with_user_snapshot_gets_refresh_message_and_no_token(
     )
     tokens, events = await _state(db_session_factory)
     assert tokens == [] and events == [("panel:operator_token_mint", "denied")]
-    text = client.chat_postEphemeral.call_args.kwargs["text"]
+    text = shown_text(client.chat_postEphemeral.call_args.kwargs)
     assert "Send Daimon a message" in text and "Bearer" not in text

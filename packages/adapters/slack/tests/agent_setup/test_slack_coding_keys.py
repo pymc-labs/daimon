@@ -96,7 +96,9 @@ class _World:
         """Press a button; the view Slack was sent (pushed or updated), and any ephemerals."""
         with AioResponsesMock() as mock:
             mock.get(  # pyright: ignore[reportUnknownMemberType]
-                _USERS_INFO_PATTERN, payload=_users_info_payload(is_admin=is_admin), repeat=True
+                _USERS_INFO_PATTERN,
+                payload=_users_info_payload(is_admin=is_admin, user_id=user_id),
+                repeat=True,
             )
             for method in ("chat.postEphemeral", "views.push", "views.update"):
                 mock.post(f"{_SLACK_API_BASE}/{method}", payload={"ok": True}, repeat=True)  # pyright: ignore[reportUnknownMemberType]

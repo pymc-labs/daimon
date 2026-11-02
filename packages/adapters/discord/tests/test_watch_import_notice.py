@@ -34,7 +34,7 @@ async def test_import_notice_is_owner_only_dm_with_no_channel_fallback(closed, a
     assert result is (allowed and not closed)
     if result:
         open_dm.assert_awaited_once_with(100, 123)
-        assert dm.send.await_args.args == (UNMAPPED_NOTICE,)
+        assert dm.send.await_args.kwargs["embed"].description == UNMAPPED_NOTICE
         assert dm.send.await_args.kwargs["allowed_mentions"].everyone is False
     else:
         open_dm.assert_not_called()

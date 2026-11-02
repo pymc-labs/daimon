@@ -199,7 +199,7 @@ async def test_live_admin_with_user_snapshot_gets_refresh_message_and_no_token(d
     view = await _view(db_session_factory, recorded_admin=False)
     admin = _interaction(admin=True)
     await _modal(view, ["tenant:read"]).on_submit(admin)
-    assert "Send Daimon a message" in admin.followup.send.call_args.args[0]
+    assert "Send Daimon a message" in admin.followup.send.call_args.kwargs["embed"].description
     async with db_session_factory() as session:
         assert await list_mcp_tokens(session, now=dt.datetime.now(dt.UTC), kind="operator") == []
         identity = await get_account_with_tenant(session, account_id=view.state.account_id)

@@ -967,7 +967,7 @@ async def test_overlapping_turns_in_one_thread_each_attribute_their_own_files() 
         await sweep("sesn_alice_big", "U_ALICE", no_sleep)
         bob_done.set()
         await alice
-        notices = [call.kwargs["json"]["text"] for call in _post_message_calls(mock)]
+        notices = [_notice_text(call) for call in _post_message_calls(mock)]
 
     uploads = [
         (json.loads(params["files"])[0]["title"], params.get("initial_comment"))

@@ -1954,4 +1954,6 @@ async def test_discord_generic_guidance_does_not_resolve_guild_or_run_a_model(db
     await DirectMessageCog(bot).on_message(message)
     bot.get_guild.assert_not_called()
     message.channel.send.assert_awaited_once()
-    assert message.channel.send.await_args.args[0] == cold_dm_text("discord", dms_on=None)
+    assert message.channel.send.await_args.kwargs["embed"].description == cold_dm_text(
+        "discord", dms_on=None
+    )

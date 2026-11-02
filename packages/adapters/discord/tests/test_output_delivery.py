@@ -1127,13 +1127,13 @@ async def _overlapping_sweeps(
     order: list[str] = []
     for call in thread.send.await_args_list:
         file = call.kwargs.get("file")
-        order.append(file.filename if file is not None else call.args[0])
+        order.append(file.filename if file is not None else call.kwargs["embed"].description)
     return order
 
 
 def _assert_attributed(call: Any, *, user: int, asked: int) -> None:
     kwargs = call.kwargs
-    text = kwargs["content"] if "file" in kwargs else call.args[0]
+    text = kwargs["content"] if "file" in kwargs else kwargs["embed"].description
     assert text.startswith(f"For <@{user}>"), "the post names whose turn made it"
     reference = kwargs["reference"]
     assert isinstance(reference, discord.MessageReference)
@@ -1168,7 +1168,7 @@ async def test_overlapping_turns_post_each_file_as_a_reply_to_its_own_turn() -> 
     _assert_attributed(bob_post, user=_BOB, asked=_BOB_ASKED)
     _assert_attributed(alice_post, user=_ALICE, asked=_ALICE_ASKED)
     _assert_attributed(bob_notice, user=_BOB, asked=_BOB_ASKED)
-    assert "`bob_dump.pdf` is 11 MB" in bob_notice.args[0]
+    assert "`bob_dump.pdf` is 11 MB" in bob_notice.kwargs["embed"].description
 
 
 async def test_overlapping_turns_attach_each_file_to_its_own_answer() -> None:
@@ -1274,7 +1274,7 @@ async def test_a_dm_skips_a_file_over_discords_default_limit_and_keeps_it() -> N
         sleep=_no_sleep,
     )
 
-    notice = cast(AsyncMock, channel.send).await_args.args[0]
+    notice = cast(AsyncMock, channel.send).await_args.kwargs["embed"].description
     assert "over the 10 MB upload limit" in notice, "a DM is held to Discord's default limit"
     assert deleted == [], "the oversize file stays in the session"
 
