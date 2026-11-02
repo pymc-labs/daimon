@@ -35,6 +35,7 @@ from daimon.core.config import DirectMessagePolicy, Settings
 from daimon.core.direct_messages import (
     ColdDmNotices,
     DirectMessageAccessRevoked,
+    DirectMessageMembershipUnknown,
     DirectMessageReply,
     DmTurnCard,
     admit_cold_dm,
@@ -817,7 +818,10 @@ class DirectMessageCog(commands.Cog):
         Every write to the card first rechecks what delivering the answer checks:
         the recipient policy, then `require_dm_delivery` against the admitted
         grant. One proved refusal closes the card for the rest of the turn, so
-        someone who loses access mid-turn sees no more of it.
+        someone who loses access mid-turn sees no more of it. A failed membership
+        lookup proves nothing: the write goes ahead if the previous check (or the
+        admission) verified the person, and is refused otherwise, with the next
+        write checking again.
         """
         runtime = self.bot.runtime
         channel = message.channel
@@ -825,8 +829,10 @@ class DirectMessageCog(commands.Cog):
 
         def build(admission: Admission, cancel: asyncio.Event) -> DiscordTurnLifecycle:
             grant = admission.grant
+            verified = True
 
             async def still_allowed() -> None:
+                nonlocal verified
                 policy = runtime.settings.direct_message_policies.get(
                     conversation.tenant_id, DirectMessagePolicy()
                 )
@@ -838,9 +844,21 @@ class DirectMessageCog(commands.Cog):
                         runtime.turn_deps,
                         DirectMessageReply(text="", conversation=conversation, grant=grant),
                     )
+                except DirectMessageMembershipUnknown:
+                    log.info(
+                        "discord.dm.delivery_membership_unknown",
+                        user_id=person,
+                        route_key=str(channel.id),
+                        allowed=verified,
+                    )
+                    if not verified:
+                        raise
+                    verified = False
+                    return
                 except DirectMessageAccessRevoked as exc:
                     self._suppress(message, exc.reason)
                     raise AdmissionDenied(reason="invoker_not_allowed") from exc
+                verified = True
 
             async def edit(sent: discord.Message, **kwargs: Any) -> discord.Message | None:  # noqa: ANN401
                 # A plain message edit has no replacement post to allow or refuse.

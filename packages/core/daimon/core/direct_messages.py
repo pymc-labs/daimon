@@ -91,6 +91,13 @@ class DirectMessageAccessRevoked(UserFacingError):
         self.reason = reason
 
 
+class DirectMessageMembershipUnknown(DirectMessageAccessRevoked):
+    """The recipient's membership lookup failed; nothing proved their access gone."""
+
+    def __init__(self) -> None:
+        super().__init__("delivery_membership_unknown", message="Private access unverified.")
+
+
 @dataclass(frozen=True)
 class DirectMessageReply:
     """Text and the exact agent authority used for this private model turn.
@@ -130,6 +137,10 @@ async def require_dm_delivery(deps: TurnDeps, reply: DirectMessageReply) -> None
 
     Agent pins and isolation apply without an admin exemption. A move's source
     provenance still seals its context independently of the answering identity.
+    A failed membership lookup is decided on the roles and admin standing the
+    turn was admitted with: any refusal on those is proved revocation, and
+    only when everything else passes does it raise `DirectMessageMembershipUnknown`.
+    Both refuse this output.
     """
     conversation = reply.conversation
     subject = await resolve_subject(
@@ -155,9 +166,21 @@ async def require_dm_delivery(deps: TurnDeps, reply: DirectMessageReply) -> None
         or current is None
         or current.scope_id != conversation.scope_id
         or current.account_id != conversation.account_id
-        or subject.verified_membership is not True
-        or not authorize(policy, subject=subject, action=Action.START_TURN)
+        or subject.verified_membership is False
     ):
+        raise DirectMessageAccessRevoked(
+            "delivery_access_revoked", message="Private access revoked."
+        )
+    membership_unknown = subject.verified_membership is None
+    if membership_unknown:
+        admitted = reply.grant.subject
+        subject = replace(
+            subject,
+            is_admin=admitted.is_admin,
+            role_ids=admitted.role_ids,
+            verified_membership=True,
+        )
+    if not authorize(policy, subject=subject, action=Action.START_TURN):
         raise DirectMessageAccessRevoked(
             "delivery_access_revoked", message="Private access revoked."
         )
@@ -178,6 +201,8 @@ async def require_dm_delivery(deps: TurnDeps, reply: DirectMessageReply) -> None
             raise DirectMessageAccessRevoked(
                 f"delivery_{decision.reason}", message="Private agent access revoked."
             )
+    if membership_unknown:
+        raise DirectMessageMembershipUnknown()
 
 
 #: How many people one process remembers having told that private chats are off.
