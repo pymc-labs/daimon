@@ -442,3 +442,29 @@ async def test_a_lowered_owner_ceiling_caps_the_next_firing(owner):
     async with runtime.session_factory() as db:
         current = await watches.get_watch(db, watch.id)
     assert current is not None and current.source_state.get("daily_cap_kind") == "owner"
+
+
+async def test_edit_checks_access_without_holding_the_watch_lock(owner, monkeypatch):
+    runtime, watch, auth, origin = owner
+    shown = await preview(runtime, auth, watch, interval=120)
+    real = tools.authorize_poll
+    seen: list[tuple[int, bool]] = []
+
+    async def lock_free(runtime_, row):
+        async with runtime.session_factory() as db:
+            held = await db.scalar(
+                text(
+                    "SELECT count(*) FROM pg_locks WHERE pid = pg_backend_pid()"
+                    " AND locktype = 'advisory' AND objid = 813749201"
+                )
+            )
+        seen.append((int(str(row.source_state["interval"])), held == 0))
+        return await real(runtime_, row)
+
+    monkeypatch.setattr(tools, "authorize_poll", lock_free)
+    edited = await update(runtime, auth, origin, shown, interval=120)
+    assert edited.revision == watch.revision + 1
+    # Polling and pause/resume wait on this lock, so provider calls run outside it,
+    # and they check the watch as it will be saved.
+    assert seen and all(free for _, free in seen), seen
+    assert (120, True) in seen
