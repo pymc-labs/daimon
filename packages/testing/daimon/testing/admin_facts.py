@@ -10,7 +10,7 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING
 
-from daimon.core.admin_authority import AdminAuthority
+from daimon.core.admin_authority import AdminAuthority, AuthorityCache
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role
 from daimon.core.stores.identity import find_platform_principal
@@ -27,7 +27,9 @@ async def platform_authority_from_test_accounts(
     *,
     tenant_id: uuid.UUID,
     platform_user_id: str,
+    cache: AuthorityCache | None = None,
 ) -> AdminAuthority:
+    del cache
     async with sessions() as session:
         tenant = await get_tenant(session, tenant_id)
         if tenant is None or tenant.archived_at is not None:
