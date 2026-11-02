@@ -1,22 +1,20 @@
 """Helper turns: their conversation key and the words a refused helper sends back."""
 
-import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 from daimon.core.errors import UserFacingError
 from daimon.core.helpers import (
-    _Desk,  # pyright: ignore[reportPrivateUsage]
     _in_thread,  # pyright: ignore[reportPrivateUsage]
     helper_thread_key,
     refusal_words,
     serve_helpers,
 )
-from daimon.core.mcp_identity import derive_agent_uuid, matching_turn
-from daimon.core.stores.domain import HelperAskRow, Role, TurnOriginRow
+from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mcp_identity import matching_turn
+from daimon.core.stores.domain import Role, TurnOriginRow
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied
@@ -26,7 +24,6 @@ from daimon.core.turn.provider_actions import (
     ProviderActionPrompt,
     ProviderActionRequester,
 )
-from daimon.core.turn_queue import TurnQueue
 
 NOW = datetime(2026, 11, 2, tzinfo=UTC)
 
@@ -115,30 +112,3 @@ async def test_a_helpers_provider_prompts_go_to_the_asking_thread() -> None:
     await placed(ProviderActionPrompt(cast(Any, None), context, cast(Any, None)))
     [prompt] = seen
     assert prompt.context.requester == ProviderActionRequester("slack", "1.2", "U1")
-
-
-async def test_a_helper_with_no_slot_left_says_the_workspace_is_busy() -> None:
-    queue = TurnQueue(
-        platform="slack", global_cap=1, max_queued_per_tenant=0, max_queued=0, max_wait_s=60.0
-    )
-    asking = queue.admit(uuid.UUID(int=1), cap=1)
-    assert asking is not None and asking.state == "running"
-    desk = _Desk(
-        deps=cast(TurnDeps, None),
-        request=cast(Any, None),
-        origin=_origin(helper_of=None),
-        asker_name="lead",
-        deadline=NOW,
-        confirm_write=None,
-        provider_action=None,
-        slots=asking,
-        no_anthropic=False,
-    )
-    ask = cast(HelperAskRow, SimpleNamespace(helper_name="argon"))
-
-    status, reply = await desk._slotted(ask, asyncio.Event())  # pyright: ignore[reportPrivateUsage]
-
-    assert (status, reply) == (
-        "failed",
-        "argon can't run now: too many agents are running. Try later.",
-    )
