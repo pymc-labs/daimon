@@ -39,7 +39,10 @@ from daimon.core.billing import (
     manual_credit,
 )
 from daimon.core.ma_resolver import retrieve_agent_cached
+from daimon.core.panel_audit import record_panel_write
 from daimon.core.platform_names import UNNAMED_CHANNEL
+from daimon.core.promo_codes import describe_refusal
+from daimon.core.promo_credit import PromoRedeemed, PromoRedeemRefused, redeem_in_transaction
 from daimon.core.spend_gate import (
     SpendRequest,
     person_verdict,
@@ -47,6 +50,7 @@ from daimon.core.spend_gate import (
     spend_person_of_account,
 )
 from daimon.core.stores import spend_allowances, tenant_ledger, web_invites
+from daimon.core.stores import tenants as tenants_store
 from daimon.core.stores import web_identities as identities_store
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores.domain import SpendAllowanceRow, WebPersonRow
@@ -59,6 +63,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 #: Amounts, in whole dollars, a card checkout may buy.
 CHECKOUT_AMOUNTS = frozenset({10, 25, 50, 100})
 _LEDGER_LIMIT = 50
+#: Refusals worded for the web app, where there is no channel to redeem in.
+_REDEEM_WORDS = {
+    "needs_channel": "That code adds to a channel's budget. Redeem it in that channel.",
+}
 _RECENT_TURNS = 12
 _CENT = Decimal("0.01")
 _NO_AGENT = "other"
@@ -130,6 +138,8 @@ class Overview(BaseModel):
     daily: list[DailySpend]
     ledger: list[LedgerEntry]
     topup: Literal["checkout", "manual"] | None
+    funding: Literal["prepaid", "operator_funded"]
+    """Who pays for turns: the workspace's own credit, or the operator."""
 
 
 class Subject(BaseModel):
@@ -159,6 +169,18 @@ class NewAllowance(BaseModel):
     amount_usd: Decimal = Field(gt=0, le=1_000_000, decimal_places=2)
     window: Literal["month", "total"]
     expires_at: datetime | None = None
+
+
+class Redeem(BaseModel):
+    code: str = Field(min_length=1, max_length=100)
+
+
+class Redeemed(BaseModel):
+    balance_usd: float
+    amount_usd: float
+    """The credit the code adds."""
+    starts_at: str | None
+    """When a code that has not started yet adds it."""
 
 
 class TopUp(BaseModel):
@@ -348,6 +370,7 @@ def credits_router(runtime: WebRuntime) -> APIRouter:
                 tenant_id=tenant_id,
                 account_ids={x.actor_account_id for x in lines if x.actor_account_id},
             )
+            tenant = await tenants_store.get_tenant(db, tenant_id)
         ledger: list[LedgerEntry] = []
         for line in lines:
             actor = actors.get(line.actor_account_id) if line.actor_account_id else None
@@ -371,6 +394,7 @@ def credits_router(runtime: WebRuntime) -> APIRouter:
             daily=[DailySpend(day=d.day.isoformat(), usd=_usd(d.usd)) for d in recent.daily],
             ledger=ledger,
             topup=topup_mode(),
+            funding=tenant.funding_mode if tenant else "prepaid",
         )
 
     @router.get("/spend")
@@ -572,6 +596,59 @@ def credits_router(runtime: WebRuntime) -> APIRouter:
                 at=runtime.now(),
             )
         return {"ok": True}
+
+    @router.post("/redeem")
+    async def redeem(body: Redeem, caller: Admin) -> Redeemed:  # pyright: ignore[reportUnusedFunction]
+        """Redeem a promo code for the workspace, as the chat panels do, and audit it."""
+        tenant_id, account_id, now = (
+            caller.person.tenant_id,
+            caller.person.account_id,
+            runtime.now(),
+        )
+        async with runtime.sessionmaker.begin() as db:
+            principal = await caller.principal(db)
+            result = await redeem_in_transaction(
+                db,
+                tenant_id=tenant_id,
+                account_id=account_id,
+                code=body.code,
+                now=now,
+                channel=None,
+                is_admin=True,
+            )
+            if isinstance(result, PromoRedeemed):
+                await audit(
+                    db,
+                    tenant_id=tenant_id,
+                    actor_account_id=account_id,
+                    action="Redeemed promo code",
+                    target="Balance",
+                    detail=usd(result.amount_usd),
+                    at=now,
+                )
+        await record_panel_write(
+            runtime.sessionmaker,
+            tenant_id=tenant_id,
+            platform=principal.platform,
+            platform_user_id=principal.external_id,
+            op="promo_redeem",
+            outcome="denied" if isinstance(result, PromoRedeemRefused) else "allowed",
+            reason=result.reason if isinstance(result, PromoRedeemRefused) else "completed",
+        )
+        if isinstance(result, PromoRedeemRefused):
+            raise HTTPException(
+                status_code=429 if result.reason == "throttled" else 422,
+                detail=_REDEEM_WORDS.get(result.reason) or describe_refusal(result.reason),
+            )
+        return Redeemed(
+            balance_usd=_usd(result.balance_usd),
+            amount_usd=_usd(result.amount_usd),
+            starts_at=(
+                None
+                if result.granted or result.credit_starts_at is None
+                else result.credit_starts_at.isoformat()
+            ),
+        )
 
     @router.post("/topup")
     async def topup(body: TopUp, caller: Admin) -> dict[str, str | float]:  # pyright: ignore[reportUnusedFunction]

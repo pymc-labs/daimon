@@ -23,6 +23,7 @@ function OverviewBody({ data }: { data: Overview }) {
         { label: "Replies, last 30 days", value: data.turns.toLocaleString("en") },
         { label: `Spent in ${month}`, value: <Money usd={data.spent_month_usd} /> },
         { label: "Projected month", value: <Money usd={data.projected_month_usd} /> },
+        { label: "Funding", value: data.funding === "prepaid" ? "Prepaid" : "Paid by the operator" },
       ]} />
       <Section title="Daily spend" aside="Last 30 days">
         <DailyChart data={data.daily} />

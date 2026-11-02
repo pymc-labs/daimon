@@ -112,7 +112,33 @@ async def redeem_promo_code(
     channel: PromoChannel | None,
     is_admin: bool,
 ) -> PromoRedeemResult:
-    """Redeem ``code`` for the tenant in one transaction; a refusal is counted for throttling.
+    """`redeem_in_transaction` in a transaction of its own."""
+    async with session_factory() as session, session.begin():
+        return await redeem_in_transaction(
+            session,
+            tenant_id=tenant_id,
+            account_id=account_id,
+            code=code,
+            now=now,
+            channel=channel,
+            is_admin=is_admin,
+        )
+
+
+async def redeem_in_transaction(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID | None,
+    code: str,
+    now: datetime,
+    channel: PromoChannel | None,
+    is_admin: bool,
+) -> PromoRedeemResult:
+    """Redeem ``code`` for the tenant in the caller's transaction, counting a refusal.
+
+    The caller commits whatever the result, so a counted refusal is kept, and writes
+    its own audit row beside a redemption.
 
     ``is_admin``: whether the caller found the redeemer to be a server or
     workspace admin, live, at submit; only an admin may redeem a server-wide
@@ -127,42 +153,41 @@ async def redeem_promo_code(
     the per-code limit and the one-per-tenant rule are applied serially too.
     """
     since = now - REDEEM_FAILURE_WINDOW
-    async with session_factory() as session, session.begin():
-        await promo_store.lock_redeemer(session, tenant_id=tenant_id, account_id=account_id)
-        failures = await promo_store.count_redeem_failures(
-            session, tenant_id=tenant_id, account_id=account_id, since=since
-        )
-        if failures >= REDEEM_FAILURE_LIMIT:
-            log.warning("promo_code.redeem_throttled", tenant_id=str(tenant_id))
-            return PromoRedeemRefused(reason="throttled")
-        result = await _redeem_in_session(
+    await promo_store.lock_redeemer(session, tenant_id=tenant_id, account_id=account_id)
+    failures = await promo_store.count_redeem_failures(
+        session, tenant_id=tenant_id, account_id=account_id, since=since
+    )
+    if failures >= REDEEM_FAILURE_LIMIT:
+        log.warning("promo_code.redeem_throttled", tenant_id=str(tenant_id))
+        return PromoRedeemRefused(reason="throttled")
+    result = await _redeem_in_session(
+        session,
+        tenant_id=tenant_id,
+        account_id=account_id,
+        code=code,
+        now=now,
+        channel=channel,
+        is_admin=is_admin,
+    )
+    if isinstance(result, PromoRedeemRefused):
+        await promo_store.record_redeem_failure(
             session,
             tenant_id=tenant_id,
             account_id=account_id,
-            code=code,
             now=now,
-            channel=channel,
-            is_admin=is_admin,
+            prune_before=since,
         )
-        if isinstance(result, PromoRedeemRefused):
-            await promo_store.record_redeem_failure(
-                session,
-                tenant_id=tenant_id,
-                account_id=account_id,
-                now=now,
-                prune_before=since,
-            )
-            log.info("promo_code.redeem_refused", tenant_id=str(tenant_id), reason=result.reason)
-        else:
-            log.info(
-                "promo_code.redeemed",
-                tenant_id=str(tenant_id),
-                promo_code_id=str(result.promo_code_id),
-                kind=result.kind,
-                granted=result.granted,
-                channel_id=result.channel_id,
-            )
-        return result
+        log.info("promo_code.redeem_refused", tenant_id=str(tenant_id), reason=result.reason)
+    else:
+        log.info(
+            "promo_code.redeemed",
+            tenant_id=str(tenant_id),
+            promo_code_id=str(result.promo_code_id),
+            kind=result.kind,
+            granted=result.granted,
+            channel_id=result.channel_id,
+        )
+    return result
 
 
 async def _redeem_in_session(

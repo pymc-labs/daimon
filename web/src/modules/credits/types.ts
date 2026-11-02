@@ -31,7 +31,11 @@ export type Overview = {
   ledger: LedgerEntry[]
   /** How admins add credit: card checkout, a recorded grant, or not at all. */
   topup: "checkout" | "manual" | null
+  /** Who pays for replies: the workspace's own credit, or the operator. */
+  funding: "prepaid" | "operator_funded"
 }
+
+export type Redeemed = { balance_usd: number; amount_usd: number; starts_at: string | null }
 
 export type SpendRow = { id: string; name: string; avatar?: string; kind?: string; turns: number; usd: number }
 export type SpendBy = "person" | "agent" | "channel"

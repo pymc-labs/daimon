@@ -15,8 +15,16 @@ import httpx
 import pytest
 from daimon.core.billing import BillingConfig
 from daimon.core.config import Settings
+from daimon.core.promo_codes import build_promo_code_terms, hash_promo_code, normalize_promo_code
 from daimon.core.stores import accounts as accounts_store
-from daimon.core.stores import spend_allowances, tenant_ledger, usage_events, web_audit
+from daimon.core.stores import promo_codes as promo_store
+from daimon.core.stores import (
+    security_audit,
+    spend_allowances,
+    tenant_ledger,
+    usage_events,
+    web_audit,
+)
 from daimon.core.stores import tenants as tenants_store
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores import web_roles as roles_store
@@ -57,6 +65,7 @@ _ADMIN_ROUTES = [
     ),
     ("DELETE", f"/api/credits/allowances/{uuid.uuid4()}", None),
     ("POST", "/api/credits/topup", {"amount_usd": 10}),
+    ("POST", "/api/credits/redeem", {"code": "ABCDEFGHJKMNPQRSTVWXYZ"}),
 ]
 
 
@@ -255,7 +264,7 @@ async def test_overview_has_the_shape_the_app_reads(
         body = (await client.get("/api/credits/overview")).json()
     assert set(body) == {
         "balance_usd", "spent_usd", "turns", "spent_month_usd", "projected_month_usd",
-        "daily", "ledger", "topup",
+        "daily", "ledger", "topup", "funding",
     }  # fmt: skip
     assert body["balance_usd"] == 125.0, "the $100 welcome credit plus the $25 grant"
     assert (body["spent_usd"], body["turns"]) == (10.0, 1), "billed, at the markup"
@@ -267,6 +276,7 @@ async def test_overview_has_the_shape_the_app_reads(
     }, "a grant names who made it"
     assert set(body["ledger"][0]) == {"id", "at", "kind", "amount_usd", "by", "note"}
     assert body["topup"] is None, "no card checkout and no manual grants here"
+    assert body["funding"] == "prepaid"
 
 
 async def test_overview_names_how_credit_can_be_added(
@@ -636,3 +646,86 @@ async def test_one_turn_is_the_same_charge_in_the_reply_the_meter_and_every_tota
     assert (overview["spent_usd"], overview["spent_month_usd"]) == (3.7, 3.7), "the totals"
     assert sum(d["usd"] for d in overview["daily"]) == 3.7, "the chart adds up to the total"
     assert meter["left_usd"] == pytest.approx(20 - 3.703701), "the meter counts the same turn"
+
+
+async def _promo(
+    factory: async_sessionmaker[AsyncSession], code: str, amount: str, **terms: Any
+) -> None:
+    terms.setdefault("timed", False)
+    async with factory.begin() as db:
+        await promo_store.insert_promo_code(
+            db,
+            code_hash=hash_promo_code(normalize_promo_code(code)),
+            terms=build_promo_code_terms(amount_usd=Decimal(amount), **terms),
+        )
+
+
+async def test_an_admin_redeems_a_promo_code_with_both_audit_trails(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    await _promo(db_session_factory, "SPRING-2026", "15")
+    rig = Rig(db_session_factory, tmp_path, web_client)
+    async with rig.open() as (client, ws, _):
+        res = await client.post("/api/credits/redeem", json={"code": "spring 2026"})
+        again = await client.post("/api/credits/redeem", json={"code": "SPRING-2026"})
+    assert res.json() == {"balance_usd": 115.0, "amount_usd": 15.0, "starts_at": None}
+    assert again.status_code == 422 and "already redeemed" in again.json()["detail"]
+    async with db_session_factory() as db:
+        trail = await web_audit.list_recent(db, tenant_id=ws.tenant_id)
+        events = await security_audit.list_events(
+            db, tenant_id=ws.tenant_id, tool_name="panel:promo_redeem"
+        )
+    assert [(a.action, a.target, a.detail) for a in trail] == [
+        ("Redeemed promo code", "Balance", "$15.00")
+    ], "only the redemption is audited for the web, and never the code"
+    assert [(e.outcome, e.reason) for e in events] == [
+        ("allowed", "completed"),
+        ("denied", "already_redeemed"),
+    ]
+
+
+async def test_redeeming_refuses_a_wrong_code_and_pauses_after_five(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    rig = Rig(db_session_factory, tmp_path, web_client)
+    async with rig.open() as (client, ws, _):
+        wrong = [
+            await client.post("/api/credits/redeem", json={"code": "NOT-A-CODE"}) for _ in range(6)
+        ]
+        balance = (await client.get("/api/credits/overview")).json()["balance_usd"]
+    assert [r.status_code for r in wrong] == [422] * 5 + [429], "the sixth try is paused"
+    assert "not valid" in wrong[0].json()["detail"]
+    assert balance == 100.0, "a refused code adds nothing"
+    async with db_session_factory() as db:
+        assert await web_audit.list_recent(db, tenant_id=ws.tenant_id) == []
+
+
+async def test_a_channel_code_is_not_redeemed_from_the_web(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    await _promo(db_session_factory, "CHANNEL-ONE", "5", channel_cap_usd=Decimal("20"))
+    rig = Rig(db_session_factory, tmp_path, web_client)
+    async with rig.open() as (client, _, _):
+        res = await client.post("/api/credits/redeem", json={"code": "CHANNEL-ONE"})
+    assert res.status_code == 422 and "in that channel" in res.json()["detail"]
+
+
+async def test_overview_states_the_funding_mode(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    rig = Rig(db_session_factory, tmp_path, web_client)
+    async with rig.open() as (client, ws, _):
+        async with db_session_factory.begin() as db:
+            await tenants_store.set_funding_mode(
+                db, tenant_id=ws.tenant_id, funding_mode="operator_funded"
+            )
+        funding = (await client.get("/api/credits/overview")).json()["funding"]
+    assert funding == "operator_funded"

@@ -6,6 +6,7 @@ import { forbidden, unauthorized, wait } from "./util"
 import { agent, AGENTS, me, SESSIONS } from "./world"
 import { face } from "./face"
 
+let redeemed = false
 const day = (d: number) => new Date(Date.UTC(2026, 9, d)).toISOString()
 const midnight = (back: number) => {
   const t = new Date()
@@ -103,7 +104,7 @@ export const creditsHandlers: HttpHandler[] = [
     const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()
     return HttpResponse.json({
       balance_usd: balance, spent_usd: spent, turns: 1002, spent_month_usd: month, projected_month_usd: (month / now.getDate()) * daysInMonth,
-      daily: DAILY, ledger, topup: "manual",
+      daily: DAILY, ledger, topup: "manual", funding: "prepaid",
     })
   }),
   http.post("/api/credits/topup", async ({ request }) => {
@@ -113,6 +114,20 @@ export const creditsHandlers: HttpHandler[] = [
     balance += amount_usd
     ledger.unshift({ id: `l${Date.now()}`, at: new Date().toISOString(), kind: "topup", amount_usd, by: me()!.name, note: "Manual grant" })
     return HttpResponse.json({ balance_usd: balance })
+  }),
+  // Codes the mock knows: "WELCOME" adds $25 once; anything else is refused.
+  http.post("/api/credits/redeem", async ({ request }) => {
+    await wait(500)
+    if (!admin()) return forbidden()
+    const { code } = (await request.json()) as { code: string }
+    if (code.trim().toUpperCase() !== "WELCOME" || redeemed) {
+      const detail = redeemed ? "That code was already redeemed here." : "That code is not valid. Check it and try again."
+      return HttpResponse.json({ detail }, { status: 422 })
+    }
+    redeemed = true
+    balance += 25
+    ledger.unshift({ id: `l${Date.now()}`, at: new Date().toISOString(), kind: "promo", amount_usd: 25, by: me()!.name, note: "Promo code" })
+    return HttpResponse.json({ balance_usd: balance, amount_usd: 25, starts_at: null })
   }),
   http.get("/api/credits/spend", async ({ request }) => {
     await wait()
