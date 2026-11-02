@@ -149,6 +149,12 @@ async def update_origin_target(
     return TurnOriginRow.model_validate(origin)
 
 
+async def mark_serving_helpers(session: AsyncSession, *, origin_id: uuid.UUID) -> None:
+    await session.execute(
+        update(TurnOrigin).where(TurnOrigin.id == origin_id).values(serves_helpers=True)
+    )
+
+
 async def delete_origin(
     session: AsyncSession,
     *,

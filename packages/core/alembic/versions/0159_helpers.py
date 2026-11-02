@@ -2,8 +2,9 @@
 
 `agent_helpers` is each agent's helper list. `helper_asks` holds one ask from a
 running turn to a helper and its reply; it cascades with the asking turn's origin.
-`turn_origins.helper_of` marks a helper's own turn, and `turn_outcomes` accepts
-the `helper` origin. Downgrading drops the lists and any asks in flight.
+`turn_origins.helper_of` marks a helper's own turn, `serves_helpers` a turn whose
+process serves its asks, and `turn_outcomes` accepts the `helper` origin.
+Downgrading drops the lists and any asks in flight.
 
 downgrade: destructive
 """
@@ -37,6 +38,10 @@ def upgrade() -> None:
         sa.CheckConstraint("agent_id <> helper_agent_id", name="ck_agent_helpers_not_self"),
     )
     op.add_column("turn_origins", sa.Column("helper_of", UUID(as_uuid=True), nullable=True))
+    op.add_column(
+        "turn_origins",
+        sa.Column("serves_helpers", sa.Boolean(), nullable=False, server_default=sa.false()),
+    )
     op.create_table(
         "helper_asks",
         sa.Column("id", UUID(as_uuid=True), primary_key=True),
@@ -73,5 +78,6 @@ def downgrade() -> None:
     )
     op.drop_index("helper_asks_origin_idx", table_name="helper_asks")
     op.drop_table("helper_asks")
+    op.drop_column("turn_origins", "serves_helpers")
     op.drop_column("turn_origins", "helper_of")
     op.drop_table("agent_helpers")

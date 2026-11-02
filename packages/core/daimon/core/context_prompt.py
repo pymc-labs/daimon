@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-TurnContext = Literal["chat", "routine", "relay", "handoff"]
+TurnContext = Literal["chat", "routine", "relay", "handoff", "helper"]
 
 DEFAULT_FRAGMENTS: dict[TurnContext, str] = {
     "chat": "",
@@ -24,6 +24,12 @@ DEFAULT_FRAGMENTS: dict[TurnContext, str] = {
     "handoff": (
         "Continue the handed-off task using the supplied context. Verify available files "
         "and state before claiming continuity; do not assume running processes survived."
+    ),
+    "helper": (
+        "Another agent asked you for help during its turn for a person. Your last message "
+        "goes back to that agent, not to the person, and nothing you write is posted. Do "
+        "not ask questions: do what you can and say what is missing. Do not hand off, set "
+        "timers or post; tell the agent instead."
     ),
 }
 FRAGMENT_MARKER = "\n\nDaimon context fragment configuration (selected per turn):\n"

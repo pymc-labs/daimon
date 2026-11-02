@@ -55,6 +55,15 @@ class TenantScopeRef(BaseModel):
 ScopeRef = UserScopeRef | ChannelScopeRef | TenantScopeRef
 
 
+class HelperTarget(BaseModel):
+    """The agent a helper's turn runs as: its MA id and configuration name."""
+
+    model_config = ConfigDict(frozen=True)
+
+    ma_agent_id: str
+    name: str
+
+
 class ScopeContext(BaseModel):
     """Inbound dimensions for resolution."""
 
@@ -65,6 +74,8 @@ class ScopeContext(BaseModel):
     account_id: uuid.UUID | None = None
     platform: str | None = None
     thread_id: str | None = None
+    # A helper's turn: this agent answers in place of whoever answers the thread.
+    helper: HelperTarget | None = None
 
 
 class UserConfigRow(BaseModel):
@@ -110,12 +121,13 @@ class ResolvedConfig(BaseModel):
     configuration_target_ma_agent_id: str | None = None
     configuration_target_name: str | None = None
     thread_binding_id: uuid.UUID | None = None
-    # Why this thread has its own responder: a setup conversation, or a task
-    # handed to another agent. None when no binding applies. The two resolve
+    # Why this thread has its own responder: a setup conversation, a task
+    # handed to another agent, or a helper asked by the thread's agent
+    # (`helper`, never stored). None when no binding applies. The two resolve
     # their responder differently -- a setup thread must answer as the built-in
     # Daimon, a handoff thread answers as whatever agent received the task --
     # so the kind has to survive as far as admission.
-    thread_binding_kind: Literal["setup", "handoff", "owner", "web"] | None = None
+    thread_binding_kind: Literal["setup", "handoff", "owner", "web", "helper"] | None = None
 
 
 class PropagateOutcome(BaseModel):

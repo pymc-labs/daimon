@@ -2668,6 +2668,10 @@ class TurnOrigin(Base):
     # Set on a helper's turn: the origin of the turn that asked it. A helper asks no
     # helpers and changes nothing about the conversation it works for.
     helper_of: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    # The process running this turn serves its helper asks (`daimon.core.helpers`).
+    serves_helpers: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
 
 
 class AgentHelper(Base):

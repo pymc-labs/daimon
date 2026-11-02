@@ -1180,6 +1180,7 @@ class TurnOriginRow(BaseModel):
     platform_channel_id: str | None = None
     platform_message_id: str | None = None
     helper_of: uuid.UUID | None = None
+    serves_helpers: bool = False
 
 
 HelperAskStatus = Literal["queued", "running", "done", "failed", "stopped"]
