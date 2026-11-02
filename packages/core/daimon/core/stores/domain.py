@@ -1179,6 +1179,25 @@ class TurnOriginRow(BaseModel):
     shared_channel: bool = False
     platform_channel_id: str | None = None
     platform_message_id: str | None = None
+    helper_of: uuid.UUID | None = None
+
+
+HelperAskStatus = Literal["queued", "running", "done", "failed", "stopped"]
+
+
+class HelperAskRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    origin_id: uuid.UUID
+    helper_agent_id: str
+    helper_name: str
+    message: str
+    status: HelperAskStatus
+    reply: str | None
+    created_at: datetime
+    finished_at: datetime | None
 
 
 class _Facts(BaseModel):
