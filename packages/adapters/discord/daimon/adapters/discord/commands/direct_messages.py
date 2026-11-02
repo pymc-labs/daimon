@@ -35,6 +35,7 @@ from daimon.core.config import DirectMessagePolicy, Settings
 from daimon.core.direct_messages import (
     ColdDmNotices,
     DirectMessageAccessRevoked,
+    DirectMessageMembershipUnknown,
     DirectMessageReply,
     DmTurnCard,
     admit_cold_dm,
@@ -101,6 +102,7 @@ _DM_FAILURES = (
     SQLAlchemyError,
 )
 _DISCOVERY_FAILURE_NOTICE = "Couldn't open a private conversation. Please retry or ask an admin."
+_BUSY_NOTICE = "I'm still answering your last message.\nTry again once it's done, or press Stop."
 
 
 @dataclass(frozen=True)
@@ -160,6 +162,19 @@ class DirectMessageCog(commands.Cog):
             lock = asyncio.Lock()
             self._locks[key] = lock
         return lock
+
+    async def _busy(self, interaction: discord.Interaction, key: tuple[int, int]) -> bool:
+        """Answer a control at once while a reply holds the conversation.
+
+        A turn holds the lock through its queue wait and any approval card,
+        far past the three seconds Discord gives an interaction to respond.
+        """
+        if not self._lock(key).locked():
+            return False
+        await interaction.response.send_message(
+            embed=build_notice_embed(_BUSY_NOTICE, neutral=True), ephemeral=True
+        )
+        return True
 
     def _claim_discovery(self, user_id: int) -> bool:
         now = monotonic()
@@ -430,6 +445,8 @@ class DirectMessageCog(commands.Cog):
     def _switch_control(self, *, user_id: int, route_id: int, scope_id: str) -> ServerSwitch:
         async def switch(interaction: discord.Interaction) -> None:
             key = (user_id, route_id)
+            if await self._busy(interaction, key):
+                return
             async with self._lock(key):
                 async with self.bot.runtime.sessionmaker() as session:
                     current = await get_conversation(
@@ -497,6 +514,8 @@ class DirectMessageCog(commands.Cog):
             await interaction.response.send_message("Run /new in your DMs with me.", ephemeral=True)
             return
         key = (interaction.user.id, channel.id)
+        if await self._busy(interaction, key):
+            return
         async with self._lock(key):
             async with self.bot.runtime.sessionmaker() as session:
                 current = await get_conversation(
@@ -799,7 +818,10 @@ class DirectMessageCog(commands.Cog):
         Every write to the card first rechecks what delivering the answer checks:
         the recipient policy, then `require_dm_delivery` against the admitted
         grant. One proved refusal closes the card for the rest of the turn, so
-        someone who loses access mid-turn sees no more of it.
+        someone who loses access mid-turn sees no more of it. A failed membership
+        lookup proves nothing: the write goes ahead if the previous check (or the
+        admission) verified the person, and is refused otherwise, with the next
+        write checking again.
         """
         runtime = self.bot.runtime
         channel = message.channel
@@ -807,8 +829,10 @@ class DirectMessageCog(commands.Cog):
 
         def build(admission: Admission, cancel: asyncio.Event) -> DiscordTurnLifecycle:
             grant = admission.grant
+            verified = True
 
             async def still_allowed() -> None:
+                nonlocal verified
                 policy = runtime.settings.direct_message_policies.get(
                     conversation.tenant_id, DirectMessagePolicy()
                 )
@@ -820,9 +844,21 @@ class DirectMessageCog(commands.Cog):
                         runtime.turn_deps,
                         DirectMessageReply(text="", conversation=conversation, grant=grant),
                     )
+                except DirectMessageMembershipUnknown:
+                    log.info(
+                        "discord.dm.delivery_membership_unknown",
+                        user_id=person,
+                        route_key=str(channel.id),
+                        allowed=verified,
+                    )
+                    if not verified:
+                        raise
+                    verified = False
+                    return
                 except DirectMessageAccessRevoked as exc:
                     self._suppress(message, exc.reason)
                     raise AdmissionDenied(reason="invoker_not_allowed") from exc
+                verified = True
 
             async def edit(sent: discord.Message, **kwargs: Any) -> discord.Message | None:  # noqa: ANN401
                 # A plain message edit has no replacement post to allow or refuse.
@@ -986,8 +1022,8 @@ class DirectMessageCog(commands.Cog):
                     )
             finally:
                 ticket.release()
-            if reply is not None and not (cards and cards[-1].was_answered):
-                # The card answered unless a recovery replaced it; then the text goes here.
+            if reply is not None and not (cards and (cards[-1].was_answered or cards[-1].ended)):
+                # The card shows the outcome unless a recovery replaced it; then the text goes here.
                 answer = reply.text
                 for start in range(0, len(answer), 1900):
                     # Each transport await is another opportunity for revocation.

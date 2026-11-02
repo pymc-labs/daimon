@@ -11,7 +11,8 @@ import discord
 import pytest
 from daimon.adapters.discord.commands import direct_messages as module
 from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core import direct_messages as core_direct_messages
+from daimon.core.access_policy import AgentRule, TenantAccessPolicy
 from daimon.core.authz import AgentRef, Place, Surface, build_subject
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.direct_messages import DirectMessageReply
@@ -431,6 +432,31 @@ async def test_new_conversation_rechecks_access(db_session_factory, monkeypatch,
     await cog.cog_unload()
 
 
+@pytest.mark.parametrize("control", ["switch", "new-button", "new-command"])
+async def test_controls_answer_at_once_while_a_reply_is_running(
+    db_session_factory, monkeypatch, control
+):
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    msg = message()
+    await cog.on_message(msg)
+    old = await conversation(db_session_factory)
+    click = interaction(channel=msg.channel)
+    running = cog._lock((999, 555))
+    async with running:
+        if control == "new-command":
+            pressed = cog.new.callback(cog, click)
+        else:
+            pressed = switch_view(msg).children[0 if control == "switch" else 1].callback(click)
+        await asyncio.wait_for(pressed, timeout=1)
+    embed = click.response.send_message.await_args.kwargs["embed"]
+    assert embed.color == module.build_notice_embed("", neutral=True).color, (
+        "a busy notice is a neutral card"
+    )
+    assert click.response.send_message.await_args.kwargs["ephemeral"] is True
+    assert (await conversation(db_session_factory)).scope_id == old.scope_id
+    await cog.cog_unload()
+
+
 async def test_new_command_replaces_current_conversation(db_session_factory, monkeypatch):
     cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
     msg = message()
@@ -784,6 +810,86 @@ async def test_dm_turn_card_rechecks_delivery_access_before_every_write(
     assert delivery.await_count == 2, "a proved refusal closes the card for the rest of the turn"
 
 
+async def test_unknown_membership_does_not_close_the_dm_turn_card(db_session_factory, monkeypatch):
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    await cog.on_message(message())
+    admission = SimpleNamespace(
+        grant=private_reply(await conversation(db_session_factory)).grant,
+        agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
+        is_admin=False,
+        budget_channel_id=None,
+    )
+    card = await _card_from_turn(cog, message(102), reply, admission)
+    member = fetch.return_value
+    fetch.return_value = Membership()
+    await card.check_output()
+    with pytest.raises(DaimonError) as refused:
+        await card.check_output()
+    assert not isinstance(refused.value, AdmissionDenied), (
+        "a second unknown lookup refuses that write without closing the card"
+    )
+    fetch.return_value = member
+    await card.check_output()
+    fetch.return_value = Membership()
+    await card.check_output()
+    fetch.return_value = Membership(is_member=False)
+    with pytest.raises(AdmissionDenied):
+        await card.check_output()
+    fetch.return_value = member
+    with pytest.raises(AdmissionDenied):
+        await card.check_output()
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        TenantAccessPolicy(invoker_user_ids=("111",)),
+        TenantAccessPolicy(agent_rules={"private": AgentRule(invoker_role_ids=("456",))}),
+    ],
+    ids=["invoker", "agent"],
+)
+async def test_unknown_membership_still_closes_the_card_on_a_proved_denial(
+    db_session_factory, monkeypatch, policy
+):
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    await cog.on_message(message())
+    admission = SimpleNamespace(
+        grant=private_reply(await conversation(db_session_factory)).grant,
+        agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
+        is_admin=False,
+        budget_channel_id=None,
+    )
+    card = await _card_from_turn(cog, message(102), reply, admission)
+    async with db_session_factory.begin() as session:
+        await set_access_policy(session, tenant_id=tenants[0].id, policy=policy)
+    member = fetch.return_value
+    fetch.return_value = Membership()
+    with pytest.raises(AdmissionDenied):
+        await card.check_output()
+    fetch.return_value = member
+    with pytest.raises(AdmissionDenied):
+        await card.check_output()
+
+
+async def test_unknown_membership_refuses_a_write_once_the_source_is_sealed(
+    db_session_factory, monkeypatch
+):
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    await cog.on_message(message())
+    admission = SimpleNamespace(
+        grant=private_reply(await conversation(db_session_factory)).grant,
+        agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
+        is_admin=False,
+        budget_channel_id=None,
+    )
+    card = await _card_from_turn(cog, message(102), reply, admission)
+    monkeypatch.setattr(core_direct_messages, "_source_is_sealed", lambda policy, row: True)
+    fetch.return_value = Membership()
+    with pytest.raises(AdmissionDenied):
+        await card.check_output()
+    assert await conversation(db_session_factory) is None, "the sealed conversation is quarantined"
+
+
 async def test_recipient_policy_closes_the_dm_turn_card(db_session_factory, monkeypatch):
     cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
     delivery = AsyncMock()
@@ -815,16 +921,20 @@ class _AnsweredCard:
         self.authorization = authorization
 
 
-@pytest.mark.parametrize("answered", [True, False], ids=["card-answered", "recovered"])
-async def test_answer_is_sent_as_text_only_when_the_card_did_not_answer(
-    db_session_factory, monkeypatch, answered
+@pytest.mark.parametrize(
+    ("answered", "ended"),
+    [(True, True), (False, True), (False, False)],
+    ids=["card-answered", "card-stopped", "recovered"],
+)
+async def test_answer_is_sent_as_text_only_when_the_card_shows_no_outcome(
+    db_session_factory, monkeypatch, answered, ended
 ):
     cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
     await cog.on_message(message())
     monkeypatch.setattr(
         module,
         "DiscordTurnLifecycle",
-        lambda **kwargs: _AnsweredCard(answered=answered, ended=answered),
+        lambda **kwargs: _AnsweredCard(answered=answered, ended=ended),
     )
 
     async def answer(deps, **kwargs):
@@ -843,8 +953,8 @@ async def test_answer_is_sent_as_text_only_when_the_card_did_not_answer(
     msg = message(102)
     await cog.on_message(msg)
     sent = [call.args[0] for call in msg.channel.send.await_args_list if call.args]
-    assert ("the answer" in sent) is not answered, (
-        "the card delivers its own answer; text goes out only when it did not"
+    assert ("the answer" in sent) is not ended, (
+        "a card that answered or shows the stop is the outcome; text goes out only without one"
     )
 
 

@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- A watch that reports in its owner's DM waits while the owner has a DM reply running, such as one waiting on an approval card, and reports once it ends. Before, the report was skipped.
+
+- A Discord DM answer survives one failed server membership lookup while it is written. Before, a single timed-out or rate-limited lookup closed the progress card for the rest of the turn, so the answer never showed. A person verified as no longer a member still sees no more of it.
+
+- **New conversation**, **Switch server** and `/new` in a Discord DM answer straight away while Daimon is still replying there, saying to try again once it's done. Before, they waited for the reply and Discord showed the interaction as failed.
+
+- Stopping a Discord DM turn no longer posts its partial answer again under the card, or "The reply finished without text." when it stopped before any text. A DM turn that ends with no text and no tools shows only its card too.
+
 - Files an agent saves during a Discord DM turn are sent in the DM, attached to the answer as in a server thread. Before, a DM turn never collected them, so the agent said a file was ready when none arrived, and it stayed only in the session. A DM is held to Discord's default 10 MB upload limit; a larger file stays in the session with a notice, as in a thread. Each file first checks that the person may still receive the answer.
 
 - Discord DMs have a **New conversation** button next to **Switch server**, and `/new` and `/dm-settings` commands in DMs. The buttons appear only on a conversation's opening message, which says to run `/dm-settings` for them, and on `/dm-settings` itself; replies no longer carry them. Both start an empty private conversation with the same server and its DM agent, so a person picks up an agent's changed credentials or tools without choosing a server again. Access is checked as for a first DM, and a button from an older conversation refuses. Non-production deployments, which register commands per server, also register their DM-only commands globally so they appear in DMs, and leave them out of the server copies.
