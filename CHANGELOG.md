@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- A watch that reports in its owner's DM waits while the owner has a DM reply running, such as one waiting on an approval card, and reports once it ends. Before, the report was skipped.
+
 - A Discord DM answer survives one failed server membership lookup while it is written. Before, a single timed-out or rate-limited lookup closed the progress card for the rest of the turn, so the answer never showed. A person verified as no longer a member still sees no more of it.
 
 - **New conversation**, **Switch server** and `/new` in a Discord DM answer straight away while Daimon is still replying there, saying to try again once it's done. Before, they waited for the reply and Discord showed the interaction as failed.
