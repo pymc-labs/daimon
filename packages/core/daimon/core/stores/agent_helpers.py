@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Collection
+from collections.abc import Collection, Iterable
 
 from daimon.core._models import AgentHelper
 from sqlalchemy import delete, select
@@ -21,6 +21,21 @@ async def list_helper_ids(
         .order_by(AgentHelper.created_at, AgentHelper.helper_agent_id)
     )
     return list(rows.scalars())
+
+
+async def list_helper_ids_many(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_ids: Iterable[str]
+) -> dict[str, list[str]]:
+    """Each of `agent_ids`' helper ids, oldest first; an agent with none is left out."""
+    rows = await session.execute(
+        select(AgentHelper.agent_id, AgentHelper.helper_agent_id)
+        .where(AgentHelper.tenant_id == tenant_id, AgentHelper.agent_id.in_(list(agent_ids)))
+        .order_by(AgentHelper.created_at, AgentHelper.helper_agent_id)
+    )
+    out: dict[str, list[str]] = {}
+    for agent_id, helper_id in rows:
+        out.setdefault(agent_id, []).append(helper_id)
+    return out
 
 
 async def set_helpers(

@@ -37,10 +37,12 @@ from daimon.core.agent_view import (
     AgentViewDeps,
     AgentViewer,
     Backend,
+    HelperDoc,
     McpServer,
     ModelChoice,
     PlaceDoc,
     config_of,
+    fetch_tenant_agent,
     load_agent_facts,
     redact_config,
     sees_details,
@@ -58,7 +60,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, strip_tenant_pre
 from daimon.core.model_presets import ModelConfig
 from daimon.core.permissions import WEB_PLACE_ID
 from daimon.core.stores import agent_drafts as drafts_store
-from daimon.core.stores import agent_tool_rules
+from daimon.core.stores import agent_helpers, agent_tool_rules
 from daimon.core.stores.agent_tool_rules import Rule
 from daimon.core.stores.domain import BackendAgent, CompatibilityPreview
 from daimon.core.turn.notices import provider_name
@@ -84,6 +86,7 @@ EFFECT_FIELDS: dict[str, tuple[Axis, tuple[str, ...]]] = {
     "purpose": ("route", ()),
     "avatar": ("route", ()),
     "place": ("route", ()),
+    "helper": ("route", ()),
 }
 
 
@@ -277,6 +280,14 @@ def diff_config(a: AgentConfigDoc, b: AgentConfigDoc) -> list[Change]:
     for place_id, place in places_a.items():
         if place_id not in places_b:
             add(f"place:{place_id}", "places", _place_label(place), "remove")
+    helpers_a = {helper.id: helper for helper in a.helpers or []}
+    helpers_b = {helper.id: helper for helper in b.helpers or []}
+    for helper_id, helper in helpers_b.items():
+        if helper_id not in helpers_a:
+            add(f"helper:{helper_id}", "helpers", f"{helper.name} helper", "add")
+    for helper_id, helper in helpers_a.items():
+        if helper_id not in helpers_b:
+            add(f"helper:{helper_id}", "helpers", f"{helper.name} helper", "remove")
     return out
 
 
@@ -391,6 +402,13 @@ def revert_target(current: AgentConfigDoc, old: AgentConfigDoc) -> AgentConfigDo
     )
 
 
+def keep_helpers(base: AgentConfigDoc, target: AgentConfigDoc) -> AgentConfigDoc:
+    """``target`` with ``base``'s helpers where it lists none (None: unread, not emptied). Pure."""
+    if target.helpers is None:
+        return target.model_copy(update={"helpers": base.helpers})
+    return target
+
+
 def with_hidden_places(
     base: AgentConfigDoc, target: AgentConfigDoc, *, is_admin: bool
 ) -> AgentConfigDoc:
@@ -413,7 +431,7 @@ def keep_unseen(
 ) -> AgentConfigDoc:
     """``config`` with what its author could not see taken from ``base``. Pure.
 
-    Without details the prompt, the MCP servers and the places come back redacted, so a
+    Without details the prompt, the MCP servers, the places and the helpers come back redacted, so a
     round trip carries nothing of them; reading that as an edit would erase the prompt
     and the servers' URLs. Confidential places are kept for a non-admin as in
     `with_hidden_places`.
@@ -424,9 +442,10 @@ def keep_unseen(
                 "system": base.system,
                 "mcp_servers": base.mcp_servers,
                 "places": base.places,
+                "helpers": base.helpers,
             }
         )
-    return with_hidden_places(base, config, is_admin=is_admin)
+    return keep_helpers(base, with_hidden_places(base, config, is_admin=is_admin))
 
 
 def confidential_place_ids(configs: Iterable[AgentConfigDoc]) -> set[str]:
@@ -464,7 +483,10 @@ def _provider_state(model: ModelChoice) -> list[str | None]:
 
 
 def _state_hash(
-    places: Iterable[PlaceDoc], rules: Iterable[tuple[str, str, str]], model: ModelChoice
+    places: Iterable[PlaceDoc],
+    rules: Iterable[tuple[str, str, str]],
+    model: ModelChoice,
+    helpers: Iterable[HelperDoc],
 ) -> str:
     return hashlib.sha256(
         json.dumps(
@@ -472,6 +494,7 @@ def _state_hash(
                 sorted((place.id, bool(place.default)) for place in places),
                 sorted(rules),
                 _provider_state(model),
+                sorted(helper.id for helper in helpers),
             ]
         ).encode()
     ).hexdigest()
@@ -479,20 +502,21 @@ def _state_hash(
 
 def db_state(config: AgentConfigDoc) -> str:
     """A fingerprint of what the config keeps outside the provider's agent: its places, its
-    tool rules and its model provider. They change without a new provider version. Pure."""
+    tool rules, its model provider and its helpers. They change without a new provider
+    version. Pure."""
     rules = (
         (server.key, tool.name, tool.rule)
         for server in config.mcp_servers
         for tool in server.tools
         if tool.rule != "allow"
     )
-    return _state_hash(config.places or [], rules, config.model)
+    return _state_hash(config.places or [], rules, config.model, config.helpers or [])
 
 
 def stored_db_state(base: AgentConfigDoc, facts: AgentFacts) -> str:
-    """`db_state` of ``base``'s tools and places as they are stored now.
+    """`db_state` of ``base``'s tools, places and helpers as they are stored now.
 
-    Read from the stored places and rules, never a server's live tool listing, so an
+    Read from the stored places, rules and helpers, never a server's live tool listing, so an
     unreachable server cannot make a draft stale. Pure.
     """
     stored = {
@@ -506,7 +530,7 @@ def stored_db_state(base: AgentConfigDoc, facts: AgentFacts) -> str:
         for tool in server.tools
         if (stored_rule := stored.get((server.key, tool.name), "allow")) != "allow"
     )
-    return _state_hash(facts.places, rules, config_of(facts).model)
+    return _state_hash(facts.places, rules, config_of(facts).model, facts.helpers)
 
 
 def place_edits(places: list[PlaceDoc] | None) -> list[PlaceEdit]:
@@ -719,7 +743,8 @@ def _stale(agent: BetaManagedAgentsAgent) -> AgentEditError:
 
 def _moved() -> AgentEditError:
     return AgentEditError(
-        "This agent's model, where it answers or its tool rules changed since your draft began",
+        "This agent's model, helpers, where it answers or its tool rules changed since your "
+        "draft began",
         kind="stale",
     )
 
@@ -875,6 +900,33 @@ async def _check_added_skills(
         raise AgentEditError("That skill isn't available here.", kind="invalid")
 
 
+async def _check_added_helpers(
+    deps: AgentChangeDeps,
+    *,
+    actor: AgentActor,
+    agent: BetaManagedAgentsAgent,
+    base: AgentConfigDoc,
+    target: AgentConfigDoc,
+) -> None:
+    """Refuse a helper that is the agent itself or not a live agent of the actor's workspace.
+
+    Only added helpers are checked: one already listed that has since been archived can
+    still be taken off. Every agent of the workspace is one the actor may add, as in the
+    web roster; there is no narrower per-viewer list.
+    """
+    known = {helper.id for helper in base.helpers or []}
+    for helper in target.helpers or []:
+        if helper.id in known:
+            continue
+        if helper.id == agent.id:
+            raise AgentEditError("An agent can't be its own helper.", kind="invalid")
+        found = await fetch_tenant_agent(
+            deps.view, tenant_id=actor.tenant_id, ma_agent_id=helper.id
+        )
+        if found is None:
+            raise AgentEditError("That helper isn't available here.", kind="invalid")
+
+
 async def _write(
     deps: AgentChangeDeps,
     *,
@@ -885,7 +937,7 @@ async def _write(
     note: str | None,
     provider_revision: int,
 ) -> BetaManagedAgentsAgent:
-    target = with_hidden_places(base, target, is_admin=actor.subject.is_admin)
+    target = keep_helpers(base, with_hidden_places(base, target, is_admin=actor.subject.is_admin))
     changes = diff_config(base, target)
     if not changes:
         raise AgentEditError("Nothing to apply", kind="conflict")
@@ -896,6 +948,7 @@ async def _write(
     if rules and not actor.subject.is_admin:
         raise AgentEditError("Only an admin can change tool rules.", kind="forbidden")
     await _check_added_skills(deps, actor=actor, base=base, target=target)
+    await _check_added_helpers(deps, actor=actor, agent=agent, base=base, target=target)
     patch = patch_for(agent, changes, target)
     before, after = place_edits(base.places), place_edits(target.places)
     # Checked before the first write; a rule or a missing right stops the whole change.
@@ -943,6 +996,13 @@ async def _write(
                 rule=rule,
                 set_by=str(actor.account_id),
                 actor=actor.subject,
+            )
+        if any(change.key.startswith("helper:") for change in changes):
+            await agent_helpers.set_helpers(
+                session,
+                tenant_id=actor.tenant_id,
+                agent_id=agent.id,
+                helper_ids=[helper.id for helper in target.helpers or []],
             )
         await drafts_store.record_version(
             session,
