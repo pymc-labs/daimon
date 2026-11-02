@@ -202,7 +202,10 @@ def _shown(interaction: MagicMock) -> Any:
 
 
 def _followups(interaction: MagicMock) -> list[str]:
-    return [call.args[0] for call in interaction.followup.send.await_args_list]
+    return [
+        call.args[0] if call.args else call.kwargs["embed"].description
+        for call in interaction.followup.send.await_args_list
+    ]
 
 
 async def _route(
@@ -269,7 +272,10 @@ async def test_an_unbound_agent_refuses_a_members_form(
     await view._on_add_skill(interaction)
 
     interaction.response.send_modal.assert_not_awaited()
-    assert "needs a Daimon admin" in interaction.response.send_message.await_args.args[0]
+    assert (
+        "needs a Daimon admin"
+        in interaction.response.send_message.await_args.kwargs["embed"].description
+    )
 
 
 async def test_a_built_in_agent_is_refused_with_the_fork_route(
@@ -282,7 +288,9 @@ async def test_a_built_in_agent_is_refused_with_the_fork_route(
     await _details_view(world, built_in)._on_add_skill(interaction)
 
     interaction.response.send_modal.assert_not_awaited()
-    assert interaction.response.send_message.await_args.args[0] == BUILT_IN_MESSAGE
+    assert (
+        interaction.response.send_message.await_args.kwargs["embed"].description == BUILT_IN_MESSAGE
+    )
 
 
 async def test_a_server_default_needs_a_server_admin(
@@ -294,7 +302,10 @@ async def test_a_server_default_needs_a_server_admin(
     member = _interaction()
     await _details_view(world, agent)._on_add_skill(member)
     member.response.send_modal.assert_not_awaited()
-    assert "needs a Daimon admin" in member.response.send_message.await_args.args[0]
+    assert (
+        "needs a Daimon admin"
+        in member.response.send_message.await_args.kwargs["embed"].description
+    )
 
     admin = _interaction(admin=True)
     await _details_view(world, agent)._on_add_skill(admin)
@@ -452,7 +463,7 @@ async def test_a_pinned_agent_opens_add_skill_only_inside_its_channels_or_for_an
     outside = _interaction()
     await _details_view(world, agent)._on_add_skill(outside)
     outside.response.send_modal.assert_not_awaited()
-    assert outside.response.send_message.await_args.args[0] == PIN_WRITE_REFUSAL
+    assert outside.response.send_message.await_args.kwargs["embed"].description == PIN_WRITE_REFUSAL
 
     inside = _interaction(channel_id=OTHER_CHANNEL_ID)
     await _details_view(world, agent)._on_add_skill(inside)

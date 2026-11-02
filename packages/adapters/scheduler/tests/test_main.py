@@ -16,14 +16,16 @@ import json
 import os
 import unittest.mock
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
-from typing import Literal
+from typing import Any, Literal
 
+import anthropic
 import httpx
 import pytest
+import structlog.testing
 from anthropic import AsyncAnthropic, NotFoundError
 from cryptography.fernet import Fernet
 from daimon.adapters.scheduler.main import (
@@ -39,7 +41,7 @@ from daimon.adapters.scheduler.main import (
     _sweep_slack_event_dedup,  # pyright: ignore[reportPrivateUsage]  # test seam for the slack_event_dedup sweep wrapper
     _sweep_wizard_sessions,  # pyright: ignore[reportPrivateUsage]  # test seam for the wizard sweep wrapper
     _usage_sweep_once,  # pyright: ignore[reportPrivateUsage]  # --once usage pass
-    _validate_mcp_settings,  # pyright: ignore[reportPrivateUsage]  # boot-validation seam
+    _validate_mcp_settings,
 )
 from daimon.core.billing import BillingConfig
 from daimon.core.config import Settings
@@ -53,7 +55,13 @@ from daimon.core.rule_views import RoutineOrigin
 from daimon.core.scheduler import run_one_tick
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.session_snapshot import SessionSnapshot
-from daimon.core.stores import github_issued_tokens, tenant_ledger, tenant_user_caps, usage_events
+from daimon.core.stores import (
+    github_issued_tokens,
+    spend_allowances,
+    tenant_ledger,
+    tenant_user_caps,
+    usage_events,
+)
 from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores.accounts import delete_account
 from daimon.core.stores.domain import RoutineRow
@@ -463,6 +471,7 @@ def fresh_refresh_state(monkeypatch: pytest.MonkeyPatch) -> dict[str, tuple[int,
     failures: dict[str, tuple[int, datetime]] = {}
     monkeypatch.setattr("daimon.adapters.scheduler.main._last_app_access_checks", {})
     monkeypatch.setattr("daimon.adapters.scheduler.main._app_refresh_failures", failures)
+    monkeypatch.setattr("daimon.adapters.scheduler.main._app_refresh_retired", {})
     monkeypatch.setattr("daimon.adapters.scheduler.main._mcp_running_since", {})
     return failures
 
@@ -684,6 +693,268 @@ async def test_failed_refresh_backs_off_exponentially(
     fresh_refresh_state["mapped-active-turn"] = (7, datetime.now(UTC) - timedelta(seconds=1))
     await _refresh_mapped(db_session_factory, monkeypatch, [[item], [item]], rotate=rotate)
     assert "mapped-active-turn" not in fresh_refresh_state
+
+
+@pytest.fixture
+def retired_refresh_state(
+    fresh_refresh_state: dict[str, tuple[int, datetime]], monkeypatch: pytest.MonkeyPatch
+) -> dict[str, str]:
+    retired: dict[str, str] = {}
+    monkeypatch.setattr("daimon.adapters.scheduler.main._app_refresh_retired", retired)
+    return retired
+
+
+_ARCHIVED_400 = (
+    anthropic.BadRequestError,
+    400,
+    "invalid_request_error",
+    "Cannot update resources on an archived session",
+)
+_GONE_404 = (anthropic.NotFoundError, 404, "not_found_error", "Session not found: sesn_011")
+_SESSION = "mapped-active-turn"
+
+
+def _api_error(
+    kind: type[anthropic.APIStatusError], status: int, error_type: str, message: str
+) -> anthropic.APIStatusError:
+    """Build the error the SDK raises: message and body come from the response JSON."""
+    body = {
+        "type": "error",
+        "error": {"type": error_type, "message": message},
+        "request_id": "req_011",
+    }
+    response = httpx.Response(
+        status,
+        json=body,
+        request=httpx.Request("POST", "https://api.anthropic.com/v1/sessions/sesn_011"),
+    )
+    return kind(f"Error code: {status} - {body}", response=response, body=body)
+
+
+def _session_record(*, archived: bool = False, status: str = "idle") -> SimpleNamespace:
+    return SimpleNamespace(
+        archived_at=datetime.now(UTC) if archived else None,
+        status=status,
+    )
+
+
+def _patch_retrieve(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    record: SimpleNamespace | None = None,
+    error: BaseException | None = None,
+) -> unittest.mock.AsyncMock:
+    retrieve = unittest.mock.AsyncMock(return_value=record, side_effect=error)
+    monkeypatch.setattr("daimon.adapters.scheduler.main.retrieve_session_record", retrieve)
+    return retrieve
+
+
+def _events(logs: Sequence[Mapping[str, Any]], event: str) -> list[Mapping[str, Any]]:
+    return [entry for entry in logs if entry["event"] == event]
+
+
+@pytest.mark.parametrize(
+    ("failure", "confirm", "reason"),
+    [
+        pytest.param(
+            _ARCHIVED_400, {"record": _session_record(archived=True)}, "session_archived", id="400"
+        ),
+        pytest.param(
+            _ARCHIVED_400,
+            {"record": _session_record(status="terminated")},
+            "session_archived",
+            id="400-terminated",
+        ),
+        pytest.param(
+            _GONE_404,
+            {"error": _api_error(*_GONE_404)},
+            "session_not_found",
+            id="404",
+        ),
+    ],
+)
+async def test_refresh_retires_a_session_ma_reports_gone(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    retired_refresh_state: dict[str, str],
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+    failure: tuple[type[anthropic.APIStatusError], int, str, str],
+    confirm: dict[str, Any],
+    reason: str,
+) -> None:
+    item = _mapped_app_session()
+    rotate = unittest.mock.AsyncMock(side_effect=_api_error(*failure))
+    retrieve = _patch_retrieve(monkeypatch, **confirm)
+    with structlog.testing.capture_logs() as logs:
+        await _refresh_mapped(db_session_factory, monkeypatch, [[item], [item]], rotate=rotate)
+    assert retired_refresh_state == {_SESSION: reason}
+    assert _SESSION not in fresh_refresh_state
+    assert retrieve.await_count == 1
+    assert retrieve.await_args is not None
+    assert retrieve.await_args.args[1] == _SESSION
+    scope = retrieve.await_args.kwargs["scope"]
+    assert (scope.tenant_id, scope.account_id) == (
+        str(item.mapping.tenant_id),
+        str(item.mapping.account_id),
+    )
+    assert scope.authorization_id == "scheduler:refresh_github_app_sessions"
+    [retired] = _events(logs, "scheduler.github_app_session_refresh.retired")
+    assert retired["log_level"] == "info"
+    assert {key: retired[key] for key in retired if key not in ("event", "log_level")} == {
+        "session_id": _SESSION,
+        "reason": reason,
+    }
+    assert _events(logs, "scheduler.github_app_session_refresh.failed") == []
+
+    # Next tick, past the due checks and with the old backoff expired: no mint, no
+    # read. Without the retired state the same tick tries again.
+    fresh_refresh_state[_SESSION] = (1, datetime.now(UTC) - timedelta(seconds=1))
+    lister, _, _ = await _refresh_mapped(db_session_factory, monkeypatch, [[item]], rotate=rotate)
+    assert rotate.await_count == 1
+    assert retrieve.await_count == 1
+    assert lister.await_count == 2, "the pre-fence listing and the prune only"
+    retired_refresh_state.clear()
+    await _refresh_mapped(db_session_factory, monkeypatch, [[item], [item]], rotate=rotate)
+    assert rotate.await_count == 2
+
+
+async def test_refresh_keeps_backing_off_when_ma_still_shows_the_session_live(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    retired_refresh_state: dict[str, str],
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+) -> None:
+    item = _mapped_app_session()
+    rotate = unittest.mock.AsyncMock(side_effect=_api_error(*_ARCHIVED_400))
+    retrieve = _patch_retrieve(monkeypatch, record=_session_record())
+    with structlog.testing.capture_logs() as logs:
+        await _refresh_mapped(db_session_factory, monkeypatch, [[item], [item]], rotate=rotate)
+    retrieve.assert_awaited_once()
+    assert retired_refresh_state == {}
+    assert fresh_refresh_state[_SESSION][0] == 1
+    assert len(_events(logs, "scheduler.github_app_session_refresh.failed")) == 1
+    assert _events(logs, "scheduler.github_app_session_refresh.retired") == []
+
+
+@pytest.mark.parametrize(
+    "confirm_error",
+    [
+        _api_error(anthropic.InternalServerError, 500, "api_error", "Internal server error"),
+        anthropic.APITimeoutError(request=httpx.Request("GET", "https://api.anthropic.com")),
+    ],
+    ids=["500", "timeout"],
+)
+async def test_refresh_does_not_retire_when_the_confirming_read_fails(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    retired_refresh_state: dict[str, str],
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+    confirm_error: Exception,
+) -> None:
+    item = _mapped_app_session()
+    rotate = unittest.mock.AsyncMock(side_effect=_api_error(*_ARCHIVED_400))
+    retrieve = _patch_retrieve(monkeypatch, error=confirm_error)
+    with structlog.testing.capture_logs() as logs:
+        await _refresh_mapped(db_session_factory, monkeypatch, [[item], [item]], rotate=rotate)
+    retrieve.assert_awaited_once()
+    assert retired_refresh_state == {}
+    assert fresh_refresh_state[_SESSION][0] == 1
+    assert len(_events(logs, "scheduler.github_app_session_refresh.failed")) == 1
+
+
+_REQUEST = httpx.Request("POST", "https://api.anthropic.com/v1/sessions/sesn_011")
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        _api_error(anthropic.BadRequestError, 400, "invalid_request_error", "Invalid resource id"),
+        _api_error(anthropic.NotFoundError, 404, "not_found_error", "Vault not found: vlt_011"),
+        _api_error(anthropic.AuthenticationError, 401, "authentication_error", "invalid x-api-key"),
+        _api_error(anthropic.PermissionDeniedError, 403, "permission_error", "Forbidden"),
+        _api_error(anthropic.ConflictError, 409, "invalid_request_error", "Conflict"),
+        _api_error(anthropic.RateLimitError, 429, "rate_limit_error", "Rate limited"),
+        _api_error(anthropic.InternalServerError, 500, "api_error", "Internal server error"),
+        _api_error(anthropic.InternalServerError, 529, "overloaded_error", "Overloaded"),
+        httpx.ReadTimeout("timed out"),
+        anthropic.APITimeoutError(request=_REQUEST),
+        anthropic.APIConnectionError(request=_REQUEST),
+    ],
+    ids=[
+        "other-400",
+        "vault-404",
+        "401",
+        "403",
+        "409",
+        "429",
+        "500",
+        "529",
+        "httpx-timeout",
+        "api-timeout",
+        "connection",
+    ],
+)
+async def test_refresh_keeps_backing_off_on_any_other_failure(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    retired_refresh_state: dict[str, str],
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+    error: Exception,
+) -> None:
+    item = _mapped_app_session()
+    rotate = unittest.mock.AsyncMock(side_effect=error)
+    retrieve = _patch_retrieve(monkeypatch, record=_session_record(archived=True))
+    with structlog.testing.capture_logs() as logs:
+        await _refresh_mapped(db_session_factory, monkeypatch, [[item], [item]], rotate=rotate)
+    retrieve.assert_not_awaited()
+    assert retired_refresh_state == {}
+    assert fresh_refresh_state[_SESSION][0] == 1
+    assert len(_events(logs, "scheduler.github_app_session_refresh.failed")) == 1
+    assert _events(logs, "scheduler.github_app_session_refresh.retired") == []
+
+
+async def test_retired_session_does_not_stop_the_others_in_the_sweep(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    retired_refresh_state: dict[str, str],
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+) -> None:
+    gone = _mapped_app_session()
+    live = _mapped_app_session()
+    live.mapping.ma_session_id = "other-live"
+    minted: list[str] = []
+
+    async def rotate(*_args: object, session_id: str, **_kwargs: object) -> AppSessionAccess:
+        minted.append(session_id)
+        if session_id == _SESSION:
+            raise _api_error(*_ARCHIVED_400)
+        return unittest.mock.MagicMock(spec=AppSessionAccess)
+
+    _patch_retrieve(monkeypatch, record=_session_record(archived=True))
+    await _refresh_mapped(
+        db_session_factory,
+        monkeypatch,
+        [[gone, live], [gone], [live]],
+        rotate=unittest.mock.AsyncMock(side_effect=rotate),
+    )
+    assert minted == [_SESSION, "other-live"]
+    assert retired_refresh_state == {_SESSION: "session_archived"}
+    assert "other-live" not in fresh_refresh_state
+
+
+async def test_retired_state_is_dropped_once_the_mapping_is_no_longer_live(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    retired_refresh_state: dict[str, str],
+) -> None:
+    item = _mapped_app_session()
+    retired_refresh_state[_SESSION] = "session_archived"
+    # Still mapped live: kept, so the loop keeps skipping it.
+    await _refresh_mapped(db_session_factory, monkeypatch, [[item]])
+    assert retired_refresh_state == {_SESSION: "session_archived"}
+    # The turn path replaced the mapping: the next sweep no longer lists it.
+    await _refresh_mapped(db_session_factory, monkeypatch, [[]])
+    assert retired_refresh_state == {}
 
 
 async def test_access_check_with_nothing_to_rotate_clears_the_backoff(
@@ -1369,6 +1640,78 @@ async def test_fire_rejects_routine_when_tenant_balance_depleted(
     assert fetched.delivery_payload.startswith("Your team's Daimon credit has run out.")
 
     await fake_client.close()
+
+
+@pytest.mark.parametrize("amount", [Decimal("0"), Decimal("5")], ids=["exhausted", "room"])
+async def test_fire_is_stopped_by_the_creators_exhausted_allowance(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    amount: Decimal,
+) -> None:
+    """The creator's spend allowance gates a fire after balance and channel budget."""
+    now = datetime(2026, 5, 30, 12, 0, 0, tzinfo=UTC)
+    tenant = await make_tenant(db_session)
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    await spend_allowances.create_allowance(
+        db_session,
+        tenant_id=tenant.id,
+        subject_kind="person",
+        subject_id="u4",
+        agent_id=None,
+        amount_usd=amount,
+        window="total",
+        starts_at=now - timedelta(days=1),
+    )
+    row = await create_routine(
+        db_session,
+        created_by_user_id="u4",
+        agent_id="agent_z",
+        agent_name="daimon",
+        cron_expr="* * * * *",
+        timezone_="UTC",
+        trigger_message="trigger",
+        next_fire_at=now - timedelta(minutes=1),
+        tenant_id=tenant.id,
+        channel_id="chan-4",
+    )
+    await db_session.commit()
+    fake_client = AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999")
+    calls: list[dict[str, object]] = []
+
+    async def capturing_run_turn(**kwargs: object) -> str:
+        calls.append(kwargs)
+        return "tail"
+
+    async def fake_resolve(*args: object, **kwargs: object) -> str:
+        return "agent_z"
+
+    fire = await _build_fire(
+        client=fake_client,
+        sm=db_session_factory,
+        settings=_make_test_settings(monkeypatch),
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+    )
+    with (
+        unittest.mock.patch(
+            "daimon.adapters.scheduler.main.run_turn", side_effect=capturing_run_turn
+        ),
+        unittest.mock.patch("daimon.adapters.scheduler.main.resolve_agent", fake_resolve),
+        unittest.mock.patch("daimon.adapters.scheduler.main.resolve_environment", fake_resolve),
+    ):
+        await fire(row)
+    await fake_client.close()
+
+    async with db_session_factory() as s:
+        fetched = await get_routine(s, row.id, tenant_id=tenant.id)
+    assert fetched is not None
+    if amount == 0:
+        assert calls == [], "an exhausted allowance must refuse the fire"
+        assert fetched.last_error == "allowance_exhausted"
+        return
+    assert fetched.last_error is None, "an allowance with room lets the fire run"
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize("limit", [Decimal("0"), Decimal("5")], ids=["over", "under"])
@@ -3140,9 +3483,7 @@ async def test_mcp_token_sweep_prunes_only_past_the_retention_grace(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    from daimon.adapters.scheduler.main import (
-        _sweep_mcp_tokens,  # pyright: ignore[reportPrivateUsage]
-    )
+    from daimon.adapters.scheduler.main import _sweep_mcp_tokens
     from daimon.core.mcp_auth import mint_chat_mcp_token
     from daimon.core.stores.mcp_tokens import get_mcp_token
 
@@ -3167,25 +3508,6 @@ async def test_mcp_token_sweep_prunes_only_past_the_retention_grace(
     async with db_session_factory() as session:
         assert await get_mcp_token(session, jti=expired_jti) is None
         assert await get_mcp_token(session, jti=recent_jti) is not None
-
-
-@pytest.mark.parametrize("fails", [False, True])
-async def test_fleet_deadline_sweep_uses_store_owner_and_isolates_tick_failures(monkeypatch, fails):
-    from daimon.adapters.scheduler.main import _sweep_fleet_deadlines
-    from daimon.core.stores import fleet
-
-    calls = []
-
-    async def sweep(sessions):
-        calls.append(sessions)
-        if fails:
-            raise RuntimeError("temporary database outage")
-        return (2, 1)
-
-    monkeypatch.setattr(fleet, "sweep_expired", sweep)
-    sessions = object()
-    await _sweep_fleet_deadlines(sessions)
-    assert calls == [sessions]
 
 
 @pytest.mark.parametrize("allowed", [True, False])

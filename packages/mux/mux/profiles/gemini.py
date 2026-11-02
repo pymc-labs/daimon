@@ -11,14 +11,8 @@ from __future__ import annotations
 from mux.contracts.extensions import ExtensionRef
 from mux.contracts.profile import AccountingMode, Profile
 
-WORKER_MODEL = "gemini-3.5-flash-lite"
-# Opt-in model: one attempt, never the Flash fallback chain. A channel runs it
-# directly; a fleet worker runs it only on the bounded token envelope.
+# Opt-in model: one attempt, never the Flash fallback chain.
 ARGON_MODEL = "gemini-4-argon"
-# A whole unbounded worker turn (input + output). At the highest output tariff it
-# may run on (Flash), its worst case stays under the $0.49 worker hold.
-WORKER_MAX_TOTAL_TOKENS = 65_536
-WORKER_MAX_RUNTIME_S = 600
 
 INLINE_REUSE = Profile(
     provider="gemini",
@@ -34,7 +28,7 @@ INLINE_REUSE = Profile(
     catalog_readback="verify",
     support={
         "neutral_catalog": "emulated",
-        "input_token_limit": "emulated",
+        "input_token_limit": "unsupported",
         "output_token_limit": "native",
         "agent_delete": "unsupported",
         "thread_workspace_persistence": "unsupported",

@@ -623,3 +623,51 @@ async def test_fast_native_receipt_debits_fast_tariff_once(db_session, db_sessio
     assert len(rows) == 1
     assert rows[0].model == OPUS_FAST
     assert await tenant_ledger.get_balance(db_session, tenant_id=tenant.id) == Decimal("-12")
+
+
+async def test_record_turn_usage_stamps_the_agent_on_the_usage_row(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A turn's usage row names the agent that answered; without one it stays unattributed."""
+    tenant = await make_tenant(db_session)
+    for event_id, agent_id in (("evt_a", "agent_1"), ("evt_b", None)):
+        await usage_recording.record_turn_usage(
+            sessionmaker=db_session_factory,
+            tenant_id=tenant.id,
+            platform_user_id="u1",
+            managed_session_id="s1",
+            model_id="claude-opus-4-7",
+            event=BetaManagedAgentsSpanModelRequestEndEvent(
+                id=event_id,
+                is_error=False,
+                model_request_start_id="start_1",
+                model_usage=ma_model_usage(input_tokens=10, output_tokens=5),
+                processed_at=datetime.now(UTC),
+                type="span.model_request_end",
+            ),
+            agent_id=agent_id,
+        )
+    rows = (await db_session.execute(select(UsageEvent.event_id, UsageEvent.agent_id))).tuples()
+    assert dict(rows.all()) == {"evt_a": "agent_1", "evt_b": None}, (
+        "agent_id lands on the usage row, None when the caller names no agent"
+    )
+
+
+async def test_record_media_usage_stamps_the_agent_on_the_usage_row(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    await usage_recording.record_media_usage(
+        sessionmaker=db_session_factory,
+        tenant_id=tenant.id,
+        platform_user_id="u1",
+        model_id="gemini-3-pro-image-preview",
+        input_tokens=10,
+        output_tokens=5,
+        cache_read_input_tokens=0,
+        agent_id="agent_1",
+    )
+    agent_ids = (await db_session.execute(select(UsageEvent.agent_id))).scalars().all()
+    assert agent_ids == ["agent_1"], "a tool model call is attributed to the calling agent"

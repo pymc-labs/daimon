@@ -1543,16 +1543,40 @@ async def test_a_policy_refused_handoff_is_audited_as_an_authz_denial(
     ), "the refusal is audited as the policy's denial, not a tool error"
 
 
-@pytest.mark.parametrize("pinned", ["unpinned", "older_session", "shared_binding"])
-async def test_a_hand_off_never_moves_a_thread_to_another_provider_by_itself(
+_SUMMARY = "Carlos asked for a copy on Argon; we agreed to keep the same prompt and skills."
+
+
+async def _unsealed(db_session: AsyncSession, ma_session_id: str) -> None:
+    """Stamp a recorded session as run unsealed, as a live one is (NULL reads as sealed)."""
+    from sqlalchemy import text
+
+    await db_session.execute(
+        text("UPDATE thread_sessions SET seal_ids = '[]'::jsonb WHERE ma_session_id = :s"),
+        {"s": ma_session_id},
+    )
+
+
+@pytest.mark.parametrize(
+    ("pinned", "summary"),
+    [
+        ("unpinned", None),
+        ("older_session", None),
+        ("older_session", _SUMMARY),
+        ("shared_binding", _SUMMARY),
+    ],
+)
+async def test_a_hand_off_to_another_provider_moves_only_with_a_summary(
     db_session: AsyncSession,
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     pinned: str,
+    summary: str | None,
 ) -> None:
     """A copy on Gemini, routed nowhere: an admin may hand an unpinned thread to it
-    (its own provider applies). A thread pinned to Claude (by an older session, or
-    a shared binding) is refused: moving it drops history, and only a confirmed
-    switch may do that. Nothing is released either way."""
+    (its own provider applies). A thread on Claude (an older session) moves to it
+    only with the handing agent's summary: this caller's slot is released and the
+    summary waits for the copy's first turn. Without one, or in a shared
+    conversation (moving would drop its history for everyone), it is refused and
+    nothing is bound or released."""
     from daimon.core.ma_identity import derive_agent_uuid
     from daimon.core.stores import agent_backends, mux_state
     from daimon.core.thread_release import caller_slot, pending_releases
@@ -1573,6 +1597,7 @@ async def test_a_hand_off_never_moves_a_thread_to_another_provider_by_itself(
             ma_session_id="sess_old",
             ma_agent_id=_RESPONDER_ID,
         )
+        await _unsealed(db_session, "sess_old")
     await db_session.commit()
     async with committing_sessionmaker.begin() as session:
         await agent_backends.put_revision(
@@ -1635,18 +1660,31 @@ async def test_a_hand_off_never_moves_a_thread_to_another_provider_by_itself(
         shared_channel=False,
         chat_session_id="provider-handoff-grant",
     ) as origin:
-        if pinned == "unpinned":
+        moves = pinned == "older_session" and summary is not None
+        if pinned == "unpinned" or moves:
             result = await _hand_off_task_impl(
-                runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
+                runtime,
+                auth,
+                origin_context_id=str(origin.id),
+                agent_id=_DESTINATION_ID,
+                summary=summary,
             )
             assert "research-bot will handle your next message." in result.confirmation
+            assert ("it has a summary of what we discussed." in result.confirmation) == moves
+            if moves:
+                assert "continues with research-bot on Gemini 3.8 Flash" in result.confirmation
         else:
-            with pytest.raises(ToolError, match="runs on Gemini.*can't take over here"):
+            match = "shared on Anthropic" if pinned == "shared_binding" else "with `summary`"
+            with pytest.raises(ToolError, match=f"runs on Gemini.*{match}"):
                 await _hand_off_task_impl(
-                    runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
+                    runtime,
+                    auth,
+                    origin_context_id=str(origin.id),
+                    agent_id=_DESTINATION_ID,
+                    summary=summary,
                 )
     async with committing_sessionmaker() as session:
-        assert await pending_releases(session, tenant_id=tenant.id) == []
+        released = await pending_releases(session, tenant_id=tenant.id)
         handed = await get_binding(
             session,
             tenant_id=tenant.id,
@@ -1654,7 +1692,321 @@ async def test_a_hand_off_never_moves_a_thread_to_another_provider_by_itself(
             parent_channel_id="C_PARENT",
             thread_id="T_THREAD",
         )
-    assert (handed is not None) == (pinned == "unpinned"), "a refusal rolls the hand-off back"
+    assert len(released) == (1 if moves else 0), "only a move releases this caller's slot"
+    bound = pinned == "unpinned" or moves
+    assert (handed is not None) == bound, "a refusal rolls the hand-off back"
+    if moves:
+        from daimon.core.stores.thread_agent_bindings import take_handoff_summary
+
+        async with committing_sessionmaker.begin() as session:
+            taken = await take_handoff_summary(
+                session,
+                tenant_id=tenant.id,
+                platform="discord",
+                parent_channel_id="C_PARENT",
+                thread_id="T_THREAD",
+                responder_ma_agent_id=_DESTINATION_ID,
+                account_id=caller.id,
+            )
+            again = await take_handoff_summary(
+                session,
+                tenant_id=tenant.id,
+                platform="discord",
+                parent_channel_id="C_PARENT",
+                thread_id="T_THREAD",
+                responder_ma_agent_id=_DESTINATION_ID,
+                account_id=caller.id,
+            )
+        assert taken == ("daimon", _SUMMARY) and again is None, "taken once"
+
+
+async def test_hand_off_then_switch_moves_the_copy_with_its_summary_too(
+    db_session: AsyncSession,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """J2 in the other order: hand to the copy while both are on Claude (nothing
+    moves, the summary waits), then the copy's confirmed switch moves this
+    conversation, and its first turn there still has the summary."""
+    from daimon.adapters.mcp.tools.agents import _move_this_thread
+    from daimon.core.stores.thread_agent_bindings import take_handoff_summary
+    from daimon.core.thread_release import pending_releases
+    from daimon.testing.factories import make_thread_session
+
+    tenant = await make_tenant(db_session)
+    caller = await make_account(db_session, tenant=tenant)
+    await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=caller,
+        thread_id="T_THREAD",
+        channel_id="C_PARENT",
+        ma_session_id="sess_old",
+        ma_agent_id=_RESPONDER_ID,
+    )
+    await _unsealed(db_session, "sess_old")
+    await db_session.commit()
+    runtime = _runtime(
+        committing_sessionmaker, _client([_destination(tenant.id)]), default_agent_name="daimon"
+    )
+    auth = AuthIdentity(
+        account_id=caller.id,
+        tenant_id=tenant.id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+        platform="discord",
+        platform_user_id="42",
+        chat_session_id="test-session",
+    )
+    async with turn_origin(
+        committing_sessionmaker,
+        tenant_id=tenant.id,
+        account_id=caller.id,
+        platform="discord",
+        parent_channel_id="C_PARENT",
+        thread_id="T_THREAD",
+        responder_ma_agent_id=_RESPONDER_ID,
+        responder_name="daimon",
+        role=Role.ADMIN,
+        sender_foreign=False,
+        shared_channel=False,
+        chat_session_id="test-session",
+    ) as origin:
+        result = await _hand_off_task_impl(
+            runtime,
+            auth,
+            origin_context_id=str(origin.id),
+            agent_id=_DESTINATION_ID,
+            summary=_SUMMARY,
+        )
+        assert "it has a summary" not in result.confirmation, "same provider: nothing moved"
+        async with committing_sessionmaker() as session:
+            assert await pending_releases(session, tenant_id=tenant.id) == []
+        moved = await _move_this_thread(
+            runtime, auth, origin, "research-bot", "gemini", pinned_here=False
+        )
+    assert moved.startswith("This conversation moves to Gemini")
+    async with committing_sessionmaker.begin() as session:
+        assert len(await pending_releases(session, tenant_id=tenant.id)) == 1
+        taken = await take_handoff_summary(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            parent_channel_id="C_PARENT",
+            thread_id="T_THREAD",
+            responder_ma_agent_id=_DESTINATION_ID,
+            account_id=caller.id,
+        )
+    assert taken == ("daimon", _SUMMARY)
+
+
+@pytest.mark.parametrize("why", ["sealed_elsewhere", "another_participant"])
+async def test_a_move_is_refused_when_the_summary_may_not_reach_the_destination(
+    db_session: AsyncSession,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    why: str,
+) -> None:
+    """The summary retells the conversation: a destination that may not read it
+    (its session was sealed by a place outside this thread) is refused rather than
+    started blind; and a thread another participant is also talking in can't move."""
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores import agent_backends
+    from daimon.core.thread_release import pending_releases
+    from daimon.testing.factories import make_thread_session
+    from sqlalchemy import text
+
+    tenant = await make_tenant(db_session)
+    caller = await make_account(db_session, tenant=tenant)
+    await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=caller,
+        thread_id="T_THREAD",
+        channel_id="C_PARENT",
+        ma_session_id="sess_old",
+        ma_agent_id=_RESPONDER_ID,
+    )
+    if why == "sealed_elsewhere":
+        await db_session.execute(
+            text(
+                "UPDATE thread_sessions SET seal_ids = '[\"C_SOMEWHERE_ELSE\"]'::jsonb "
+                "WHERE ma_session_id = 'sess_old'"
+            )
+        )
+    else:
+        await make_thread_session(
+            db_session,
+            tenant=tenant,
+            account=await make_account(db_session, tenant=tenant),
+            thread_id="T_THREAD",
+            channel_id="C_PARENT",
+            ma_session_id="sess_other",
+            ma_agent_id=_RESPONDER_ID,
+        )
+    await db_session.commit()
+    async with committing_sessionmaker.begin() as session:
+        await agent_backends.put_revision(
+            session,
+            tenant_id=tenant.id,
+            agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_DESTINATION_ID),
+            local=1,
+            backend="gemini",
+            digest="d" * 64,
+            previous_local=None,
+            agent_name="research-bot",
+            preview_digest="p" * 64,
+        )
+    runtime = _runtime(
+        committing_sessionmaker, _client([_destination(tenant.id)]), default_agent_name="daimon"
+    )
+    auth = AuthIdentity(
+        account_id=caller.id,
+        tenant_id=tenant.id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+        platform="discord",
+        platform_user_id="42",
+        chat_session_id="test-session",
+    )
+    async with turn_origin(
+        committing_sessionmaker,
+        tenant_id=tenant.id,
+        account_id=caller.id,
+        platform="discord",
+        parent_channel_id="C_PARENT",
+        thread_id="T_THREAD",
+        responder_ma_agent_id=_RESPONDER_ID,
+        responder_name="daimon",
+        role=Role.ADMIN,
+        sender_foreign=False,
+        shared_channel=False,
+        chat_session_id="test-session",
+    ) as origin:
+        match = "can't read this conversation" if why == "sealed_elsewhere" else "shared on"
+        with pytest.raises(ToolError, match=match):
+            await _hand_off_task_impl(
+                runtime,
+                auth,
+                origin_context_id=str(origin.id),
+                agent_id=_DESTINATION_ID,
+                summary=_SUMMARY,
+            )
+    async with committing_sessionmaker() as session:
+        assert await pending_releases(session, tenant_id=tenant.id) == []
+        assert (
+            await get_binding(
+                session,
+                tenant_id=tenant.id,
+                platform="discord",
+                parent_channel_id="C_PARENT",
+                thread_id="T_THREAD",
+            )
+            is None
+        ), "nothing bound, released or stored"
+
+
+def test_a_summary_carries_no_turn_ids_or_credentials_and_isnt_a_stub() -> None:
+    from daimon.adapters.mcp.tools.task_continuity import _clean_summary
+
+    cleaned = _clean_summary(
+        "Carlos wants a copy on Argon. Key sk-ant-api03-abcdefghijklmnopqrstuv was set; "
+        "token ghp_abcdefghijklmnopqrstuvwxyz0123 and Bearer eyJabcdefghijk.lmnopqrstuv.wx "
+        "and AKIAABCDEFGHIJKLMNOP.\n\n\n\nOpen: confirm the switch."
+    )
+    assert cleaned is not None
+    for secret in ("sk-ant", "ghp_", "eyJ", "AKIA"):
+        assert secret not in cleaned, secret
+    assert cleaned.count("[redacted]") >= 3
+    assert "\n\n\n" not in cleaned and cleaned.endswith("Open: confirm the switch.")
+    # What a summary legitimately names stays: paths, file names, identifiers, SHAs.
+    path = "packages/adapters/mcp/daimon/adapters/mcp/tools/task_continuity.py"
+    sha = "6519711d7c4be309f2d7a166af4f2eb836ad8037"
+    name = "test_a_hand_off_to_another_provider_moves_only_with_a_summary"
+    kept = _clean_summary(f"We changed {path} in commit {sha}; see {name}.")
+    assert kept == f"We changed {path} in commit {sha}; see {name}."
+    labelled = _clean_summary(
+        f"Set api_key={sha} and a run QWxhZGRpbjpvcGVuIHNlc2FtZQ1234567890abcdefXYZ0QWxhZGRp."
+    )
+    assert labelled is not None and sha not in labelled and "QWxhZGRpbj" not in labelled
+    with pytest.raises(ToolError, match="too short"):
+        _clean_summary("ok, moving")
+    assert _clean_summary(None) is None
+
+
+async def test_a_same_provider_hand_off_says_when_its_summary_cant_go(
+    db_session: AsyncSession,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A session whose seal was never recorded (NULL) reads as sealed, so the
+    destination may not read this conversation: the hand-off still goes ahead on
+    the same provider, but says the summary didn't go, and stores none."""
+    from daimon.core.stores.thread_agent_bindings import take_handoff_summary
+    from daimon.testing.factories import make_thread_session
+
+    tenant = await make_tenant(db_session)
+    caller = await make_account(db_session, tenant=tenant)
+    await make_thread_session(  # seal_ids left NULL: read as sealed, on purpose
+        db_session,
+        tenant=tenant,
+        account=caller,
+        thread_id="T_THREAD",
+        channel_id="C_PARENT",
+        ma_session_id="sess_old",
+        ma_agent_id=_RESPONDER_ID,
+    )
+    await db_session.commit()
+    runtime = _runtime(
+        committing_sessionmaker, _client([_destination(tenant.id)]), default_agent_name="daimon"
+    )
+    auth = AuthIdentity(
+        account_id=caller.id,
+        tenant_id=tenant.id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+        platform="discord",
+        platform_user_id="42",
+        chat_session_id="test-session",
+    )
+    async with turn_origin(
+        committing_sessionmaker,
+        tenant_id=tenant.id,
+        account_id=caller.id,
+        platform="discord",
+        parent_channel_id="C_PARENT",
+        thread_id="T_THREAD",
+        responder_ma_agent_id=_RESPONDER_ID,
+        responder_name="daimon",
+        role=Role.ADMIN,
+        sender_foreign=False,
+        shared_channel=False,
+        chat_session_id="test-session",
+    ) as origin:
+        result = await _hand_off_task_impl(
+            runtime,
+            auth,
+            origin_context_id=str(origin.id),
+            agent_id=_DESTINATION_ID,
+            summary=_SUMMARY,
+        )
+    assert "research-bot will handle your next message." in result.confirmation
+    assert result.confirmation.endswith(
+        "(without the summary: this conversation can't be shared with research-bot)"
+    )
+    async with committing_sessionmaker.begin() as session:
+        assert (
+            await take_handoff_summary(
+                session,
+                tenant_id=tenant.id,
+                platform="discord",
+                parent_channel_id="C_PARENT",
+                thread_id="T_THREAD",
+                responder_ma_agent_id=_DESTINATION_ID,
+                account_id=caller.id,
+            )
+            is None
+        )
 
 
 @pytest.mark.parametrize(

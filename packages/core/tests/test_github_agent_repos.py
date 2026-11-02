@@ -93,6 +93,10 @@ async def _may_manage(
         tenant_id=world.tenant_id,
         platform="discord",
         caller=AdminCaller(platform_user_id=user_id, is_server_admin=user_id == "admin"),
+        agent_names=(agent_name,),
+        ma_agent_id=ma_agent_id,
+        is_daimon_managed=managed,
+        default=DEFAULT,
     )
 
 

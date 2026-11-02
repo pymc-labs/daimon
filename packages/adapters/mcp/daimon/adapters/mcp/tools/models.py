@@ -40,8 +40,7 @@ def register_model_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         to pick a name for an agent's model. Only providers this server has turned
         on are listed, and every listed name (e.g. "Opus 5.5", "Astra", "Argon")
         is accepted wherever a model is named. Prices are list prices per million
-        tokens, before this server's markup. A fleet's own allowed models are in
-        fleet_agents.
+        tokens, before this server's markup.
         """
         from daimon.core.channel_backend import make_backend_service
 

@@ -38,12 +38,6 @@ ADMIN_INPUTS: dict[str, dict[str, object]] = {
         "expected_revision": 1,
         "preview_digest": "a" * 64,
     },
-    "request_fleet_config": {
-        "agent_name": "agent",
-        "revoke": True,
-        "expected_revision": 1,
-        "preview_digest": "a" * 64,
-    },
     "request_provider_allowlist": {
         "providers": ["anthropic"],
         "expected_revision": "policy-revision",
@@ -481,7 +475,7 @@ async def test_fixed_gate_names_ask_on_own_endpoint_aliases_and_unrelated_server
     card.assert_awaited_once()
 
     if tool in ADMIN_INPUTS:
-        assert card.await_args.args[0].admin is True
+        assert card.await_args.args[0].admin is own_endpoint
 
 
 async def test_own_endpoint_alias_deny_is_read_without_reserved_rule_index() -> None:
@@ -561,11 +555,12 @@ async def test_protected_names_never_auto_allow_on_any_host(endpoint: str, tool:
     card = AsyncMock(return_value="denied")
     gate = AsyncMock(return_value=OFF)
     bindings = {"office": endpoint}
+    trusted = trusted_servers_for("https://daimon.example/mcp", bindings)
     result = await interactive_decider(
         ON.model_copy(update={"agent_rules": True, "effects": {"office": "read"}}),
         requester_platform_user_id="requester",
         confirm=card,
-        trusted_servers=trusted_servers_for("https://daimon.example/mcp", bindings),
+        trusted_servers=trusted,
         confirmed_tools=frozenset(CONFIRMED_DAIMON_TOOLS),
         rules_for=AsyncMock(return_value=ResolvedAgentToolRule(rule="allow")),
         approval_gate_for=gate,
@@ -591,4 +586,4 @@ async def test_protected_names_never_auto_allow_on_any_host(endpoint: str, tool:
     card.assert_awaited_once()
     gate.assert_not_awaited()
     if tool in ADMIN_INPUTS:
-        assert card.await_args.args[0].admin is True
+        assert card.await_args.args[0].admin is ("office" in trusted)

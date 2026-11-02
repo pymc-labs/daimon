@@ -264,6 +264,15 @@ def _tool_line(call: ToolUseBlock) -> str:
     return f"{icon} {label}"
 
 
+def tool_label(call: ToolUseBlock) -> tuple[str, str | None]:
+    """A call's label and its detail, without icons, for a surface that draws its own."""
+    narration = _BUILT_IN.get(call.name) if call.type == "agent.tool_use" else None
+    if narration is not None:
+        label = narration.finished if call.status != "pending" else narration.running
+        return label, _built_in_detail(call)
+    return _clip(_humanize(call.name)[1]), call.mcp_server_name
+
+
 def _humanize(name: str) -> tuple[str, str]:
     """``search_issues`` -> the lookup icon and ``Search issues``."""
     words = [word for word in _WORD_BREAK.split(name) if word] or [name]

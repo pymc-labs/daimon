@@ -16,6 +16,7 @@ import uuid
 from collections.abc import Callable, Coroutine
 from typing import Any, Concatenate, ParamSpec, cast
 
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -124,9 +125,13 @@ async def refuse_if_not_admin(
     if await is_guild_admin(interaction, action=action):
         return False
     if interaction.response.is_done():
-        await interaction.followup.send(_ADMIN_ONLY_MESSAGE, ephemeral=True)
+        await interaction.followup.send(
+            embed=build_notice_embed(_ADMIN_ONLY_MESSAGE), ephemeral=True
+        )
     else:
-        await interaction.response.send_message(_ADMIN_ONLY_MESSAGE, ephemeral=True)
+        await interaction.response.send_message(
+            embed=build_notice_embed(_ADMIN_ONLY_MESSAGE), ephemeral=True
+        )
     return True
 
 
@@ -162,14 +167,16 @@ def require_registered_guild(  # noqa: UP047  -- ParamSpec used for decorator ge
     ) -> None:
         if interaction.guild_id is None:
             await interaction.response.send_message(
-                "This command is only available in a server.",
+                embed=build_notice_embed("This command is only available in a server."),
                 ephemeral=True,
             )
             return
         tenant_id = await resolve_tenant_for_interaction(interaction.client, interaction)
         if tenant_id is None:
             await interaction.response.send_message(
-                "This server is not registered. Ask an operator to register it.",
+                embed=build_notice_embed(
+                    "This server is not registered. Ask an operator to register it."
+                ),
                 ephemeral=True,
             )
             return
@@ -196,8 +203,10 @@ def require_manage_guild(  # noqa: UP047  -- ParamSpec used for decorator generi
     ) -> None:
         if not await is_guild_admin(interaction, action=DelegatedAction.ROUTINES):
             await interaction.response.send_message(
-                "🛡️ Viewing scheduled routines needs a Daimon admin. "
-                "Ask one: “Please open `/routines` to review this server’s scheduled routines.”",
+                embed=build_notice_embed(
+                    "🛡️ Viewing scheduled routines needs a Daimon admin. "
+                    "Ask one: “Please open `/routines` to review this server’s scheduled routines.”"
+                ),
                 ephemeral=True,
             )
             return
@@ -232,9 +241,9 @@ async def refuse_if_not_platform_admin(interaction: discord.Interaction) -> bool
     """Money controls must never consume the delegated Daimon admin check."""
     if is_platform_admin(interaction):
         return False
-    message = "That action needs Manage Server — ask a platform admin to do it."
+    embed = build_notice_embed("That action needs Manage Server — ask a platform admin to do it.")
     if interaction.response.is_done():
-        await interaction.followup.send(message, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
     else:
-        await interaction.response.send_message(message, ephemeral=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
     return True

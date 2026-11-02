@@ -12,7 +12,7 @@ import json
 import re
 import uuid
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -32,6 +32,7 @@ from daimon.adapters.slack.agent_setup.coding_tools import (
     render_coding_tools_message,
 )
 from daimon.adapters.slack.agent_setup.panel_views import ACTION_REVOKE_TOKEN
+from daimon.adapters.slack.blockkit import ERROR_COLOR, notice_update_fields
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.admin_actions import DelegatedAction
@@ -39,10 +40,12 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import mint_agent_mcp_token
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.agent_owners import set_owner
 from daimon.core.stores.daimon_admins import change_grant
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.mcp_tokens import get_mcp_token, list_mcp_tokens
 from daimon.core.stores.security_audit import list_events
+from daimon.testing.adapters.slack.notices import shown_text
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent
 from daimon.testing.turn_fakes import deps_for
@@ -63,11 +66,11 @@ _USERS_INFO_PATTERN = re.compile(r"https://slack\.com/api/users\.info.*")
 _EPHEMERAL_KEY = ("POST", yarl.URL(f"{_SLACK_API_BASE}/chat.postEphemeral"))
 
 
-def _users_info_payload(*, is_admin: bool) -> dict[str, Any]:
+def _users_info_payload(*, is_admin: bool, user_id: str = _USER_ID) -> dict[str, Any]:
     return {
         "ok": True,
         "user": {
-            "id": _USER_ID,
+            "id": user_id,
             "team_id": _TEAM_ID,
             "deleted": False,
             "is_bot": False,
@@ -154,7 +157,7 @@ def test_coding_tools_message_is_a_title_then_lines_a_blank_line_apart(
     )
     title, body = (block["text"]["text"] for block in blocks[:2])
     assert title == f"*Use {_AGENT_NAME} from your coding tools*"
-    lines = ["Copy the setup below now. The token is shown only once."]
+    lines = ["Copy this now: the key is shown only once. It acts as you."]
     if channel_id is not None:
         lines.append(f"It runs in <#{channel_id}>, with that channel's rules and budget.")
     assert body == "\n\n".join(lines), "the channel line only for a channel-bound token"
@@ -246,9 +249,9 @@ async def test_coding_tools_click_by_a_member_refuses_and_mints_nothing(
         posted = _ephemerals(mock)
 
     assert await list_mcp_tokens(db_session, now=datetime.now(UTC), tenant_id=tenant.id) == []
-    assert "Only platform admins" in posted[0]["text"]
     assert len(posted) == 1, "a refused click is explained, never silent"
-    assert posted[0]["text"] == NEEDS_ADMIN_MESSAGE, "the refusal names the way round it"
+    assert shown_text(posted[0]) == NEEDS_ADMIN_MESSAGE, "the refusal names the way round it"
+    assert posted[0]["attachments"][0]["color"] == ERROR_COLOR, "a refusal is a red card"
     assert "Bearer" not in json.dumps(posted[0]), "a refused click mints nothing"
     expected = [("daimon_admins", "allowed")] if delegated else []
     assert await _audited(db_session_factory, tenant.id) == expected + [
@@ -280,7 +283,7 @@ async def test_coding_tools_click_when_unconfigured_posts_a_note(
         )
         posted = _ephemerals(mock)
 
-    assert [entry["text"] for entry in posted] == [NOT_CONFIGURED_MESSAGE], (
+    assert [shown_text(entry) for entry in posted] == [NOT_CONFIGURED_MESSAGE], (
         "an unconfigured deployment says so, once"
     )
 
@@ -339,8 +342,11 @@ async def test_revoke_replaces_the_original_message_and_kills_the_token(
     )
 
     assert http_client.posts == [
-        (_RESPONSE_URL, {"replace_original": True, "text": TOKEN_REVOKED_MESSAGE})
-    ], "the revoked token's message is replaced where it stands"
+        (
+            _RESPONSE_URL,
+            {"replace_original": True, **notice_update_fields(TOKEN_REVOKED_MESSAGE, neutral=True)},
+        )
+    ], "the revoked token's message is replaced where it stands, as a neutral card"
     async with db_session_factory() as session:
         row = await get_mcp_token(session, jti=jti)
     assert row is not None and row.revoked_at is not None, "the registry row is revoked"
@@ -372,7 +378,8 @@ async def test_revoke_by_someone_other_than_the_minter_is_refused(
     assert len(http_client.posts) == 1, "the refused click is answered"
     _url, body = http_client.posts[0]
     assert body["replace_original"] is False, "someone else's message is not replaced"
-    assert "minted" in body["text"], "the refusal says who may revoke"
+    assert "minted" in shown_text(body), "the refusal says who may revoke"
+    assert body["attachments"][0]["color"] == ERROR_COLOR, "a refusal is a red card"
     async with db_session_factory() as session:
         row = await get_mcp_token(session, jti=jti)
     assert row is not None and row.revoked_at is None, "the token is still live"
@@ -423,3 +430,106 @@ async def test_coding_tools_click_binds_a_token_minted_in_a_sealed_or_pinned_cha
     assert row is not None
     assert (row.platform, row.channel_id) == (("slack", bound) if bound else (None, None))
     assert (f"It runs in <#{_CHANNEL_ID}>" in rendered) is (bound is not None)
+
+
+# ---- owners ----
+
+
+async def _make_owner(
+    db_factory: async_sessionmaker[AsyncSession], *, tenant_id: uuid.UUID, ma_agent_id: str
+) -> uuid.UUID:
+    """Make `_USER_ID` the recorded owner of the agent; returns their account id."""
+    async with db_factory() as session, session.begin():
+        principal = await get_or_create_platform_principal(
+            session, platform="slack", external_id=_USER_ID, tenant_id=tenant_id
+        )
+        await set_owner(
+            session,
+            tenant_id=tenant_id,
+            agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id),
+            owner_account_id=principal.account_id,
+            source="admin_assigned",
+        )
+    return principal.account_id
+
+
+async def _click_as(
+    runtime: SlackRuntime, tenant_id: uuid.UUID, *, is_admin: bool
+) -> list[dict[str, Any]]:
+    with AioResponsesMock() as mock:
+        mock.get(_USERS_INFO_PATTERN, payload=_users_info_payload(is_admin=is_admin), repeat=True)  # pyright: ignore[reportUnknownMemberType]
+        mock.post(f"{_SLACK_API_BASE}/chat.postEphemeral", payload={"ok": True}, repeat=True)  # pyright: ignore[reportUnknownMemberType]
+        await handle_coding_tools_click(
+            runtime,
+            WorkspaceWebClient(token="xoxb-test").bind_workspace(runtime, _TEAM_ID),
+            team_id=_TEAM_ID,
+            tenant_id=tenant_id,
+            agent_name=_AGENT_NAME,
+            channel_id=_CHANNEL_ID,
+            user_id=_USER_ID,
+            trigger_id="TRIG",
+        )
+        return _ephemerals(mock)
+
+
+def _token_of(posted: dict[str, Any]) -> str:
+    rendered = json.dumps(posted["blocks"])
+    return rendered.split("Authorization: Bearer ")[1].split("\\")[0].split(" ")[0]
+
+
+async def test_an_owner_mints_a_thirty_day_key_that_acts_as_themselves(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session, platform="slack", workspace_id=_TEAM_ID)
+    await db_session.commit()
+    owner_account = await _make_owner(
+        db_session_factory, tenant_id=tenant.id, ma_agent_id=_MA_AGENT_ID
+    )
+    runtime = _build_runtime(db_session_factory, tenant_id=tenant.id)
+
+    posted = await _click_as(runtime, tenant.id, is_admin=False)
+
+    assert len(posted) == 1 and "Bearer" in json.dumps(posted[0]), "an owner gets a key"
+    claims: dict[str, Any] = pyjwt.decode(
+        _token_of(posted[0]), b"jwt-secret", algorithms=["HS256"], options={"verify_exp": False}
+    )
+    assert claims["sub"] == str(owner_account), "the key acts as the owner"
+    async with db_session_factory() as session:
+        row = await get_mcp_token(session, jti=uuid.UUID(claims["jti"]))
+    assert row is not None and row.purpose == "coding"
+    assert row.expires_at is not None and row.expires_at - row.created_at == timedelta(days=30)
+
+
+async def test_an_admins_key_lasts_ninety_days(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session, platform="slack", workspace_id=_TEAM_ID)
+    await db_session.commit()
+    runtime = _build_runtime(db_session_factory, tenant_id=tenant.id)
+
+    posted = await _click_as(runtime, tenant.id, is_admin=True)
+
+    claims: dict[str, Any] = pyjwt.decode(
+        _token_of(posted[0]), b"jwt-secret", algorithms=["HS256"], options={"verify_exp": False}
+    )
+    async with db_session_factory() as session:
+        row = await get_mcp_token(session, jti=uuid.UUID(claims["jti"]))
+    assert row is not None and row.expires_at is not None
+    assert row.expires_at - row.created_at == timedelta(days=90)
+
+
+async def test_an_owner_of_another_agent_is_refused_and_mints_nothing(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session, platform="slack", workspace_id=_TEAM_ID)
+    await db_session.commit()
+    await _make_owner(db_session_factory, tenant_id=tenant.id, ma_agent_id="agent_not_this_one")
+    runtime = _build_runtime(db_session_factory, tenant_id=tenant.id)
+
+    posted = await _click_as(runtime, tenant.id, is_admin=False)
+
+    assert [shown_text(entry) for entry in posted] == [NEEDS_ADMIN_MESSAGE]
+    assert "Bearer" not in json.dumps(posted)

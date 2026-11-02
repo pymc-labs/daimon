@@ -14,7 +14,7 @@ import asyncio
 import uuid
 
 import structlog
-from daimon.adapters.teams.card_actions import text_lines
+from daimon.adapters.teams.card import notice_card
 from daimon.adapters.teams.identity import canonical_uuid
 from daimon.adapters.teams.lifecycle import SEND_TIMEOUT_S, TEAMS_SEND_ERRORS
 from daimon.core.ops_alerts import alert_ops
@@ -30,7 +30,7 @@ from microsoft_teams.api import (
     UninstalledActivity,
 )
 from microsoft_teams.apps import ActivityContext
-from microsoft_teams.cards import AdaptiveCard, OpenUrlAction
+from microsoft_teams.cards import OpenUrlAction
 from pydantic import SecretStr
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -66,21 +66,11 @@ def chat_link(bot_id: str | None) -> str | None:
     return _CHAT_LINK.format(bot_id=bot_id) if bot_id and bot_id.startswith("28:") else None
 
 
-def team_welcome_card(bot: str, url: str) -> AdaptiveCard:
-    """The team welcome with an Open chat button, so the 1:1 chat it names is one click away."""
-    return AdaptiveCard(
-        body=text_lines(*welcome_lines(bot, team=True)),
-        actions=[OpenUrlAction(title="Open chat", url=url)],
-        fallback_text=welcome_text(bot, team=True),
-    )
-
-
 def welcome_message(bot: str, *, team: bool, bot_id: str | None) -> MessageActivityInput:
-    """The welcome as sent: a card with Open chat for a team, plain text otherwise."""
+    """The welcome as sent: a neutral card, with Open chat for a team."""
     url = chat_link(bot_id) if team else None
-    if url is None:
-        return MessageActivityInput(text=welcome_text(bot, team=team))
-    return MessageActivityInput().add_card(team_welcome_card(bot, url))
+    actions = [OpenUrlAction(title="Open chat", url=url)] if url else ()
+    return notice_card(welcome_text(bot, team=team), error=False, actions=actions)
 
 
 class TeamInstalls:

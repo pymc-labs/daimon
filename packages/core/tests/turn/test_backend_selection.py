@@ -403,6 +403,12 @@ async def test_agent_preference_and_revert_select_new_threads_without_channel_ov
     assert old.ma_session_id == original.ma_session_id and old.admission.backend_revision is None
     assert old.admission.backend_footer_profile == "anthropic.managed_agents"
     assert await host.store.get_binding(host.slot) == original_binding
+    # M03: the thread tried to follow its agent to OpenAI, which can't serve it here;
+    # that move was withdrawn, so nothing is left to move it on a later message.
+    from daimon.core.stores import thread_provider_releases
+
+    async with host.sessions() as db:
+        assert await thread_provider_releases.requested_generation(db, host.slot) is None
     restored = await service.revert(agent, actor, expected_revision=changed.local)
     assert restored.backend is None and restored.previous_local == changed.local
     new_default = await host.prepare("after-revert")
@@ -1024,27 +1030,14 @@ async def test_button_resend_uses_normal_provider_retention_and_confirmed_releas
             == []
         )
     # The adapter integrations exercise this same ordinary admit/bind entry.
-    # A click adds no provider transition: only a previously confirmed request
-    # lets its re-sent message consume the existing release/adoption machinery.
-    from daimon.core.session_preparation_stages import PreparedReplacement
-
-    async def carry_history(**_options):
-        # This retained case pins the bind-level transfer rule: its transfer is
-        # supplied by the test, rather than derived from adapter ingress.
-        # Workspace checkpoint execution is independent of provider selection.
-        return PreparedReplacement(
-            extra_resources=(), transfer_file_id=None, transfer_kind="history", user_prefix=""
-        )
-
-    prepared = await host.prepare(
-        "thread", **({"transfer": carry_history} if slot_state == "retained" else {})
-    )
+    # A click adds no provider transition of its own: the re-sent message follows
+    # the answering agent's selection (M03), so a retained slot moves as well.
+    prepared = await host.prepare("thread")
     after = await host.store.get_binding(host.slot)
     assert after is not None
     assert prepared.admission.agent.id == target_agent.id
-    native = slot_state != "retained"
-    assert after.provider == ("openai" if native else "anthropic")
-    assert (prepared.session_ref is not None) is native
+    assert after.provider == "openai"
+    assert prepared.session_ref is not None
     if slot_state == "released":
         assert after.id == before.id
         assert after.generation == before.generation + 2

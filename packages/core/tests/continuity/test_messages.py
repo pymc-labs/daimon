@@ -23,9 +23,7 @@ from daimon.core.continuity.messages import (
     render_fresh_start,
     render_handoff_acknowledged,
     render_preparation_failed,
-    render_replacement_summary,
     render_responder_changed_without_handoff,
-    render_unexpected_loss,
     render_unsaved_work_question,
 )
 from daimon.core.continuity.tool_messages import (
@@ -329,29 +327,6 @@ def test_render_preparation_failed() -> None:
     ), "preparation failure copy states the turn did not run"
 
 
-# --- J. unexpected session loss ----------------------------------------------------
-
-
-def test_render_unexpected_loss_transcript() -> None:
-    assert render_unexpected_loss("transcript") == (
-        "I lost this task's working files and started with new ones.\n"
-        "I have this conversation and the files that were saved to your task.\n"
-        "Anything unsaved there is gone, and nothing that was running "
-        "came across.\n"
-        "Tell me what to re-check and I'll go from there."
-    ), "transcript recovery should mention the saved task files"
-
-
-def test_render_unexpected_loss_history() -> None:
-    assert render_unexpected_loss("history") == (
-        "I lost this task's working files and started with new ones.\n"
-        "I have what was posted here, but not the earlier conversation.\n"
-        "Anything unsaved there is gone, and nothing that was running "
-        "came across.\n"
-        "Tell me what to re-check and I'll go from there."
-    ), "history-only recovery should say the earlier conversation is missing"
-
-
 # --- K. current work must finish first ----------------------------------------------
 
 
@@ -398,40 +373,6 @@ def test_responder_changed_in_direct_chat_has_no_new_thread_hint() -> None:
         new_thread_hint=False,
     )
     assert text == "Nova answers new conversations here. Ada is still handling this one."
-
-
-# --- M. planned replacement summary --------------------------------------------------
-
-
-def test_render_replacement_summary_full_with_nothing_lost() -> None:
-    assert render_replacement_summary("full", []) == (
-        "Your conversation, decisions and working files came across."
-    ), "full transfer with nothing lost is a single line"
-
-
-def test_render_replacement_summary_transcript_with_nothing_lost() -> None:
-    assert render_replacement_summary("transcript", []) == (
-        "Your working files from before could not be carried over."
-    ), "a transcript transfer says briefly what was lost"
-
-
-def test_render_replacement_summary_history_with_nothing_lost() -> None:
-    assert render_replacement_summary("history", []) == (
-        "Your working files and earlier conversation could not be carried over."
-    ), "a history transfer says briefly what was lost"
-
-
-def test_render_replacement_summary_appends_not_carried_line_when_lost_is_nonempty() -> None:
-    assert render_replacement_summary("full", ["memory"]) == (
-        "Your conversation, decisions and working files came across.\nNot carried: memory."
-    ), "a single lost item should still get its own 'Not carried' line"
-
-
-def test_render_replacement_summary_joins_multiple_lost_items_with_commas() -> None:
-    assert render_replacement_summary("history", ["memory", "keys"]) == (
-        "Your working files and earlier conversation could not be carried over.\n"
-        "Not carried: memory, keys."
-    ), "multiple lost items should be comma-joined on the 'Not carried' line"
 
 
 # --- Tool-facing (ToolError) copy -----------------------------------------------------
@@ -898,8 +839,6 @@ def test_other_render_functions_never_contain_forbidden_tokens_or_blank_lines() 
         ),
         "render_fresh_start": render_fresh_start("Ada"),
         "render_preparation_failed": render_preparation_failed("Ada"),
-        "render_unexpected_loss (transcript)": render_unexpected_loss("transcript"),
-        "render_unexpected_loss (history)": render_unexpected_loss("history"),
         "render_current_work_must_finish (config)": render_current_work_must_finish(
             "Ada", handoff=False
         ),
@@ -908,11 +847,6 @@ def test_other_render_functions_never_contain_forbidden_tokens_or_blank_lines() 
         ),
         "render_responder_changed_without_handoff": render_responder_changed_without_handoff(
             new_responder="Nova", owner="Ada", channel="#data"
-        ),
-        "render_replacement_summary (full)": render_replacement_summary("full", []),
-        "render_replacement_summary (transcript)": render_replacement_summary("transcript", []),
-        "render_replacement_summary (history, lost)": render_replacement_summary(
-            "history", ["memory", "keys"]
         ),
         "render_tool_refusal_unreachable": render_tool_refusal_unreachable("Ada", "#data"),
         "render_tool_refusal_setup_thread": render_tool_refusal_setup_thread("Ada"),

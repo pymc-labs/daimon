@@ -14,6 +14,7 @@ import anthropic
 import structlog
 from daimon.adapters.discord import layout
 from daimon.adapters.discord.errors import generate_request_id, render_error
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.privacy_panel.embeds import build_post_delete_container
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.errors import DaimonError
@@ -50,15 +51,19 @@ class DeleteConfirmModal(discord.ui.Modal, title="Confirm delete"):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:  # type: ignore[override]  # base uses broader Interaction[Client] type
         if not self.runtime.settings.privacy.delete_enabled:
-            await interaction.response.send_message(DELETE_PAUSED, ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed(DELETE_PAUSED), ephemeral=True
+            )
             return
         rid = generate_request_id()
         typed = str(self.name_in.value).strip() if self.name_in.value else ""
         if typed != self.user_name:
             # Mismatch: ephemeral error, NO purge, no state change.
             await interaction.response.send_message(
-                f"Username didn't match. Expected `{self.user_name}`, got `{typed}`.\n"
-                "Nothing was deleted — re-open the cascade preview to try again.",
+                embed=build_notice_embed(
+                    f"Username didn't match. Expected `{self.user_name}`, got `{typed}`.\n"
+                    "Nothing was deleted — re-open the cascade preview to try again."
+                ),
                 ephemeral=True,
             )
             return
@@ -79,7 +84,7 @@ class DeleteConfirmModal(discord.ui.Modal, title="Confirm delete"):
         except (DaimonError, anthropic.APIError) as exc:
             log.warning("privacy.purge.failed", rid=rid, error=str(exc))
             await interaction.followup.send(
-                render_error(exc, request_id=rid),
+                embed=build_notice_embed(render_error(exc, request_id=rid)),
                 ephemeral=True,
             )
             return

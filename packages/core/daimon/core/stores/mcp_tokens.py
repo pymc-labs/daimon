@@ -8,6 +8,8 @@ No try/except — exceptions propagate (guideline:architecture).
 - revoke_mcp_token: atomic UPDATE…RETURNING that sets revoked_at=now only when
   revoked_at IS NULL; returns McpTokenRow | None (None = already-revoked or unknown).
 - list_mcp_tokens: operator listing, live tokens only unless asked.
+- list_coding_keys / revoke_coding_key: one agent's live "coding tools" keys, and
+  revoking one of them only when it is that agent's.
 - lock_mcp_token / add_issued_usd: the per-token promo issuing ceiling.
 - update_mcp_token_scopes: replace a live operator token's scopes.
 
@@ -24,7 +26,7 @@ from decimal import Decimal
 from typing import Any, cast
 
 from daimon.core._models import McpToken
-from daimon.core.stores.domain import McpTokenKind, McpTokenRow, McpTokenSurface
+from daimon.core.stores.domain import McpTokenKind, McpTokenPurpose, McpTokenRow, McpTokenSurface
 from sqlalchemy import CursorResult, String, and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -45,6 +47,7 @@ async def create_mcp_token_row(
     platform: str | None = None,
     channel_id: str | None = None,
     surface: McpTokenSurface | None = None,
+    purpose: McpTokenPurpose | None = None,
 ) -> None:
     """Insert a new mcp_tokens row.
 
@@ -68,6 +71,7 @@ async def create_mcp_token_row(
         platform=platform,
         channel_id=channel_id,
         surface=surface,
+        purpose=purpose,
     )
     session.add(orm)
     await session.flush()
@@ -207,6 +211,69 @@ async def list_mcp_tokens(
             or_(McpToken.expires_at.is_(None), McpToken.expires_at > now),
         )
     return [McpTokenRow.model_validate(orm) for orm in (await session.scalars(stmt)).all()]
+
+
+async def list_coding_keys(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    now: datetime,
+    account_id: uuid.UUID | None = None,
+) -> list[McpTokenRow]:
+    """The agent's live coding keys, newest first; only `account_id`'s when given.
+
+    A coding key is a row made from the agent's "coding tools" button
+    (`McpToken.purpose`). Revoked and expired keys are left out.
+    """
+    stmt = (
+        select(McpToken)
+        .where(
+            McpToken.tenant_id == tenant_id,
+            McpToken.kind == "agent",
+            McpToken.purpose == "coding",
+            McpToken.agent_id == str(agent_id),
+            McpToken.revoked_at.is_(None),
+            or_(McpToken.expires_at.is_(None), McpToken.expires_at > now),
+        )
+        .order_by(McpToken.created_at.desc(), McpToken.jti)
+    )
+    if account_id is not None:
+        stmt = stmt.where(McpToken.account_id == account_id)
+    return [McpTokenRow.model_validate(orm) for orm in (await session.scalars(stmt)).all()]
+
+
+async def revoke_coding_key(
+    session: AsyncSession,
+    *,
+    jti: uuid.UUID,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    now: datetime,
+    account_id: uuid.UUID | None = None,
+) -> McpTokenRow | None:
+    """Revoke a live coding key of this agent; None when it is not one (or not `account_id`'s).
+
+    The same atomic revoke as `revoke_mcp_token`, narrowed to one agent's coding
+    keys so a list screen can never revoke a key of another agent, kind or tenant.
+    """
+    stmt = (
+        update(McpToken)
+        .where(
+            McpToken.jti == jti,
+            McpToken.tenant_id == tenant_id,
+            McpToken.kind == "agent",
+            McpToken.purpose == "coding",
+            McpToken.agent_id == str(agent_id),
+            McpToken.revoked_at.is_(None),
+        )
+        .values(revoked_at=now)
+        .returning(McpToken)
+    )
+    if account_id is not None:
+        stmt = stmt.where(McpToken.account_id == account_id)
+    orm = (await session.execute(stmt)).scalar_one_or_none()
+    return None if orm is None else McpTokenRow.model_validate(orm)
 
 
 async def lock_mcp_token(session: AsyncSession, *, jti: uuid.UUID) -> McpTokenRow | None:

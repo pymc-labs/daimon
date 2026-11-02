@@ -18,6 +18,7 @@ from typing import Any
 
 import structlog
 from anthropic import AsyncAnthropic
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.core.media.filenames import display_filename_for, sanitize_title
 from daimon.core.output_delivery import (
     MAX_BYTES_CEILING,
@@ -170,7 +171,10 @@ async def deliver_session_outputs(
             log.info("discord.output_delivery.skipped_already_posted", filename=name)
             return
         await thread.send(
-            render_oversize_notice(skipped, max_bytes=max_bytes, for_whom=mention), **attributed
+            embed=build_notice_embed(
+                render_oversize_notice(skipped, max_bytes=max_bytes, for_whom=mention)
+            ),
+            **attributed,
         )
 
     try:
@@ -201,7 +205,10 @@ async def deliver_session_outputs(
         if not await may_post():
             return
         try:
-            await thread.send(_ATTACH_NOTICE, allowed_mentions=discord.AllowedMentions.none())
+            await thread.send(
+                embed=build_notice_embed(_ATTACH_NOTICE),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
         except discord.HTTPException:
             return
         notice_thread_ids.add(thread.id)

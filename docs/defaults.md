@@ -1,9 +1,10 @@
 # Authoring defaults
 
-`defaults/` is the YAML tree every deployment seeds into Managed Agents: the
-agents a new install gets, the environment they run in, and the skills they
-carry. `defaults/README.md` is the one-screen layout reference; this page is
-about what happens when you change something in there.
+How to change the agents, environment and skills every Daimon install is seeded
+with, and what happens when you apply the change. Read it if you edit
+`defaults/` or run `daimon defaults apply` and `verify`. The one-screen layout
+reference is
+[defaults/README.md](https://github.com/pymc-labs/daimon/blob/main/defaults/README.md).
 
 ## What the tree holds
 
@@ -15,357 +16,257 @@ about what happens when you change something in there.
 | `defaults/skills/<name>/SKILL.md` | directory | `SkillSpec` frontmatter plus the whole directory |
 | `defaults/config.yaml` | deployment | `SystemConfigSpec` |
 
-The models are in `packages/core/daimon/core/specs.py` and the tree is read by
-`packages/core/daimon/core/defaults/loader.py`. All three spec models set
-`extra="forbid"`, so a typo'd key is a parse error rather than a silently
-ignored field, and the field names deliberately mirror the Anthropic SDK's
-create-params shapes — what you write is close to what the SDK sees, with no
-authoring aliases. The defaults pipeline converts these specs at the host
-boundary to resource ports in `mux`; the Anthropic driver preserves the same
-request fields, pagination, skill uploads and error behavior.
+The spec models reject unknown keys, so a typo is a parse error rather than an
+ignored field. Field names mirror the Anthropic SDK's create parameters, with no
+authoring aliases. The loader enforces two naming rules before anything is
+written:
 
-Two naming rules the loader enforces before anything is written: an agent or
-environment file's stem must equal its `name` field, and a skill directory's
-name must equal the frontmatter `name`. Skill names may not contain
-`anthropic` or `claude` in any case, because the provider rejects them.
+- An agent or environment file's stem must equal its `name`, and a skill
+  directory's name must equal its frontmatter `name`.
+- Skill names may not contain `anthropic` or `claude` in any case, because the
+  provider rejects them.
 
 ### Agents
 
-`AgentSpec` requires `name` and `model`, and accepts `description`, `system`,
-`tools`, `mcp_servers`, `multiagent`, `skills`, `skill_repos` and `isolated`.
-`metadata` is not authorable — it is synthesised at the boundary, which is how
-reconciliation later recognises what it owns.
+An agent requires `name` and `model`. It accepts `description`, `system`,
+`tools`, `mcp_servers`, `multiagent`, `skills`, `skill_repos`, `isolated` and
+`template`. A file with `template: true` is a starting point for new agents in
+the web app and is never provisioned.
+`metadata` is not authorable, because Daimon sets it so that reconciliation
+recognises what it owns. Declaring `mcp_servers` without a matching
+`{type: mcp_toolset, mcp_server_name: ...}` entry in `tools` is rejected at
+parse time.
 
-A `skills:` entry is a reference, `{type: custom, skill_id: <name>}` for
-something in `defaults/skills/` or `{type: anthropic, skill_id: ...}` for a
-built-in. For custom skills `skill_id` is the bare authoring name, never a
-provider id; resolution to a real id happens in
-`packages/core/daimon/core/defaults/skills.py`, which is the single place
-allowed to do it.
+A `skills:` entry is a reference. Use `{type: custom, skill_id: <name>}` for a
+skill in `defaults/skills/`, with the bare authoring name and never a provider
+id. Use `{type: anthropic, skill_id: ...}` for a built-in.
 
-An entry may add `platforms: [teams]` (any of `discord`, `slack`, `teams`,
-each once) to limit the skill to turns on those platforms. Such a skill is
-left off the agent at the provider and out of its spec fingerprint, so apply
-and verify read the agent as if the entry were absent. Each turn on a listed
-platform adds it to the session instead, through the same per-session skills
-override as a channel's skills. It fills only the room the agent's own
-skills leave under the 20-skill limit, and counts before a channel's skills
-both at turn time and when a channel adds one; a channel skill can't take a
-built-in's name. Only the Anthropic backend gets it. A custom one is looked
-up in the provider's skills list: when the list can't be read the id from
-the last good read is kept, and with none yet the skill is skipped for that
-turn; one the list no longer shows is left out, with a warning logged once
-per process. A skill the provider refuses when a session starts is dropped
-from that session and from new ones for an hour, with a warning. Only
-`defaults/` agents may use `platforms`: resolving a user agent's skills
-refuses it, whichever command or tool writes the agent.
+An entry may add `platforms: [teams]`, any of `discord`, `slack` and `teams`,
+each once, to limit the skill to turns on those platforms. Such a skill is left
+off the agent at the provider and out of its fingerprint, so `apply` and
+`verify` read the agent as if the entry were absent. Each turn on a listed
+platform adds it to the session instead.
 
-Such an entry may also add `requires: microsoft_accounts`, naming an optional
-feature the deployment must have set up. Where it is not, every process that
-starts turns or changes a channel's skills leaves the skill out, so it takes
-no room on those platforms. An unknown feature name, or `requires` without
-`platforms`, fails validation.
+- It fills only the room left under the 20-skill limit, and counts before a
+  channel's skills.
+- Only the Anthropic backend gets it.
+- A skill the provider refuses at session start is dropped for an hour, with a
+  warning.
+- Only `defaults/` agents may use `platforms`.
 
-One validator catches a failure that is otherwise a confusing upstream 400:
-declaring `mcp_servers` without a matching `{type: mcp_toolset,
-mcp_server_name: ...}` entry in `tools` is rejected at parse time.
+An entry may also add `requires: microsoft_accounts`, naming an optional
+feature. Where the deployment lacks it, the skill is left out and takes no room.
+An unknown feature name, or `requires` without `platforms`, fails validation.
 
 ### Environments
 
-An environment is a named cloud config — a package manifest and a networking
-policy — and nothing else. It is not an image, not a set of env vars and not a
-tool list. `defaults/environments/default.yaml` is the whole shape: a `config`
-block whose `packages` names `pip`, `apt`, `npm` and friends.
-The default environment installs the `gh` CLI as an apt package.
+An environment is a named package manifest and networking policy, and nothing
+else. It is not an image, a set of env vars or a tool list.
+`defaults/environments/default.yaml` shows the shape: a `config` block whose
+`packages` names `pip`, `apt`, `npm` and friends. The default installs the `gh`
+CLI.
 
-There is one Daimon-specific behaviour authors need to know.
-`EnvironmentSpec` fills in every package ecosystem with an explicit empty list
-whenever `config` is present. Upstream's environment update merges per field,
-so an absent `packages` key would preserve whatever is already there and
-removing a dependency from the YAML would never take effect. Because the
-validator forces the key, deleting a `pip:` entry and re-applying really does
-remove it.
+Daimon fills every package ecosystem with an explicit empty list whenever
+`config` is present. Upstream merges per field, so an absent key would keep old
+packages. With the empty list, deleting a `pip:` entry and re-applying removes
+it.
 
 ### Skills
 
-A skill is a directory: `SKILL.md` with YAML frontmatter, plus whatever
-`references/`, `scripts/` or data files it needs. Only `name` and
-`description` are required in the frontmatter and only those two are
-interpreted; other keys are preserved but mean nothing to Daimon.
+A skill is a directory with `SKILL.md`, plus any `references/`, `scripts/` or
+data files. Only `name` and `description` are required in the frontmatter, and
+only those two mean anything to Daimon.
 
-`packages/core/daimon/core/skill_zip.py` packages the directory. It rewrites
-every path under a top-level directory matching the skill name (the provider
-rejects a zip whose top directory disagrees with the manifest), renames any
-nested `SKILL.md` so only the root manifest is discoverable, and drops files
-whose relative path contains anything outside `[A-Za-z0-9._/-]` — a filename
-with a space in it will not ship, and nothing surfaces that to you, so keep
-filenames plain. Hard limits are 200 files and 28 MiB uncompressed; exceeding
-either fails the apply.
+Packaging puts every path under a top-level directory named for the skill and
+renames any nested `SKILL.md`. It silently drops files whose path has anything
+outside `[A-Za-z0-9._/-]`, so keep filenames plain. The limits are 200 files and
+28 MiB uncompressed, and exceeding either fails the apply.
 
-### `defaults/config.yaml`
+### Config and optional agents
 
-It has exactly two keys, `agent_name` and `environment_name`, and it binds
-nothing else. It is the bottom tier of the config cascade described in
-[architecture.md](architecture.md) — the deployment-wide fallback used when no
-thread, channel or tenant setting applies. Which agents exist is decided by
-which files are in `defaults/agents/`; which skills an agent has is the
-`skills:` list in that agent's own file; the model is that file's `model:`.
+`defaults/config.yaml` has exactly two keys, `agent_name` and
+`environment_name`. It is the bottom tier of the config cascade
+([architecture.md](architecture.md)), used when no thread, channel or tenant
+setting applies. Which agents exist is the files in `defaults/agents/`. Which
+skills an agent has is its own `skills:` list.
 
-### `agents-optional/`
+Nothing seeds `agents-optional/`. To opt in, move a file into
+`defaults/agents/`, where it is managed like the rest. Or create it per
+deployment with `daimon agents create <path>`, which marks it unmanaged so the
+sweep leaves it alone.
 
-Nothing reads this directory. `defaults/agents/`, `defaults/environments/` and
-`defaults/skills/` are the only three the reconciler walks, so an agent parked
-in `agents-optional/` is shipped in the repo and seeded into nobody's install.
-Opting in means either moving the file into `defaults/agents/` — after which
-it is managed and swept like the rest — or creating it per deployment with
-`daimon agents create <path>`, which marks it unmanaged so the sweep leaves it
-alone.
+## Optional write skills and agents
 
-## `daimon defaults apply`
+Some seeded skills write to outside services through a shared credential. Each
+runs on its own optional agent in `defaults/agents-optional/`, never on default
+Daimon.
 
+| Skill | Agent | Credential | Does |
+| --- | --- | --- | --- |
+| `workspace-write` | `workspace-writer` | Google binding | Gmail send and draft, Drive create, copy and rename, Docs edits, Calendar create and update |
+| `slides-workflow` | `workspace-writer` | Google binding | Copy a named template or edit a named deck, then render changed slides to check them |
+| `toggl-edits` | `time-editor` | `TOGGL_API_TOKEN` | Edit stopped Toggl entries for a named member, up to 365 days old |
+| `image-workflow` | `image-maker` | `OPENAI_API_KEY` | Generate or edit one PNG into `/mnt/session/outputs` |
+| `lead-intake` | none | none | Classify enquiries and draft replies for [lead intake](lead-intake.md) |
+
+To opt in, deliver the skills, create the agent, then bind its credential:
+
+```bash
+daimon defaults apply
+daimon agents create defaults/agents-optional/workspace-writer.yaml
+daimon agents bind-google workspace-writer <shared-email> --scopes <scope>...
 ```
+
+Collect Toggl and OpenAI keys with `request_agent_key`. The specs hold no
+credentials and attach nothing on their own.
+
+A Google binding uses `credentials.google_user_json` when its email matches
+`credentials.google_user_email`, else the service account in
+`credentials.google_sa_json` with domain-wide delegation. With a user
+credential, bind only the scopes its sign-in was granted, or Google refuses the
+refresh with `invalid_scope`. A matching binding never falls back to the
+service account. Full Drive scope is needed for existing shared files.
+
+The skills never share files, change permissions, delete permanently or move
+Drive files. Writes are not retried, so check an uncertain result before
+trying again. Pillow must be in custom sandbox images for the image and slides
+checks.
+
+> **Warning:** Everyone who can reach one of these agents acts as its account,
+> including reading Drive and sending mail. A separate agent name is not an
+> access limit.
+
+Limit who can reach them:
+
+- **Discord:** set the agent rule's `invoker_role_ids`. Role-gated agents
+  refuse routines.
+- **Slack and Teams:** there is no per-person gate. Route the agent only to
+  private channels with restricted members, and set `runs_in`.
+- **CLI:** `--agent` is not checked per agent, so keep CLI access to trusted
+  operators.
+- **Routines:** outside the Discord role gate, only the skill text forbids
+  unattended writes. Do not schedule routines on these agents.
+
+The shared I/O helper has one source,
+`defaults/skills/workspace-write/scripts/workflow_io.py`. After changing it, copy
+it into each skill and check the copies match:
+
+```bash
+uv run python scripts/sync_workflow_runtime.py
+uv run python scripts/sync_workflow_runtime.py --check
+```
+
+## Add invocation context fragments
+
+Core adds a `turn_context` block before the user message, chosen by the
+trusted caller origin: `chat`, `routine`, `relay` or `handoff`. Default chat
+adds nothing. An agent's YAML accepts `context_fragments`, keyed by origin, with
+`text` and an optional `mode` (`replace`, the default, or `extend`).
+
+```yaml
+context_fragments:
+  routine:
+    mode: extend
+    text: "Include the source timestamps in the result."
+  relay:
+    text: "Write a concise client-ready answer in Spanish."
+```
+
+The configuration is stored in the agent's system field, so it survives upload,
+forks and fingerprints. Replacing that field without it removes the overrides.
+An empty replacement disables a fragment. Fragments affect prompting only and
+grant no permissions.
+
+## Apply defaults
+
+```bash
 daimon defaults apply [--dry-run] [--json] [--defaults-root PATH]
 ```
 
-There is no `--tenant` and no `--force`: apply is not a fan-out over installs.
-It provisions and targets a single local tenant, loads the whole tree, then
-reconciles skills, environments and agents in that order, sweeping in reverse
-afterwards. Existing installs pick the change up through the per-tenant path
-described below, and `verify` is the command that walks all of them.
-Registering a tenant (here, even with `--dry-run`, and on every platform's
-join) fails before any reconcile when its id begins with the same 8 hex
-characters as an existing tenant's, since skill titles name a tenant by
-those: the operator sees an error naming the workspace, and existing tenants
-carry on normally.
+Apply targets a single local tenant. It has no `--tenant` and no `--force`, so
+it is not a fan-out over installs. It loads the whole tree, reconciles skills,
+environments and agents in that order, then sweeps in reverse.
 
 Everything that can fail before a write does. Bad YAML, a filename that
-disagrees with a `name`, and an agent referencing a skill directory that does
-not exist are all caught while loading. After that a pre-flight step creates
-and immediately archives a throwaway agent per distinct model to check the
-model is accepted, and aborts the whole apply if one is not — better than
-discovering it halfway through. Per-resource failures after that point are
-isolated: the pass continues, the resource is reported as failed, and the
-command exits non-zero at the end.
+disagrees with a `name` and a reference to a missing skill are caught while
+loading. A pre-flight step then creates and archives a throwaway agent per
+model, and aborts the apply if the model is not accepted. Later failures are
+isolated per resource. The pass continues, reports the failure and exits
+non-zero at the end.
 
-**It is idempotent, by two different mechanisms.** Agents and environments
-carry a spec fingerprint in their provider metadata; when the fingerprint of
-what you would write matches what is there, the reconciler skips the call
-entirely rather than bumping a version on every boot. Skills use the
-fingerprint table described below.
+Registering a tenant fails when its id starts with the same 8 hex characters as
+an existing tenant's, because skill titles name a tenant by that prefix. The
+error names the workspace, and existing tenants carry on.
 
-**The sweep is asymmetric.** An agent or environment that disappears from the
-tree is archived, never hard-deleted; a skill is hard-deleted. Only resources
-stamped as defaults-managed are candidates, so an operator's own agents are
-never touched.
-Skills carry no managed marker, so the skill sweep spares any skill a
-non-archived agent still pins or a channel rule (`channel_skills`) still adds;
-deleting either would fail every turn that mounts it. Each delete is decided
-again just before it runs, so a reference added after the sweep's first look
-also keeps it. If the channel rules can't be read, the skill sweep
-is skipped and reported as failed rather than run without them.
+**Apply is idempotent.** Agents and environments carry a spec fingerprint, and
+the reconciler skips the call when it matches. Skills use the fingerprint table
+below.
 
-Apply is not something you only run by hand. It runs at container start and
-from the compose `init` service, and a per-tenant equivalent,
-`reconcile_tenant_defaults` in
-`packages/core/daimon/core/defaults/provisioning.py`, runs lazily as the
-self-heal path when a tag fails to resolve during admission, when the bot
-joins a new server, and on adapter boot. That is why the fingerprint skip
-matters: without it every one of those calls would rewrite every resource.
-Discord also reconciles registered, unarchived tenants when the bot is no longer
-in their guild. This refreshes their managed agents without changing the tenant's
-status, posting to the guild, or syncing guild commands.
-After reconciling seeded agents, each tenant reconcile also refreshes credential
-guidance in the system prompt of live, non-isolated user agents. It skips
-unchanged prompts and leaves other agent fields alone; individual failures are
-logged and retried on the next reconcile.
+**The sweep is asymmetric.** An agent or environment that leaves the tree is
+archived, never deleted, and a skill is deleted. Only defaults-managed
+resources are candidates, so your own agents are never touched. The skill sweep
+spares any skill that a live agent pins or a channel rule adds. If it cannot
+read the channel rules, it skips the sweep and reports a failure.
 
-## `daimon defaults verify`
+Apply also runs at container start and from the Compose `init` service. A
+per-tenant version runs lazily when a tag fails to resolve, when the bot joins a
+server and on adapter boot. After reconciling seeded agents, it also refreshes
+credential guidance in the system prompt of live user agents, leaving other
+fields alone.
 
-```
+## Verify defaults
+
+```bash
 daimon defaults verify [--json] [--defaults-root PATH]
 ```
 
-Always a dry run. It walks every ready install, runs the same reconciliation
-in comparison mode, and buckets each one as in sync (every resource would be
-skipped), diverged (something would change, and it names what), or
-unverifiable (a comparison failed). Installs that are not ready yet are
-counted separately as awaiting re-seed rather than reported as drift. It exits
-non-zero if anything diverged or could not be checked, which is how it is used
-as a deploy gate. Within each tenant, custom agent skill references are
-resolved against the complete strict skill-list snapshot already loaded for
-skill verification; if that list fails, verification remains unverifiable.
-Apply continues to resolve references from the live provider view so it can
-see skills created during that same apply.
+Verify is always a dry run. It walks every ready install and buckets each as
+in sync, diverged (naming what would change) or unverifiable (a comparison
+failed). Installs not yet ready count as awaiting re-seed, not drift. It exits
+non-zero if anything diverged or could not be checked, so it works as a deploy
+gate.
 
-## The seeded-skill fingerprint
+## How seeded skills are fingerprinted
 
-The provider offers nothing to compare skill content against: skills carry no
-metadata, the version counter is opaque, no endpoint returns a version's
-bytes, and the folder name is pinned to the manifest name so it cannot carry a
-digest either. Daimon therefore keeps its own record, in the `seeded_skills`
-table — `(tenant, skill name) → content hash, provider skill id`.
+The provider cannot tell Daimon whether a skill's content changed. Skills carry
+no metadata, and no endpoint returns a version's bytes. Daimon keeps its own
+record: a `seeded_skills` row per tenant and skill, holding a content hash and
+the provider skill id.
 
-The hash is not a hash of the zip file. A zip carries real timestamps, so two
-builds of identical content differ byte for byte. `build_skill_zip` instead
-digests the same `(archive path, file bytes)` pairs it is about to write, in
-sorted order, so the digest cannot describe anything other than what was
-uploaded. Files dropped for an unsafe path are excluded from both.
+The hash covers each file's archive path and bytes in sorted order, not the zip,
+because zips carry timestamps. Files dropped for an unsafe path are excluded.
 
-On apply, a skill is skipped only when all three of these hold: a provider
-skill matches by name, a `seeded_skills` row exists for it, and that row's
-recorded id and content hash both match. Otherwise a **new version** is
-pushed — never a delete-and-recreate, because agents pin the latest version
-and deleting a referenced skill breaks every one of that agent's turns. The
-row is written after the upload succeeds, so a failed upload cannot leave a
-fingerprint claiming content was delivered. Apply drops the rows of skills no
-longer in the tree, so a retired default stops reserving its name.
+Apply skips a skill only when a provider skill matches by name, a row exists,
+and its id and hash both match. Otherwise it pushes a **new version**. It never
+deletes and recreates, because deleting a referenced skill breaks every turn of
+the agents that pin it. The row is written after the upload succeeds, and apply
+drops the rows of skills no longer in the tree. In practice:
 
-What that means in practice when you edit a seeded skill:
+- **You edit `defaults/skills/**`.** The hash changes and apply pushes a new
+  version to every install. It overwrites anyone's edits to that skill, with no
+  prompt and no `--force`. The only trace is a log line.
+- **Someone changes a seeded skill outside `defaults/`.** Chat tools refuse:
+  importing under a seeded name fails and `delete_skill` refuses. An edit made
+  directly at the provider survives, because the fingerprint still matches.
+  Daimon cannot read the content back, so `verify` calls it in sync.
+- **No row, but the skill exists.** A new version is pushed unconditionally.
 
-- **You edit `defaults/skills/**`.** The local hash changes, the guard fails,
-  and apply pushes a new version to every install. If a user had edited that
-  skill on their side, your version wins. There is no prompt and no
-  `--force`; the only trace is a structured log line.
-- **Someone changes a seeded skill outside `defaults/`.** Chat tools refuse
-  to: a library import under a seeded name fails, and `delete_skill` refuses a
-  seeded skill. An edit made straight on the provider still survives apply,
-  because the fingerprint still matches. Daimon never reads the live content
-  back, so it genuinely cannot tell that install apart from an untouched one,
-  and `verify` calls it in sync.
-- **No fingerprint row, but the skill exists.** A new version is pushed
-  unconditionally. This is the case the table was added for: without a local
-  record, apply used to adopt whatever was on the provider as correct, which
-  left every edit to `defaults/skills/**` undeliverable to installs that
-  already had the skill.
+`daimon skills delete <name>` refuses while any agent or channel names the
+skill, and lists them. `--force` detaches it everywhere, in every tenant, then
+deletes it. Chat's `delete_skill` has no force.
 
 ## Settings
 
-`DAIMON_DEFAULTS_ROOT` (default `defaults`) is the one setting that points at
-this tree, shared by the scheduler, the chat adapters and the MCP routine
-tools. The CLI's `--defaults-root` flag is separate and defaults to the same
-relative path.
+`DAIMON_DEFAULTS_ROOT` (default `defaults`) points every service at this tree
+([configuration.md](configuration.md#daimon_defaults_root)). The CLI's
+`--defaults-root` flag is separate and defaults to the same path.
 
-One indirect setting changes what gets seeded rather than from where:
-`DAIMON_MCP__PUBLIC_URL` is what merges Daimon's own MCP server and its
-toolset into each seeded agent, so an apply run without it produces agents
-that differ from a deployed one. Both are in
-[configuration.md](configuration.md).
+`DAIMON_MCP__PUBLIC_URL` changes what gets seeded rather than from where. It
+merges Daimon's own MCP server and toolset into each seeded agent, so an apply
+without it produces agents that differ from a deployed one
+([configuration.md](configuration.md#daimon_mcp__public_url)).
 
-The seeded Daimon prompt describes Markdown tables in final replies: Discord renders
-them as PNG attachments unless the tenant opts out, and Slack uses native table blocks
-when the tenant enables them; Teams shows Markdown tables
-as they are, with no setting. Existing custom agent
-prompts are unchanged; see [platform table rendering](architecture.md#platform-table-rendering).
-
-The optional `lead-intake` skill classifies consulting/project enquiries and
-prepares source quotes, research and draft replies. Qualification is a model
-step; deterministic source and identity verification remain in the intake
-service. Applying defaults does not activate provider writes.
-
-Lead classification reads each discovered source through `lead_intake_read_source`
-before submission; the model receives source text without service credentials.
-
-## Sandbox Workspace writes
-
-The `workspace-write` default skill packages a Python script for explicit Gmail
-send/draft, Drive create/copy/rename, Docs create/text edits and Calendar create/update.
-It uses `get_cli_token("gcloud")` and an operator-bound dedicated agent, such as
-`workspace-writer`. Ordinary chat supplies the signed identity needed by the broker.
-Deployment credentials stay server-side; no refresh token is mounted. Operators
-can set `credentials.google_user_json` to the full authorized-user JSON and
-`credentials.google_user_email` to its account email. Only bindings matching that
-email (without case sensitivity) use it, with the binding’s scopes and without
-domain-wide delegation. Other bindings use `credentials.google_sa_json`, a
-service-account key with domain-wide delegation. With a user credential, bind only scopes the sign-in was granted, such as `gmail.modify`, `calendar`, `drive`, `documents` and `presentations` (each under `https://www.googleapis.com/auth/`); any other scope makes Google refuse the refresh with `invalid_scope`. A matching
-binding never falls back to the service account when the user refresh fails.
-Full Drive scope is required for existing shared files and templates.
-
-Sharing, permission changes, permanent file deletion, Calendar deletion and Drive
-moves are not exposed. Tokens enter on stdin; errors are redacted, writes are not
-retried automatically, and uncertain outcomes need read-back before retrying.
-All users of the bound agent can use its identity directly; these scripts do not
-isolate credentials from sandbox code. Operators must restrict access to that agent
-or workspace and must not bind default Daimon to the shared account. With full
-Drive and send-mail scopes, everyone who can reach the bound agent can act as that
-account, including reading or changing Drive files and sending mail. No routine
-is created. Skill scripts participate in the existing content-derived fingerprint.
-
-`slides-workflow` uses the same dedicated Google-bound agent. Copy a named template
-or edit a deck ID named explicitly by the user; no default/recent deck is selected.
-The packaged script supports text, images, slides, deletion and validated styling
-batches with revision checks. It refuses unknown targets and deletion of the final
-slide. Render changed slides to PNG and visually inspect them before reporting
-completion; mutation success alone reports review incomplete. The skill copies no
-credentials and exposes no permission or sharing changes. PNG validation requires
-Pillow in custom sandbox images.
-
-Sandbox I/O helpers are packaged with each workflow, with one canonical source at
-`defaults/skills/workspace-write/scripts/workflow_io.py`. After changing it run
-`uv run python scripts/sync_workflow_runtime.py`; `--check` verifies the packaged
-copies remain identical and fails if an expected skill folder is missing. A
-packaging test checks that all four runtime copies are byte-identical. Each skill
-is independently deliverable.
-
-`toggl-edits` packages narrow Toggl Track operations for an operator-created
-`time-editor` agent with `TOGGL_API_TOKEN` collected through `request_agent_key`.
-Every operation requires an explicit workspace and uniquely resolved member ID
-or email. All target owners are checked before writing; owner/workspace changes
-and administration are refused. Only stopped entries attributed by Reports are
-supported. A 403 identifies the shared token owner’s required
-workspace administrator/access permission. Bulk partial results identify successful
-and failed entries without retrying. All users of this agent can use the shared key;
-it must not be attached to default Daimon. Ownership lookup uses workspace-scoped
-Reports v3 search filtered by entry IDs and the explicitly named member, not a
-key-owner-only `/me` lookup. Every search supplies YYYY-MM-DD bounds from today
-minus 365 days through today, selected in UTC. Older entries are refused. Missing
-or ambiguous report rows refuse all writes; running entries and very recent edits
-(Reports lag) are unsupported. Running timers must be stopped in Toggl itself:
-a shared key cannot verify their owner through Reports.
-
-`image-workflow` supports OpenAI image generation and local-reference edits using
-`gpt-image-2` or `gpt-image-1.5`. It requires `OPENAI_API_KEY` on an operator-created
-`image-maker` agent and Pillow in the sandbox. Each call generates one bounded PNG,
-validates it and writes a unique file under `/mnt/session/outputs` for attachment.
-It refuses remote references, symlinks, oversized images and custom output paths.
-There is no automatic paid retry. Google’s retired Gemini Imagen route is explicitly
-refused; no Gemini key is needed. All users of image-maker can spend its project key.
-
-Optional agent specs for `workspace-writer`, `time-editor` and `image-maker` live
-in `defaults/agents-optional/`. Run `daimon defaults apply` to deliver skills, then
-`daimon agents create defaults/agents-optional/<name>.yaml` to opt into an agent.
-These specs contain no credentials and do not auto-attach keys or Google bindings.
-Operators must restrict their audience before binding Google or collecting keys.
-Use `daimon agents bind-google workspace-writer <shared-email> --scopes <scope>...`
-with explicit scopes and either the matching authorized-user credential (bind
-only scopes its sign-in was granted) or a service account with domain-wide
-delegation; use `request_agent_key`
-for `TOGGL_API_TOKEN` on time-editor and `OPENAI_API_KEY` on image-maker. Keep default
-Daimon unbound and without these shared keys. The skill library’s existing per-file
-content hashes update for changed skill bytes; no static fingerprint is maintained.
-
-Audience controls are platform-specific; a separate agent name is not an access
-restriction:
-
-- Discord: `AgentRule.invoker_role_ids` restricts invocation to current holders
-  of the configured Discord roles, including admins. Role-gated agents deny
-  routines.
-- Slack and Teams have no per-user agent gate. Admins must route these agents
-  only to private channels with restricted membership and use `runs_in` to limit
-  the channels in which they run. Every permitted channel participant can use
-  the agent's shared credentials.
-- CLI `--agent NAME` is unchecked at the agent level. Local CLI access must be
-  limited to trusted operators.
-- Fleet grants can bypass channel routing by spawning the credential holder as
-  a worker. Keep these agents out of grants whose `worker_agents` is `"any"` and
-  out of explicit worker-agent lists for other roots. Narrow the grant to
-  uncredentialed workers rather than allowing any agent.
-- Outside the Discord invoker-role gate, routines are not technically blocked
-  on these agents; only skill guidance forbids unattended writes. Operators
-  must not configure such routines.
-
-Google tokens enter the transcript as tool results and again in literal shell
-handoff commands, and last about one hour. The skills show a quoted heredoc;
-the scripts receive stdin and do not store tokens in their own argv or files.
-Drive copy/rename and template-copy/get support Shared Drives. Calendar updates
-accept any nonempty subset of supported fields; creates require summary/start/end.
-Slides text replacement skips deletion when a placeholder is already empty.
+The seeded Daimon prompt describes Markdown tables in replies. Discord renders
+them as PNG attachments unless the tenant opts out, Slack uses native table
+blocks when the tenant enables them, and Teams shows Markdown as it is.
+Existing custom agent prompts are unchanged.

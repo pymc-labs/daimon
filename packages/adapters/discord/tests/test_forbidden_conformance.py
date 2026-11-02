@@ -314,7 +314,8 @@ async def test_real_forbidden_path(ingress: OwnedIngress, backend: Provider) -> 
     assert len(receipt.parent_posts) == 1
     post = receipt.parent_posts[0]
     assert post.operation == "send" and post.message.channel_id == "101"
-    assert post.message.content == "Couldn't open a thread. @mention Daimon again."
+    assert post.message.content == ""
+    assert post.message.embed_texts == ("Couldn't open a thread. @mention Daimon again.",)
     wire = json.loads(post.request_json)
     assert wire["message_reference"]["message_id"] == ingress.message.id
     assert wire["allowed_mentions"]["replied_user"] is False

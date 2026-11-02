@@ -31,6 +31,7 @@ import structlog
 from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.core.errors import DaimonError
+from daimon.core.media.attachments import AttachedFile, attachment_line
 from daimon.core.media.filenames import sanitize_title
 from daimon.core.media.vision import (
     MAX_VISION_IMAGE_BYTES,
@@ -241,20 +242,16 @@ def image_block(data: bytes) -> BetaManagedAgentsImageBlockParam:
 
 
 def _link_line(file: InboundFile, reason: str | None) -> str:
-    skipped = f", not inlined as an image ({reason})" if reason else ""
-    warning = ""
+    hints: list[str] = []
     if file.name.lower().endswith(_IMAGE_EXTENSIONS):
-        warning = f" Downscale it under {MAX_VISION_IMAGE_DIMENSION}px before viewing it."
-    replace = ""
+        hints.append(f"Downscale it under {MAX_VISION_IMAGE_DIMENSION}px before viewing it.")
     if file.link and file.version:
-        replace = (
-            " To save an edited file over it as a new version, pass replace_channel_file "
+        hints.append(
+            "To save an edited file over it as a new version, pass replace_channel_file "
             f"link `{file.link}` and version `{file.version}`."
         )
-    return (
-        f"[attachment] `{file.name}`, shared by the user with this message{skipped}. "
-        f"Short-lived download URL, fetch it now (curl to disk, then read it): {file.url}{warning}"
-        f"{replace}"
+    return attachment_line(
+        AttachedFile(file.name, url=file.url, not_inlined=reason, hint=" ".join(hints))
     )
 
 
@@ -357,15 +354,22 @@ async def prepare_attachments(
     for file in files:
         if file.kind == "refused":
             lines.append(
-                f"[attachment] `{file.name}` was shared but can't be opened: daimon has no "
-                "access to this channel's files until a Microsoft 365 admin grants it "
-                "Files.ReadWrite.All."
+                attachment_line(
+                    AttachedFile(
+                        file.name,
+                        unreadable="daimon has no access to this channel's files until a "
+                        "Microsoft 365 admin grants it Files.ReadWrite.All.",
+                    )
+                )
             )
             continue
         if file.kind == "unreachable":
             lines.append(
-                f"[attachment] `{file.name}` was shared but can't be opened: "
-                "daimon could not fetch it from this conversation."
+                attachment_line(
+                    AttachedFile(
+                        file.name, unreadable="daimon could not fetch it from this conversation."
+                    )
+                )
             )
             continue
         pasted = file.kind in ("pasted_image", "graph_image")
@@ -389,10 +393,7 @@ async def prepare_attachments(
             )
             blocks.append(image_block(data))
             # Unnamed in the text, an image block reads as part of the prompt, not as shared.
-            lines.append(
-                f"[attachment] `{file.name}`, shared by the user with this message, "
-                "is attached as an image."
-            )
+            lines.append(attachment_line(AttachedFile(file.name, inlined=True)))
         except (FetchRefused, httpx.InvalidURL, *TEAMS_SEND_ERRORS) as err:
             # Never log or show the URL: a download URL is itself a credential.
             reason = str(err) if isinstance(err, FetchRefused) else type(err).__name__

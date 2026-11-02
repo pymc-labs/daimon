@@ -13,6 +13,7 @@ from daimon.adapters.discord.checks import (
 )
 from daimon.adapters.discord.confidential import MakeConfidentialView
 from daimon.adapters.discord.errors import generate_request_id, render_error
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.outsiders import channel_outsiders
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.access_policy import Approvals
@@ -273,6 +274,7 @@ class HereCog(commands.Cog):
             )
         except (DaimonError, discord.HTTPException) as exc:
             await interaction.edit_original_response(
-                content=render_error(exc, request_id=generate_request_id()),
+                content=None,
+                embed=build_notice_embed(render_error(exc, request_id=generate_request_id())),
                 allowed_mentions=discord.AllowedMentions.none(),
             )

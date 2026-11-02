@@ -62,6 +62,43 @@ async def resolve(
             parent_channel_id=context.channel_id,
             thread_id=context.thread_id,
         )
+        if (
+            binding is not None
+            and binding.kind == "web"
+            and (context.account_id is None or context.account_id != binding.creator_account_id)
+        ):
+            # A web chat answers only the person who started it.
+            raise UserFacingError("This chat belongs to someone else. Start a new chat.")
+        if binding is not None and binding.kind == "owner":
+            if context.account_id is None:
+                # No requester to check: never route to a private copy (fail closed);
+                # the channel's own agent stands.
+                return config
+            if context.account_id != binding.creator_account_id:
+                # Someone's private copy answers only them: nobody else's turn (or
+                # session) ever runs on it.
+                raise UserFacingError(
+                    f"This thread belongs to someone's private copy ({binding.responder_name}). "
+                    "Ask me in the channel or a new thread."
+                )
+            from daimon.core.ma_identity import derive_agent_uuid
+            from daimon.core.stores import agent_owners
+
+            still_owner = await agent_owners.is_owner(
+                session,
+                context.tenant_id,
+                derive_agent_uuid(
+                    tenant_id=context.tenant_id, ma_agent_id=binding.responder_ma_agent_id
+                ),
+                context.account_id,
+            )
+            if not still_owner:
+                # Ownership moved (or was cleared) since the hand-off: the copy is no
+                # longer this person's to talk to here.
+                raise UserFacingError(
+                    "This conversation's private copy changed owner, so it can't answer "
+                    "here any more. Start a new conversation."
+                )
         if binding is not None:
             if binding.deleted:
                 raise UserFacingError(

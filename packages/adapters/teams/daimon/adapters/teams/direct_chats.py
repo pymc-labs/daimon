@@ -37,6 +37,10 @@ class DirectChats(Protocol):
         """Post `text`; returns the new message's activity id."""
         ...
 
+    async def post_card(self, conversation_id: str, card: MessageActivityInput) -> str:
+        """Post Daimon's own `card`; returns the new message's activity id."""
+        ...
+
 
 class SdkDirectChats:
     """`DirectChats` over the SDK app, every call timed: the SDK's HTTP client sets no timeout."""
@@ -72,3 +76,6 @@ class SdkDirectChats:
             text=escape_dollars(text), text_format="extendedmarkdown"
         ).add_ai_generated()
         return (await self._sender.send(conversation_id, activity, service_url=SERVICE_URL)).id
+
+    async def post_card(self, conversation_id: str, card: MessageActivityInput) -> str:
+        return (await self._sender.send(conversation_id, card, service_url=SERVICE_URL)).id

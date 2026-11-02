@@ -8,8 +8,10 @@ here. Recording is best-effort and in the background
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.platform_names import remember_user_name
+from daimon.core.platform_names import remember_channel_names, remember_user_name
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
@@ -32,3 +34,30 @@ def remember_guild_user(
         display_name=user.display_name,
         handle=user.name,
     )
+
+
+def remember_guild_channels(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    guild_id: int | None,
+    channels: Iterable[object],
+) -> None:
+    """Store the names of guild channels, as the gateway cache already holds them.
+
+    A thread is stored under its parent, the channel a person configures; categories,
+    voice channels and direct messages are skipped. Never calls Discord.
+    """
+    if guild_id is None:
+        return
+    names: dict[str, str] = {}
+    for channel in channels:
+        target = channel.parent if isinstance(channel, discord.Thread) else channel
+        if isinstance(target, (discord.TextChannel, discord.ForumChannel)):
+            names[str(target.id)] = target.name
+    if names:
+        remember_channel_names(
+            sessionmaker,
+            tenant_id=derive_tenant_uuid(platform="discord", workspace_id=str(guild_id)),
+            platform="discord",
+            names=names,
+        )

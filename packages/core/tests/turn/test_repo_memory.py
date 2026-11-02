@@ -25,7 +25,6 @@ from daimon.core.turn.prepare import PreparedTurn
         ("hold", False, True),
         ("shared_channel", False, True),
         ("source_shared", False, True),
-        ("worker", False, True),
         ("unresolved", False, True),
         ("routine", True, False),
         ("disabled", False, False),
@@ -73,7 +72,7 @@ async def test_turn_memory_eligibility_and_principal(
             deps,
             prepared,
             tenant_id=tenant_id,
-            origin="worker" if case == "worker" else "routine" if case == "routine" else "chat",
+            origin="routine" if case == "routine" else "chat",
             unattended=case in {"unattended", "routine"},
         )
     finally:

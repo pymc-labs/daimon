@@ -12,10 +12,7 @@ from __future__ import annotations
 import hashlib
 import re
 
-from daimon.core.agent_guidance import (
-    CREDENTIAL_GUIDANCE_BLOCK,
-    apply_credential_guidance,
-)
+from daimon.core.agent_guidance import CREDENTIAL_GUIDANCE_BLOCK, apply_credential_guidance
 
 
 def test_github_helper_guidance_adds_exactly_one_static_paragraph() -> None:

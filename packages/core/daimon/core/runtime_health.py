@@ -13,6 +13,7 @@ from typing import TypedDict, cast
 
 import httpx
 import structlog
+from daimon.core.release import current_release
 from daimon.core.session_preparation_gate import preparation_counts
 from daimon.core.turn_queue import take_queue_window
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -208,6 +209,11 @@ async def _run_health(
             next_log = window_start + interval_s
 
 
+def log_runtime_started(process: str) -> None:
+    """Once per process start: which process, and which build."""
+    structlog.get_logger().info("runtime.started", process=process, release=current_release())
+
+
 @asynccontextmanager
 async def runtime_health(
     process: str,
@@ -215,7 +221,11 @@ async def runtime_health(
     interval_s: float,
     turns: Callable[[], tuple[int, int | None]] | None = None,
 ) -> AsyncIterator[None]:
-    """Start the process health heartbeat; interval zero disables it."""
+    """Start the process health heartbeat; interval zero disables it.
+
+    Logs `runtime.started` once on entry, whatever the interval.
+    """
+    log_runtime_started(process)
     discord_loggers = (
         [logging.getLogger("discord.http"), logging.getLogger("discord.webhook.async_")]
         if process == "discord"

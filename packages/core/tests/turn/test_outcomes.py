@@ -1,15 +1,22 @@
 """Content-free outcomes are once-only and never put database I/O on a turn."""
 
 import asyncio
+import uuid
 from dataclasses import asdict
+from datetime import UTC, datetime
+from decimal import Decimal
 from types import ModuleType
 
 import pytest
+from anthropic.types.beta.sessions import BetaManagedAgentsSpanModelRequestEndEvent
 from daimon.core._models import TurnOutcome
 from daimon.core.stores.turn_outcomes import list_for_tenant, record
 from daimon.core.turn.outcomes import TurnObservation, drain_outcomes, observe_turn, record_refusal
 from daimon.core.turn.termination import TerminationReason
+from daimon.core.usage_compat import event_observation
 from daimon.testing.factories import make_tenant
+from mux.contracts.usage import UsageObservation
+from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
 
@@ -164,3 +171,32 @@ def _migration(name: str) -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _call(tenant_id: uuid.UUID, event_id: str) -> UsageObservation:
+    return event_observation(
+        BetaManagedAgentsSpanModelRequestEndEvent(
+            id=event_id,
+            type="span.model_request_end",
+            is_error=False,
+            model_request_start_id="start",
+            processed_at=datetime(2026, 9, 29, tzinfo=UTC),
+            model_usage=ma_model_usage(input_tokens=1000, output_tokens=500),
+        ),
+        session_id="session",
+        model_id="claude-sonnet-4-6",
+        tenant_id=str(tenant_id),
+    )
+
+
+def test_billed_cost_is_the_marked_up_sum_of_the_turns_calls() -> None:
+    tenant_id = uuid.uuid4()
+    turn = TurnObservation(async_sessionmaker(), tenant_id, "web", session_id="session")
+    assert turn.billed_cost(Decimal(2)) is None, "no call metered, no cost to show"
+    turn.note_usage(_call(tenant_id, "a"), metered=True)
+    turn.note_usage(_call(tenant_id, "b"), metered=True)
+    assert turn.billed_cost(Decimal(2)) == Decimal("0.042000"), (
+        "two calls at $0.0105 each, times the markup of 2"
+    )
+    turn.note_usage(_call(tenant_id, "c").model_copy(update={"output_tokens": None}))
+    assert turn.billed_cost(Decimal(2)) is None, "one unpriced call makes the total unknown"

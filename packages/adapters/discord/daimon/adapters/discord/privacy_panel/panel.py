@@ -9,6 +9,7 @@ from __future__ import annotations
 import uuid
 
 from daimon.adapters.discord import layout
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.privacy import DELETE_PAUSED, PRIVACY_TITLE, privacy_lines
 
@@ -94,13 +95,17 @@ class PrivacyPanelView(discord.ui.LayoutView):
 
     async def _on_export(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message(
-            _export_placeholder_message(self._bot_display_name),
+            embed=build_notice_embed(
+                _export_placeholder_message(self._bot_display_name), neutral=True
+            ),
             ephemeral=True,
         )
 
     async def _on_delete(self, interaction: discord.Interaction) -> None:
         if not self.runtime.settings.privacy.delete_enabled:
-            await interaction.response.send_message(DELETE_PAUSED, ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed(DELETE_PAUSED), ephemeral=True
+            )
             return
         # Lazy import to avoid circular: panel.py <-> cascade.py
         from daimon.adapters.discord.privacy_panel.cascade import CascadePreviewView
@@ -134,7 +139,7 @@ class PrivacyPanelView(discord.ui.LayoutView):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:  # type: ignore[override]  # base uses broader Interaction[Client] type
         if interaction.user.id != self.allowed_user_id:
             await interaction.response.send_message(
-                "Only the command invoker can use these buttons.",
+                embed=build_notice_embed("Only the command invoker can use these buttons."),
                 ephemeral=True,
             )
             return False

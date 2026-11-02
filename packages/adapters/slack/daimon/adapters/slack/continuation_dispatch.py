@@ -9,6 +9,7 @@ from typing import Any, cast
 
 import structlog
 from anthropic import AsyncAnthropic
+from daimon.adapters.slack.blockkit import notice_fields
 from daimon.adapters.slack.context import DEFAULT_PAGE_LIMIT
 from daimon.core.continuity.dispatch import dispatch_pending_continuations as dispatch_core
 from daimon.core.stores.domain import TaskContinuationRow
@@ -101,7 +102,7 @@ async def dispatch_pending_continuations(
             )
             return
         await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-            channel=channel, thread_ts=thread_id, text=text
+            channel=channel, thread_ts=thread_id, **notice_fields(text)
         )
 
     await dispatch_core(

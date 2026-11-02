@@ -89,8 +89,8 @@ class AdminsView(PanelViewBase):
             "Granted admins can change what agents do, including agents platform admins use."
         ]
         lines.extend(
-            f"{g.subject_kind}: {g.subject_id} · by {g.granted_by or 'erased'} "
-            f"· {g.granted_at:%Y-%m-%d}"
+            f"{g.subject_kind}: {g.subject_id}, added by {g.granted_by or 'erased'} "
+            f"on {g.granted_at:%Y-%m-%d}"
             for g in grants[:25]
         )
         if len(grants) > 25:

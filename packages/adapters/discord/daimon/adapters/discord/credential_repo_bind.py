@@ -58,6 +58,7 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.discord.agent_setup.write import load_agent_inline_pat, store_inline_pat
 from daimon.adapters.discord.checks import admin_caller, is_platform_admin
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.agent_reach import load_target_facts
@@ -110,9 +111,9 @@ async def resolve_ma_agent_for_uuid(
 
 async def _send_ephemeral(interaction: discord.Interaction, content: str) -> None:  # type: ignore[type-arg]  # discord.Interaction default generic arg; only response/followup are used
     if interaction.response.is_done():
-        await interaction.followup.send(content, ephemeral=True)
+        await interaction.followup.send(embed=build_notice_embed(content), ephemeral=True)
     else:
-        await interaction.response.send_message(content, ephemeral=True)
+        await interaction.response.send_message(embed=build_notice_embed(content), ephemeral=True)
 
 
 async def refuse_if_shared_and_not_admin_for_request(

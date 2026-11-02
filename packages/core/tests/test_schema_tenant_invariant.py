@@ -55,6 +55,10 @@ _TENANT_ID_EXEMPT: dict[str, str] = {
     # than belonging to one. Only the privacy purge writes it and only the
     # scheduler's erasure sweep reads it; nothing tenant-facing queries it.
     "privacy_session_deletes": "one erasure job per deleted account; lists every linked tenant in tenant_ids",
+    # The account fence for mux writers: a deleted account may have private state in
+    # any tenant, and the fence must outlive the tenant the account was created in.
+    "erased_account": "one bare account id per erased account; spans every tenant it was in",
+    "erased_principal": "one bare principal id per erased account's principal; same reason",
     # Push delivery receipts and jobs are deployment-wide GitHub metadata, not
     # tenant data. Resync resolves each tenant's bindings and scoped credentials
     # at execution time from the canonical repository/ref.

@@ -31,6 +31,7 @@ from daimon.core.confirmation import ApprovedConfirmation, prompt_for_tool_call
 from daimon.core.native_admins import GroupMembersCache
 from daimon.core.stores.domain import Role
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall
+from daimon.testing.adapters.slack.notices import shown_text
 from daimon.testing.db import db_committing_engine  # noqa: F401
 
 PLATFORMS = ("discord", "slack", "teams")
@@ -438,35 +439,44 @@ class Card:
             return json.dumps(self.client.chat_postMessage.await_args.kwargs["attachments"])
         return self.sent[0].model_dump_json(by_alias=True)
 
-    async def click(self, user: str) -> str | None:
-        """Press Confirm as `user`; the refusal they are shown, or None."""
+    async def click(self, user: str, *, deny: bool = False) -> str | None:
+        """Press Confirm (or Deny) as `user`; the refusal they are shown, or None."""
+        label = "Deny" if deny else "Confirm"
         if self.chat.platform == "discord":
             import discord
 
             view = self.channel.send.await_args.kwargs["view"]
-            confirm = next(i for i in view.walk_children() if isinstance(i, discord.ui.Button))
-            assert confirm.label == "Confirm"
+            confirm = next(
+                i
+                for i in view.walk_children()
+                if isinstance(i, discord.ui.Button) and i.label == label
+            )
             interaction = MagicMock()
             interaction.user.id = int(user)
             interaction.response.send_message = AsyncMock()
             interaction.response.edit_message = AsyncMock()
             await confirm.callback(interaction)
             sent = interaction.response.send_message
-            return sent.await_args.args[0] if sent.await_count else None
+            if not sent.await_count:
+                return None
+            args, kwargs = sent.await_args
+            return args[0] if args else kwargs["embed"].description
         if self.chat.platform == "slack":
             before = self.client.chat_postEphemeral.await_count
             await self.cards.handle_click(
-                {"actions": [{"action_id": self._slack_action()}], "user": {"id": user}}
+                {"actions": [{"action_id": self._slack_action(deny)}], "user": {"id": user}}
             )
             ephemeral = self.client.chat_postEphemeral
-            return ephemeral.await_args.kwargs["text"] if ephemeral.await_count > before else None
+            if ephemeral.await_count == before:
+                return None
+            return shown_text(ephemeral.await_args.kwargs)
         from daimon.adapters.teams.tool_confirmation import VERB
         from microsoft_teams.api import AdaptiveCardInvokeActivity
 
         action = {
             "type": "Action.Execute",
             "verb": VERB,
-            "data": {"action": VERB, "op": "approve", "token": self._token()},
+            "data": {"action": VERB, "op": "deny" if deny else "approve", "token": self._token()},
         }
         activity = AdaptiveCardInvokeActivity.model_validate(
             {
@@ -487,12 +497,12 @@ class Card:
             }
         )
         response = await self.cards.on_action(SimpleNamespace(activity=activity))  # pyright: ignore[reportArgumentType]
-        return None if response.value == "Approved" else response.value
+        return None if response.value in ("Approved", "Denied") else response.value
 
-    def _slack_action(self) -> str:
+    def _slack_action(self, deny: bool = False) -> str:
         blocks = self.client.chat_postMessage.await_args.kwargs["attachments"][0]["blocks"]
         actions = next(block for block in blocks if block["type"] == "actions")
-        return actions["elements"][0]["action_id"]
+        return actions["elements"][1 if deny else 0]["action_id"]
 
     def _token(self) -> str:
         if self.chat.platform == "slack":
@@ -675,6 +685,145 @@ async def test_a_model_said_by_name_prepares_the_card_the_tool_previewed(
     assert current.backend == target
 
 
+@pytest.mark.parametrize("target", TARGETS)
+async def test_a_change_after_the_preview_posts_one_card_with_the_fresh_preview(
+    chat: Chat, card: Card, target: str
+) -> None:
+    """J5 (smoke 857a82bb): "switch it to GPT and turn off web search" can preview
+    the switch first, then change the agent, then confirm with the stale preview.
+    The card re-previews the same request against the agent as it is now and shows
+    that; the approved call (the model's original arguments) then applies it.
+    Adapted from dsh's stale-preview test."""
+    preview = await chat.tool(target)
+    data = tool_call(target, preview, list(preview.declared_drops))
+    # Web search is turned off after the preview: the agent's setup moved.
+    _web_search_off(chat)
+    from daimon.core.confirmation import drop_words
+
+    fresh = await chat.tool(target)
+    assert fresh.declared_drops == (*DROPS, "tools") != preview.declared_drops
+    text = await card.post(prompt_for(chat, data))
+    assert f"won't have {drop_words(fresh.declared_drops)}" in text, text
+    assert await card.click(REQUESTER[chat.platform]) is None
+    assert isinstance(await card.answer(), ApprovedConfirmation)
+    changed = await apply(chat, data)
+    assert changed.status == "changed" and changed.declared_drops == fresh.declared_drops
+    _, current = await chat.current()
+    assert current.backend == target and current.declared_drops == fresh.declared_drops
+    assert len(await chat.audit()) == 1
+    # The re-preview is used once: the same stale call cannot apply again.
+    with pytest.raises(Exception, match="Someone just switched Researcher"):
+        await apply(chat, data)
+
+
+def _web_search_off(chat: Chat) -> None:
+    chat.payload["tools"] = [
+        *(chat.payload.get("tools") or []),
+        {"type": "agent_toolset_20260401", "configs": [{"name": "web_search", "enabled": False}]},
+    ]
+
+
+async def test_a_re_previewed_card_applies_only_while_the_agent_is_as_it_showed(
+    chat: Chat, card: Card
+) -> None:
+    """The agent moves again after Confirm, before the approved call runs: the card's
+    refresh no longer matches, so the call refuses and nothing moves."""
+    preview = await chat.tool(TARGET)
+    data = tool_call(TARGET, preview, list(preview.declared_drops))
+    _web_search_off(chat)
+    await card.post(prompt_for(chat, data))
+    assert await card.click(REQUESTER[chat.platform]) is None
+    chat.payload["system"] = "Changed again after the card was confirmed."
+    with pytest.raises(Exception, match="(?i)preview again"):
+        await apply(chat, data)
+    _, current = await chat.current()
+    assert current is None and await chat.audit() == []
+
+
+async def test_a_denied_re_previewed_card_never_applies(chat: Chat, card: Card) -> None:
+    preview = await chat.tool(TARGET)
+    data = tool_call(TARGET, preview, list(preview.declared_drops))
+    _web_search_off(chat)
+    await card.post(prompt_for(chat, data))
+    assert await card.click(REQUESTER[chat.platform], deny=True) is None
+    with pytest.raises(Exception, match="(?i)preview again"):
+        await apply(chat, data)
+    _, current = await chat.current()
+    assert current is None and await chat.audit() == []
+
+
+async def test_a_refresh_is_spent_only_once_by_its_own_confirmed_card(chat: Chat) -> None:
+    """Card Y re-previewed to F2 and denied; card X re-previewed to F1 and confirmed. The
+    agent is back at F2 when X's call runs: Y's refresh was never confirmed, X's shows
+    F1, so nothing applies. A confirmed refresh is spent once, by its own account and
+    agent only."""
+    from daimon.core.confirmation import BackendSwitchReference
+    from daimon.core.stores import backend_switch_cards as cards
+
+    if chat.platform != "discord":
+        pytest.skip("store-level: one platform is enough")
+    now = datetime.now(UTC)
+    tenant, account = chat.auth.tenant_id, chat.auth.account_id
+
+    def fresh(digest: str) -> BackendSwitchReference:
+        return BackendSwitchReference(
+            agent="Researcher",
+            target_backend=TARGET,
+            expected_revision=0,
+            preview_digest=digest,
+            refreshed_from="s" * 64,
+        )
+
+    key = {"tenant_id": tenant, "account_id": account, "agent_name": "Researcher"}
+    spend = {**key, "stale_digest": "s" * 64, "fresh_revision": 0, "now": now}
+    async with chat.runtime.session_factory.begin() as db:
+        for digest in ("2" * 64, "1" * 64):  # Y, then X
+            await cards.record_refresh(
+                db,
+                tenant_id=tenant,
+                account_id=account,
+                platform="discord",
+                channel_id="channel",
+                thread_id="thread",
+                requester_platform_user_id=REQUESTER["discord"],
+                agent_name="Researcher",
+                stale_digest="s" * 64,
+                fresh=fresh(digest),
+                expires_at=now + timedelta(minutes=10),
+            )
+        # Only X is confirmed.
+        assert await cards.approve_refresh(db, **spend, fresh_digest="1" * 64)
+    async with chat.runtime.session_factory.begin() as db:
+        assert not await cards.consume_refresh(db, **spend, fresh_digest="2" * 64)
+        other_account = {**spend, "account_id": uuid.uuid4()}
+        assert not await cards.consume_refresh(db, **other_account, fresh_digest="1" * 64)
+        other_agent = {**spend, "agent_name": "someone-else"}
+        assert not await cards.consume_refresh(db, **other_agent, fresh_digest="1" * 64)
+        assert await cards.consume_refresh(db, **spend, fresh_digest="1" * 64)
+        assert not await cards.consume_refresh(db, **spend, fresh_digest="1" * 64)
+
+
+async def test_a_stale_preview_whose_re_preview_is_refused_asks_to_preview_again(
+    chat: Chat, card: Card, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fallback (dsh's typed refusal): when the agent changed and the switch is
+    now refused (the provider was turned off), the model is told to preview again."""
+    from daimon.core.confirmation import STALE_SWITCH_TEXT, StalePreview
+
+    preview = await chat.tool(TARGET)
+    data = tool_call(TARGET, preview, list(preview.declared_drops))
+    chat.payload["system"] = "Changed after the switch preview was taken."
+    monkeypatch.setattr("daimon.core.channel_backend.backend_is_enabled", lambda *_: False)
+    with pytest.raises(StalePreview, match="Preview the switch again") as refused:
+        await card.post(prompt_for(chat, data))
+    assert str(refused.value) == STALE_SWITCH_TEXT
+    assert not card._posted()  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(Exception, match="(?i)isn't turned on"):
+        await apply(chat, data)
+    _, current = await chat.current()
+    assert current is None and await chat.audit() == []
+
+
 @pytest.mark.parametrize("accepted", ["missing", "partial", "extra", "empty"])
 async def test_accepted_drops_other_than_the_preview_never_post_or_apply(
     chat: Chat, card: Card, accepted: str
@@ -714,7 +863,9 @@ async def test_a_card_changed_after_prepare_is_refused_on_click(
         # The agent itself changed after the card was drawn: a fresh preview differs.
         chat.payload["system"] = "Changed after the card was drawn."
     refusal = await card.click(REQUESTER[chat.platform])
-    assert refusal is not None and "Preview and confirm again" in refusal
+    assert refusal is not None and re.search(
+        r"(?i)preview (the switch )?(and confirm )?again", refusal
+    )
     assert await card.still_pending()
     if change == "source":
         with pytest.raises(Exception, match="(?i)preview again"):

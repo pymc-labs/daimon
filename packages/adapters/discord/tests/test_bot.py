@@ -397,7 +397,7 @@ class TestInflightCapRejection:
         await bot.on_message(message)
 
         message.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        sent_text: str = message.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
+        sent_text: str = message.channel.send.call_args.kwargs["embed"].description  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
         assert "too many chats at once" in sent_text, (
             f"over-cap reply must contain 'too many chats at once'; got: {sent_text!r}"
         )
@@ -585,7 +585,7 @@ class TestInflightIsolation:
         await bot.on_message(message_a)
 
         message_a.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        sent_a: str = message_a.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
+        sent_a: str = message_a.channel.send.call_args.kwargs["embed"].description  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
         assert "too many chats at once" in sent_a, (
             f"guild A (saturated) should be rejected; got: {sent_a!r}"
         )
@@ -2468,7 +2468,6 @@ class TestCredentialButtonRegistration:
             "run_request_expiry_poller",
             "run_connect_notice_poller",
             "run_delivery_poller",
-            "run_run_end_poller",
         ):
             monkeypatch.setattr(bot_module, name, fake_poller(name))
         edits: list[tuple[object, object, str]] = []
@@ -2926,7 +2925,7 @@ async def test_replay_does_not_repeat_a_provisioning_notice(
     await bot.on_message(message)
     await bot.on_message(message, startup_replay=True)
     message.channel.send.assert_awaited_once()
-    assert "setting up" in message.channel.send.await_args.args[0]
+    assert "setting up" in message.channel.send.await_args.kwargs["embed"].description
 
 
 async def test_queue_keeps_original_messages_with_identical_text() -> None:

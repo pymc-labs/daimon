@@ -6,7 +6,6 @@ from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
-import pytest
 from daimon.adapters.discord.commands.model import ModelCog
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.access_policy import TenantAccessPolicy
@@ -142,28 +141,3 @@ async def test_outside_a_thread_it_points_at_one(
 
     assert "Use /model inside a conversation thread." in content
     assert await _stored(db_session_factory, guild_id) is None
-
-
-async def test_on_a_fleet_root_thread_the_reply_says_the_fleet_keeps_its_model(
-    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from daimon.adapters.discord.commands import model as model_command
-    from daimon.core.thread_models import FLEET_ROOT_NOTE
-
-    guild_id = 720000004
-    await _registered_guild(db_session_factory, guild_id)
-    runtime = _runtime(db_session_factory)
-    asked: list[dict[str, object]] = []
-
-    async def runs_fleet(_sessionmaker: object, **kwargs: object) -> bool:
-        asked.append(kwargs)
-        return True
-
-    monkeypatch.setattr(model_command, "thread_runs_fleet", runs_fleet)
-
-    content = await _run(_interaction(runtime, guild_id=guild_id), "opus")
-
-    assert content == "This conversation runs on Opus 5.5 from the next reply." + FLEET_ROOT_NOTE
-    assert "approved" in FLEET_ROOT_NOTE
-    assert asked[0]["thread_id"] == str(_THREAD_ID)
-    assert await _stored(db_session_factory, guild_id) == "claude-opus-5-5"

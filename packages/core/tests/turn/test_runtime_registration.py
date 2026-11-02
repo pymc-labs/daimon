@@ -48,20 +48,21 @@ def installed_entry(monkeypatch, install):
     return entry
 
 
-def test_installed_conversation_profile_is_discoverable_in_a_cold_process():
+def test_installed_workspace_profile_is_discoverable_in_a_cold_process():
     code = """
 from importlib.metadata import entry_points
 from daimon.core.turn import runtimes
-from mux.profiles.openai import CONVERSATION_ONLY
+from mux.profiles.openai import PERSISTENT_WORKSPACE
 
-profile = CONVERSATION_ONLY.profile_id
+assert not entry_points(group="daimon.turn_runtimes", name="openai.conversation_only")
+profile = PERSISTENT_WORKSPACE.profile_id
 entries = entry_points(group="daimon.turn_runtimes", name=profile)
-assert len(entries) == 1, "Missing installed conversation profile; refresh package metadata with uv sync"
+assert len(entries) == 1, "Missing installed workspace profile; refresh package metadata with uv sync"
 assert not runtimes._RUNTIME_FACTORIES
 assert runtimes.ensure_channel_runtime(profile)
 registration = runtimes._RUNTIME_FACTORIES[profile]
 assert registration.authorizations is not None
-assert registration.tariffs is None
+assert registration.tariffs is not None
 """
     environment = {
         key: value
@@ -586,7 +587,7 @@ def test_conversation_registration_preserves_explicit_openai_tariff_owner(regist
     registry.register_channel_runtime(PROFILE, explicit, tariffs=lambda: source)
     register_runtime()
     assert registry._RUNTIME_FACTORIES[PROFILE].factory is explicit
-    assert "openai.conversation_only" in registry._RUNTIME_FACTORIES
+    assert "openai.conversation_only" not in registry._RUNTIME_FACTORIES
     assert dict(registry.channel_runtime_prices()) == source
 
 
@@ -608,19 +609,15 @@ def test_openai_authorization_reads_only_the_selected_profile(registry, monkeypa
         api_key_env="OFFLINE_OPENAI_KEY",
     )
     persistent = OpenAIDeployment(profile=PROFILE, environment_id="environment", **common)
-    conversation = OpenAIDeployment(profile="openai.conversation_only", **common)
     path = tmp_path / "runtime.json"
-    path.write_text(
-        json.dumps([persistent.model_dump(mode="json"), conversation.model_dump(mode="json")])
-    )
+    path.write_text(json.dumps([persistent.model_dump(mode="json")]))
     monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(path))
     monkeypatch.setattr(registry, "entry_points", lambda **kwargs: EntryPoints(()))
     register_runtime()
     assert authorized_deployments("tenant") == (persistent,)
     assert registry.authorized_channel_deployments(PROFILE, "tenant") == (persistent,)
-    assert registry.authorized_channel_deployments("openai.conversation_only", "tenant") == (
-        conversation,
-    )
+    with pytest.raises(UnsupportedCapability, match="host_deployment_authorization"):
+        registry.authorized_channel_deployments("openai.conversation_only", "tenant")
     path.write_text(
         json.dumps(
             [
@@ -630,4 +627,5 @@ def test_openai_authorization_reads_only_the_selected_profile(registry, monkeypa
         )
     )
     assert registry.authorized_channel_deployments(PROFILE, "tenant") == (persistent,)
-    assert registry.authorized_channel_deployments("openai.conversation_only", "tenant") == ()
+    with pytest.raises(UnsupportedCapability, match="host_deployment_authorization"):
+        registry.authorized_channel_deployments("openai.conversation_only", "tenant")

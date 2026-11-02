@@ -33,7 +33,7 @@ from daimon.core.config import (
     Settings,
 )
 from daimon.core.scope import DeploymentDefault
-from daimon.core.stores import tenant_ledger
+from daimon.core.stores import spend_allowances, tenant_ledger
 from daimon.core.stores.domain import Role
 from daimon.core.stores.turn_origins import create_origin
 from daimon.testing.factories import (
@@ -405,6 +405,75 @@ async def test_a_billed_transcript_counts_toward_the_turns_channel_budget(
         rows = await tenant_ledger.list_for_tenant(session, tenant_id=tenant.id)
     debits = [row.channel_id for row in rows if row.delta_usd < 0]
     assert debits == ([] if refused else ["222"]), "the debit carries the turn's channel"
+    assert len(gemini_calls) == (0 if refused else 1), "a refused call never reaches Gemini"
+
+
+@pytest.mark.parametrize(
+    ("allowed_agent", "refused"), [("agent_x", True), ("agent_other", False)], ids=["its", "other"]
+)
+async def test_a_billed_transcript_is_held_to_the_persons_allowance_on_the_turns_agent(
+    tmp_path: Path,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    allowed_agent: str,
+    refused: bool,
+) -> None:
+    now = datetime.now(UTC)
+    async with committing_sessionmaker.begin() as session:
+        tenant = await make_tenant(session, platform="discord")
+        account = await make_account(session, tenant=tenant)
+        await make_ledger_entry(session, tenant=tenant)
+        await spend_allowances.create_allowance(
+            session,
+            tenant_id=tenant.id,
+            subject_kind="person",
+            subject_id="u1",
+            agent_id=allowed_agent,
+            amount_usd=Decimal(0),
+            window="total",
+            starts_at=now - timedelta(days=1),
+        )
+        origin = await create_origin(
+            session,
+            tenant_id=tenant.id,
+            account_id=account.id,
+            platform="discord",
+            parent_channel_id="222",
+            thread_id="999",
+            responder_ma_agent_id="agent_x",
+            responder_name="daimon",
+            configuration_target_ma_agent_id=None,
+            configuration_target_name=None,
+            role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
+            expires_at=now + timedelta(minutes=10),
+            now=now,
+            chat_session_id="test-session",
+        )
+    auth = AuthIdentity(
+        account_id=account.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        platform="discord",
+        platform_user_id="u1",
+        chat_session_id="test-session",
+    )
+    gemini_calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        gemini_calls.append(request)
+        return _transcript_response("[00:00:01] hello")
+
+    mcp = await _registered_billing_mcp(
+        tmp_path, auth=auth, sessionmaker=committing_sessionmaker, handler=handler
+    )
+    call = {"url": "https://youtu.be/dQw4w9WgXcQ", "origin_context_id": str(origin.id)}
+    async with Client(mcp) as client:
+        if refused:
+            with pytest.raises(ToolError, match="You've used your Daimon credit"):
+                await client.call_tool("fetch_youtube_transcript", call)
+        else:
+            await client.call_tool("fetch_youtube_transcript", call)
     assert len(gemini_calls) == (0 if refused else 1), "a refused call never reaches Gemini"
 
 

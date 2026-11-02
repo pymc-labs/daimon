@@ -362,8 +362,7 @@ async def test_unauthorized_pause_click_rejected(monkeypatch: pytest.MonkeyPatch
     await pause_btn.callback(interaction)
 
     interaction.response.send_message.assert_called_once()
-    args, kwargs = interaction.response.send_message.call_args
-    text = args[0] if args else kwargs.get("content", "")
+    text = interaction.response.send_message.call_args.kwargs["embed"].description
     assert "creator or a server admin" in text, (
         "non-creator non-admin must see the explicit gate message"
     )
@@ -641,8 +640,7 @@ async def test_picker_callback_value_outside_guild_rejected(
 
     await pause_btn.callback(interaction)
     interaction.response.send_message.assert_called_once()
-    args, kwargs = interaction.response.send_message.call_args
-    text = args[0] if args else kwargs.get("content", "")
+    text = interaction.response.send_message.call_args.kwargs["embed"].description
     assert "is from another server" in text, (
         "cross-guild routine ids must be rejected with an explicit message"
     )
@@ -993,7 +991,8 @@ async def test_resume_race_replies_already_running_without_callback_error(monkey
     interaction.guild_id = "G1"
     interaction.response.send_message = AsyncMock()
     await button.callback(interaction)
-    interaction.response.send_message.assert_awaited_once_with(
-        "This routine is already on.", ephemeral=True
-    )
+    interaction.response.send_message.assert_awaited_once()
+    sent = interaction.response.send_message.await_args.kwargs
+    assert sent["embed"].description == "This routine is already on."
+    assert sent["ephemeral"] is True
     error.assert_not_awaited()

@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime
 
 from daimon.core._models import ThreadProviderRelease
+from daimon.core.stores import mux_erasure
 from mux.state.lease import Slot
 from sqlalchemy import ColumnElement, delete, select
 from sqlalchemy.dialects.postgresql import insert
@@ -29,6 +30,7 @@ def _where(slot: Slot) -> tuple[ColumnElement[bool], ...]:
 async def put_request(session: AsyncSession, slot: Slot, *, generation: int, now: datetime) -> None:
     """Record or replace `slot`'s request, bound to the binding `generation` seen."""
     assert slot.account_id is not None
+    await mux_erasure.fence_writers(session, slot.account_id)
     await session.execute(
         insert(ThreadProviderRelease)
         .values(

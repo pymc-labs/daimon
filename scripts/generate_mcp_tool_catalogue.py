@@ -90,7 +90,6 @@ TAG_LABELS: dict[str, str] = {
     "admin": "admin only",
     "agent-chat": "agent tokens only",
     "discord": "Discord callers",
-    "fleet": "fleet orchestrator turns",
     "scope:agents:archive": "operator tokens with agents:archive",
     "scope:channels:write": "operator tokens with channels:write",
     "scope:promo:create": "operator tokens with promo:create",
@@ -98,6 +97,7 @@ TAG_LABELS: dict[str, str] = {
     "scope:tenant:read": "operator tokens with tenant:read",
     "slack": "Slack callers",
     "teams": "Teams callers",
+    "web": "web app callers",
 }
 UNTAGGED_LABEL = "all callers"
 

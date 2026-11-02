@@ -25,6 +25,7 @@ from daimon.adapters.discord.output_delivery import (
 )
 from daimon.adapters.discord.post_transport import DiscordPostTransport, _webhooks
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.adapters.discord.theme import COLOR_RED
 from daimon.core.output_delivery import DeliverableFile, NoticedFiles
 from daimon.core.turn.run import RunOutcome
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
@@ -226,7 +227,10 @@ async def test_oversize_uses_guild_limit_posts_skip_notice_and_keeps_the_file() 
     )
 
     thread.send.assert_awaited_once()
-    notice = thread.send.await_args.args[0]
+    assert not thread.send.await_args.args, "the notice is a card, not plain text"
+    card = thread.send.await_args.kwargs["embed"]
+    assert card.colour is not None and card.colour.value == COLOR_RED, "red like the error card"
+    notice = card.description
     assert "big_chart" in notice and "10 MB upload limit" in notice
     assert "still saved" in notice and "smaller version" in notice, (
         "the notice says the file was kept and how to get it"
@@ -292,7 +296,7 @@ async def test_an_unboosted_guild_skips_a_file_a_boosted_one_would_take_and_quot
     )
 
     thread.send.assert_awaited_once()
-    notice = thread.send.await_args.args[0]
+    notice = thread.send.await_args.kwargs["embed"].description
     assert "40 MB" in notice and "10 MB upload limit" in notice
     assert deleted == [], "the file is kept, not downloaded or deleted"
 
@@ -368,7 +372,7 @@ async def test_oversize_file_kept_and_normal_file_attached_and_cleared() -> None
 
     sends = thread.send.await_args_list
     files = [call.kwargs["file"] for call in sends if "file" in call.kwargs]
-    notices = [call.args[0] for call in sends if call.args]
+    notices = [call.kwargs["embed"].description for call in sends if "embed" in call.kwargs]
     assert [file.filename for file in files] == ["poster.png"], "the normal file is attached"
     assert len(notices) == 1 and "render.mp4" in notices[0]
     assert deleted == ["file_ok"], "only the delivered file leaves the listing"
@@ -420,7 +424,9 @@ async def test_missing_attach_permission_keeps_file_and_posts_one_notice() -> No
     assert deleted == [], "a failed upload remains listed for retry"
     assert 123 in notice_thread_ids
     assert thread.send.await_count == 3
-    assert "Attach Files" in thread.send.await_args_list[1].args[0]
+    card = thread.send.await_args_list[1].kwargs["embed"]
+    assert "Attach Files" in card.description
+    assert card.colour is not None and card.colour.value == COLOR_RED
 
 
 async def test_protected_thread_posts_nothing_and_keeps_file() -> None:
@@ -1121,13 +1127,13 @@ async def _overlapping_sweeps(
     order: list[str] = []
     for call in thread.send.await_args_list:
         file = call.kwargs.get("file")
-        order.append(file.filename if file is not None else call.args[0])
+        order.append(file.filename if file is not None else call.kwargs["embed"].description)
     return order
 
 
 def _assert_attributed(call: Any, *, user: int, asked: int) -> None:
     kwargs = call.kwargs
-    text = kwargs["content"] if "file" in kwargs else call.args[0]
+    text = kwargs["content"] if "file" in kwargs else kwargs["embed"].description
     assert text.startswith(f"For <@{user}>"), "the post names whose turn made it"
     reference = kwargs["reference"]
     assert isinstance(reference, discord.MessageReference)
@@ -1162,7 +1168,7 @@ async def test_overlapping_turns_post_each_file_as_a_reply_to_its_own_turn() -> 
     _assert_attributed(bob_post, user=_BOB, asked=_BOB_ASKED)
     _assert_attributed(alice_post, user=_ALICE, asked=_ALICE_ASKED)
     _assert_attributed(bob_notice, user=_BOB, asked=_BOB_ASKED)
-    assert "`bob_dump.pdf` is 11 MB" in bob_notice.args[0]
+    assert "`bob_dump.pdf` is 11 MB" in bob_notice.kwargs["embed"].description
 
 
 async def test_overlapping_turns_attach_each_file_to_its_own_answer() -> None:
@@ -1268,7 +1274,7 @@ async def test_a_dm_skips_a_file_over_discords_default_limit_and_keeps_it() -> N
         sleep=_no_sleep,
     )
 
-    notice = cast(AsyncMock, channel.send).await_args.args[0]
+    notice = cast(AsyncMock, channel.send).await_args.kwargs["embed"].description
     assert "over the 10 MB upload limit" in notice, "a DM is held to Discord's default limit"
     assert deleted == [], "the oversize file stays in the session"
 

@@ -118,6 +118,29 @@ async def list_live_thread_sessions(
     return [ThreadSessionRow.model_validate(row) for row in rows]
 
 
+async def thread_session_accounts(
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    platform: str,
+    thread_id: str,
+) -> set[_uuid.UUID | None]:
+    """Everyone who has had a session in one thread, live or closed (None: no account).
+
+    For a decision about the thread itself, like `list_live_thread_sessions`.
+    """
+    rows = await session.scalars(
+        select(ThreadSession.account_id)
+        .where(
+            ThreadSession.tenant_id == tenant_id,
+            ThreadSession.platform == platform,
+            ThreadSession.thread_id == thread_id,
+        )
+        .distinct()
+    )
+    return set(rows)
+
+
 async def list_live_sessions_for_agent(
     session: AsyncSession, *, tenant_id: _uuid.UUID, agent_id: _uuid.UUID
 ) -> list[ThreadSessionRow]:
@@ -138,12 +161,6 @@ async def list_live_sessions_for_agent(
     ]
 
 
-GITHUB_KEY_RESTART_LINE = (
-    "GitHub connection updated. Chat restarted. Earlier messages are still here; "
-    "unsaved work from before is gone."
-)
-
-
 async def mark_github_key_restart(
     session: AsyncSession, *, tenant_id: _uuid.UUID, agent_id: _uuid.UUID
 ) -> int:
@@ -162,15 +179,13 @@ async def mark_github_key_restart(
     return len(live)
 
 
-async def github_key_restart_line(session: AsyncSession, *, mapping_id: _uuid.UUID) -> str | None:
-    """Return the one-time prefix for a replacement of a marked PAT session."""
+async def is_github_key_restart(session: AsyncSession, *, mapping_id: _uuid.UUID) -> bool:
+    """Whether this session replaced a PAT session marked when its key was retired."""
     current = await session.get(ThreadSession, mapping_id)
     if current is None or current.predecessor_id is None:
-        return None
+        return False
     old = await session.get(ThreadSession, current.predecessor_id)
-    if old is None or not old.github_key_restart_notice:
-        return None
-    return GITHUB_KEY_RESTART_LINE
+    return old is not None and old.github_key_restart_notice
 
 
 async def get_thread_session_at(
@@ -302,8 +317,11 @@ async def create_thread_session(
     transfer_file_id: str | None = None,
     transfer_kind: TransferKind | None = None,
     seal_ids: frozenset[str] | None = None,
+    id: _uuid.UUID | None = None,
 ) -> ThreadSessionRow:
     """Insert a new thread-session mapping row and return the Pydantic domain type.
+
+    `id` is the row's id when the caller had to name it before the session existed.
 
     account_id is the calling user's account and is persisted on the row so that
     get_live_thread_session can scope future lookups to the same caller.
@@ -342,6 +360,8 @@ async def create_thread_session(
     }
     if created_at is not None:
         kwargs["created_at"] = created_at
+    if id is not None:
+        kwargs["id"] = id
     orm = ThreadSession(**kwargs)
     session.add(orm)
     await session.flush()

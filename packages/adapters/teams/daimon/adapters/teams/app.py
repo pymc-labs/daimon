@@ -24,7 +24,7 @@ import uuid
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping
 from datetime import UTC, datetime
-from typing import Any, Literal, NamedTuple
+from typing import Any, NamedTuple
 
 import anthropic
 import daimon.core.turn.bookkeeping as turn_bookkeeping
@@ -41,7 +41,7 @@ from daimon.adapters.teams.admissions import (
 from daimon.adapters.teams.attachments import BotToken, prepare_attachments
 from daimon.adapters.teams.boot_sweep import retire_orphaned_turns
 from daimon.adapters.teams.budget_notice import with_budget_notifier
-from daimon.adapters.teams.card import CANCELLED_NOTICE
+from daimon.adapters.teams.card import CANCELLED_NOTICE, notice_card
 from daimon.adapters.teams.card_actions import replace_card, toast
 from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.channel_subscriptions import ChannelSubscriptions, SeenChannel
@@ -110,9 +110,7 @@ from daimon.core.continuity.dispatch import dispatch_pending_continuations
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
     render_preparation_failed,
-    render_replacement_summary,
     render_responder_changed_without_handoff,
-    render_unexpected_loss,
 )
 from daimon.core.continuity.wakes import WakeThread, run_wake_poller
 from daimon.core.errors import DaimonError
@@ -152,6 +150,7 @@ from daimon.core.turn.admission import (
     AdmissionDenied,
     MissingTurnConfigError,
     admit,
+    backend_facts,
 )
 from daimon.core.turn.errors import (
     AdmissionDenialReason,
@@ -162,7 +161,7 @@ from daimon.core.turn.errors import (
 )
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
-from daimon.core.turn.outcomes import observe_turn, record_refusal
+from daimon.core.turn.outcomes import finish_with_error, observe_turn, record_refusal
 from daimon.core.turn.prepare import ContinuityOutcome, bind_session
 from daimon.core.turn.protection import ProtectionState, protection_state
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
@@ -196,7 +195,6 @@ from microsoft_teams.api import (
     AdaptiveCardInvokeActivity,
     AdaptiveCardInvokeResponse,
     MessageActivity,
-    MessageActivityInput,
 )
 from microsoft_teams.apps import ActivityContext
 from microsoft_teams.cards import ExecuteAction
@@ -214,6 +212,21 @@ DRAIN_GRACE_S = 60.0
 CONTROLS_WAIT_S = 30.0
 _RECOVERY_MAX_RETRY_DELAY_S = 30.0
 _FAILED = "Sorry, something went wrong handling that. Please try again."
+# Daimon's own short-lived contention (an admin's settings write held the policy fence
+# past the wait): nothing is wrong, and the same message works in a moment.
+_DAIMON_BUSY = "Daimon is busy right now. Try again in a moment."
+
+
+def failure_notice(exc: BaseException) -> str:
+    """The card's closing words for a turn that failed unexpectedly."""
+    from daimon.core.errors import TurnError
+    from daimon.core.session_fence_retry import FenceUnavailable
+    from daimon.core.stores.access_policy import PolicyBusyError
+
+    cause = exc.cause if isinstance(exc, TurnError) else exc
+    return _DAIMON_BUSY if isinstance(cause, (PolicyBusyError, FenceUnavailable)) else _FAILED
+
+
 _SHED = "Too many chats at once right now. Try again in a moment."
 _CANCEL_NOT_AUTHOR = "Only the person who asked, or a Daimon admin, can stop this reply."
 _CANCEL_ROLE_UNKNOWN = "I couldn't check your role just now. Try again in a moment."
@@ -257,6 +270,7 @@ _RESOLVER_MISS = _resolver_miss(TEAMS_REFUSAL_NOUNS)
 _DENIALS: dict[AdmissionDenialReason, str] = {
     "balance_depleted": "turn.skipped.over_balance",
     "cap_exceeded": "turn.skipped.over_cap",
+    "allowance_exhausted": "turn.skipped.allowance_exhausted",
     "invoker_not_allowed": "turn.skipped.invoker_not_allowed",
     "runs_elsewhere": "turn.skipped.runs_elsewhere",
     "channel_budget_exceeded": "turn.skipped.channel_budget_exceeded",
@@ -705,9 +719,9 @@ class TeamsApp:
                 log.error("teams.admission.notice_unrecorded", exc_info=exc)
                 continue
             if owed:
-                await self._tell(chat[-1:], HOLDING)
+                await self._tell(chat[-1:], HOLDING, error=False)
 
-    async def _tell(self, items: list[TeamsInbound], notice: str) -> None:
+    async def _tell(self, items: list[TeamsInbound], notice: str, *, error: bool = True) -> None:
         """One `notice` per chat, best effort: a failed send is not retried."""
         told: set[str] = set()
         for item in items:
@@ -715,7 +729,7 @@ class TeamsApp:
                 continue
             told.add(item.conversation_id)
             with contextlib.suppress(*TEAMS_SEND_ERRORS):
-                await self._say(item, notice)
+                await self._say(item, notice, error=error)
 
     async def _hold_arrival(self, activity: MessageActivity, service_url: str | None) -> None:
         """A message landing while the process drains: admit and hold it if it would
@@ -979,7 +993,7 @@ class TeamsApp:
 
         async def reply(text: str) -> object:
             return await self._sender.send(
-                conversation, MessageActivityInput(text=text), service_url=source.service_url
+                conversation, notice_card(text), service_url=source.service_url
             )
 
         await self._refuse(parsed, conversation, message.id, source.kind, reply)
@@ -1127,6 +1141,7 @@ class TeamsApp:
                 platform="teams",
                 channel_id=trigger.channel_id,
                 thread_id=trigger.thread_id,
+                alertable=False,
             )
             log.info(
                 "turn.skipped.concurrency_shed",
@@ -1143,19 +1158,22 @@ class TeamsApp:
                 await self._participation.record(trigger, tenant_id)
             await self._run_turns(key, tenant_id, [trigger])
 
-    async def _say(self, inbound: TeamsInbound, text: str, *, sender_only: bool = False) -> None:
-        """Post `text` in reply; `sender_only`, or to a targeted message, for its sender alone."""
+    async def _say(
+        self, inbound: TeamsInbound, text: str, *, sender_only: bool = False, error: bool = True
+    ) -> None:
+        """Post `text` in reply; `sender_only`, or to a targeted message, for its sender alone.
+
+        A red card unless `error=False`, for information.
+        """
         if inbound.unprompted:
             # Nobody asked: a refusal or notice per quiet burst would spam the thread.
             log.info("teams.notice.withheld", reason="unprompted")
             return
         if sender_only or inbound.is_targeted:
-            await self._private.tell_sender(inbound, text)
+            await self._private.tell_sender(inbound, text, error=error)
             return
         await self._sender.send(
-            inbound.conversation_id,
-            MessageActivityInput(text=text),
-            service_url=inbound.service_url,
+            inbound.conversation_id, notice_card(text, error=error), service_url=inbound.service_url
         )
 
     async def _may_post(self, channel_id: str, thread_id: str) -> bool:
@@ -1394,6 +1412,7 @@ class TeamsApp:
                 channel_id=inbound.channel_id,
                 thread_id=inbound.thread_id,
                 origin="chat" if continuation is None else "handoff",
+                alertable=not inbound.unprompted,
             ):
                 await self._run_turn_observed(
                     inbound, tenant_id, handoff=handoff, reraise=reraise, continuation=continuation
@@ -1570,6 +1589,12 @@ class TeamsApp:
                             if inbound.is_foreign
                             else TEAMS_REFUSAL_NOUNS,
                         ),
+                        "allowance_exhausted": admission_refusal_text(
+                            "allowance_exhausted",
+                            TEAMS_FOREIGN_REFUSAL_NOUNS
+                            if inbound.is_foreign
+                            else TEAMS_REFUSAL_NOUNS,
+                        ),
                         "queue_full": _SHED,
                     }[slot]
                     await lifecycle.close_with_notice(
@@ -1578,8 +1603,8 @@ class TeamsApp:
                     if reraise:
                         # A continuation that never ran must not settle as
                         # delivered: tell its dispatcher.
-                        if slot == "balance_depleted":
-                            raise AdmissionDenied(reason="balance_depleted")
+                        if slot in ("balance_depleted", "allowance_exhausted"):
+                            raise AdmissionDenied(reason=slot)
                         raise TurnNotStarted(slot)
                     return
                 await self._bind_and_run(
@@ -1608,7 +1633,8 @@ class TeamsApp:
                     "teams.turn.failed", conversation_id=inbound.conversation_id, exc_info=exc
                 )
                 capture_exception_with_scope(exc)
-                await holder[-1].close_with_notice(_FAILED)
+                finish_with_error(exc)
+                await holder[-1].close_with_notice(failure_notice(exc))
                 await holder[-1].release_controls()  # An answer that landed keeps its own.
                 if reraise:
                     raise
@@ -1654,7 +1680,7 @@ class TeamsApp:
         )
         if selfhosted:
             return text, ()
-        return text, (hand_over_button(agent_id=agent.id, agent_name=name),)
+        return text, (hand_over_button(agent_id=agent.id, agent_name=name, offer=text),)
 
     async def _bind_and_run(
         self,
@@ -1702,7 +1728,9 @@ class TeamsApp:
                     and admission.backend_revision.backend == "selfhosted"
                 ),
             )
-            await lifecycle.close_with_notice(text, actions=actions)
+            await lifecycle.close_with_notice(
+                text, actions=actions, error=isinstance(error, SessionPreparationFailed)
+            )
             if reraise:
                 raise
             return
@@ -1717,10 +1745,6 @@ class TeamsApp:
             await lifecycle.close_with_notice(_NO_CONTEXT)
             return
 
-        summary: str | None = None
-        if prepared.continuity.announces_replacement() and prepared.continuity.transfer_kind:
-            summary = render_replacement_summary(prepared.continuity.transfer_kind, lost=[])
-            lifecycle.answer_prefix = summary
         if prepared.mapping_id is not None and lifecycle.message_id is not None:
             async with self.runtime.sessionmaker.begin() as session:
                 await mark_turn_active(
@@ -1736,7 +1760,6 @@ class TeamsApp:
             # Keep rendering into the card the person is already watching.
             previous = holder[-1]
             adopted = new_lifecycle(fresh_cancel, lifecycle.message_id)
-            adopted.answer_prefix = lifecycle.answer_prefix
             adopted.inherit_stop(previous)
             return adopted
 
@@ -1770,11 +1793,14 @@ class TeamsApp:
             is_setup=config.thread_binding_kind == "setup",
             sender_foreign=inbound.is_foreign,
             shared_channel=admission.shared_channel,
+            platform_channel_id=inbound.conversation_id,
+            platform_message_id=None if inbound.from_form else inbound.activity_id,
         ) as origin:
             notice = handoff(prepared.continuity) if handoff is not None else None
             quiet = notice is not None or prepared.continuity.state == "continued"
             controls = render_turn_origin(
                 origin,
+                **backend_facts(admission),
                 responder_handle=f"@{inbound.bot_name}" if inbound.bot_name else None,
                 session_state=None if quiet else prepared.continuity.session_state(),
                 handoff=notice,
@@ -1810,6 +1836,7 @@ class TeamsApp:
                 watch_row=watch_row,
                 origin="handoff" if notice is not None else "chat",
                 user_message=message,
+                request_text=None if inbound.unprompted else inbound.text,
                 lifecycle=lifecycle,
                 cancel=cancel,
                 reseed_user_message=reseed,
@@ -1839,15 +1866,6 @@ class TeamsApp:
                     and admission.backend_revision.backend == "selfhosted"
                 ),
             )
-        if outcome.continuity.state == "replaced_after_loss":
-            kind: Literal["transcript", "history"] = (
-                "transcript" if outcome.continuity.transfer_kind == "transcript" else "history"
-            )
-            # Above the answer or not at all: a message of its own lands below it.
-            if not await final.prepend_revealed_answer(render_unexpected_loss(kind)):
-                log.info("teams.turn.loss_notice_dropped")
-        if summary is not None and not final.answer_prefix_applied:
-            log.info("teams.turn.summary_dropped")
         if outcome.mapping_id is not None and final.final_message_id is not None:
             mark = final.final_message_id
             if inbound.kind != "dm":
@@ -2018,9 +2036,7 @@ class TeamsApp:
 
         async def notify(text: str) -> None:
             with contextlib.suppress(*TEAMS_SEND_ERRORS):
-                await self._sender.send(
-                    key, MessageActivityInput(text=text), service_url=service_url
-                )
+                await self._sender.send(key, notice_card(text), service_url=service_url)
 
         async def latest_message_at(_row: TaskContinuationRow) -> datetime | None:
             return self._last_message_at.get(key)

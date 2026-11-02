@@ -25,6 +25,7 @@ from daimon.adapters.discord.checks import (
 )
 from daimon.adapters.discord.commands.cold_dm_views import ServerSelector, ServerSwitch
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.tables import tables_enabled
 from daimon.adapters.discord.tool_confirmation import discord_confirmation_hook
 from daimon.adapters.discord.views import CancelView
@@ -612,8 +613,10 @@ class DirectMessageCog(commands.Cog):
         channel = interaction.channel
         if guild is None or not isinstance(channel, (discord.TextChannel, discord.Thread)):
             await interaction.followup.send(
-                "You can't start a private conversation from here.\n\n"
-                "Run /dm-me in the channel you want to continue from.",
+                embed=build_notice_embed(
+                    "You can't start a private conversation from here.\n\n"
+                    "Run /dm-me in the channel you want to continue from."
+                ),
                 ephemeral=True,
             )
             return
@@ -632,7 +635,10 @@ class DirectMessageCog(commands.Cog):
                 )
                 if not permitted:
                     await interaction.followup.send(
-                        "Only a platform admin can turn Daimon DMs on or off here.", ephemeral=True
+                        embed=build_notice_embed(
+                            "Only a platform admin can turn Daimon DMs on or off here."
+                        ),
+                        ephemeral=True,
                     )
                     return
                 if action in {"agent", "clear-agent"}:
@@ -649,9 +655,12 @@ class DirectMessageCog(commands.Cog):
                 async with runtime.sessionmaker.begin() as session:
                     await set_dm_enabled(session, tenant_id=tenant_id, enabled=action == "enable")
                 await interaction.followup.send(
-                    "Daimon DMs are on for this server."
-                    if action == "enable"
-                    else "Daimon DMs are off for this server.",
+                    embed=build_notice_embed(
+                        "Daimon DMs are on for this server."
+                        if action == "enable"
+                        else "Daimon DMs are off for this server.",
+                        neutral=True,
+                    ),
                     ephemeral=True,
                 )
                 return
@@ -706,11 +715,16 @@ class DirectMessageCog(commands.Cog):
                 context=context,
             )
             await dm_channel.send(
-                f"Continuing from {source_url}.\n\nSend your next message here. "
-                "To start a new private conversation, run /dm-me in a channel.",
+                embed=build_notice_embed(
+                    f"Continuing from {source_url}.\n\nSend your next message here. "
+                    "To start a new private conversation, run /dm-me in a channel.",
+                    neutral=True,
+                ),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
-            await interaction.followup.send("Ready in your DMs.", ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed("Ready in your DMs.", neutral=True), ephemeral=True
+            )
         except _DM_FAILURES as exc:
             log.warning("discord.dm.move_failed", error_type=type(exc).__name__)
             message = _error_text(
@@ -718,7 +732,7 @@ class DirectMessageCog(commands.Cog):
                 "Couldn't open the conversation. Check that your DMs are open and retry.",
                 settings=self.bot.runtime.settings,
             )
-            await interaction.followup.send(message, ephemeral=True)
+            await interaction.followup.send(embed=build_notice_embed(message), ephemeral=True)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
@@ -769,7 +783,7 @@ class DirectMessageCog(commands.Cog):
             dm_permission_text("discord") if permission else cold_dm_text("discord", dms_on=dms_on)
         )
         try:
-            await message.channel.send(text)
+            await message.channel.send(embed=build_notice_embed(text))
         except discord.HTTPException as exc:
             self._cold_dm_notices.forget(person)
             log.warning("discord.dm.cold_notice_failed", error_type=type(exc).__name__)
@@ -914,7 +928,9 @@ class DirectMessageCog(commands.Cog):
                 return
             role = Role.ADMIN if subject.is_admin else Role.USER
             if not message.content.strip():
-                await message.channel.send("Send a text message to continue this conversation.")
+                await message.channel.send(
+                    embed=build_notice_embed("Send a text message to continue this conversation.")
+                )
                 return
             # A DM has no card: over the cap it waits under the typing
             # indicator. Only the process-wide cap applies, as before; a
@@ -935,14 +951,16 @@ class DirectMessageCog(commands.Cog):
                     reason="queue_full",
                 )
                 await message.channel.send(
-                    GLOBAL_CAP_NOTICE, allowed_mentions=discord.AllowedMentions.none()
+                    embed=build_notice_embed(GLOBAL_CAP_NOTICE),
+                    allowed_mentions=discord.AllowedMentions.none(),
                 )
                 return
             try:
                 async with message.channel.typing():
                     if await ticket.wait(asyncio.Event()) != "started":
                         await message.channel.send(
-                            QUEUE_TIMED_OUT_TEXT, allowed_mentions=discord.AllowedMentions.none()
+                            embed=build_notice_embed(QUEUE_TIMED_OUT_TEXT),
+                            allowed_mentions=discord.AllowedMentions.none(),
                         )
                         return
                     reply = await reply_to_dm_result(
@@ -964,6 +982,7 @@ class DirectMessageCog(commands.Cog):
                             admission=admission,
                         ),
                         card_for=self._turn_card(message, conversation, cards),
+                        platform_channel_id=str(message.channel.id),
                     )
             finally:
                 ticket.release()
@@ -1006,4 +1025,7 @@ class DirectMessageCog(commands.Cog):
                 settings=self.bot.runtime.settings,
             )
             with contextlib.suppress(discord.HTTPException):
-                await message.channel.send(error, allowed_mentions=discord.AllowedMentions.none())
+                await message.channel.send(
+                    embed=build_notice_embed(error),
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )

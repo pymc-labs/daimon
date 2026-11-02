@@ -138,7 +138,7 @@ class PlatformDriver(Protocol):
         """
         ...
 
-    def expected_blocked_text(self, kind: Literal["balance", "cap"]) -> str:
+    def expected_blocked_text(self, kind: Literal["balance", "cap", "allowance"]) -> str:
         """The exact per-driver copy a blocked turn must have posted.
 
         Deliberately NOT shared across platforms -- the divergence principle

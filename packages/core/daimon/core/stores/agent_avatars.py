@@ -11,6 +11,7 @@ import io
 import secrets
 import unicodedata
 import uuid
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -390,6 +391,28 @@ async def get_avatar_by_token(
     return await session.scalar(
         select(image).where(AgentAvatar.token == token, or_(current_hash, previous_hash)).limit(1)
     )
+
+
+async def get_agent_avatars(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_names: Collection[str]
+) -> dict[str, AvatarLink]:
+    """`get_agent_avatar` for many names in one read, keyed by `normalize_agent_name(name)`."""
+    wanted = {normalize_agent_name(name) for name in agent_names}
+    if not wanted:
+        return {}
+    rows = await session.execute(
+        select(
+            AgentAvatar.agent_name,
+            AgentAvatar.token,
+            AgentAvatar.sha256,
+            AgentAvatar.source,
+            AgentAvatar.face_combo,
+        ).where(AgentAvatar.tenant_id == tenant_id, AgentAvatar.agent_name.in_(list(wanted)))
+    )
+    return {
+        row.agent_name: AvatarLink(row.token, row.sha256, row.source, row.face_combo is not None)
+        for row in rows
+    }
 
 
 async def get_agent_avatar(

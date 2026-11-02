@@ -8,12 +8,15 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._admin import current_admin
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._owner import may_own
 from daimon.adapters.mcp.tools._words import admin_noun
 from daimon.adapters.mcp.tools.setup_target import (
     origin_channel_id,
     require_turn_origin,
     resolve_setup_agent,
 )
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
+from daimon.core.github_panel import requester_manages_agent
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.github_access import (
@@ -70,8 +73,21 @@ async def remove_repo_impl(
         if account is None or account.tenant_id != auth.tenant_id:
             raise ToolError("GitHub setup is unavailable for this account.")
         is_admin = await current_admin(session, auth)
-        if not is_admin:
-            raise ToolError(f"Ask {admin_noun(auth.platform)}.")
+        manages = is_admin or await requester_manages_agent(
+            session,
+            tenant_id=auth.tenant_id,
+            account_id=auth.account_id,
+            platform=auth.platform,
+            platform_user_id=auth.platform_user_id if auth.agent_id is None else None,
+            agent_name=agent.name,
+            other_names=(target_name, str(agent.metadata.get(MA_METADATA_KEY_NAME) or "")),
+            ma_agent_id=str(agent.id),
+            default=runtime.deployment_default,
+            is_daimon_managed=agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
+            allow_owner=may_own(auth),
+        )
+        if not manages:
+            raise ToolError(f"Ask {admin_noun(auth.platform)} or an owner of {agent.name}.")
         repo_id = await repo_id_for_agent_removal(
             session, tenant_id=auth.tenant_id, agent_id=agent_id, repo_name=requested
         )
@@ -111,7 +127,8 @@ def register_github_remove_repo_tools(mcp: FastMCP, runtime: McpRuntime) -> None
         A clear ask is enough: call it right away and reply with the returned
         line. Ask only if the repo or agent is unclear. confirmed is ignored.
         The Connect GitHub page also adds and removes repos. If it was the working
-        repo, the working repo is cleared. Other agents keep their access.
+        repo, the working repo is cleared. Other agents keep their access. An admin or an
+        owner of the agent may remove any repo from it.
         Pass the current turn origin and selected agent identity.
         """
         return await remove_repo_impl(

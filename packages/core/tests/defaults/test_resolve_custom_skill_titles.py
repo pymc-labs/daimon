@@ -112,3 +112,28 @@ async def test_resolve_custom_skill_titles_covers_every_agent_in_one_listing() -
         "one listing must cover every agent's skills"
     )
     assert len(calls) == 1, "a roster of agents must cost one skills listing, not one per agent"
+
+
+async def test_resolve_custom_skill_titles_names_an_attached_unprefixed_skill_by_its_last_part() -> (
+    None
+):
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/skills",
+        lambda _req, _m: list_response(
+            [
+                _skill(id="skill_kb", display_title="release/kb-coding"),
+                _skill(id="skill_loose", display_title="release/unrelated"),
+            ]
+        ),
+    )
+    agent = ma_agent(skills=[{"type": "custom", "skill_id": "skill_kb", "version": "latest"}])
+
+    titles, _truncated = await resolve_custom_skill_titles(
+        build_fake_anthropic(router.dispatch), agents=[agent], tenant_id=uuid.uuid4()
+    )
+
+    assert titles == {"skill_kb": "kb-coding"}, (
+        "an attached skill without a tenant prefix shows its last part; unattached ones stay hidden"
+    )

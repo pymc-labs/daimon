@@ -27,6 +27,7 @@ from daimon.core.stores.domain import Platform
 from daimon.core.stores.slack_bot_tokens import delete_slack_bot_token, get_slack_bot_token
 from daimon.core.stores.slack_connect_prompts import delete_connect_prompts_for_team
 from daimon.core.stores.slack_event_dedup import delete_event_dedup_for_team
+from daimon.core.stores.workspace_members import clear_members
 from pydantic import BaseModel
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -252,7 +253,7 @@ async def teardown_slack_install(
     slack_bot_tokens, slack_connect_prompts and slack_event_dedup rows (0
     rowcount when absent, never raises). Token-existence is the liveness
     signal: after teardown, any event handler that reads the token row will
-    see None and drop the event.
+    see None and drop the event. The workspace's member list goes too.
 
     `event_time` is when Slack says the uninstall (or bot-token revocation)
     happened. A bot token stored after that moment belongs to a reinstall, so
@@ -274,3 +275,4 @@ async def teardown_slack_install(
         await delete_slack_bot_token(s, team_id=team_id, stored_at_or_before=event_time)
         await delete_connect_prompts_for_team(s, team_id=team_id)
         await delete_event_dedup_for_team(s, team_id=team_id)
+        await clear_members(s, tenant_id=tenant_id)

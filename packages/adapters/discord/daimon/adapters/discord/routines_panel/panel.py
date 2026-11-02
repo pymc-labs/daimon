@@ -13,6 +13,7 @@ import anthropic
 import sentry_sdk
 import structlog
 from daimon.adapters.discord import checks, layout
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.routines_panel.embeds import build_panel_container
 from daimon.adapters.discord.routines_panel.forms import DeleteButton, NewButton
 from daimon.adapters.discord.routines_panel.read import load_guild_routines
@@ -53,12 +54,12 @@ async def _send_callback_error(interaction: discord.Interaction, exc: Exception)
     """
     log.exception("routines_panel_callback_failed", error=str(exc))
     sentry_sdk.capture_exception(exc)
-    error_text = "Something went wrong.\n\nTry again."
+    error_embed = build_notice_embed("Something went wrong.\n\nTry again.")
     try:
         if interaction.response.is_done():
-            await interaction.followup.send(error_text, ephemeral=True)
+            await interaction.followup.send(embed=error_embed, ephemeral=True)
         else:
-            await interaction.response.send_message(error_text, ephemeral=True)
+            await interaction.response.send_message(embed=error_embed, ephemeral=True)
     except discord.HTTPException:
         log.exception("routines_panel_callback_error_send_failed")
 
@@ -233,7 +234,9 @@ class _PauseButton(discord.ui.Button["RoutinesPanelView"]):
                     "not_owner": ("Only its creator or a server admin can pause it."),
                 }
                 if result != "changed":
-                    await interaction.response.send_message(refusals[result], ephemeral=True)
+                    await interaction.response.send_message(
+                        embed=build_notice_embed(refusals[result]), ephemeral=True
+                    )
                     return
 
             await _rerender(interaction, self.view)
@@ -355,7 +358,7 @@ class RoutinesPanelView(discord.ui.LayoutView):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:  # type: ignore[override]  # base uses broader Interaction[Client] type
         if interaction.user.id != self.allowed_user_id:
             await interaction.response.send_message(
-                "Only the person who opened this can use it.",
+                embed=build_notice_embed("Only the person who opened this can use it."),
                 ephemeral=True,
             )
             return False

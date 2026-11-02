@@ -29,9 +29,16 @@ from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.turn_fakes import deps_for
 
 
+def sent_text(call):
+    """The words of one send: an embed's description, or plain content."""
+    if "embed" in call.kwargs:
+        return call.kwargs["embed"].description
+    return call.args[0] if call.args else None
+
+
 def assert_generic_guidance(msg, tenants):
     msg.channel.send.assert_awaited_once()
-    notice = msg.channel.send.await_args.args[0]
+    notice = sent_text(msg.channel.send.await_args)
     assert notice == module.cold_dm_text("discord", dms_on=None)
     for tenant in tenants:
         assert str(tenant.id) not in notice
@@ -213,7 +220,7 @@ async def test_non_member_gets_generic_guidance_and_member_without_role_is_told(
     await cog.on_message(msg)
     if facts.is_member:
         msg.channel.send.assert_awaited_once()
-        assert msg.channel.send.await_args.args[0] == module.dm_permission_text("discord"), (
+        assert sent_text(msg.channel.send.await_args) == module.dm_permission_text("discord"), (
             "a verified member without the role is told they lack permission"
         )
     else:
@@ -241,9 +248,8 @@ async def test_generic_notice_does_not_skip_later_eligible_discovery(
     reply.assert_awaited_once()
     assert fetch.await_count >= 2
     assert all(
-        call.args[0] != module.cold_dm_text("discord", dms_on=None)
+        sent_text(call) != module.cold_dm_text("discord", dms_on=None)
         for call in accepted.channel.send.await_args_list
-        if call.args
     )
 
 
@@ -578,13 +584,15 @@ async def test_admission_denials_preserve_notices_and_silence_access_failures(
                 msg.channel.send.assert_not_awaited()
             elif reason == "invoker_not_allowed":
                 msg.channel.send.assert_awaited_once()
-                assert msg.channel.send.await_args.args[0] == module.dm_permission_text("discord")
+                assert sent_text(msg.channel.send.await_args) == module.dm_permission_text(
+                    "discord"
+                )
             else:
                 assert_generic_guidance(msg, tenants)
             assert any(entry.get("reason") == reason for entry in logs)
         else:
             msg.channel.send.assert_awaited_once()
-            notice = msg.channel.send.await_args.args[0]
+            notice = sent_text(msg.channel.send.await_args)
             if active_route:
                 assert notice == module.admission_refusal_message(
                     reason, cog.bot.runtime.settings, in_dm=True

@@ -29,7 +29,7 @@ the generation check to show a stale S1 pass marking a newer S2 push done.
   redeliver it. Operator redelivery or reconciliation is required.
 - `SyncCurrentBranch` abstracts a successful batch as one external write of
   the branch version at that moment. Per-binding failures and backoff are
-  executable checks and [queue documentation](../../docs/github-push-resync.md),
+  executable checks and [queue documentation](../../docs/github.md#how-pushes-resync-skills),
   outside this state space. A continuously failing provider does not satisfy
   the progress assumption.
 - `CrashAndExpire` releases the advisory lock. The model excludes a database

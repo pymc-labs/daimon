@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from daimon.adapters.slack import tool_confirmation as confirmation_module
+from daimon.adapters.slack.blockkit import ERROR_COLOR, notice_attachments, notice_fields
 from daimon.adapters.slack.tool_confirmation import SlackConfirmationCards
 from daimon.core.authz import Subject
 from daimon.core.config import TurnSettings
@@ -28,6 +29,7 @@ from daimon.core.posted_controls.confirmation import (
 )
 from daimon.core.posted_controls.lifecycle import drain_card_edits
 from daimon.core.tool_safety import ToolCall
+from daimon.testing.adapters.slack.notices import shown_text
 from slack_sdk.web.async_client import AsyncWebClient
 
 
@@ -86,9 +88,7 @@ async def test_the_requesters_approve_answers_approved_and_edits_the_card() -> N
         channel="C1",
         user="U2",
         thread_ts="1699.9",
-        text=NOT_YOURS_MESSAGE.format(requester="<@U1>"),
-        mrkdwn=False,
-        parse="none",
+        **notice_fields(NOT_YOURS_MESSAGE.format(requester="<@U1>")),
     )
     assert not waiting.done(), "a stranger's click answers nothing"
 
@@ -224,7 +224,10 @@ async def test_always_click_refuses_nonadmins_without_settling(
         ("U2", "Only an admin can allow this for everyone."),
     ):
         await cards.handle_click(_click(f"dcf:{token}:always", user))
-        assert client.chat_postEphemeral.await_args.kwargs["text"] == expected
+        assert shown_text(client.chat_postEphemeral.await_args.kwargs) == expected
+        assert (
+            client.chat_postEphemeral.await_args.kwargs["attachments"][0]["color"] == ERROR_COLOR
+        ), "a refusal is a red card"
     assert not future.done()
     save.assert_not_awaited()
 
@@ -320,7 +323,7 @@ async def test_always_role_check_loses_to_deny_and_saves_nothing(
     release.set()
     await always
     save.assert_not_awaited()
-    assert client.chat_postEphemeral.await_args.kwargs["text"] == (
+    assert shown_text(client.chat_postEphemeral.await_args.kwargs) == (
         "This request was already answered."
     )
 
@@ -358,7 +361,7 @@ async def test_stale_always_click_approves_once_and_notifies_clicker(
     assert future.result() == "approved"
     blocks = client.chat_update.await_args.kwargs["attachments"][0]["blocks"]
     assert blocks[-1]["elements"][0]["text"] == "Approved once by <@U2>"
-    assert client.chat_postEphemeral.await_args.kwargs["text"] == (
+    assert shown_text(client.chat_postEphemeral.await_args.kwargs) == (
         "Approved this time only.\n"
         "Someone changed this tool's setting while the card waited, so Always allow wasn't saved."
     )
@@ -629,7 +632,7 @@ async def test_admin_confirmation_rechecks_each_click_before_settlement() -> Non
         action_id = actions["elements"][0]["action_id"]
         await cards.handle_click(_click(action_id, "U1"))
         assert (
-            client.chat_postEphemeral.await_args.kwargs["text"]
+            shown_text(client.chat_postEphemeral.await_args.kwargs)
             == "Current admin permission required."
         )
         client.chat_update.assert_not_awaited()
@@ -951,11 +954,14 @@ async def test_a_card_still_open_posts_one_reminder_in_its_thread(monkeypatch) -
     waiting, _approve = await _post(cards, client, _prompt(expires_in=timedelta(seconds=0.3)))
     assert await waiting == "expired"
     posts = [call.kwargs for call in client.chat_postMessage.await_args_list]
-    reminders = [kwargs for kwargs in posts if "still waiting" in str(kwargs.get("text"))]
+    reminders = [kwargs for kwargs in posts if "still waiting" in str(kwargs.get("attachments"))]
     assert reminders == [
         {
             "channel": "C1",
             "thread_ts": "1699.9",
-            "text": "<@U1> This is still waiting for your click.",
+            "text": "<@U1>",
+            "attachments": notice_attachments(
+                "This is still waiting for your click.", neutral=True
+            ),
         }
-    ]
+    ], "the mention stays in text so it notifies; the words ride a neutral card"

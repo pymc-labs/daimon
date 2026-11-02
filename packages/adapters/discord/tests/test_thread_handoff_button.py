@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -18,13 +19,17 @@ import discord
 import pytest
 from daimon.adapters.discord.feedback_button import FeedbackButton
 from daimon.adapters.discord.support_escalation import SupportEscalateButton
+from daimon.adapters.discord.theme import COLOR_RED
 from daimon.adapters.discord.thread_handoff import HandOverButton, build_custom_id, hand_over_view
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, ScopeContext
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.agent_notices import take_agent_notices
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.thread_agent_bindings import get_binding
+from daimon.core.thread_handoff import HANDOVER_FALLBACK_SEED
+from daimon.core.turn.agent_notices import HANDED_OVER_NOTICE
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent
@@ -106,10 +111,18 @@ async def test_a_click_hands_the_thread_to_the_channels_agent(
 
     await HandOverButton(agent_id="ag_research").callback(interaction)
 
-    interaction.channel.send.assert_awaited_once()
-    posted = interaction.channel.send.call_args.args[0]
-    assert "Your latest message is being sent to research-bot" in posted
+    interaction.channel.send.assert_not_awaited()
     interaction.message.edit.assert_awaited_once_with(view=None)
+    async with db_session_factory.begin() as session:
+        notices = await take_agent_notices(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id=str(_THREAD),
+            agent_id="ag_research",
+            since=datetime.now(UTC) - timedelta(hours=1),
+        )
+    assert notices == [HANDED_OVER_NOTICE], "research-bot hears of it, not the thread"
     async with db_session_factory() as session:
         binding = await get_binding(
             session,
@@ -154,7 +167,9 @@ async def test_a_refused_click_answers_privately_and_writes_nothing(
 
     interaction.channel.send.assert_not_awaited()
     interaction.followup.send.assert_awaited_once()
-    assert "only runs in other channels" in interaction.followup.send.call_args.args[0]
+    refusal = interaction.followup.send.call_args.kwargs["embed"]
+    assert "only runs in other channels" in refusal.description
+    assert refusal.color is not None and refusal.color.value == COLOR_RED
     assert interaction.followup.send.call_args.kwargs["ephemeral"] is True
     async with db_session_factory() as session:
         binding = await get_binding(
@@ -165,6 +180,16 @@ async def test_a_refused_click_answers_privately_and_writes_nothing(
             thread_id=str(_THREAD),
         )
     assert binding is None
+    async with db_session_factory.begin() as session:
+        notices = await take_agent_notices(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id=str(_THREAD),
+            agent_id="ag_research",
+            since=datetime.now(UTC) - timedelta(hours=1),
+        )
+    assert notices == [], "a refused click tells the agent nothing"
 
     assert interaction.client.tasks == []
     interaction.client.on_message.assert_not_awaited()
@@ -409,4 +434,4 @@ async def test_unreadable_seed_history_resends_the_fixed_prompt(
     await HandOverButton(agent_id="ag_research").callback(interaction)
     await asyncio.gather(*interaction.client.tasks)
     resent = interaction.client.on_message.await_args.args[0]
-    assert resent.content == "Pick up this conversation where it left off."
+    assert resent.content == HANDOVER_FALLBACK_SEED

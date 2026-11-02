@@ -311,7 +311,9 @@ async def submit_mcp_token(
 
     async with sessionmaker() as session:
         after = await peek_credential_request(session, token=row.token)
-    replies = tuple(str(call.args[0]) for call in interaction.followup.send.call_args_list)
+    replies = tuple(
+        str(call.kwargs["embed"].description) for call in interaction.followup.send.call_args_list
+    )
     return McpTokenSubmitReceipt(
         request_key=row.idempotency_key,
         outcome=after.outcome if after is not None else None,

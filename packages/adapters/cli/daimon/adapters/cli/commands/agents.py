@@ -60,9 +60,11 @@ from daimon.core.stores import agent_tool_rules as tool_rules_store
 from daimon.core.stores.agent_google_binding import upsert_agent_google_binding
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.tenants import list_tenants_by_platform
+from daimon.core.turn.notices import conversations_follow_line
 from mux.profiles import selectable_models
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from rich.console import Console
+from sqlalchemy.ext.asyncio import AsyncSession
 from typer.core import TyperGroup
 
 
@@ -979,7 +981,11 @@ async def agents_backend_change(
             )
             console.print("Revert any time; nothing is deleted.", markup=False)
         console.print(preview.cost_line, markup=False)
-        console.print("Existing threads keep their backend; channel overrides still apply.")
+        console.print(
+            conversations_follow_line(name, preview.target_backend)
+            + " Channel overrides still apply.",
+            markup=False,
+        )
     if dry_run:
         if as_json:
             console.print(preview_json, markup=False, highlight=False, soft_wrap=True)
@@ -1525,7 +1531,7 @@ async def agents_rekey(
 
 @owner_app.command("show")
 def agents_owner_show_command(ctx: typer.Context, name: str) -> None:
-    """Show the agent's owner account, if it has one."""
+    """Show the agent's primary owner and co-owners, if it has any."""
     settings = load_settings()
     console = Console(highlight=False)
 
@@ -1551,10 +1557,11 @@ def agents_owner_set_command(
     ] = None,
     yes: Annotated[bool, YES_OPTION] = False,
 ) -> None:
-    """Make one person the agent's owner: they may edit it without being an admin.
+    """Make one person the agent's primary owner: they may edit it without being an admin.
 
     The owner may change its prompt, model, provider, settings, skills, connections
-    and fleet; never the provider allowlist, budgets or GitHub access.
+    and its GitHub repos; never the provider allowlist, budgets or server-wide repos.
+    Co-owners (`owner add`) are not affected.
     """
     settings = load_settings()
     console = Console(highlight=False)
@@ -1580,7 +1587,7 @@ def agents_owner_set_command(
 def agents_owner_clear_command(
     ctx: typer.Context, name: str, yes: Annotated[bool, YES_OPTION] = False
 ) -> None:
-    """Clear the agent's owner: only admins may edit it."""
+    """Clear the agent's primary owner. Co-owners (`owner add`) stay."""
     settings = load_settings()
     console = Console(highlight=False)
 
@@ -1593,21 +1600,129 @@ def agents_owner_clear_command(
     run_cli(work(), console=console)
 
 
+@owner_app.command("add")
+def agents_owner_add_command(
+    ctx: typer.Context,
+    name: str,
+    account: Annotated[
+        str | None, typer.Option("--account", help="The co-owner's account id.")
+    ] = None,
+    platform: Annotated[
+        str | None, typer.Option("--platform", help="With --user: discord, slack or teams.")
+    ] = None,
+    user: Annotated[
+        str | None, typer.Option("--user", help="The co-owner's platform user id.")
+    ] = None,
+    yes: Annotated[bool, YES_OPTION] = False,
+) -> None:
+    """Add a co-owner: owns the agent exactly as its primary owner does.
+
+    A person from another organisation can never be an owner.
+    """
+    settings = load_settings()
+    console = Console(highlight=False)
+
+    async def work() -> None:
+        async with build_runtime(settings) as runtime:
+            await agents_owner(
+                rt=runtime,
+                console=console,
+                name=name,
+                selector=ctx.obj,
+                change="add",
+                account=account,
+                platform=platform,
+                user=user,
+                yes=yes,
+            )
+
+    run_cli(work(), console=console)
+
+
+@owner_app.command("remove")
+def agents_owner_remove_command(
+    ctx: typer.Context,
+    name: str,
+    account: Annotated[
+        str | None, typer.Option("--account", help="The co-owner's account id.")
+    ] = None,
+    platform: Annotated[
+        str | None, typer.Option("--platform", help="With --user: discord, slack or teams.")
+    ] = None,
+    user: Annotated[
+        str | None, typer.Option("--user", help="The co-owner's platform user id.")
+    ] = None,
+    yes: Annotated[bool, YES_OPTION] = False,
+) -> None:
+    """Remove a co-owner. The primary owner is changed with `owner set` or `owner clear`."""
+    settings = load_settings()
+    console = Console(highlight=False)
+
+    async def work() -> None:
+        async with build_runtime(settings) as runtime:
+            await agents_owner(
+                rt=runtime,
+                console=console,
+                name=name,
+                selector=ctx.obj,
+                change="remove",
+                account=account,
+                platform=platform,
+                user=user,
+                yes=yes,
+            )
+
+    run_cli(work(), console=console)
+
+
+async def _owner_account_argument(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    account: str | None,
+    platform: str | None,
+    user: str | None,
+) -> uuid.UUID:
+    """The account named by `--account`, or by `--platform` with `--user`."""
+    from daimon.core.stores.identity import find_platform_principal
+
+    if (account is None) == (user is None) or (user is not None and platform is None):
+        raise typer.BadParameter("Pass --account, or --platform with --user.")
+    if account is not None:
+        try:
+            return uuid.UUID(account)
+        except ValueError as exc:
+            raise typer.BadParameter("--account is an account id.") from exc
+    found = await find_platform_principal(
+        session, tenant_id=tenant_id, platform=platform or "", external_id=user or ""
+    )
+    if found is None:
+        raise StoreError("No account for that platform user in this tenant.")
+    return found.account_id
+
+
 async def agents_owner(
     *,
     rt: CliRuntime,
     console: Console,
     name: str,
     selector: TenantSelector | None = None,
-    change: Literal["set", "clear"] | None = None,
+    change: Literal["set", "clear", "add", "remove"] | None = None,
     account: str | None = None,
     platform: str | None = None,
     user: str | None = None,
     yes: bool = False,
 ) -> None:
-    """The CLI is the operator's own: assigning or clearing an owner is an admin's act."""
-    from daimon.core.agent_ownership import agent_owner, assign_agent_owner, clear_agent_owner
-    from daimon.core.stores.identity import find_platform_principal
+    """The CLI is the operator's own: changing who owns an agent is an admin's act."""
+    from daimon.core.agent_ownership import (
+        ForeignOwnerError,
+        add_agent_co_owner,
+        agent_co_owners,
+        agent_owner,
+        assign_agent_owner,
+        clear_agent_owner,
+        remove_agent_co_owner,
+    )
 
     async with rt.sessionmaker.begin() as session:
         override = await resolve_tenant_override(session, selector)
@@ -1616,34 +1731,28 @@ async def agents_owner(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
         owner_id: uuid.UUID | None = None
-        if change == "set":
-            if (account is None) == (user is None) or (user is not None and platform is None):
-                raise typer.BadParameter("Pass --account, or --platform with --user.")
-            if account is not None:
-                try:
-                    owner_id = uuid.UUID(account)
-                except ValueError as exc:
-                    raise typer.BadParameter("--account is an account id.") from exc
-            else:
-                found = await find_platform_principal(
-                    session, tenant_id=tenant_id, platform=platform or "", external_id=user or ""
-                )
-                if found is None:
-                    raise StoreError("No account for that platform user in this tenant.")
-                owner_id = found.account_id
+        if change in ("set", "add", "remove"):
+            owner_id = await _owner_account_argument(
+                session, tenant_id=tenant_id, account=account, platform=platform, user=user
+            )
     agent = await find_agent_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=name)
     if agent is None:
         raise StoreError(f"no agent named {name!r} in your account.")
     agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id)
     if change is None:
         current = await agent_owner(rt.sessionmaker, tenant_id=tenant_id, agent_id=agent_id)
+        co_owners = await agent_co_owners(rt.sessionmaker, tenant_id=tenant_id, agent_id=agent_id)
         console.print(
-            f"{name}: owner {current}" if current else f"{name}: no owner (admins only)",
+            f"{name}: owner {current}" if current else f"{name}: no primary owner",
             markup=False,
         )
+        for co_owner in co_owners:
+            console.print(f"{name}: co-owner {co_owner}", markup=False)
+        if current is None and not co_owners:
+            console.print(f"{name}: no owner (admins only)", markup=False)
         return
     if change == "clear":
-        confirm_or_abort(console, f"Clear {name}'s owner? Only admins could edit it.", yes=yes)
+        confirm_or_abort(console, f"Clear {name}'s primary owner? Co-owners stay owners.", yes=yes)
         cleared = await clear_agent_owner(
             rt.sessionmaker,
             tenant_id=tenant_id,
@@ -1655,6 +1764,41 @@ async def agents_owner(
         )
         return
     assert owner_id is not None
+    if change == "add":
+        confirm_or_abort(console, f"Make {owner_id} a co-owner of {name}?", yes=yes)
+        try:
+            added = await add_agent_co_owner(
+                rt.sessionmaker,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                account_id=owner_id,
+                by_account_id=principal.account_id,
+            )
+        except LookupError as exc:
+            raise StoreError("That account is not in this tenant.") from exc
+        except ForeignOwnerError as exc:
+            raise StoreError("A person from another organisation cannot own an agent.") from exc
+        console.print(
+            f"{owner_id} now co-owns {name}." if added else f"{owner_id} already owns {name}.",
+            markup=False,
+        )
+        return
+    if change == "remove":
+        confirm_or_abort(console, f"Remove {owner_id} as a co-owner of {name}?", yes=yes)
+        removed = await remove_agent_co_owner(
+            rt.sessionmaker,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            account_id=owner_id,
+            by_account_id=principal.account_id,
+        )
+        console.print(
+            f"{owner_id} no longer co-owns {name}."
+            if removed
+            else f"{owner_id} was not a co-owner of {name}.",
+            markup=False,
+        )
+        return
     confirm_or_abort(console, f"Make {owner_id} the owner of {name}?", yes=yes)
     try:
         await assign_agent_owner(

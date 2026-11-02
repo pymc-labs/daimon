@@ -1,476 +1,212 @@
-# Slack Adapter — Trust Model
+# Slack
 
-This page documents how Daimon's Slack adapter handles per-user access and
-what operators should understand about the resulting trust model.
+Connect Daimon to Slack workspaces, then learn how it behaves there: who it can
+read, how files move and what shared channels allow. Read this if you run the
+deployment or administer a workspace.
 
-### Agent visibility
+## Connect Slack
 
-Members see only the effective channel and thread responders and agents whose
-explicit rules allow them to answer at that location. Unrouted agents,
-shadowed workspace or deployment defaults, and agents restricted to other
-channels are hidden from the setup panel and agent tool lookups. Agent aliases
-and channels kept to their own agents follow the same rules as on Discord.
-Admins retain their existing visibility.
+Slack needs a publicly reachable
+[`DAIMON_MCP__PUBLIC_URL`](configuration.md#daimon_mcp__public_url). The bot
+token comes from an OAuth install callback served by the `mcp` process, not
+from an environment variable, and Slack will not redirect to `localhost`.
 
-Agent tools verify location from the active turn origin or a channel-bound
-key. Omitting a turn origin cannot reveal the workspace roster. External
-participants retain the separate restriction on setup tools.
+1. Create the Slack app from [`slack-app-manifest.yaml`](slack-app-manifest.yaml)
+   and follow the steps in its header comment. It fills in the scopes, slash
+   commands, events and Socket Mode toggles.
+2. Put `DAIMON_SLACK__SIGNING_SECRET`, `DAIMON_SLACK__APP_TOKEN`,
+   `DAIMON_SLACK__CLIENT_ID` and `DAIMON_SLACK__CLIENT_SECRET` in `.env`. Also
+   set [`DAIMON_CRYPTO__KEYS`](configuration.md#daimon_crypto__keys): the
+   adapter encrypts workspace tokens and refuses to start without it.
+3. Start the adapter:
 
-Discovery and mutation authorization are separate: operations that already
-name an agent still apply their existing channel isolation and edit permission
-checks. Knowing an agent name does not grant permission to change it.
+   ```bash
+   docker compose --profile slack up --build -d
+   ```
 
-### `/here` card
+4. Open `https://<your-host>/oauth/slack/install` and install to a workspace.
 
-`/here` sends only the caller a compact channel card. Its title names the agent
-that answers here or the reason replies are unavailable. When an agent answers,
-Reading and Publishing show the effective scope and whether approval is
-required; a card that only gives a reason has no fields. The footer says
-`Channel setting. Threads can differ.` because Slack slash commands have no
-thread context. Credential names and values are absent from the card.
+After install, invite Daimon to a channel with `/invite @daimon` and mention
+it. On a first install the installer also gets a short welcome DM.
 
-### Agent memory
+### Update an existing app
 
-An agent's shared memory is mounted in every member's session. Each member also
-has a personal memory with each agent, mounted only in their own sessions
-(channel threads and private conversations alike), so another member's session
-cannot read it. `/memory` shows the shared memory, `/memory mine` shows your
-own, and `/memory forget-mine` clears yours after you confirm with the code it
-gives you. Every reply is ephemeral, to the person who ran the command, and no
-argument names another member. In a channel shared with another organisation the
-agent uses that channel's own memory instead, which everyone in the channel sees: no
-shared or personal memory is mounted there, `/memory` shows the channel's, and
-`/memory mine` and `/memory forget-mine` say personal memory is not used there. See
-[architecture](architecture.md#shared-and-personal-memory).
+New features need new scopes, events or commands. Apply the current manifest,
+then reinstall the app so the workspace approves the scopes:
 
-### Session output files
+| Feature | Needs |
+| --- | --- |
+| `/github` command | The command from the manifest |
+| Private conversations | `im:history` and `im:write` scopes, the `message.im` event, the App Home messages tab |
+| Direct messages from agents | `im:write` scope |
+| Slack Connect channels | The `channel_shared`, `channel_unshared` and `member_joined_channel` events |
+| Web access that follows workspace membership | The `team_join` and `user_change` events |
+| Channel lifecycle tracking | The `message.channels`, `message.groups` and channel archive, unarchive and delete events |
+| File delivery | `files:write` scope |
+| Agent names and avatars | `chat:write.customize` scope, requested at install when [agent identity](agent-identity.md) is on |
 
-Self-hosted turns do not run the automatic Managed Agents file sweep. Deliver
-files through Daimon's MCP message tools using staged file handles.
+Slack file and DM errors tell the admin to reinstall when a scope is missing.
+After adding `chat:write.customize`, restart the Slack and MCP services.
 
-Watch reports require live authorization at each post, edit and file-upload
-step. A refused check stops subsequent delivery, including terminal cleanup.
-Watch turns do not schedule detached session-output sweeps after their execution
-grant ends.
+## How Daimon behaves in Slack
 
-Files an agent saves under `/mnt/session/outputs` are uploaded to the Slack
-thread after an interactive turn completes (a routine with a destination
-sends its files with its result instead; see
-[routines](routines.md#generated-files)). Delivery runs in the background after the reply is posted — the
-adapter waits for Managed Agents to index newly written files, so files may
-arrive a few seconds after the reply. Every delivery is labelled with the
-person whose turn made the files, in every thread, whether one person uses
-it or several: the first file posted (or the first oversize notice, if that
-comes first) carries "For @name", a mention, so that person is notified
-once per delivery. Files are labelled, not reordered: in a thread several
-people use, they can still appear after a later turn's answer. A
-successfully posted file is deleted from the session's file listing, so the listing only ever holds undelivered
-work and there is no delivery-receipt store to go stale. An interrupted
-delivery (a deploy restart mid-sweep) leaves the file listed and it goes out
-on the next turn; a crash between posting and deleting can re-post a file
-once. Files over 200 MB are not uploaded (Slack's own hard cap is far higher,
-but Daimon downloads the whole file into memory and then uploads it). Such a
-file stays in the session's listing and the agent's workspace, and the thread
-gets one notice naming it and offering a smaller version or parts under
-200 MB. An upload has a time limit that grows with the file's size, so a
-file near the cap gets several minutes. 0-byte files are skipped silently, logged and
-removed. Delivery requires the
-`files:write` bot scope; adding a scope to an existing install requires
-re-running the install flow. A workspace that has hit its Slack file-storage
-limit gets one in-thread notice and no deliveries until space is freed.
+### Start conversations
 
-### Files in message tools
+A channel message starts a conversation only through `app_mention`. Follow-ups
+in a thread need a real mention too. An admin can turn on plain-text mentions,
+where a person types `@` and the bot's configured name. It ignores a name
+followed by `(` or by a dot and a letter. A message with both counts once.
 
-`read_channel`, `read_thread`, `get_message` and `search_messages` include attached
-file names, MIME types and sizes. Download URLs are signed and use Daimon's file
-proxy; private Slack download URLs are never exposed. Anyone holding a URL can
-download the file, so these expire after an hour, with the turn grant, rather than
-the 24 hours a turn's own attachment links last. Without a configured public MCP
-URL and signing secret, metadata is still returned with no download URL. Deleted
-and retention-hidden placeholders are omitted.
+A mention that arrives while its thread is busy gets a waiting emoji and runs
+after the active turn. Each participant in a thread keeps a separate session.
+Tool approvals appear as cards in the thread, and only the requester can
+approve or deny. Answers carry 👍 and 👎 buttons. A 👎 opens a short form for
+reasons and text, and sends it to your support channel when
+`DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT` is on for the tenant.
 
-`send_message` accepts staged `file_handles` and signed file links from those read
-tools in `attachments`. Links must be valid and belong to the same workspace;
-arbitrary URLs are refused. A link is a bearer token, so it is not proof the
-requester may see the file: Slack's list of where the file is shared must include
-a channel the requester can view and the channel policy lets the call read. A file
-in a sealed thread can be reposted only into that same thread, since
-`send_message` carries no turn origin, and a file shared only in a 1:1 DM can be
-reposted only into a DM. The combined limit is ten files, and each
-file is capped at 20 MiB. A caption is required. The caption posts
-first; files upload into its new thread or the existing target thread. The upload
-messages are recorded for tidying when Slack reports their share in the upload
-response. An upload failure leaves the caption posted, and the error
-says not to send it again. The bot needs `files:write`; reinstall only when Slack
-reports the installed token lacks it.
+### Read channels and history
 
-### History pages
+By default Daimon reads only channels the bot is invited to. A top-level
+mention starts a thread with no history, so the first turn gets the 25 messages
+before the mention, marked untrusted. Apps outside the Marketplace get at most
+15. A first turn inside a thread replays that thread. Slack may return fewer
+messages than asked, and a failed or slow read (over 10 seconds) runs the turn
+without history. Message tools return up to 200 messages per call, with a
+cursor for older ones.
 
-Thread context requests one page of `DAIMON_SLACK__HISTORY_PAGE_LIMIT` messages
-(default 100, range 1–1000). Slack may grant fewer depending on the app's rate
-limits; `has_more` still marks the replay as truncated. Message tools return at
-most 200 messages per call. `read_channel` returns a cursor for older messages.
-`read_thread` returns the root and the newest replies, with a cursor for older
-ones; the root counts toward its 200, and a limit below 2 still reads the root
-and one reply. No automatic multi-page sweep runs during a turn.
+### Let members connect their Slack account
 
-A top-level mention starts a new thread with no history of its own, so its
-first turn gets the channel instead: one `conversations.history` page of 25
-messages ending at the mention, the mention itself left out, shown oldest
-first in a `<channel_context source="slack" trust="untrusted">` block. Nothing
-posted after the mention is included; earlier answers from the bot account
-are. A first turn inside an existing thread replays that thread as before.
+Members can connect their own Slack account. Daimon offers a link when it hits
+a channel it cannot read. A connected member's reads then use their own Slack
+permissions, with no bot invite needed, and include message search. Operators
+should know:
 
-The channel is read as `read_channel` would read it for that turn: the
-answering agent must be allowed to read it from the new thread, and a thread
-whose readers are limited on its own is withheld (its root and broadcast
-replies) before any file link is minted.
+- Daimon answers with channel content wherever the connected person asks,
+  gated only by whether that person can see the source channel.
+- Direct-message content is surfaced only in a DM with that person, never in a
+  channel.
+- User tokens (`xoxp-...`) are stored encrypted, one per person and workspace.
+  **Disconnect Slack** in `/privacy` deletes and revokes them.
+- Workspaces with admin app approval must approve the added user scopes first.
 
-`truncated="true"` says older messages exist; apps distributed outside the
-Marketplace get at most 15. When the access policy can't be read, the read is
-refused, or Slack fails, rate-limits or takes over 10 seconds, the block is
-`status="unavailable"` and the turn runs without it; the fetch never waits out
-a rate limit. A recovery re-seed rebuilds the same window on the policy as it
-is then. On an install held to one history call a minute, this fetch spends
-that call, so a `read_channel` the agent makes straight after may wait up to a
-minute for Slack's limit to reset.
+### Send and receive files
 
-The replay leaves out the turn's own status card, which is posted before
-history is read. Every other message stays, including earlier answers from the
-bot account and other bots' posts. The turn's controls name the bot account
-(`platform_user_id`, the `auth.test` user for the workspace) and its native
-`<@U…>` mention as the responder, so a mention of the app addresses the agent
-answering, whatever its name. The bot account can front different agents over a
-thread's life, so its earlier messages are not attributed to the current one.
+For Managed Agents turns, files in `/mnt/session/outputs` upload to the thread
+after an interactive turn, a few seconds after the reply. The first file of each
+delivery says "For @name", naming the person whose turn made it. A routine with
+a destination sends its files with its result, through the same uploader (see
+[routines](routines.md#generated-files)).
 
-### Skill files
+Files over 200 MB are not uploaded. The thread gets a notice naming
+the file and offering a smaller version. Self-hosted turns skip this sweep, and
+agents deliver files through the MCP message tools instead. A watch report
+rechecks access before every post, edit and upload, and stops at the first
+refusal.
 
-A `.md` or `.zip` attached in a message reaches `add_skill` as the file link
-Daimon gave the turn, or as a link from a read tool. Daimon reads it with the bot
-token only when the link's signature checks, it names this workspace, and the file
-passes the same sharing check as a repost: it is shared in a channel the caller can
-view and this turn may read, or in a 1:1 DM only when the turn is in a DM. It refuses a file over the
-skill size cap or not named `.md` or `.zip` before downloading it. Adding it
-needs the person's Approve on a confirmation card, which only tool safety
-(`DAIMON_TOOL_SAFETY__ENABLED=true`) shows, and only in a chat turn whose
-session asks before `add_skill`. When no card can show, the preview says which
-it is: approval cards are off for the deployment, or this conversation can't
-show one and why (a missing or stale `origin_context_id`, a session started
-before tool safety was on, a session Daimon could not read). Without the card, use the setup panel's Add skill form, which
-takes a paste only, since Slack modals have no file input.
+Read tools (`read_channel`, `read_thread`, `get_message`, `search_messages`)
+list file names, types and sizes. Download links go through Daimon's file proxy
+and expire after an hour, and private Slack URLs are never exposed. Without a
+public MCP URL and signing secret, you get metadata only.
 
-### Per-user Slack access (optional)
+`send_message` accepts staged file handles and links from those tools. A link
+is a bearer token, not proof of access. The file must be shared in a channel
+the requester can view, a file from a sealed thread can be reposted only into
+that thread, and a file shared only in a DM only into a DM. The limit is ten
+files of 20 MiB each, and a caption is required.
 
-Tool approvals appear as Block Kit cards in the turn's thread. The card shows
-the action, consequence and requester, with **Approve**, **Deny** and
-**Details** buttons. Details sends a few plain labelled inputs privately to
-the clicker. Only
-the requester can approve or deny. Each call gets its own card. Answered,
-expired and stopped cards lose
-their buttons.
+A `.md` or `.zip` attached in a message can become a skill through
+`add_skill`, after the person approves a confirmation card. The card appears
+only when
+[`DAIMON_TOOL_SAFETY__ENABLED`](configuration.md#daimon_tool_safety__enabled)
+is on. Otherwise use the setup panel's **Add skill** form, which accepts pasted
+text only.
 
-After install, the success page says to invite Daimon with `/invite @daimon`
-and mention it there, and on a first install the installer gets the same short
-welcome as a DM. A
-DM to Daimon when private chats are off, or before one has been started from a
-channel with `/dm-me`, gets a one-time reply saying how to reach it.
+### Work in shared channels
 
-By default Daimon reads only channels the bot is invited to. Members can
-additionally **connect their Slack account** (Daimon offers a link whenever it
-hits a channel it can't read; it doesn't ask before that). A connected member's
-reads run with *their* Slack permissions: any channel or DM they can see, no
-bot invite needed, plus message search (results that come from a DM are only
-surfaced when you ask in a DM with Daimon).
+Slack Connect needs no setting. When Daimon is in a channel shared with another
+workspace, that workspace's people can mention it. On every turn Daimon asks
+Slack which workspace the person belongs to, and only a verified member of the
+installing workspace counts as one of its own.
 
-Trust model notes for operators:
+People from the other workspace are plain users, held to the channel they
+asked in. They can stop their own turn, answer the approval card for it and
+rate its answer. They cannot be admins, use private conversations, create
+agents, set keys, read the directory, or use routines, billing, privacy, agent
+setup, GitHub or **Ask a person**. Those controls reply "That's only for people
+at your workspace".
 
-- Connected users' reach is no longer signalled by bot presence in a channel.
-  Daimon answers with channel content wherever the connected user asks, gated
-  only by whether that user can see the source channel themselves.
-- User tokens (`xoxp-…`) are stored Fernet-encrypted (`DAIMON_CRYPTO__KEYS`),
-  one row per (workspace, user), and are deleted + revoked from the `/privacy`
-  panel ("Disconnect Slack").
-- Workspaces with admin app-approval must have an admin approve the added
-  user scopes before members can connect.
-- Reads mirror the connecting user's own Slack visibility: any channel or DM
-  they can see, answered wherever they ask — the same model as the Discord
-  bot. The one exception is direct-message content (DMs and group DMs), which
-  Daimon will only surface in a DM with you, never in a channel.
+Every turn in a shared channel is held to that channel, including your own
+members' turns, and has no admin tools. Set agents up from an internal channel
+or a DM. Channel-bound chat tools do not limit an agent's sandbox or
+third-party connectors, so choose an agent whose connectors and repos suit the
+other workspace. If both organisations install Daimon, the installation that
+receives the event answers.
 
-`/agent-setup` opens the Agents roster, which pushes into either an agent's Details view or Who answers where. Setup conversations can be opened with **⚙️ Set up agents** from the Agents roster or from Details; creating a new agent lands on its Details view rather than a separate confirmation screen, and for an admin Details also offers **🧰 Use from your coding tools** to connect that agent over MCP and **➕ Add skill** (members see neither, since both are admin changes). The channel gets a short launcher with a **Reply to Daimon** button; Daimon's welcome appears inside the shared thread. The panel also provides the reply button immediately after opening setup. Follow it, reply in that thread, and mention the bot. Daimon answers while the named agent is configured. Opening setup does not run a billed turn or change channel defaults. Each participant keeps a separate session.
+### Use private conversations
 
-`/github connect` shows a workspace admin an ephemeral **Connect GitHub** button
-in the channel or thread where they asked. Use `/github connect AgentName` to
-choose another agent. The button opens the repo picker, then activates the
-selected repos for that agent. If the
-agent still has a saved GitHub key, `/github connect` asks the admin to contact
-the Daimon operator to switch it. Existing Slack installations need the
-`/github` command added from `docs/slack-app-manifest.yaml` and reinstallation.
+Workspace admins opt in with `/dm-me enable` and opt out with `/dm-me disable`.
+In a channel, `/dm-me` continues privately with its recent text and a link
+back. Later messages go straight to the app, and running `/dm-me` again resets
+the scope. It carries recent channel text, not thread replies or attachments,
+and it refuses in channels with limited readers.
 
-Existing Slack apps must update **Event Subscriptions → Subscribe to bot events** to match `docs/slack-app-manifest.yaml`, including `message.channels`, `message.groups`, channel/group archive, unarchive, and deletion events. These subscriptions track setup lifecycle; a channel message starts a conversation only through `app_mention`, or, when an admin turned on plain-text mentions (`set_plain_text_mentions`), as a person's message that types `@` followed by the bot's configured name (not inside a link or a `>` quote, nor followed by "(" or by a dot and a letter, as in "@Daimon (urgent)" or "@Daimon.Thanks"). An `app_mention` runs a turn only when the message actually contains a real mention of the bot, so follow-ups in a thread need one too (or the typed name, with that setting on); Slack has been reported to deliver the event for un-mentioned thread replies, and those are dropped. A message with both a real mention and the typed name runs one turn. Root deletion is delivered as the [`message_deleted` message subtype](https://docs.slack.dev/reference/events/message/message_deleted/).
+Before enabling, finish the DM setup in the manifest: the two scopes, the
+`message.im` event and the App Home messages tab. Without them people see
+"Daimon can't use DMs in this workspace yet", and the log shows
+`slack.dm.setup_incomplete`.
 
-Workspace admins can click **🐙 GitHub** in `/agent-setup` or run `/github`.
-The GitHub home lists each agent and its repo count without grant controls.
-An agent's **🐙 GitHub repos** section lists its repos one per line, identifies
-its working repo (or says there is none), and says to ask the agent in chat to
-change repos. Connect GitHub remains a browser sign-in link. In the setup
-conversation, ask the agent to connect repos or change its working repo.
-The `/github connect` command can still issue a browser link. GitHub request
-cards use ephemeral replies in their originating thread; connection and
-confirmation are not sent as DMs. Add `/github` from
-`docs/slack-app-manifest.yaml` and reinstall the Slack app before testing it.
+> **Warning:** Upgrade every MCP reader (session, agent-chat and hub
+> endpoints) before enabling private conversations. Older readers ignore
+> private session stamps and can expose private content to another caller on
+> the same account. Keep DMs disabled through mixed-version rollouts and
+> before any rollback.
 
-Completion notifications can be enabled per tenant with `DAIMON_COMPLETION_PINGS`
-(see [architecture](architecture.md#completion-signals)). Enabled turns post their
-final answer as a fresh thread reply and mention only the requester. Trigger
-messages replace admission eyes with a check on success; default tenants keep eyes.
-Reaction permission errors do not fail turns.
-A mention that arrives while its thread is busy gets ⌛ and waits for the
-active turn. The ⌛ comes off once that request is answered, fails, is cancelled
-or is dropped unanswered.
-Agent-initiated DMs use `send_direct_message` with a workspace user ID. Existing
-installations need to reauthorize the app with the `im:write` bot scope; the
-[app manifest](slack-app-manifest.yaml) includes it. The tool checks live workspace
-membership, then opens a one-person DM and posts using the bot token.
-See Slack's [conversations.open reference](https://docs.slack.dev/reference/methods/conversations.open/)
-and the tenant [recipient policy](architecture.md#agent-initiated-direct-messages).
-
-When a direct-message call fails because an install lacks `im:write`, the tool
-asks a workspace admin to reinstall or reauthorize Daimon from the install link.
-Revoked, expired, or invalid bot authorizations give the same recovery direction.
-Errors include the number of chunks already delivered; a failure to open the DM
-sends no messages.
-With the tenant enabled in `DAIMON_TABLE_RENDERING`, final-answer Markdown tables use native table blocks with wrapped cells, up to
-20 columns and 100 rows including the header. Larger tables retain their Markdown
-text. Surrounding prose and multiple tables are delivered in order.
-
-Final answers go out as `markdown` blocks. Slack shows text inside inline code
-and fenced blocks exactly as written, entities included, so Daimon sends code
-unescaped and escapes only the prose around it: `<https://example.com|label>`
-in prose becomes a link, while the same text in code stays literal. Prose keeps
-user and channel mentions but not `<!channel>`, `<!here>` or `<!everyone>`. Each
-message is checked again as sent, since splitting a long answer can leave code
-lines outside their fence. Where the code boundary is ambiguous (an inline span
-across lines, a fence inside a blockquote, a span in a table cell holding `|`,
-a backtick a link or bare URL could take), the text is escaped as prose and its
-`<` shows as `&lt;`. The message's `text` field, which Slack parses as mrkdwn
-for notifications, escapes code as well.
-
-
-### Feedback on answers
-
-Every final answer carries 👍 and 👎 buttons on its last message. A turn that only
-ran tools (a file written, a chart posted) carries them on its finished status card.
-👍 records the vote and thanks the person with a message only they see.
-
-👎 records the vote and opens a **What went wrong?** form. The form offers optional
-reasons (wrong or inaccurate, didn't do what I asked, incomplete or cut off, too slow,
-something else) and optional free text, and needs at least one. Every 👎 click opens
-it, so a person can come back and add details. If Slack doesn't open the form, they
-get a private **Tell us what went wrong** button that opens it. Sending the form
-records a down-vote on that answer with the reasons and text. Each person has one
-row per answer, so a double click or a second form replaces the first rather than
-adding another.
-
-Who may vote: anyone who could start a turn there (the invoker allowlist and the
-channel's rules), checked when the vote is recorded and again on send. Anyone else is
-told they can't, and nothing is recorded. A member of another workspace
-(Slack Connect) can vote and send the form only on an answer to their own request.
-The text is stored on the feedback row. Logs carry the row id and the reason
-codes. Deleting your data with `/privacy` removes the row.
-
-To also send 👎 forms to the support team, turn on
-`DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT` for the workspace's tenant (a JSON object of
-tenant UUID to `true`; off by default). Each sent form is then posted once to the
-**Ask the team** channel (`DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID`), with the
-person, the agent and session, the reasons, the text and a link to the answer, never
-its content. Sending the same form again posts nothing; a changed one posts again.
-The form says it is shared before it is sent. A sealed origin is marked, as Ask the
-team marks it. No support request is spent. Discord does the same with its 👎 text,
-to `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID`.
-
-Emoji reactions (a :-1: on the message) are not read: that would need the
-`reactions:read` scope and a reinstall of every workspace.
+Private turns start a fresh session each time. Recent private history is
+replayed, but workspace files and OAuth grants held only in a shared vault are
+not copied.
 
 ### Ask a person
 
-Set `DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID` to show an **Ask a person** button
-next to the 👍/👎 buttons on every final answer (and on a tool-only turn's status card). It opens a short form; sending it
-spends one of the person's support requests (`DAIMON_SUPPORT__CREDITS_PER_USER`,
-default 20, counted per person per workspace and shared with Discord's ledger) and
-posts the request to that channel. The click shows a "Checking…" form at once and
-then the note form, or the reason there is none. Opening the form spends nothing, and asking twice
-on the same answer (a double click, two open forms, a Slack retry) records and posts
-once.
+Set `DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID` to show an **Ask a person**
+button beside 👍 and 👎. Each send spends one support credit, and sends one
+request to that channel. The post carries the requester and a link, never
+answer text. The bot must be in the channel. Leave it unset to hide the
+button. External Slack Connect members cannot use it.
 
-- **Slack-only deployments** set the Slack channel. Leaving it unset hides the
-  button: a request nobody reads is worse than none.
-- **Multi-platform deployments** set one channel per platform. Discord requests go
-  to `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID`, Teams requests to
-  `DAIMON_SUPPORT__TEAMS_ESCALATION_CHANNEL_ID`, Slack requests to the Slack channel;
-  no request is posted to another platform, and setting only another platform's
-  channel leaves Slack off.
-- **Several workspaces**: requests are posted with the requesting workspace's bot
-  token unless `DAIMON_SUPPORT__SLACK_ESCALATION_TEAM_ID` names the workspace that
-  owns the channel; then every workspace's requests are posted with that one's token.
-  The bot must be a member of the channel.
+[`DAIMON_SUPPORT__CREDITS_PER_USER`](configuration.md#daimon_support__credits_per_user)
+sets the credits, 20 per person per workspace by default and shared across
+platforms. Zero turns the button off.
 
-- **Channels with their own admins** (Discord too): the request goes to those
-  admins by DM instead, then to the server admins when none could be reached, and
-  to the escalation channel only when no DM landed. The asker never gets their own
-  request, and each DM follows the workspace's direct message policy. Recipients
-  are matched by the roles or groups stored at their last turn; a Slack user group
-  is looked up again first.
+In a channel with its own admins, the request goes to them by DM first, then
+to the server admins. The support channel gets it only if no DM landed.
 
-Who may ask: anyone who could start a turn in that thread (the invoker allowlist and
-the channel's writers rule, checked on click and again on send). External Slack
-Connect members are refused. An escalation channel whose rule lets nobody write
-refuses the post; the request
-stays recorded as undelivered.
+Multi-platform deployments set one channel per platform: Discord uses
+`DAIMON_SUPPORT__ESCALATION_CHANNEL_ID` and Teams its own channel. No request
+crosses platforms. For several workspaces,
+`DAIMON_SUPPORT__SLACK_ESCALATION_TEAM_ID` names the workspace that owns the
+channel.
 
-What is posted: the requester (mention, username, user and workspace id), a link to
-the answer, and their note. No answer text or conversation content, the same as
-Discord, and link previews are off, so the link shows nothing to anyone who can't
-already open the channel. When the answer is in a channel or thread with limited
-readers, the form
-tells the person their note leaves the channel, and the post says to answer there.
+### Pick agents and see where they answer
 
-### Slack Connect (shared channels)
+`/agent-setup` opens the agents roster, and `/here` shows only the caller a
+card with the agent that answers in the channel. Members see only agents whose
+rules allow them to answer at that location, while admins see all. Knowing an
+agent's name does not grant edit rights.
 
-There is no setting. When Daimon is in a channel shared with another workspace,
-people from that workspace can mention it. On every turn Daimon asks Slack
-(`users.info`) which workspace the person belongs to; only a verified member of
-the workspace that installed the app counts as one of its own.
+When a channel's readers are not `own`, `/here` and the Permissions screen warn
+that guest accounts aren't checked on Slack. A channel shared with another
+workspace gets a sharing warning and, for admins, a **Make confidential**
+button. If Slack can't answer, the card says **Outsider check skipped**.
 
-People from the other workspace are plain users, held to the channel they asked
-in and its threads. They can stop their own turn, answer the approval card of
-their own turn, and rate an answer to their own request. They can't be
-administrators, use `/dm-me` or private conversations, create agents, set keys,
-read the workspace directory, or use routines, billing, privacy, agent setup,
-GitHub, browser sign-in or site access, **Ask a person** or thread hand-over.
-Clicking one of those controls, or sending one of those forms, gets "That's only
-for people at <your workspace>." and does nothing. "Always allow" on an approval
-card stays admin-only.
+`/memory` shows an agent's shared memory, `/memory mine` your personal memory
+with it, and `/memory forget-mine` clears yours after you confirm a code.
+Replies are visible only to you. In a shared channel the agent uses that
+channel's own memory instead. See [architecture](architecture.md) and
+[permissions](permissions.md).
 
-Everything in a shared channel stays in it: every turn there is held to that
-channel, your own members' turns included. Those turns have no admin tools, so
-set agents up from an internal channel or a DM.
-
-Chat tools that read and post are bound to the channel. That does not limit
-the agent's sandbox or a third-party connector, which can still reach whatever
-the agent can reach. The person who picks the agent for a shared channel decides
-what it can reach, so choose an agent whose connectors and repos are fine for the
-other workspace to use.
-
-A channel counts as shared when `conversations.info` reports `is_ext_shared`
-(Slack's other flag, `is_shared`, also covers sharing between your own
-workspaces, so it is not used). The answer is cached for ten minutes per channel;
-if Slack can't be asked, Daimon falls back to what it has recorded and to who is
-asking. The `channel_shared` event records the channel at once. A channel stays
-recorded after `channel_unshared`, so its turns stay held.
-
-If both organisations install Daimon, the workspace whose installation receives
-the event answers.
-
-Subscribe the app to `channel_shared`, `channel_unshared` and
-`member_joined_channel`: apply `docs/slack-app-manifest.yaml` and reinstall.
-
-### Private conversations
-
-Workspace admins opt in with `/dm-me enable` (and disable with `/dm-me disable`). Then use
-`/dm-me` in a channel to continue privately with its recent text context and a back-link.
-Send later messages directly to the app. Run `/dm-me` again to reset the private scope.
-Only current workspace members allowed by the tenant access policy can invoke it.
-`/dm-me` refuses in a channel with limited readers and leaves threads with their own
-rule out of the copied history, so their content never moves into a DM.
-
-Update the app from `docs/slack-app-manifest.yaml` and reinstall it to grant the new
-bot scopes `im:history` and `im:write`, subscribe to `message.im`, and enable the App
-Home messages tab. Existing installations remain DM-disabled until an admin opts in.
-This version moves recent channel text, not Slack thread replies or attachments.
-
-Before `/dm-me` moves a conversation or `/dm-me enable` changes policy, Daimon checks the
-granted `x-oauth-scopes` for both IM scopes. Missing or unreadable grants refuse
-without saving a route. The person sees "Daimon can't use DMs in this workspace
-yet." and "Ask a workspace admin to finish Daimon's DM setup."; the steps below are
-logged as a `slack.dm.setup_incomplete` warning with the workspace's `team_id`.
-The scope header cannot verify event subscriptions: operators must also apply the
-manifest's `message.im` subscription and enable the Messages tab.
-
-#### DM setup
-
-1. Reinstall or reauthorize the Slack app so it holds the `im:history` and
-   `im:write` bot scopes.
-2. Subscribe the app to the `message.im` bot event.
-3. Turn on the Messages tab under App Home.
-4. Run `/dm-me enable` as a workspace admin.
-
-`docs/slack-app-manifest.yaml` already carries steps 1 to 3; applying it and
-reinstalling covers them.
-
-Private turns use fresh MA sessions with isolated execution credentials. Recent
-private history is replayed, but ephemeral workspace files are not carried forward.
-External MCP OAuth grants held only in a shared vault are not copied into private
-turn vaults; stored shared agent credentials still follow ordinary assembly.
-
-Before enabling DM routing, upgrade **all MCP readers**, including session,
-agent-chat and hub endpoints. Keep DMs disabled throughout mixed-version rollouts
-and before rollback. Older readers ignore execution claims/private session stamps
-and can expose private content to another caller on the same account. Do not roll
-those reader guards back while private sessions remain: disabling routing does
-not erase existing transcripts. Drain active turns before changing versions.
-
-### Agent names and avatars
-
-This feature is off by default. Set `DAIMON_AGENT_IDENTITY__ENABLED=true`
-and restart the Slack and MCP services to show per-agent headers and the
-Avatar control. With it off, the app posts as itself and keeps agent names in
-answer footers.
-
-Each non-built-in agent posts turn messages with its own Slack message name and
-avatar. The built-in Daimon agent keeps the app's name and icon. Files uploaded
-by a turn still appear as the app. The avatar URL is public to anyone who sees
-the message; cached copies can remain after an avatar is changed or deleted.
-
-When identity is enabled, new OAuth installs request `chat:write.customize`;
-with it off, they use the previous consent screen. The app needs that scope
-to show agent headers. To add it, first open the
-**staging** app at [api.slack.com/apps](https://api.slack.com/apps). Under
-**OAuth & Permissions → Bot Token Scopes**, add `chat:write.customize`. Open
-**Install App** and click **Reinstall to Workspace**, then approve the new
-scope. Repeat for each staging workspace. Verify an agent's answer has its own
-name and avatar before repeating these steps for the **production** app and
-its workspaces. An installation without the scope keeps posting with the app
-header until it is reinstalled.
-Restart the Slack and MCP services after reinstalling to clear any remembered
-missing-scope result immediately; otherwise the result expires within 15 minutes.
-
-Each agent shows its generated Daimon face. Custom picture uploads are turned
-off. An agent with a picture uploaded earlier keeps it until a workspace admin
-opens `/agent-setup`, selects the agent, and clicks **Use default** in the
-Picture row. The Picture row is hidden when identity is off. Each change gets a
-new URL. Pictures are public: anyone who sees a message can open its image, and
-platform caches can keep a copy after the picture changes.
-
-For explicitly configured alternate providers, progress cards display neutral message snapshots and ordered draft previews. Terminal callbacks replace the card with the authoritative answer and retire Cancel. A provider cost is omitted until a verified display tariff is available; the default Anthropic display and price calculation are unchanged.
-
-Scheduled routine deliveries use the same file uploader as interactive turns,
-including thread destinations and creator fallback DMs. The file limits, the
-per-file rechecks and the at-most-once delivery guarantee are in
-[routines](routines.md#generated-files).
-
-The outsider warning on `/here` and the current channel's Permissions screen uses
-one fresh `conversations.info` response for external, Enterprise workspace and
-pending sharing. Sharing flags and workspace-ID lists are described in Slack's
-[conversation object](https://docs.slack.dev/reference/objects/conversation-object/).
-Nothing is cached, and no guest directory or channel member list is read for this
-check. No new OAuth scope is required.
-
-When readers is not `own`, both screens always say: **Guest accounts aren't checked
-on Slack; if this channel has guests, make it confidential.** An unshared channel
-is not certified free of outsiders. Failed or incomplete sharing lookups also say
-**Outsider check skipped**. Admins can use **Make confidential** when the sharing
-warning is shown; their admin status is checked again on click. Later metadata
-failures on `/here` preserve known warnings without admin controls or unrelated
-channel details. In a private channel the bot cannot see, `/here` asks you to invite
-it and reports that the outsider check was skipped.
+`/github` and `/github connect` open the GitHub flow described in
+[GitHub](github.md). Completion pings, per-agent names and avatars, and table
+rendering are optional. See
+[`DAIMON_COMPLETION_PINGS`](configuration.md#daimon_completion_pings),
+[agent identity](agent-identity.md) and
+[`DAIMON_TABLE_RENDERING`](configuration.md#daimon_table_rendering).

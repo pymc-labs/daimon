@@ -183,7 +183,6 @@ CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
     "add_skill": "content_hash",
     "lead_intake_resolve": "resolution",
     "request_agent_backend_switch": "preview_digest",
-    "request_fleet_config": "preview_digest",
     "request_provider_allowlist": "preview_digest",
     "request_channel_pin_clear": "preview_digest",
     # Every call names its action, so every call asks.
@@ -216,13 +215,21 @@ def confirmation_gated_tools() -> frozenset[str]:
     )
 
 
+def self_carded_tools() -> frozenset[str]:
+    """Gated tools Daimon confirms with a card it posts itself (`daimon.core.switch_cards`).
+
+    A provider turn with no confirmation card of its own may call them: the
+    tool posts the card instead of acting, and the press applies.
+    """
+    return frozenset({"request_agent_backend_switch"})
+
+
 def backend_switch_tools(*, enabled: bool) -> frozenset[str]:
     """Project authoritative backend-selection eligibility into session controls."""
     return (
         frozenset(
             {
                 "request_agent_backend_switch",
-                "request_fleet_config",
                 "request_provider_allowlist",
                 "request_channel_pin_clear",
             }

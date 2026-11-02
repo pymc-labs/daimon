@@ -58,6 +58,8 @@ HandoffRefusalReason = Literal[
     "invoker_not_allowed",
     "own_agents_only",
     "not_a_reader",
+    # An owner's private copy may take only a thread nobody else is in.
+    "shared_thread",
 ]
 
 # `authorize(HAND_OFF)` denials that refuse before reachability is looked at.
@@ -107,10 +109,11 @@ def decide_handoff(
     destination_ma_agent_id: str,
     destination_name: str,
     destination_reachable: bool,
-    existing_binding_kind: Literal["setup", "handoff"] | None,
+    existing_binding_kind: Literal["setup", "handoff", "owner", "web"] | None,
     origin_responder_ma_agent_id: str | None,
     access: Decision,
     caller_is_admin: bool = False,
+    caller_owns: bool = False,
 ) -> HandoffDecision:
     """Decide whether this task may move to `destination_ma_agent_id`.
 
@@ -126,7 +129,9 @@ def decide_handoff(
     can move on again — a `setup` one is not. `origin_responder_ma_agent_id`
     is who answers now; None skips the same-agent check (a switch out of a
     session the new responder can't use yet). `caller_is_admin` is a current
-    admin acting in person (never via an agent key).
+    admin acting in person (never via an agent key). `caller_owns` is the
+    destination's recorded owner acting in person (`hand_over_thread` reads it from
+    the owner rows).
     """
     if existing_binding_kind == "setup":
         return HandoffRefused(reason="setup_thread", destination_name=destination_name)
@@ -135,10 +140,11 @@ def decide_handoff(
         return HandoffRefused(
             reason=_POLICY_REFUSALS[denied], destination_name=destination_name, authz_reason=denied
         )
-    if not destination_reachable and not (caller_is_admin and denied is None):
-        # Only an admin (a person, not an agent key) may hand this thread to an
-        # agent routed nowhere yet, such as a fresh copy: the binding is this
-        # thread only, and the alternative, routing it to a channel, is wider.
+    if not destination_reachable and not ((caller_is_admin or caller_owns) and denied is None):
+        # Only an admin (a person, not an agent key), or the agent's own owner, may
+        # hand this thread to an agent routed nowhere yet, such as a fresh copy: the
+        # binding is this thread only, and the alternative, routing it to a
+        # channel, is wider.
         # A member authorized only by a channel rule still learns it answers nowhere.
         return HandoffRefused(reason="unreachable", destination_name=destination_name)
     if destination_ma_agent_id == origin_responder_ma_agent_id:

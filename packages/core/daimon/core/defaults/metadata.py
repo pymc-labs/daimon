@@ -41,6 +41,9 @@ MA_METADATA_KEY_AGENT_CHAT = "daimon_agent_chat"
 MA_METADATA_KEY_MANAGED = "daimon_managed"
 MA_METADATA_KEY_SPEC_HASH = "daimon_spec_hash"
 MA_METADATA_KEY_ISOLATED = "daimon_isolated"
+# Stamped on a copy a member made of the agent answering them: they own it, but the
+# setup it inherited (prompt, connector URLs) stays an admin's to read, as on the source.
+MA_METADATA_KEY_SETUP_HIDDEN = "daimon_setup_hidden"
 # Stamped on the copy `set_channel_rule` makes, with the channel it was
 # made for, so `archive_channel_copy` archives only such copies.
 MA_METADATA_KEY_CHANNEL_COPY = "daimon_isolation_copy"

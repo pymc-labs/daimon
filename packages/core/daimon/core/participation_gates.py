@@ -20,19 +20,18 @@ from typing import Final, Protocol
 
 import structlog
 from anthropic import AsyncAnthropic
-from daimon.core.billing import BillingConfig, is_over_cap
+from daimon.core.billing import BillingConfig
 from daimon.core.channel_backend import effective_thread_backend
-from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.config import ThreadParticipationSettings
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.rule_views import is_thread_turn_refused
 from daimon.core.scope import DeploymentDefault
+from daimon.core.spend_gate import SpendBlock, SpendRequest, spend_gate_in_new_session
 from daimon.core.stores.thread_participation import (
     count_auto_responses_since,
     get_participation_modes,
     record_auto_response,
 )
-from daimon.core.tenant_balance import is_over_balance
 from daimon.core.thread_classifier import ClassifierOutcome, classify
 from daimon.core.thread_participation import (
     ClassifierMessage,
@@ -55,6 +54,14 @@ RATE_LIMIT_WINDOW = timedelta(hours=1)
 # a bounded delay with a bounded prompt.
 BATCH_MAX_MESSAGES: Final[int] = 10
 BATCH_MAX_QUIET_PERIODS: Final[int] = 6
+
+
+_SKIPS: dict[SpendBlock, str] = {
+    "balance_depleted": "over_balance",
+    "cap_exceeded": "over_cap",
+    "budget_exceeded": "over_channel_budget",
+    "allowance_exhausted": "allowance_exhausted",
+}
 
 
 class Classify(Protocol):
@@ -128,7 +135,7 @@ class ParticipationGates:
     ) -> bool:
         """Run the gates and, if they pass, the classifier. Logs every skip with its reason.
 
-        The balance, cap and channel budget gates run before the classifier, on
+        The spend gate (balance, cap, channel budget, allowance) runs before the classifier, on
         `caller_id`, the person the turn would run as, and with a deployment
         default so do the pin and isolation ones: a tenant that could not
         be admitted must not pay for the question of whether to admit it. The
@@ -171,28 +178,22 @@ class ParticipationGates:
                 tier=resolved.tier,
             )
             return False
-        if await is_over_balance(sessionmaker=self._sessionmaker, tenant_id=tenant_id):
-            log.info("thread_participation.skipped", reason="over_balance", thread_id=thread_id)
-            return False
-        if await is_over_cap(
+        block = await spend_gate_in_new_session(
+            self._sessionmaker,
             billing_config=self._billing_config,
-            sessionmaker=self._sessionmaker,
-            tenant_id=tenant_id,
-            user_id=caller_id,
-            now=datetime.now(UTC),
-        ):
-            log.info("thread_participation.skipped", reason="over_cap", thread_id=thread_id)
-            return False
-        if await is_over_channel_budget(
-            sessionmaker=self._sessionmaker,
-            tenant_id=tenant_id,
-            platform=self._platform,
-            channel_id=channel_id,
-            now=datetime.now(UTC),
-        ):
-            log.info(
-                "thread_participation.skipped", reason="over_channel_budget", thread_id=thread_id
-            )
+            request=SpendRequest(
+                tenant_id=tenant_id,
+                platform_user_id=caller_id,
+                platform=self._platform,
+                channel_id=channel_id,
+                # The agent that would answer is not resolved yet, so only an
+                # allowance for every agent is read here; admission applies the rest.
+                agent_id=None,
+            ),
+            markup=self._markup,
+        )
+        if block is not None:
+            log.info("thread_participation.skipped", reason=_SKIPS[block], thread_id=thread_id)
             return False
         if self._deployment_default is not None and await is_thread_turn_refused(
             self._sessionmaker,

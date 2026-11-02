@@ -100,8 +100,9 @@ uv run python scripts/generate_mcp_tool_catalogue.py --check # docs/mcp-tools.md
 Those three pages are written by generators, so a change to a settings field's
 `Field(description=...)` or to an MCP tool's docstring is a change to their
 source: re-run the generator without `--check` and commit the result, rather
-than editing the page. `CLAUDE.md` has the table of which change means which
-generator, and which pages are maintained by hand.
+than editing the page. `CLAUDE.md` says which page a change belongs on and
+how to write it; `scripts/check_docs.py` keeps the hand-written pages within
+their length budgets.
 
 CI splits the Postgres-backed pytest run into parallel jobs, and the largest
 suites (`core`, `mcp`, `discord`) into shards by test file with
@@ -112,37 +113,19 @@ from it still runs, on the shard its path hashes to. Refresh the table from a
 run's junit artifacts with `uv run python scripts/generate_ci_durations.py --run <run-id>`.
 Each job runs `-n 4 --dist worksteal` (the four vCPUs of a hosted runner;
 Discord keeps `-n 2`), so a failure names the failing area in the job list. Add
-a shard by adding a leg to the `pytest-db` matrix (or the `pytest-discord` one)
-in `.github/workflows/ci.yml`. The `shard-check` job
+a shard by adding a leg to `pytest-db` in `MATRICES` in `scripts/ci/plan.py`
+(or to the `pytest-discord` matrix in `.github/workflows/ci.yml`). The `shard-check` job
 runs `uv run python scripts/check_ci_shards.py`, which collects each split suite
 once (`--collect-only`, no database), places its files the way CI will, and
 fails if a shard is empty or the shards omit or repeat a test, so a new test
 file lands in exactly one shard without any edit.
 
-Production defaults to mux with backends and fleets on; the flags are emergency
-stops. A test run that sets no `DAIMON_TURN__PATH` runs on the stop leg (legacy,
-backend flags off) through `daimon.testing.stop_leg_default`, which the root
-`addopts` load. The turn-relevant suites (`packages/core/tests/turn`, `tests/parity`, the
-Slack, Discord, Teams and scheduler adapters, `daimon run`, and the non-chat
-turn files: headless, routines, smoke, workspace transfer and session
-preparation) also run on a second, blocking `pytest-mux-leg` job
-with `DAIMON_TURN__PATH=mux` and `DAIMON_TURN__CHANNEL_BACKENDS=true`, the
-production default, which gates the deploy; its suites
-carry a `-mux` suffix. Fixtures read the leg through `daimon.testing.turn_leg`
-(`deps_for` and the parity drivers), so run a suite locally on the mux leg by
-setting those two variables. The mux leg is a ratchet: `tests/mux_leg_known_failures.txt` lists the
-failures that exist today and `-p daimon.testing.mux_leg_known` marks them strict
-expected failures, so a new failure fails the leg and a listed test that starts
-passing must be removed from the list. It is not a prerequisite of the staging
-deploy, because legacy is the production default. A test that only holds on mux builds its deps with
-`deps_for_pinned_mux`; the rest must hold on both legs.
-
-The blocking `pytest-staging-config` job also runs focused turn checks in two
-configurations. Its enabled leg sets `DAIMON_TURN__PATH=mux`,
-`DAIMON_TURN__CHANNEL_BACKENDS=true`, `DAIMON_TURN__AGENT_BACKENDS=true`, and
-`DAIMON_FLEET__ENABLED=true`; its legacy leg sets the path and all three switches
-off. The tests verify the selected platform turn path, native agent counterpart
-proof, and fleet grant admission. Both legs must pass before staging deploys.
+A pull request runs only the jobs its changed files need: `scripts/ci/plan.py`
+maps each path to the suites that cover it and starts only their jobs and matrix
+legs; main runs everything. A path
+the planner does not know runs every job. A test that reads a file outside its
+own package, such as a manifest under `docs/`, needs that file in the planner's
+`FILES`; `tests/test_ci_plan.py` flags the reads it can find.
 
 The pre-commit hooks from the setup above run the linters and the generator
 checks on `git commit`; `pytest` stays a manual step.
