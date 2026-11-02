@@ -37,10 +37,21 @@ from daimon.adapters.teams.routines_card import (
     panel_card,
 )
 from daimon.adapters.teams.runtime import TeamsRuntime
-from daimon.core.cron import InvalidScheduleError, validated_next_slot
-from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
+from daimon.core import routine_service
+from daimon.core.authz import build_subject
+from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.posted_controls.routines import apply_routine_action
+from daimon.core.routine_service import (
+    InvalidSchedule,
+    NewRoutine,
+    RoutineCaller,
+    RoutineEnv,
+    RoutineNotFound,
+    RoutineNotOwned,
+    RoutineRefused,
+    UnknownAgent,
+)
 from daimon.core.routines import can_manage_routine, panel_rows
 from daimon.core.stores import routines as store
 from daimon.core.stores.domain import RoutineRow
@@ -101,6 +112,24 @@ class RoutinesPanel:
         shown, hidden = panel_rows(rows)
         return panel_card(shown, hidden, user_id=user_id, is_admin=is_admin, notice=notice)
 
+    def _service_caller(self, actor: Actor) -> RoutineCaller:
+        return RoutineCaller(
+            tenant_id=actor.tenant_id,
+            subject=build_subject(is_admin=actor.is_admin, platform_user_id=actor.user_id),
+            platform="teams",
+            is_admin=actor.is_admin,
+        )
+
+    def _service_env(self, tenant_id: uuid.UUID) -> RoutineEnv:
+        """The panel sets no destination, so it brings no platform lookup."""
+        return RoutineEnv(
+            sessionmaker=self._runtime.sessionmaker,
+            anthropic=self._runtime.anthropic,
+            load_view=routine_service.isolation_view_loader(
+                self._runtime.sessionmaker, self._runtime.anthropic, tenant_id
+            ),
+        )
+
     async def _act(self, activity: AdaptiveCardInvokeActivity) -> AdaptiveCardInvokeResponse:
         actor = await card_actor(self._runtime, activity)
         if actor is None:
@@ -114,40 +143,52 @@ class RoutinesPanel:
             except ValueError:
                 return toast(GONE)
             tenant_id = actor.tenant_id
-            async with self._runtime.sessionmaker.begin() as session:
-                if op in ("pause", "resume"):
-
-                    async def allowed(row: RoutineRow) -> bool:
-                        return can_manage_routine(
-                            row, user_id=actor.user_id, is_admin=actor.is_admin
-                        )
-
-                    result = await apply_routine_action(
-                        session,
+            if op == "confirm_delete":
+                try:
+                    await routine_service.delete_routine(
+                        self._service_env(tenant_id),
+                        self._service_caller(actor),
                         routine_id,
-                        tenant_id=tenant_id,
-                        op=op,
-                        allowed=allowed,
-                        load=store.get_routine,
-                        pause=store.pause_routine,
-                        resume=store.resume_routine,
-                        now=lambda: datetime.now(UTC),
                     )
-                    if result != "changed":
-                        return toast(GONE if result == "gone" else NOT_OWNER)
-                else:
-                    row = await store.get_routine(session, routine_id, tenant_id=tenant_id)
-                    if row is None:
-                        return toast(GONE)
-                    if not can_manage_routine(row, user_id=actor.user_id, is_admin=actor.is_admin):
-                        return toast(NOT_OWNER)
-                    if op == "output":
-                        return replace_card(output_card(row))
-                    if op == "delete":
-                        return replace_card(confirm_delete_card(row))
-                    if op == "confirm_delete":
-                        await store.delete_routine(session, routine_id, tenant_id=tenant_id)
-                        notice = "🗑️ Routine deleted."
+                except RoutineNotOwned:
+                    return toast(NOT_OWNER)
+                except RoutineNotFound:
+                    return toast(GONE)
+                notice = "🗑️ Routine deleted."
+            else:
+                async with self._runtime.sessionmaker.begin() as session:
+                    if op in ("pause", "resume"):
+
+                        async def allowed(row: RoutineRow) -> bool:
+                            return can_manage_routine(
+                                row, user_id=actor.user_id, is_admin=actor.is_admin
+                            )
+
+                        result = await apply_routine_action(
+                            session,
+                            routine_id,
+                            tenant_id=tenant_id,
+                            op=op,
+                            allowed=allowed,
+                            load=store.get_routine,
+                            pause=store.pause_routine,
+                            resume=store.resume_routine,
+                            now=lambda: datetime.now(UTC),
+                        )
+                        if result != "changed":
+                            return toast(GONE if result == "gone" else NOT_OWNER)
+                    else:
+                        row = await store.get_routine(session, routine_id, tenant_id=tenant_id)
+                        if row is None:
+                            return toast(GONE)
+                        if not can_manage_routine(
+                            row, user_id=actor.user_id, is_admin=actor.is_admin
+                        ):
+                            return toast(NOT_OWNER)
+                        if op == "output":
+                            return replace_card(output_card(row))
+                        if op == "delete":
+                            return replace_card(confirm_delete_card(row))
         card = await self._panel(
             actor.tenant_id, user_id=actor.user_id, is_admin=actor.is_admin, notice=notice
         )
@@ -191,27 +232,21 @@ class RoutinesPanel:
         if missing:
             return f"{missing[0]} is required."
         try:
-            next_fire_at = validated_next_slot(
-                values["cron"], values["timezone"], datetime.now(UTC)
+            await routine_service.create_routine(
+                self._service_env(actor.tenant_id),
+                self._service_caller(actor),
+                NewRoutine(
+                    agent_name=values["agent"],
+                    cron_expr=values["cron"],
+                    timezone=values["timezone"],
+                    trigger_message=values["message"],
+                ),
             )
-        except InvalidScheduleError:
+        except InvalidSchedule:
             return "That schedule or time zone isn't valid.\n\nCheck both and try again."
-        agent = await find_agent_by_daimon_tag(
-            self._runtime.anthropic, tenant_id=actor.tenant_id, name=values["agent"]
-        )
-        if agent is None:
+        except UnknownAgent:
             return f"No agent named {values['agent']!r} found."
-        async with self._runtime.sessionmaker.begin() as session:
-            await store.create_routine(
-                session,
-                tenant_id=actor.tenant_id,
-                created_by_user_id=actor.user_id,
-                agent_id=agent.id,
-                agent_name=values["agent"],
-                cron_expr=values["cron"],
-                timezone_=values["timezone"],
-                trigger_message=values["message"],
-                next_fire_at=next_fire_at,
-            )
+        except RoutineRefused as refused:
+            return str(refused)
         log.info("teams.routines.created", tenant_id=str(actor.tenant_id), agent=values["agent"])
         return None

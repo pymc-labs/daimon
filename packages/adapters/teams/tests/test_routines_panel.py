@@ -12,7 +12,8 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 from daimon.adapters.teams.http_service import TeamsHttpService
-from daimon.adapters.teams.routines_panel import ADMIN_ONLY, NOT_OWNER
+from daimon.adapters.teams.routines_panel import ADMIN_ONLY, GONE, NOT_OWNER
+from daimon.core import routine_service
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import create_routine, get_routine, list_routines_for_tenant
@@ -189,3 +190,35 @@ async def test_create_rejects_a_bad_cron_then_creates_the_routine_for_the_admin(
     assert row.next_fire_at is not None
     edits = [r for r in teams_api_fake.activity_requests if r.method == "PUT"]
     assert edits and edits[-1].url.endswith("/activities/m-7"), "the panel refreshes in place"
+
+
+async def test_create_and_delete_go_through_the_routine_service(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    teams_api_fake: TeamsApiFake,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The panel holds no routine checks of its own: the service's answer is what it shows."""
+
+    async def refuse(*_args: object, **_kwargs: object) -> RoutineRow:
+        raise routine_service.RoutineRefused("service said no")
+
+    async def gone(*_args: object, **_kwargs: object) -> None:
+        raise routine_service.RoutineNotFound
+
+    monkeypatch.setattr(routine_service, "create_routine", refuse)
+    monkeypatch.setattr(routine_service, "delete_routine", gone)
+    row = await _routine(db_session_factory, owner=AAD_OBJECT_ID, message="standup")
+    form = {
+        "action": "routine_create",
+        "agent": "daimon",
+        "timezone": "UTC",
+        "message": "standup",
+        "cron": "0 9 * * *",
+    }
+    async with _running(db_session_factory, teams_api_fake, (AAD_OBJECT_ID,)) as service:
+        created = await post_activity(service, make_invoke("task/submit", {"data": form}))
+        deleted = await post_activity(service, _click("confirm_delete", row))
+
+    assert "service said no" in json.dumps(created)
+    assert deleted["value"] == GONE
+    assert await _load(db_session_factory, row) == row, "the service decides what is deleted"
