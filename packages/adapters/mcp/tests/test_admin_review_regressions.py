@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -34,6 +35,7 @@ from daimon.adapters.mcp.tools._session_access import (
     session_belongs_to_caller,
 )
 from daimon.adapters.mcp.tools.admins import change_admin
+from daimon.core import admin_authority
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.admin_authority import AUTHORITY_TTL_S, AuthorityCache, resolve_authority
 from daimon.core.config import DiscordSettings
@@ -649,3 +651,63 @@ async def test_cached_attestation_never_outlives_a_revoked_daimon_grant(
     await db_session.commit()
     assert not await authority()
     assert facts.await_count == 1
+
+
+async def _settle() -> None:
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+
+async def test_a_lookup_joined_after_the_ttl_never_answers_with_its_older_grant() -> None:
+    now = [0.0]
+    release = asyncio.Event()
+    cache = AuthorityCache(clock=lambda: now[0])
+    key = (uuid.uuid4(), "teams", "owner")
+    fetches = 0
+
+    async def slow_owner_lookup() -> admin_authority._Attestation | None:
+        nonlocal fetches
+        fetches += 1
+        await release.wait()
+        return admin_authority._Attestation(platform_admin=True)
+
+    early = asyncio.create_task(cache.get(key, slow_owner_lookup))
+    await _settle()
+    now[0] = AUTHORITY_TTL_S + 1
+    late = asyncio.create_task(cache.get(key, slow_owner_lookup))
+    await _settle()
+    release.set()
+    for waiter in (early, late):
+        with pytest.raises(LookupError):
+            await waiter
+    assert fetches == 1
+    release.clear()
+    pending = asyncio.create_task(cache.get(key, slow_owner_lookup))
+    await _settle()
+    assert fetches == 2, "a late answer must not be cached"
+    pending.cancel()
+
+
+async def test_abandoned_lookups_end_at_the_deadline_and_pending_ones_are_capped() -> None:
+    cache = AuthorityCache(ttl_s=0.05, max_in_flight=2)
+    started = 0
+
+    async def hung_lookup() -> admin_authority._Attestation | None:
+        nonlocal started
+        started += 1
+        await asyncio.Event().wait()
+        return admin_authority._Attestation(platform_admin=True)
+
+    callers = [
+        asyncio.create_task(cache.get((uuid.uuid4(), "slack", str(n)), hung_lookup))
+        for n in range(2)
+    ]
+    await _settle()
+    with pytest.raises(LookupError, match="too many pending"):
+        await cache.get((uuid.uuid4(), "slack", "overflow"), hung_lookup)
+    assert started == 2
+    for caller in callers:
+        caller.cancel()
+    await asyncio.gather(*callers, return_exceptions=True)
+    await asyncio.sleep(0.1)
+    assert not cache._in_flight, "a lookup every caller abandoned must still end"
