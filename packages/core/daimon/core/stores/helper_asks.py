@@ -96,8 +96,7 @@ async def claim_queued(
             .values(status="running")
         )
     return [
-        HelperAskRow.model_validate(ask).model_copy(update={"status": "running"})
-        for ask in claimed
+        HelperAskRow.model_validate(ask).model_copy(update={"status": "running"}) for ask in claimed
     ]
 
 
