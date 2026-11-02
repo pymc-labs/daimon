@@ -33,7 +33,7 @@ from .credentials import (
     process_credentials,
     remember_log_secret,
 )
-from .errors import HarnessError
+from .errors import HarnessError, ToolErrorResult
 from .identity import AsyncIdentity, CapturedIdentity
 from .isolation import validate_credential_sources
 from .runtime import TurnContext
@@ -360,9 +360,11 @@ async def context_tools(
 
                     async def execute() -> JsonValue:
                         result = await connection.call_tool(name, args)
+                        content = JSON.validate_python(result.model_dump(mode="json"))
                         if result.isError:
-                            raise ValueError("MCP tool returned an error")
-                        return JSON.validate_python(result.model_dump(mode="json"))
+                            # The server's error text tells the model how to recover.
+                            raise ToolErrorResult(content)
+                        return content
 
                     return json.dumps(
                         await context.tool(

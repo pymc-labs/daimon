@@ -28,7 +28,7 @@ from mux.drivers.selfhosted.wire import (
 from pydantic import JsonValue
 
 from .credentials import redact
-from .errors import HarnessError
+from .errors import HarnessError, ToolErrorResult
 from .isolation import can_switch_uid, tool_identity
 from .journal import identifier
 
@@ -179,6 +179,8 @@ class TurnContext:
             if not result_sent:
                 await result("Tool interrupted; side effects may have occurred", True)
             raise
+        except ToolErrorResult as exc:
+            return await result(exc.output, True)
         except Exception as exc:
             return await result(f"Tool failed: {type(exc).__name__}", True)
         return await result(output)
