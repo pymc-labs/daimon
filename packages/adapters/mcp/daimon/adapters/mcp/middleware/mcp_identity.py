@@ -39,7 +39,7 @@ from daimon.adapters.mcp.auth.verifier import (
 )
 from daimon.adapters.mcp.middleware.held_tools import held_tool_refusal, narrow_to_held_tools
 from daimon.adapters.mcp.middleware.tool_rule_backstop import DENIAL_REASON, tool_rule_refusal
-from daimon.core.admin_authority import resolve_authority
+from daimon.core.admin_authority import AuthorityCache, resolve_authority
 from daimon.core.anthropic_guard import AnthropicDisabled, without_anthropic
 from daimon.core.channel_backend import is_selfhosted_channel
 from daimon.core.config import Settings
@@ -64,6 +64,15 @@ HELD_DENIAL_REASON = "held_tool_not_allowed"
 
 #: Requests whose answer depends on which tools a chat agent may see.
 _TOOL_METHODS = frozenset({"tools/list", "tools/call"})
+
+#: Requests whose answer depends on the caller's admin standing.
+_AUTHORITY_METHODS = _TOOL_METHODS | {
+    "resources/list",
+    "resources/templates/list",
+    "resources/read",
+    "prompts/list",
+    "prompts/get",
+}
 
 ClaimResolver = Callable[[MiddlewareContext], Awaitable[str | None]]
 SubjectResolver = ClaimResolver
@@ -144,10 +153,12 @@ class IdentityMiddleware(Middleware):
         tool_safety: ToolSafetyPolicy | None = None,
         public_url: str | None = None,
         settings: Settings | None = None,
+        authority_cache: AuthorityCache | None = None,
     ) -> None:
         # Agent-wide `deny` rules on Daimon's own tools are enforced here; see
         # `tool_rule_backstop`. Both unset (the default) leaves that off.
         self._settings = settings
+        self._authority_cache = authority_cache or AuthorityCache()
         self._tool_safety = tool_safety
         self._public_url = public_url
         self._sessionmaker = sessionmaker
@@ -381,12 +392,14 @@ class IdentityMiddleware(Middleware):
                 self._settings is not None
                 and current.tenant_id == tenant_id
                 and platform_user_id is not None
+                and context.method in _AUTHORITY_METHODS
             ):
                 authority = await resolve_authority(
                     self._sessionmaker,
                     self._settings,
                     tenant_id=tenant_id,
                     platform_user_id=platform_user_id,
+                    cache=self._authority_cache,
                 )
                 is_admin, is_platform_admin = authority.daimon_admin, authority.platform_admin
                 verified_role_ids = authority.role_ids

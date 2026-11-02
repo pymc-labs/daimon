@@ -12,6 +12,7 @@ from daimon.adapters.mcp.tools.admins import change_admin
 from daimon.adapters.mcp.tools.channel_budgets import require_budget_write
 from daimon.adapters.mcp.tools.promo_codes import _redeem_promo_code_impl
 from daimon.core.admin_actions import DelegatedAction
+from daimon.core.admin_authority import AUTHORITY_TTL_S, AuthorityCache
 from daimon.core.config import DiscordSettings
 from daimon.core.discord_membership import DiscordRestMembershipResolver
 from daimon.core.membership import Membership
@@ -49,6 +50,7 @@ async def test_mcp_refuses_stale_admin_claim_after_revoke(
     membership = AsyncMock(return_value=Membership(is_member=True))
     monkeypatch.setattr(DiscordRestMembershipResolver, "resolve", membership)
     settings = MagicMock(discord=DiscordSettings(bot_token=SecretStr("test")))
+    now = [0.0]
     mcp = FastMCP(name="delegation test")
     mcp.add_middleware(
         IdentityMiddleware(
@@ -60,6 +62,7 @@ async def test_mcp_refuses_stale_admin_claim_after_revoke(
             internal_resolver=AsyncMock(return_value="true"),
             sessionmaker=db_session_factory,
             settings=settings,
+            authority_cache=AuthorityCache(clock=lambda: now[0]),
         )
     )
     captured: list[AuthIdentity] = []
@@ -82,11 +85,13 @@ async def test_mcp_refuses_stale_admin_claim_after_revoke(
             "neither a stale DB role claim nor internal claim elevates"
         )
         membership.return_value = Membership(is_member=True, is_admin=True)
+        now[0] += AUTHORITY_TTL_S
         await client.call_tool("inspect_authority", {})
         assert captured[-1].is_admin and captured[-1].is_platform_admin, (
             "revoking a grant and demoting its account cannot revoke live platform authority"
         )
         membership.return_value = Membership()
+        now[0] += AUTHORITY_TTL_S
         await client.call_tool("inspect_authority", {})
         assert not captured[-1].is_admin and not captured[-1].is_platform_admin
 
