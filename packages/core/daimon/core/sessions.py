@@ -650,10 +650,11 @@ async def create_session(
     handling. Only a caller whose session belongs to one verified person
     passes it: an interactive chat turn (keyed on the caller's account), a hub
     `ask`/`start_turn` (platform sign-in, owner-only handles), and explicit DM
-    routines through the normal live-DM pipeline. Headless routines, including
-    legacy destination-free rows, leave it off and mount the shared store alone,
-    with instructions that forbid recording personal facts. Agent keys and
-    operator/CLI tokens also leave it off.
+    routines through the normal live-DM pipeline. A headless routine passes it
+    only when its result reaches nobody but its owner (no destination or
+    channel), read-only like its shared mount; every other headless routine
+    mounts the shared store alone, with instructions that forbid recording
+    personal facts. Agent keys and operator/CLI tokens also leave it off.
 
     GitHub repository resources and credentials come from the agent's usable
     GitHub App grants. ``prepare_app_access`` mints installation tokens and

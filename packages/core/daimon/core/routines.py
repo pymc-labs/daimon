@@ -64,9 +64,7 @@ def mounts_personal_memory(row: RoutineRow) -> bool:
 
 def has_private_output(row: RoutineRow) -> bool:
     """DM results and destination-free runs, which mount personal memory."""
-    return row.destination_kind == "dm" or (
-        row.destination_kind is None and row.destination_id is None and row.channel_id is None
-    )
+    return row.destination_kind == "dm" or mounts_personal_memory(row)
 
 
 def can_read_routine_output(row: RoutineRow, *, user_id: str | None) -> bool:

@@ -66,7 +66,7 @@ from daimon.core.stores import (
 from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores.accounts import delete_account
 from daimon.core.stores.domain import RoutineRow
-from daimon.core.stores.identity import find_platform_principal
+from daimon.core.stores.identity import find_platform_principal, get_or_create_platform_principal
 from daimon.core.stores.routines import create_routine, get_routine, update_routine
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.tenants import set_provision_status
@@ -3344,8 +3344,8 @@ async def test_only_a_routine_answering_its_owner_alone_reads_their_personal_mem
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A destination-free routine mounts its owner's personal memory; the same
-    routine once it posts to a channel does not."""
+    """A routine with no destination and no channel mounts its owner's personal
+    memory; the same routine with a destination, or only a channel, does not."""
     now = datetime(2026, 5, 30, 12, 0, 0, tzinfo=UTC)
     tenant = await make_tenant(db_session)
     await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
@@ -3383,6 +3383,8 @@ async def test_only_a_routine_answering_its_owner_alone_reads_their_personal_mem
     posting = row.model_copy(
         update={"destination_kind": "channel", "destination_id": "chan-9", "channel_id": "chan-9"}
     )
+    # Made in a channel with no automatic delivery: the channel can still read it.
+    channel_only = row.model_copy(update={"channel_id": "chan-9"})
     with (
         unittest.mock.patch(
             "daimon.adapters.scheduler.main.run_turn", side_effect=capturing_run_turn
@@ -3392,10 +3394,17 @@ async def test_only_a_routine_answering_its_owner_alone_reads_their_personal_mem
     ):
         await fire(row)
         await fire(posting)
+        await fire(channel_only)
     await fake_client.close()
 
-    assert [call["personal_memory"] for call in calls] == [True, False]
-    assert calls[0]["account_id"] is not None, "owner credentials still use the owner account"
+    assert [call["personal_memory"] for call in calls] == [True, False, False]
+    async with db_session_factory() as session:
+        owner = await get_or_create_platform_principal(
+            session, tenant_id=tenant.id, platform=tenant.platform, external_id="123"
+        )
+    assert all(call["account_id"] == owner.account_id for call in calls), (
+        "personal memory and credentials are the routine owner's own"
+    )
 
 
 async def test_routine_fires_into_a_shared_channel_run_held_and_never_unheld(
