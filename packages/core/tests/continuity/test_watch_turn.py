@@ -845,6 +845,26 @@ async def test_dm_watch_refuses_a_thread_wake_or_another_recipient(row):
         )
 
 
+async def test_dm_watch_waits_for_its_owner_rather_than_skipping(db_session_factory):
+    from daimon.core.direct_messages import owner_dm_turn, run_dm_watch
+    from daimon.core.turn.admission import DmSource
+    from daimon.core.turn.errors import SessionBusyError
+    from daimon.testing.turn_fakes import deps_for
+
+    deps = deps_for(None, db_session_factory)
+    row = _report_row()
+    async with owner_dm_turn(deps, platform="discord", owner="555", wait=True):
+        with pytest.raises(SessionBusyError):
+            await run_dm_watch(
+                deps,
+                row,
+                owner_user_id="555",
+                prompt="seed",
+                source=DmSource(channel_id="4241", thread_id="4242"),
+                budget_channel_id="4241",
+            )
+
+
 def _send_world(monkeypatch, *, delivery, row, origin_place, session_id="sess_new", **firing):
     """Patch the stores `require_watch_send` reads, around one watch and its firing."""
     from contextlib import asynccontextmanager

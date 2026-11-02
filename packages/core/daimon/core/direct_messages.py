@@ -67,7 +67,7 @@ from daimon.core.stores.thread_sessions import (
 from daimon.core.turn.admission import Admission, AdmissionGrant, DmSource, admit
 from daimon.core.turn.ceiling import TURN_CEILING_S, turn_deadline
 from daimon.core.turn.deps import TurnDeps
-from daimon.core.turn.errors import AdmissionDenied, DmSourceSealedError
+from daimon.core.turn.errors import AdmissionDenied, DmSourceSealedError, SessionBusyError
 from daimon.core.turn.io import turn_io
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.prepare import PreparedTurn, bind_session
@@ -988,20 +988,29 @@ async def run_dm_watch(
     routine, serialised per owner the same way. The turn reads and reports only
     (`watch_turn.watch_posture`), never routine posture. The fresh session is
     recorded on the firing before anything is sent, and each send checks it.
-    `source` is the place the watch was made; nothing is posted here.
+    `source` is the place the watch was made; nothing is posted here. While the
+    owner has a DM turn running, which may be waiting on an approval card, it
+    raises `SessionBusyError` so the report is offered again later.
     """
     if row.reason != "watch_report" or row.requester_external_user_id != owner_user_id:
         raise DirectMessageAccessRevoked("invoker_not_allowed", message="Watch owner changed.")
-    return await _run_dm_fire(
-        deps,
-        tenant_id=row.tenant_id,
-        owner_user_id=owner_user_id,
-        agent_name=row.target_name,
-        prompt=prompt,
-        source=source,
-        budget_channel_id=budget_channel_id,
-        watch_row=row,
-    )
+    try:
+        return await _run_dm_fire(
+            deps,
+            tenant_id=row.tenant_id,
+            owner_user_id=owner_user_id,
+            agent_name=row.target_name,
+            prompt=prompt,
+            source=source,
+            budget_channel_id=budget_channel_id,
+            watch_row=row,
+        )
+    except DirectMessageAccessRevoked as error:
+        if error.reason != "owner_busy":
+            raise
+        raise SessionBusyError(
+            pending_reasons=("watch_report",), retry_after=datetime.now(UTC)
+        ) from error
 
 
 async def _run_dm_fire(
