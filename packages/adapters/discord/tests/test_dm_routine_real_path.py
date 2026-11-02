@@ -1691,7 +1691,7 @@ async def test_stale_public_edit_cannot_reclassify_concurrent_private_fire(
 @pytest.mark.parametrize("origin", ["cleared_dm", "legacy"])
 @pytest.mark.parametrize("change", ["agent", "retarget", "aba"])
 @pytest.mark.parametrize("stage", ["running", "pending", "error"])
-async def test_destination_free_fire_has_no_personal_memory_or_reclassified_result(
+async def test_destination_free_fire_reads_owner_memory_read_only_and_drops_reclassified_result(
     harness: Harness, origin: str, change: str, stage: str
 ):
     from daimon.core.stores import routines
@@ -1755,14 +1755,14 @@ async def test_destination_free_fire_has_no_personal_memory_or_reclassified_resu
 
     async def headless(upstream: Upstream, sid: str) -> AsyncIterator[bytes]:
         await upstream.wait(lambda: bool(upstream.events(sid, "user.message")))
-        assert personal not in harness.memory_stores(sid)
-        assert len(harness.memory_stores(sid)) == 1
-        assert set(harness.memory_stores(sid).values()) == {"read_only"}
+        mounts = harness.memory_stores(sid)
+        assert mounts.get(personal) == "read_only", "the owner's memory, read-only"
+        assert len(mounts) == 2 and set(mounts.values()) == {"read_only"}
         entered.set()
         await release.wait()
         if stage == "error":
             raise RuntimeError("old producer raw diagnostic")
-        async for chunk in answer("shared-only result")(upstream, sid):
+        async for chunk in answer("owner-only result")(upstream, sid):
             yield chunk
 
     harness.upstream.scripts = [headless]
@@ -1772,7 +1772,7 @@ async def test_destination_free_fire_has_no_personal_memory_or_reclassified_resu
         release.set()
         await task
         completed = await harness.reload(row)
-        assert completed is not None and completed.last_result_tail == "shared-only result"
+        assert completed is not None and completed.last_result_tail == "owner-only result"
     async with harness.factory.begin() as db:
         await _reclassify(db, row, change, clear_destination=True)
     release.set()

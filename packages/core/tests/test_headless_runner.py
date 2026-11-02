@@ -1617,12 +1617,15 @@ async def test_headless_result_callback_only_receives_completed_turns(reason):
     assert seen == ([state] if reason == "completed" else [])
 
 
-async def test_headless_routines_never_mount_owner_memory(
+@pytest.mark.parametrize("answers_only_owner", [True, False])
+async def test_a_routines_owner_memory_is_mounted_read_only_only_when_asked(
+    answers_only_owner: bool,
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     run_turn: RunTurn,
 ) -> None:
-    """The headless API cannot request personal memory, even for a known owner."""
+    """A routine that posts where others read runs on the shared store alone; one
+    whose result reaches only its owner also reads the owner's store, read-only."""
     from daimon.core.stores.agent_memory_stores import (
         insert_memory_store,
         insert_personal_memory_store,
@@ -1655,13 +1658,17 @@ async def test_headless_routines_never_mount_owner_memory(
         session_factory=db_session_factory,
         origin="routine",
         tool_safety=OPEN_TOOL_SAFETY,
+        personal_memory=answers_only_owner,
     )
     mounts = {
         r["memory_store_id"]: r["access"]
         for r in bodies[0]["resources"]
         if r["type"] == "memory_store"
     }
-    assert mounts == {"memstore_shared": "read_only"}
+    expected = {"memstore_shared": "read_only"}
+    if answers_only_owner:
+        expected["memstore_owner"] = "read_only"
+    assert mounts == expected
 
 
 async def test_a_held_routine_fire_reads_only_its_channels_store_read_only(
@@ -1715,6 +1722,7 @@ async def test_a_held_routine_fire_reads_only_its_channels_store_read_only(
         session_factory=db_session_factory,
         origin="routine",
         hold=TurnHold("slack", "C-SYN-1", client=False),
+        personal_memory=True,
     )
 
     mounts = {

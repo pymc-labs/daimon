@@ -181,6 +181,7 @@ async def run_turn(
     platform: str | None = None,
     hold: TurnHold | None = None,
     turn_path: TurnPath | None = None,
+    personal_memory: bool = False,
 ) -> str:
     observation = current_outcome.get()
     owns_observation = observation is None
@@ -216,6 +217,7 @@ async def run_turn(
             platform=platform,
             hold=hold,
             turn_path=turn_path,
+            personal_memory=personal_memory,
         )
     observation.agent_id = agent_id
     observation.account_id = account_id
@@ -251,6 +253,7 @@ async def run_turn(
                 platform=platform,
                 hold=hold,
                 turn_path=turn_path,
+                personal_memory=personal_memory,
             )
     except BaseException as exc:
         # The enclosing scheduler owns its deadline and classifies wait_for cancellation.
@@ -314,6 +317,7 @@ async def run_turn_impl(
     platform: str | None = None,
     hold: TurnHold | None = None,
     turn_path: TurnPath | None = None,
+    personal_memory: bool = False,
 ) -> str:
     """Run a single non-interactive turn end-to-end and return its complete final reply.
 
@@ -389,7 +393,10 @@ async def run_turn_impl(
     ``origin_place`` stamps where the routine fires (`routine_origin`), so its
     transcript reads only where a turn there would, and only by its owner.
 
-    Headless turns mount shared memory only, never personal memory.
+    ``personal_memory`` also mounts ``account_id``'s personal store, with the
+    same (read-only, for a routine) access as the shared one. The scheduler
+    sets it only for a routine whose result reaches nobody but its owner,
+    decided again at every fire (`routines.mounts_personal_memory`).
 
     ``sandbox`` is the routine's admin opt-in to built-in sandbox tools. They
     are on only when this run's own session uses exactly the agent version
@@ -506,6 +513,7 @@ async def run_turn_impl(
             requester_is_headless=True,
             billing_exempt=billing_exempt,
             memory_read_only=origin == "routine",
+            personal_memory=personal_memory,
             # A held fire mounts only channel-local memory.
             hold=hold,
             memory_hold=hold,

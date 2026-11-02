@@ -66,7 +66,7 @@ from daimon.core.stores import (
 from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores.accounts import delete_account
 from daimon.core.stores.domain import RoutineRow
-from daimon.core.stores.identity import find_platform_principal
+from daimon.core.stores.identity import find_platform_principal, get_or_create_platform_principal
 from daimon.core.stores.routines import create_routine, get_routine, update_routine
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.tenants import set_provision_status
@@ -3339,12 +3339,13 @@ async def test_once_usage_pass_honours_the_switch(enabled: bool, expected: int) 
     assert calls == expected, f"usage pass ran {calls} times with enabled={enabled}"
 
 
-async def test_channel_and_destination_free_routines_have_no_personal_memory_option(
+async def test_only_a_routine_answering_its_owner_alone_reads_their_personal_memory(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Headless routine calls have no personal-memory capability."""
+    """A routine with no destination and no channel mounts its owner's personal
+    memory; the same routine with a destination, or only a channel, does not."""
     now = datetime(2026, 5, 30, 12, 0, 0, tzinfo=UTC)
     tenant = await make_tenant(db_session)
     await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
@@ -3382,6 +3383,8 @@ async def test_channel_and_destination_free_routines_have_no_personal_memory_opt
     posting = row.model_copy(
         update={"destination_kind": "channel", "destination_id": "chan-9", "channel_id": "chan-9"}
     )
+    # Made in a channel with no automatic delivery: the channel can still read it.
+    channel_only = row.model_copy(update={"channel_id": "chan-9"})
     with (
         unittest.mock.patch(
             "daimon.adapters.scheduler.main.run_turn", side_effect=capturing_run_turn
@@ -3391,10 +3394,17 @@ async def test_channel_and_destination_free_routines_have_no_personal_memory_opt
     ):
         await fire(row)
         await fire(posting)
+        await fire(channel_only)
     await fake_client.close()
 
-    assert len(calls) == 2 and all("personal_memory" not in call for call in calls)
-    assert calls[0]["account_id"] is not None, "owner credentials still use the owner account"
+    assert [call["personal_memory"] for call in calls] == [True, False, False]
+    async with db_session_factory() as session:
+        owner = await get_or_create_platform_principal(
+            session, tenant_id=tenant.id, platform=tenant.platform, external_id="123"
+        )
+    assert all(call["account_id"] == owner.account_id for call in calls), (
+        "personal memory and credentials are the routine owner's own"
+    )
 
 
 async def test_routine_fires_into_a_shared_channel_run_held_and_never_unheld(
@@ -3484,7 +3494,7 @@ async def test_routine_fires_into_a_shared_channel_run_held_and_never_unheld(
         None,
         None,
     ], "the unplaceable thread never reached run_turn"
-    assert "personal_memory" not in calls[0]
+    assert calls[0]["personal_memory"] is False
     async with db_session_factory() as session:
         refused = await get_routine(session, row.id, tenant_id=tenant.id)
     assert refused is not None and refused.last_error == "routine_destination_parent_unknown"
