@@ -1753,8 +1753,10 @@ async def test_hand_off_then_switch_moves_the_copy_with_its_summary_too(
         tenant_id=tenant.id,
         role=Role.ADMIN,
         is_admin=True,
+        is_platform_admin=True,
         platform="discord",
         platform_user_id="42",
+        chat_session_id="test-session",
     )
     async with turn_origin(
         committing_sessionmaker,
@@ -1768,6 +1770,7 @@ async def test_hand_off_then_switch_moves_the_copy_with_its_summary_too(
         role=Role.ADMIN,
         sender_foreign=False,
         shared_channel=False,
+        chat_session_id="test-session",
     ) as origin:
         result = await _hand_off_task_impl(
             runtime,
@@ -1861,8 +1864,10 @@ async def test_a_move_is_refused_when_the_summary_may_not_reach_the_destination(
         tenant_id=tenant.id,
         role=Role.ADMIN,
         is_admin=True,
+        is_platform_admin=True,
         platform="discord",
         platform_user_id="42",
+        chat_session_id="test-session",
     )
     async with turn_origin(
         committing_sessionmaker,
@@ -1876,6 +1881,7 @@ async def test_a_move_is_refused_when_the_summary_may_not_reach_the_destination(
         role=Role.ADMIN,
         sender_foreign=False,
         shared_channel=False,
+        chat_session_id="test-session",
     ) as origin:
         match = "can't read this conversation" if why == "sealed_elsewhere" else "shared on"
         with pytest.raises(ToolError, match=match):
@@ -1958,8 +1964,10 @@ async def test_a_same_provider_hand_off_says_when_its_summary_cant_go(
         tenant_id=tenant.id,
         role=Role.ADMIN,
         is_admin=True,
+        is_platform_admin=True,
         platform="discord",
         platform_user_id="42",
+        chat_session_id="test-session",
     )
     async with turn_origin(
         committing_sessionmaker,
@@ -1973,6 +1981,7 @@ async def test_a_same_provider_hand_off_says_when_its_summary_cant_go(
         role=Role.ADMIN,
         sender_foreign=False,
         shared_channel=False,
+        chat_session_id="test-session",
     ) as origin:
         result = await _hand_off_task_impl(
             runtime,

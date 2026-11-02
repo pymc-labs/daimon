@@ -129,12 +129,16 @@ async def _discovered(
 
 
 async def test_the_session_a_key_starts_runs_on_the_owners_member_credential(
-    sessionmaker: async_sessionmaker[AsyncSession],
+    sessionmaker: async_sessionmaker[AsyncSession], platform_admin_edge: None
 ) -> None:
     """The in-session credential is the owner's chat credential: no admin-only tool."""
     _token, tenant_id, owner_id, agent_id = await _owner_key(sessionmaker)
     async with sessionmaker.begin() as s:
-        admin = await make_account(s, tenant=await get_tenant(s, tenant_id))
+        tenant = await get_tenant(s, tenant_id)
+        admin = await make_account(s, tenant=tenant)
+        await make_platform_principal(
+            s, platform="discord", external_id="u-admin", tenant=tenant, account=admin
+        )
         await set_role(s, admin.id, Role.ADMIN)
 
     as_owner = await _discovered(sessionmaker, account_id=owner_id, agent_id=agent_id)

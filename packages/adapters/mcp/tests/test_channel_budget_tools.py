@@ -376,13 +376,19 @@ async def test_a_web_chat_turn_is_attributed_to_its_place_and_agent(
         platform="web",
     )
     for platform in ("web", "discord"):
-        auth = _auth(tenant, account_id, admin=False, platform=platform)
+        auth = dataclasses.replace(
+            _auth(tenant, account_id, admin=False, platform=platform),
+            chat_session_id="test-session",
+        )
         spend = await origin_spend(committing_sessionmaker, auth, web_origin)
         assert (spend.channel_id, spend.agent_id) == ("web", "agent_x"), (
             f"a web turn run as a {platform} principal is attributed to the web place and agent"
         )
     stranger, stranger_account = await _seed(committing_sessionmaker)
-    outsider = _auth(stranger, stranger_account, admin=False, platform="web")
+    outsider = dataclasses.replace(
+        _auth(stranger, stranger_account, admin=False, platform="web"),
+        chat_session_id="test-session",
+    )
     assert (await origin_spend(committing_sessionmaker, outsider, web_origin)).channel_id is None, (
         "another account's web origin is not attributed"
     )

@@ -650,6 +650,7 @@ async def _card(chat: Chat, name: str, preview, **extra):
         tenant_id=chat.auth.tenant_id,
         account_id=chat.auth.account_id,
         current_admin=AsyncMock(return_value=chat.auth.is_admin),
+        current_platform_admin=AsyncMock(return_value=False),
     )
     return await prepare(
         prompt_for_tool_call(
@@ -913,8 +914,11 @@ async def _message(chat: Chat, key: str):
         channel_id="fresh-channel",
         thread_id="thread",
         now=datetime.now(UTC),
+        origin="chat",
     )
-    controls = render_turn_origin(chat.origin, **backend_facts(admission))
+    controls = render_turn_origin(
+        chat.origin, **backend_facts(admission), effective_is_admin=admission.is_admin
+    )
     prepared = await bind_session_impl(
         deps,
         admission,
@@ -1181,6 +1185,7 @@ async def test_m03_a_card_confirmed_mid_message_keeps_its_move_when_the_follow_f
             channel_id="fresh-channel",
             thread_id="thread",
             now=datetime.now(UTC),
+            origin="chat",
         )
     assert confirmed, "the card was confirmed during the message"
     async with sm() as session:

@@ -448,6 +448,7 @@ async def test_a_billed_transcript_is_held_to_the_persons_allowance_on_the_turns
             shared_channel=False,
             expires_at=now + timedelta(minutes=10),
             now=now,
+            chat_session_id="test-session",
         )
     auth = AuthIdentity(
         account_id=account.id,
@@ -455,6 +456,7 @@ async def test_a_billed_transcript_is_held_to_the_persons_allowance_on_the_turns
         role=Role.USER,
         platform="discord",
         platform_user_id="u1",
+        chat_session_id="test-session",
     )
     gemini_calls: list[httpx.Request] = []
 
