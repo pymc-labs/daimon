@@ -26,10 +26,9 @@ DEFAULT_FRAGMENTS: dict[TurnContext, str] = {
         "and state before claiming continuity; do not assume running processes survived."
     ),
     "helper": (
-        "Another agent asked you for help during its turn for a person. Your last message "
-        "goes back to that agent, not to the person, and nothing you write is posted. Do "
-        "not ask questions: do what you can and say what is missing. Do not hand off, set "
-        "timers or post; tell the agent instead."
+        "Another agent asked you for help while it answers a person. Your last message "
+        "is your reply to that agent; the person does not see it. Do not ask questions: "
+        "do what you can and say what is missing."
     ),
 }
 FRAGMENT_MARKER = "\n\nDaimon context fragment configuration (selected per turn):\n"

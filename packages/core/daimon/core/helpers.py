@@ -59,6 +59,7 @@ _REFUSALS = {
     "runs_elsewhere": "it is kept to other channels",
     "own_agents_only": "this channel only uses its own agents",
     "client_requester": "it can't run for someone from another organisation here",
+    "provider_setup_pending": "its model provider is still being set up, so ask again shortly",
 }
 
 
@@ -303,5 +304,8 @@ async def serve_helpers(
         yield
     finally:
         serving.cancel()
-        await asyncio.gather(serving, return_exceptions=True)
+        [ended] = await asyncio.gather(serving, return_exceptions=True)
+        if isinstance(ended, Exception):
+            # Asks left queued are stopped below; the asking agent hears that.
+            log.warning("helpers.serve_failed", err_type=type(ended).__name__, exc_info=ended)
         await asyncio.shield(desk.stop())
