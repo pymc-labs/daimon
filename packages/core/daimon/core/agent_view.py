@@ -874,11 +874,12 @@ async def _helper_docs(
 
     Names come from ``agents`` where they hold the helper; only the rest is retrieved.
     """
-    names = {agent.id: agent.name for agent in agents}
-    for helper_id in sorted({h for helpers in ids.values() for h in helpers} - names.keys()):
+    known = {agent.id: agent for agent in agents}
+    names = {agent.id: _avatar_name(agent) for agent in agents if agent.archived_at is None}
+    for helper_id in sorted({h for helpers in ids.values() for h in helpers} - known.keys()):
         helper = await fetch_tenant_agent(deps, tenant_id=tenant_id, ma_agent_id=helper_id)
         if helper is not None:
-            names[helper_id] = helper.name
+            names[helper_id] = _avatar_name(helper)
     return {
         agent_id: [HelperDoc(id=h, name=names[h]) for h in helpers if h in names]
         for agent_id, helpers in ids.items()
