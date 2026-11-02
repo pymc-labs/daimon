@@ -377,7 +377,8 @@ Prepared legacy replay and interruption pass the caller's admitted scope to the
 private transport while preserving SDK traffic and recovery behavior.
 
 The Anthropic legacy turn transport bounds idempotent reads (status, replay and
-idle history) to 60 seconds including retries and pagination. Its read client
+idle history) to 60 seconds including retries and pagination; a replay may be
+given a longer budget by its caller. Its read client
 uses a 30-second request timeout and at most two retries. Turn mutations (input,
 confirmations, interrupt and archive) retain the original client timeout and
 always disable automatic SDK retries, including attended turns. An unknown

@@ -76,7 +76,7 @@ from anthropic.types.beta.sessions import (
 from daimon.core.config import load_turn_settings
 from daimon.core.context_provider import ContextHook, ContextInput
 from daimon.core.errors import TurnError
-from daimon.core.ma import SessionEvent, terminal_stop_reason
+from daimon.core.ma import REPLAY_TIMEOUT_S, SessionEvent, terminal_stop_reason
 from daimon.core.mux_backend import TurnBackendRequest
 from daimon.core.tool_safety import ToolCall
 from daimon.core.turn.approvals import (
@@ -85,7 +85,7 @@ from daimon.core.turn.approvals import (
     pending_confirmation_ids,
     tool_calls_for,
 )
-from daimon.core.turn.ceiling import ceiling_error, remaining_s
+from daimon.core.turn.ceiling import ceiling_error, current_turn_deadline, remaining_s
 from daimon.core.turn.degraded import degraded_failure_message
 from daimon.core.turn.io import (
     LegacyTurnIO,
@@ -608,6 +608,18 @@ async def _watch_silence(
 # clients retry reads eight times) could otherwise hold the turn until its
 # ceiling on a single question; a read that runs out is a transient failure.
 _STATUS_READ_TIMEOUT_S = 30.0
+
+# A replay walks the session's whole log, so a long-lived thread can outgrow the
+# default budget. Inside a turn it may use what the ceiling leaves, less this
+# margin, so a replay that runs out ends the turn as itself, not as the ceiling.
+_REPLAY_CEILING_MARGIN_S = 30.0
+
+
+def _replay_timeout_s(now: datetime) -> float:
+    deadline = current_turn_deadline.get()
+    if deadline is None:
+        return REPLAY_TIMEOUT_S
+    return max(REPLAY_TIMEOUT_S, remaining_s(deadline, now=now) - _REPLAY_CEILING_MARGIN_S)
 
 
 _DROPS_WITHOUT_PROGRESS = 2
@@ -1373,6 +1385,7 @@ async def _pump(
                                 delivered_provider_event_ids=delivered_provider_event_ids,
                                 billed_event_ids=billed_event_ids,
                                 stream_read_timeout_s=stream_read_timeout_s,
+                                now=now,
                                 silence=silence,
                             )
                     break  # a terminal event was found — exit the outer loop too
@@ -1408,10 +1421,13 @@ async def _pump(
                         status=status,
                     )
                     replayed = (
-                        await io.replay()
+                        await io.replay(timeout_s=_replay_timeout_s(now()))
                         if getattr(io, "replay_may_send", False)
                         else await _read_after_quiet(
-                            io.replay, name="replay", session_id=session_id, cancel=cancel
+                            lambda: io.replay(timeout_s=_replay_timeout_s(now())),
+                            name="replay",
+                            session_id=session_id,
+                            cancel=cancel,
                         )
                     )
                     current_turn_events = _events_since_last_turn_boundary(
@@ -1899,6 +1915,7 @@ async def _consume_with_reconnect(
     delivered_provider_event_ids: set[str],
     billed_event_ids: set[str],
     stream_read_timeout_s: float,
+    now: Callable[[], datetime],
     silence: _Silence | None = None,
 ) -> None:
     """One attempt at the consume leg. On retry, replay + re-fold first."""
@@ -1937,11 +1954,14 @@ async def _consume_with_reconnect(
             )
             await lifecycle.on_reconnect(reconnect_reason)
             if getattr(io, "replay_may_send", False):
-                replayed = await io.replay()
+                replayed = await io.replay(timeout_s=_replay_timeout_s(now()))
             else:
                 try:
                     replayed = await _read_after_quiet(
-                        io.replay, name="replay", session_id=session_id, cancel=cancel
+                        lambda: io.replay(timeout_s=_replay_timeout_s(now())),
+                        name="replay",
+                        session_id=session_id,
+                        cancel=cancel,
                     )
                 except _InterruptInConsume:
                     # Same as a Stop seen right after the replay, below.

@@ -38,6 +38,23 @@ async def test_idempotent_reads_cancel_a_hung_request(
     assert requests[0].extensions["timeout"]["read"] == 30.0
 
 
+async def test_replay_may_take_longer_than_the_default_read_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(transport, "READ_TIMEOUT_S", 0.05)
+
+    async def slow_page(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0.1)
+        return httpx.Response(200, json={"data": [], "next_page": None})
+
+    async with AsyncAnthropic(
+        api_key="test",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(slow_page)),
+    ) as client:
+        events = await LegacyTurnTransport(client, "sess_1").replay(timeout_s=5.0)
+    assert events == []
+
+
 async def test_claimed_mutations_keep_zero_retries_and_original_timeout() -> None:
     attempts: list[httpx.Request] = []
 
