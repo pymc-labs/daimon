@@ -8,13 +8,17 @@ monthly allowance is added when one for every agent exists. A person's override 
 held to the highest monthly `everyone` allowance that existed before, since a person's
 own allowance replaces the group's.
 
-The old cap counted raw cost; an allowance counts billed dollars, so a markup above one
-makes the converted limit stricter. The `tenant_user_caps` rows stay as a record.
+The old cap counted raw provider cost; an allowance counts billed dollars (raw cost times
+the deployment markup, `DAIMON_BILLING__MARKUP`). Each cap is multiplied by that markup, to
+the cent, so the effective limit is unchanged. The `tenant_user_caps` rows stay as a record.
 
 downgrade: unsupported
 """
 
 from __future__ import annotations
+
+import os
+from decimal import Decimal
 
 import sqlalchemy as sa
 from alembic import op
@@ -25,11 +29,18 @@ branch_labels: str | None = None
 depends_on: str | None = None
 
 _EVERYONE = "everyone"
+_CENT = Decimal("0.01")
+
+
+def _markup() -> Decimal:
+    raw = os.environ.get("DAIMON_BILLING__MARKUP", "").strip()
+    return Decimal(raw) if raw else Decimal("1.0")
 
 
 def upgrade() -> None:
     op.execute("SET LOCAL lock_timeout = '5s'")
     conn = op.get_bind()
+    markup = _markup()
     # Overrides first, so a person's ceiling reads only allowances that predate the caps.
     caps = conn.execute(
         sa.text(
@@ -39,7 +50,7 @@ def upgrade() -> None:
     ).all()
     for tenant_id, user_id, cap_usd, set_at in caps:
         kind, subject = ("group", _EVERYONE) if user_id is None else ("person", user_id)
-        amount = cap_usd
+        amount = (Decimal(cap_usd) * markup).quantize(_CENT)
         if user_id is not None:
             ceiling = conn.execute(
                 sa.text(

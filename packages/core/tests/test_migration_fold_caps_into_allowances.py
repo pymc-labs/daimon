@@ -6,6 +6,7 @@ from decimal import Decimal
 from pathlib import Path
 from types import ModuleType
 
+import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from daimon.testing.factories import make_tenant
@@ -91,3 +92,23 @@ async def test_caps_become_monthly_allowances_and_the_stricter_limit_wins(
         ("person", "u1", Decimal("8.00"), "month"),
     ], "a person's override is held to the group allowance it would otherwise replace"
     assert await _rows(db_session, bystander) == [("group", "everyone", Decimal("99.00"), "month")]
+
+
+async def test_caps_are_converted_by_the_markup_so_the_effective_limit_holds(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DAIMON_BILLING__MARKUP", "1.25")
+    tenant = (await make_tenant(db_session)).id
+    await _cap(db_session, tenant, None, "10.00")
+    await _cap(db_session, tenant, "u1", "40.00")
+
+    def upgrade(sync_conn: Connection) -> None:
+        with Operations.context(MigrationContext.configure(sync_conn)):
+            _migration().upgrade()
+
+    await (await db_session.connection()).run_sync(upgrade)
+
+    assert await _rows(db_session, tenant) == [
+        ("group", "everyone", Decimal("12.50"), "month"),
+        ("person", "u1", Decimal("50.00"), "month"),
+    ]
