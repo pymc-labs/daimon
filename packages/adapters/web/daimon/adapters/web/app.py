@@ -5,6 +5,7 @@ from __future__ import annotations
 import anthropic
 from daimon.adapters.web.admin import admin_router
 from daimon.adapters.web.agent_keys import agent_keys_router
+from daimon.adapters.web.agent_knowledge import agent_knowledge_router
 from daimon.adapters.web.agent_library import agent_library_router
 from daimon.adapters.web.agent_lifecycle import agent_lifecycle_router
 from daimon.adapters.web.agent_people import agent_people_router
@@ -102,6 +103,7 @@ def create_app(runtime: WebRuntime) -> FastAPI:
     app.include_router(profile_router(runtime))
     app.include_router(nodes_router(runtime))
     app.include_router(agent_keys_router(runtime))
+    app.include_router(agent_knowledge_router(runtime))
     app.include_router(agent_people_router(runtime))
     app.include_router(agent_lifecycle_router(runtime))
     app.include_router(agent_library_router(runtime))
