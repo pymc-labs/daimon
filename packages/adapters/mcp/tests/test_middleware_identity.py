@@ -1426,6 +1426,7 @@ async def test_selfhosted_mcp_dispatch_blocks_legacy_helpers_and_preserves_neutr
             http.get(  # pyright: ignore[reportUnknownMemberType]
                 re.compile(r"https://slack\.com/api/users\.info.*"),
                 payload={"ok": True, "user": {"id": "U_CALLER", "is_restricted": False}},
+                repeat=True,  # the access check and the attribution name both look it up
             )
             http.post(  # pyright: ignore[reportUnknownMemberType]
                 "https://slack.com/api/chat.postMessage",
@@ -1444,7 +1445,12 @@ async def test_selfhosted_mcp_dispatch_blocks_legacy_helpers_and_preserves_neutr
                 re.compile(r"https://slack\.com/api/files\.completeUploadExternal.*"),
                 payload={"ok": True, "files": [{"id": "F_REPORT"}]},
             )
-            arguments = {"channel_id": "C1", "content": "requested report", "file_handles": handles}
+            arguments = {
+                "channel_id": "C1",
+                "content": "requested report",
+                "file_handles": handles,
+                "plan": {"threads": 0, "places": 1, "people": 0},
+            }
             if rule == "denied":
                 with pytest.raises(ToolError, match="only in certain channels"):
                     await client.call_tool("send_message", arguments)

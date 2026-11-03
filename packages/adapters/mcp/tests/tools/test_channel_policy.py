@@ -291,7 +291,10 @@ async def test_discord_send_into_a_protected_channel_is_refused_through_the_disp
     patch_discord_http(monkeypatch, _discord_handler([]))
 
     payload = await _call(
-        _app(sessionmaker), token, "send_message", {"channel_id": _OTHER, "content": "hi"}
+        _app(sessionmaker),
+        token,
+        "send_message",
+        {"channel_id": _OTHER, "content": "hi", "plan": {"threads": 0, "places": 1, "people": 0}},
     )
 
     assert payload.get("isError") and "writers to none" in _text(payload), f"got {payload!r}"
@@ -359,7 +362,14 @@ async def test_slack_send_into_a_protected_channel_is_refused_through_the_dispat
     with aioresponses(passthrough=["http://127.0.0.1", "http://testserver"]) as m:
         _mock_public_channel(m, "C_CLIENT")
         payload = await _call(
-            _app(sessionmaker), token, "send_message", {"channel_id": "C_CLIENT", "content": "hi"}
+            _app(sessionmaker),
+            token,
+            "send_message",
+            {
+                "channel_id": "C_CLIENT",
+                "content": "hi",
+                "plan": {"threads": 0, "places": 1, "people": 0},
+            },
         )
         assert _POST_KEY not in m.requests, "a protected channel must receive no post"
     assert payload.get("isError") and "writers to none" in _text(payload), f"got {payload!r}"

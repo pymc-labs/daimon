@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.core.outbound.mentions import ping_users
 from fastmcp.exceptions import ToolError
 
 _application_ids: dict[int, int] = {}
@@ -20,7 +21,17 @@ _application_ids: dict[int, int] = {}
 @asynccontextmanager
 async def rest_client(token: str) -> AsyncIterator[discord.Client]:
     """Per-call REST-only ``discord.Client``. Closes its HTTP session on exit."""
-    client = discord.Client(intents=discord.Intents.default())
+    # Never everyone, here or a role; only the people the rendered post tags.
+    users = ping_users.get()
+    client = discord.Client(
+        intents=discord.Intents.default(),
+        allowed_mentions=discord.AllowedMentions(
+            everyone=False,
+            roles=False,
+            users=True if users is None else [discord.Object(int(u)) for u in users],
+            replied_user=False,
+        ),
+    )
     me = await client.http.static_login(token)
     # Client.login would set this; REST-only mode must do it by hand so tools
     # can tell daimon's own threads apart (rename_thread's ownership check).
