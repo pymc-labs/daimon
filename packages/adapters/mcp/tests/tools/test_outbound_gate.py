@@ -24,9 +24,11 @@ from daimon.core.outbound.mentions import ping_users
 from daimon.core.outbound.reach import NO_CARD, SHORT_CAPTION, TOO_LONG, ReachPlan, card_title
 from daimon.core.stores.domain import Role, TurnOriginRow
 from daimon.core.stores.reach_tallies import lock_tally
+from daimon.core.stores.tag_opt_outs import set_opt_out
+from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.turn_origins import bind_origin_session, create_origin
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -155,15 +157,19 @@ async def test_prepare_posts_when_long_or_bare_media_in_own_conversation_then_po
 
 @pytest.mark.parametrize("platform", ("discord", "slack"))
 async def test_prepare_posts_when_person_opted_out_then_untagged_and_uncounted(
-    sessionmaker, platform, monkeypatch
+    sessionmaker, platform
 ):
+    """The stored choice reaches the gate through the person's principal, not a stub."""
     runtime, auth = await _setup(sessionmaker, platform)
     opted = "U2" if platform == "slack" else "2"
-
-    async def opt_outs(*_args: object, **_kwargs: object) -> frozenset[str]:
-        return frozenset({opted})
-
-    monkeypatch.setattr(_outbound, "tag_opt_outs", opt_outs)
+    async with sessionmaker.begin() as session:
+        tenant = await get_tenant(session, auth.tenant_id)
+        assert tenant is not None, "the tenant _setup made"
+        account = await make_account(session, tenant=tenant)
+        await make_platform_principal(
+            session, platform=platform, external_id=opted, tenant=tenant, account=account
+        )
+        await set_opt_out(session, account_id=account.id, tenant_id=auth.tenant_id)
     text = " ".join(TAG[platform].format(n) for n in range(1, 7))
     [post] = await prepare_posts(
         runtime,
