@@ -20,7 +20,7 @@ import { useEnvironments, useEnvironmentWrites } from "./api"
 import { LIBRARY_TABS } from "./tabs"
 
 const count = (e: EnvironmentDoc) => Object.values(e.packages).reduce((n, p) => n + (p?.length ?? 0), 0)
-const lines = (text: string) => [...new Set(text.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean))]
+const lines = (text: string) => [...new Set(text.split("\n").map((x) => x.trim()).filter(Boolean))]
 const NETWORK = { limited: "Limited", unrestricted: "Open" }
 
 export function Environments() {

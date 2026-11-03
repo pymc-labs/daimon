@@ -32,13 +32,23 @@ describe("EnvironmentForm", () => {
       .mockResolvedValueOnce(env as never)
     show(env)
     await userEvent.clear(screen.getByLabelText("pip"))
-    await userEvent.type(screen.getByLabelText("pip"), "numpy pandas")
+    await userEvent.type(screen.getByLabelText("pip"), "numpy{Enter}pandas")
     await userEvent.click(screen.getByRole("button", { name: "Save" }))
     await waitFor(() => expect(api.put).toHaveBeenCalledTimes(1))
     expect(vi.mocked(api.put).mock.calls[0]![1]).toMatchObject({ spec: { packages: { pip: ["numpy", "pandas"] } }, confirm_open_network: false })
     await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Continue" }))
     await waitFor(() => expect(api.put).toHaveBeenCalledTimes(2))
     expect(vi.mocked(api.put).mock.calls[1]![1]).toMatchObject({ confirm_open_network: true })
+  })
+
+  it("keeps a package spec with a comma as one entry", async () => {
+    vi.mocked(api.put).mockResolvedValue(env as never)
+    show(env)
+    await userEvent.clear(screen.getByLabelText("pip"))
+    await userEvent.type(screen.getByLabelText("pip"), "numpy>=1.26,<2{Enter}{Enter}pandas")
+    await userEvent.click(screen.getByRole("button", { name: "Save" }))
+    await waitFor(() => expect(api.put).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(api.put).mock.calls[0]![1]).toMatchObject({ spec: { packages: { pip: ["numpy>=1.26,<2", "pandas"] } } })
   })
 
   it("leaves a managed environment read-only", () => {
