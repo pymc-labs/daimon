@@ -12,7 +12,7 @@ from daimon.adapters.web.access import (
 )
 from daimon.core.config import WebModuleKey
 
-ALL: tuple[WebModuleKey, ...] = ("chat", "agents", "channels", "credits", "admin")
+ALL: tuple[WebModuleKey, ...] = ("chat", "agents", "channels", "credits", "integrations", "admin")
 
 
 @pytest.mark.parametrize(
@@ -39,7 +39,14 @@ def test_role_is_the_highest_one_held(kwargs: dict[str, object], expected: Role)
 
 
 def test_modules_follow_the_role_and_the_deployment() -> None:
-    assert modules_for("owner", ALL) == ["chat", "agents", "channels", "credits", "admin"]
+    assert modules_for("owner", ALL) == [
+        "chat",
+        "agents",
+        "channels",
+        "credits",
+        "integrations",
+        "admin",
+    ]
     assert modules_for("member", ALL) == ["chat", "agents", "channels", "credits"]
     assert modules_for("visitor", ALL) == ["chat"]
     assert modules_for("owner", ("chat", "admin")) == ["chat", "admin"], "off means off"
@@ -60,8 +67,11 @@ def test_capabilities_by_role() -> None:
         "people.manage",
         "credits.manage",
         "channels.manage",
+        "integrations.view",
+        "integrations.manage",
     }
-    assert len(capabilities_for("owner", ALL)) == 11
+    assert not {"integrations.view", "integrations.manage"} & capabilities_for("member", ALL)
+    assert len(capabilities_for("owner", ALL)) == 13
 
 
 def test_a_module_that_is_off_takes_its_capabilities_with_it() -> None:

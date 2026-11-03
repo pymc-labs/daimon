@@ -359,6 +359,7 @@ async def test_settings_are_read_and_changed_with_an_audit_row(
         "channels": True,
         "routines": True,
         "credits": True,
+        "integrations": True,
     }
     assert before["default_agent"] == AGENT_ID, "the workspace default is offered"
     assert changed.json()["modules"]["agents"] is False, changed.text

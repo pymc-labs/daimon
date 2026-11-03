@@ -137,7 +137,15 @@ async def test_roles_are_read_from_grants_held_now(
             me = (await _get_me(client, token)).json()
             got = (me["role"], me["workspace"]["role"], "people.manage" in me["capabilities"])
             assert got == (role, role, True), person.id
-            assert me["modules"] == ["chat", "agents", "channels", "routines", "credits", "admin"]
+            assert me["modules"] == [
+                "chat",
+                "agents",
+                "channels",
+                "routines",
+                "credits",
+                "integrations",
+                "admin",
+            ]
         # Revoking the grant takes effect on the next request, not at next sign-in.
         async with db_session_factory() as db, db.begin():
             await db.execute(text("delete from workspace_admins"))
