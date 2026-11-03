@@ -299,9 +299,9 @@ async def serve_helpers(
     origin_id = current_origin_id.get()
     if (
         origin not in SERVING_ORIGINS
+        or origin_id is None
         or admission.grant is None
         or not admission.grant.human_invocation
-        or origin_id is None
         or admission.request is None
     ):
         yield
