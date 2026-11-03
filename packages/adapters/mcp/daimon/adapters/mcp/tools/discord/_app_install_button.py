@@ -73,13 +73,6 @@ async def _post_app_install_button_impl(  # pyright: ignore[reportUnusedFunction
     view: discord.ui.View = discord.ui.View(timeout=None)
     view.add_item(button)
 
-    content = _build_message_body(requester_platform_user_id=requester_id, purpose=purpose)
-    # Someone who asked never to be tagged is named, not pinged.
-    content = await untag_opted_out(
-        runtime.session_factory, tenant_id=auth.tenant_id, platform="discord", text=content
-    )
-    ping = f"<@{requester_id}>" in content
-
     async with rest_client(bot_token) as c:
         _, member = await _resolve_member(c, guild_id, requester_id)
         raw_channel = await _resolve_channel(c, channel_id)
@@ -93,6 +86,12 @@ async def _post_app_install_button_impl(  # pyright: ignore[reportUnusedFunction
         await _require_discord_channel_writable(runtime, auth, channel)
         if not isinstance(channel, discord.abc.Messageable):
             raise ToolError("channel does not support sending messages")
+        content = _build_message_body(requester_platform_user_id=requester_id, purpose=purpose)
+        # Someone who asked never to be tagged is named, not pinged.
+        content = await untag_opted_out(
+            runtime.session_factory, tenant_id=auth.tenant_id, platform="discord", text=content
+        )
+        ping = f"<@{requester_id}>" in content
         sent = await channel.send(
             content=content,
             view=view,
