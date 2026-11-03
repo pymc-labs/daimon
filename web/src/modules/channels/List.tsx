@@ -11,10 +11,11 @@ import { plural, usd } from "@/lib/format"
 import { cn } from "@/lib/utils"
 import { Tag } from "@/modules/admin/shared"
 import { useChannels } from "./api"
-import { ACCESS_FILTERS, agentsOf, filterChannels, groupChannels, nameOf, platformLabel, sourcedLabel, TAGS } from "./lib"
+import { Defaults } from "./Defaults"
+import { ACCESS_FILTERS, agentsOf, filterChannels, groupChannels, nameOf, platformLabel, TAGS } from "./lib"
 import { ChannelPanel } from "./Panel"
 import { PlatformIcon } from "./shared"
-import type { Channel, ChannelList } from "./types"
+import type { Channel } from "./types"
 
 function Budget({ c }: { c: Channel }) {
   const b = c.budget
@@ -25,16 +26,6 @@ function Budget({ c }: { c: Channel }) {
       <div className="mt-1 h-1 overflow-hidden rounded-full bg-foreground/10">
         <div className={cn("h-full rounded-full", b.exceeded ? "bg-destructive" : b.percent_used >= 80 ? "bg-warning" : "bg-teal")} style={{ width: `${Math.min(100, b.percent_used)}%` }} />
       </div>
-    </div>
-  )
-}
-
-function Defaults({ list }: { list: ChannelList }) {
-  return (
-    <div className="flex flex-wrap gap-x-8 gap-y-1 px-4 pt-4 pb-3 text-sm lg:px-6">
-      {([["Default agent", sourcedLabel(list.default_agent)], ["Sandbox", sourcedLabel(list.default_environment)]] as const).map(([k, v]) => (
-        <div key={k} className="flex gap-2"><span className="text-muted-foreground">{k}</span><span className="font-medium">{v}</span></div>
-      ))}
     </div>
   )
 }
@@ -55,7 +46,7 @@ export function Channels() {
 
   return (
     <Page crumbs={[{ label: "Channels" }]} flush>
-      {query.data && <Defaults list={query.data} />}
+      <Defaults />
       <FilterBar className="pt-0">
         <SearchInput value={q} onChange={(v) => setQ(v || null)} className="w-56" />
         {platformNames.length > 1 && (

@@ -11,7 +11,8 @@ import { Facts, Field, PanelSection } from "@/modules/admin/shared"
 import { useSave, type Outcome } from "./api"
 import { budgetStops, spentFor, WINDOWS } from "./lib"
 import { Notice } from "./shared"
-import type { BudgetWindow, ChannelBudget, ChannelDetail } from "./types"
+import { SpendBreakdown } from "./Spend"
+import type { BudgetWindow, ChannelBudget, ChannelDetail, ChannelSettings } from "./types"
 
 const WINDOW_NAMES = Object.keys(WINDOWS) as BudgetWindow[]
 const day = (iso: string | null) => (iso ? iso.slice(0, 10) : "")
@@ -21,7 +22,7 @@ function windowText(b: ChannelBudget) {
   return WINDOWS[b.window]
 }
 
-export function Budget({ c }: { c: ChannelDetail }) {
+export function Budget({ c, spend }: { c: ChannelDetail; spend?: ChannelSettings["spend"] }) {
   const b = c.budget
   return (
     <PanelSection title="Budget and spend">
@@ -38,9 +39,9 @@ export function Budget({ c }: { c: ChannelDetail }) {
       )}
       <Facts rows={[
         ["Budget", b ? null : "None"],
-        ["This month", <Money key="m" usd={c.spend.month_usd} />],
         ["Last 30 days", <Money key="d" usd={c.spend.last_30_days_usd} />],
       ]} />
+      {spend && <SpendBreakdown spend={spend} />}
       {c.can_manage && c.budget_editable && <BudgetForm key={JSON.stringify(b && [b.limit_usd, b.window, b.starts_at, b.ends_at])} c={c} />}
     </PanelSection>
   )

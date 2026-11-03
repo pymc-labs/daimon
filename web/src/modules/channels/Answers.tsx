@@ -4,16 +4,19 @@ import { useState } from "react"
 import { AgentAvatar } from "@/components/common"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { useAgents } from "@/modules/agents/api"
+import { Button } from "@/components/ui/button"
+import { useConfirm } from "@/lib/confirm"
 import { PanelSection } from "@/modules/admin/shared"
 import { useSave, type Outcome } from "./api"
 import { sourcedLabel } from "./lib"
-import { Notice } from "./shared"
-import type { ChannelDetail, Sourced } from "./types"
+import { Line, Notice } from "./shared"
+import type { ChannelDetail, ChannelSettings, Sourced } from "./types"
 
 const WORKSPACE = "__workspace"
 
-export function Answers({ c, workspace }: { c: ChannelDetail; workspace?: Sourced }) {
+export function Answers({ c, workspace, settings }: { c: ChannelDetail; workspace?: Sourced; settings?: ChannelSettings }) {
   const save = useSave(c.id)
+  const confirm = useConfirm()
   const [out, setOut] = useState<Outcome | null>(null)
   const { data: agents = [] } = useAgents()
   const edit = c.can_manage && c.platform !== "web"
@@ -30,13 +33,17 @@ export function Answers({ c, workspace }: { c: ChannelDetail; workspace?: Source
   }
   const keep = async (action: "add" | "remove", agent: string) =>
     setOut(await save.run("post", "kept-agents", { action, agent, expected: c.kept_agents }))
+  const copy = settings?.channel_copy ?? null
+  const retire = async () => {
+    if (!copy || !(await confirm({ title: "Retire the channel copy?", body: copy.name, action: "Retire", destructive: true }))) return
+    setOut(await save.run("post", "channel-copy/retire", { name: copy.name, agent_id: copy.agent_id }))
+  }
   const free = names.filter((n) => !c.kept_agents.includes(n))
 
   return (
     <PanelSection title="Who answers">
       <div className="space-y-3 text-sm">
-        <div className="grid grid-cols-[112px_1fr] items-center gap-3">
-          <span className="text-muted-foreground">Default agent</span>
+        <Line label="Default agent">
           {edit ? (
             <Select value={own ?? WORKSPACE} onValueChange={(v) => void pick(v)} disabled={save.pending}>
               <SelectTrigger size="sm" className="w-full max-w-64" aria-label="Default agent"><SelectValue /></SelectTrigger>
@@ -45,11 +52,10 @@ export function Answers({ c, workspace }: { c: ChannelDetail; workspace?: Source
                 {withCurrent(names, own).map((n) => <SelectItem key={n} value={n}>{n}</SelectItem>)}
               </SelectContent>
             </Select>
-          ) : <span className="min-w-0 truncate">{sourcedLabel(c.agent)}</span>}
-        </div>
+          ) : <span className="block truncate">{sourcedLabel(c.agent)}</span>}
+        </Line>
         {(c.kept_agents.length > 0 || edit) && (
-          <div className="grid grid-cols-[112px_1fr] items-start gap-3">
-            <span className="pt-1 text-muted-foreground">Kept here</span>
+          <Line label="Kept here" top>
             <div className="flex min-w-0 flex-wrap items-center gap-1.5">
               {c.kept_agents.map((n) => (
                 <span key={n} className="inline-flex h-7 max-w-full items-center gap-1.5 rounded-md border pr-1 pl-1.5 text-xs">
@@ -71,7 +77,15 @@ export function Answers({ c, workspace }: { c: ChannelDetail; workspace?: Source
               )}
               {!c.kept_agents.length && !edit && <span className="text-faint">None</span>}
             </div>
-          </div>
+          </Line>
+        )}
+        {copy && (
+          <Line label="Channel copy">
+            <span className="flex min-w-0 items-center gap-2">
+              <span className="truncate">{copy.name}</span>
+              {edit && <Button size="xs" variant="outline" disabled={save.pending} onClick={() => void retire()}>Retire</Button>}
+            </span>
+          </Line>
         )}
       </div>
       <Notice out={out} />

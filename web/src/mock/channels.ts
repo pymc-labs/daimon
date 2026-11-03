@@ -31,6 +31,7 @@ const channels: Channel[] = [
   C("c_mmm", "mmm", "Projects", { readers: "inside", tags: ["kept_inside"], spend: { month_usd: 28, last_30_days_usd: 30.5 }, last_active_at: ago(26),
     budget: { limit_usd: "25.00", window: "monthly", starts_at: null, ends_at: null, spent_usd: 28, remaining_usd: 0, percent_used: 100, active: true, exceeded: true } }),
   C("c_partners", "partners", null, { tags: ["shared"] }),
+  C("t_ops", "ops-room", "Ops team", { platform: "teams", kind: "private", last_active_at: ago(9), spend: { month_usd: 2.4, last_30_days_usd: 4.8 } }),
 ]
 const history: Record<string, ChannelHistoryEntry[]> = {
   c_clv: [
@@ -41,22 +42,41 @@ const history: Record<string, ChannelHistoryEntry[]> = {
 
 const sw = (value: ChannelSwitch["value"], source: ChannelSwitch["source"], own: ChannelSwitch["own"] = null): ChannelSwitch =>
   ({ available: true, own, value, source })
+/** A deterministic spend curve over the last `days` days that adds up to `total`. */
+const curve = (total: number, days: number): { key: string; name: null; usd: number }[] => {
+  const weights = Array.from({ length: days }, (_, i) => (i % 7 === 5 || i % 7 === 6 ? 0.15 : 0.6 + ((i * 37) % 11) / 10) * (i > days - 8 ? 1.4 : 1))
+  const sum = weights.reduce((a, b) => a + b, 0)
+  return weights.map((w, i) => ({ key: ago((days - 1 - i) * 24).slice(0, 10), name: null, usd: +((w / sum) * total).toFixed(2) }))
+}
 const settingsOf = (c: Channel): ChannelSettings => ({
   participation: sw("off", "deployment"),
   progress_plans: sw("on", "workspace"),
-  skills: c.id === "c_clv" ? [{ skill_id: "skill_pymc", name: "pymc-modeling" }] : [],
-  tool_rules: { editable: false, rules: [] },
+  skills: c.id === "c_clv" ? [{ skill_id: "skill_pymc", name: "pymc-modeling" }, { skill_id: "skill_brief", name: "client-brief" }] : [],
+  tool_rules: { editable: true, rules: c.id === "c_clv" ? [
+    { agent: "clv", tool: "web_search", rule: "ask", scope: "chat", revision: 2 },
+    { agent: "clv", tool: "send_email", rule: "deny", scope: "chat_and_routines", revision: 1 },
+  ] : [] },
   provider_pin: c.id === "c_clv" ? { backend: "openai", model: "gpt-5", local: 3 } : null,
   channel_copy: c.id === "c_board" ? { name: "board-desk", agent_id: "agent_board" } : null,
   threads: c.id === "c_general" ? [{ thread_id: "t_launch", kind: "progress_plans", value: "off" }, { thread_id: "t_help", kind: "handoff", value: "clv" }] : [],
   link: c.id === "web" ? null : `https://discord.com/channels/1/${c.id}`,
-  teams_subscription: null,
-  routines: c.id === "c_clv" ? [{ id: "r_weekly", agent: "clv", cron: "0 9 * * 1", enabled: true, relation: "both" }] : [],
+  teams_subscription: c.id === "t_ops" ? { status: "expired", expires_at: ago(30) } : null,
+  routines: c.id === "c_clv" ? [
+    { id: "r1", agent: "clv", cron: "0 9 * * 1", enabled: true, relation: "both" },
+    { id: "r2", agent: "pricing-analyst", cron: "30 8 * * 1-5", enabled: false, relation: "posts_here" },
+  ] : [],
   spend: {
     days: 30,
-    by_day: c.spend.last_30_days_usd ? [{ key: ago(48).slice(0, 10), name: null, usd: c.spend.last_30_days_usd }] : [],
-    by_agent: c.spend.last_30_days_usd ? [{ key: "agent_1", name: c.agent.value, usd: c.spend.last_30_days_usd }] : [],
-    by_person: c.spend.last_30_days_usd ? [{ key: "u_1", name: "Priya Raman", usd: c.spend.last_30_days_usd }] : [],
+    by_day: c.spend.last_30_days_usd ? curve(c.spend.last_30_days_usd, 30) : [],
+    by_agent: c.spend.last_30_days_usd ? [
+      { key: "agent_1", name: c.agent.value, usd: +(c.spend.last_30_days_usd * 0.7).toFixed(2) },
+      { key: "agent_2", name: "pricing-analyst", usd: +(c.spend.last_30_days_usd * 0.3).toFixed(2) },
+    ] : [],
+    by_person: c.spend.last_30_days_usd ? [
+      { key: "u_1", name: "Priya Raman", usd: +(c.spend.last_30_days_usd * 0.55).toFixed(2) },
+      { key: "u_2", name: "Jonas Weber", usd: +(c.spend.last_30_days_usd * 0.35).toFixed(2) },
+      { key: null, name: null, usd: +(c.spend.last_30_days_usd * 0.1).toFixed(2) },
+    ] : [],
   },
 })
 const settings: Record<string, ChannelSettings> = {}
@@ -100,7 +120,9 @@ export const channelsHandlers: HttpHandler[] = [
   http.get("/api/channels/:id/history", ({ params }) => manage() ? HttpResponse.json(history[params.id as string] ?? []) : forbidden()),
   http.get("/api/channels/:id/settings", ({ params }) => {
     const c = find(params.id as string)
-    return c ? HttpResponse.json(settingsFor(c)) : notFound()
+    if (!c) return notFound()
+    const s = settingsFor(c)
+    return HttpResponse.json({ ...s, tool_rules: { ...s.tool_rules, editable: s.tool_rules.editable && manage() } })
   }),
   ...(["participation", "progress-plans"] as const).map((path) => http.put(`/api/channels/:id/${path}`, async ({ params, request }) => {
     const c = find(params.id as string)

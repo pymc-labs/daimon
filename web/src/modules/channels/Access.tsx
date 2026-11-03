@@ -1,43 +1,39 @@
 import { useState } from "react"
 
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { useConfirm } from "@/lib/confirm"
+import { useChoose } from "@/lib/confirm"
 import { PanelSection } from "@/modules/admin/shared"
 import { useSave, type Outcome } from "./api"
-import { accessAsk } from "./lib"
-import { Notice } from "./shared"
+import { accessAsk, accessFlags } from "./lib"
+import { Line, Notice } from "./shared"
 import type { ChannelDetail, Choice, Readers, Writers } from "./types"
 
 function Rule<T extends string>({ label, value, shown, options, edit, busy, onPick }: {
   label: string; value: T; shown: string; options: Choice<T>[]; edit: boolean; busy: boolean; onPick: (v: T) => void
 }) {
   return (
-    <div className="grid grid-cols-[112px_1fr] items-center gap-3">
-      <span className="text-muted-foreground">{label}</span>
+    <Line label={label}>
       {edit ? (
         <Select value={value} onValueChange={(v) => onPick(v as T)} disabled={busy}>
           <SelectTrigger size="sm" className="w-full max-w-64" aria-label={label}><SelectValue /></SelectTrigger>
           <SelectContent>{options.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}</SelectContent>
         </Select>
       ) : <span>{shown}</span>}
-    </div>
+    </Line>
   )
 }
 
 export function Access({ c }: { c: ChannelDetail }) {
   const save = useSave(c.id)
-  const confirm = useConfirm()
+  const choose = useChoose()
   const [out, setOut] = useState<Outcome | null>(null)
   const edit = c.can_manage
 
   const change = async (next: { readers?: Readers; writers?: Writers }) => {
     const ask = accessAsk(c, next)
-    if (ask && !(await confirm(ask))) return
-    const toOwn = next.readers === "own" || next.writers === "own"
-    const leaves = c.readers === "own" && !!next.readers && next.readers !== "own"
-    setOut(await save.run("put", "access", {
-      ...next, expected: { readers: c.readers, writers: c.writers }, ...(toOwn && { copy_agent: true }), ...(leaves && { release_agents: true }),
-    }))
+    const pick = ask ? await choose(ask) : "action"
+    if (!pick) return
+    setOut(await save.run("put", "access", { ...next, expected: { readers: c.readers, writers: c.writers }, ...accessFlags(c, next, pick) }))
   }
 
   return (

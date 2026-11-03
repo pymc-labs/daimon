@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest"
 
-import { accessAsk, budgetStops, describeChange, type Filters, filterChannels, groupChannels, nameOf, sourcedLabel, spentFor } from "./lib"
+import {
+  accessAsk, accessFlags, budgetStops, choiceOf, cronWords, defaultSource, describeChange, fillDays, type Filters, filterChannels,
+  groupChannels, nameOf, sourcedLabel, spendLines, spentFor, switchChange, threadValue, toolRuleChange, unavailableText,
+} from "./lib"
 import type { Channel } from "./types"
 
 const channel = (id: string, name: string, more: Partial<Channel> = {}): Channel => ({
@@ -118,5 +121,87 @@ describe("describeChange", () => {
     expect(describeChange(entry("kept_agents", ["a"], ["a", "b"]), labels)).toEqual({ what: "Kept agents", from: "", to: "added b" })
     expect(describeChange(entry("budget", null, { limit_usd: "25.00", window: "monthly" }), labels)).toEqual({ what: "Budget", from: "none", to: "$25.00 monthly" })
     expect(describeChange(entry("default_agent", null, "clv"), labels)).toEqual({ what: "Default agent", from: "none", to: "clv" })
+  })
+})
+
+describe("leaving its own agents", () => {
+  const own = { readers: "own" as const, writers: "own" as const, agent: { value: "ops", source: "channel" as const }, kept_agents: ["ops"] }
+
+  it("offers to keep their rules next to releasing them", () => {
+    const ask = accessAsk(own, { readers: "inside" })
+    expect(ask).toMatchObject({ action: "Release agents", alternate: "Keep their rules" })
+  })
+
+  it("has nothing to keep when no agent is kept here", () => {
+    expect(accessAsk({ ...own, kept_agents: [] }, { readers: "any" })?.alternate).toBeUndefined()
+  })
+
+  it("sends exactly one of release_agents and keep_rules", () => {
+    expect(accessFlags(own, { readers: "any" }, "action")).toEqual({ release_agents: true })
+    expect(accessFlags(own, { readers: "any" }, "alternate")).toEqual({ keep_rules: true })
+  })
+
+  it("sends neither when the readers do not leave own, and copies the agent when they enter it", () => {
+    expect(accessFlags({ ...own, readers: "any" }, { writers: "none" })).toEqual({})
+    expect(accessFlags({ ...own, readers: "any" }, { readers: "own" })).toEqual({ copy_agent: true })
+  })
+})
+
+describe("switches", () => {
+  it("reads no own value as inherit and sends null to clear it", () => {
+    expect(choiceOf({ own: null })).toBe("inherit")
+    expect(switchChange("inherit", { own: "on" })).toEqual({ mode: null, expected: "on" })
+    expect(switchChange("off", { own: null })).toEqual({ mode: "off", expected: null })
+  })
+
+  it("says participation is not on Slack and keeps value and source apart for defaults", () => {
+    expect(unavailableText("participation", "slack")).toBe("Not on Slack")
+    expect(unavailableText("progress_plans", "slack")).toBe("Not available")
+    expect(defaultSource({ source: "workspace" })).toBe("Workspace")
+    expect(defaultSource({ source: "deployment" })).toBe("Built-in default")
+    expect(defaultSource({ source: null })).toBeNull()
+  })
+})
+
+describe("spend", () => {
+  const now = Date.UTC(2026, 10, 3, 15)
+
+  it("fills 30 days ending today with zeros for days without spend", () => {
+    const days = fillDays([{ key: "2026-11-01", name: null, usd: 4 }, { key: "2026-10-05", name: null, usd: 1 }], 30, now)
+    expect(days).toHaveLength(30)
+    expect(days[29]).toEqual({ day: "2026-11-03", usd: 0 })
+    expect(days[27]).toEqual({ day: "2026-11-01", usd: 4 })
+    expect(days[0]!.day).toBe("2026-10-05")
+    expect(days[0]!.usd).toBe(1)
+  })
+
+  it("drops spend older than the window", () => {
+    expect(fillDays([{ key: "2026-09-01", name: null, usd: 9 }], 30, now).every((d) => d.usd === 0)).toBe(true)
+  })
+
+  it("lists biggest first with shares, naming spend with no id", () => {
+    const lines = spendLines([{ key: null, name: null, usd: 1 }, { key: "a", name: "clv", usd: 3 }, { key: "b", name: null, usd: 0 }], "No person")
+    expect(lines.map((l) => [l.label, l.share])).toEqual([["clv", 0.75], ["No person", 0.25], ["Unknown", 0]])
+  })
+})
+
+describe("channel rows", () => {
+  it("writes a schedule in words and keeps shapes it cannot draw", () => {
+    expect(cronWords("0 9 * * 1")).toBe("Mondays at 09:00")
+    expect(cronWords("30 8 * * 1-5")).toBe("Weekdays at 08:30")
+    expect(cronWords("5 4 * * 1,3")).toBe("5 4 * * 1,3")
+  })
+
+  it("labels a thread's own value by its kind", () => {
+    const labels = { readers: [{ value: "own" as const, label: "Only its own agents" }], writers: [{ value: "none" as const, label: "Nobody" }] }
+    expect(threadValue("participation", "off", labels)).toBe("Off")
+    expect(threadValue("thread_rule", "own/none", labels)).toBe("Only its own agents, Nobody")
+    expect(threadValue("handoff", "clv", labels)).toBe("clv")
+  })
+
+  it("compares a tool rule with the revision of the same agent and tool", () => {
+    const rules = [{ agent: "a", tool: "x", rule: "ask" as const, scope: "chat_and_routines" as const, revision: 4 }]
+    expect(toolRuleChange({ agent: "a", tool: "x", rule: "deny" }, rules)).toMatchObject({ scope: "chat_and_routines", expected_revision: 4 })
+    expect(toolRuleChange({ agent: "a", tool: "y", rule: "allow" }, rules).expected_revision).toBe(0)
   })
 })
