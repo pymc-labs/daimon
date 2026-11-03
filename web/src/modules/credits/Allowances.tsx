@@ -2,7 +2,11 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Check, ChevronDown, Ticket, Users, UserRound } from "lucide-react"
 import { useEffect, useState } from "react"
 import { toast } from "sonner"
+import { Link } from "react-router"
 import { AgentAvatar } from "@/components/common"
+import { Empty, FilterBar, SearchInput } from "@/components/filters"
+import { AgentLink, PersonLink } from "@/components/links"
+import { Facts, PanelHead, PanelSection, Tag } from "@/components/panel"
 import { useConfirm } from "@/lib/confirm"
 import { CreditMeter } from "@/components/CreditMeter"
 import { Drawer } from "@/components/Drawer"
@@ -16,10 +20,9 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { api } from "@/lib/api"
-import { shortDate, usd } from "@/lib/format"
+import { ENTITY_FALLBACK, shortDate, usd } from "@/lib/format"
 import { useChatAgents, useGroups, usePeopleSearch } from "@/lib/hooks"
 import type { Allowance, Subject, Window } from "./types"
-import { Tag } from "@/modules/admin/shared"
 import { Field } from "./shared"
 
 const KIND_ICON = { person: UserRound, group: Users, invite: Ticket }
@@ -36,89 +39,120 @@ const changed = (qc: ReturnType<typeof useQueryClient>) => {
 }
 
 function AllowanceTable({ data }: { data: Allowance[] }) {
-  const qc = useQueryClient()
-  const confirm = useConfirm()
+  const [search, setSearch] = useParam("q")
   const [, setAllowance] = useParam("allowance")
-  const del = useMutation({
-    mutationFn: (a: Allowance) => api.del(`/api/credits/allowances/${a.id}`),
-    onSuccess: () => { changed(qc); setAllowance(null); toast("Allowance removed") },
-  })
+  const needle = (search ?? "").toLowerCase()
+  const shown = data.filter((a) => !needle || `${a.subject.name} ${a.agent?.name ?? ""}`.toLowerCase().includes(needle))
   return (
     <div className="mx-auto max-w-[1040px]">
-      <Table>
-        <TableHeader>
-          <TableRow className="hover:bg-transparent">
-            <TableHead>For</TableHead><TableHead className="max-md:hidden">Agent</TableHead><TableHead className="text-right">Amount</TableHead>
-            <TableHead className="w-48 max-sm:hidden">Used</TableHead><TableHead className="max-lg:hidden">Expires</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {data.map((a) => {
-            const Icon = KIND_ICON[a.subject.kind]
-            return (
-              <TableRow key={a.id} {...rowProps(() => setAllowance(a.id))}>
-                <TableCell>
-                  <span className="flex items-center gap-2.5">
-                    <span className="flex size-6 items-center justify-center rounded-full bg-accent"><Icon className="size-3.5 text-muted-foreground" /></span>
-                    <span className="truncate font-medium">{a.subject.name}</span>
-                    <span className="text-xs text-muted-foreground">{KIND_LABEL[a.subject.kind]}</span>
-                    {a.cap && <Tag>Cap</Tag>}
-                  </span>
-                </TableCell>
-                <TableCell className="max-md:hidden">
-                  {a.agent ? <span className="flex items-center gap-2"><AgentAvatar src={a.agent.avatar} name={a.agent.name} className="size-5" />{a.agent.name}</span>
-                    : <span className="text-muted-foreground">Any agent</span>}
-                </TableCell>
-                <TableCell className="text-right whitespace-nowrap">
-                  <span className="font-medium tabular">{usd(a.amount_usd)}</span>
-                  <span className="text-muted-foreground">{a.window === "month" ? " / month" : " total"}</span>
-                </TableCell>
-                <TableCell className="max-sm:hidden">
-                  {a.subject.kind === "group" ? <span className="text-muted-foreground">Each of {a.members} members</span>
-                    : <CreditMeter compact meter={{ left_usd: a.amount_usd - a.used_usd, total_usd: a.amount_usd, window: a.window, resets_at: null }} />}
-                </TableCell>
-                <TableCell className="text-muted-foreground max-lg:hidden">{a.expires_at ? shortDate(a.expires_at) : "Never"}</TableCell>
-              </TableRow>
-            )
-          })}
-        </TableBody>
-      </Table>
+      <FilterBar className="px-0 pt-0">
+        <SearchInput value={search} onChange={(v) => setSearch(v || null)} className="w-48" />
+        <span className="ml-auto text-xs text-muted-foreground tabular">{shown.length} of {data.length}</span>
+      </FilterBar>
+      {!shown.length ? <Empty>Nothing matches</Empty> : (
+        <Table>
+          <TableHeader>
+            <TableRow className="hover:bg-transparent">
+              <TableHead>For</TableHead><TableHead className="max-md:hidden">Agent</TableHead><TableHead className="text-right">Amount</TableHead>
+              <TableHead className="w-48 max-sm:hidden">Used</TableHead><TableHead className="max-lg:hidden">Expires</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {shown.map((a) => {
+              const Icon = KIND_ICON[a.subject.kind]
+              return (
+                <TableRow key={a.id} {...rowProps(() => setAllowance(a.id))}>
+                  <TableCell>
+                    <span className="flex items-center gap-2.5">
+                      <span className="flex size-6 items-center justify-center rounded-full bg-accent"><Icon className="size-3.5 text-muted-foreground" /></span>
+                      <span className="truncate font-medium">{a.subject.name || (a.subject.kind === "group" ? "Deleted group" : ENTITY_FALLBACK.person)}</span>
+                      <span className="text-xs text-muted-foreground">{KIND_LABEL[a.subject.kind]}</span>
+                      {a.cap && <Tag>Cap</Tag>}
+                    </span>
+                  </TableCell>
+                  <TableCell className="max-md:hidden">
+                    {a.agent ? <span className="flex items-center gap-2"><AgentAvatar src={a.agent.avatar} name={a.agent.name} className="size-5" />{a.agent.name}</span>
+                      : <span className="text-muted-foreground">Any agent</span>}
+                  </TableCell>
+                  <TableCell className="text-right whitespace-nowrap">
+                    <span className="font-medium tabular">{usd(a.amount_usd)}</span>
+                    <span className="text-muted-foreground">{a.window === "month" ? " / month" : " total"}</span>
+                  </TableCell>
+                  <TableCell className="max-sm:hidden">
+                    {a.subject.kind === "group" ? <span className="text-muted-foreground">Each of {a.members} members</span>
+                      : <CreditMeter compact meter={{ left_usd: a.amount_usd - a.used_usd, total_usd: a.amount_usd, window: a.window, resets_at: null }} />}
+                  </TableCell>
+                  <TableCell className="text-muted-foreground max-lg:hidden">{a.expires_at ? shortDate(a.expires_at) : "Never"}</TableCell>
+                </TableRow>
+              )
+            })}
+          </TableBody>
+        </Table>
+      )}
       <Drawer param="allowance" title="Allowance" ids={data.map((a) => a.id)}>
         {(id) => {
           const a = data.find((x) => x.id === id)
-          if (!a) return null
-          const Icon = KIND_ICON[a.subject.kind]
-          return (
-            <div>
-              <div className="flex items-center gap-3 px-5 py-5">
-                <span className="flex size-10 items-center justify-center rounded-full bg-accent"><Icon className="size-4 text-muted-foreground" /></span>
-                <div className="min-w-0">
-                  <div className="truncate text-base font-semibold">{a.subject.name}</div>
-                  <div className="flex items-center gap-1.5 text-sm text-muted-foreground">{KIND_LABEL[a.subject.kind]}{a.cap && <Tag>Cap</Tag>}</div>
-                </div>
-              </div>
-              <section className="border-t px-5 py-4">
-                <dl className="space-y-1.5 text-sm">
-                  {([
-                    ["Amount", `${usd(a.amount_usd)}${a.window === "month" ? " / month" : " total"}`],
-                    ["Used", a.subject.kind === "group" ? `Each of ${a.members} members` : usd(a.used_usd)],
-                    ["Agent", a.agent?.name ?? "Any agent"],
-                    ["Expires", a.expires_at ? shortDate(a.expires_at) : "Never"],
-                  ] as const).map(([k, v]) => (
-                    <div key={k} className="grid grid-cols-[112px_1fr] gap-3"><dt className="text-muted-foreground">{k}</dt><dd>{v}</dd></div>
-                  ))}
-                </dl>
-              </section>
-              <div className="border-t px-5 py-4">
-                <Button variant="outline" size="sm" className="text-destructive" disabled={del.isPending} onClick={async () => {
-                  if (await confirm({ title: "Remove allowance?", body: a.subject.name, action: "Remove", destructive: true })) del.mutate(a)
-                }}>Remove</Button>
-              </div>
-            </div>
-          )
+          return a ? <Detail a={a} /> : null
         }}
       </Drawer>
     </div>
+  )
+}
+
+function SubjectName({ s }: { s: Subject }) {
+  if (s.kind === "group") return <Link to={`/admin?group=${encodeURIComponent(s.id)}`} className="truncate hover:underline">{s.name || "Deleted group"}</Link>
+  if (s.kind === "person") return <PersonLink id={s.id} name={s.name || null} />
+  return <span className="truncate">{s.name}</span>
+}
+
+function Detail({ a }: { a: Allowance }) {
+  const qc = useQueryClient()
+  const confirm = useConfirm()
+  const [, setAllowance] = useParam("allowance")
+  const [editing, setEditing] = useState(false)
+  const [amount, setAmount] = useState(String(a.amount_usd))
+  const Icon = KIND_ICON[a.subject.kind]
+  const del = useMutation({
+    mutationFn: () => api.del(`/api/credits/allowances/${a.id}`),
+    onSuccess: () => { changed(qc); setAllowance(null); toast("Allowance removed") },
+  })
+  const save = useMutation({
+    mutationFn: () => api.patch(`/api/credits/allowances/${a.id}`, { amount_usd: Number(amount) }),
+    onSuccess: () => { changed(qc); setEditing(false); toast("Allowance saved") },
+  })
+  const dirty = Number(amount) !== a.amount_usd
+  const per = a.window === "month" ? " / month" : " total"
+  return (
+    <form className="flex min-h-full flex-col" onSubmit={(e) => { e.preventDefault(); if (dirty && Number(amount) > 0) save.mutate() }}>
+      <PanelHead
+        icon={<Icon className="size-4 text-muted-foreground" />}
+        title={<SubjectName s={a.subject} />}
+        subtitle={KIND_LABEL[a.subject.kind]}
+        tags={a.cap ? <Tag>Cap</Tag> : undefined}
+        actions={!editing && <Button type="button" variant="outline" size="sm" onClick={() => { setAmount(String(a.amount_usd)); setEditing(true) }}>Edit</Button>}
+        menu={[{
+          label: "Remove", destructive: true, disabled: del.isPending,
+          onSelect: async () => { if (await confirm({ title: "Remove allowance?", body: a.subject.name, action: "Remove", destructive: true })) del.mutate() },
+        }]}
+      />
+      <PanelSection>
+        <Facts rows={[
+          ["Amount", editing
+            ? <span key="amount" className="flex items-center gap-2"><Input className="h-8 w-28" inputMode="decimal" aria-label="Amount" value={amount} onChange={(e) => setAmount(e.target.value.replace(/[^\d.]/g, ""))} /><span className="text-muted-foreground">{per.trim()}</span></span>
+            : `${usd(a.amount_usd)}${per}`],
+          ["Applies to", a.subject.kind === "group" ? `Each of ${a.members} members` : null],
+          ["Used", a.subject.kind === "group" ? null : usd(a.used_usd)],
+          ["Agent", a.agent ? <AgentLink key="agent" id={a.agent.id} name={a.agent.name} avatar={a.agent.avatar} /> : "Any agent"],
+          ["Expires", a.expires_at ? shortDate(a.expires_at) : "Never"],
+        ]} />
+      </PanelSection>
+      {editing && (
+        <div className="sticky bottom-0 mt-auto flex justify-end gap-2 border-t bg-popover px-5 py-3">
+          <Button type="button" variant="outline" onClick={() => setEditing(false)}>Discard</Button>
+          <Button type="submit" disabled={!dirty || !Number(amount) || save.isPending}>Save</Button>
+        </div>
+      )}
+    </form>
   )
 }
 

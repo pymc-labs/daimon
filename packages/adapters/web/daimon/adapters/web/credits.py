@@ -174,6 +174,10 @@ class NewAllowance(BaseModel):
     """A cap is monthly, for everyone or one person, for every agent, with no end date."""
 
 
+class EditAllowance(BaseModel):
+    amount_usd: Decimal = Field(gt=0, le=1_000_000, decimal_places=2)
+
+
 class Redeem(BaseModel):
     code: str = Field(min_length=1, max_length=100)
 
@@ -584,6 +588,29 @@ def credits_router(runtime: WebRuntime) -> APIRouter:
                 target=await _audit_target(db, tenant_id, made.subject),
                 detail=_allowance_words(made),
                 at=now,
+            )
+            return made
+
+    @router.patch("/allowances/{allowance_id}")
+    async def edit_allowance(  # pyright: ignore[reportUnusedFunction]
+        allowance_id: uuid.UUID, body: EditAllowance, caller: Admin
+    ) -> Allowance:
+        tenant_id = caller.person.tenant_id
+        async with runtime.sessionmaker.begin() as db:
+            row = await spend_allowances.set_amount(
+                db, tenant_id=tenant_id, allowance_id=allowance_id, amount_usd=body.amount_usd
+            )
+            if row is None:
+                raise HTTPException(status_code=404, detail="This allowance no longer exists.")
+            [made] = await allowances_for(db, tenant_id, [row])
+            await audit(
+                db,
+                tenant_id=tenant_id,
+                actor_account_id=caller.person.account_id,
+                action="Changed cap" if made.cap else "Changed allowance",
+                target=await _audit_target(db, tenant_id, made.subject),
+                detail=_allowance_words(made),
+                at=runtime.now(),
             )
             return made
 
