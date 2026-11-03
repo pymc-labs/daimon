@@ -360,10 +360,11 @@ async def test_only_the_owner_or_an_admin_runs_a_routine_now(
 
 
 async def test_a_paused_routine_is_not_run_now(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+    db_session: AsyncSession, committing_sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
     tenant_id = await _tenant(db_session)
-    env = _env(db_session_factory, tenant_id)
+    await db_session.commit()
+    env = _env(committing_sessionmaker, tenant_id)
     owner = _caller(tenant_id)
     row = await create_routine(env, owner, _new())
     await set_enabled(env, owner, row.id, enabled=False)
