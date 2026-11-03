@@ -32,11 +32,14 @@ describe("Access", () => {
     expect(save).toHaveBeenCalledWith({ invokers: { everyone: false, people: ["p2"] } })
   })
 
-  it("will not remove the last person when nobody else is listed", async () => {
-    const save = vi.fn()
-    wrap(<Access access={{ ...open, people: [{ id: "p1", name: "Maya" }] }} save={save} />)
-    await userEvent.click(screen.getByRole("button", { name: "Remove Maya" }))
-    expect(save).not.toHaveBeenCalled()
+  it("disables removing the last person when nobody else is listed", () => {
+    wrap(<Access access={{ ...open, people: [{ id: "p1", name: "Maya" }] }} save={vi.fn()} />)
+    expect(screen.getByRole("button", { name: "Remove Maya" })).toBeDisabled()
+  })
+
+  it("disables removing Everyone", () => {
+    wrap(<Access access={open} save={vi.fn()} />)
+    expect(screen.getByRole("button", { name: "Remove Everyone" })).toBeDisabled()
   })
 })
 

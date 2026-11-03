@@ -1,9 +1,9 @@
-import { useQuery } from "@tanstack/react-query"
+import { useEffect, useState } from "react"
 import { Lock, Users } from "lucide-react"
 import { MultiPicker } from "@/components/picker"
 import { SettingsList, type SettingsRow } from "@/components/settings"
 import { Switch } from "@/components/ui/switch"
-import { api } from "@/lib/api"
+import { usePeopleSearch } from "@/lib/hooks"
 import type { Access as AccessState, Providers as ProvidersState, SettingsPatch } from "./types"
 
 type Save = (patch: SettingsPatch) => void
@@ -17,10 +17,14 @@ const sw = (label: string, checked: boolean, on: (v: boolean) => void, extra?: {
 export function Access({ access, save }: { access: AccessState; save: Save }) {
   const listed = access.people
   const ids = (listed ?? []).map((p) => p.id)
-  const everyone = useQuery({
-    queryKey: ["admin", "people", "picker"], queryFn: () => api.get<{ id: string; name: string }[]>("/api/admin/people?limit=100"),
-  })
-  const known = new Map([...(everyone.data ?? []), ...(listed ?? [])].map((p) => [p.id, p.name]))
+  const [text, setText] = useState("")
+  const [term, setTerm] = useState("")
+  useEffect(() => {
+    const t = setTimeout(() => setTerm(text.trim()), 200)
+    return () => clearTimeout(t)
+  }, [text])
+  const found = usePeopleSearch(term)
+  const known = new Map([...(found.data ?? []), ...(listed ?? [])].map((p) => [p.id, p.name]))
   const items = [{ id: EVERYONE, label: "Everyone", icon: <Users className="size-3.5 text-muted-foreground" /> }, ...[...known].map(([id, label]) => ({ id, label }))]
   const lastOne = listed?.length === 1 && access.others === 0
   const rows: SettingsRow[] = [{
@@ -28,9 +32,9 @@ export function Access({ access, save }: { access: AccessState; save: Save }) {
     control: (
       <>
         <MultiPicker
-          items={items} value={listed ? ids : [EVERYONE]} placeholder="Find a person" unknown="Unknown person"
+          items={items} value={listed ? ids : [EVERYONE]} onSearch={setText} locked={listed ? (lastOne ? ids : []) : [EVERYONE]} placeholder="Find a person" unknown="Unknown person"
           onAdd={(id) => save({ invokers: id === EVERYONE ? { everyone: true, people: [] } : { everyone: false, people: [...ids, id] } })}
-          onRemove={(id) => { if (listed && id !== EVERYONE && !(lastOne && ids.includes(id))) save({ invokers: { everyone: false, people: ids.filter((i) => i !== id) } }) }}
+          onRemove={(id) => save({ invokers: { everyone: false, people: ids.filter((i) => i !== id) } })}
         />
         {listed && access.others > 0 && <span className="text-muted-foreground">{access.others} more from chat</span>}
       </>
