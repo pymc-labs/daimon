@@ -1,7 +1,7 @@
 """Exercise the canonical migration chain through real Alembic and PostgreSQL.
 
 Main's branch (0132..0158) and the preview branch (0134..0167) both descend from
-0131_usage_obs_tenant_idx; 0168 joins them and 0169 is the single head. The ORM
+0131_usage_obs_tenant_idx; 0168 joins them, 0169 follows and 0170 is the single head. The ORM
 describes the head, so below the merge the preview branch is compared without
 the objects main's branch changes.
 """
@@ -128,7 +128,8 @@ PREVIEW_HEAD = "0167_cost_footer"
 MERGE = "0168_merge_main_preview"
 
 
-HEAD = "0169_continuation_reasons"
+CONTINUATION_HEAD = "0169_continuation_reasons"
+HEAD = "0170_helpers"
 
 
 # Main's branch after MAIN_HEAD, oldest first; it ends at one parent of MERGE.
@@ -170,6 +171,10 @@ MAIN_BRANCH_COLUMNS = {
     ("turn_origins", "platform_channel_id"),
     ("turn_origins", "platform_message_id"),
 }
+
+
+# Columns added after CONTINUATION_HEAD; heads below HEAD skip them.
+AFTER_MERGE_COLUMNS = {("turn_origins", "helper_of"), ("turn_origins", "serves_helpers")}
 
 
 MAIN_BRANCH_OBJECTS = {"ix_platform_principals_account_id", "usage_observation_binding_id_fkey"}
@@ -366,7 +371,7 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             return False
         if expected != HEAD:
             table = getattr(getattr(obj, "table", None), "name", None)
-            if kind == "column" and (table, name) in MAIN_BRANCH_COLUMNS:
+            if kind == "column" and (table, name) in MAIN_BRANCH_COLUMNS | AFTER_MERGE_COLUMNS:
                 return False
             if name in MAIN_BRANCH_OBJECTS:
                 return False
@@ -438,7 +443,9 @@ def test_authoritative_chain() -> None:
             assert Path(node.path).stem == revision
             parent = revision
     head = script.get_revision(HEAD)
-    assert head is not None and head.down_revision == MERGE
+    assert head is not None and head.down_revision == CONTINUATION_HEAD
+    continuation = script.get_revision(CONTINUATION_HEAD)
+    assert continuation is not None and continuation.down_revision == MERGE
     merge = script.get_revision(MERGE)
     assert merge is not None
     assert set(merge.down_revision or ()) == {MAIN_BRANCH[-1], PREVIEW_HEAD}

@@ -213,6 +213,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Alternatively, restore a policy backup from before overrides were saved.
   Disabling the deployment flag does not remove the stored fields.
 
+- **Helpers.** An agent can ask other agents, on any model provider, for help inside its
+  turn (`list_helpers`, `ask_helper`, `wait_for_helpers`). Pick each agent's helpers on its
+  canvas in the web app. A helper runs for the same person in the same thread, with that
+  person's rules, budget and confirmations; its reply goes back to the asking agent, and it
+  stops when that turn ends. Replies are text. Migration 0170 adds the helper tables.
 - **Web app.** People chat with agents in a browser, signing in with Discord. Shared files
   reach the agent, and files it makes come back as downloads. Key requests show as a form in
   the chat. Admins manage people, invites, credit and settings, and a one-time owner link

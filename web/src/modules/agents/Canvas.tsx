@@ -4,7 +4,7 @@ import {
   Background, BackgroundVariant, BaseEdge, type Edge, type EdgeProps, Handle, type Node, Position, ReactFlow, useEdgesState, useNodesState, useReactFlow,
   useStore,
 } from "@xyflow/react"
-import { Blocks, Cpu, Maximize, Minus, Plug, Plus, ScrollText, Sparkles, Wrench } from "lucide-react"
+import { Blocks, Cpu, Maximize, Minus, Plug, Plus, ScrollText, Sparkles, Users, Wrench } from "lucide-react"
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react"
 
 import { AgentAvatar, Ago, Avatar, Money } from "@/components/common"
@@ -13,7 +13,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { useTheme } from "@/lib/theme-context"
 import { cn } from "@/lib/utils"
 import { pressProps } from "@/lib/filters"
-import { useConnectNode } from "./api"
+import { useAgents, useConnectNode } from "./api"
 import { Dot, Locked, Pill, PlaceIcon, RuleChip } from "./bits"
 import { layoutNarrow, layoutWide, type Dep, type Plan, type Pt, type Size } from "./layout"
 import { EFFORT_LABEL, placeName } from "./lib"
@@ -198,6 +198,27 @@ function SkillsNode() {
   )
 }
 
+function HelpersNode() {
+  const { config, agent } = useCanvas()
+  const roster = useAgents().data
+  return (
+    <Card id="helpers" icon={<Users />} title="Helpers" count={config.helpers?.length}>
+      {config.helpers == null ? <Locked who={agent.owner.name} className="p-3" /> : !config.helpers.length ? (
+        <div className="p-3 text-xs text-faint">None</div>
+      ) : (
+        <div className="py-1">
+          {config.helpers.map((h) => (
+            <Row key={h.id} k={`helper:${h.id}`}>
+              <AgentAvatar src={roster?.find((a) => a.id === h.id)?.avatar} name={h.name} className="size-4 text-[8px]" />
+              <span className="truncate">{h.name}</span>
+            </Row>
+          ))}
+        </div>
+      )}
+    </Card>
+  )
+}
+
 function ToolsNode() {
   const { config, catalog, changed } = useCanvas()
   const on = config.tools.filter((t) => t.enabled)
@@ -290,7 +311,7 @@ function HubNode() {
 
 const NODE_TYPES = {
   agent: AgentNode, instructions: InstructionsNode, model: ModelNode, places: PlacesNode,
-  skills: SkillsNode, tools: ToolsNode, mcp: ({ id }: { id: string }) => <McpNode id={id} />,
+  skills: SkillsNode, tools: ToolsNode, helpers: HelpersNode, mcp: ({ id }: { id: string }) => <McpNode id={id} />,
   platform: ({ id }: { id: string }) => <PlatformNode id={id} />, hub: HubNode,
 }
 
@@ -325,7 +346,7 @@ const EDGE_TYPES = { line: LineEdge }
 // ---------- Graph and layout ----------
 
 const LEFT = ["instructions", "model", "places"]
-const RIGHT = ["skills", "tools"]
+const RIGHT = ["skills", "tools", "helpers"]
 const HUB = "connections"
 /** Below this canvas width the editor is one column. */
 const NARROW = 760
@@ -423,7 +444,7 @@ export function Canvas({ agent, config, catalog, changed, changedNodes, selected
       home.current = null
       return
     }
-    const id = selected.startsWith("skill:") ? "skills" : selected.startsWith("place:") ? "places" : selected.split("/")[0]!
+    const id = selected.startsWith("skill:") ? "skills" : selected.startsWith("place:") ? "places" : selected.startsWith("helper:") ? "helpers" : selected.split("/")[0]!
     const n = rf.getNode(id)
     const el = document.querySelector(".react-flow")
     if (!n?.measured?.width || !el) return

@@ -316,6 +316,41 @@ async def test_the_form_is_posted_only_for_a_server_listed_with_owner_keys(
     assert posted.await_count == 1
 
 
+async def _make_helper_turn(fx: SimpleNamespace) -> None:
+    async with fx.runtime.session_factory.begin() as db:
+        await db.execute(
+            text("UPDATE turn_origins SET helper_of=:lead WHERE id=:id"),
+            {"lead": uuid.uuid4(), "id": uuid.UUID(fx.origin)},
+        )
+
+
+async def test_a_helpers_turn_cannot_request_a_watch_key(owner_server, monkeypatch):
+    """A helper may not post a key form into the person's thread."""
+    fx = owner_server
+    posted = AsyncMock(return_value="sentinel")
+    monkeypatch.setattr("daimon.adapters.mcp.tools.credential_requests._mint_and_post", posted)
+    await _make_helper_turn(fx)
+    with pytest.raises(ToolError, match="You are helping another agent"):
+        await _request_watch_credential_impl(
+            fx.runtime, fx.auth, server="fixture-bridge", origin_context_id=fx.origin
+        )
+    assert posted.await_count == 0, "no key form may be posted for a helper"
+
+
+async def test_a_helpers_turn_cannot_forget_a_watch_key(owner_server):
+    """A helper may not delete the person's saved watch key."""
+    fx = owner_server
+    await fx.save(fx.native.owner_account_id, OWNER_A)
+    await _make_helper_turn(fx)
+    with pytest.raises(ToolError, match="You are helping another agent"):
+        await _forget_watch_credential_impl(
+            fx.runtime, fx.auth, server="fixture-bridge", origin_context_id=fx.origin
+        )
+    async with fx.runtime.session_factory() as db:
+        kept = await db.scalar(text("SELECT count(*) FROM watch_credentials"))
+    assert kept == 1, "the saved key must survive a helper's forget request"
+
+
 async def test_an_owner_keyed_entry_switched_to_agent_pauses_the_watch(owner_server, monkeypatch):
     fx = owner_server
     await fx.save(fx.native.owner_account_id, OWNER_A)

@@ -55,6 +55,7 @@ from daimon.core.platform_names import UNNAMED_CHANNEL, ChannelLookup, lookup_ch
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault, TenantConfigRow
 from daimon.core.stores import (
     agent_backends,
+    agent_helpers,
     agent_owners,
     agent_tool_rules,
     identity,
@@ -166,6 +167,13 @@ class PlaceDoc(_Doc):
     confidential: bool | None = Field(default=None, exclude_if=_omit_none)
 
 
+class HelperDoc(_Doc):
+    """An agent this one may ask for help: its Managed Agents id and configuration name."""
+
+    id: str
+    name: str
+
+
 class AgentConfigDoc(_Doc):
     """`AgentConfig` in the web contract: what a draft edits and a version stores."""
 
@@ -178,6 +186,8 @@ class AgentConfigDoc(_Doc):
     tools: list[BuiltinTool]
     mcp_servers: list[McpServer]
     places: list[PlaceDoc] | None
+    # None where the viewer reads no details, and in configs stored before helpers existed.
+    helpers: list[HelperDoc] | None = None
 
 
 class PersonRef(_Doc):
@@ -236,6 +246,7 @@ class AgentFacts:
     tool_rules: Sequence[AgentToolRule] = ()
     credential_urls: frozenset[str] = frozenset()
     places: Sequence[PlaceDoc] = ()
+    helpers: Sequence[HelperDoc] = ()
     owner_account_id: uuid.UUID | None = None
     # The account the agent's metadata says made it, when it resolves to a person. Names
     # the owner where none is recorded; it grants no access.
@@ -385,6 +396,7 @@ def config_of(facts: AgentFacts) -> AgentConfigDoc:
         ],
         mcp_servers=_servers(facts),
         places=list(facts.places),
+        helpers=list(facts.helpers),
     )
 
 
@@ -431,7 +443,7 @@ def redact_config[Config: AgentConfigDoc](
 ) -> Config:
     """Strip what a viewer may not read. Pure.
 
-    Without details: no prompt, no places, and no MCP servers but Daimon's own,
+    Without details: no prompt, no places, no helpers, and no MCP servers but Daimon's own,
     whose presence is a capability (as `get_agent` shows a member), without URL,
     credential state or tool rules.
     With details but no admin: confidential places stay hidden.
@@ -441,6 +453,7 @@ def redact_config[Config: AgentConfigDoc](
             update={
                 "system": None,
                 "places": None,
+                "helpers": None,
                 "mcp_servers": [
                     server.model_copy(
                         update={"url": "", "credential": None, "tools": [], "listed": False}
@@ -850,6 +863,29 @@ async def _sign_ins(
     }
 
 
+async def _helper_docs(
+    deps: AgentViewDeps,
+    *,
+    tenant_id: uuid.UUID,
+    agents: Sequence[BetaManagedAgentsAgent],
+    ids: Mapping[str, Sequence[str]],
+) -> dict[str, list[HelperDoc]]:
+    """Each agent's helpers by name. A helper that is gone or archived is left out.
+
+    Names come from ``agents`` where they hold the helper; only the rest is retrieved.
+    """
+    known = {agent.id: agent for agent in agents}
+    names = {agent.id: _avatar_name(agent) for agent in agents if agent.archived_at is None}
+    for helper_id in sorted({h for helpers in ids.values() for h in helpers} - known.keys()):
+        helper = await fetch_tenant_agent(deps, tenant_id=tenant_id, ma_agent_id=helper_id)
+        if helper is not None:
+            names[helper_id] = _avatar_name(helper)
+    return {
+        agent_id: [HelperDoc(id=h, name=names[h]) for h in helpers if h in names]
+        for agent_id, helpers in ids.items()
+    }
+
+
 async def load_agent_facts(
     deps: AgentViewDeps,
     *,
@@ -868,7 +904,11 @@ async def load_agent_facts(
     facts: list[AgentFacts] = []
     async with deps.session_factory() as session:
         shared = await _tenant_places(session, tenant_id)
+        helper_ids = await agent_helpers.list_helper_ids_many(
+            session, tenant_id=tenant_id, agent_ids=[agent.id for agent in agents]
+        )
     shared = await _named_places(shared, deps, tenant_id)
+    helper_docs = await _helper_docs(deps, tenant_id=tenant_id, agents=agents, ids=helper_ids)
     async with deps.session_factory() as session:
         # The credit pages' source: billed spend by agent, markup included.
         costs = (
@@ -950,6 +990,7 @@ async def load_agent_facts(
                         platform=shared.platform,
                         channel_names=shared.channel_names,
                     ),
+                    helpers=helper_docs.get(agent.id, ()),
                     owner_account_id=owner,
                     creator_account_id=creator if creator in people else None,
                     co_owner_account_ids=tuple(agent_co_owners),

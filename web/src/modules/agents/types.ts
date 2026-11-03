@@ -48,6 +48,9 @@ export type Place = {
   confidential?: boolean
 }
 
+/** An agent this one may ask for help: its id and name. */
+export type Helper = { id: string; name: string }
+
 export type AgentConfig = {
   name: string
   purpose: string
@@ -60,6 +63,8 @@ export type AgentConfig = {
   mcp_servers: McpServer[]
   /** Null when the reader may not see reach details. */
   places: Place[] | null
+  /** Null when the reader may not see details; absent in versions that predate helpers. */
+  helpers?: Helper[] | null
 }
 
 export type PersonRef = { id: string; name: string }
@@ -91,7 +96,7 @@ export type AgentSummary = Pick<Agent, "id" | "name" | "purpose" | "avatar" | "v
 }
 
 export type Change = {
-  /** Stable key: `system`, `model`, `skill:<id>`, `mcp:<key>`, `mcp:<key>/<tool>`, `tool:<name>`, `place:<id>`, `name`, `purpose`. */
+  /** Stable key: `system`, `model`, `skill:<id>`, `mcp:<key>`, `mcp:<key>/<tool>`, `tool:<name>`, `place:<id>`, `helper:<id>`, `name`, `purpose`. */
   key: string
   node: string
   label: string

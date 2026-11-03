@@ -11,7 +11,7 @@ function randomPlan(seed: number, conns: number): { plan: Plan; size: (id: strin
   const card = (id: string, w = 240) => { sizes[id] = { w, h: 40 + Math.round(rand() * 400) }; return id }
   const plan: Plan = {
     left: ["instructions", "model", "places"].map((id) => card(id)),
-    right: ["skills", "tools"].map((id) => card(id)),
+    right: ["skills", "tools", "helpers"].map((id) => card(id)),
     hub: card("hub", 150),
     conns: Array.from({ length: conns }, (_, i) => card(`c${i}`, 256)),
     skills: "skills",

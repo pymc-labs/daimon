@@ -186,6 +186,7 @@ async def test_teams_connect_link_goes_to_the_requesters_one_to_one_chat(
         parent_channel_id="19:c@thread.tacv2",
         thread_id="19:c@thread.tacv2;messageid=1",
         sender_foreign=False,
+        helper_of=None,
     )
     agent = SimpleNamespace(id="ma_agent", name="Agent", metadata={})
     monkeypatch.setattr(connect_tool, "require_turn_origin", AsyncMock(return_value=origin))

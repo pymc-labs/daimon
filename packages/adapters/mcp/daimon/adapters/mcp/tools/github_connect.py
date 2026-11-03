@@ -18,6 +18,7 @@ from daimon.adapters.mcp.tools.discord._client import (
 )
 from daimon.adapters.mcp.tools.setup_target import (
     origin_channel_id,
+    refuse_helper,
     require_turn_origin,
     resolve_setup_agent,
 )
@@ -186,7 +187,7 @@ async def _github_connect_impl(
         (config.app_id, config.app_slug, config.private_key, config.client_id, config.client_secret)
     ):
         raise ToolError(f"GitHub setup is unavailable on this {space_noun(auth.platform)}.")
-    origin = await require_turn_origin(runtime, auth, origin_context_id)
+    origin = refuse_helper(await require_turn_origin(runtime, auth, origin_context_id))
     target_name = agent_name or origin.configuration_target_name or origin.responder_name
     target_ma_id = expected_ma_agent_id
     if target_ma_id is None:

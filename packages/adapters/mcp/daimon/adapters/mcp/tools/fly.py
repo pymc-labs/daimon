@@ -10,7 +10,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import _session_gate
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._session_access import source_metadata_readable
-from daimon.adapters.mcp.tools.setup_target import require_turn_origin
+from daimon.adapters.mcp.tools.setup_target import refuse_helper, require_turn_origin
 from daimon.adapters.mcp.tools.watches import fresh_admin
 from daimon.core.compute_fly import FlyComputeProvider
 from daimon.core.compute_models import ComputeSession, ComputeStatus, ComputeTask
@@ -40,7 +40,7 @@ async def _caller(
         or not auth.chat_session_id
     ):
         raise ToolError("Use a conversation where the machine owner is present.")
-    origin = await require_turn_origin(runtime, auth, origin_id)
+    origin = refuse_helper(await require_turn_origin(runtime, auth, origin_id))
     if (
         origin.sender_foreign
         or not origin.attended

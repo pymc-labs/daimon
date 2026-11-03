@@ -106,7 +106,7 @@ async def resolve(
                     if binding.kind == "setup"
                     else "This conversation was deleted. Start again in a new conversation."
                 )
-            return config.model_copy(
+            config = config.model_copy(
                 update={
                     "agent_name": binding.responder_name,
                     "agent_name_tier": "thread",
@@ -117,6 +117,20 @@ async def resolve(
                     "thread_binding_kind": binding.kind,
                 }
             )
+    if context.helper is not None:
+        # The thread's own checks above still apply: a helper runs only where the
+        # turn that asked it could run.
+        config = config.model_copy(
+            update={
+                "agent_name": context.helper.name,
+                "agent_name_tier": "thread",
+                "responder_ma_agent_id": context.helper.ma_agent_id,
+                "configuration_target_ma_agent_id": None,
+                "configuration_target_name": None,
+                "thread_binding_id": None,
+                "thread_binding_kind": "helper",
+            }
+        )
     return config
 
 

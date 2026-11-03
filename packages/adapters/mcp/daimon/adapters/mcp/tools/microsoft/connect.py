@@ -10,7 +10,7 @@ import httpx
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.microsoft._person import require_person
-from daimon.adapters.mcp.tools.setup_target import require_turn_origin
+from daimon.adapters.mcp.tools.setup_target import refuse_helper, require_turn_origin
 from daimon.adapters.mcp.tools.teams._direct import send_card_to_caller
 from daimon.core.stores import microsoft_sign_ins as sign_ins
 from daimon.core.stores.domain import TurnOriginRow
@@ -75,7 +75,7 @@ async def connect_microsoft_impl(
     root = runtime.settings.mcp.app_root_url
     if root is None:
         raise ToolError("Microsoft 365 access is not set up on this server.")
-    origin = await require_turn_origin(runtime, auth, origin_context_id)
+    origin = refuse_helper(await require_turn_origin(runtime, auth, origin_context_id))
     now = datetime.now(UTC)
     async with runtime.session_factory.begin() as session:
         # One card per link lifetime: a repeated or concurrent call must not

@@ -27,7 +27,7 @@ from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     rest_client,
 )
-from daimon.adapters.mcp.tools.setup_target import require_turn_origin
+from daimon.adapters.mcp.tools.setup_target import refuse_helper, require_turn_origin
 from daimon.adapters.mcp.watch_polling import (
     CredentialMissing,
     PollAccessRevoked,
@@ -236,7 +236,7 @@ async def require_attended_owner(
 ) -> TurnOriginRow:
     if origin_context_id is None:
         raise ToolError("An active reply from the owner is required")
-    origin = await require_turn_origin(runtime, auth, origin_context_id)
+    origin = refuse_helper(await require_turn_origin(runtime, auth, origin_context_id))
     if not origin.attended or auth.platform != "discord" or auth.platform_user_id is None:
         raise ToolError("An attended owner conversation is required")
     try:

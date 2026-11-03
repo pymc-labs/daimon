@@ -75,6 +75,7 @@ from daimon.adapters.mcp.tools.github_connect import register_github_connect_too
 from daimon.adapters.mcp.tools.github_remove_repo import register_github_remove_repo_tools
 from daimon.adapters.mcp.tools.github_requests import register_github_request_tools
 from daimon.adapters.mcp.tools.github_working_repo import register_github_working_repo_tools
+from daimon.adapters.mcp.tools.helpers import register_helper_tools
 from daimon.adapters.mcp.tools.here import register_here_tools
 from daimon.adapters.mcp.tools.lead_intake import register_lead_intake_tools
 from daimon.adapters.mcp.tools.media import register_media_tools, register_upload_tool
@@ -497,6 +498,7 @@ def create_mcp_app(
     register_credential_request_tools(mcp, runtime)
     register_setup_target_tools(mcp, runtime)
     register_task_continuity_tools(mcp, runtime)  # hand off a task / start fresh
+    register_helper_tools(mcp, runtime)  # ask helper agents inside this turn
     register_thread_model_tools(mcp, runtime)  # switch this conversation's model
     register_github_app_tools(mcp, runtime)
     register_github_connect_tools(mcp, runtime)
