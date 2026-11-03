@@ -67,7 +67,7 @@ export type ChannelKind = "channel" | "category" | "thread" | "forum_post" | "te
 
 const UNNAMED_CHANNEL = "Unnamed channel"
 // Labels the server sends for a channel with no name of its own; they never get a "#".
-const PLAIN_CHANNEL_LABELS = new Set([UNNAMED_CHANNEL, "Deleted channel", "Direct message"])
+const PLAIN_CHANNEL_LABELS = new Set([UNNAMED_CHANNEL, "Unknown channel", "Deleted channel", "Direct message"])
 // Threads, forum posts, categories and teams are named as they are; only a channel gets a "#".
 const HASHLESS = new Set<string>(["thread", "forum_post", "category", "team"])
 /** A channel as people write it; a channel the platform never named stays unnamed. */
