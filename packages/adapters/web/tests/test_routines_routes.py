@@ -356,7 +356,7 @@ async def test_a_member_may_deliver_only_to_a_channel_their_platform_shows_them(
     ], "what the platform shows them, minus a channel kept to its own agents"
     assert {user for user, _ in asked} == {"m-1"}
     assert (refused.status_code, locked.status_code) == (422, 422)
-    assert made.json()["destination"] == {"id": _CHANNEL, "name": "general"}
+    assert made.json()["destination"] == {"id": _CHANNEL, "name": "general", "kind": "channel"}
     assert cleared.json()["destination"] is None
 
 
