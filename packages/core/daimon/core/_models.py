@@ -3782,6 +3782,9 @@ class PlatformChannelName(Base):
             ondelete="CASCADE",
             name="fk_platform_channel_names_tenants",
         ),
+        CheckConstraint(
+            "status IN ('named', 'gone', 'direct')", name="ck_platform_channel_names_status"
+        ),
     )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
@@ -3798,6 +3801,8 @@ class PlatformChannelName(Base):
     parent_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     archived: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Whether the platform still has it: "named", "gone" (deleted) or "direct" (a DM).
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="named")
 
 
 class ChannelChange(Base):

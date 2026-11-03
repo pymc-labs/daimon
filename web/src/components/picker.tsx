@@ -6,7 +6,8 @@ import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, Command
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { cn } from "@/lib/utils"
 
-export type PickItem = { id: string; label: string; icon?: React.ReactNode }
+/** `node` replaces the icon and label in a chip, e.g. a link. */
+export type PickItem = { id: string; label: string; icon?: React.ReactNode; node?: React.ReactNode }
 
 /**
  * Picked items as removable chips, then `+ Add`: a searchable list where picking an item toggles it.
@@ -24,8 +25,7 @@ export function MultiPicker({ items, value, onAdd, onRemove, placeholder = "Sear
         const item = byId.get(id)
         return (
           <span key={id} className="inline-flex h-7 max-w-full items-center gap-1.5 rounded-md border pr-1 pl-1.5 text-xs">
-            {item?.icon}
-            <span className="truncate">{item?.label ?? unknown}</span>
+            {item?.node ?? <>{item?.icon}<span className="truncate">{item?.label ?? unknown}</span></>}
             <button
               type="button" aria-label={`Remove ${item?.label ?? unknown}`} disabled={disabled}
               className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground disabled:pointer-events-none" onClick={() => onRemove(id)}

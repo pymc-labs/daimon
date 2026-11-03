@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { ApiError, api } from "@/lib/api"
 import { useEnvironments } from "@/modules/agents/library/api"
 import type {
-  ChannelChangeResult, ChannelDefaults, ChannelDetail, ChannelHistoryEntry, ChannelList, ChannelSettings,
+  ChannelChangeResult, ChannelDefaults, ChannelDetail, ChannelHistory, ChannelList, ChannelSettings,
 } from "./types"
 
 export const useChannels = () => useQuery({ queryKey: ["channels"], queryFn: () => api.get<ChannelList>("/api/channels") })
@@ -11,7 +11,7 @@ export const useChannel = (id: string) => useQuery({ queryKey: ["channels", id],
 export const useChannelSettings = (id: string) =>
   useQuery({ queryKey: ["channels", id, "settings"], queryFn: () => api.get<ChannelSettings>(`/api/channels/${id}/settings`) })
 export const useChannelHistory = (id: string, enabled: boolean) =>
-  useQuery({ queryKey: ["channels", id, "history"], queryFn: () => api.get<ChannelHistoryEntry[]>(`/api/channels/${id}/history`), enabled })
+  useQuery({ queryKey: ["channels", id, "history"], queryFn: () => api.get<ChannelHistory>(`/api/channels/${id}/history`), enabled })
 export const useChannelDefaults = () =>
   useQuery({ queryKey: ["channel-defaults"], queryFn: () => api.get<ChannelDefaults>("/api/channel-defaults") })
 

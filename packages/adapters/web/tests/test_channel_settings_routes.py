@@ -63,7 +63,7 @@ async def test_a_switch_is_compared_recorded_and_audited(
             "/api/channels/web/participation", json={"mode": "on", "expected": None}
         )
         settings = (await admin.client.get("/api/channels/c1/settings")).json()
-        history = (await admin.client.get("/api/channels/c1/history")).json()
+        history = (await admin.client.get("/api/channels/c1/history")).json()["entries"]
         trail = await shown_trail(db_session_factory, admin.ws.tenant_id)
 
     assert first.status_code == 200, first.text
@@ -124,7 +124,7 @@ async def test_a_thread_override_lists_and_clears(
         )
         after = (await admin.client.get("/api/channels/c1/settings")).json()["threads"]
 
-    assert listed == [{"thread_id": "t1", "kind": "progress_plans", "value": "off"}]
+    assert listed == [{"thread_id": "t1", "name": None, "kind": "progress_plans", "value": "off"}]
     assert (cleared.status_code, again.status_code) == (200, 409)
     assert after == []
 
@@ -212,3 +212,30 @@ async def test_a_member_reads_no_spend_or_budget_and_only_the_routines_they_may_
     assert len(settings["routines"]) == 1, (
         "only the member's own routine, as the routine list shows"
     )
+
+
+async def test_settings_name_the_agents_they_mention_and_a_missing_one_is_null(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    async with _channels(web_client, db_session_factory, tmp_path) as admin:
+        async with db_session_factory.begin() as db:
+            await create_routine(
+                db,
+                tenant_id=admin.ws.tenant_id,
+                created_by_user_id=str(admin.member.id),
+                agent_id=AGENT_ID,
+                agent_name="ghost",
+                cron_expr="0 9 * * *",
+                timezone_="UTC",
+                trigger_message="hi",
+                next_fire_at=datetime(2030, 1, 1, tzinfo=UTC),
+                destination_kind="channel",
+                destination_id="c1",
+                channel_id="c1",
+            )
+        settings = (await admin.client.get("/api/channels/c1/settings")).json()
+
+    assert settings["agents"]["ghost"] == {"id": None, "name": None, "avatar": None}
+    assert settings["routines"][0]["title"] == "hi"

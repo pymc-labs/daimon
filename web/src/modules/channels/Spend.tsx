@@ -63,7 +63,7 @@ function Lines({ title, lines }: { title: string; lines: SpendLine[] }) {
 export function SpendBreakdown({ spend }: { spend: NonNullable<ChannelSettings["spend"]> }) {
   if (!spend.by_day.some((d) => d.usd > 0)) return null
   return (
-    <div className="mt-4 space-y-4">
+    <div className="space-y-4">
       <div>
         <h4 className="mb-1.5 text-xs font-medium text-muted-foreground">By day</h4>
         <Chart spend={spend} />

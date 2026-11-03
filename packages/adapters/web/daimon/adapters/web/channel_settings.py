@@ -17,11 +17,12 @@ from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.web.access import is_admin
 from daimon.adapters.web.admin_common import listed_agents
 from daimon.adapters.web.caller import WebCaller, requires
+from daimon.adapters.web.channel_agents import AgentRefJson, agent_refs
 from daimon.adapters.web.channels import (
     ChangeResultJson,
     actor_of,
     channel_refusals,
-    detail_json,
+    detail_of,
     one_row,
 )
 from daimon.adapters.web.runtime import WebRuntime
@@ -41,7 +42,6 @@ from daimon.core.channel_settings import (
     clear_provider_pin,
     clear_thread_override,
     list_thread_overrides,
-    pin_json,
     provider_pin,
     remove_skill,
     retire_channel_copy,
@@ -60,10 +60,12 @@ from daimon.core.stores import agent_tool_rules as tool_rules
 from daimon.core.stores.channel_changes import WORKSPACE_ID
 from daimon.core.stores.channel_skills import list_channel_skills
 from daimon.core.stores.domain import RoutineRow
-from daimon.core.stores.platform_names import get_user_names
+from daimon.core.stores.platform_names import get_channel_names, get_user_names
 from daimon.core.stores.switch_modes import Switch, get_switch_modes
 from daimon.core.stores.tenants import get_tenant
+from daimon.core.thread_models import model_label
 from fastapi import APIRouter, Depends, HTTPException
+from mux.contracts.config import ConfigRevision
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -71,6 +73,7 @@ ChannelViewer = Annotated[WebCaller, Depends(requires("channels.view"))]
 ChannelAdmin = Annotated[WebCaller, Depends(requires("channels.manage"))]
 Mode = Literal["on", "off", "disabled"]
 _SPEND_DAYS = 30
+_TITLE_CHARS = 60
 _NO_WEB = "Web chat has no such setting."
 _NO_AGENT = "Pick an agent from this workspace."
 
@@ -91,6 +94,9 @@ class SkillJson(BaseModel):
 class ToolRuleJson(BaseModel):
     agent: str
     tool: str
+    tool_label: str
+    """The tool as people read it, without its server."""
+    server_name: str
     rule: Literal["allow", "ask", "deny"] | None
     scope: Literal["chat", "chat_and_routines"]
     revision: int
@@ -104,6 +110,7 @@ class ToolRulesJson(BaseModel):
 class PinJson(BaseModel):
     backend: str
     model: str | None
+    model_label: str | None
     local: int
 
 
@@ -114,6 +121,8 @@ class CopyJson(BaseModel):
 
 class ThreadJson(BaseModel):
     thread_id: str
+    name: str | None
+    """What the platform calls the thread; None when it was never seen."""
     kind: Literal["participation", "progress_plans", "thread_rule", "handoff"]
     value: str
 
@@ -125,10 +134,17 @@ class SubscriptionJson(BaseModel):
 
 class RoutineJson(BaseModel):
     id: str
+    title: str
+    """The first line of its prompt, up to 60 characters."""
     agent: str
     cron: str
     enabled: bool
     relation: Literal["posts_here", "made_here", "both"]
+
+
+def _routine_title(message: str) -> str:
+    first = next((line.strip() for line in message.splitlines() if line.strip()), "")
+    return first if len(first) <= _TITLE_CHARS else f"{first[: _TITLE_CHARS - 1]}…"
 
 
 class AmountJson(BaseModel):
@@ -156,6 +172,8 @@ class ChannelSettingsJson(BaseModel):
     link: str | None
     teams_subscription: SubscriptionJson | None
     routines: list[RoutineJson]
+    agents: dict[str, AgentRefJson]
+    """The agents the tool rules and routines name, by key."""
     spend: SpendBreakdownJson | None
     """None for a member: spend figures are an admin's."""
 
@@ -217,6 +235,26 @@ class ThreadClear(BaseModel):
 class DefaultAgentChange(BaseModel):
     agent: str | None
     expected: str | None
+
+
+def _humanise(key: str) -> str:
+    words = key.replace("_", " ").replace("-", " ").strip()
+    return words[:1].upper() + words[1:]
+
+
+def split_tool(tool_key: str) -> tuple[str, str]:
+    """A tool key `server/tool` as a server name and a tool label, both in words."""
+    server, _, tool = tool_key.partition("/")
+    return (_humanise(server), _humanise(tool)) if tool else ("", _humanise(server))
+
+
+def _pin(pin: ConfigRevision) -> PinJson:
+    return PinJson(
+        backend=pin.backend,
+        model=pin.model,
+        model_label=model_label(pin.model) if pin.model else None,
+        local=pin.local,
+    )
 
 
 def _mode(mode: CascadeMode | None) -> Mode | None:
@@ -308,7 +346,8 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
 
     async def changed(caller: WebCaller, channel_id: str) -> ChangeResultJson:
         row = await one_row(runtime, caller, channel_id)
-        return ChangeResultJson(channel=detail_json(row, manage=True, figures=True), notes=[])
+        detail = await detail_of(runtime, caller.person.tenant_id, row, manage=True, figures=True)
+        return ChangeResultJson(channel=detail, notes=[])
 
     @router.get("/api/channels/{channel_id}/settings")
     async def get_settings(caller: ChannelViewer, channel_id: str) -> ChannelSettingsJson:  # pyright: ignore[reportUnusedFunction]
@@ -327,6 +366,12 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
             )
             threads = await list_thread_overrides(
                 db, tenant_id=tenant_id, platform=platform, channel_id=channel_id
+            )
+            thread_names = await get_channel_names(
+                db,
+                tenant_id=tenant_id,
+                platform=platform,
+                channel_ids=[t.thread_id for t in threads],
             )
             name = row.name
             sub = await read_subscription(
@@ -367,6 +412,15 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
         person_name = {k: v.display_name or v.handle for k, v in people.items()}
         if not is_admin(caller.role):
             routines = await member_routines(caller, routines)
+        refs = await agent_refs(
+            runtime,
+            tenant_id,
+            [
+                *(r.agent_name for r in rules),
+                *(r.agent_name for r, _ in routines),
+                *(t.value for t in threads if t.kind == "handoff"),
+            ],
+        )
         return ChannelSettingsJson(
             participation=participation,
             progress_plans=plans,
@@ -377,6 +431,8 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
                     ToolRuleJson(
                         agent=r.agent_name,
                         tool=r.tool_key,
+                        server_name=split_tool(r.tool_key)[0],
+                        tool_label=split_tool(r.tool_key)[1],
                         rule=r.rule,
                         scope=r.scope,
                         revision=r.revision,
@@ -384,10 +440,16 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
                     for r in rules
                 ],
             ),
-            provider_pin=PinJson.model_validate(pin_json(pin)) if pin is not None else None,
+            provider_pin=_pin(pin) if pin is not None else None,
             channel_copy=CopyJson(name=copy.name, agent_id=copy.id) if copy else None,
             threads=[
-                ThreadJson(thread_id=t.thread_id, kind=t.kind, value=t.value) for t in threads
+                ThreadJson(
+                    thread_id=t.thread_id,
+                    name=thread_names.get(t.thread_id),
+                    kind=t.kind,
+                    value=t.value,
+                )
+                for t in threads
             ],
             link=platform_link(
                 platform,
@@ -404,6 +466,7 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
             routines=[
                 RoutineJson(
                     id=str(r.id),
+                    title=_routine_title(r.trigger_message),
                     agent=r.agent_name,
                     cron=r.cron_expr,
                     enabled=r.enabled,
@@ -411,6 +474,7 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
                 )
                 for r, rel in routines
             ],
+            agents=refs,
             spend=None
             if spend is None
             else SpendBreakdownJson(

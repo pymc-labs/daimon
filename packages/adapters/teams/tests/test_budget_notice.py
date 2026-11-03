@@ -48,6 +48,7 @@ async def test_recipients_on_the_roster_get_a_1_1_message() -> None:
         monthly=True,
         budget_id=uuid.uuid4(),
         window_key="window",
+        channel_name="ops-room",
     )
     delivered = await teams_budget_notifier(runtime, direct)(notice)
     assert delivered == 1, "only a DM that landed counts"
@@ -56,7 +57,7 @@ async def test_recipients_on_the_roster_get_a_1_1_message() -> None:
     chat, card = direct.post_card.await_args.args
     assert chat == "chat-29:one"
     assert card.model_dump(by_alias=True) == notice_card(
-        "Channel `19:chan@thread.tacv2` has used its $1.00 monthly budget.\n\n"
+        "#ops-room has used its $1.00 monthly budget.\n\n"
         "Raise the budget to resume now, or wait until next month."
     ).model_dump(by_alias=True)
 

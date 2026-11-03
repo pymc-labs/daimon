@@ -21,6 +21,7 @@ from daimon.core.native_admins import ServerAdminIds
 from daimon.core.stores.accounts import list_platform_user_ids
 from daimon.core.stores.channel_budgets import claim_exhausted_notice, release_exhausted_notice
 from daimon.core.stores.domain import ChannelBudgetRow
+from daimon.core.stores.platform_names import get_channel_names
 from daimon.core.stores.tenants import get_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -44,6 +45,13 @@ class BudgetNotice:
     budget_id: uuid.UUID
     window_key: str
     """The `notice_key` claimed for this notice, released when no DM lands."""
+    channel_name: str | None = None
+    """The channel's name as last seen; None when never seen."""
+
+    @property
+    def channel_label(self) -> str:
+        """The channel as a reader sees it where the platform cannot mention it."""
+        return f"#{self.channel_name}" if self.channel_name else "This channel"
 
     def allowed_recipients(self, policy: DirectMessagePolicy) -> tuple[str, ...]:
         return tuple(r for r in self.recipient_ids if policy.allows(r))
@@ -97,6 +105,9 @@ async def claim_budget_notice(
     tenant = await get_tenant(session, tenant_id)
     if tenant is None:
         return None
+    names = await get_channel_names(
+        session, tenant_id=tenant_id, platform=platform, channel_ids=(channel_id,)
+    )
     return BudgetNotice(
         tenant_id=tenant_id,
         workspace_id=tenant.external_id,
@@ -107,6 +118,7 @@ async def claim_budget_notice(
         monthly=budget.window == "monthly",
         budget_id=budget.id,
         window_key=key,
+        channel_name=names.get(channel_id),
     )
 
 

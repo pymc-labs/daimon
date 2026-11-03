@@ -9,5 +9,5 @@ const Channels = lazyPage(() => import("./List"), "Channels")
 export const channels: ModuleDef = {
   key: "channels",
   nav: [{ to: "/channels", label: "Channels", icon: Hash, cap: "channels.view", g: "h" }],
-  routes: <Route path="/channels" element={<Channels />} />,
+  routes: <Route path="/channels/*" element={<Channels />} />,
 }
