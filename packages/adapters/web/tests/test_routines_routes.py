@@ -333,3 +333,31 @@ async def test_a_member_may_deliver_only_to_a_channel_their_platform_shows_them(
     assert (refused.status_code, locked.status_code) == (422, 422)
     assert made.json()["destination"] == {"id": _CHANNEL, "name": "general"}
     assert cleared.json()["destination"] is None
+
+
+async def test_a_member_delivers_by_direct_message_to_themselves_only(rig: Rig) -> None:
+    async with rig.open(discord_id="222222222222222222") as (client, ws, _):
+        choices = (await client.get("/api/routines/choices")).json()
+        made = await client.post("/api/routines", json=_NEW | {"dm": True})
+        assert made.status_code == 200, made.text
+        cleared = await client.patch(
+            f"/api/routines/{made.json()['id']}", json={"clear_destination": True}
+        )
+        back = await client.patch(f"/api/routines/{made.json()['id']}", json={"dm": True})
+        async with rig.factory() as db:
+            [row] = await list_routines_for_tenant(db, tenant_id=ws.tenant_id)
+    assert choices["can_dm"] is True
+    routine = made.json()
+    assert (routine["dm"], routine["destination"], routine["sandbox_tools"]) == (True, None, False)
+    assert cleared.json()["dm"] is False
+    assert back.json()["dm"] is True
+    assert (row.destination_kind, row.destination_id) == ("dm", "222222222222222222")
+
+
+async def test_changing_a_routine_needs_a_linked_chat_account(rig: Rig) -> None:
+    async with rig.open(as_="owner", discord_id=None) as (client, ws, _):
+        theirs = await _seed(rig.factory, ws.tenant_id, owner="someone-else", message="theirs")
+        choices = (await client.get("/api/routines/choices")).json()
+        refused = await client.patch(f"/api/routines/{theirs}", json={"message": "mine now"})
+    assert choices["can_dm"] is False
+    assert refused.status_code == 409

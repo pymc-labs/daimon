@@ -13,6 +13,7 @@ import { Field } from "../credits/shared"
 import type { CatchUp, Choices, Routine, RoutineChange } from "./types"
 
 const NONE = "none"
+const DM = "dm"
 
 const zones = (current: string) => {
   const all = typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : []
@@ -78,7 +79,8 @@ export function Editor({ routine, choices, onDone }: { routine?: Routine; choice
   const [agent, setAgent] = useState(routine?.agent.id ?? choices.agents[0]?.id ?? "")
   const [spec, setSpec] = useState<Spec>(routine ? fromCron(routine.cron) : DEFAULT_SPEC)
   const [zone, setZone] = useState(routine?.timezone ?? localZone())
-  const [dest, setDest] = useState(routine?.destination?.id ?? NONE)
+  const was = routine ? (routine.dm ? DM : routine.destination?.id ?? NONE) : NONE
+  const [dest, setDest] = useState(was)
   const [message, setMessage] = useState(routine?.message ?? "")
   const [catchUp, setCatchUp] = useState<CatchUp>(routine?.catch_up ?? "skip")
   const cron = toCron(spec)
@@ -89,14 +91,14 @@ export function Editor({ routine, choices, onDone }: { routine?: Routine; choice
 
   const save = useMutation({
     mutationFn: () => {
-      if (!routine) return api.post<Routine>("/api/routines", { agent_id: agent, cron, timezone: zone, message: message.trim(), catch_up: catchUp, destination: dest === NONE ? null : dest })
+      if (!routine) return api.post<Routine>("/api/routines", { agent_id: agent, cron, timezone: zone, message: message.trim(), catch_up: catchUp, destination: dest === NONE || dest === DM ? null : dest, dm: dest === DM })
       const change: RoutineChange = {}
       if (agent !== routine.agent.id) change.agent_id = agent
       if (cron !== routine.cron) change.cron = cron
       if (zone !== routine.timezone) change.timezone = zone
       if (message.trim() !== routine.message) change.message = message.trim()
       if (catchUp !== routine.catch_up) change.catch_up = catchUp
-      if (dest !== (routine.destination?.id ?? NONE)) { if (dest === NONE) change.clear_destination = true; else change.destination = dest }
+      if (dest !== was) { if (dest === NONE) change.clear_destination = true; else if (dest === DM) change.dm = true; else change.destination = dest }
       return api.patch<Routine>(`/api/routines/${routine.id}`, change)
     },
     onSuccess: (saved) => { void qc.invalidateQueries({ queryKey: ["routines"] }); toast(routine ? "Saved" : "Routine added"); onDone(saved.id) },
@@ -117,6 +119,7 @@ export function Editor({ routine, choices, onDone }: { routine?: Routine; choice
           <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value={NONE}>No channel</SelectItem>
+            {(choices.can_dm || routine?.dm) && <SelectItem value={DM}>Direct message</SelectItem>}
             {dests.map((d) => <SelectItem key={d.id} value={d.id}>{channelLabel(d.name)}</SelectItem>)}
           </SelectContent>
         </Select>

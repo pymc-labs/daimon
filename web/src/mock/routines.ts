@@ -16,13 +16,13 @@ type Stored = Routine & { owner_id: string }
 const routines: Stored[] = [
   { id: "r1", owner_id: "p_maya", owner: "Maya Lindqvist", mine: false, agent: { id: "ag_mmm", name: "MMM Analyst" }, cron: "0 9 * * 1", timezone: "Europe/Stockholm",
     schedule: "every Monday at 09:00", message: "Summarize last week's channel contribution for Larkspur and flag any interval wider than 20%.",
-    enabled: true, catch_up: "run-once", destination: DESTINATIONS[0]!, next_run: hours(60), last_run: hours(-108), failed: false, last_output: "Search and social held steady; TV's interval widened to 24%." },
+    enabled: true, catch_up: "run-once", destination: DESTINATIONS[0]!, dm: false, sandbox_tools: true, next_run: hours(60), last_run: hours(-108), failed: false, last_output: "Search and social held steady; TV's interval widened to 24%." },
   { id: "r2", owner_id: "p_priya", owner: "Priya Raman", mine: false, agent: { id: "ag_pricing", name: "Pricing Analyst" }, cron: "30 8 * * 1-5", timezone: "America/New_York",
     schedule: "every weekday at 08:30", message: "Post the overnight price test readout.",
-    enabled: true, catch_up: "skip", destination: DESTINATIONS[1]!, next_run: hours(14), last_run: hours(-10), failed: true, last_output: null },
+    enabled: true, catch_up: "skip", destination: DESTINATIONS[1]!, dm: false, sandbox_tools: false, next_run: hours(14), last_run: hours(-10), failed: true, last_output: null },
   { id: "r3", owner_id: "p_priya", owner: "Priya Raman", mine: false, agent: { id: "ag_review", name: "Code Reviewer" }, cron: "0 17 * * 5", timezone: "Europe/London",
     schedule: "every Friday at 17:00", message: "List pull requests open for more than a week.",
-    enabled: false, catch_up: "skip", destination: null, next_run: null, last_run: hours(-200), failed: false, last_output: null },
+    enabled: false, catch_up: "skip", destination: null, dm: true, sandbox_tools: false, next_run: null, last_run: hours(-200), failed: false, last_output: null },
 ]
 
 const view = (r: Stored): Routine => {
@@ -55,7 +55,7 @@ export const routinesHandlers: HttpHandler[] = [
     if (!m) return unauthorized()
     const body: Choices = {
       agents: AGENTS.map((a) => ({ id: a.id, name: a.name })), destinations: DESTINATIONS,
-      can_create: m.capabilities.includes("routines.manage"), platform: m.workspace.platform,
+      can_create: m.capabilities.includes("routines.manage"), can_dm: m.workspace.platform === "discord", platform: m.workspace.platform,
     }
     return HttpResponse.json(body)
   }),
@@ -69,7 +69,7 @@ export const routinesHandlers: HttpHandler[] = [
     if (!a) return invalid("Pick an agent from the list.")
     const r: Stored = {
       id: `r${Date.now()}`, owner_id: m.id, owner: m.name, mine: true, agent: { id: a.id, name: a.name }, cron: b.cron, timezone: b.timezone,
-      schedule: words(b.cron, b.timezone), message: b.message, enabled: true, catch_up: b.catch_up as CatchUp, destination: dest(b.destination),
+      schedule: words(b.cron, b.timezone), message: b.message, enabled: true, catch_up: b.catch_up as CatchUp, destination: b.dm ? null : dest(b.destination), dm: !!b.dm, sandbox_tools: false,
       next_run: next(b.cron), last_run: null, failed: false, last_output: null,
     }
     routines.unshift(r)
@@ -92,8 +92,9 @@ export const routinesHandlers: HttpHandler[] = [
     if (b.cron || b.timezone) { r.schedule = words(r.cron, r.timezone); if (r.enabled) r.next_run = next(r.cron) }
     if (b.message) r.message = b.message
     if (b.catch_up) r.catch_up = b.catch_up
-    if (b.clear_destination) r.destination = null
-    else if (b.destination) r.destination = dest(b.destination)
+    if (b.clear_destination) { r.destination = null; r.dm = false }
+    else if (b.dm) { r.destination = null; r.dm = true }
+    else if (b.destination) { r.destination = dest(b.destination); r.dm = false }
     return HttpResponse.json(view(r))
   }),
   ...(["pause", "resume"] as const).map((verb) => http.post(`/api/routines/:id/${verb}`, async ({ params }) => {

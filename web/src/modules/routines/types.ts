@@ -12,6 +12,9 @@ export type Routine = {
   enabled: boolean
   catch_up: CatchUp
   destination: Choice | null
+  /** Delivered to the owner by direct message. */
+  dm: boolean
+  sandbox_tools: boolean
   next_run: string | null
   last_run: string | null
   failed: boolean
@@ -22,7 +25,7 @@ export type Routine = {
 }
 
 /** What the editor may pick from. */
-export type Choices = { agents: Choice[]; destinations: Choice[]; can_create: boolean; platform: string }
+export type Choices = { agents: Choice[]; destinations: Choice[]; can_create: boolean; can_dm: boolean; platform: string }
 
-export type NewRoutine = { agent_id: string; cron: string; timezone: string; message: string; catch_up: CatchUp; destination: string | null }
+export type NewRoutine = { agent_id: string; cron: string; timezone: string; message: string; catch_up: CatchUp; destination: string | null; dm?: boolean }
 export type RoutineChange = Partial<Omit<NewRoutine, "destination">> & { destination?: string | null; clear_destination?: boolean }

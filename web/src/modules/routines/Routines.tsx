@@ -73,7 +73,7 @@ function RoutineTable({ rows, choices }: { rows: Routine[]; choices: Choices | u
                 <span className="flex items-center gap-2"><span className="truncate font-medium">{r.agent.name}</span>{!r.enabled && <Pill>Paused</Pill>}</span>
               </TableCell>
               <TableCell>{r.schedule}</TableCell>
-              <TableCell className="max-md:hidden">{r.destination ? channelLabel(r.destination.name) : <span className="text-faint">None</span>}</TableCell>
+              <TableCell className="max-md:hidden">{r.dm ? "Direct message" : r.destination ? channelLabel(r.destination.name) : <span className="text-faint">None</span>}</TableCell>
               <TableCell className="max-sm:hidden">{r.next_run ? <Ago iso={r.next_run} /> : <span className="text-faint">Paused</span>}</TableCell>
               <TableCell className="max-lg:hidden"><Result r={r} /></TableCell>
               {everyone && <TableCell className="text-muted-foreground max-lg:hidden">{r.mine ? "You" : (r.owner ?? "Unknown")}</TableCell>}
@@ -119,6 +119,7 @@ function Detail({ routine: r, choices }: { routine: Routine; choices: Choices })
             ["Next run", r.next_run ? absolute(r.next_run) : "Paused"],
             ["Last run", r.last_run ? `${absolute(r.last_run)}${r.failed ? ", failed" : ""}` : "Never"],
             ...(r.owner && !r.mine ? [["Owner", r.owner] as const] : []),
+            ...(r.sandbox_tools ? [["Sandbox tools", "On"] as const] : []),
           ] as const).map(([k, v]) => (
             <div key={k} className="grid grid-cols-[112px_1fr] gap-3"><dt className="text-muted-foreground">{k}</dt><dd>{v}</dd></div>
           ))}

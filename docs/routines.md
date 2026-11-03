@@ -30,14 +30,15 @@ Five MCP tools manage routines: `create_routine`, `list_routines`,
 `update_routine(enabled=False)`. The last run is in the `last_*` fields that
 `get_routine` returns.
 
-Chat is the simplest way: ask the agent ("every weekday at 9am, post the sales
+Chat is simplest: ask the agent ("every weekday at 9am, post the sales
 numbers"). Each platform also has a panel:
 
 - **Slack** `/routines` and **Teams** `routines` (in a 1:1 chat): workspace
   admins create and delete. The form's schedule field takes cron, such as
   `0 9 * * 1-5`, and the panel shows schedules in words.
-- **Web app** Routines page: members manage their own, admins all. Creating
-  needs a linked chat account. **Run now** makes an active routine due at once.
+- **Web app** Routines page: members manage their own, admins all. Creating or
+  changing one needs a linked chat account. **Run now** makes an active routine
+  due at once.
 - **Discord** `/routines` needs Manage Server. **New** creates a routine for
   an agent, schedule, timezone and message. The creator or an admin can pause,
   resume or delete one.

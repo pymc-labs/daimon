@@ -84,6 +84,8 @@ class Routine(BaseModel):
     enabled: bool
     catch_up: CatchUpPolicy
     destination: Destination | None
+    dm: bool
+    sandbox_tools: bool
     next_run: str | None
     last_run: str | None
     failed: bool
@@ -96,6 +98,7 @@ class Choices(BaseModel):
     agents: list[Choice]
     destinations: list[Destination]
     can_create: bool
+    can_dm: bool
     platform: str
 
 
@@ -107,6 +110,7 @@ class NewBody(BaseModel):
     catch_up: CatchUpPolicy = "skip"
     enabled: bool = True
     destination: str | None = None
+    dm: bool = False
 
 
 class EditBody(BaseModel):
@@ -116,6 +120,7 @@ class EditBody(BaseModel):
     message: str | None = Field(default=None, min_length=1, max_length=20_000)
     catch_up: CatchUpPolicy | None = None
     destination: str | None = None
+    dm: bool = False
     clear_destination: bool = False
 
 
@@ -125,6 +130,12 @@ def _iso(moment: datetime | None) -> str | None:
 
 def _agent_name(agent: BetaManagedAgentsAgent) -> str:
     return str(agent.metadata.get(MA_METADATA_KEY_NAME) or agent.name)
+
+
+def _kind(dm: bool, destination: str | None) -> RoutineDestinationKind | None:
+    if dm:
+        return "dm"
+    return "channel" if destination else None
 
 
 def _refusal(error: RoutineRefused) -> HTTPException:
@@ -314,7 +325,7 @@ def routines_router(runtime: WebRuntime) -> APIRouter:
                 platform, row.destination_kind, row.destination_id
             )
             destination = None
-            if row.destination_kind is not None and row.destination_id is not None:
+            if row.destination_kind in ("channel", "thread") and row.destination_id is not None:
                 name = (
                     channels.get(channel or "", UNNAMED_CHANNEL)
                     if row.destination_kind == "channel"
@@ -334,6 +345,8 @@ def routines_router(runtime: WebRuntime) -> APIRouter:
                     enabled=row.enabled,
                     catch_up=row.catch_up_policy,
                     destination=destination,
+                    dm=row.destination_kind == "dm",
+                    sandbox_tools=row.sandbox_tools_enabled,
                     next_run=_iso(row.next_fire_at),
                     last_run=_iso(row.last_fired_at),
                     failed=row.last_error is not None,
@@ -372,6 +385,7 @@ def routines_router(runtime: WebRuntime) -> APIRouter:
             agents=[Choice(id=a.id, name=_agent_name(a)) for a in agents],
             destinations=[Destination(id=i, name=n) for i, n in channels.items()],
             can_create=linked == acting.platform,
+            can_dm=linked == acting.platform and acting.platform in routine_service.DM_PLATFORMS,
             platform=acting.platform,
         )
 
@@ -392,8 +406,8 @@ def routines_router(runtime: WebRuntime) -> APIRouter:
                     trigger_message=body.message,
                     enabled=body.enabled,
                     catch_up_policy=body.catch_up,
-                    destination_kind="channel" if body.destination else None,
-                    destination_id=body.destination,
+                    destination_kind=_kind(body.dm, body.destination),
+                    destination_id=None if body.dm else body.destination,
                 ),
             )
         except RoutineRefused as refused:
@@ -402,7 +416,9 @@ def routines_router(runtime: WebRuntime) -> APIRouter:
 
     @router.patch("/{routine_id}")
     async def edit(routine_id: uuid.UUID, body: EditBody, caller: Manager) -> Routine:  # pyright: ignore[reportUnusedFunction]
-        env, acting, _ = await service(caller)
+        env, acting, linked = await service(caller)
+        # A changed routine runs as whoever changed it, so that must be a linked account.
+        require_linked(acting.platform, linked)
         name = None
         if body.agent_id is not None:
             async with runtime.sessionmaker() as db:
@@ -418,8 +434,8 @@ def routines_router(runtime: WebRuntime) -> APIRouter:
                     timezone=body.timezone,
                     trigger_message=body.message,
                     catch_up_policy=body.catch_up,
-                    destination_kind="channel" if body.destination else None,
-                    destination_id=body.destination,
+                    destination_kind=_kind(body.dm, body.destination),
+                    destination_id=None if body.dm else body.destination,
                     clear_destination=body.clear_destination,
                 ),
             )
