@@ -61,7 +61,7 @@ NOT_YET_PRIVATE_FOREIGN = (
 UNSHOWN = "I ran `{name}`, but couldn't show you its result privately here."
 # Admission refusals about the sender, not the thread: only they see them.
 SENDER_ONLY: frozenset[AdmissionDenialReason] = frozenset(
-    {"invoker_not_allowed", "allowance_exhausted"}
+    {"invoker_not_allowed", "cap_exceeded", "allowance_exhausted"}
 )
 _TIMEOUTS = (TimeoutError, httpx.TimeoutException)
 

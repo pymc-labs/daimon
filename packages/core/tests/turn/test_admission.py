@@ -183,7 +183,7 @@ async def test_admit_over_balance_tenant_raises_admission_denied_balance_deplete
 
 @pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
 @pytest.mark.parametrize("funding_mode", ["prepaid", "operator_funded"])
-async def test_admit_user_with_a_used_up_allowance_raises_admission_denied(
+async def test_admit_over_limit_user_raises_admission_denied_cap_exceeded(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -224,8 +224,8 @@ async def test_admit_user_with_a_used_up_allowance_raises_admission_denied(
             now=_NOW,
         )
 
-    assert exc_info.value.reason == "allowance_exhausted", (
-        "a user with nothing left of their allowance must raise AdmissionDenied"
+    assert exc_info.value.reason == "cap_exceeded", (
+        "a user past their monthly limit must raise AdmissionDenied(reason='cap_exceeded')"
     )
 
     from daimon.core.stores.turn_outcomes import list_for_tenant
@@ -235,7 +235,7 @@ async def test_admit_user_with_a_used_up_allowance_raises_admission_denied(
     async with db_session_factory() as session:
         outcomes = await list_for_tenant(session, tenant.id)
     assert len(outcomes) == 1
-    assert outcomes[0].reason == "admission_denied"
+    assert outcomes[0].reason == "admission_cap_exceeded"
     assert outcomes[0].platform == platform
     assert outcomes[0].agent_id == "ag_1"
     assert outcomes[0].account_id is not None

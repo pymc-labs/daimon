@@ -84,6 +84,7 @@ from daimon.core.spend_gate import (
     AFTER_QUEUE_CHECKS,
     SpendPerson,
     SpendRequest,
+    person_verdict,
     spend_gate,
     spend_gate_in_new_session,
 )
@@ -1422,7 +1423,14 @@ async def _admit_gates(
                 reason="balance_depleted", cause=None if credited else "no_credit_yet"
             )
         if block == "allowance_exhausted":
-            raise AdmissionDenied(reason="allowance_exhausted")
+            # The gate folds a member's monthly cap into their allowances; a cap refusal
+            # still reads as one.
+            verdict = await person_verdict(
+                billing_session, request=spend_request, markup=deps.markup, now=now
+            )
+            raise AdmissionDenied(
+                reason="cap_exceeded" if verdict.capped else "allowance_exhausted"
+            )
         budget_exceeded = block == "budget_exceeded"
         channel_skill_rows = (
             []

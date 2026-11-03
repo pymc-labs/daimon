@@ -269,6 +269,7 @@ _RESOLVER_MISS = _resolver_miss(TEAMS_REFUSAL_NOUNS)
 # The log event each refusal is recorded under.
 _DENIALS: dict[AdmissionDenialReason, str] = {
     "balance_depleted": "turn.skipped.over_balance",
+    "cap_exceeded": "turn.skipped.over_cap",
     "allowance_exhausted": "turn.skipped.allowance_exhausted",
     "invoker_not_allowed": "turn.skipped.invoker_not_allowed",
     "runs_elsewhere": "turn.skipped.runs_elsewhere",

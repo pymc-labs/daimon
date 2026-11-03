@@ -121,6 +121,7 @@ _CONVERSATIONS_REPLIES_PATTERN = re.compile(r"https://slack\.com/api/conversatio
 _BALANCE_BLOCKED_TEXT = (
     "Your team has no Daimon credit yet.\n\nAn admin can add some with `/billing`."
 )
+_CAP_BLOCKED_TEXT = "You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
 _ALLOWANCE_BLOCKED_TEXT = "You've used your Daimon credit.\n\nAsk an admin to add more."
 
 
@@ -442,9 +443,10 @@ class SlackDriver:
             posted = _extract_posted_texts(mock)
         return posted
 
-    def expected_blocked_text(self, kind: Literal["balance", "allowance"]) -> str:
+    def expected_blocked_text(self, kind: Literal["balance", "cap", "allowance"]) -> str:
         return {
             "balance": _BALANCE_BLOCKED_TEXT,
+            "cap": _CAP_BLOCKED_TEXT,
             "allowance": _ALLOWANCE_BLOCKED_TEXT,
         }[kind]
 

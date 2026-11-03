@@ -77,8 +77,8 @@ async def test_turn_blocked_when_over_cap_writes_no_new_usage_or_ledger_row(
         billing_config=_BILLING_CONFIG,
     )
 
-    expected = driver.expected_blocked_text("allowance")
-    assert expected in posted, f"expected the allowance copy {expected!r}, got: {posted}"
+    expected = driver.expected_blocked_text("cap")
+    assert expected in posted, f"expected the over-limit copy {expected!r}, got: {posted}"
 
     usage_rows = await usage_events.list_for_tenant(db_session, tenant_id=tenant.id)
     assert len(usage_rows) == 1, (

@@ -19,6 +19,7 @@ from daimon.core.scope import ConfigTier
 
 AdmissionDenialReason = Literal[
     "balance_depleted",
+    "cap_exceeded",
     "channel_budget_exceeded",
     # The person's own spend allowance is used up (or a visitor has none).
     "allowance_exhausted",

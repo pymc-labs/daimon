@@ -197,6 +197,7 @@ _BY_VALUE: dict[str, TerminationReason] = {m.value: m for m in TerminationReason
 
 _BY_DENIAL: dict[str, TerminationReason] = {
     "balance_depleted": TerminationReason.ADMISSION_BALANCE_DEPLETED,
+    "cap_exceeded": TerminationReason.ADMISSION_CAP_EXCEEDED,
     "channel_budget_exceeded": TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED,
     "writers_none": TerminationReason.ADMISSION_CHANNEL_PROTECTED,
     "runs_elsewhere": TerminationReason.ADMISSION_AGENT_PINNED_ELSEWHERE,

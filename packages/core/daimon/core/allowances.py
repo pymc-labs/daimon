@@ -45,6 +45,8 @@ class AllowanceVerdict:
     window: AllowanceWindow | None
     resets_at: datetime | None
     """When a monthly allowance renews; None for a total one."""
+    capped: bool = False
+    """True when the cap, not an allowance, is what has no room."""
 
 
 def applicable(
@@ -150,6 +152,7 @@ def allowance_verdict(
         total_usd=cap.amount_usd,
         window=cap.window,
         resets_at=window_end(cap, now=now),
+        capped=cap_left <= 0,
     )
 
 

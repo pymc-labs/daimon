@@ -11,7 +11,9 @@ from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError
 from daimon.core.turn.errors import SessionBusyError
 
 # Every way spending is stopped reads the same to the person: ask an admin for credit.
-_OUT_OF_CREDIT = frozenset({"balance_depleted", "channel_budget_exceeded", "allowance_exhausted"})
+_OUT_OF_CREDIT = frozenset(
+    {"balance_depleted", "cap_exceeded", "channel_budget_exceeded", "allowance_exhausted"}
+)
 
 
 def _refusal(title: str, body: str, help: str) -> WebRefusalCard:

@@ -93,6 +93,7 @@ from .views import CapturedView, normalize_line, read_discord_modal, read_discor
 _BALANCE_BLOCKED_TEXT = (
     "Your team has no Daimon credit yet.\n\nAn admin can add some with `/billing`."
 )
+_CAP_BLOCKED_TEXT = "You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
 _ALLOWANCE_BLOCKED_TEXT = "You've used your Daimon credit.\n\nAsk an admin to add more."
 
 #: The message id the faked REST POST hands back for a posted card. The row
@@ -457,9 +458,10 @@ class DiscordDriver:
                 posted.append(embed.description)
         return posted
 
-    def expected_blocked_text(self, kind: Literal["balance", "allowance"]) -> str:
+    def expected_blocked_text(self, kind: Literal["balance", "cap", "allowance"]) -> str:
         return {
             "balance": _BALANCE_BLOCKED_TEXT,
+            "cap": _CAP_BLOCKED_TEXT,
             "allowance": _ALLOWANCE_BLOCKED_TEXT,
         }[kind]
 
