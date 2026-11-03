@@ -71,6 +71,8 @@ from daimon.core.agent_identity import AgentIdentity
 from daimon.core.errors import TurnError
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.stores import tenant_ledger
+from daimon.core.stores.platform_names import KnownName, upsert_user_names
+from daimon.core.stores.tag_opt_outs import set_opt_out
 from daimon.core.stores.tenants import set_funding_mode
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.lifecycle import TurnLifecycle
@@ -85,7 +87,13 @@ from daimon.core.turn.state import (
 )
 from daimon.core.turn.status_lines import SUMMARY_GAP as GAP
 from daimon.core.turn.termination import TerminationReason
-from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
+from daimon.testing.factories import (
+    make_account,
+    make_channel_budget,
+    make_ledger_entry,
+    make_platform_principal,
+    make_tenant,
+)
 from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from slack_sdk.errors import SlackApiError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -2202,3 +2210,33 @@ async def test_nothing_posted_names_another_app(fake_slack_web_client: Any) -> N
     final = _block_text(_last_update_blocks(fake_slack_web_client))
     assert "Use Slack, not another app. See another app." in final
     assert "Discord" not in final and "Teams" not in final
+
+
+@pytest.mark.asyncio
+async def test_terminal_success_when_answer_tags_an_opted_out_person_then_plain_name(
+    fake_slack_web_client: Any,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The model's answer is Daimon's own post, so a never-tag choice holds there too."""
+    tenant = await make_tenant(db_session, platform="slack", workspace_id="T_LC_OPT")
+    account = await make_account(db_session, tenant=tenant)
+    await make_platform_principal(
+        db_session, platform="slack", external_id="U2", tenant=tenant, account=account
+    )
+    await set_opt_out(db_session, account_id=account.id, tenant_id=tenant.id)
+    await upsert_user_names(
+        db_session, tenant_id=tenant.id, platform="slack", names={"U2": KnownName("Bo")}
+    )
+    await db_session.commit()
+    lc, *_ = _make_lifecycle(
+        fake_slack_web_client, sessionmaker=db_session_factory, tenant_id=tenant.id
+    )
+    await lc.post_initial()
+    await lc.on_terminal_success(
+        TurnState(content=[TextBlock(kind="text", text="ask <@U2> or <@U3>")])
+    )
+
+    text = _block_text(_last_update_blocks(fake_slack_web_client))
+    assert "@Bo" in text and "<@U2>" not in text, "the opted-out person is named, not tagged"
+    assert "<@U3>" in text, "everyone else keeps their tag"

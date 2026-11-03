@@ -81,7 +81,8 @@ from daimon.core.cost_footer import cost_footer_shown
 from daimon.core.native_footer_cost import native_footer_text
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_alerts import alert_ops
-from daimon.core.outbound.opt_out import tag_opt_outs
+from daimon.core.outbound.mentions import mentioned_user_ids, untag
+from daimon.core.outbound.opt_out import opt_out_names, tag_opt_outs
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.card_state import CardState as State
@@ -260,6 +261,10 @@ class SlackTurnLifecycle(OutputGate):
         self._status_ts: str | None = adopt_status_ts
         self._last_flush: float = 0.0
         self._terminal: bool = False
+        # Opt-out answers per mentioned person, so a streamed card asks once per
+        # new mention rather than on every flush.
+        self._opted_out: dict[str, bool] = {}
+        self._opt_out_names: dict[str, str] = {}
         self.final_ts: str | None = None
 
     async def on_acknowledgment(self, phase: Acknowledgment) -> None:
@@ -411,8 +416,8 @@ class SlackTurnLifecycle(OutputGate):
             cancel_key = self._cancel_key
         else:
             cancel_key = self._status_ts
-        blocks = to_blocks(self._state, now=now, cancel_key=cancel_key)
-        text = to_fallback_text(self._state, now=now)
+        blocks = await self._untag_blocks(to_blocks(self._state, now=now, cancel_key=cancel_key))
+        text = await self._untag(to_fallback_text(self._state, now=now))
         rendered_json = (
             json.dumps({"blocks": blocks, "text": text})
             if initial and self._on_initial_progress is not None
@@ -565,6 +570,43 @@ class SlackTurnLifecycle(OutputGate):
         )
         return bool(skip)
 
+    async def _untag(self, text: str) -> str:
+        """``text`` with every opted-out person's mention as a plain name."""
+        if self._tenant_id is None:
+            return text
+        new = [uid for uid in mentioned_user_ids(text, "slack") if uid not in self._opted_out]
+        if new:
+            skip = await tag_opt_outs(
+                self._sessionmaker, tenant_id=self._tenant_id, platform="slack", user_ids=new
+            )
+            self._opted_out.update({uid: uid in skip for uid in new})
+            self._opt_out_names.update(
+                await opt_out_names(
+                    self._sessionmaker, tenant_id=self._tenant_id, platform="slack", user_ids=skip
+                )
+            )
+        skip = frozenset(uid for uid, out in self._opted_out.items() if out)
+        return untag(text, "slack", skip, self._opt_out_names)
+
+    async def _untag_blocks(self, blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """The card with opted-out mentions as plain names in every text it carries."""
+        # One lookup over the whole card fills the cache; the walk then reuses it.
+        await self._untag(json.dumps(blocks))
+        skip = frozenset(uid for uid, out in self._opted_out.items() if out)
+        if not skip:
+            return blocks
+
+        def walk(value: object) -> object:
+            if isinstance(value, str):
+                return untag(value, "slack", skip, self._opt_out_names)
+            if isinstance(value, list):
+                return [walk(item) for item in cast("list[object]", value)]
+            if isinstance(value, dict):
+                return {k: walk(v) for k, v in cast("dict[str, object]", value).items()}
+            return value
+
+        return cast("list[dict[str, Any]]", walk(blocks))
+
     async def _flush_terminal(
         self,
         fallback_text: str | None = None,
@@ -583,11 +625,13 @@ class SlackTurnLifecycle(OutputGate):
         whose product is this card: a tool-only turn has no answer to carry them.
         """
         self._terminal = True
-        blocks = to_blocks(
-            self._state,
-            now=self._clock(),
-            cancel_key=self._cancel_key,
-            answer_visible=answer_visible,
+        blocks = await self._untag_blocks(
+            to_blocks(
+                self._state,
+                now=self._clock(),
+                cancel_key=self._cancel_key,
+                answer_visible=answer_visible,
+            )
         )
         if feedback:
             blocks.append(self._feedback_block())
@@ -692,7 +736,7 @@ class SlackTurnLifecycle(OutputGate):
             final_response = extract_final_response(state.content)
             if final_response:
                 answer_parts.append(final_response)
-            final_text = "\n\n".join(answer_parts)
+            final_text = await self._untag("\n\n".join(answer_parts))
             notify_on_completion = (
                 self._notify_on_completion and not cancelled and not await self._author_opted_out()
             )
