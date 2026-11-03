@@ -22,11 +22,16 @@ from daimon.core.turn.ceiling import remaining_s, turn_deadline
 from daimon.core.turn.errors import AdmissionDenied
 from mux.contracts.config import CapabilityRequirement, ConfigRevision, ThreadMode
 from mux.contracts.extensions import ExtensionConfig
-from mux.contracts.ids import ModelRef, ResourceRef, SkillRef
+from mux.contracts.ids import ModelRef, Provider, ResourceRef, SkillRef
 from mux.contracts.profile import Capability
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, ResourceBinding, ToolSpec
 from mux.errors import InvalidConfig, MuxError, UnsupportedCapability
-from mux.profiles import backend_selection, get_profile, native_agent_tools
+from mux.profiles import (
+    CONSENTED_DEFAULT_MODELS,
+    backend_selection,
+    get_profile,
+    native_agent_tools,
+)
 from mux.state.operations import request_digest
 from pydantic import (
     AfterValidator,
@@ -1282,12 +1287,68 @@ def preview_source_drops(source: BackendAgent, model: ModelRef) -> AgentSpec:
 _SWITCH_TOOL_DROP: Final[str] = f"mcp_tool:{DAIMON_SERVER_NAME}:request_agent_backend_switch"
 
 
+def _model_consented(backend: Provider, model: str | None, picked: str | None) -> bool:
+    """The resolved `model` is the one the consent was confirmed for.
+
+    A consent stores no model (a release before this one must still read the
+    row), so a default-model setting counts only while the provider default is
+    still the one such consents were recorded under. No model means the
+    source's own, which the source pin covers.
+    """
+    return model is None or model == (picked or CONSENTED_DEFAULT_MODELS.get(backend))
+
+
 def _consented(target: AgentSpec | None, consent: _BackendDropConsent) -> bool:
     return (
         target is not None
         and target.declared_drops == consent.declared_drops
         and request_digest(target.model_dump(mode="json")) == consent.target_digest
     )
+
+
+def _same_losses(target: AgentSpec, consent: _BackendDropConsent) -> bool:
+    """`target` loses what `consent` accepted, apart from what Daimon's own tools decide.
+
+    Daimon's gating and catalogue change with a release, not with the agent: the
+    server refuses a gated tool to provider turns whatever the consent says, and a
+    tool Daimon no longer serves can't be lost. The source pin covers the owner's
+    tool settings. Any other difference, a gain included (a tool Daimon stops
+    gating, MCP back on a copy confirmed without it), asks again.
+    """
+    from daimon.core.tool_safety import confirmation_gated_tools, self_carded_tools
+
+    prefix = f"mcp_tool:{DAIMON_SERVER_NAME}:"
+    # A self-carded tool runs on provider turns: offering it is a gain.
+    gated = confirmation_gated_tools() - self_carded_tools()
+    served = {
+        drop.removeprefix(prefix) for drop in target.declared_drops if drop.startswith(prefix)
+    }
+    for server in target.mcp_servers or ():
+        allowed = server.tool_policy.get("allowed_tools") if server.tool_policy else None
+        if server.name == DAIMON_SERVER_NAME and isinstance(allowed, list):
+            served.update(name for name in allowed if isinstance(name, str))
+    today = {
+        drop
+        for drop in target.declared_drops
+        if not drop.startswith(prefix) or drop.removeprefix(prefix) not in gated
+    }
+    # A consent from before the switch tool was offered names it a loss; one the
+    # owner confirmed with it turned off still loses it.
+    switch_offered = _SWITCH_TOOL_DROP not in target.declared_drops
+    accepted = {
+        drop
+        for drop in consent.declared_drops
+        if not drop.startswith(prefix)
+        or (
+            not (switch_offered and drop == _SWITCH_TOOL_DROP)
+            and drop.removeprefix(prefix) in served - gated
+        )
+    }
+    if "tools" in accepted and "tools" not in today and target.tools:
+        # Before #1483 a template lost the source's tools whole; now it keeps
+        # them and names only the web tools it can't carry.
+        accepted = (accepted - {"tools"}) | {d for d in today if d.startswith("builtin_tool:")}
+    return today == accepted
 
 
 def _with_switch_tool_dropped(target: AgentSpec, source_system: str | None) -> AgentSpec | None:
@@ -1511,7 +1572,14 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
         target = preview_source_drops(
             source, ModelRef(provider=revision.backend, id=revision.model or spec.model.id)
         )
-        if not _consented(target, consent) and not _consented_before(target, spec.system, consent):
+        if not (
+            _consented(target, consent)
+            or (
+                _model_consented(revision.backend, revision.model, setting.model)
+                and _same_losses(target, consent)
+            )
+            or _consented_before(target, spec.system, consent)
+        ):
             raise AgentBackendRefused("re_confirm")
     retain_native = (
         (setting is not None)
