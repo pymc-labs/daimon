@@ -171,9 +171,15 @@ def test_archive_note_counts_the_cleared_picks() -> None:
 
 
 def test_environment_notes_name_the_scope_and_the_tier() -> None:
-    assert "Channel c1 now runs in the gpu environment" in build_set_environment_note(
-        environment_name="gpu", channel="c1"
+    assert "#ops now runs in the gpu environment" in build_set_environment_note(
+        environment_name="gpu", channel="c1", channel_name="ops"
     ), "a set names the channel and the environment"
+    assert "This channel now runs" in build_set_environment_note(
+        environment_name="gpu", channel="c1"
+    ), "a bare id is never shown"
+    assert "Channel <#c1> now runs" in build_set_environment_note(
+        environment_name="gpu", channel="<#c1>"
+    ), "a platform mention stands for the name"
     assert "workspace default" in build_set_environment_note(
         environment_name="gpu", channel=None
     ), "no channel is the workspace default"

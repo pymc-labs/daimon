@@ -41,6 +41,7 @@ from daimon.core.channel_environments import (
 )
 from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores.access_policy import AccessPolicyUnreadable
+from daimon.core.stores.platform_names import get_channel_names
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -58,6 +59,21 @@ class ChannelEnvironmentResult:
     changed: bool
     note: str
     """What changed and from when, to report back as is."""
+
+
+async def _channel_name(
+    runtime: McpRuntime, auth: AuthIdentity, channel_id: str | None
+) -> str | None:
+    if channel_id is None:
+        return None
+    async with runtime.session_factory() as session:
+        names = await get_channel_names(
+            session,
+            tenant_id=auth.tenant_id,
+            platform=auth.platform or "",
+            channel_ids=(channel_id,),
+        )
+    return names.get(channel_id)
 
 
 def _scope_label(channel_id: str | None) -> str:
@@ -185,7 +201,10 @@ async def _set_channel_environment_impl(
         previous_environment_name=None if previous in hidden else previous,
         changed=previous != name,
         note=build_set_environment_note(
-            environment_name=name, channel=target.channel_id, space=space_noun(auth.platform)
+            environment_name=name,
+            channel=target.channel_id,
+            space=space_noun(auth.platform),
+            channel_name=await _channel_name(runtime, auth, target.channel_id),
         ),
     )
 
@@ -222,7 +241,10 @@ async def _clear_channel_environment_impl(
         previous_environment_name=None if previous in hidden else previous,
         changed=previous is not None,
         note=build_clear_environment_note(
-            channel=channel_id, cleared=previous is not None, space=space_noun(auth.platform)
+            channel=channel_id,
+            cleared=previous is not None,
+            space=space_noun(auth.platform),
+            channel_name=await _channel_name(runtime, auth, channel_id),
         ),
     )
 
