@@ -72,7 +72,9 @@ async def funded_workspace(factory: async_sessionmaker[AsyncSession]) -> Workspa
     return Workspace(tenant.tenant_id, person)
 
 
-async def visitor_of(factory: async_sessionmaker[AsyncSession], ws: Workspace) -> WebPersonRow:
+async def visitor_of(
+    factory: async_sessionmaker[AsyncSession], ws: Workspace, *, allow_files: bool = False
+) -> WebPersonRow:
     """A visitor from a fresh invite to the workspace, on an account of their own."""
     person_id = uuid.uuid4()
     async with factory.begin() as session:
@@ -81,6 +83,7 @@ async def visitor_of(factory: async_sessionmaker[AsyncSession], ws: Workspace) -
             tenant_id=ws.tenant_id,
             kind="invite",
             expires_at=datetime.now(UTC) + timedelta(days=7),
+            allow_files=allow_files,
             created_by_account_id=ws.person.account_id,
         )
         principal = await get_or_create_platform_principal(
