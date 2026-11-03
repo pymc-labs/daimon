@@ -23,6 +23,7 @@ import type { Role } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import type { AdminPerson } from "./types"
 import { ROLE } from "./roles"
+import { FilesRow } from "./FilesRow"
 import { Facts, PanelSection as Section, Tag } from "./shared"
 
 const usePeople = () => usePaged<AdminPerson>(["admin", "people"], "/api/admin/people")
@@ -144,6 +145,7 @@ function PersonBody({ p, save }: { p: AdminPerson; save: { mutate: (b: Partial<A
           ["Credit", p.credit ? <CreditMeter key="credit" meter={{ ...p.credit, window: p.role === "visitor" ? "total" : "month", resets_at: null }} /> : null],
           ["Last seen", <Ago key="seen" iso={p.last_seen} />],
         ]} />
+        {p.role === "visitor" && p.invite_id && <FilesRow invite={p.invite_id} on={!!p.allow_files} />}
       </Section>
       {owned.length > 0 && (
         <Section title="Agents">

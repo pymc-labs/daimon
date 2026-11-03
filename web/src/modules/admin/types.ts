@@ -10,6 +10,9 @@ export type AdminPerson = {
   identities: Identity[]
   credit: { left_usd: number; total_usd: number } | null
   last_seen: string | null
+  /** A visitor with a live invite: the invite and whether it lets them attach files. */
+  invite_id?: string | null
+  allow_files?: boolean | null
 }
 
 export type Invite = {
@@ -18,6 +21,7 @@ export type Invite = {
   role: "visitor" | "member"
   agents: AgentRef[]
   credit_usd: number
+  allow_files: boolean
   expires_at: string
   status: "pending" | "accepted" | "expired"
   by: string

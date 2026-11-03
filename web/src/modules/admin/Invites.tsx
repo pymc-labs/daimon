@@ -23,6 +23,8 @@ import { ROLE } from "./roles"
 import { AgentLink } from "@/components/links"
 import { Facts, PanelHead, PanelSection } from "@/components/panel"
 import { Field } from "./shared"
+import { FilesRow } from "./FilesRow"
+import { Switch } from "@/components/ui/switch"
 
 // Invites
 
@@ -93,6 +95,7 @@ function InviteTable({ data }: { data: Invite[] }) {
                   ? <span key="agents" className="flex flex-col items-end gap-1">{i.agents.map((a) => <AgentLink key={a.id} id={a.id} name={a.name} avatar={a.avatar} />)}</span>
                   : "Any agent"],
               ]} />
+              {i.role === "visitor" && <FilesRow invite={i.id} on={i.allow_files} />}
             </PanelSection>
           </div>
         )
@@ -111,13 +114,14 @@ export function NewInvite() {
   const [picked, setPicked] = useState<string[]>([])
   const [credit, setCredit] = useState("5")
   const [days, setDays] = useState("14")
+  const [files, setFiles] = useState(false)
   const [made, setMade] = useState<Invite | null>(null)
   const qc = useQueryClient()
   const create = useMutation({
-    mutationFn: () => api.post<Invite>("/api/admin/invites", { email, role, agents: role === "visitor" ? picked : [], credit_usd: Number(credit), days: Number(days) }),
+    mutationFn: () => api.post<Invite>("/api/admin/invites", { email, role, agents: role === "visitor" ? picked : [], credit_usd: Number(credit), days: Number(days), allow_files: role === "visitor" && files }),
     onSuccess: (inv) => { void qc.invalidateQueries({ queryKey: ["admin"] }); setMade(inv) },
   })
-  const close = (o: boolean) => { if (!o) { setDialog(null); setMade(null); setEmail("") } }
+  const close = (o: boolean) => { if (!o) { setDialog(null); setMade(null); setEmail(""); setFiles(false) } }
   return (
     <Dialog open={open} onOpenChange={close}>
       <DialogContent className="sm:max-w-md">
@@ -157,6 +161,12 @@ export function NewInvite() {
                     ))}
                   </div>
                 </Field>
+              )}
+              {role === "visitor" && (
+                <label className="flex min-h-9 items-center justify-between gap-3 text-sm font-medium">
+                  Allow files
+                  <Switch checked={files} onCheckedChange={setFiles} />
+                </label>
               )}
               <div className="grid grid-cols-2 gap-3">
                 <Field label={role === "visitor" ? "Credit" : "Credit a month"}>

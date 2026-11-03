@@ -4,7 +4,7 @@ export type Role = "owner" | "admin" | "member" | "visitor"
 export type Platform = "discord" | "slack" | "teams" | "web"
 export type ModuleKey = "chat" | "agents" | "channels" | "routines" | "credits" | "integrations" | "admin"
 export type Capability =
-  | "chat.use" | "agents.view" | "agents.edit" | "agents.create" | "channels.view" | "channels.manage"
+  | "chat.use" | "files.attach" | "agents.view" | "agents.edit" | "agents.create" | "channels.view" | "channels.manage"
   | "routines.view" | "routines.manage"
   | "credits.view_own" | "credits.manage" | "people.manage" | "integrations.view" | "integrations.manage" | "audit.view" | "workspace.manage"
 

@@ -4,8 +4,8 @@ import { useEffect, useRef, useState } from "react"
 import { bytes, MAX_FILE_BYTES } from "./format"
 import { cn } from "@/lib/utils"
 
-export function Composer({ onSend, onStop, busy, placeholder, disabled, picker, autoFocus }: {
-  onSend: (text: string, files: File[]) => void; onStop: () => void; busy: boolean
+export function Composer({ onSend, onStop, busy, placeholder, disabled, picker, autoFocus, canAttach }: {
+  onSend: (text: string, files: File[]) => void; onStop: () => void; busy: boolean; canAttach: boolean
   placeholder: string; disabled?: boolean; picker: React.ReactNode; autoFocus?: boolean
 }) {
   const [text, setText] = useState("")
@@ -28,7 +28,7 @@ export function Composer({ onSend, onStop, busy, placeholder, disabled, picker, 
     setTooBig([])
   }
   const add = (list: File[]) => {
-    if (!list.length || disabled) return
+    if (!list.length || disabled || !canAttach) return
     setTooBig(list.filter((f) => f.size > MAX_FILE_BYTES).map((f) => f.name))
     setFiles((cur) => [...cur, ...list.filter((f) => f.size <= MAX_FILE_BYTES)])
   }
@@ -73,16 +73,20 @@ export function Composer({ onSend, onStop, busy, placeholder, disabled, picker, 
       />
       <div className="flex items-center gap-1 px-2 pb-2">
         {picker}
-        <input ref={pick} type="file" multiple hidden onChange={(e) => {
-          add(Array.from(e.target.files ?? []))
-          e.target.value = ""
-        }} />
-        <button
-          type="button" aria-label="Attach files" disabled={disabled} onClick={() => pick.current?.click()}
-          className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
-        >
-          <Paperclip className="size-4" />
-        </button>
+        {canAttach && (
+          <>
+            <input ref={pick} type="file" multiple hidden onChange={(e) => {
+              add(Array.from(e.target.files ?? []))
+              e.target.value = ""
+            }} />
+            <button
+              type="button" aria-label="Attach files" disabled={disabled} onClick={() => pick.current?.click()}
+              className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+            >
+              <Paperclip className="size-4" />
+            </button>
+          </>
+        )}
         {busy ? (
           <button type="button" onClick={onStop} aria-label="Stop" className="ml-auto inline-flex size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
             <Square className="size-3 fill-current" />

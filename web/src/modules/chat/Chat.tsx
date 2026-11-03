@@ -15,7 +15,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { api, ApiError } from "@/lib/api"
 import { usd } from "@/lib/format"
 import { cn } from "@/lib/utils"
-import { useChatAgents, useMe, useSessions } from "@/lib/hooks"
+import { useCan, useChatAgents, useMe, useSessions } from "@/lib/hooks"
 import type { AgentRef, ChatSession, CreditMeter } from "@/lib/types"
 import { Pill } from "../agents/bits"
 import { AgentPicker } from "./AgentPicker"
@@ -60,6 +60,7 @@ export function NewChat() {
   const navigate = useNavigate()
   const qc = useQueryClient()
   const { out, card } = useCredit()
+  const can = useCan()
   const list = agents.data ?? []
   const agent = list.find((a) => a.id === params.get("agent")) ?? list[0]
   // A failed start clears itself, so the composer is never left disabled.
@@ -93,7 +94,7 @@ export function NewChat() {
               </div>
               {out && <div className="mb-3">{card}</div>}
               <Composer
-                key={agent.id} onSend={go} onStop={() => {}} busy={start.isPending} disabled={out} autoFocus
+                key={agent.id} onSend={go} onStop={() => {}} busy={start.isPending} disabled={out} canAttach={can("files.attach")} autoFocus
                 placeholder={out ? "Out of credit" : `Message ${agent.name}`}
                 picker={<AgentPicker agents={list} value={agent} onChange={pick} />}
               />
@@ -154,6 +155,7 @@ export function ChatView() {
   const agent = session?.agent
   const confirm = useConfirm()
   const { data: me } = useMe()
+  const can = useCan()
   const [renaming, setRenaming] = useState<ChatSession | null>(null)
   const del = useMutation({
     mutationFn: (s: ChatSession) => api.del(`/api/chat/sessions/${s.id}`),
@@ -245,7 +247,7 @@ export function ChatView() {
             {out && card}
             {agent && (
               <Composer
-                key={id} onSend={(t, f) => { stick.current = true; send(qc, id!, t, f) }} onStop={() => stop(id!)} busy={busy} disabled={out} autoFocus
+                key={id} onSend={(t, f) => { stick.current = true; send(qc, id!, t, f) }} onStop={() => stop(id!)} busy={busy} disabled={out} canAttach={can("files.attach")} autoFocus
                 placeholder={out ? "Out of credit" : `Message ${agent.name}`}
                 picker={<AgentPicker agents={[agent]} value={agent} />}
               />
