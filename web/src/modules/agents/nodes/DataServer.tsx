@@ -181,7 +181,7 @@ function Scopes({ agentId, a }: { agentId: string; a: DataServerAgent }) {
   const { data: visible } = useDataServerScopes(agentId)
   const edit = useDataServerEdit(agentId)
   const [open, setOpen] = useState(false)
-  const name = (id: string) => visible?.find((s) => s.id === id)?.name ?? id
+  const name = (id: string) => visible?.find((s) => s.id === id)?.name ?? "Unknown scope"
   const addable = (visible ?? []).filter((s) => !a.scopes.includes(s.id))
   const set = (scopes: string[]) => edit.update.mutate({ scopes })
   const x = "ml-auto rounded p-1 text-faint hover:bg-accent hover:text-foreground"
