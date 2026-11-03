@@ -53,7 +53,8 @@ from daimon.core.channel_rules import READERS_LABELS, WRITERS_LABELS, ChannelRul
 from daimon.core.errors import DaimonError, StaleChannelValue
 from daimon.core.stores.access_policy import AccessPolicyUnreadable
 from daimon.core.stores.agent_tool_rules import list_channel_rule_history
-from daimon.core.stores.channel_changes import list_changes
+from daimon.core.stores.channel_changes import WORKSPACE_ID, list_changes
+from daimon.core.stores.domain import ChannelSetting
 from daimon.core.stores.platform_names import get_channel_names
 from daimon.core.stores.tenants import get_tenant
 from fastapi import APIRouter, Depends, HTTPException
@@ -73,6 +74,14 @@ _AUDIT_DETAIL = {
     "kept_agents": "Agents kept here",
     "access": "Who can read and post",
     "budget": "Budget",
+    "participation": "Following threads",
+    "progress_plans": "Progress plans",
+    "environment": "Sandbox",
+    "skills": "Skills",
+    "tool_rule": "Tool rules",
+    "provider_pin": "Provider",
+    "channel_copy": "Channel copy",
+    "thread": "Thread settings",
 }
 
 
@@ -162,7 +171,7 @@ class HistoryActorJson(BaseModel):
 
 class HistoryEntryJson(BaseModel):
     at: str
-    setting: Literal["default_agent", "kept_agents", "access", "budget", "tool_rule"]
+    setting: ChannelSetting | Literal["tool_rule"]
     before: object
     after: object
     actor: HistoryActorJson | None
@@ -192,6 +201,7 @@ class AccessChange(BaseModel):
     copy_agent: bool = False
     copy_from: str | None = None
     release_agents: bool = False
+    keep_rules: bool = False
 
 
 class BudgetExpected(BaseModel):
@@ -286,33 +296,89 @@ def _budget_value(expected: BudgetExpected | None) -> BudgetValue | None:
         raise HTTPException(422, "The budget you read is not valid.") from exc
 
 
+async def platform_user(db: AsyncSession, caller: WebCaller, platform: str) -> str | None:
+    principal = await caller.principal(db)
+    return principal.external_id if principal.platform == platform else None
+
+
+async def member_visible(
+    runtime: WebRuntime, caller: WebCaller, rows: tuple[ChannelRow, ...]
+) -> set[str]:
+    """The rows a member may read: web chat, and channels the platform shows them."""
+    tenant_id = caller.person.tenant_id
+    async with runtime.sessionmaker() as db:
+        tenant = await get_tenant(db, tenant_id)
+        if tenant is None:
+            return set()
+        user_id = await platform_user(db, caller, tenant.platform)
+    candidates = [r.channel_id for r in rows if r.channel_id != WEB_ROW_ID and not r.confidential]
+    visible = await readable_channels(
+        runtime,
+        tenant_id=tenant_id,
+        platform=tenant.platform,
+        workspace_id=tenant.external_id,
+        user_id=user_id,
+        channel_ids=candidates,
+    )
+    return {WEB_ROW_ID, *visible}
+
+
+async def one_row(runtime: WebRuntime, caller: WebCaller, channel_id: str) -> ChannelRow:
+    """The channel's row as the caller may read it; 404 when they may not."""
+    try:
+        async with runtime.sessionmaker() as db:
+            row = await load_channel_row(
+                db,
+                tenant_id=caller.person.tenant_id,
+                channel_id=channel_id,
+                default=runtime.deployment_default,
+                now=datetime.now(UTC),
+            )
+    except AccessPolicyUnreadable as exc:
+        raise HTTPException(503, _UNREADABLE) from exc
+    if row is None:
+        raise HTTPException(404, _NOT_FOUND)
+    if not is_admin(caller.role) and channel_id not in await member_visible(
+        runtime, caller, (row,)
+    ):
+        raise HTTPException(404, _NOT_FOUND)
+    return row
+
+
+def actor_of(caller: WebCaller, channel_id: str, platform: str, setting: str) -> ChannelActor:
+    """The web admin acting, writing an audit row in the change's own transaction."""
+    tenant_id = caller.person.tenant_id
+
+    async def audited(db: AsyncSession) -> None:
+        names = await get_channel_names(
+            db, tenant_id=tenant_id, platform=platform, channel_ids=(channel_id,)
+        )
+        name = names.get(channel_id)
+        await audit(
+            db,
+            tenant_id=tenant_id,
+            actor_account_id=caller.person.account_id,
+            action="Changed channel",
+            target=f"#{name}"
+            if name
+            else "Workspace"
+            if channel_id == WORKSPACE_ID
+            else channel_id,
+            detail=_AUDIT_DETAIL[setting],
+            at=datetime.now(UTC),
+        )
+
+    return ChannelActor(
+        tenant_id=tenant_id,
+        account_id=caller.person.account_id,
+        subject=Subject(is_admin=is_admin(caller.role)),
+        surface="web",
+        on_write=audited,
+    )
+
+
 def channels_router(runtime: WebRuntime) -> APIRouter:
     router = APIRouter(prefix="/api/channels")
-
-    async def platform_user(db: AsyncSession, caller: WebCaller, platform: str) -> str | None:
-        principal = await caller.principal(db)
-        return principal.external_id if principal.platform == platform else None
-
-    async def member_visible(caller: WebCaller, rows: tuple[ChannelRow, ...]) -> set[str]:
-        """The rows a member may read: web chat, and channels the platform shows them."""
-        tenant_id = caller.person.tenant_id
-        async with runtime.sessionmaker() as db:
-            tenant = await get_tenant(db, tenant_id)
-            if tenant is None:
-                return set()
-            user_id = await platform_user(db, caller, tenant.platform)
-        candidates = [
-            r.channel_id for r in rows if r.channel_id != WEB_ROW_ID and not r.confidential
-        ]
-        visible = await readable_channels(
-            runtime,
-            tenant_id=tenant_id,
-            platform=tenant.platform,
-            workspace_id=tenant.external_id,
-            user_id=user_id,
-            channel_ids=candidates,
-        )
-        return {WEB_ROW_ID, *visible}
 
     async def directory(caller: WebCaller) -> ChannelDirectory:
         try:
@@ -326,54 +392,9 @@ def channels_router(runtime: WebRuntime) -> APIRouter:
         except AccessPolicyUnreadable as exc:
             raise HTTPException(503, _UNREADABLE) from exc
 
-    async def one_row(caller: WebCaller, channel_id: str) -> ChannelRow:
-        try:
-            async with runtime.sessionmaker() as db:
-                row = await load_channel_row(
-                    db,
-                    tenant_id=caller.person.tenant_id,
-                    channel_id=channel_id,
-                    default=runtime.deployment_default,
-                    now=datetime.now(UTC),
-                )
-        except AccessPolicyUnreadable as exc:
-            raise HTTPException(503, _UNREADABLE) from exc
-        if row is None:
-            raise HTTPException(404, _NOT_FOUND)
-        if not is_admin(caller.role) and channel_id not in await member_visible(caller, (row,)):
-            raise HTTPException(404, _NOT_FOUND)
-        return row
-
     async def readable(caller: WebCaller, channel_id: str) -> ChannelDetailJson:
-        row = await one_row(caller, channel_id)
+        row = await one_row(runtime, caller, channel_id)
         return detail_json(row, manage="channels.manage" in caller.capabilities)
-
-    def actor_of(caller: WebCaller, channel_id: str, platform: str, setting: str) -> ChannelActor:
-        """The web admin acting, writing an audit row in the change's own transaction."""
-        tenant_id = caller.person.tenant_id
-
-        async def audited(db: AsyncSession) -> None:
-            names = await get_channel_names(
-                db, tenant_id=tenant_id, platform=platform, channel_ids=(channel_id,)
-            )
-            name = names.get(channel_id)
-            await audit(
-                db,
-                tenant_id=tenant_id,
-                actor_account_id=caller.person.account_id,
-                action="Changed channel",
-                target=f"#{name}" if name else channel_id,
-                detail=_AUDIT_DETAIL[setting],
-                at=datetime.now(UTC),
-            )
-
-        return ChannelActor(
-            tenant_id=tenant_id,
-            account_id=caller.person.account_id,
-            subject=Subject(is_admin=is_admin(caller.role)),
-            surface="web",
-            on_write=audited,
-        )
 
     async def agent_names(caller: WebCaller, name: str) -> tuple[str, ...]:
         """Every name the workspace agent called `name` answers to; 422 when none is."""
@@ -396,7 +417,7 @@ def channels_router(runtime: WebRuntime) -> APIRouter:
         found = await directory(caller)
         rows = found.rows
         if not is_admin(caller.role):
-            visible = await member_visible(caller, rows)
+            visible = await member_visible(runtime, caller, rows)
             rows = tuple(r for r in rows if r.channel_id in visible)
         return ChannelListJson(
             platform=found.platform,
@@ -415,9 +436,9 @@ def channels_router(runtime: WebRuntime) -> APIRouter:
     ) -> ChangeResultJson:
         if channel_id == WEB_ROW_ID:
             raise HTTPException(422, "Web chat uses the workspace default agent.")
-        platform = (await one_row(caller, channel_id)).platform
+        platform = (await one_row(runtime, caller, channel_id)).platform
         actor = actor_of(caller, channel_id, platform, "default_agent")
-        with _refusals():
+        with channel_refusals():
             if body.agent is None:
                 await clear_default_agent(
                     runtime.sessionmaker,
@@ -446,9 +467,9 @@ def channels_router(runtime: WebRuntime) -> APIRouter:
         if channel_id == WEB_ROW_ID:
             raise HTTPException(422, "Agents are kept to channels, not web chat.")
         client = anthropic()
-        platform = (await one_row(caller, channel_id)).platform
+        platform = (await one_row(runtime, caller, channel_id)).platform
         change = keep_agent if body.action == "add" else release_agent
-        with _refusals():
+        with channel_refusals():
             result = await change(
                 client,
                 runtime.sessionmaker,
@@ -468,10 +489,10 @@ def channels_router(runtime: WebRuntime) -> APIRouter:
         if channel_id == WEB_ROW_ID:
             raise HTTPException(422, "Web chat has no channel rule.")
         client = anthropic()
-        row = await one_row(caller, channel_id)
+        row = await one_row(runtime, caller, channel_id)
         platform = row.platform
         public_url = runtime.settings.mcp.public_url
-        with _refusals():
+        with channel_refusals():
             result = await set_access(
                 client,
                 runtime.sessionmaker,
@@ -489,6 +510,7 @@ def channels_router(runtime: WebRuntime) -> APIRouter:
                 channel_label=row.name.name if row.name is not None else None,
                 public_url=str(public_url) if public_url is not None else None,
                 release_agents=body.release_agents,
+                keep_rules=body.keep_rules,
             )
         return await changed(caller, channel_id, list(result.notes))
 
@@ -498,10 +520,10 @@ def channels_router(runtime: WebRuntime) -> APIRouter:
     ) -> ChangeResultJson:
         if channel_id == WEB_ROW_ID:
             raise HTTPException(422, _NO_WEB_BUDGET)
-        platform = (await one_row(caller, channel_id)).platform
+        platform = (await one_row(runtime, caller, channel_id)).platform
         actor = actor_of(caller, channel_id, platform, "budget")
         expected = Expected(_budget_value(body.expected))
-        with _refusals():
+        with channel_refusals():
             if body.action == "clear":
                 await clear_budget(
                     runtime.sessionmaker,
@@ -595,14 +617,18 @@ def channels_router(runtime: WebRuntime) -> APIRouter:
 
 
 @contextmanager
-def _refusals() -> Iterator[None]:
+def channel_refusals() -> Iterator[None]:
     """Map a core refusal to the HTTP answer the web gives it."""
     try:
         yield
     except StaleChannelValue as exc:
         raise HTTPException(409, str(exc)) from exc
     except ChannelChangeRefused as exc:
-        status = {"forbidden": 403, "invalid": 422, "not_found": 404}[exc.kind]
+        status = (
+            428
+            if exc.reason == "needs_confirm"
+            else {"forbidden": 403, "invalid": 422, "not_found": 404}[exc.kind]
+        )
         raise HTTPException(status, str(exc)) from exc
     except ChannelRuleRefused as exc:
         status = 403 if exc.reason == "admin_required" else 422

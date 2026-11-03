@@ -7,6 +7,7 @@ from daimon.adapters.web.admin import admin_router
 from daimon.adapters.web.agents import agents_router
 from daimon.adapters.web.auth import auth_router
 from daimon.adapters.web.avatars import avatars_router
+from daimon.adapters.web.channel_settings import channel_settings_router
 from daimon.adapters.web.channels import channels_router
 from daimon.adapters.web.chat import chat_router
 from daimon.adapters.web.credits import credits_router
@@ -95,6 +96,7 @@ def create_app(runtime: WebRuntime) -> FastAPI:
     app.include_router(nodes_router(runtime))
     app.include_router(agents_router(runtime))
     app.include_router(channels_router(runtime))
+    app.include_router(channel_settings_router(runtime))
     app.include_router(chat_router(runtime))
     app.include_router(routines_router(runtime))
     app.include_router(credits_router(runtime))
