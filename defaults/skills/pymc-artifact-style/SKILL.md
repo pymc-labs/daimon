@@ -1,6 +1,6 @@
 ---
 name: pymc-artifact-style
-description: Apply PyMC Labs' house style and the readability and clarity rules to every artifact you produce — reports, PDFs, slide decks, charts, images, notebooks, guides, FAQs, demos and walkthroughs. Use whenever you generate something a person will look at, and always before anything is sent, shown or published to a client or prospect, including a demo, a proposal or a guided tour.
+description: Apply PyMC Labs' house style and the readability and clarity principles to every artifact you produce — reports, PDFs, slide decks, charts, images, notebooks, guides, FAQs, demos and walkthroughs. Use whenever you generate something a person will look at, and always before anything is sent, shown or published to a client or prospect, including a demo, a proposal or a guided tour.
 ---
 
 # PyMC Labs artifact style
@@ -37,9 +37,9 @@ the shape. Use the reasoning to make the call each time.
   different document for a VP choosing a budget than for an analyst running a
   model. Writing before you know which one you're writing for produces a document
   that serves neither. If the reader or the decision is unclear, ask one
-  question, not a questionnaire. When a request will drown its reader, say so
-  and offer the tighter version alongside the one they asked for, so they can
-  choose.
+  question, not a questionnaire, and give your best guess alongside it. When a
+  request will drown its reader, say so and offer the tighter version alongside
+  the one they asked for, so they can choose.
 - **Lead with what changes for the reader.** A client decides in the first screen
   whether to keep reading. If that screen is navigation, setup or caveats, they
   conclude the document is about us, not them. Open with the outcome, the decision
@@ -69,15 +69,14 @@ the shape. Use the reasoning to make the call each time.
 
 ### Judgement calls
 
+- **Prefer short by default.** For client and demo sends with no explicit size,
+  the shortest version that does the job usually wins. A prospect trying a demo
+  wants one early success, not a curriculum.
 - **When long is justified:** when the requester explicitly wants depth (a full
   handbook, an internal deep dive), or the content can't be made shorter without
   losing something the reader needs. Then give them the length, keep it tight, and
   make it easy to navigate. Never pad to look substantial, and never refuse a big
-  request. If the result would be hard for a client to read, say so in one line
-  and offer a tighter version.
-- **Prefer short by default.** For client and demo sends with no explicit size,
-  the shortest version that does the job usually wins. A prospect trying a demo
-  wants one early success, not a curriculum.
+  request.
 - **What counts as noise:** filler and throat-clearing; boilerplate labels;
   restated context; setup repeated across steps; hedges that protect us but don't
   inform them; decorative mock-ups; meta-commentary about how the document was
@@ -98,14 +97,17 @@ well-formatted wrong claim is worse, because it looks checked.
 
 - Claim nothing beyond the evidence. If something was not run, measured or
   sourced, say what it is: a plan, an assumption or an illustration.
-- Keep sandbox and simulated work visibly separate from real results. A number
-  from synthetic data that reads like a finding about the client's business will
-  get quoted as one.
+- Keep sandbox and simulated work visibly separate from real results, and label
+  it where it appears. A number from synthetic data that reads like a finding
+  about the client's business will get quoted as one, and excerpts travel without
+  their context.
 - Flag weak methods instead of smoothing them over. The reader can't see the
   method, so they trust us to tell them when it is thin.
-- Don't present a sampling shortcut as sufficient. A few hundred draws, or a few
-  dozen posterior draws carried into a second stage, is a smoke test. Calling it
-  a result invites a wrong decision.
+- Don't call a fit reliable on the strength of its settings. Whether there are
+  enough draws is for the diagnostics to say (effective sample size, R-hat,
+  divergences), and passing them shows the sampler worked, not that the model is
+  right. A few dozen posterior draws carried into a second stage is a smoke test,
+  not a result.
 - Don't validate in a circle. Calibrating on a lift test simulated from the model's
   own truth shows the plumbing works, not that calibration works. A real
   experiment's result can't be simulated in advance. If it could, no one would run
@@ -114,14 +116,10 @@ well-formatted wrong claim is worse, because it looks checked.
   data or of the method in general overstates what anyone can know.
 - Promise what you checked, not completeness ("a source for every point"). One
   missing source then breaks the whole promise.
-- Label demo and synthetic results where they appear, because excerpts travel
-  without their context.
-- Modelling guidance a client might act on gets a PyMC Labs modeller's review
-  before it is sent. Say so when you deliver it.
 
 ### Rewrite pass before sending (mandatory)
 
-Reread the whole thing as the client: senior, busy, paying a monthly fee. This
+Reread the whole thing as the client: senior, busy, and paying for this. This
 pass is about whether the document honours the principles above, not about its
 format. Cut the noise. Make sure the point lands early and that any part can be
 read on its own. Fix every claim that fails. Then ask the real question: would
@@ -129,12 +127,13 @@ this client pay for what they just read? If not, rewrite before sending.
 
 ### Send-readiness note (advisory)
 
-When the output looks client-bound, end your reply to the requester (not the
-document) with a short send-readiness note: who the reader is, what you would
-still cut or check, and the two or three questions the client is likely to ask.
-The requester usually knows the client better than you do, and this is the
+When you hand a colleague a document meant for a client, add a short
+send-readiness note to your reply to them, after the deliverable: who the reader
+is, what you would still cut or check (including whether a modeller should review
+any modelling advice), and the two or three questions the client is likely to
+ask. The requester usually knows the client better than you do, and this is the
 fastest way to let them catch what you can't. It is advice and never blocks the
-send.
+send. Skip it when the person you are talking to is the client.
 
 ## Reports and PDFs — everything you need is bundled here
 
