@@ -701,8 +701,9 @@ async def test_the_audit_log_adds_chat_tool_calls_and_panel_writes_with_stored_f
         "Reason": "needs_admin",
         "Platform": "discord",
         "Token": "operator",
-        "Channel": "1200000000000000009",
     }, "only stored, readable fields; no hash, no chat user id"
+    assert event["channel"] == {"id": "1200000000000000009", "name": None}, "by name once known"
+    assert event["reference"] is None, "no message or turn stored"
     assert "secret-hash" not in str(entries)
 
 

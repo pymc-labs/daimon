@@ -15,13 +15,15 @@ vi.mock("@/lib/api", async (importOriginal) => ({
 
 const event: AuditEntry = {
   id: "s1", source: "security", at: "2026-03-10T12:00:00Z", who: "Maya", actor_id: null, action: "Channel backend: clear pin", target: { kind: "other", id: null, name: "" }, detail: "Refused",
-  facts: [["Tool", "Channel backend"], ["Reason", "needs_admin"], ["Channel", "1200000000000000009"]],
+  facts: [["Tool", "Channel backend"], ["Reason", "needs_admin"]],
+  channel: { id: "c9", name: null }, reference: "Message m1\nTurn t1",
 }
 const change: AuditEntry = { id: "a1", source: "web", at: "2026-03-10T11:00:00Z", who: "Jonas", actor_id: "p2", action: "Suspended", target: { kind: "person", id: "p1", name: "Mia" } }
 
 function serve(rows: AuditEntry[]) {
   vi.mocked(api.page).mockImplementation(async (path: string) => ({ rows: path.includes("/people") ? [] : rows, next: null }))
-  vi.mocked(api.get).mockResolvedValue([{ source: "security", value: "channel_backend", label: "Channel backend" }])
+  vi.mocked(api.get).mockImplementation(async (path: string) =>
+    path === "/api/me" ? { capabilities: ["channels.view"], workspace: { name: "Workspace" } } : [{ source: "security", value: "channel_backend", label: "Channel backend" }])
 }
 
 describe("Audit", () => {
@@ -39,6 +41,9 @@ describe("Audit", () => {
     await userEvent.click(await screen.findByText("Channel backend: clear pin"))
     expect(await screen.findByText("needs_admin")).toBeInTheDocument()
     expect(screen.getByText("Chat and panels")).toBeInTheDocument()
+    expect(await screen.findByRole("link", { name: "Unknown channel" })).toHaveAttribute("href", "/channels?channel=c9")
+    expect(screen.queryByText(/Message m1|Turn t1/)).not.toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Copy reference" })).toBeInTheDocument()
     expect(screen.getByText("Suspended")).toBeInTheDocument()
     await waitFor(() => expect(vi.mocked(api.page).mock.calls.some(([p]) => p === "/api/admin/audit")).toBe(true))
   })

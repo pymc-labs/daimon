@@ -1,8 +1,9 @@
 import { useQuery } from "@tanstack/react-query"
 
 import { Ago, Avatar } from "@/components/common"
+import { Button } from "@/components/ui/button"
 import { Drawer } from "@/components/Drawer"
-import { PersonLink } from "@/components/links"
+import { ChannelLink, PersonLink } from "@/components/links"
 import { Link } from "react-router"
 import { Facet, FilterBar } from "@/components/filters"
 import { rowProps, useParam } from "@/lib/filters"
@@ -12,6 +13,7 @@ import { api } from "@/lib/api"
 import { absolute } from "@/lib/format"
 import { usePaged } from "@/lib/hooks"
 import { ScrollText } from "lucide-react"
+import { toast } from "sonner"
 import { Facts, PanelHead, PanelSection } from "@/components/panel"
 import type { AdminPerson, AuditEntry, AuditKind, AuditSource, AuditTarget } from "./types"
 
@@ -97,8 +99,12 @@ function AuditTable({ data }: { data: AuditEntry[] }) {
                 ["Who", e.actor_id ? <PersonLink key="who" id={e.actor_id} name={e.who} /> : e.who],
                 ["Target", e.target.name ? <Target key="target" t={e.target} /> : null],
                 ["When", absolute(e.at, true)],
+                ["Channel", e.channel ? <ChannelLink key="channel" id={e.channel.id} name={e.channel.name ?? "Unknown channel"} /> : null],
                 ...(e.facts ?? [["Detail", e.detail] as [string, string | undefined]]),
               ]} />
+              {e.reference && (
+                <Button variant="outline" size="sm" className="mt-3" onClick={() => { void navigator.clipboard?.writeText(e.reference!); toast("Reference copied") }}>Copy reference</Button>
+              )}
             </PanelSection>
           </div>
         )

@@ -58,9 +58,11 @@ const entry = (r: Raw): AuditEntry => {
 
 const audit: AuditEntry[] = ([
   { id: "s1", source: "security", at: ago(1), who: "Maya Lindqvist", action: "Panel: agent backend", target: "", detail: "Allowed",
-    facts: [["Where", "Panel"], ["Tool", "Panel: agent backend"], ["Operation", "Agent backend"], ["Outcome", "Allowed"], ["Reason", "completed"], ["Platform", "discord"], ["Channel", "1200000000000000009"]] },
+    facts: [["Where", "Panel"], ["Tool", "Panel: agent backend"], ["Operation", "Agent backend"], ["Outcome", "Allowed"], ["Reason", "completed"], ["Platform", "discord"]],
+    channel: { id: "1200000000000000009", name: "analytics" }, reference: "Message 1300000000000000004\nTurn 7f3a9c" },
   { id: "s2", source: "security", at: ago(7), who: "MMM Analyst", action: "Channel backend: clear pin", target: "", detail: "Refused",
-    facts: [["Where", "Chat tool"], ["Tool", "Channel backend"], ["Operation", "Clear pin"], ["Outcome", "Refused"], ["Reason", "needs_admin"], ["Platform", "discord"], ["Agent", "MMM Analyst"]] },
+    facts: [["Where", "Chat tool"], ["Tool", "Channel backend"], ["Operation", "Clear pin"], ["Outcome", "Refused"], ["Reason", "needs_admin"], ["Platform", "discord"], ["Agent", "MMM Analyst"]],
+    channel: { id: "1200000000000000010", name: null } },
   { id: "a1", source: "web", at: ago(0.4), who: "Maya Lindqvist", action: "Changed agent", target: "MMM Analyst", detail: "Instructions, version 14" },
   { id: "a2", source: "web", at: ago(2), who: "Jonas Weber", action: "Created invite", target: "sam.ortiz@larkspur.example", detail: "Visitor, MMM Analyst, $10.00" },
   { id: "a3", source: "web", at: ago(5), who: "Maya Lindqvist", action: "Added allowance", target: "MMM group", detail: "$60.00 a month, MMM Analyst" },

@@ -39,6 +39,10 @@ export type AuditEntry = {
   id: string; source: AuditSource; at: string; who: string; actor_id: string | null; action: string; target: AuditTarget; detail?: string
   /** Security events only: every readable field the event stores. */
   facts?: [string, string][]
+  /** Security events only: where it happened; `name` is null while the channel is unnamed. */
+  channel?: { id: string; name: string | null } | null
+  /** Security events only: the message and turn ids, to copy; never shown. */
+  reference?: string | null
 }
 export type AuditKind = { source: AuditSource; value: string; label: string }
 

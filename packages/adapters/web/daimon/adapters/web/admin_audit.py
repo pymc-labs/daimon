@@ -7,6 +7,7 @@ from datetime import date
 from typing import Annotated, Any
 
 from daimon.adapters.web.admin_common import AuditViewer
+from daimon.adapters.web.channel_names import channel_names
 from daimon.adapters.web.paging import PageRequest, cut, page_of
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core import audit_trail
@@ -49,11 +50,18 @@ def _event_facts(event: SecurityAuditRow) -> list[list[str]]:
         ("Agent", event.agent_name or ""),
         ("Token", event.token_kind or ""),
         ("Scope", event.scope or ""),
-        ("Channel", event.target_channel_id or ""),
-        ("Message", event.target_message_id or ""),
-        ("Turn", event.turn_ref or ""),
     ]
     return [[label, value] for label, value in stored if value]
+
+
+def _reference(event: SecurityAuditRow) -> str | None:
+    """The message and turn ids, for support to look the event up; not shown, only copied."""
+    lines = [
+        f"{label} {value}"
+        for label, value in (("Message", event.target_message_id), ("Turn", event.turn_ref))
+        if value
+    ]
+    return "\n".join(lines) or None
 
 
 def audit_router(runtime: WebRuntime) -> APIRouter:
@@ -107,7 +115,16 @@ def audit_router(runtime: WebRuntime) -> APIRouter:
             )
         person_names = {p.id: p.display_name for p in people if p.tenant_id == tenant_id}
         actors = {p.account_id: p for p in workspace}
-        return [_shown(e, actors, person_names, emails) for e in entries]
+        channel_ids = {
+            e.row.target_channel_id
+            for e in entries
+            if isinstance(e.row, SecurityAuditRow) and e.row.target_channel_id
+        }
+        labels: dict[str, str] = {}
+        if channel_ids:
+            _, found = await channel_names(runtime, tenant_id, channel_ids)
+            labels = found.labels()
+        return [_shown(e, actors, person_names, emails, labels) for e in entries]
 
     @router.get("/audit/kinds")
     async def audit_kinds(  # pyright: ignore[reportUnusedFunction]
@@ -144,6 +161,7 @@ def _shown(
     actors: dict[uuid.UUID, WebPersonRow],
     person_names: dict[uuid.UUID, str],
     emails: dict[uuid.UUID, str],
+    channels: dict[str, str],
 ) -> dict[str, Any]:
     row = entry.row
     actor = actors.get(entry.actor_account_id) if entry.actor_account_id else None
@@ -175,4 +193,8 @@ def _shown(
         },
         "detail": _OUTCOMES[row.outcome],
         "facts": _event_facts(row),
+        "channel": {"id": row.target_channel_id, "name": channels.get(row.target_channel_id)}
+        if row.target_channel_id
+        else None,
+        "reference": _reference(row),
     }
