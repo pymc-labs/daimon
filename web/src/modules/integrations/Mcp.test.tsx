@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { render, screen } from "@testing-library/react"
+import { MemoryRouter } from "react-router"
 import { describe, expect, it, vi } from "vitest"
 
 import { api } from "@/lib/api"
@@ -15,8 +16,8 @@ const servers = [
 describe("Mcp", () => {
   it("lists servers at once and names expired sign-ins when the check answers", async () => {
     vi.mocked(api.get).mockImplementation(async (path: string) =>
-      (path.endsWith("/expiry") ? { complete: true, servers: [{ id: "s1", expired: 2, people: ["Ada", "Bo"] }] } : { servers }) as never)
-    render(<QueryClientProvider client={new QueryClient()}><Mcp /></QueryClientProvider>)
+      (path === "/api/me" ? { capabilities: [] } : path.endsWith("/expiry") ? { complete: true, servers: [{ id: "s1", expired: 2, people: ["Ada", "Bo"] }] } : { servers }) as never)
+    render(<MemoryRouter><QueryClientProvider client={new QueryClient()}><Mcp /></QueryClientProvider></MemoryRouter>)
     expect(await screen.findByText("Warehouse")).toBeInTheDocument()
     expect(screen.getByText("shared sign-in")).toBeInTheDocument()
     expect(await screen.findByText("2 expired")).toBeInTheDocument()
@@ -25,10 +26,11 @@ describe("Mcp", () => {
 
   it("keeps the list when the expiry check fails", async () => {
     vi.mocked(api.get).mockImplementation(async (path: string) => {
+      if (path === "/api/me") return { capabilities: [] } as never
       if (path.endsWith("/expiry")) throw new Error("down")
       return { servers } as never
     })
-    render(<QueryClientProvider client={new QueryClient()}><Mcp /></QueryClientProvider>)
+    render(<MemoryRouter><QueryClientProvider client={new QueryClient()}><Mcp /></QueryClientProvider></MemoryRouter>)
     expect(await screen.findByText("Linear")).toBeInTheDocument()
     expect(screen.queryByText(/expired/)).not.toBeInTheDocument()
   })

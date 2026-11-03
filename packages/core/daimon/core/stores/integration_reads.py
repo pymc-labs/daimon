@@ -201,7 +201,7 @@ async def list_sync_trouble(
     found = [
         SyncTroubleRow(
             kind="push",
-            subject=f"{job.repo_full_name} {job.ref}",
+            subject=f"{job.repo_full_name} {job.ref.removeprefix('refs/heads/')}",
             attempts=job.attempts,
             error=job.last_error or "",
             at=job.updated_at,

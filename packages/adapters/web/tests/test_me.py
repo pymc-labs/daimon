@@ -97,6 +97,7 @@ async def test_me_has_the_shape_the_app_reads(
     assert me["capabilities"] == sorted(
         [
             "chat.use",
+            "files.attach",
             "agents.view",
             "agents.edit",
             "agents.create",

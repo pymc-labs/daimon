@@ -18,8 +18,6 @@ from anthropic import APIStatusError
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.web.access import Role
 from daimon.adapters.web.audit import (
-    INVITE_LABEL,
-    PERSON_LABEL,
     AuditTarget,
     audit,
     invite_target,
@@ -54,6 +52,7 @@ from daimon.core.stores import tenants as tenants_store
 from daimon.core.stores import web_identities as identities_store
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores.domain import SpendAllowanceRow, WebPersonRow
+from daimon.core.stores.web_audit import INVITE_LABEL, PERSON_LABEL
 from daimon.core.web_identity import linked_identity, principal_of, with_spend_person
 from fastapi import APIRouter, Depends, HTTPException
 from mux.errors import ScopeViolation
@@ -173,6 +172,10 @@ class NewAllowance(BaseModel):
     expires_at: datetime | None = None
     cap: bool = False
     """A cap is monthly, for everyone or one person, for every agent, with no end date."""
+
+
+class EditAllowance(BaseModel):
+    amount_usd: Decimal = Field(gt=0, le=1_000_000, decimal_places=2)
 
 
 class Redeem(BaseModel):
@@ -588,6 +591,29 @@ def credits_router(runtime: WebRuntime) -> APIRouter:
             )
             return made
 
+    @router.patch("/allowances/{allowance_id}")
+    async def edit_allowance(  # pyright: ignore[reportUnusedFunction]
+        allowance_id: uuid.UUID, body: EditAllowance, caller: Admin
+    ) -> Allowance:
+        tenant_id = caller.person.tenant_id
+        async with runtime.sessionmaker.begin() as db:
+            row = await spend_allowances.set_amount(
+                db, tenant_id=tenant_id, allowance_id=allowance_id, amount_usd=body.amount_usd
+            )
+            if row is None:
+                raise HTTPException(status_code=404, detail="This allowance no longer exists.")
+            [made] = await allowances_for(db, tenant_id, [row])
+            await audit(
+                db,
+                tenant_id=tenant_id,
+                actor_account_id=caller.person.account_id,
+                action="Changed cap" if made.cap else "Changed allowance",
+                target=await _audit_target(db, tenant_id, made.subject),
+                detail=_allowance_words(made),
+                at=runtime.now(),
+            )
+            return made
+
     @router.delete("/allowances/{allowance_id}")
     async def remove_allowance(allowance_id: uuid.UUID, caller: Admin) -> dict[str, bool]:  # pyright: ignore[reportUnusedFunction]
         target = allowance_id
@@ -722,7 +748,7 @@ async def _audit_target(db: AsyncSession, tenant_id: uuid.UUID, subject: Subject
     """A group by name; a person or invite by id, which the audit log shows by name while
     they exist. An id that matches no one (a chat-only person) stays a generic label."""
     if subject.kind == "group":
-        label = "Everyone" if subject.id == "everyone" else f"{subject.name or subject.id} group"
+        label = "Everyone" if subject.id == "everyone" else f"{subject.name or 'Deleted'} group"
         return AuditTarget(label)
     try:
         subject_id = uuid.UUID(subject.id)

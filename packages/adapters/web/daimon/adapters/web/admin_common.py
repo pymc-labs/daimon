@@ -59,6 +59,12 @@ class AdminPerson(BaseModel):
     last_seen: str | None
 
 
+class AdminPersonDetail(AdminPerson):
+    # A visitor's invite and whether it lets them attach files; null for everyone else.
+    invite_id: str | None = None
+    allow_files: bool | None = None
+
+
 def no_person() -> HTTPException:
     return HTTPException(status_code=404, detail="This person isn't in the workspace.")
 
@@ -87,6 +93,11 @@ async def listed_agents(runtime: WebRuntime, tenant_id: uuid.UUID) -> list[BetaM
     if runtime.turns is None:
         return []
     return await runtime.agents.agents(runtime.turns.deps.anthropic, tenant_id)
+
+
+async def person_ids_by_account(db: AsyncSession, tenant_id: uuid.UUID) -> dict[uuid.UUID, str]:
+    people = await people_store.list_people(db, tenant_id=tenant_id)
+    return {p.account_id: str(p.id) for p in people}
 
 
 async def names_by_account(db: AsyncSession, tenant_id: uuid.UUID) -> dict[uuid.UUID, str]:

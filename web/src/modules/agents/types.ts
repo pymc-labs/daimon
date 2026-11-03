@@ -195,14 +195,16 @@ export type CodingKey = { id: string; creator: string; created_at: string; expir
 /** A coding key as made: `token` appears here once. */
 export type MintedCodingKey = { id: string; token: string; command: string; config: string; expires_at: string }
 
-export type SkillUse = { kind: "agent" | "channel"; name: string }
+export type SkillUse = { kind: "agent" | "channel"; id: string; name: string; /** The version pinned there; null is the latest. */ version: string | null }
 export type LibrarySkill = {
-  id: string; name: string; source: "custom" | "anthropic"; version: string; created_at: string
+  id: string; name: string; /** `name` as words. */ title: string; description: string
+  source: "custom" | "anthropic"; version: string; created_at: string; updated_at: string
   /** A skill the server ships. */
   default: boolean
   used_by: SkillUse[]
 }
-export type SkillVersion = { version: string; created_at: string }
+export type SkillDetail = LibrarySkill & { source_url: string | null }
+export type SkillVersion = { version: string; created_at: string; author: string | null }
 export type SyncedSkill = { name: string; action: "created" | "updated" | "skipped" | "failed"; detail: string | null }
 
 export const ECOSYSTEMS = ["pip", "npm", "apt", "cargo", "gem", "go"] as const
@@ -220,6 +222,8 @@ export type EnvironmentDoc = {
   allow_package_managers: boolean
   allow_mcp_servers: boolean
   packages: Partial<Record<Ecosystem, string[]>>
+  /** Channels and workspaces that pick it; absent when the server does not report them. */
+  used_by?: { kind: "channel" | "workspace"; id: string; name: string; platform_kind?: string | null }[]
 }
 export type EnvironmentInput = {
   name: string; description: string; network: "limited" | "unrestricted"; allowed_hosts: string[]

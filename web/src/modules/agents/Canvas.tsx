@@ -8,12 +8,12 @@ import { Blocks, Brain, Cpu, KeyRound, Maximize, Minus, Plug, Plus, ScrollText, 
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react"
 
 import { AgentAvatar, Ago, Avatar, Money } from "@/components/common"
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
+import { modelLabel } from "@/lib/format"
 import { useTheme } from "@/lib/theme-context"
 import { cn } from "@/lib/utils"
 import { pressProps } from "@/lib/filters"
-import { useAgents, useConnectNode } from "./api"
+import { useAgents } from "./api"
 import { useAgentKeys, useCodingKeys, useKnowledge } from "./setup/api"
 import { Dot, Locked, Pill, PlaceIcon, RuleChip } from "./bits"
 import { layoutNarrow, layoutWide, type Dep, type Plan, type Pt, type Size } from "./layout"
@@ -147,7 +147,7 @@ function ModelNode() {
     <Card id="model" icon={<Cpu />} title="Model">
       <div className="space-y-1 p-3">
         <div className="flex items-center gap-2">
-          <span className="text-sm font-medium">{c?.label ?? config.model.id}{config.model.speed === "fast" && " Fast"}</span>
+          <span className="text-sm font-medium">{modelLabel(config.model.id, c?.label)}{config.model.speed === "fast" && " Fast"}</span>
           {config.model.backend === "anthropic" && <Pill>{EFFORT_LABEL[config.model.effort]}</Pill>}
         </div>
         <div className="text-xs text-muted-foreground">
@@ -326,47 +326,10 @@ function PlatformNode({ id }: { id: string }) {
   return <Card id={id} className="w-64" icon={<ui.icon />} title={node.label}><ui.Card agent={agent} node={node} /></Card>
 }
 
-/** The Connections branch: its count, and adding an MCP server or a node kind not yet attached. */
-function HubNode() {
-  const { agent, config, select, ro } = useCanvas()
-  const connect = useConnectNode(agent.id)
-  const n = connections(agent, config).length
-  const addable = agent.nodes.filter((x) => x.server == null)
-  return (
-    <div className="flex h-8 items-center gap-1.5 rounded-full border bg-card pr-1 pl-3 text-xs shadow-[0_1px_3px_rgb(0_0_0/0.05)]">
-      <Handle type="target" position={Position.Top} isConnectable={false} className="!pointer-events-none !opacity-0" />
-      <Handle type="source" position={Position.Bottom} isConnectable={false} className="!pointer-events-none !opacity-0" />
-      <span className="font-medium">Connections</span>
-      <span className="text-faint tabular">{n}</span>
-      {ro ? <span className="w-1.5" /> : (
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button className="flex size-6 items-center justify-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground" aria-label="Add connection">
-              <Plus className="size-3.5" />
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="center" className="w-48">
-            <DropdownMenuItem onSelect={() => select("mcp:new")}><Plug />MCP server</DropdownMenuItem>
-            {addable.map((x) => {
-              const Icon = nodeUi(x.kind).icon
-              return (
-                <DropdownMenuItem key={x.kind} disabled={connect.isPending}
-                  onSelect={() => connect.mutate(x.kind, { onSuccess: () => select(nodeId(x.kind)) })}>
-                  <Icon />{x.label}
-                </DropdownMenuItem>
-              )
-            })}
-          </DropdownMenuContent>
-        </DropdownMenu>
-      )}
-    </div>
-  )
-}
-
 const NODE_TYPES = {
   agent: AgentNode, instructions: InstructionsNode, model: ModelNode, places: PlacesNode,
   skills: SkillsNode, tools: ToolsNode, helpers: HelpersNode, people: PeopleNode, keys: KeysNode, coding: CodingNode, knowledge: KnowledgeNode, mcp: ({ id }: { id: string }) => <McpNode id={id} />,
-  platform: ({ id }: { id: string }) => <PlatformNode id={id} />, hub: HubNode,
+  platform: ({ id }: { id: string }) => <PlatformNode id={id} />,
 }
 
 // ---------- Edges ----------
@@ -404,7 +367,6 @@ const lanes = (agent: Agent) => ({
   left: ["instructions", "model", "places", "people"],
   right: ["skills", "tools", "helpers", ...(agent.can_view_details ? ["knowledge", "keys", "coding"] : [])],
 })
-const HUB = "connections"
 /** Below this canvas width the editor is one column. */
 const NARROW = 760
 
@@ -417,20 +379,18 @@ function connections(agent: Agent, config: AgentConfig): { id: string; type: "mc
   ]
 }
 
-function graph(agent: Agent, config: AgentConfig, ro: boolean) {
+function graph(agent: Agent, config: AgentConfig) {
   const conns = connections(agent, config)
-  const hub = conns.length || !ro
   const { left, right } = lanes(agent)
   const nodes: Node[] = [
     ...left.map((id) => ({ id, type: id })),
     { id: "agent", type: "agent" },
     ...right.map((id) => ({ id, type: id })),
-    ...(hub ? [{ id: HUB, type: "hub" }] : []),
     ...conns,
   ].map((n) => ({ ...n, position: { x: 0, y: 0 }, data: {}, draggable: false, selectable: false }))
   const ids = new Set(conns.map((c) => c.id))
   const deps = config.skills.flatMap((s) => (s.requires ?? []).filter((k) => ids.has(`mcp:${k}`)).map((k) => ({ skill: s.skill_id, target: `mcp:${k}` })))
-  return { nodes, conns: conns.map((c) => c.id), hub: hub ? HUB : null, deps }
+  return { nodes, conns: conns.map((c) => c.id), deps }
 }
 
 /** The y of a skill's row inside the skills card. */
@@ -448,7 +408,7 @@ type Props = Omit<Ctx, "ro"> & { ro: boolean }
 export function Canvas({ agent, config, catalog, changed, changedNodes, selected, select, ro }: Props) {
   const { resolved } = useTheme()
   const structure = `${agent.can_view_details}|${config.mcp_servers.map((s) => s.key).join(",")}|${agent.nodes.map((n) => `${n.kind}:${n.server}`).join(",")}|${ro}|${config.skills.map((s) => `${s.skill_id}:${(s.requires ?? []).join("+")}`).join(",")}`
-  const built = useMemo(() => graph(agent, config, ro), [structure]) // eslint-disable-line react-hooks/exhaustive-deps
+  const built = useMemo(() => graph(agent, config), [structure]) // eslint-disable-line react-hooks/exhaustive-deps
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([])
   const [edges, setEdges] = useEdgesState<Edge>([])
   const fitted = useRef(false)
@@ -472,7 +432,7 @@ export function Canvas({ agent, config, catalog, changed, changedNodes, selected
     const known = Object.fromEntries(rf.getNodes().map((n) => [n.id, { w: n.measured?.width ?? 240, h: n.measured?.height ?? 80 }]))
     const size = (id: string): Size => known[id] ?? { w: 240, h: 80 }
     const deps: Dep[] = built.deps.map((d) => ({ key: `${d.skill}>${d.target}`, target: d.target, y: rowY(d.skill) }))
-    const plan: Plan = { ...lanes(agent), hub: built.hub, conns: built.conns, skills: "skills", deps }
+    const plan: Plan = { ...lanes(agent), conns: built.conns, skills: "skills", deps }
     const laid = (narrow ? layoutNarrow : layoutWide)("agent", plan, size)
     setNodes((ns) => ns.map((n) => ({ ...n, position: laid.pos[n.id] ?? n.position, style: { opacity: 1 } })))
     setEdges(Object.entries(laid.edges).map(([id, l]) => ({ id, source: l.source, target: l.target, type: "line", data: { points: l.points, dep: l.dep } })))

@@ -52,7 +52,9 @@ __all__ = [
     "LiveLookup",
     "UserKey",
     "CHANNEL_STATUS_LABELS",
+    "UNKNOWN_CHANNEL",
     "UNNAMED_CHANNEL",
+    "known_channel_label",
     "ChannelLookup",
     "ChannelStatus",
     "LookedUpChannels",
@@ -408,10 +410,20 @@ class ChannelStatus(StrEnum):
 
 
 UNNAMED_CHANNEL = "Unnamed channel"
+UNKNOWN_CHANNEL = "Unknown channel"
 CHANNEL_STATUS_LABELS: Mapping[ChannelStatus, str] = {
     ChannelStatus.GONE: "Deleted channel",
     ChannelStatus.DIRECT: "Direct message",
 }
+
+
+def known_channel_label(status: str | None) -> str:
+    """The label of a channel with no stored name: its status says, else it is not known."""
+    try:
+        return CHANNEL_STATUS_LABELS[ChannelStatus(status)]
+    except ValueError:
+        return UNKNOWN_CHANNEL
+
 
 ChannelLookup = Callable[[str, str], Awaitable[str | ChannelStatus | None]]
 """A platform lookup by (workspace external id, channel id): the name, a status, or None.

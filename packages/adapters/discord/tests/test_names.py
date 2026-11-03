@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import discord
 from daimon.adapters.discord.bot import DaimonBot
-from daimon.adapters.discord.names import remember_guild_user
+from daimon.adapters.discord.names import bot_channel_lookup, remember_guild_user
 from daimon.core import platform_names
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.platform_names import KnownName
+from daimon.core.platform_names import ChannelStatus, KnownName
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.platform_names import get_user_names
 from daimon.testing.factories import make_tenant
@@ -86,3 +86,15 @@ async def test_every_interaction_remembers_the_clickers_name(
     assert await _stored(db_session, "100000000000000043") == {
         "100000000000000043": KnownName("Maya Chen", "maya")
     }
+
+
+async def test_the_bot_lookup_names_a_channel_and_reads_a_missing_one_as_gone() -> None:
+    client = MagicMock()
+    missing = discord.NotFound(MagicMock(status=404, reason="Not Found"), {"code": 10003})
+    client.http.get_channel = AsyncMock(
+        side_effect=[{"id": "1", "type": 0, "name": "general", "guild_id": str(GUILD)}, missing]
+    )
+    lookup = bot_channel_lookup(client)
+    assert await lookup(str(GUILD), "web") is None, "not a Discord id"
+    assert await lookup(str(GUILD), "1") == "general"
+    assert await lookup(str(GUILD), "2") is ChannelStatus.GONE

@@ -34,6 +34,12 @@ class NewInvite(BaseModel):
     agents: list[str] = Field(default_factory=list[str], max_length=50)
     credit_usd: Decimal = Field(ge=0, le=100_000, decimal_places=2)
     days: int = Field(ge=1, le=90)
+    # Visitors only; a member may always attach files.
+    allow_files: bool = False
+
+
+class InviteChange(BaseModel):
+    allow_files: bool
 
 
 def invites_admin_router(runtime: WebRuntime) -> APIRouter:
@@ -58,6 +64,7 @@ def invites_admin_router(runtime: WebRuntime) -> APIRouter:
                 for a in invite.agent_ids
             ],
             "credit_usd": float(invite.credit_usd),
+            "allow_files": invite.allow_files,
             "expires_at": invite.expires_at.isoformat(),
             "status": invite_status(invite, runtime.now()),
             "by": by or "An admin",
@@ -102,6 +109,7 @@ def invites_admin_router(runtime: WebRuntime) -> APIRouter:
                 email=str(body.email),
                 role=body.role,
                 credit_usd=body.credit_usd,
+                allow_files=body.allow_files,
                 agent_ids=picked,
                 created_by_account_id=caller.person.account_id,
             )
@@ -114,7 +122,14 @@ def invites_admin_router(runtime: WebRuntime) -> APIRouter:
                 actor_account_id=caller.person.account_id,
                 action="Created invite",
                 target=invite_target(invite.id),
-                detail=", ".join([ROLE_WORDS[body.role], *names, usd(body.credit_usd)]),
+                detail=", ".join(
+                    [
+                        ROLE_WORDS[body.role],
+                        *names,
+                        usd(body.credit_usd),
+                        *(["Files on"] if invite.allow_files else []),
+                    ]
+                ),
                 at=now,
             )
             people_names = await names_by_account(db, tenant_id)
@@ -125,6 +140,32 @@ def invites_admin_router(runtime: WebRuntime) -> APIRouter:
             await avatars_of(runtime, tenant_id, agents),
             link=link_url(runtime.web, token),
         )
+
+    @router.patch("/invites/{invite_id}")
+    async def change_invite(  # pyright: ignore[reportUnusedFunction]
+        invite_id: uuid.UUID, body: InviteChange, caller: PeopleAdmin
+    ) -> dict[str, Any]:
+        """Turn files on or off for a visitor invite, whether or not it was accepted."""
+        now, tenant_id = runtime.now(), caller.person.tenant_id
+        async with runtime.sessionmaker.begin() as db:
+            before = await web_invites.get_invite(db, tenant_id=tenant_id, invite_id=invite_id)
+            invite = await web_invites.set_allow_files(
+                db, tenant_id=tenant_id, invite_id=invite_id, allow=body.allow_files
+            )
+            if invite is None:
+                raise HTTPException(status_code=404, detail="This invite no longer exists.")
+            if before is not None and before.allow_files != invite.allow_files:
+                await audit(
+                    db,
+                    tenant_id=tenant_id,
+                    actor_account_id=caller.person.account_id,
+                    action="Turned files on" if invite.allow_files else "Turned files off",
+                    target=invite_target(invite.id),
+                    at=now,
+                )
+            names = await names_by_account(db, tenant_id)
+        agents = await listed_agents(runtime, tenant_id)
+        return invite_json(invite, agents, names, await avatars_of(runtime, tenant_id, agents))
 
     @router.delete("/invites/{invite_id}")
     async def revoke_invite(invite_id: uuid.UUID, caller: PeopleAdmin) -> dict[str, bool]:  # pyright: ignore[reportUnusedFunction]

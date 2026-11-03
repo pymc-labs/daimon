@@ -12,6 +12,7 @@ from daimon.core.web_identity import WebRoleName
 Role = WebRoleName
 Capability = Literal[
     "chat.use",
+    "files.attach",
     "agents.view",
     "agents.edit",
     "agents.create",
@@ -30,6 +31,7 @@ Capability = Literal[
 
 _ALL: tuple[Capability, ...] = (
     "chat.use",
+    "files.attach",
     "agents.view",
     "agents.edit",
     "agents.create",
@@ -51,6 +53,7 @@ _BY_ROLE: dict[Role, frozenset[Capability]] = {
     "member": frozenset(
         {
             "chat.use",
+            "files.attach",
             "agents.view",
             "agents.edit",
             "agents.create",
@@ -65,6 +68,7 @@ _BY_ROLE: dict[Role, frozenset[Capability]] = {
 # Each capability lives in one module; turning the module off removes it.
 _MODULE_OF: dict[Capability, WebModuleKey] = {
     "chat.use": "chat",
+    "files.attach": "chat",
     "agents.view": "agents",
     "agents.edit": "agents",
     "agents.create": "agents",
@@ -142,6 +146,14 @@ def modules_for(role: Role, enabled: Iterable[WebModuleKey]) -> list[WebModuleKe
     return [m for m in _MODULE_ORDER if m in allowed]
 
 
-def capabilities_for(role: Role, modules: Collection[WebModuleKey]) -> frozenset[Capability]:
-    """What the role may do, limited to the modules that are on."""
-    return frozenset(c for c in _BY_ROLE[role] if _MODULE_OF[c] in modules)
+def capabilities_for(
+    role: Role, modules: Collection[WebModuleKey], *, files: bool = False
+) -> frozenset[Capability]:
+    """What the role may do, limited to the modules that are on.
+
+    A visitor's role never carries files; `files` adds it when their invite allows it.
+    """
+    caps = set(_BY_ROLE[role])
+    if files:
+        caps.add("files.attach")
+    return frozenset(c for c in caps if _MODULE_OF[c] in modules)

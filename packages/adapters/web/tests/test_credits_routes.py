@@ -63,6 +63,7 @@ _ADMIN_ROUTES = [
             "window": "month",
         },
     ),
+    ("PATCH", f"/api/credits/allowances/{uuid.uuid4()}", {"amount_usd": 5}),
     ("DELETE", f"/api/credits/allowances/{uuid.uuid4()}", None),
     ("POST", "/api/credits/topup", {"amount_usd": 10}),
     ("POST", "/api/credits/redeem", {"code": "ABCDEFGHJKMNPQRSTVWXYZ"}),
@@ -394,6 +395,9 @@ async def test_allowances_are_added_listed_and_removed(
         # An allowance counts what is spent once it exists.
         await _spend(db_session_factory, ws.tenant_id, user=str(member.id), n=1)
         listed = (await client.get("/api/credits/allowances")).json()
+        edited = await client.patch(
+            f"/api/credits/allowances/{person.json()['id']}", json={"amount_usd": 25}
+        )
         removed = await client.delete(f"/api/credits/allowances/{person.json()['id']}")
         again = await client.delete(f"/api/credits/allowances/{person.json()['id']}")
         after = (await client.get("/api/credits/allowances")).json()
@@ -407,6 +411,7 @@ async def test_allowances_are_added_listed_and_removed(
     assert everyone["subject"] == {"kind": "group", "id": "everyone", "name": "Everyone"}
     assert (everyone["agent"], everyone["amount_usd"], everyone["members"]) == (None, 40.5, 2)
     assert everyone["expires_at"] is not None, "the newest allowance comes first"
+    assert edited.status_code == 200 and edited.json()["amount_usd"] == 25.0
     assert removed.json() == {"ok": True} and again.status_code == 404
     assert [a["subject"]["kind"] for a in after] == ["group"], "the removed one is gone"
     async with db_session_factory() as db:
@@ -416,7 +421,8 @@ async def test_allowances_are_added_listed_and_removed(
     assert trail == [
         ("Added allowance", "Mia", f"$20.00 a month, {DEFAULT_AGENT_NAME}"),
         ("Added allowance", "Everyone", "$40.50 in total"),
-        ("Removed allowance", "Mia", f"$20.00 a month, {DEFAULT_AGENT_NAME}"),
+        ("Changed allowance", "Mia", f"$25.00 a month, {DEFAULT_AGENT_NAME}"),
+        ("Removed allowance", "Mia", f"$25.00 a month, {DEFAULT_AGENT_NAME}"),
     ], "every allowance change is in the audit trail"
 
 

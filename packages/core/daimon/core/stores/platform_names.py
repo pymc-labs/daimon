@@ -18,7 +18,7 @@ import dataclasses
 import uuid
 from collections.abc import Collection, Mapping
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from daimon.core._models import PlatformChannelName, PlatformPrincipal, PlatformUserName
 from daimon.core.stores.domain import ChannelNameRow
@@ -236,6 +236,8 @@ async def upsert_channel_names(
             "name": stmt.excluded.name,
             "updated_at": now,
             "last_seen_at": now,
+            # A platform that names a channel still has it.
+            "status": "named",
             **{
                 column: func.coalesce(
                     getattr(stmt.excluded, column), getattr(PlatformChannelName, column)
@@ -248,16 +250,80 @@ async def upsert_channel_names(
     await session.flush()
 
 
+async def mark_channel_status(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    statuses: Mapping[str, Literal["gone", "direct"]],
+) -> None:
+    """Record that the platform no longer has these channels, or that they are direct messages.
+
+    A channel not stored yet gets a row with an empty name; a stored one keeps its name.
+    """
+    now = datetime.now(UTC)
+    values = [
+        {
+            "tenant_id": tenant_id,
+            "platform": platform,
+            "channel_id": channel_id,
+            "name": "",
+            "status": status,
+            "updated_at": now,
+        }
+        for channel_id, status in sorted(statuses.items())
+        if channel_id
+    ]
+    if not values:
+        return
+    stmt = pg_insert(PlatformChannelName).values(values)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[
+            PlatformChannelName.tenant_id,
+            PlatformChannelName.platform,
+            PlatformChannelName.channel_id,
+        ],
+        set_={"status": stmt.excluded.status, "updated_at": now},
+    )
+    await session.execute(stmt)
+    await session.flush()
+
+
 async def list_channel_names(
-    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str
+    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, unnamed: bool = False
 ) -> list[ChannelNameRow]:
-    """Every channel of the tenant on `platform` that an adapter has named."""
-    rows = await session.scalars(
-        select(PlatformChannelName).where(
-            PlatformChannelName.tenant_id == tenant_id, PlatformChannelName.platform == platform
+    """Every channel of the tenant on `platform` that an adapter has named.
+
+    `unnamed` also returns the rows that hold only a status (a gone or direct channel).
+    """
+    stmt = select(PlatformChannelName).where(
+        PlatformChannelName.tenant_id == tenant_id, PlatformChannelName.platform == platform
+    )
+    if not unnamed:
+        stmt = stmt.where(PlatformChannelName.name != "")
+    rows = await session.scalars(stmt)
+    return [ChannelNameRow.model_validate(row) for row in rows]
+
+
+async def get_channel_statuses(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_ids: Collection[str],
+) -> dict[str, str]:
+    """The recorded status (`gone` or `direct`) of each of ``channel_ids`` that has one."""
+    if not channel_ids:
+        return {}
+    rows = await session.execute(
+        select(PlatformChannelName.channel_id, PlatformChannelName.status).where(
+            PlatformChannelName.tenant_id == tenant_id,
+            PlatformChannelName.platform == platform,
+            PlatformChannelName.channel_id.in_(list(channel_ids)),
+            PlatformChannelName.status.in_(("gone", "direct")),
         )
     )
-    return [ChannelNameRow.model_validate(row) for row in rows]
+    return {channel_id: status for channel_id, status in rows.all()}
 
 
 async def get_channel_names(
@@ -275,6 +341,7 @@ async def get_channel_names(
             PlatformChannelName.tenant_id == tenant_id,
             PlatformChannelName.platform == platform,
             PlatformChannelName.channel_id.in_(list(channel_ids)),
+            PlatformChannelName.name != "",
         )
     )
     return {channel_id: name for channel_id, name in rows.all()}

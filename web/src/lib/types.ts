@@ -4,7 +4,7 @@ export type Role = "owner" | "admin" | "member" | "visitor"
 export type Platform = "discord" | "slack" | "teams" | "web"
 export type ModuleKey = "chat" | "agents" | "channels" | "routines" | "credits" | "integrations" | "admin"
 export type Capability =
-  | "chat.use" | "agents.view" | "agents.edit" | "agents.create" | "channels.view" | "channels.manage"
+  | "chat.use" | "files.attach" | "agents.view" | "agents.edit" | "agents.create" | "channels.view" | "channels.manage"
   | "routines.view" | "routines.manage"
   | "credits.view_own" | "credits.manage" | "people.manage" | "integrations.view" | "integrations.manage" | "audit.view" | "workspace.manage"
 
@@ -47,3 +47,6 @@ export type Person = {
 
 /** Sign-in methods the server offers; `dev` signs in locally without leaving the page. */
 export type Provider = { id: string; label: string; kind: "redirect" | "dev" }
+
+/** A cross-reference to a named object; `name` is null once it no longer exists. */
+export type EntityRef = { id: string | null; name: string | null; avatar?: string | null }

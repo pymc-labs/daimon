@@ -1,21 +1,16 @@
 import { useState } from "react"
 
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
-import { PanelSection, Tag } from "@/modules/admin/shared"
+import { InheritedSegmented } from "@/components/inherited"
+import { PanelSection, SettingRow } from "@/components/panel"
 import { useSave, type Outcome } from "./api"
-import { choiceOf, SWITCH_SOURCE, SWITCH_VALUE, switchChange, unavailableText, type SwitchChoice } from "./lib"
-import { Line, Notice } from "./shared"
-import type { ChannelDetail, ChannelSettings, ChannelSwitch } from "./types"
+import { SWITCH_SOURCE, SWITCH_VALUE, switchChange, unavailableText } from "./lib"
+import { Notice } from "./shared"
+import type { ChannelDetail, ChannelSettings } from "./types"
 
 const ROWS = [
   { key: "participation", path: "participation", label: "Joins threads" },
   { key: "progress_plans", path: "progress-plans", label: "Progress plans" },
 ] as const
-
-/** The value that applies and where it comes from, as two separate things. */
-export const Applied = ({ s }: { s: ChannelSwitch }) => (
-  <span className="flex flex-wrap items-center gap-1.5"><span>{SWITCH_VALUE[s.value]}</span><Tag>{SWITCH_SOURCE[s.source]}</Tag></span>
-)
 
 export function Switches({ c, s }: { c: ChannelDetail; s: ChannelSettings }) {
   const save = useSave(c.id)
@@ -23,28 +18,27 @@ export function Switches({ c, s }: { c: ChannelDetail; s: ChannelSettings }) {
   const edit = c.can_manage
 
   return (
-    <PanelSection title="Threads and plans">
-      <div className="space-y-3 text-sm">
+    <PanelSection title="Behaviour">
+      <div className="space-y-3">
         {ROWS.map(({ key, path, label }) => {
           const sw = s[key]
-          if (!sw.available) return <Line key={key} label={label}><span className="text-muted-foreground">{unavailableText(key, c.platform)}</span></Line>
-          const pick = async (v: string) => {
-            if (!v || v === choiceOf(sw)) return
-            setOut(await save.run("put", path, switchChange(v as SwitchChoice, sw)))
+          if (!sw.available) return <SettingRow key={key} label={label}><span className="text-muted-foreground">{unavailableText(key, c.platform)}</span></SettingRow>
+          if (!edit) {
+            return (
+              <SettingRow key={key} label={label} overridden={sw.source === "channel"}>
+                <span>{SWITCH_VALUE[sw.value]}</span>{sw.source !== "channel" && <span className="ml-2 text-muted-foreground">{SWITCH_SOURCE[sw.source]}</span>}
+              </SettingRow>
+            )
           }
+          // The inherited value is only known while this channel sets none of its own.
+          const inherited = sw.own === null ? sw.value === "on" : null
           return (
-            <div key={key} className="space-y-1.5">
-              <Line label={label}>
-                {edit ? (
-                  <ToggleGroup type="single" variant="segmented" size="sm" value={choiceOf(sw)} onValueChange={(v) => void pick(v)} disabled={save.pending} aria-label={label}>
-                    <ToggleGroupItem value="inherit" className="px-2.5 text-xs">Workspace default</ToggleGroupItem>
-                    <ToggleGroupItem value="on" className="px-2.5 text-xs">On</ToggleGroupItem>
-                    <ToggleGroupItem value="off" className="px-2.5 text-xs">Off</ToggleGroupItem>
-                  </ToggleGroup>
-                ) : <Applied s={sw} />}
-              </Line>
-              {edit && <Line label="Applies"><Applied s={sw} /></Line>}
-            </div>
+            <InheritedSegmented
+              key={key} label={label} disabled={save.pending}
+              value={sw.own === null ? null : sw.own === "on"}
+              inherited={{ value: inherited, from: sw.source === "deployment" ? "Built-in" : "Workspace" }}
+              onChange={async (v) => setOut(await save.run("put", path, switchChange(v === null ? "inherit" : v ? "on" : "off", sw)))}
+            />
           )
         })}
       </div>

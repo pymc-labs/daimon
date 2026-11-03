@@ -6,14 +6,15 @@ import uuid
 from datetime import date
 from typing import Annotated, Any
 
-from daimon.adapters.web.admin_common import AuditViewer, names_by_account
+from daimon.adapters.web.admin_common import AuditViewer
+from daimon.adapters.web.channel_names import channel_names
 from daimon.adapters.web.paging import PageRequest, cut, page_of
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core import audit_trail
 from daimon.core.audit_trail import AuditEntry, AuditFilter, AuditSource
 from daimon.core.stores import web_invites
 from daimon.core.stores import web_people as people_store
-from daimon.core.stores.domain import WebAuditRow
+from daimon.core.stores.domain import WebAuditRow, WebPersonRow
 from daimon.core.stores.security_audit import SecurityAuditRow
 from fastapi import APIRouter, Depends, Query, Response
 
@@ -49,11 +50,18 @@ def _event_facts(event: SecurityAuditRow) -> list[list[str]]:
         ("Agent", event.agent_name or ""),
         ("Token", event.token_kind or ""),
         ("Scope", event.scope or ""),
-        ("Channel", event.target_channel_id or ""),
-        ("Message", event.target_message_id or ""),
-        ("Turn", event.turn_ref or ""),
     ]
     return [[label, value] for label, value in stored if value]
+
+
+def _reference(event: SecurityAuditRow) -> str | None:
+    """The message and turn ids, for support to look the event up; not shown, only copied."""
+    lines = [
+        f"{label} {value}"
+        for label, value in (("Message", event.target_message_id), ("Turn", event.turn_ref))
+        if value
+    ]
+    return "\n".join(lines) or None
 
 
 def audit_router(runtime: WebRuntime) -> APIRouter:
@@ -93,7 +101,7 @@ def audit_router(runtime: WebRuntime) -> APIRouter:
                 db, tenant_id=tenant_id, query=query, before=page.cursor, limit=page.limit + 1
             )
             entries = cut(found, page, response, lambda e: e.cursor)
-            names = await names_by_account(db, tenant_id)
+            workspace = await people_store.list_people(db, tenant_id=tenant_id)
             web_rows = [e.row for e in entries if isinstance(e.row, WebAuditRow)]
             # People and invites are shown as they are now; an erased one falls back to
             # the row's generic label.
@@ -106,7 +114,17 @@ def audit_router(runtime: WebRuntime) -> APIRouter:
                 invite_ids=[r.target_invite_id for r in web_rows if r.target_invite_id],
             )
         person_names = {p.id: p.display_name for p in people if p.tenant_id == tenant_id}
-        return [_shown(e, names, person_names, emails) for e in entries]
+        actors = {p.account_id: p for p in workspace}
+        channel_ids = {
+            e.row.target_channel_id
+            for e in entries
+            if isinstance(e.row, SecurityAuditRow) and e.row.target_channel_id
+        }
+        labels: dict[str, str] = {}
+        if channel_ids:
+            _, found = await channel_names(runtime, tenant_id, channel_ids)
+            labels = found.labels()
+        return [_shown(e, actors, person_names, emails, labels) for e in entries]
 
     @router.get("/audit/kinds")
     async def audit_kinds(  # pyright: ignore[reportUnusedFunction]
@@ -126,25 +144,37 @@ def audit_router(runtime: WebRuntime) -> APIRouter:
     return router
 
 
+def _target(
+    row: WebAuditRow, person_names: dict[uuid.UUID, str], emails: dict[uuid.UUID, str]
+) -> dict[str, str | None]:
+    """What the change was about, as the app links it: a person by id; an invite by address;
+    anything else, or someone erased, by its generic label."""
+    if row.target_person_id and (name := person_names.get(row.target_person_id)):
+        return {"kind": "person", "id": str(row.target_person_id), "name": name}
+    if row.target_invite_id and (email := emails.get(row.target_invite_id)):
+        return {"kind": "invite", "id": str(row.target_invite_id), "name": email}
+    return {"kind": "other", "id": None, "name": row.target}
+
+
 def _shown(
     entry: AuditEntry,
-    names: dict[uuid.UUID, str],
+    actors: dict[uuid.UUID, WebPersonRow],
     person_names: dict[uuid.UUID, str],
     emails: dict[uuid.UUID, str],
+    channels: dict[str, str],
 ) -> dict[str, Any]:
     row = entry.row
-    who = names.get(entry.actor_account_id) if entry.actor_account_id else None
+    actor = actors.get(entry.actor_account_id) if entry.actor_account_id else None
+    who = actor.display_name if actor else None
     if isinstance(row, WebAuditRow):
-        shown = (person_names.get(row.target_person_id) if row.target_person_id else None) or (
-            emails.get(row.target_invite_id) if row.target_invite_id else None
-        )
         out: dict[str, Any] = {
             "id": str(row.id),
             "source": entry.source,
             "at": row.at.isoformat(),
             "who": who or ("Daimon" if row.actor_account_id is None else "Someone"),
+            "actor_id": str(actor.id) if actor else None,
             "action": row.action,
-            "target": shown or row.target,
+            "target": _target(row, person_names, emails),
         }
         if row.detail is not None:
             out["detail"] = row.detail
@@ -154,8 +184,17 @@ def _shown(
         "source": entry.source,
         "at": row.occurred_at.isoformat(),
         "who": who or row.agent_name or "Someone",
+        "actor_id": str(actor.id) if actor else None,
         "action": _event_label(row),
-        "target": row.agent_name if who and row.agent_name else "",
+        "target": {
+            "kind": "other",
+            "id": None,
+            "name": row.agent_name if who and row.agent_name else "",
+        },
         "detail": _OUTCOMES[row.outcome],
         "facts": _event_facts(row),
+        "channel": {"id": row.target_channel_id, "name": channels.get(row.target_channel_id)}
+        if row.target_channel_id
+        else None,
+        "reference": _reference(row),
     }

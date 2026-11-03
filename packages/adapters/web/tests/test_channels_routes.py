@@ -14,8 +14,10 @@ from daimon.adapters.web import channel_visibility
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.platform_names import ChannelSighting
+from daimon.core.scope_cascade import CascadeMode, CascadeScope
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.platform_names import upsert_channel_names
+from daimon.core.stores.platform_names import mark_channel_status, upsert_channel_names
+from daimon.core.stores.switch_modes import set_switch_mode
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -122,7 +124,7 @@ async def test_a_stale_value_is_a_409_and_a_change_is_audited_and_in_history(
         web_budget = await admin.client.put(
             "/api/channels/web/budget", json={**budget, "expected": None}
         )
-        history = (await admin.client.get("/api/channels/c1/history")).json()
+        history = (await admin.client.get("/api/channels/c1/history")).json()["entries"]
         trail = await shown_trail(db_session_factory, admin.ws.tenant_id)
 
     assert stale_default.status_code == 409, stale_default.text
@@ -186,3 +188,46 @@ async def test_a_platform_that_cannot_be_checked_shows_no_channel() -> None:
         }
 
     assert found == {"discord": frozenset(), "teams": frozenset()}, "fail closed"
+
+
+async def test_rows_carry_kind_path_and_agents_and_gone_rows_stay_out(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    async with _channels(web_client, db_session_factory, tmp_path) as admin:
+        async with db_session_factory.begin() as db:
+            await upsert_channel_names(
+                db,
+                tenant_id=admin.ws.tenant_id,
+                platform="discord",
+                names={
+                    "t9": ChannelSighting("Launch", kind="thread", parent_id="c1"),
+                    "gone1": ChannelSighting("old"),
+                },
+            )
+            await mark_channel_status(
+                db, tenant_id=admin.ws.tenant_id, platform="discord", statuses={"gone1": "gone"}
+            )
+        async with db_session_factory.begin() as db:
+            await set_switch_mode(
+                db,
+                "progress_plans",
+                tenant_id=admin.ws.tenant_id,
+                platform="discord",
+                scope=CascadeScope.THREAD,
+                scope_id="t9",
+                mode=CascadeMode.OFF,
+                parent_id="c1",
+            )
+        listed = (await admin.client.get("/api/channels")).json()
+        detail = (await admin.client.get("/api/channels/c1")).json()
+        history = (await admin.client.get("/api/channels/c1/history")).json()
+
+    by_id = {row["id"]: row for row in listed["channels"]}
+    assert "gone1" not in by_id, "a deleted channel is not listed"
+    assert by_id["c1"]["kind"] == "channel" and by_id["c1"]["status"] == "active"
+    assert by_id["t9"]["kind"] == "thread"
+    assert [node["name"] for node in by_id["t9"]["path"]] == ["general"]
+    assert listed["agents"] == {} and detail["agents"] == {}
+    assert history == {"entries": [], "agents": {}}

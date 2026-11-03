@@ -23,7 +23,7 @@ def teams_budget_notifier(runtime: TeamsRuntime, direct: DirectChats) -> BudgetN
 
     async def send(notice: BudgetNotice) -> int:
         policies = runtime.settings.direct_message_policies
-        text = notice.text(f"Channel `{notice.channel_id}`")
+        text = notice.text(notice.channel_label)
         delivered = 0
         for user_id in notice.allowed_recipients(
             policies.get(notice.tenant_id, DirectMessagePolicy())

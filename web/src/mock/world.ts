@@ -54,14 +54,16 @@ export const SESSIONS: Record<string, ChatSession[]> = {
 }
 
 const ALL: Capability[] = [
-  "chat.use", "agents.view", "agents.edit", "agents.create", "channels.view", "channels.manage", "routines.view", "routines.manage",
+  "chat.use", "files.attach", "agents.view", "agents.edit", "agents.create", "channels.view", "channels.manage", "routines.view", "routines.manage",
   "credits.view_own", "credits.manage", "integrations.view", "integrations.manage", "people.manage", "audit.view", "workspace.manage",
 ]
 const CAPS: Record<Role, Capability[]> = {
   owner: ALL, admin: ALL,
-  member: ["chat.use", "agents.view", "agents.edit", "agents.create", "channels.view", "routines.view", "routines.manage", "credits.view_own"],
+  member: ["chat.use", "files.attach", "agents.view", "agents.edit", "agents.create", "channels.view", "routines.view", "routines.manage", "credits.view_own"],
   visitor: ["chat.use", "credits.view_own"],
 }
+/** Visitors the demo lets attach files, by person; the default visitor has them off. */
+export const visitorFiles: Record<string, boolean> = { p_jordan: false }
 const MODULES: Record<Role, ModuleKey[]> = {
   owner: ["chat", "agents", "channels", "routines", "credits", "integrations", "admin"],
   admin: ["chat", "agents", "channels", "routines", "credits", "integrations", "admin"],
@@ -111,7 +113,7 @@ export function me(): Me | null {
   const role = ws.role
   return {
     id: p.id, name: p.name, email: p.email, workspace: ws, workspaces: wss, role,
-    modules: MODULES[role], capabilities: CAPS[role], identities: p.identities, credit: live(p.id, CREDIT[role]),
+    modules: MODULES[role], capabilities: role === "visitor" && visitorFiles[p.id] ? [...CAPS.visitor, "files.attach"] : CAPS[role], identities: p.identities, credit: live(p.id, CREDIT[role]),
     invited_by: role === "visitor" ? "Maya Lindqvist" : undefined,
   }
 }

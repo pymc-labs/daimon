@@ -68,21 +68,31 @@ NOT_OFFERED_NOTE: Final = "That is not an environment this panel offers. Nothing
 """A pick whose value no picker offered: forged or stale."""
 
 
-def _scope_phrase(channel: str | None, space: str) -> str:
-    return f"Channel {channel}" if channel is not None else f"The {space} default"
+def _scope_phrase(channel: str | None, space: str, name: str | None = None) -> str:
+    """The channel by its name, else a platform mention; a bare id is never shown."""
+    if channel is None:
+        return f"The {space} default"
+    if name:
+        return f"#{name}"
+    return f"Channel {channel}" if channel.startswith("<") else "This channel"
 
 
 def build_set_environment_note(
-    *, environment_name: str, channel: str | None, space: str = NEUTRAL_SPACE
+    *,
+    environment_name: str,
+    channel: str | None,
+    space: str = NEUTRAL_SPACE,
+    channel_name: str | None = None,
 ) -> str:
     """What changed after an environment is set, and when a conversation sees it.
 
     `channel` is the channel as the reader sees it (an id or a platform
     mention); None is the default for the whole `space` (server, workspace,
-    organisation).
+    organisation). `channel_name` is the channel's name, when known; a bare id is not shown.
     """
+    scope = _scope_phrase(channel, space, channel_name)
     return (
-        f"{_scope_phrase(channel, space)} now runs in the {environment_name} environment, from "
+        f"{scope} now runs in the {environment_name} environment, from "
         "the next message in each conversation. The conversation and its saved files carry "
         "over; a running process does not."
     )
@@ -107,13 +117,18 @@ def build_archive_environment_note(
 
 
 def build_clear_environment_note(
-    *, channel: str | None, cleared: bool, space: str = NEUTRAL_SPACE
+    *,
+    channel: str | None,
+    cleared: bool,
+    space: str = NEUTRAL_SPACE,
+    channel_name: str | None = None,
 ) -> str:
     """What changed after an environment is cleared; `cleared` False means nothing did."""
+    scope = _scope_phrase(channel, space, channel_name)
     if not cleared:
-        return f"{_scope_phrase(channel, space)} had no environment of its own; nothing changed."
+        return f"{scope} had no environment of its own; nothing changed."
     return (
-        f"{_scope_phrase(channel, space)} no longer picks an environment; from the next message "
+        f"{scope} no longer picks an environment; from the next message "
         "it falls back to the next default."
     )
 

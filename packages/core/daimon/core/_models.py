@@ -479,6 +479,7 @@ class Routine(Base):
     created_by_user_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     agent_id: Mapped[str] = mapped_column(Text, nullable=False)
     agent_name: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str | None] = mapped_column(Text, nullable=True)
     cron_expr: Mapped[str] = mapped_column(Text, nullable=False)
     timezone: Mapped[str] = mapped_column(Text, nullable=False, server_default="UTC")
     trigger_message: Mapped[str] = mapped_column(Text, nullable=False)
@@ -3781,6 +3782,9 @@ class PlatformChannelName(Base):
             ondelete="CASCADE",
             name="fk_platform_channel_names_tenants",
         ),
+        CheckConstraint(
+            "status IN ('named', 'gone', 'direct')", name="ck_platform_channel_names_status"
+        ),
     )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
@@ -3797,6 +3801,8 @@ class PlatformChannelName(Base):
     parent_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     archived: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Whether the platform still has it: "named", "gone" (deleted) or "direct" (a DM).
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="named")
 
 
 class ChannelChange(Base):
@@ -5468,6 +5474,8 @@ class WebInvite(Base):
     email: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
     role: Mapped[str] = mapped_column(Text, nullable=False, server_default="visitor")
     credit_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, server_default="0")
+    # Whether a visitor this invite brings in may attach files in web chat.
+    allow_files: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     # The person a sign-in link signs in.
     person_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("web_people.id", ondelete="CASCADE"), nullable=True

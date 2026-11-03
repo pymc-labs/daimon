@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Lock } from "lucide-react"
 import { toast } from "sonner"
 import { AgentAvatar } from "@/components/common"
+import { SettingsList } from "@/components/settings"
 import { QueryState } from "@/components/QueryState"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
@@ -9,7 +10,6 @@ import { api } from "@/lib/api"
 import { useChatAgents } from "@/lib/hooks"
 import { Access, Providers } from "./Access"
 import type { SettingsPatch, WorkspaceSettings } from "./types"
-import { Block, Row } from "./shared"
 
 // Workspace
 
@@ -54,25 +54,25 @@ function Settings({ s }: { s: WorkspaceSettings }) {
     },
   })
   return (
-    <div className="mx-auto max-w-[720px] space-y-8">
-      <Block title="Modules">
-        {(Object.keys(MODULE_LABEL) as (keyof typeof MODULE_LABEL)[]).map((k) => (
-          <Row key={k} label={MODULE_LABEL[k]}>
-            <Switch checked={s.modules[k]} onCheckedChange={(v) => save.mutate({ modules: { ...s.modules, [k]: v } })} />
-          </Row>
-        ))}
-        <Row label="Admin"><Lock className="size-4 text-faint" aria-label="Always on" /></Row>
-      </Block>
-      <Block title="Web chat">
-        <Row label="Web chat agent">
+    <div className="mx-auto max-w-3xl space-y-8">
+      <SettingsList title="Modules" rows={[
+        ...(Object.keys(MODULE_LABEL) as (keyof typeof MODULE_LABEL)[]).map((k) => ({
+          key: k, label: MODULE_LABEL[k],
+          control: <Switch aria-label={MODULE_LABEL[k]} checked={s.modules[k]} onCheckedChange={(v) => save.mutate({ modules: { ...s.modules, [k]: v } })} />,
+        })),
+        { key: "admin", label: "Admin", control: <Lock className="size-4 text-faint" aria-label="Always on" /> },
+      ]} />
+      <SettingsList title="Web chat" rows={[{
+        label: "Web chat agent",
+        control: (
           <Select value={s.default_agent} onValueChange={(v) => save.mutate({ default_agent: v })}>
             <SelectTrigger size="sm" className="w-48"><SelectValue /></SelectTrigger>
             <SelectContent>
               {agents?.map((a) => <SelectItem key={a.id} value={a.id}><AgentAvatar src={a.avatar} name={a.name} className="size-4 rounded" />{a.name}</SelectItem>)}
             </SelectContent>
           </Select>
-        </Row>
-      </Block>
+        ),
+      }]} />
       <Access access={s.access} save={save.mutate} />
       {s.providers && <Providers providers={s.providers} save={save.mutate} />}
     </div>

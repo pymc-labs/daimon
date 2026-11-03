@@ -181,6 +181,7 @@ class NewRoutine:
     destination_id: str | None = None
     made_in_channel_id: str | None = None
     """The channel it was made from; the caller's place when unset."""
+    name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -196,6 +197,8 @@ class RoutineChange:
     destination_kind: RoutineDestinationKind | None = None
     destination_id: str | None = None
     clear_destination: bool = False
+    name: str | None = None
+    """A new title; empty clears it."""
 
 
 def destination_channel_of(
@@ -560,6 +563,7 @@ async def create_routine(env: RoutineEnv, caller: RoutineCaller, new: NewRoutine
                 created_by_user_id=caller.user_id,
                 agent_id=match.id,
                 agent_name=new.agent_name,
+                name=new.name,
                 cron_expr=new.cron_expr,
                 timezone_=new.timezone,
                 trigger_message=new.trigger_message,
@@ -737,6 +741,7 @@ async def update_routine(
                 catch_up_policy=change.catch_up_policy,
                 agent_id=new_agent_id,
                 agent_name=change.agent_name if new_agent_id is not None else None,
+                name=change.name,
                 next_fire_at=next_fire_at,
                 destination_kind=change.destination_kind,
                 destination_id=destination_id,

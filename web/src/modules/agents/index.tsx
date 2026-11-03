@@ -8,6 +8,7 @@ const AgentPage = lazyPage(() => import("./AgentPage"), "AgentPage")
 const AgentList = lazyPage(() => import("./List"), "AgentList")
 const NewAgent = lazyPage(() => import("./New"), "NewAgent")
 const Skills = lazyPage(() => import("./library/Skills"), "Skills")
+const SkillPage = lazyPage(() => import("./library/SkillPage"), "SkillPage")
 const Environments = lazyPage(() => import("./library/Environments"), "Environments")
 
 export const agents: ModuleDef = {
@@ -18,6 +19,7 @@ export const agents: ModuleDef = {
       <Route path="/agents" element={<AgentList />} />
       <Route path="/agents/new" element={<NewAgent />} />
       <Route path="/agents/skills" element={<Skills />} />
+      <Route path="/agents/skills/:id" element={<SkillPage />} />
       <Route path="/agents/environments" element={<Environments />} />
       <Route path="/agents/:id" element={<AgentPage />} />
     </>

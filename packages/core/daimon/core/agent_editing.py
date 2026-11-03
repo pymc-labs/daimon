@@ -76,7 +76,9 @@ BuiltinToolName = Literal[
 BUILTIN_NAMES: Final[tuple[str, ...]] = get_args(BuiltinToolName)
 TOOLSET_TYPE: Final[str] = "agent_toolset_20260401"
 
-AgentEditRefusal = Literal["forbidden", "invalid", "conflict", "stale", "not_found", "taken"]
+AgentEditRefusal = Literal[
+    "forbidden", "invalid", "conflict", "stale", "not_found", "taken", "unavailable"
+]
 
 
 class AgentEditError(DaimonError):

@@ -155,6 +155,13 @@ export const creditsHandlers: HttpHandler[] = [
     allowances.unshift(row)
     return HttpResponse.json(row)
   }),
+  http.patch("/api/credits/allowances/:id", async ({ params, request }) => {
+    if (!admin()) return forbidden()
+    const a = allowances.find((x) => x.id === params.id)
+    if (!a) return HttpResponse.json({ detail: "This allowance no longer exists." }, { status: 404 })
+    a.amount_usd = ((await request.json()) as { amount_usd: number }).amount_usd
+    return HttpResponse.json(a)
+  }),
   http.delete("/api/credits/allowances/:id", ({ params }) => {
     if (!admin()) return forbidden()
     const i = allowances.findIndex((a) => a.id === params.id)

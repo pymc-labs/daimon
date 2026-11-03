@@ -1,9 +1,9 @@
 // Admin: people, invites, agent web access, audit log and workspace settings.
 import { http, HttpResponse, type HttpHandler } from "msw"
 
-import type { AdminPerson, AgentAccess, AuditEntry, AuditKind, Feedback, Invite, SettingsPatch, WorkspaceSettings } from "@/modules/admin/types"
+import type { AdminPerson, AgentAccess, AuditEntry, AuditKind, AuditTarget, Feedback, Invite, SettingsPatch, WorkspaceSettings } from "@/modules/admin/types"
 import { forbidden, notFound, paged, wait } from "./util"
-import { agent, AGENTS, DOMAIN, me } from "./world"
+import { agent, AGENTS, DOMAIN, me, visitorFiles } from "./world"
 import { face } from "./face"
 
 const ago = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString()
@@ -13,6 +13,7 @@ const P = (id: string, name: string, role: AdminPerson["role"], groups: string[]
   email: role === "visitor" ? "jordan@brightwave.example" : `${name.toLowerCase().replace(/ /g, ".").normalize("NFD").replace(/[̀-ͯ]/g, "")}@${DOMAIN}`,
   identities: role === "visitor" ? [{ provider: "invite", provider_label: "Invite link", icon: "link", label: "jordan@brightwave.example" }] : [{ provider: "discord", provider_label: "Discord", label: name.split(" ")[0]!.toLowerCase() }],
   credit: credit && { left_usd: credit[0], total_usd: credit[1] },
+  ...(role === "visitor" && { invite_id: "inv_demo", allow_files: false }),
 })
 
 const people: AdminPerson[] = [
@@ -31,10 +32,10 @@ const people: AdminPerson[] = [
 people[9]!.status = "suspended"
 
 const invites: Invite[] = [
-  { id: "inv_demo", email: "jordan@brightwave.example", role: "visitor", agents: [agent("ag_pricing")], credit_usd: 5, expires_at: inDays(14), status: "accepted", by: "Maya Lindqvist" },
-  { id: "inv_2", email: "sam.ortiz@larkspur.example", role: "visitor", agents: [agent("ag_mmm")], credit_usd: 10, expires_at: inDays(6), status: "pending", by: "Jonas Weber" },
-  { id: "inv_3", email: "marco.bianchi@fernhill.example", role: "member", agents: [], credit_usd: 40, expires_at: inDays(2), status: "pending", by: "Maya Lindqvist" },
-  { id: "inv_4", email: "dana.ko@tidewater.example", role: "visitor", agents: [agent("ag_pricing"), agent("ag_sales")], credit_usd: 5, expires_at: inDays(-3), status: "expired", by: "Viktor Petrov" },
+  { id: "inv_demo", email: "jordan@brightwave.example", role: "visitor", agents: [agent("ag_pricing")], credit_usd: 5, allow_files: false, expires_at: inDays(14), status: "accepted", by: "Maya Lindqvist" },
+  { id: "inv_2", email: "sam.ortiz@larkspur.example", role: "visitor", agents: [agent("ag_mmm")], credit_usd: 10, allow_files: false, expires_at: inDays(6), status: "pending", by: "Jonas Weber" },
+  { id: "inv_3", email: "marco.bianchi@fernhill.example", role: "member", agents: [], credit_usd: 40, allow_files: false, expires_at: inDays(2), status: "pending", by: "Maya Lindqvist" },
+  { id: "inv_4", email: "dana.ko@tidewater.example", role: "visitor", agents: [agent("ag_pricing"), agent("ag_sales")], credit_usd: 5, allow_files: false, expires_at: inDays(-3), status: "expired", by: "Viktor Petrov" },
 ]
 
 const access: AgentAccess[] = [
@@ -47,11 +48,22 @@ const access: AgentAccess[] = [
     web: false, who: "everyone", groups: [], fixed_to: "1100000000000000001", fixed_name: "northwind-support" },
 ]
 
-const audit: AuditEntry[] = [
+type Raw = Omit<AuditEntry, "target" | "actor_id"> & { target: string }
+/** The server resolves ids; here the people and invites above stand in for its tables. */
+const entry = (r: Raw): AuditEntry => {
+  const person = people.find((p) => p.name === r.target), invite = invites.find((i) => i.email === r.target)
+  const target: AuditTarget = person ? { kind: "person", id: person.id, name: person.name }
+    : invite ? { kind: "invite", id: invite.id, name: invite.email } : { kind: "other", id: null, name: r.target }
+  return { ...r, actor_id: people.find((p) => p.name === r.who)?.id ?? null, target }
+}
+
+const audit: AuditEntry[] = ([
   { id: "s1", source: "security", at: ago(1), who: "Maya Lindqvist", action: "Panel: agent backend", target: "", detail: "Allowed",
-    facts: [["Where", "Panel"], ["Tool", "Panel: agent backend"], ["Operation", "Agent backend"], ["Outcome", "Allowed"], ["Reason", "completed"], ["Platform", "discord"], ["Channel", "1200000000000000009"]] },
+    facts: [["Where", "Panel"], ["Tool", "Panel: agent backend"], ["Operation", "Agent backend"], ["Outcome", "Allowed"], ["Reason", "completed"], ["Platform", "discord"]],
+    channel: { id: "1200000000000000009", name: "analytics" }, reference: "Message 1300000000000000004\nTurn 7f3a9c" },
   { id: "s2", source: "security", at: ago(7), who: "MMM Analyst", action: "Channel backend: clear pin", target: "", detail: "Refused",
-    facts: [["Where", "Chat tool"], ["Tool", "Channel backend"], ["Operation", "Clear pin"], ["Outcome", "Refused"], ["Reason", "needs_admin"], ["Platform", "discord"], ["Agent", "MMM Analyst"]] },
+    facts: [["Where", "Chat tool"], ["Tool", "Channel backend"], ["Operation", "Clear pin"], ["Outcome", "Refused"], ["Reason", "needs_admin"], ["Platform", "discord"], ["Agent", "MMM Analyst"]],
+    channel: { id: "1200000000000000010", name: null } },
   { id: "a1", source: "web", at: ago(0.4), who: "Maya Lindqvist", action: "Changed agent", target: "MMM Analyst", detail: "Instructions, version 14" },
   { id: "a2", source: "web", at: ago(2), who: "Jonas Weber", action: "Created invite", target: "sam.ortiz@larkspur.example", detail: "Visitor, MMM Analyst, $10.00" },
   { id: "a3", source: "web", at: ago(5), who: "Maya Lindqvist", action: "Added allowance", target: "MMM group", detail: "$60.00 a month, MMM Analyst" },
@@ -61,7 +73,7 @@ const audit: AuditEntry[] = [
   { id: "a7", source: "web", at: ago(51), who: "Jonas Weber", action: "Turned off web chat", target: "Code Reviewer" },
   { id: "a8", source: "web", at: ago(74), who: "Maya Lindqvist", action: "Changed role", target: "Jonas Weber", detail: "Member to Admin" },
   { id: "a9", source: "web", at: ago(98), who: "Jonas Weber", action: "Changed setting", target: "Web chat agent", detail: "Daimon" },
-]
+] satisfies Raw[]).map(entry)
 
 const settings: WorkspaceSettings = {
   modules: { chat: true, agents: true, channels: true, routines: true, credits: true, integrations: true },
@@ -76,7 +88,7 @@ const settings: WorkspaceSettings = {
 
 const admin = () => me()?.capabilities.includes("people.manage")
 const log = (action: string, target: string, detail?: string) =>
-  audit.unshift({ id: `a${Date.now()}`, source: "web", at: new Date().toISOString(), who: me()!.name, action, target, detail })
+  audit.unshift(entry({ id: `a${Date.now()}`, source: "web", at: new Date().toISOString(), who: me()!.name, action, target, detail }))
 
 export const adminHandlers: HttpHandler[] = [
   http.get("/api/admin/*", async () => { await wait(); if (!admin()) return forbidden() }),
@@ -109,15 +121,25 @@ export const adminHandlers: HttpHandler[] = [
   http.get("/api/admin/invites", ({ request }) => paged(request, invites)),
   http.post("/api/admin/invites", async ({ request }) => {
     await wait(400)
-    const b = (await request.json()) as { email: string; role: Invite["role"]; agents: string[]; credit_usd: number; days: number }
+    const b = (await request.json()) as { email: string; role: Invite["role"]; agents: string[]; credit_usd: number; days: number; allow_files?: boolean }
     const inv: Invite = {
-      id: `inv_${Date.now().toString(36)}`, email: b.email, role: b.role, agents: b.agents.map(agent), credit_usd: b.credit_usd,
+      id: `inv_${Date.now().toString(36)}`, email: b.email, role: b.role, agents: b.agents.map(agent), credit_usd: b.credit_usd, allow_files: b.role === "visitor" && !!b.allow_files,
       expires_at: inDays(b.days), status: "pending", by: me()!.name,
     }
     inv.link = `${location.origin}/invite/inv_demo`
     invites.unshift(inv)
     log("Created invite", b.email)
     return HttpResponse.json(inv)
+  }),
+  http.patch("/api/admin/invites/:id", async ({ params, request }) => {
+    const i = invites.find((x) => x.id === params.id)
+    if (!i || i.role !== "visitor") return notFound()
+    const { allow_files: on } = (await request.json()) as { allow_files: boolean }
+    if (on !== i.allow_files) log(on ? "Turned files on" : "Turned files off", i.email)
+    i.allow_files = on
+    const holder = people.find((p) => p.invite_id === i.id)
+    if (holder) { holder.allow_files = on; visitorFiles[holder.id] = on }
+    return HttpResponse.json(i)
   }),
   http.delete("/api/admin/invites/:id", ({ params }) => {
     const i = invites.findIndex((x) => x.id === params.id)

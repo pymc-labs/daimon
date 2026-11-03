@@ -14,9 +14,16 @@ import anthropic
 import httpx
 import pytest
 from daimon.adapters.web import directory
+from daimon.adapters.web.invites import issue_link
 from daimon.core.access_policy import AgentRule, TenantAccessPolicy
 from daimon.core.config import Settings, TurnSettings
-from daimon.core.stores import message_feedback, platform_names, security_audit, web_audit
+from daimon.core.stores import (
+    message_feedback,
+    platform_names,
+    security_audit,
+    web_audit,
+    web_invites,
+)
 from daimon.core.stores import web_identities as identities_store
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores import web_roles as roles_store
@@ -28,7 +35,14 @@ from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from .chat_support import Workspace, build_turns, funded_workspace, shown_trail, signed_in
+from .chat_support import (
+    Workspace,
+    build_turns,
+    funded_workspace,
+    shown_trail,
+    signed_in,
+    visitor_of,
+)
 from .conftest import PUBLIC_URL, WebClientFactory, web_settings
 
 _OWN = {"X-Daimon-Web": "1", "Origin": PUBLIC_URL}
@@ -52,6 +66,7 @@ _ROUTES: list[tuple[str, str, dict[str, Any] | None]] = [
             "days": 7,
         },
     ),
+    ("PATCH", f"/api/admin/invites/{uuid.uuid4()}", {"allow_files": True}),
     ("DELETE", f"/api/admin/invites/{uuid.uuid4()}", None),
     ("GET", "/api/admin/agent-access", None),
     ("PATCH", f"/api/admin/agent-access/{AGENT_ID}", {"web": False}),
@@ -281,6 +296,119 @@ async def test_invites_are_created_listed_and_revoked(
     ]
 
 
+async def test_files_are_off_for_a_new_visitor_invite_and_a_member_invite_stores_none(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    visitor = {
+        "email": "guest@example.com",
+        "role": "visitor",
+        "agents": [AGENT_ID],
+        "credit_usd": 5,
+        "days": 7,
+    }
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
+        plain = (await admin.client.post("/api/admin/invites", json=visitor)).json()
+        allowed = (
+            await admin.client.post("/api/admin/invites", json={**visitor, "allow_files": True})
+        ).json()
+        member = (
+            await admin.client.post(
+                "/api/admin/invites",
+                json={**visitor, "role": "member", "agents": [], "allow_files": True},
+            )
+        ).json()
+
+    assert plain["allow_files"] is False, "files are off unless the admin turns them on"
+    assert allowed["allow_files"] is True
+    assert member["allow_files"] is False, "a member needs no setting, so none is stored"
+
+
+async def test_an_admin_turns_files_on_and_off_for_a_visitor_invite_with_an_audit_row(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
+        made = (
+            await admin.client.post(
+                "/api/admin/invites",
+                json={
+                    "email": "guest@example.com",
+                    "role": "visitor",
+                    "agents": [AGENT_ID],
+                    "credit_usd": 5,
+                    "days": 7,
+                },
+            )
+        ).json()
+        url = f"/api/admin/invites/{made['id']}"
+        on = await admin.client.patch(url, json={"allow_files": True})
+        again = await admin.client.patch(url, json={"allow_files": True})
+        off = await admin.client.patch(url, json={"allow_files": False})
+        listed = (await admin.client.get("/api/admin/invites")).json()
+
+    assert on.json()["allow_files"] is True and off.json()["allow_files"] is False
+    assert again.status_code == 200, "setting what is already set is fine"
+    assert [i["allow_files"] for i in listed] == [False], "the list shows the setting"
+    assert (await admin.trail(db_session_factory))[1:] == [
+        ("Turned files on", "guest@example.com", None),
+        ("Turned files off", "guest@example.com", None),
+    ], "one audit row per change, none for a repeat"
+
+
+async def test_files_cannot_be_set_on_a_member_invite_or_an_invite_of_another_workspace(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    other = await funded_workspace(db_session_factory)
+    async with db_session_factory.begin() as db:
+        theirs, _ = await issue_link(
+            db,
+            tenant_id=other.tenant_id,
+            kind="invite",
+            expires_at=datetime.now(UTC) + timedelta(days=7),
+            created_by_account_id=other.person.account_id,
+        )
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
+        member = (
+            await admin.client.post(
+                "/api/admin/invites",
+                json={"email": "m@example.com", "role": "member", "credit_usd": 0, "days": 7},
+            )
+        ).json()
+        for invite_id in (member["id"], str(theirs.id)):
+            res = await admin.client.patch(
+                f"/api/admin/invites/{invite_id}", json={"allow_files": True}
+            )
+            assert res.status_code == 404, f"{invite_id} is not this workspace's visitor invite"
+
+    async with db_session_factory() as db:
+        kept = await web_invites.get_invite(db, tenant_id=other.tenant_id, invite_id=theirs.id)
+    assert kept is not None and not kept.allow_files, "the other workspace's invite is untouched"
+    assert await admin.trail(db_session_factory) == [
+        ("Created invite", "m@example.com", "Member, $0.00")
+    ], "a refused change leaves no audit row"
+
+
+async def test_a_visitor_person_shows_their_invites_files_setting_to_admins(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
+        guest = await visitor_of(db_session_factory, admin.ws, allow_files=True)
+        shown = (await admin.client.get(f"/api/admin/people/{guest.id}")).json()
+        member = (await admin.client.get(f"/api/admin/people/{admin.member.id}")).json()
+
+    assert (shown["invite_id"] is not None, shown["allow_files"]) == (True, True)
+    assert (member["invite_id"], member["allow_files"]) == (None, None), (
+        "a member has no setting to show"
+    )
+
+
 async def test_turning_web_chat_off_hides_the_agent_from_members(
     web_client: WebClientFactory,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -500,9 +628,13 @@ async def test_the_audit_log_names_who_acted(
         )
         [entry] = (await admin.client.get("/api/admin/audit")).json()
 
-    assert (entry["who"], entry["action"], entry["target"]) == ("Ada", "Suspended", "Mia")
+    assert (entry["who"], entry["action"]) == ("Ada", "Suspended")
+    assert entry["target"] == {"kind": "person", "id": str(admin.member.id), "name": "Mia"}
+    assert entry["actor_id"] == str(admin.ws.person.id), "the actor links to their person"
     assert entry["source"] == "web"
-    assert set(entry) == {"id", "source", "at", "who", "action", "target"}, "no detail, no key"
+    assert set(entry) == {"id", "source", "at", "who", "actor_id", "action", "target"}, (
+        "no detail, no key"
+    )
 
 
 async def test_the_audit_log_shows_an_erased_person_by_a_generic_label(
@@ -522,11 +654,11 @@ async def test_the_audit_log_shows_an_erased_person_by_a_generic_label(
             await people_store.delete_for_account(db, account_id=admin.member.account_id)
         after = (await admin.client.get("/api/admin/audit")).json()
 
-    assert {e["action"]: e["target"] for e in before} == {
+    assert {e["action"]: e["target"]["name"] for e in before} == {
         "Suspended": "Mia",
         "Created invite": "guest@example.com",
     }, "while they exist, a person and an invite are shown by name and address"
-    assert {e["action"]: e["target"] for e in after} == {
+    assert {e["action"]: e["target"]["name"] for e in after} == {
         "Suspended": "A person",
         "Created invite": "guest@example.com",
     }, "an erased person is a generic label; an invite nobody accepted is still its own"
@@ -697,8 +829,9 @@ async def test_the_audit_log_adds_chat_tool_calls_and_panel_writes_with_stored_f
         "Reason": "needs_admin",
         "Platform": "discord",
         "Token": "operator",
-        "Channel": "1200000000000000009",
     }, "only stored, readable fields; no hash, no chat user id"
+    assert event["channel"] == {"id": "1200000000000000009", "name": None}, "by name once known"
+    assert event["reference"] is None, "no message or turn stored"
     assert "secret-hash" not in str(entries)
 
 

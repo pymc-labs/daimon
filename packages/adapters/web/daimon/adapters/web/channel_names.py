@@ -9,6 +9,7 @@ from typing import Any, cast
 import httpx
 import structlog
 from daimon.adapters.web.runtime import WebRuntime
+from daimon.core.channel_listing import discord_channel_answer
 from daimon.core.platform_names import (
     ChannelLookup,
     ChannelStatus,
@@ -21,10 +22,6 @@ from daimon.core.stores.tenants import get_tenant
 log = structlog.get_logger(__name__)
 
 _DISCORD_API = "https://discord.com/api/v10"
-# Discord's "Unknown Channel": the channel was deleted.
-_UNKNOWN_CHANNEL = 10003
-# Discord channel types for a direct message and a group direct message.
-_DIRECT_TYPES = (1, 3)
 
 
 def channel_lookup_of(runtime: WebRuntime) -> ChannelLookup | None:
@@ -48,20 +45,7 @@ def channel_lookup_of(runtime: WebRuntime) -> ChannelLookup | None:
         except httpx.HTTPError as exc:
             log.info("web.channel_lookup_failed", error=type(exc).__name__)
             return None
-        fields = _json_fields(response)
-        if response.status_code == 404 and fields.get("code") == _UNKNOWN_CHANNEL:
-            return ChannelStatus.GONE
-        if response.status_code != 200:
-            log.info("web.channel_lookup_refused", status=response.status_code)
-            return None
-        if fields.get("guild_id") is None and fields.get("type") in _DIRECT_TYPES:
-            return ChannelStatus.DIRECT
-        # The bot sits in many servers; a channel of another one is not this tenant's to name.
-        if fields.get("guild_id") != guild_id:
-            log.info("web.channel_lookup_foreign")
-            return None
-        name = fields.get("name")
-        return name if isinstance(name, str) else None
+        return discord_channel_answer(response.status_code, _json_fields(response), guild_id)
 
     return lookup
 

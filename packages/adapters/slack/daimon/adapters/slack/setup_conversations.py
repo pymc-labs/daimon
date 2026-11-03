@@ -21,6 +21,7 @@ from daimon.core.setup_conversations import (
     setup_thread_name,
 )
 from daimon.core.stores.identity import get_or_create_platform_principal
+from daimon.core.stores.platform_names import mark_channel_status
 from daimon.core.stores.thread_agent_bindings import (
     create_binding,
     update_channel_lifecycle,
@@ -212,3 +213,10 @@ async def handle_setup_lifecycle(
                 else None,
                 deleted=True if event_type.endswith("_deleted") else None,
             )
+            if event_type.endswith("_deleted"):
+                await mark_channel_status(
+                    session,
+                    tenant_id=tenant_id,
+                    platform="slack",
+                    statuses={channel_id: "gone"},
+                )

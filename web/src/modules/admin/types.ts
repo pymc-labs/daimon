@@ -10,6 +10,9 @@ export type AdminPerson = {
   identities: Identity[]
   credit: { left_usd: number; total_usd: number } | null
   last_seen: string | null
+  /** A visitor with a live invite: the invite and whether it lets them attach files. */
+  invite_id?: string | null
+  allow_files?: boolean | null
 }
 
 export type Invite = {
@@ -18,6 +21,7 @@ export type Invite = {
   role: "visitor" | "member"
   agents: AgentRef[]
   credit_usd: number
+  allow_files: boolean
   expires_at: string
   status: "pending" | "accepted" | "expired"
   by: string
@@ -34,10 +38,15 @@ export type AgentAccess = {
 }
 
 export type AuditSource = "web" | "security"
+export type AuditTarget = { kind: "person" | "invite" | "other"; id: string | null; name: string }
 export type AuditEntry = {
-  id: string; source: AuditSource; at: string; who: string; action: string; target: string; detail?: string
+  id: string; source: AuditSource; at: string; who: string; actor_id: string | null; action: string; target: AuditTarget; detail?: string
   /** Security events only: every readable field the event stores. */
   facts?: [string, string][]
+  /** Security events only: where it happened; `name` is null while the channel is unnamed. */
+  channel?: { id: string; name: string | null } | null
+  /** Security events only: the message and turn ids, to copy; never shown. */
+  reference?: string | null
 }
 export type AuditKind = { source: AuditSource; value: string; label: string }
 

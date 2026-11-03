@@ -19,6 +19,7 @@ from daimon.core._models import (
     GitHubAccessRequest,
     GitHubInstallationReconciliation,
     GitHubPushResync,
+    TeamsChannelSubscription,
     TenantGitHubRepo,
 )
 from daimon.core.authz import Subject
@@ -26,6 +27,7 @@ from daimon.core.credential_requests import mint_request_token
 from daimon.core.integration_views import AgentServers, IntegrationsRefused
 from daimon.core.stores import credential_requests, github_app_installations, mcp_oauth_flows
 from daimon.core.stores.agent_mcp_credentials import upsert_credential
+from daimon.core.stores.teams_installations import record_teams_installation
 from daimon.testing.factories import make_account, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -178,7 +180,7 @@ async def test_github_overview_lists_repos_per_agent_requests_and_failed_syncs(
     assert [r.agent_id for r in overview.requests] == [other]
     assert sorted((t.kind, t.subject) for t in overview.trouble) == [
         ("installation", "team-a"),
-        ("push", "team-a/app refs/heads/main"),
+        ("push", "team-a/app main"),
     ], "another workspace's repo sync is not listed"
 
 
@@ -208,6 +210,35 @@ async def test_the_chat_install_reads_the_tenant(db_session: AsyncSession) -> No
     assert install is not None
     assert (install.platform, install.name, install.status) == ("discord", "Acme", "connected")
     assert install.problem is False
+
+
+async def test_a_team_without_a_name_takes_the_one_its_channels_reported(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session, platform="teams")
+    for team_id, name in (("t1", None), ("t2", "Sales")):
+        await record_teams_installation(
+            db_session, tenant_id=tenant.id, team_id=team_id, group_id=f"g-{team_id}", name=name
+        )
+    db_session.add(
+        TeamsChannelSubscription(
+            tenant_id=tenant.id,
+            channel_id="c1",
+            team_id="t1",
+            group_id="g-t1",
+            channel_type="private",
+            team_name="Platform",
+            subscription_id="s1",
+            client_state_sha256=b"x",
+            expires_at=NOW,
+        )
+    )
+    await db_session.flush()
+    install = await views.load_workspace_install(
+        db_session, tenant_id=tenant.id, subject=ADMIN, workspace_name="Acme", now=NOW
+    )
+    assert install is not None
+    assert {t.id: t.name for t in install.teams} == {"t1": "Platform", "t2": "Sales"}
 
 
 async def test_the_catalogue_groups_agents_by_server_and_never_reads_a_token(

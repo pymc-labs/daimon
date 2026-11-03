@@ -14,7 +14,7 @@ export type Github = {
   configured: boolean
   installations: { id: string; account: string; selection: string | null; repos: number; state: "active" | "suspended" | "removed"; refreshed_at: string | null }[]
   agents: { id: string; name: string; repos: GithubRepo[] }[]
-  requests: { id: string; agent: string; repos: string[]; access: Access; requester: string; created_at: string; expires_at: string; waiting_github: boolean }[]
+  requests: { id: string; agent: string; agent_id: string | null; repos: string[]; access: Access; requester: string; requester_id: string | null; created_at: string; expires_at: string; waiting_github: boolean }[]
   trouble: { kind: "push" | "installation"; subject: string; attempts: number; error: string; at: string }[]
 }
 

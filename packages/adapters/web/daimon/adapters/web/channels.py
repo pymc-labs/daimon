@@ -13,13 +13,14 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 
 from anthropic import AsyncAnthropic
 from daimon.adapters.web.access import is_admin
 from daimon.adapters.web.admin_common import listed_agents, names_by_account
 from daimon.adapters.web.audit import audit
 from daimon.adapters.web.caller import WebCaller, requires
+from daimon.adapters.web.channel_agents import AgentRefJson, agent_refs
 from daimon.adapters.web.channel_visibility import readable_channels
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.access_policy import ChannelReaders, ChannelRule, ChannelWriters
@@ -43,7 +44,9 @@ from daimon.core.channel_changes import (
 from daimon.core.channel_directory import (
     WEB_ROW_ID,
     ChannelDirectory,
+    ChannelKind,
     ChannelRow,
+    ChannelStatusName,
     Sourced,
     ValueSource,
     load_channel_directory,
@@ -120,12 +123,21 @@ class SpendJson(BaseModel):
     last_30_days_usd: float
 
 
+class PathNodeJson(BaseModel):
+    id: str
+    name: str | None
+    kind: ChannelKind
+
+
 class ChannelJson(BaseModel):
     id: str
     platform: str
     name: str | None
-    kind: str | None
+    kind: ChannelKind
+    status: ChannelStatusName
     parent: ParentJson | None
+    path: list[PathNodeJson]
+    """Ancestors, root first: category and channel, or team."""
     last_seen_at: str | None
     agent: SourcedJson
     environment: SourcedJson
@@ -151,6 +163,8 @@ class ChannelDetailJson(ChannelJson):
     writers_options: list[ChoiceJson]
     can_manage: bool
     budget_editable: bool
+    agents: dict[str, AgentRefJson]
+    """The agents the row's keys name (its answering and kept agents), by key."""
 
 
 class ChannelListJson(BaseModel):
@@ -158,6 +172,8 @@ class ChannelListJson(BaseModel):
     default_agent: SourcedJson
     default_environment: SourcedJson
     channels: list[ChannelJson]
+    agents: dict[str, AgentRefJson]
+    """The agents the list's keys name (the default, answering and kept agents), by key."""
 
 
 class ChangeResultJson(BaseModel):
@@ -177,6 +193,12 @@ class HistoryEntryJson(BaseModel):
     after: object
     actor: HistoryActorJson | None
     surface: Literal["web", "chat", "panel", "cli"] | None
+
+
+class HistoryJson(BaseModel):
+    entries: list[HistoryEntryJson]
+    agents: dict[str, AgentRefJson]
+    """The agents the entries' keys name, by key."""
 
 
 class DefaultAgentChange(BaseModel):
@@ -254,9 +276,11 @@ def channel_json(row: ChannelRow, *, figures: bool) -> ChannelJson:
     return ChannelJson(
         id=row.channel_id,
         platform=row.platform,
-        name="Web chat" if row.channel_id == WEB_ROW_ID else name.name if name else None,
-        kind=name.kind if name else None,
+        name="Web chat" if row.channel_id == WEB_ROW_ID else name.name or None if name else None,
+        kind=row.kind,
+        status=row.status,
         parent=parent,
+        path=[PathNodeJson(id=n.id, name=n.name or None, kind=n.kind) for n in row.path],
         last_seen_at=_iso(name.last_seen_at) if name else None,
         agent=_sourced(row.agent),
         environment=_sourced(row.environment),
@@ -274,7 +298,13 @@ def channel_json(row: ChannelRow, *, figures: bool) -> ChannelJson:
     )
 
 
-def detail_json(row: ChannelRow, *, manage: bool, figures: bool) -> ChannelDetailJson:
+def row_agent_keys(row: ChannelRow) -> list[str | None]:
+    return [row.agent.value, *row.kept_agents]
+
+
+def detail_json(
+    row: ChannelRow, *, manage: bool, figures: bool, agents: dict[str, AgentRefJson]
+) -> ChannelDetailJson:
     return ChannelDetailJson(
         **channel_json(row, figures=figures).model_dump(),
         readers_label=READERS_LABELS[row.readers],
@@ -283,7 +313,20 @@ def detail_json(row: ChannelRow, *, manage: bool, figures: bool) -> ChannelDetai
         writers_options=[ChoiceJson(value=k, label=v) for k, v in WRITERS_LABELS.items()],
         can_manage=manage,
         budget_editable=manage and row.channel_id != WEB_ROW_ID,
+        agents=agents,
     )
+
+
+def _history_keys(value: object) -> list[str]:
+    """The agent keys inside a change's before or after: a key, a list of keys, or a rule."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [item for item in cast("list[object]", value) if isinstance(item, str)]
+    if isinstance(value, dict):
+        agent = cast("dict[str, object]", value).get("agent")
+        return [agent] if isinstance(agent, str) else []
+    return []
 
 
 def _budget_value(expected: BudgetExpected | None) -> BudgetValue | None:
@@ -298,6 +341,14 @@ def _budget_value(expected: BudgetExpected | None) -> BudgetValue | None:
         )
     except (InvalidOperation, ValueError) as exc:
         raise HTTPException(422, "The budget you read is not valid.") from exc
+
+
+async def detail_of(
+    runtime: WebRuntime, caller: WebCaller, row: ChannelRow, *, manage: bool, figures: bool
+) -> ChannelDetailJson:
+    """`detail_json` with the agents its keys name."""
+    refs = await agent_refs(runtime, caller, row_agent_keys(row))
+    return detail_json(row, manage=manage, figures=figures, agents=refs)
 
 
 async def platform_user(db: AsyncSession, caller: WebCaller, platform: str) -> str | None:
@@ -400,8 +451,12 @@ def channels_router(runtime: WebRuntime) -> APIRouter:
 
     async def readable(caller: WebCaller, channel_id: str) -> ChannelDetailJson:
         row = await one_row(runtime, caller, channel_id)
-        return detail_json(
-            row, manage="channels.manage" in caller.capabilities, figures=is_admin(caller.role)
+        return await detail_of(
+            runtime,
+            caller,
+            row,
+            manage="channels.manage" in caller.capabilities,
+            figures=is_admin(caller.role),
         )
 
     async def agent_names(caller: WebCaller, name: str) -> tuple[str, ...]:
@@ -427,11 +482,17 @@ def channels_router(runtime: WebRuntime) -> APIRouter:
         if not is_admin(caller.role):
             visible = await member_visible(runtime, caller, rows)
             rows = tuple(r for r in rows if r.channel_id in visible)
+        refs = await agent_refs(
+            runtime,
+            caller,
+            [found.default_agent.value, *(k for r in rows for k in row_agent_keys(r))],
+        )
         return ChannelListJson(
             platform=found.platform,
             default_agent=_sourced(found.default_agent),
             default_environment=_sourced(found.default_environment),
             channels=[channel_json(r, figures=is_admin(caller.role)) for r in rows],
+            agents=refs,
         )
 
     @router.get("/{channel_id}")
@@ -574,7 +635,7 @@ def channels_router(runtime: WebRuntime) -> APIRouter:
         return await changed(caller, channel_id, [])
 
     @router.get("/{channel_id}/history")
-    async def history(caller: ChannelAdmin, channel_id: str) -> list[HistoryEntryJson]:  # pyright: ignore[reportUnusedFunction]
+    async def history(caller: ChannelAdmin, channel_id: str) -> HistoryJson:  # pyright: ignore[reportUnusedFunction]
         tenant_id = caller.person.tenant_id
         async with runtime.sessionmaker() as db:
             changes = await list_changes(db, tenant_id=tenant_id, channel_id=channel_id)
@@ -619,7 +680,9 @@ def channels_router(runtime: WebRuntime) -> APIRouter:
             )
             for r in tool_rules
         ]
-        return sorted(entries, key=lambda e: e.at, reverse=True)
+        entries.sort(key=lambda e: e.at, reverse=True)
+        keys = [k for e in entries for v in (e.before, e.after) for k in _history_keys(v)]
+        return HistoryJson(entries=entries, agents=await agent_refs(runtime, caller, keys))
 
     return router
 

@@ -12,7 +12,6 @@ function randomPlan(seed: number, conns: number): { plan: Plan; size: (id: strin
   const plan: Plan = {
     left: ["instructions", "model", "places"].map((id) => card(id)),
     right: ["skills", "tools", "helpers"].map((id) => card(id)),
-    hub: card("hub", 150),
     conns: Array.from({ length: conns }, (_, i) => card(`c${i}`, 256)),
     skills: "skills",
     deps: conns ? [{ key: "s1", target: "c0", y: 60 }] : [],
@@ -42,6 +41,18 @@ describe("agent editor layout", () => {
     expect(Math.min(...row.map((p) => p.y)), "the branch starts below the lowest card").toBeGreaterThan(lowest)
     const mid = (row[0]!.x + row[1]!.x + size("c1").w) / 2
     expect(Math.abs(mid - cx), "the row is centred on the agent").toBeLessThan(1)
+  })
+
+  it("branches every connection from the agent's bottom edge", () => {
+    const { plan, size } = randomPlan(3, 5)
+    const { edges, pos } = layoutWide("agent", plan, size)
+    const bottom = pos.agent!.y + size("agent").h
+    const cx = pos.agent!.x + size("agent").w / 2
+    for (const id of plan.conns) {
+      const line = edges[`agent>${id}`]
+      expect(line, `${id} has a line`).toBeDefined()
+      expect(line!.points[0], "it leaves the agent's bottom centre").toEqual({ x: cx, y: bottom })
+    }
   })
 
   it("wraps wide branches into rows", () => {

@@ -437,6 +437,7 @@ source_modules = [
     "daimon.core.profile",
     "daimon.core.routine_service",
     "daimon.core.skill_library",
+    "daimon.core.skill_library_files",
     "daimon.core.workspace_settings",
 ]
 forbidden_modules = ["daimon.core._models"]

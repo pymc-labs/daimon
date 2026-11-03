@@ -201,6 +201,31 @@ async def test_a_member_creates_lists_pauses_and_deletes_their_own_routine(rig: 
     ], "every change is recorded with the change"
 
 
+async def test_a_routine_is_titled_by_its_name_else_by_the_start_of_its_prompt(rig: Rig) -> None:
+    async with rig.open() as (client, _ws, _member):
+        made = (await client.post("/api/routines", json=_NEW)).json()
+        assert (made["name"], made["title"]) == (None, "post the numbers")
+
+        named = (
+            await client.patch(f"/api/routines/{made['id']}", json={"name": " Daily numbers "})
+        ).json()
+        assert (named["name"], named["title"]) == ("Daily numbers", "Daily numbers")
+
+        cleared = (await client.patch(f"/api/routines/{made['id']}", json={"name": ""})).json()
+        assert (cleared["name"], cleared["title"]) == (None, "post the numbers")
+
+        spaced = (await client.post("/api/routines", json=_NEW | {"name": " Weekly "})).json()
+        blank = (await client.post("/api/routines", json=_NEW | {"name": "   "})).json()
+        assert (spaced["name"], blank["name"]) == ("Weekly", None), "create trims like update"
+
+
+def test_the_title_falls_back_to_the_first_line_cut_at_sixty_characters() -> None:
+    title = routines_module.routine_title
+    assert title(None, "\n  first line\nsecond") == "first line"
+    assert len(title(None, "x" * 200)) == 60, "a long first line is cut to 60 characters"
+    assert title("Named", "ignored") == "Named"
+
+
 async def test_run_now_makes_a_routine_due_is_audited_and_refused_while_paused(rig: Rig) -> None:
     async with rig.open() as (client, ws, _):
         routine = (await client.post("/api/routines", json=_NEW)).json()
@@ -326,12 +351,12 @@ async def test_a_member_may_deliver_only_to_a_channel_their_platform_shows_them(
             f"/api/routines/{made.json()['id']}", json={"clear_destination": True}
         )
     assert choices["destinations"] == [
-        {"id": _CHANNEL, "name": "general"},
-        {"id": "222", "name": "secret"},
+        {"id": _CHANNEL, "name": "general", "kind": "channel"},
+        {"id": "222", "name": "secret", "kind": "channel"},
     ], "what the platform shows them, minus a channel kept to its own agents"
     assert {user for user, _ in asked} == {"m-1"}
     assert (refused.status_code, locked.status_code) == (422, 422)
-    assert made.json()["destination"] == {"id": _CHANNEL, "name": "general"}
+    assert made.json()["destination"] == {"id": _CHANNEL, "name": "general", "kind": "channel"}
     assert cleared.json()["destination"] is None
 
 

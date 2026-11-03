@@ -85,7 +85,7 @@ async def test_a_file_only_its_owner_can_attach_and_a_quota_bounds_them(
     monkeypatch: Any,
 ) -> None:
     ws = await funded_workspace(db_session_factory)
-    guest = await visitor_of(db_session_factory, ws)
+    guest = await visitor_of(db_session_factory, ws, allow_files=True)
     turns = build_turns(db_session_factory, build_turn_router(str(ws.tenant_id)), tmp_path)
     monkeypatch.setattr(chat, "PERSON_UPLOAD_QUOTA_BYTES", 8)
 

@@ -10,9 +10,19 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from daimon.core.channel_listing import store_listing
+from daimon.core.channel_listing import (
+    check_unlisted_channels,
+    discord_channel_answer,
+    store_listing,
+)
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.platform_names import ChannelSighting, remember_channel_names, remember_user_name
+from daimon.core.platform_names import (
+    ChannelLookup,
+    ChannelSighting,
+    ChannelStatus,
+    remember_channel_names,
+    remember_user_name,
+)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
@@ -98,17 +108,55 @@ def listed_guild_channels(guild: discord.Guild) -> dict[str, ChannelSighting]:
     return found
 
 
+def bot_channel_lookup(client: discord.Client) -> ChannelLookup:
+    """Ask Discord, through the bot's own client, what one channel id is.
+
+    The client waits out Discord's rate limits itself. Ids that are not numbers (web chat,
+    a routine's destination) are no Discord channel.
+    """
+
+    async def lookup(guild_id: str, channel_id: str) -> str | ChannelStatus | None:
+        if not channel_id.isdigit():
+            return None
+        try:
+            fields = await client.http.get_channel(int(channel_id))
+        except discord.HTTPException as exc:
+            return discord_channel_answer(exc.status, {"code": exc.code}, guild_id)
+        return discord_channel_answer(200, fields, guild_id)
+
+    return lookup
+
+
+#: Seconds between the status checks of one round: a handful a second at most.
+_CHECK_GAP_S = 0.3
+
+
 async def list_guilds_once(
     sessionmaker: async_sessionmaker[AsyncSession],
     guilds: Iterable[discord.Guild],
+    *,
+    lookup: ChannelLookup | None = None,
 ) -> int:
-    """Store every guild's listed channels; one round of `run_channel_listing`."""
+    """Store every guild's listed channels; one round of `run_channel_listing`.
+
+    With a `lookup`, channels that have settings but are not in the list are asked about
+    too (a few a round): the ones Discord says are deleted or direct messages are marked.
+    """
     stored = 0
     for guild in guilds:
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(guild.id))
+        listed = listed_guild_channels(guild)
         stored += await store_listing(
-            sessionmaker,
-            tenant_id=derive_tenant_uuid(platform="discord", workspace_id=str(guild.id)),
-            platform="discord",
-            channels=listed_guild_channels(guild),
+            sessionmaker, tenant_id=tenant_id, platform="discord", channels=listed
         )
+        if lookup is not None:
+            await check_unlisted_channels(
+                sessionmaker,
+                tenant_id=tenant_id,
+                platform="discord",
+                external_id=str(guild.id),
+                listed=listed.keys(),
+                lookup=lookup,
+                gap_s=_CHECK_GAP_S,
+            )
     return stored

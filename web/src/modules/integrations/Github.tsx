@@ -1,7 +1,8 @@
 import { useQuery } from "@tanstack/react-query"
 import { Star } from "lucide-react"
-import { Ago, StatStrip, StatusDot } from "@/components/common"
+import { Ago, StatusDot } from "@/components/common"
 import { Empty } from "@/components/filters"
+import { AgentLink, PersonLink } from "@/components/links"
 import { QueryState } from "@/components/QueryState"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { api } from "@/lib/api"
@@ -22,14 +23,8 @@ export function Github() {
 function Body({ d }: { d: Data }) {
   return (
     <>
-      <StatStrip stats={[
-        { label: "Installations", value: d.installations.length },
-        { label: "Agents with repos", value: d.agents.length },
-        { label: "Waiting for approval", value: d.requests.length },
-        { label: "Sync problems", value: <span className={cn(d.trouble.length > 0 && "text-destructive")}>{d.trouble.length}</span> },
-      ]} />
       {d.trouble.length > 0 && (
-        <Section title="Sync problems" className="mt-8">
+        <Section title={`Sync problems (${d.trouble.length})`}>
           <div className="divide-y rounded-lg border">
             {d.trouble.map((t) => (
               <div key={`${t.kind}:${t.subject}`} className="flex flex-wrap items-baseline gap-x-3 px-4 py-2.5 text-sm">
@@ -41,14 +36,14 @@ function Body({ d }: { d: Data }) {
           </div>
         </Section>
       )}
-      <Section title="Installations">
+      <Section title={`Installations (${d.installations.length})`}>
         {d.installations.length ? (
           <div className="divide-y rounded-lg border">
             {d.installations.map((i) => (
               <div key={i.id} className="flex min-h-12 items-center gap-3 px-4 py-2 text-sm">
-                <span className="min-w-0 flex-1">
+                <span className="flex min-w-0 flex-1 items-baseline gap-2">
                   <span className="font-medium">{i.account}</span>
-                  <span className="ml-2 text-xs text-muted-foreground">{i.selection ? SELECTION[i.selection] ?? i.selection : ""}</span>
+                  <span className="text-xs text-muted-foreground">{i.selection ? SELECTION[i.selection] ?? i.selection : ""}</span>
                 </span>
                 <span className="text-xs text-muted-foreground max-sm:hidden">{plural(i.repos, "repo")}</span>
                 <span className="text-xs text-muted-foreground max-md:hidden">Checked <Ago iso={i.refreshed_at} /></span>
@@ -59,7 +54,7 @@ function Body({ d }: { d: Data }) {
         ) : <Empty>No repos are shared with agents</Empty>}
       </Section>
       {d.requests.length > 0 && (
-        <Section title="Waiting for approval" aside="Approved in chat">
+        <Section title={`Waiting for approval (${d.requests.length})`}>
           <Table>
             <TableHeader>
               <TableRow className="hover:bg-transparent">
@@ -70,7 +65,7 @@ function Body({ d }: { d: Data }) {
             <TableBody>
               {d.requests.map((r) => (
                 <TableRow key={r.id}>
-                  <TableCell className="font-medium">{r.agent}</TableCell>
+                  <TableCell className="font-medium"><AgentLink id={r.agent_id} name={r.agent} /></TableCell>
                   <TableCell>
                     <span className="flex flex-wrap gap-1">
                       {r.repos.map((n) => <Pill key={n}>{n}</Pill>)}
@@ -78,7 +73,7 @@ function Body({ d }: { d: Data }) {
                       {r.waiting_github && <Pill>Waiting on GitHub</Pill>}
                     </span>
                   </TableCell>
-                  <TableCell className="text-muted-foreground max-sm:hidden">{r.requester}</TableCell>
+                  <TableCell className="text-muted-foreground max-sm:hidden"><PersonLink id={r.requester_id} name={r.requester} /></TableCell>
                   <TableCell className="text-muted-foreground max-md:hidden"><Ago iso={r.expires_at} /></TableCell>
                 </TableRow>
               ))}
@@ -86,14 +81,14 @@ function Body({ d }: { d: Data }) {
           </Table>
         </Section>
       )}
-      <Section title="Repos per agent">
+      <Section title={`Repos per agent (${d.agents.length})`}>
         {d.agents.length ? (
           <Table>
             <TableHeader><TableRow className="hover:bg-transparent"><TableHead className="w-56">Agent</TableHead><TableHead>Repos</TableHead></TableRow></TableHeader>
             <TableBody>
               {d.agents.map((a) => (
                 <TableRow key={a.id}>
-                  <TableCell className="align-top font-medium">{a.name}</TableCell>
+                  <TableCell className="align-top font-medium"><AgentLink id={a.id} name={a.name} /></TableCell>
                   <TableCell>
                     <span className="flex flex-wrap gap-1.5">
                       {a.repos.map((r) => (

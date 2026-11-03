@@ -342,9 +342,14 @@ class ChannelSettingsDialog:
             environment_name=name,
             previous_environment_name=previous,
         )
+        channel_name = (await self._listed(actor.tenant_id)).get(channel_id)
         if name is None:
-            return build_clear_environment_note(channel=channel_id, cleared=previous is not None)
-        return build_set_environment_note(environment_name=name, channel=channel_id)
+            return build_clear_environment_note(
+                channel=channel_id, cleared=previous is not None, channel_name=channel_name
+            )
+        return build_set_environment_note(
+            environment_name=name, channel=channel_id, channel_name=channel_name
+        )
 
     async def _change_rule(
         self,

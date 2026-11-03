@@ -33,9 +33,9 @@ export function History({ agent }: { agent: Agent }) {
                   <span className="truncate font-medium">{summary}</span>
                   {cur && <span className="shrink-0 text-xs text-success">Current</span>}
                 </span>
-                <span className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
-                  <Avatar name={v.by.name} className="size-4 text-[8px]" />{v.by.name}<span className="text-faint">·</span><Ago iso={v.at} />
-                  {v.changes.length > 0 && <><span className="text-faint">·</span>{v.changes.length} {v.changes.length === 1 ? "change" : "changes"}</>}
+                <span className="mt-0.5 flex items-center gap-3 text-xs text-muted-foreground">
+                  <span className="flex items-center gap-1.5"><Avatar name={v.by.name} className="size-4 text-[8px]" />{v.by.name}</span><Ago iso={v.at} />
+                  {v.changes.length > 0 && <span>{v.changes.length} {v.changes.length === 1 ? "change" : "changes"}</span>}
                 </span>
               </span>
               <ChevronRight className={cn("mt-1 size-4 shrink-0 text-faint transition-transform", on && "rotate-90")} />

@@ -12,7 +12,7 @@ const workspaces: Workspaces = {
   workspaces: [
     { platform: "discord", name: "Fernhill Labs", status: "connected", problem: false, teams: [] },
     { platform: "slack", name: "Fernhill Labs", status: "disconnected", problem: true, teams: [] },
-    { platform: "teams", name: "Fernhill Labs", status: "connected", problem: false, teams: [{ id: "t1", name: "Data science" }, { id: "t2", name: null }] },
+    { platform: "teams", name: "Fernhill Labs", status: "connected", problem: false, teams: [{ id: "t1", name: "Data science" }, { id: "t2", name: "Field sales" }] },
   ],
 }
 
@@ -31,11 +31,11 @@ const github: Github = {
     { id: "ag_mmm", name: "MMM Analyst", repos: [{ name: "fernhill-labs/mmm-core", access: "write", shared: true, status: "active", working: true }] },
   ],
   requests: [
-    { id: "r1", agent: "Pricing Analyst", repos: ["fernhill-labs/pricing-models"], access: "write", requester: "Priya Raman", created_at: ago(5), expires_at: ahead(2), waiting_github: false },
-    { id: "r2", agent: "Sales Desk", repos: ["fernhill-labs/crm-sync", "fernhill-labs/decks"], access: "read", requester: "Aiko Tanaka", created_at: ago(30), expires_at: ahead(1), waiting_github: true },
+    { id: "r1", agent: "Pricing Analyst", agent_id: "ag_pricing", requester_id: "p_priya", repos: ["fernhill-labs/pricing-models"], access: "write", requester: "Priya Raman", created_at: ago(5), expires_at: ahead(2), waiting_github: false },
+    { id: "r2", agent: "Sales Desk", agent_id: "ag_sales", requester_id: "p_aiko", repos: ["fernhill-labs/crm-sync", "fernhill-labs/decks"], access: "read", requester: "Aiko Tanaka", created_at: ago(30), expires_at: ahead(1), waiting_github: true },
   ],
   trouble: [
-    { kind: "push", subject: "fernhill-labs/mmm-core refs/heads/main", attempts: 3, error: "2 agents failed to sync", at: ago(2) },
+    { kind: "push", subject: "fernhill-labs/mmm-core main", attempts: 3, error: "2 agents failed to sync", at: ago(2) },
     { kind: "installation", subject: "fernhill-oss", attempts: 5, error: "GitHub says the install is paused", at: ago(26) },
   ],
 }

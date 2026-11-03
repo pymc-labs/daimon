@@ -24,7 +24,6 @@ export function Admin() {
   const [, setDialog] = useParam("dialog")
   const tabs = TABS.filter((t) => can(t.cap))
   const first = tabs[0]?.to
-  const tab = tabs.find((t) => t.to === pathname && t.to !== "/admin")
   // A tab this person may not open leads to the first one they may.
   const here = TABS.find((t) => t.to === pathname.replace(/\/$/, ""))
   if (first && here && !can(here.cap)) return <Navigate to={first} replace />
@@ -32,7 +31,7 @@ export function Admin() {
     <Route path={to} element={can(cap) ? el : <Navigate to={first ?? "/chat"} replace />} />
   return (
     <Page
-      crumbs={[{ label: "Admin", to: "/admin" }, ...(tab ? [{ label: tab.label }] : [])]}
+      crumbs={[{ label: "Admin", to: "/admin" }]}
       tabs={tabs}
       actions={can("people.manage") && !pathname.startsWith("/admin/settings") ? <Button size="sm" onClick={() => setDialog("invite")}><Plus />Invite</Button> : null}
     >

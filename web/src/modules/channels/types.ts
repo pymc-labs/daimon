@@ -1,4 +1,9 @@
 // `/api/channels/*` shapes. USD amounts are numbers, except a budget's `limit_usd` ("10.00").
+import type { ChannelKind } from "@/lib/format"
+import type { EntityRef } from "@/lib/types"
+
+/** The agents a response mentions, by the key it used; a key whose agent is gone has null id and name. */
+export type AgentRefs = Record<string, EntityRef>
 
 /** Where a cascaded value comes from; both null when nothing sets it. */
 export type Sourced = { value: string | null; source: "channel" | "workspace" | "deployment" | null }
@@ -21,13 +26,20 @@ export type ChannelBudget = {
   exceeded: boolean
 }
 
+/** An ancestor in a channel's `path`. */
+export type PathNode = { id: string; name: string | null; kind: ChannelKind }
+
 /** One channel; the web chat row has `id` "web", `platform` "web" and `name` "Web chat". */
 export type Channel = {
   id: string
   platform: string
   name: string | null
-  kind: string | null
+  kind: ChannelKind
+  /** Only "active" rows are listed; gone and direct ones are kept out. */
+  status: "active" | "gone" | "direct"
   parent: { id: string; name: string | null } | null
+  /** Ancestors, root first: category and channel, or team. */
+  path: PathNode[]
   last_seen_at: string | null
   agent: Sourced
   environment: Sourced
@@ -42,7 +54,9 @@ export type Channel = {
 }
 
 /** GET /api/channels: admins see every channel; members only those their chat platform shows them. */
-export type ChannelList = { platform: string; default_agent: Sourced; default_environment: Sourced; channels: Channel[] }
+export type ChannelList = {
+  platform: string; default_agent: Sourced; default_environment: Sourced; channels: Channel[]; agents: AgentRefs
+}
 
 export type Choice<T extends string> = { value: T; label: string }
 
@@ -54,6 +68,7 @@ export type ChannelDetail = Channel & {
   writers_options: Choice<Writers>[]
   can_manage: boolean
   budget_editable: boolean
+  agents: AgentRefs
 }
 
 /** Every write answers with the channel as it is now; `notes` are facts to show once. A value read is stale: 409. */
@@ -88,7 +103,8 @@ export type BudgetChange = {
   expected: Pick<ChannelBudget, "limit_usd" | "window" | "starts_at" | "ends_at"> | null
 }
 
-/** GET /:id/history (admins), newest first. `tool_rule` rows have `{agent, tool, rule}` values and no surface. */
+/** GET /:id/history (admins): entries newest first, and the agents their values name. `tool_rule` values are `{agent, tool, rule}`. */
+export type ChannelHistory = { entries: ChannelHistoryEntry[]; agents: AgentRefs }
 export type ChannelHistoryEntry = {
   at: string
   setting: ChannelSetting
@@ -112,7 +128,7 @@ export type ChannelSwitch = {
   source: "deployment" | "workspace" | "channel" | "thread"
 }
 export type ThreadOverrideKind = "participation" | "progress_plans" | "thread_rule" | "handoff"
-export type ToolRule = { agent: string; tool: string; rule: "allow" | "ask" | "deny" | null; scope: "chat" | "chat_and_routines"; revision: number }
+export type ToolRule = { agent: string; tool: string; tool_label: string; server_name: string; rule: "allow" | "ask" | "deny" | null; scope: "chat" | "chat_and_routines"; revision: number }
 /** `key` is a day (YYYY-MM-DD), an agent id or a person id; null when unknown. */
 export type SpendAmount = { key: string | null; name: string | null; usd: number }
 
@@ -123,15 +139,16 @@ export type ChannelSettings = {
   skills: { skill_id: string; name: string }[]
   /** `editable` is false while tool safety is off, or for members. */
   tool_rules: { editable: boolean; rules: ToolRule[] }
-  provider_pin: { backend: string; model: string | null; local: number } | null
+  provider_pin: { backend: string; model: string | null; model_label: string | null; local: number } | null
   channel_copy: { name: string; agent_id: string } | null
   /** Threads with their own setting; `value` is the mode, "readers/writers", or the agent handed to. */
-  threads: { thread_id: string; kind: ThreadOverrideKind; value: string }[]
+  threads: { thread_id: string; name: string | null; kind: ThreadOverrideKind; value: string }[]
   link: string | null
   /** Teams private and shared channels only. */
   teams_subscription: { status: "active" | "expired" | "missing"; expires_at: string | null } | null
-  routines: { id: string; agent: string; cron: string; enabled: boolean; relation: "posts_here" | "made_here" | "both" }[]
+  routines: { id: string; title: string; agent: string; cron: string; enabled: boolean; relation: "posts_here" | "made_here" | "both" }[]
   spend: { days: number; by_day: SpendAmount[]; by_agent: SpendAmount[]; by_person: SpendAmount[] } | null
+  agents: AgentRefs
 }
 
 /** PUT /:id/participation, /:id/progress-plans, /api/channel-defaults/{participation,progress-plans}. null mode inherits. */

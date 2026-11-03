@@ -643,7 +643,7 @@ export const agentsHandlers = [
 
 /** The roster and who is asking, for the setup handlers in `agent-setup.ts`. */
 export const roster = {
-  all: () => DB, find, viewer, details, save, library: () => SKILLS,
+  all: () => DB, find, viewer, details, save, library: () => SKILLS, files: FILES, latestVersion,
   remove: (id: string) => { DB = DB.filter((r) => r.id !== id); save() },
   copy: (r: Rec, name: string, by: string) => {
     const last = r.versions.at(-1)!

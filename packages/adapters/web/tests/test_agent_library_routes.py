@@ -9,7 +9,9 @@ import httpx
 import pytest
 from anthropic.types.beta import BetaManagedAgentsCustomSkill
 from daimon.core.defaults.report import Action, ResourceOutcome
+from daimon.core.scope import ChannelScopeRef, TenantScopeRef
 from daimon.core.stores import web_audit
+from daimon.core.stores.scoped_config_write import set_fields
 from daimon.testing.ma_models import ma_environment
 from mux.testing.drivers.anthropic.ma import json_body
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -90,10 +92,14 @@ async def test_an_admin_sees_the_library_with_what_uses_each_skill(
         versions = await client.get("/api/agents/skills/skill_spare/versions")
         foreign = await client.get("/api/agents/skills/skill_theirs/versions")
     assert res.status_code == 200, res.text
-    assert [(s["name"], s["used_by"]) for s in res.json()] == [
-        ("notes", [{"kind": "agent", "name": "helper"}]),
-        ("spare", []),
-    ], "another workspace's skill is left out"
+    assert [(s["name"], s["title"], s["used_by"]) for s in res.json()] == [
+        (
+            "notes",
+            "Notes",
+            [{"kind": "agent", "id": "ag_w", "name": "helper", "version": None}],
+        ),
+        ("spare", "Spare", []),
+    ], "another workspace's skill is left out; a latest pin has no version"
     assert [v["version"] for v in versions.json()] == ["7"]
     assert foreign.status_code == 404
 
@@ -146,6 +152,43 @@ async def test_a_skill_in_use_is_not_deleted_and_a_spare_one_is(
     assert [(r.action, r.target) for r in rows] == [("Deleted skill", "spare")]
 
 
+async def test_the_skill_routes_refuse_a_non_admin_and_a_stale_save(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    agents, owner, other = await agent_people(db_session)
+    _library(agents, str(owner.tenant_id))
+    token = await sign_in_token(db_session_factory, owner)
+    body = {"files": {"SKILL.md": "x"}, "expected_version": "7"}
+    async with agent_client(agents, owner.tenant_id, db_session_factory, token) as client:
+        plain = [
+            (await client.get("/api/agents/skills/skill_notes")).status_code,
+            (await client.get("/api/agents/skills/skill_notes/files")).status_code,
+            (
+                await client.put("/api/agents/skills/skill_notes/files", json=body, headers=OWN)
+            ).status_code,
+            (
+                await client.post(
+                    "/api/agents/skills/skill_notes/restore", json={"version": "7"}, headers=OWN
+                )
+            ).status_code,
+            (
+                await client.post(
+                    "/api/agents/skills", json={"name": "Plots", "description": "x"}, headers=OWN
+                )
+            ).status_code,
+        ]
+    assert plain == [403] * 5, "the skill page and its writes need an admin"
+    await make_admin(db_session_factory, other)
+    token = await sign_in_token(db_session_factory, other)
+    async with agent_client(agents, owner.tenant_id, db_session_factory, token) as client:
+        stale = await client.put(
+            "/api/agents/skills/skill_notes/files",
+            json={"files": {"SKILL.md": "x"}, "expected_version": "6"},
+            headers=OWN,
+        )
+    assert stale.status_code == 409, "a save against an older version is a conflict"
+
+
 def _environments(agents: Agents, tenant: Any, *envs: Any) -> list[dict[str, Any]]:
     agents.router.add(
         "GET",
@@ -183,6 +226,14 @@ async def test_an_admin_lists_and_changes_an_environment(
         metadata={"daimon_managed": "true"},
     )
     patched = _environments(agents, owner.tenant_id, mine, seeded)
+    async with db_session_factory() as session, session.begin():
+        for scope in (
+            TenantScopeRef(tenant_id=owner.tenant_id),
+            ChannelScopeRef(tenant_id=owner.tenant_id, channel_id="c1"),
+        ):
+            await set_fields(
+                session, scope=scope, tenant_id=owner.tenant_id, environment_name="Data"
+            )
     token = await sign_in_token(db_session_factory, other)
     spec = {"name": "Data", "packages": {"pip": ["numpy"]}, "network": "limited"}
     async with agent_client(agents, owner.tenant_id, db_session_factory, token) as client:
@@ -197,6 +248,8 @@ async def test_an_admin_lists_and_changes_an_environment(
         ("Builtin", True),
         ("Data", False),
     ]
+    uses = {e["name"]: {(u["kind"], u["id"]) for u in e["used_by"]} for e in listed.json()}
+    assert uses == {"Builtin": set(), "Data": {("workspace", "workspace"), ("channel", "c1")}}
     assert saved.status_code == 200, saved.text
     assert patched[0]["config"]["packages"]["pip"] == ["numpy"]
     assert patched[0]["config"]["packages"]["npm"] == [], "a removed package goes"

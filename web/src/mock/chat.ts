@@ -378,6 +378,7 @@ export const chatHandlers: HttpHandler[] = [
   // Turns run in the page here, so a reload ends them: nothing to re-attach to.
   http.get("/api/chat/sessions/:id/stream", () => notFound()),
   http.post("/api/chat/uploads", async ({ request }) => {
+    if (!me()?.capabilities.includes("files.attach")) return HttpResponse.json({ detail: "Files are off for your account." }, { status: 403 })
     const f = (await request.formData()).get("file") as File
     await wait(250)
     return HttpResponse.json({ id: `up_${uid()}`, name: f.name, size: f.size })

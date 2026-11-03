@@ -56,6 +56,7 @@ def test_capabilities_by_role() -> None:
     member = capabilities_for("member", ["chat", "agents", "channels", "credits"])
     assert member == {
         "chat.use",
+        "files.attach",
         "agents.view",
         "agents.edit",
         "agents.create",
@@ -63,6 +64,10 @@ def test_capabilities_by_role() -> None:
         "credits.view_own",
     }, "a member reads channels but never changes them"
     assert capabilities_for("visitor", ["chat"]) == {"chat.use"}
+    assert capabilities_for("visitor", ["chat"], files=True) == {"chat.use", "files.attach"}, (
+        "a visitor's invite can add files, and only files"
+    )
+    assert "files.attach" not in capabilities_for("visitor", [], files=True), "no chat, no files"
     assert capabilities_for("admin", ALL) >= member | {
         "people.manage",
         "credits.manage",
@@ -71,7 +76,7 @@ def test_capabilities_by_role() -> None:
         "integrations.manage",
     }
     assert not {"integrations.view", "integrations.manage"} & capabilities_for("member", ALL)
-    assert len(capabilities_for("owner", ALL)) == 13
+    assert len(capabilities_for("owner", ALL)) == 14
 
 
 def test_a_module_that_is_off_takes_its_capabilities_with_it() -> None:

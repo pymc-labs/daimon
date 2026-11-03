@@ -1,33 +1,35 @@
 // Routines: scheduled prompts. Admins see everyone's, members their own.
 import { http, HttpResponse, type HttpHandler } from "msw"
 
-import type { CatchUp, Choices, NewRoutine, Routine, RoutineChange } from "@/modules/routines/types"
+import type { CatchUp, Choices, Destination, NewRoutine, Routine, RoutineChange } from "@/modules/routines/types"
 import { fromCron } from "@/modules/routines/cron"
 import { forbidden, notFound, unauthorized, wait } from "./util"
 import { AGENTS, me } from "./world"
 
 const hours = (h: number) => new Date(Date.now() + h * 3_600_000).toISOString()
 
-const DESTINATIONS = [
+const DESTINATIONS: Destination[] = [
   { id: "d_mmm", name: "mmm-larkspur" }, { id: "d_pricing", name: "pricing" }, { id: "d_eng", name: "eng-review" },
+  { id: "d_promo", name: "Promo test", kind: "thread" as const },
 ]
 
-type Stored = Routine & { owner_id: string }
+type Stored = Omit<Routine, "title"> & { owner_id: string }
+const titleOf = (name: string | null, message: string) => name || (message.split("\n")[0] ?? "").slice(0, 60)
 const routines: Stored[] = [
-  { id: "r1", owner_id: "p_maya", owner: "Maya Lindqvist", mine: false, agent: { id: "ag_mmm", name: "MMM Analyst" }, cron: "0 9 * * 1", timezone: "Europe/Stockholm",
+  { id: "r1", name: "Weekly channel readout", owner_id: "p_maya", owner: "Maya Lindqvist", mine: false, agent: { id: "ag_mmm", name: "MMM Analyst" }, cron: "0 9 * * 1", timezone: "Europe/Stockholm",
     schedule: "every Monday at 09:00", message: "Summarize last week's channel contribution for Larkspur and flag any interval wider than 20%.",
     enabled: true, catch_up: "run-once", destination: DESTINATIONS[0]!, dm: false, sandbox_tools: true, next_run: hours(60), last_run: hours(-108), failed: false, last_output: "Search and social held steady; TV's interval widened to 24%." },
-  { id: "r2", owner_id: "p_priya", owner: "Priya Raman", mine: false, agent: { id: "ag_pricing", name: "Pricing Analyst" }, cron: "30 8 * * 1-5", timezone: "America/New_York",
+  { id: "r2", name: "Overnight price test", owner_id: "p_priya", owner: "Priya Raman", mine: false, agent: { id: "ag_pricing", name: "Pricing Analyst" }, cron: "30 8 * * 1-5", timezone: "America/New_York",
     schedule: "every weekday at 08:30", message: "Post the overnight price test readout.",
-    enabled: true, catch_up: "skip", destination: DESTINATIONS[1]!, dm: false, sandbox_tools: false, next_run: hours(14), last_run: hours(-10), failed: true, last_output: null },
-  { id: "r3", owner_id: "p_priya", owner: "Priya Raman", mine: false, agent: { id: "ag_review", name: "Code Reviewer" }, cron: "0 17 * * 5", timezone: "Europe/London",
+    enabled: true, catch_up: "skip", destination: DESTINATIONS[3]!, dm: false, sandbox_tools: false, next_run: hours(14), last_run: hours(-10), failed: true, last_output: null },
+  { id: "r3", name: null, owner_id: "p_priya", owner: "Priya Raman", mine: false, agent: { id: "ag_review", name: "Code Reviewer" }, cron: "0 17 * * 5", timezone: "Europe/London",
     schedule: "every Friday at 17:00", message: "List pull requests open for more than a week.",
     enabled: false, catch_up: "skip", destination: null, dm: true, sandbox_tools: false, next_run: null, last_run: hours(-200), failed: false, last_output: null },
 ]
 
 const view = (r: Stored): Routine => {
   const { owner_id, ...rest } = r
-  return { ...rest, mine: owner_id === me()?.id }
+  return { ...rest, title: titleOf(r.name, r.message), mine: owner_id === me()?.id }
 }
 const visible = () => {
   const m = me()
@@ -68,7 +70,7 @@ export const routinesHandlers: HttpHandler[] = [
     const a = AGENTS.find((x) => x.id === b.agent_id)
     if (!a) return invalid("Pick an agent from the list.")
     const r: Stored = {
-      id: `r${Date.now()}`, owner_id: m.id, owner: m.name, mine: true, agent: { id: a.id, name: a.name }, cron: b.cron, timezone: b.timezone,
+      id: `r${Date.now()}`, name: b.name?.trim() || null, owner_id: m.id, owner: m.name, mine: true, agent: { id: a.id, name: a.name }, cron: b.cron, timezone: b.timezone,
       schedule: words(b.cron, b.timezone), message: b.message, enabled: true, catch_up: b.catch_up as CatchUp, destination: b.dm ? null : dest(b.destination), dm: !!b.dm, sandbox_tools: false,
       next_run: next(b.cron), last_run: null, failed: false, last_output: null,
     }
@@ -90,6 +92,7 @@ export const routinesHandlers: HttpHandler[] = [
     if (b.cron) r.cron = b.cron
     if (b.timezone) r.timezone = b.timezone
     if (b.cron || b.timezone) { r.schedule = words(r.cron, r.timezone); if (r.enabled) r.next_run = next(r.cron) }
+    if (b.name !== undefined) r.name = b.name.trim() || null
     if (b.message) r.message = b.message
     if (b.catch_up) r.catch_up = b.catch_up
     if (b.clear_destination) { r.destination = null; r.dm = false }

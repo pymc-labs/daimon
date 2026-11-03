@@ -250,6 +250,8 @@ class RoutineRow(BaseModel):
     created_by_user_id: str | None
     agent_id: str
     agent_name: str
+    #: A title people gave it; null until then.
+    name: str | None = None
     cron_expr: str
     timezone: str
     trigger_message: str
@@ -653,6 +655,8 @@ class ChannelNameRow(BaseModel):
     parent_name: str | None = None
     last_seen_at: datetime | None = None
     archived: bool | None = None
+    status: Literal["named", "gone", "direct"] = "named"
+    """Whether the platform still has it; a gone or direct row may hold an empty name."""
 
 
 AllowanceSubjectKind = Literal["person", "group", "invite"]
@@ -1605,6 +1609,7 @@ class WebInviteRow(BaseModel):
     email: str
     role: WebInviteRole
     credit_usd: Decimal
+    allow_files: bool
     person_id: uuid.UUID | None
     created_by_account_id: uuid.UUID | None
     created_at: datetime

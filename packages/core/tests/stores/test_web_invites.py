@@ -9,7 +9,7 @@ from decimal import Decimal
 from daimon.core.stores import web_agent_grants as grants
 from daimon.core.stores import web_invites as invites
 from daimon.core.stores import web_people as people
-from daimon.core.stores.domain import WebInviteRow
+from daimon.core.stores.domain import WebInviteRole, WebInviteRow
 from daimon.testing.factories import make_tenant, make_web_person
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -165,3 +165,61 @@ async def test_revoke_open_links_only_touches_unused_links_of_that_kind_and_pers
         db_session, tenant_id=tenant.id, kind="owner", now=_NOW
     )
     assert everyone == 1, "without a person it revokes every open link of the kind"
+
+
+async def test_files_are_off_by_default_and_never_stored_for_a_member_invite(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+
+    async def make(token: bytes, *, files: bool, role: WebInviteRole) -> WebInviteRow:
+        return await invites.create_invite(
+            db_session,
+            tenant_id=tenant.id,
+            token_sha256=token,
+            kind="invite",
+            role=role,
+            allow_files=files,
+            expires_at=_NOW + timedelta(days=1),
+        )
+
+    plain = await make(b"p", files=False, role="visitor")
+    allowed = await make(b"a", files=True, role="visitor")
+    member = await make(b"m", files=True, role="member")
+
+    assert (plain.allow_files, allowed.allow_files, member.allow_files) == (False, True, False)
+
+
+async def test_files_are_set_on_a_live_visitor_invite_of_this_workspace_only(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    other = await make_tenant(db_session)
+    invite = await _invite(db_session, tenant.id, b"files")
+
+    foreign = await invites.set_allow_files(
+        db_session, tenant_id=other.id, invite_id=invite.id, allow=True
+    )
+    assert foreign is None, "another workspace cannot change it"
+    assert not await invites.invite_allows_files(
+        db_session, tenant_id=tenant.id, invite_id=invite.id
+    )
+
+    on = await invites.set_allow_files(
+        db_session, tenant_id=tenant.id, invite_id=invite.id, allow=True
+    )
+    assert on is not None and on.allow_files, "an invite nobody accepted yet can be set"
+    assert await invites.invite_allows_files(db_session, tenant_id=tenant.id, invite_id=invite.id)
+
+    await invites.claim_invite(db_session, token_sha256=b"files", now=_NOW)
+    assert await invites.invite_allows_files(
+        db_session, tenant_id=tenant.id, invite_id=invite.id
+    ), "an accepted invite keeps the setting"
+
+    await invites.revoke_invite(db_session, tenant_id=tenant.id, invite_id=invite.id, now=_NOW)
+    assert not await invites.invite_allows_files(
+        db_session, tenant_id=tenant.id, invite_id=invite.id
+    ), "a revoked invite allows nothing"
+    assert not await invites.invite_allows_files(
+        db_session, tenant_id=tenant.id, invite_id=uuid.uuid4()
+    ), "a missing invite allows nothing"

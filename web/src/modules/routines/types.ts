@@ -1,8 +1,14 @@
 export type Choice = { id: string; name: string }
+/** Where a routine posts; a thread gets no "#". */
+export type Destination = Choice & { kind?: "channel" | "thread" }
 export type CatchUp = "skip" | "run-once"
 
 export type Routine = {
   id: string
+  /** The name it was given, if any. */
+  name: string | null
+  /** `name`, else the first line of the prompt. */
+  title: string
   agent: Choice
   cron: string
   timezone: string
@@ -11,7 +17,7 @@ export type Routine = {
   message: string
   enabled: boolean
   catch_up: CatchUp
-  destination: Choice | null
+  destination: Destination | null
   /** Delivered to the owner by direct message. */
   dm: boolean
   sandbox_tools: boolean
@@ -25,7 +31,7 @@ export type Routine = {
 }
 
 /** What the editor may pick from. */
-export type Choices = { agents: Choice[]; destinations: Choice[]; can_create: boolean; can_dm: boolean; platform: string }
+export type Choices = { agents: Choice[]; destinations: Destination[]; can_create: boolean; can_dm: boolean; platform: string }
 
-export type NewRoutine = { agent_id: string; cron: string; timezone: string; message: string; catch_up: CatchUp; destination: string | null; dm?: boolean }
+export type NewRoutine = { name?: string; agent_id: string; cron: string; timezone: string; message: string; catch_up: CatchUp; destination: string | null; dm?: boolean }
 export type RoutineChange = Partial<Omit<NewRoutine, "destination">> & { destination?: string | null; clear_destination?: boolean }

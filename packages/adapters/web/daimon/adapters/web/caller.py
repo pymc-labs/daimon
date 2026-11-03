@@ -22,6 +22,7 @@ from daimon.core.config import WebModuleKey
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import tenants as tenants_store
 from daimon.core.stores import web_identities as identities_store
+from daimon.core.stores import web_invites as invites_store
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores import web_roles as roles_store
 from daimon.core.stores import web_sessions as sessions_store
@@ -134,6 +135,18 @@ async def role_of(session: AsyncSession, person: WebPersonRow) -> Role:
     return (await roles_of(session, [person]))[person.id]
 
 
+async def may_attach(session: AsyncSession, person: WebPersonRow, role: Role) -> bool:
+    """Whether the person may attach files in chat: a member always, a visitor only while
+    their invite allows it. No invite, or a revoked one, is no files."""
+    if role != "visitor":
+        return True
+    if person.invite_id is None:
+        return False
+    return await invites_store.invite_allows_files(
+        session, tenant_id=person.tenant_id, invite_id=person.invite_id
+    )
+
+
 def _unauthorized() -> HTTPException:
     return HTTPException(status_code=401, detail="Sign in to continue.")
 
@@ -146,6 +159,8 @@ async def signin_allowed_in(db: AsyncSession, *, tenant_id: uuid.UUID) -> bool:
 
 #: What every refused capability reads as, whoever asks and whatever they asked for.
 NOT_ALLOWED = "Ask an admin or an owner."
+#: What a visitor whose invite leaves files off reads when they try to attach one.
+FILES_OFF = "Files are off for your account."
 
 
 @cache
@@ -223,7 +238,9 @@ async def _caller(
                 person=person,
                 role=role,
                 modules=modules,
-                capabilities=capabilities_for(role, modules),
+                capabilities=capabilities_for(
+                    role, modules, files=await may_attach(db, person, role)
+                ),
                 identities=tuple(identities),
                 left=left,
             )
