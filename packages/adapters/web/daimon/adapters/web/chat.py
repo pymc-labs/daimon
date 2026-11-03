@@ -7,7 +7,7 @@ from typing import Annotated, Any, Literal
 
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.web import directory
-from daimon.adapters.web.caller import WebCaller, requires
+from daimon.adapters.web.caller import FILES_OFF, WebCaller, requires
 from daimon.adapters.web.cards import CardChoice
 from daimon.adapters.web.chat_json import agent_json, message_json, session_json
 from daimon.adapters.web.credential_cards import CredentialRefused
@@ -135,8 +135,14 @@ def chat_router(runtime: WebRuntime) -> APIRouter:
             raise _not_found()
         return thread
 
+    def require_files(caller: WebCaller) -> None:
+        if "files.attach" not in caller.capabilities:
+            raise HTTPException(status_code=403, detail=FILES_OFF)
+
     async def require_own_uploads(caller: WebCaller, attachments: list[WebAttachment]) -> None:
-        """Every attachment is a landed upload of this person's own."""
+        """Every attachment is a landed upload of this person's own, and they may attach."""
+        if attachments:
+            require_files(caller)
         person = caller.person
         async with runtime.sessionmaker() as db:
             for attachment in attachments:
@@ -461,6 +467,7 @@ def chat_router(runtime: WebRuntime) -> APIRouter:
 
     @router.post("/uploads")
     async def upload(file: Annotated[UploadFile, File()], caller: Caller) -> dict[str, Any]:  # pyright: ignore[reportUnusedFunction]
+        require_files(caller)
         data = await file.read(file_uploads.MAX_UPLOAD_BYTES + 1)
         if len(data) > file_uploads.MAX_UPLOAD_BYTES:
             raise HTTPException(status_code=413, detail="This file is too large.")

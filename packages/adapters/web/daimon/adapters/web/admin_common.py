@@ -57,6 +57,9 @@ class AdminPerson(BaseModel):
     identities: list[Identity]
     credit: Credit | None
     last_seen: str | None
+    # A visitor's invite and whether it lets them attach files; null for everyone else.
+    invite_id: str | None = None
+    allow_files: bool | None = None
 
 
 def no_person() -> HTTPException:

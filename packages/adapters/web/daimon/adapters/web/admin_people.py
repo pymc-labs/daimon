@@ -79,7 +79,17 @@ def people_router(runtime: WebRuntime) -> APIRouter:
         credit = (
             None if meter is None else Credit(left_usd=meter.left_usd, total_usd=meter.total_usd)
         )
-        return person_json(person, role, identities, credit)
+        shown = person_json(person, role, identities, credit)
+        invite = (
+            await web_invites.get_invite(db, tenant_id=person.tenant_id, invite_id=person.invite_id)
+            if role == "visitor" and person.invite_id is not None
+            else None
+        )
+        if invite is not None and invite.revoked_at is None:
+            shown = shown.model_copy(
+                update={"invite_id": str(invite.id), "allow_files": invite.allow_files}
+            )
+        return shown
 
     # People
 
