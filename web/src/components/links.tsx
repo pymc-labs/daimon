@@ -26,7 +26,7 @@ const face = (name: string, avatar?: string | null) => <AgentAvatar src={avatar}
 /** `node` opens that node of the agent's canvas, e.g. `skill:<id>`. */
 export function AgentLink({ id, name, avatar, node, className }: Props & { node?: string }) {
   const label = name ?? ENTITY_FALLBACK.agent
-  return <EntityLink to={id && name ? `/agents/${q(id)}${node ? `?node=${q(node)}` : ""}` : null} cap="agents.view" label={label} avatar={name ? face(name, avatar) : undefined} className={className} />
+  return <EntityLink to={id && name ? `/agents/${q(id)}${node ? `?node=${q(node)}` : ""}` : null} cap="agents.view" label={label} avatar={id && name ? face(name, avatar) : undefined} className={className} />
 }
 
 /** `kind` decides the "#": threads, forum posts, categories and teams get none. */

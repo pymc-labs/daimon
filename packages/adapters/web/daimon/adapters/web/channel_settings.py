@@ -341,7 +341,7 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
 
     async def changed(caller: WebCaller, channel_id: str) -> ChangeResultJson:
         row = await one_row(runtime, caller, channel_id)
-        detail = await detail_of(runtime, caller.person.tenant_id, row, manage=True, figures=True)
+        detail = await detail_of(runtime, caller, row, manage=True, figures=True)
         return ChangeResultJson(channel=detail, notes=[])
 
     @router.get("/api/channels/{channel_id}/settings")
@@ -409,7 +409,7 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
             routines = await member_routines(caller, routines)
         refs = await agent_refs(
             runtime,
-            tenant_id,
+            caller,
             [
                 *(r.agent_name for r in rules),
                 *(r.agent_name for r, _ in routines),

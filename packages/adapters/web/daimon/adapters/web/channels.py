@@ -344,10 +344,10 @@ def _budget_value(expected: BudgetExpected | None) -> BudgetValue | None:
 
 
 async def detail_of(
-    runtime: WebRuntime, tenant_id: uuid.UUID, row: ChannelRow, *, manage: bool, figures: bool
+    runtime: WebRuntime, caller: WebCaller, row: ChannelRow, *, manage: bool, figures: bool
 ) -> ChannelDetailJson:
     """`detail_json` with the agents its keys name."""
-    refs = await agent_refs(runtime, tenant_id, row_agent_keys(row))
+    refs = await agent_refs(runtime, caller, row_agent_keys(row))
     return detail_json(row, manage=manage, figures=figures, agents=refs)
 
 
@@ -453,7 +453,7 @@ def channels_router(runtime: WebRuntime) -> APIRouter:
         row = await one_row(runtime, caller, channel_id)
         return await detail_of(
             runtime,
-            caller.person.tenant_id,
+            caller,
             row,
             manage="channels.manage" in caller.capabilities,
             figures=is_admin(caller.role),
@@ -484,7 +484,7 @@ def channels_router(runtime: WebRuntime) -> APIRouter:
             rows = tuple(r for r in rows if r.channel_id in visible)
         refs = await agent_refs(
             runtime,
-            caller.person.tenant_id,
+            caller,
             [found.default_agent.value, *(k for r in rows for k in row_agent_keys(r))],
         )
         return ChannelListJson(
@@ -682,7 +682,7 @@ def channels_router(runtime: WebRuntime) -> APIRouter:
         ]
         entries.sort(key=lambda e: e.at, reverse=True)
         keys = [k for e in entries for v in (e.before, e.after) for k in _history_keys(v)]
-        return HistoryJson(entries=entries, agents=await agent_refs(runtime, tenant_id, keys))
+        return HistoryJson(entries=entries, agents=await agent_refs(runtime, caller, keys))
 
     return router
 
