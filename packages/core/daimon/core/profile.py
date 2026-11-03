@@ -25,6 +25,7 @@ from daimon.core.mcp_vault import hold_agent_vault_lock
 from daimon.core.memory_view import delete_memory_records, list_memory_records
 from daimon.core.mux_backend import platform_scope, resource_scope
 from daimon.core.mux_compat import delete_credential, list_credentials, list_vaults
+from daimon.core.platform_words import words_for
 from daimon.core.stores import agent_memory_stores, identity, tenants, web_identities
 from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores import microsoft_user_tokens as microsoft_store
@@ -115,7 +116,10 @@ class Connection:
     agent_id: uuid.UUID | None = None
 
 
-_TOKEN_LABELS: dict[ConnectionKind, str] = {"microsoft": "Microsoft 365", "slack": "Slack"}
+_TOKEN_LABELS: dict[ConnectionKind, str] = {
+    "microsoft": "Microsoft 365",
+    "slack": words_for("slack").label,
+}
 
 
 async def list_connections(
