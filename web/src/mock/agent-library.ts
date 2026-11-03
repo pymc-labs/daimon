@@ -15,7 +15,7 @@ function admin() {
 }
 
 const PEOPLE = ["Maya Lindqvist", "Jonas Berg", "Priya Raman"]
-const GITHUB = { "pr-review": "https://github.com/pymc-labs/skills/tree/main/pr-review" } as Record<string, string>
+const GITHUB = { "pr-review": "https://github.com/example/skills/tree/main/pr-review" } as Record<string, string>
 const CHANNEL_USES: Record<string, SkillUse[]> = { "pr-review": [{ kind: "channel", id: "C0ENG", name: "engineering", version: null }] }
 
 type Ver = { version: string; at: string; author: string | null; files: Record<string, string> }
