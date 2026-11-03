@@ -169,6 +169,7 @@ async def create_routine(
     source_thread_id: str | None = None,
     source_channel_id: str | None = None,
     source_provenance_known: bool | None = None,
+    name: str | None = None,
 ) -> RoutineRow:
     """`channel_id` is the channel the routine's spend counts against (see `Routine`);
     `made_in_channel_id` the one it was created from."""
@@ -196,6 +197,7 @@ async def create_routine(
         created_by_user_id=created_by_user_id,
         agent_id=agent_id,
         agent_name=agent_name,
+        name=name,
         cron_expr=cron_expr,
         timezone=timezone_,
         trigger_message=trigger_message,
@@ -354,6 +356,7 @@ async def update_routine(
     catch_up_policy: CatchUpPolicy | None = None,
     agent_id: str | None = None,
     agent_name: str | None = None,
+    name: str | None = None,
     next_fire_at: datetime | None = None,
     destination_kind: RoutineDestinationKind | None = None,
     destination_id: str | None = None,
@@ -425,6 +428,9 @@ async def update_routine(
         values["agent_id"] = agent_id
     if agent_name is not None:
         values["agent_name"] = agent_name
+    if name is not None:
+        # An empty name clears it.
+        values["name"] = name.strip() or None
     if next_fire_at is not None:
         values["next_fire_at"] = next_fire_at
     if not values:

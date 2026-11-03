@@ -479,6 +479,7 @@ class Routine(Base):
     created_by_user_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     agent_id: Mapped[str] = mapped_column(Text, nullable=False)
     agent_name: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str | None] = mapped_column(Text, nullable=True)
     cron_expr: Mapped[str] = mapped_column(Text, nullable=False)
     timezone: Mapped[str] = mapped_column(Text, nullable=False, server_default="UTC")
     trigger_message: Mapped[str] = mapped_column(Text, nullable=False)

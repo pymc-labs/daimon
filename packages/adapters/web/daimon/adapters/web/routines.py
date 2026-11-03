@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
@@ -54,6 +54,8 @@ PICK_AGENT = "Pick an agent from the list."
 PICK_CHANNEL = "Pick a channel from the list."
 UNAVAILABLE = "Routines are not available right now."
 
+TITLE_MAX = 80
+
 _ACTIONS: dict[Happened, str] = {
     "created": "Created routine",
     "changed": "Changed routine",
@@ -72,10 +74,16 @@ class Choice(BaseModel):
 class Destination(BaseModel):
     id: str
     name: str
+    #: How to write it: `channel` gets a `#`, `thread` does not.
+    kind: Literal["channel", "thread"] = "channel"
 
 
 class Routine(BaseModel):
     id: str
+    #: The name it was given, or null.
+    name: str | None
+    #: `name`, or the first line of the prompt.
+    title: str
     agent: Choice
     cron: str
     timezone: str
@@ -104,6 +112,7 @@ class Choices(BaseModel):
 
 class NewBody(BaseModel):
     agent_id: str
+    name: str | None = Field(default=None, max_length=TITLE_MAX)
     cron: str = Field(min_length=1, max_length=120)
     timezone: str = Field(min_length=1, max_length=64)
     message: str = Field(min_length=1, max_length=20_000)
@@ -115,6 +124,7 @@ class NewBody(BaseModel):
 
 class EditBody(BaseModel):
     agent_id: str | None = None
+    name: str | None = Field(default=None, max_length=TITLE_MAX)
     cron: str | None = Field(default=None, min_length=1, max_length=120)
     timezone: str | None = Field(default=None, min_length=1, max_length=64)
     message: str | None = Field(default=None, min_length=1, max_length=20_000)
@@ -122,6 +132,14 @@ class EditBody(BaseModel):
     destination: str | None = None
     dm: bool = False
     clear_destination: bool = False
+
+
+def routine_title(name: str | None, message: str) -> str:
+    """A routine's name, else the first line of its prompt cut to 60 characters."""
+    if name:
+        return name
+    first = next((line.strip() for line in message.splitlines() if line.strip()), "")
+    return first if len(first) <= 60 else f"{first[:59].rstrip()}…"
 
 
 def _iso(moment: datetime | None) -> str | None:
@@ -331,12 +349,18 @@ def routines_router(runtime: WebRuntime) -> APIRouter:
                     if row.destination_kind == "channel"
                     else "Thread"
                 )
-                destination = Destination(id=row.destination_id, name=name)
+                destination = Destination(
+                    id=row.destination_id,
+                    name=name,
+                    kind="channel" if row.destination_kind == "channel" else "thread",
+                )
             mine = row.created_by_user_id is not None and row.created_by_user_id == acting.user_id
             label = owners.get(row.created_by_user_id or "")
             out.append(
                 Routine(
                     id=str(row.id),
+                    name=row.name,
+                    title=routine_title(row.name, row.trigger_message),
                     agent=Choice(id=row.agent_id, name=agents.get(row.agent_id, row.agent_name)),
                     cron=row.cron_expr,
                     timezone=row.timezone,
@@ -401,6 +425,7 @@ def routines_router(runtime: WebRuntime) -> APIRouter:
                 acting,
                 NewRoutine(
                     agent_name=name,
+                    name=body.name,
                     cron_expr=body.cron,
                     timezone=body.timezone,
                     trigger_message=body.message,
@@ -430,6 +455,7 @@ def routines_router(runtime: WebRuntime) -> APIRouter:
                 routine_id,
                 RoutineChange(
                     agent_name=name,
+                    name=body.name,
                     cron_expr=body.cron,
                     timezone=body.timezone,
                     trigger_message=body.message,

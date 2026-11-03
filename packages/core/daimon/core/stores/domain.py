@@ -250,6 +250,8 @@ class RoutineRow(BaseModel):
     created_by_user_id: str | None
     agent_id: str
     agent_name: str
+    #: A title people gave it; null until then.
+    name: str | None = None
     cron_expr: str
     timezone: str
     trigger_message: str
