@@ -230,6 +230,131 @@ def test_a_target_is_rebuilt_as_a_pre_1483_consent_named_it(
     assert _with_tools_dropped(rebuilt, instructions) is None, "no tools: nothing to rebuild"
 
 
+COPIES = [("openai", "gpt-6-luna"), ("gemini", "gemini-3.8-flash")]
+
+
+def daimon_copy(
+    provider: Provider,
+    model: str,
+    *,
+    asks: tuple[str, ...],
+    runs: tuple[str, ...],
+    losses: tuple[str, ...] = ("memory",),
+):
+    """A copy whose Daimon MCP tools run (`runs`) or are named losses (`asks`)."""
+    from mux.contracts.ids import ModelRef
+    from mux.contracts.resources import AgentSpec, MCPConnection, ToolSpec
+
+    drops = tuple(sorted({*losses, *(f"mcp_tool:daimon-mcp:{name}" for name in asks)}))
+    return AgentSpec(
+        name="copy",
+        model=ModelRef(provider=provider, id=model),
+        system="Source.\n\nUnavailable capabilities: " + ", ".join(drops) + ".",
+        tools=(ToolSpec(name="bash", kind="builtin"),),
+        mcp_servers=(
+            MCPConnection(
+                name="daimon-mcp",
+                url="https://daimon.invalid/mcp",
+                credential_ref="turn",
+                tool_policy={"allowed_tools": list(runs)},
+            ),
+        ),
+        declared_drops=drops,
+    )
+
+
+def consent_for(target, digest: str):
+    from daimon.core.stores.domain import _BackendDropConsent
+
+    return _BackendDropConsent(
+        declared_drops=target.declared_drops, source_pin="a" * 64, target_digest=digest
+    )
+
+
+def full_digest(target) -> str:
+    from mux.state.operations import request_digest
+
+    return request_digest(target.model_dump(mode="json"))
+
+
+def gate_also(monkeypatch: pytest.MonkeyPatch, *names: str, ungate: tuple[str, ...] = ()) -> None:
+    """A later release that gates `names` (and stops gating `ungate`)."""
+    from daimon.core import tool_safety
+
+    gated = (tool_safety.confirmation_gated_tools() | set(names)) - set(ungate)
+    monkeypatch.setattr(tool_safety, "confirmation_gated_tools", lambda: gated)
+
+
+@pytest.mark.parametrize(("provider", "model"), COPIES)
+def test_a_consent_from_before_the_server_listed_more_tools_still_holds(
+    provider: Provider, model: str
+) -> None:
+    """Confirmed when only add_skill was gated and get_long_job unlisted (before #1686)."""
+    from daimon.core.turn.runtime_manifest import _consented
+
+    before = daimon_copy(provider, model, asks=("add_skill",), runs=("describe_agent",))
+    today = daimon_copy(
+        provider,
+        model,
+        asks=("add_skill", "create_watch", "start_long_job"),
+        runs=("describe_agent", "get_long_job"),
+    )
+    assert _consented(today, "Source.", consent_for(before, full_digest(before))), (
+        "the tools new since that consent are Daimon's gating, not the owner's"
+    )
+    without = daimon_copy(provider, model, asks=("add_skill",), runs=())
+    assert not _consented(today, "Source.", consent_for(without, full_digest(without))), (
+        "a copy confirmed without describe_agent differs beyond gating"
+    )
+
+
+@pytest.mark.parametrize(("provider", "model"), COPIES)
+def test_a_tool_gated_after_the_switch_needs_no_new_confirmation(
+    monkeypatch: pytest.MonkeyPatch, provider: Provider, model: str
+) -> None:
+    """The recorded digest leaves Daimon's gating out, so a release can gate more."""
+    from daimon.core.turn.runtime_manifest import _consented, consent_target_digest
+
+    before = daimon_copy(provider, model, asks=("add_skill",), runs=("describe_agent", "hand_off"))
+    consent = consent_for(before, consent_target_digest(before, "Source."))
+    assert consent.declared_drops == before.declared_drops, "the card still names every loss"
+    gate_also(monkeypatch, "hand_off")
+    today = daimon_copy(provider, model, asks=("add_skill", "hand_off"), runs=("describe_agent",))
+    assert _consented(today, "Source.", consent), "a newly gated tool asks for nothing"
+
+
+@pytest.mark.parametrize(("provider", "model"), COPIES)
+@pytest.mark.parametrize("recorded", ["before_1686", "view"])
+@pytest.mark.parametrize("change", ["owner_loss", "model", "ungated"])
+def test_a_difference_beyond_gating_still_asks_again(
+    monkeypatch: pytest.MonkeyPatch, provider: Provider, model: str, recorded: str, change: str
+) -> None:
+    """Losses the owner did not confirm, another model, or a tool gating gave back."""
+    from daimon.core.turn.runtime_manifest import _consented, consent_target_digest
+
+    before = daimon_copy(provider, model, asks=("add_skill",), runs=("describe_agent",))
+    digest = (
+        full_digest(before)
+        if recorded == "before_1686"
+        else consent_target_digest(before, "Source.")
+    )
+    consent = consent_for(before, digest)
+    asks, runs, losses = ("add_skill", "create_watch"), ("describe_agent",), ("memory",)
+    if change == "owner_loss":
+        losses = ("memory", "skills")
+    elif change == "ungated":
+        gate_also(monkeypatch, ungate=("add_skill",))
+        asks, runs = ("create_watch",), ("add_skill", "describe_agent")
+    today = daimon_copy(
+        provider,
+        model + "-next" if change == "model" else model,
+        asks=asks,
+        runs=runs,
+        losses=losses,
+    )
+    assert not _consented(today, "Source.", consent), f"{change} needs a fresh confirmation"
+
+
 async def test_a_counterpart_that_wont_prepare_names_its_real_error(monkeypatch):
     """Smoke a1d991fb: Gemini copies and a Flash worker were refused at
     read_preparation_counterpart's catch-all with nothing logged."""

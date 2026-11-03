@@ -89,7 +89,6 @@ from mux.profiles import (
     tariff_gated,
 )
 from mux.state.lease import Slot
-from mux.state.operations import request_digest
 from mux.state.store import ConfigRevisionConflict
 from pydantic import JsonValue
 from sqlalchemy.exc import IntegrityError
@@ -1130,7 +1129,11 @@ class AgentBackendService:
 
         if capture is None:
             return preview
-        from daimon.core.turn.runtime_manifest import preview_source_drops, source_preservation_pin
+        from daimon.core.turn.runtime_manifest import (
+            consent_target_digest,
+            preview_source_drops,
+            source_preservation_pin,
+        )
 
         selection = agent_selection(target, model, settings)
         try:
@@ -1144,7 +1147,9 @@ class AgentBackendService:
         consent = {
             "declared_drops": proposed.declared_drops,
             "source_pin": source_preservation_pin(agent),
-            "target_digest": request_digest(proposed.model_dump(mode="json")),
+            "target_digest": consent_target_digest(
+                proposed, agent.effective_spec.system if agent.effective_spec else None
+            ),
         }
         preview = CompatibilityPreview.model_validate(
             {**preview.model_dump(), "drop_consent": consent}

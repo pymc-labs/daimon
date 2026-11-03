@@ -469,3 +469,44 @@ async def test_a_preparation_that_fails_after_minting_revokes_the_credential(tem
         await _turn(request, 0)
     (token,) = minted
     assert await _revoked(request, token)
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_tool_gated_after_the_switch_keeps_the_copy_running(template, monkeypatch):
+    """A release that gates one more Daimon tool asks no one to confirm again."""
+    from daimon.core import tool_safety
+
+    request, quote, wire, _ = template
+    drop = "mcp_tool:daimon-mcp:search_tools"
+    assert drop not in quote.declared_drops, "search_tools ran when the switch was confirmed"
+    gated = tool_safety.confirmation_gated_tools() | {"search_tools"}
+    monkeypatch.setattr(tool_safety, "confirmation_gated_tools", lambda: gated)
+    await _turn(request, 0)
+    (body,) = wire.posts
+    (mcp,) = [tool for tool in body["agent"]["tools"] if tool["type"] == "mcp"]
+    assert mcp["allowed_tools"] == ["call_tool"], "a gated tool never runs"
+    assert drop in wire.agent["instructions"], "the model is told it is gone"
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_tool_the_owner_turned_off_after_the_switch_asks_again(template, consent_request):
+    """Turning a Daimon tool off is the owner's change: re_confirm, nothing sent."""
+    from anthropic.types.beta import BetaManagedAgentsAgent
+    from daimon.core.channel_backend import AgentBackendRefused
+    from daimon.core.turn.errors import AdmissionDenied
+
+    request, _, wire, _ = template
+    router = consent_request[5]
+    native = request.admission.agent.model_dump(mode="json")
+    search, _ = native["tools"][1]["configs"]
+    assert search["name"] == "search_tools", "the toolset this test turns off"
+    search["enabled"] = False
+    router.routes.clear()
+    router.add_agent(BetaManagedAgentsAgent.model_validate(native))
+    router.add_environment(request.admission.environment)
+    router.add_environment_list(request.admission.environment)
+    with pytest.raises(AdmissionDenied) as refused:
+        await _turn(request, 0)
+    assert isinstance(refused.value.__cause__, AgentBackendRefused), "refused as a re-confirm"
+    assert refused.value.__cause__.reason == "re_confirm", "the owner's change needs a new card"
+    assert wire.posts == [], "nothing reached OpenAI"

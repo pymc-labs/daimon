@@ -868,7 +868,7 @@ def consent_recorded_before_self_cards(monkeypatch):
     """While on, gated-tool handling is as before Daimon posted the switch card itself.
 
     The catalogue also lists the switch tool and one other gated tool, so the
-    consent has something to drop.
+    consent has something to drop. The consent digests its whole target, as then.
     """
     from daimon.core import tool_safety
     from daimon.core.mcp_oauth import discovery
@@ -884,7 +884,23 @@ def consent_recorded_before_self_cards(monkeypatch):
     monkeypatch.setattr(
         tool_safety, "self_carded_tools", lambda: frozenset() if state["old"] else real()
     )
+    whole_target_digest(monkeypatch, state)
     return state
+
+
+def whole_target_digest(monkeypatch, state: dict[str, bool]) -> None:
+    """While `state["old"]`, a consent records its whole target's digest."""
+    from daimon.core.turn import runtime_manifest
+    from mux.state.operations import request_digest
+
+    view = runtime_manifest.consent_target_digest
+    monkeypatch.setattr(
+        runtime_manifest,
+        "consent_target_digest",
+        lambda target, system: (
+            request_digest(target.model_dump(mode="json")) if state["old"] else view(target, system)
+        ),
+    )
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
@@ -934,7 +950,14 @@ def consent_recorded_before_template_tools(monkeypatch):
         raise InvalidConfig("as before #1483")
 
     monkeypatch.setattr(mux.profiles, "represented_execution_tools", unmapped)
-    return lambda: monkeypatch.setattr(mux.profiles, "represented_execution_tools", real)
+    state = {"old": True}
+    whole_target_digest(monkeypatch, state)
+
+    def today() -> None:
+        state["old"] = False
+        monkeypatch.setattr(mux.profiles, "represented_execution_tools", real)
+
+    return today
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
@@ -987,3 +1010,19 @@ async def test_an_old_consent_with_tools_and_any_other_difference_still_needs_a_
     monkeypatch.setattr(tool_safety, "self_carded_tools", lambda: frozenset({"add_skill"}))
     with pytest.raises((AgentBackendRefused, AdmissionDenied)):
         await _prepared(request)
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_tool_gated_after_the_switch_still_prepares_without_it(template, monkeypatch):
+    """A release that gates one more Daimon tool asks no one to confirm again."""
+    from daimon.core import tool_safety
+
+    request, quote, *_ = template
+    drop = "mcp_tool:daimon-mcp:search_tools"
+    assert drop not in quote.declared_drops, "search_tools ran when the switch was confirmed"
+    gated = tool_safety.confirmation_gated_tools() | {"search_tools"}
+    monkeypatch.setattr(tool_safety, "confirmation_gated_tools", lambda: gated)
+    selected, _ = await _prepared(request)
+    assert _connection(selected).tool_policy["allowed_tools"] == ["call_tool"], "it never runs"
+    assert drop in selected.target_spec.declared_drops, "still a named loss"
+    assert drop in (selected.target_spec.system or ""), "the model is told it is gone"

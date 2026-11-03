@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- An OpenAI or Gemini agent whose switch was confirmed before a release that gated more Daimon tools answers again. Every turn was refused with a request to confirm the switch again. A change to the agent, its model or the losses its owner confirmed still asks again.
+
 - Remove client-specific references and use neutral self-hosting examples.
 
 - In the web app, a Discord routine can post to its owner by direct message, and a routine shows when sandbox tools are on. Changing a routine there needs a linked chat account, because the routine then runs as you.
