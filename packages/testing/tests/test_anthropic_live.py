@@ -502,7 +502,7 @@ async def test_real_f2_scripted_flow_uploads_default_skills_and_uses_ports(
     assert calls.index(("POST", "/v1/vaults/vault_f2/credentials")) < calls.index(
         ("POST", "/v1/sessions")
     )
-    assert calls.count(("POST", "/v1/skills")) == 11
+    assert calls.count(("POST", "/v1/skills")) == 12
     assert calls.count(("POST", "/v1/sessions")) == 1
     assert ("POST", "/v1/sessions/sess_f1/archive") in calls
     assert ("POST", "/v1/vaults/vault_f2/archive") in calls
