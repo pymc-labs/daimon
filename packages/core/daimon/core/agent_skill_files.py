@@ -29,7 +29,16 @@ from mux.contracts.errors import ScopeViolation
 from mux.errors import ProviderError
 from pydantic import BaseModel, ConfigDict
 
-__all__ = ["SkillFileDoc", "SkillFilesDoc", "read_skill_files", "save_skill_files"]
+__all__ = [
+    "MAX_EDIT_BYTES",
+    "SkillFileDoc",
+    "SkillFilesDoc",
+    "concrete_version",
+    "download_files",
+    "files_doc",
+    "read_skill_files",
+    "save_skill_files",
+]
 
 log = structlog.get_logger()
 
@@ -97,7 +106,7 @@ def _version_order(version: str) -> tuple[int, str]:
     return (int(version), version) if version.isdigit() else (-1, version)
 
 
-async def _concrete_version(
+async def concrete_version(
     deps: AgentEditDeps, *, actor: AgentActor, skill_id: str, version: str
 ) -> str:
     """``version`` itself, or the newest published one when an agent pins ``latest``.
@@ -121,7 +130,7 @@ async def _concrete_version(
     return max(listed, key=_version_order)
 
 
-async def _download_files(
+async def download_files(
     deps: AgentEditDeps, *, actor: AgentActor, skill_id: str, version: str
 ) -> dict[str, bytes]:
     """The files of one version of ``skill_id``; a version of another skill is not found."""
@@ -132,6 +141,21 @@ async def _download_files(
         return retained_archive_files(data)
     except (anthropic.APIStatusError, ProviderError, ScopeViolation, SkillIngestError) as exc:
         raise _unreadable(exc, skill_id=skill_id, step="download") from exc
+
+
+def files_doc(skill_id: str, version: str, files: dict[str, bytes]) -> SkillFilesDoc:
+    """The editor's view of a version's files: SKILL.md first, text opened, the rest listed."""
+    out: list[SkillFileDoc] = []
+    for path in sorted(files, key=lambda p: (p != "SKILL.md", p)):
+        body = files[path]
+        text: str | None = None
+        if len(body) <= MAX_EDIT_BYTES:
+            try:
+                text = body.decode("utf-8")
+            except UnicodeDecodeError:
+                text = None
+        out.append(SkillFileDoc(path=path, size=len(body), content=text))
+    return SkillFilesDoc(skill_id=skill_id, version=version, files=out)
 
 
 async def read_skill_files(
@@ -145,19 +169,9 @@ async def read_skill_files(
     """The files of a custom skill the agent (or the actor's draft of it) holds."""
     agent = await agent_editing.load_editable_agent(deps, actor=actor, ma_agent_id=ma_agent_id)
     pinned = await _attached_skill(deps, actor=actor, agent=agent, skill_id=skill_id)
-    held = await _concrete_version(deps, actor=actor, skill_id=skill_id, version=version or pinned)
-    files = await _download_files(deps, actor=actor, skill_id=skill_id, version=held)
-    out: list[SkillFileDoc] = []
-    for path in sorted(files, key=lambda p: (p != "SKILL.md", p)):
-        body = files[path]
-        text: str | None = None
-        if len(body) <= MAX_EDIT_BYTES:
-            try:
-                text = body.decode("utf-8")
-            except UnicodeDecodeError:
-                text = None
-        out.append(SkillFileDoc(path=path, size=len(body), content=text))
-    return SkillFilesDoc(skill_id=skill_id, version=held, files=out)
+    held = await concrete_version(deps, actor=actor, skill_id=skill_id, version=version or pinned)
+    files = await download_files(deps, actor=actor, skill_id=skill_id, version=held)
+    return files_doc(skill_id, held, files)
 
 
 async def save_skill_files(
@@ -191,10 +205,10 @@ async def save_skill_files(
         if skill_id is None:
             raise AgentEditError("A new skill has no files to keep.", kind="invalid")
         pinned = await _attached_skill(deps, actor=actor, agent=agent, skill_id=skill_id)
-        base = await _concrete_version(
+        base = await concrete_version(
             deps, actor=actor, skill_id=skill_id, version=version or pinned
         )
-        original = await _download_files(deps, actor=actor, skill_id=skill_id, version=base)
+        original = await download_files(deps, actor=actor, skill_id=skill_id, version=base)
         if not kept <= original.keys():
             raise AgentEditError("A kept file is not in the skill.", kind="invalid")
         bodies |= {path: original[path] for path in kept}
