@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Remove client-specific install materials and use neutral self-hosting examples.
+
 - Cap each Postgres import CLI call at 180 seconds within the total retry budget;
   kill stalled CLI process groups and retry the next source instead of exhausting
   all remaining time on a single call.
