@@ -1,7 +1,7 @@
 # Web app
 
 The web app lets people chat with Daimon's agents in a browser. Members also
-manage their own routines, and admins manage members, channels, credit and
+manage their own routines, and admins manage members, channels, credit, integrations and
 settings. Read this if you run the deployment.
 
 ## Before you start

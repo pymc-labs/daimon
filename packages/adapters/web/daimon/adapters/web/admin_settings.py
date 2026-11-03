@@ -28,12 +28,15 @@ from fastapi import APIRouter, HTTPException
 from mux.contracts.ids import Provider
 from pydantic import BaseModel
 
-_SWITCHABLE: tuple[Literal["chat", "agents", "channels", "routines", "credits"], ...] = (
+_SWITCHABLE: tuple[
+    Literal["chat", "agents", "channels", "routines", "credits", "integrations"], ...
+] = (
     "chat",
     "agents",
     "channels",
     "routines",
     "credits",
+    "integrations",
 )
 _PROVIDERS: Final[tuple[tuple[Provider, str], ...]] = (
     ("anthropic", "Anthropic"),
@@ -53,7 +56,10 @@ class InvokersChange(BaseModel):
 
 
 class SettingsChange(BaseModel):
-    modules: dict[Literal["chat", "agents", "channels", "routines", "credits"], bool] | None = None
+    modules: (
+        dict[Literal["chat", "agents", "channels", "routines", "credits", "integrations"], bool]
+        | None
+    ) = None
     default_agent: str | None = None
     invokers: InvokersChange | None = None
     dm_enabled: bool | None = None
