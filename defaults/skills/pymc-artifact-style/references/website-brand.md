@@ -54,8 +54,11 @@ redistributable); it applies only to HTML.
 
 ## Document conventions (not website tokens)
 
-The report's Tufte margin layout, Fira Math, and the plain cover are document
-conventions. For HTML and notebooks, apply the website colors and type families
-in frontend code. Use spacious layouts and short labels; do not copy the site's
-navigation, marketing sections, or claims into an analysis. Preserve meaningful
-legends, units, uncertainty, and sourcing when reducing copy.
+The website supplies the palette and the type families; it does not supply the
+document layout. Documents use their own plain conventions (one column, large
+text, one accent, rules-only tables, no pills, badges, serif accents or hero
+bands), set out in `../SKILL.md` and frozen in `../page/page.css` and
+`../typst/pymc-plain.typ`. Do not copy the site's navigation, marketing
+sections, badges or claims into an analysis. Preserve meaningful legends,
+units, uncertainty, and sourcing when reducing copy. The older Tufte margin
+layout (`../typst/pymc-report.typ`) is kept only for explicit requests.

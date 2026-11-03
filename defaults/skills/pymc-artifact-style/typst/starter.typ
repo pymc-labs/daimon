@@ -1,56 +1,32 @@
-// Minimal PyMC Labs report — verified to compile with the bundled fonts/logo.
-// Copy this, replace the content, keep the structure.
-// Build:  python -c "import typst; typst.compile('starter.typ', output='out.pdf', root='..', font_paths=['../fonts'])"
-#import "pymc-report.typ": *
+// Minimal PyMC Labs document: copy this, replace the content, keep the structure.
+// Build: python -c "import typst; typst.compile('starter.typ', output='out.pdf', root='..', font_paths=['../fonts'])"
+#import "pymc-plain.typ": *
 
-#show: pymc-report.with(
-  title:    [Report title],
-  subtitle: [One-line description of the work],
-  client:   [Client name],
-  author:   [PyMC Labs],
-  date:     [August 2026],
-  status:   "Confidential",
-  paper:    "a4",
-  cover-background: none,
-  abstract: [
-    Two or three sentences a stakeholder can read on its own: what was asked,
-    what was found, what to do about it.
-  ],
-  outline-depth: 2,
+#show: pymc-plain.with(
+  title: [A title that states the finding],
+  lede: [Two sentences a busy reader can stop after: what was found and what to do about it.],
+  date: [November 2026],
+  footer-note: none,          // e.g. [Example data, not a real business.]
 )
 
-= Background
+= A heading that states the point of this section
 
-Body text sits in the ⅔ column. Sourcing goes in the margin as a numbered
-sidenote#sidenote[Author, _Title_, 2026.], not a footnote at the page foot.
+Body text in one full-width column. Short paragraphs, sparse bullets, each number
+with its unit, comparison and interval.
 
-#marginnote[Un-numbered margin commentary — caveats and assumptions belong
-here, beside the prose they qualify.]
-
-= Results
-
-#keyfigure[1.21x][Best estimated ROAS]
-
-#flowfigure(
+#figure(
   dtable(
     columns: 3,
-    table.header([Channel], [Coefficient], [94% HDI]),
-    [TV],     [0.188], [[0.010, 0.335]],
-    [Search], [0.243], [[0.067, 0.425]],
-    [Social], [0.204], [[0.024, 0.363]],
+    align: (left, right, right),
+    table.header([Channel], [Coefficient], [94% interval]),
+    [TV],     [0.19], [0.01 to 0.34],
+    [Search], [0.24], [0.07 to 0.43],
+    [Social], [0.20], [0.02 to 0.36],
   ),
-  caption: [Posterior summaries. Horizontal rules only — no verticals.],
-  label: <tbl-channels>,
+  caption: [Posterior summaries from the fitted model.],
 )
 
-As @tbl-channels shows, all three intervals exclude zero.
+= What we recommend
 
-#callout[
-  A single emphasis box. Use sparingly — color earns its place.
-]
-
-= Recommendation
-
-#quotebox(by: [PyMC Labs])[
-  State the decision, not the analysis.
-]
+State the decision and what it depends on. Caveats go in a plain sentence here,
+where they apply, not in a box.

@@ -72,51 +72,33 @@ def _():
       /* marimo's own theme variables */
       --heading-font:'Inter',system-ui,sans-serif;--text-font:'Inter',system-ui,sans-serif;
       --monospace-font:'JetBrains Mono',ui-monospace,monospace;
-      --primary:#0C9E82;--color-blue-500:#0C9E82;--color-blue-600:#0C9E82;--blue-9:#0C9E82;
+      --primary:#5462C4;--color-blue-500:#5462C4;--color-blue-600:#5462C4;--blue-9:#5462C4;
       --color-slate-200:#0c1f4018;}
     html,body,#root{background:#fff!important;}
     body,.markdown,.prose,marimo-ui-element,label,button,input,select,table{
       font-family:'Inter',system-ui,-apple-system,sans-serif;color:var(--pm-navy);}
     body{line-height:1.55;font-weight:400;-webkit-font-smoothing:antialiased;}
-    .markdown h1,.prose h1{font-weight:600;letter-spacing:-.02em;line-height:1.1;color:var(--pm-navy);}
-    .markdown h2,.prose h2{font-weight:500;letter-spacing:-.015em;color:var(--pm-navy);
-      margin-top:2.4rem;padding-top:1.1rem;border-top:1px solid var(--pm-line);}
-    .markdown h3,.prose h3{font-weight:500;letter-spacing:-.01em;color:var(--pm-navy);}
-    .markdown a,.prose a{color:var(--pm-indigo);text-decoration:none;border-bottom:1px solid #5462c455;}
-    .markdown a:hover,.prose a:hover{color:#3a4fc4;}
-    .markdown code,.prose code{background:var(--pm-soft);color:var(--pm-navy);padding:.1em .35em;
-      border-radius:4px;font-size:.88em;font-family:'JetBrains Mono',ui-monospace,monospace;}
+    body{font-size:18px;}
+    .markdown,.prose{font-size:18px;line-height:1.6;}
+    .markdown h1,.prose h1{font-weight:600;letter-spacing:-.02em;line-height:1.15;color:var(--pm-navy);}
+    .markdown h2,.prose h2{font-weight:600;letter-spacing:-.015em;color:var(--pm-navy);margin-top:2.6rem;}
+    .markdown h3,.prose h3{font-weight:600;color:var(--pm-navy);}
+    .markdown a,.prose a{color:var(--pm-indigo);}
+    .markdown code,.prose code{background:var(--pm-soft);color:var(--pm-navy);padding:.1em .3em;
+      font-size:.85em;font-family:'JetBrains Mono',ui-monospace,monospace;}
     .markdown pre,.prose pre{background:var(--pm-soft)!important;color:var(--pm-navy)!important;
-      border:1px solid var(--pm-line);border-radius:8px;}
-    .markdown blockquote,.prose blockquote{border-left:3px solid var(--pm-aqua);background:transparent;
-      color:var(--pm-navy);padding-left:1rem;font-style:normal;}
-    .pm-head{display:flex;flex-direction:column;gap:.9rem;padding:1.2rem 0 1.6rem;
-      border-bottom:3px solid var(--pm-aqua);margin-bottom:1.6rem;}
-    .pm-head img{height:34px;width:auto;align-self:flex-start;}
-    .pm-head h1{margin:0;font-size:2.35rem;font-weight:600;letter-spacing:-.02em;line-height:1.05;}
-    .pm-head h1 em{font-family:Georgia,serif;font-style:italic;font-weight:500;}
-    .pm-head p{margin:0;font-size:1.05rem;color:#0c1f40cc;max-width:42rem;}
-    .pm-meta{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;}
-    .pm-badge{display:inline-block;font-size:.72rem;font-weight:500;letter-spacing:.02em;
-      padding:.18rem .6rem;border-radius:999px;}
-    .pm-badge.teal{color:var(--pm-teal);background:#b4e7dd59;}
-    .pm-badge.orange{color:var(--pm-orange);background:#f6ae7259;}
-    .pm-badge.indigo{color:var(--pm-indigo);background:#9faae240;}
-    .pm-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.8rem;margin:.4rem 0 1rem;}
-    .pm-kpi{border:1px solid var(--pm-line);border-top:3px solid var(--pm-aqua);border-radius:10px;
-      padding:.8rem 1rem;background:#fff;}
-    .pm-kpi b{display:block;font-size:1.6rem;font-weight:600;letter-spacing:-.02em;line-height:1.15;}
-    .pm-kpi span{font-size:.78rem;color:#0c1f40b3;}
-    .pm-callout{border-left:3px solid var(--pm-aqua);background:#b4e7dd2e;border-radius:0 8px 8px 0;
-      padding:.75rem 1rem;margin:.6rem 0;font-size:.95rem;}
-    .pm-callout.warn{border-left-color:var(--pm-peach);background:#f6ae7226;}
-    .pm-callout p{margin:.2rem 0;}
-    .pm-callout strong:first-child{color:var(--pm-teal);}
-    .pm-callout.warn strong:first-child{color:var(--pm-orange);}
+      border:1px solid var(--pm-line);}
+    .pm-head{padding:.4rem 0 1.2rem;margin-bottom:1rem;}
+    .pm-head img{height:20px;width:auto;display:block;margin-bottom:2rem;}
+    .pm-head h1{margin:0 0 .6rem;font-size:2.4rem;font-weight:600;letter-spacing:-.02em;line-height:1.15;}
+    .pm-head p{margin:0 0 .4rem;font-size:1.25rem;line-height:1.5;max-width:44rem;}
+    .pm-meta{font-size:1rem;color:#0c1f40b8;}
+    .pm-keytable{margin:.4rem 0 1.2rem;}
+    .pm-note{margin:.6rem 0;font-size:1.05rem;}
     .pm-fig{margin:.6rem 0 1.2rem;}
     .pm-fig img{width:100%;height:auto;display:block;}
-    .pm-fig figcaption{font-size:.8rem;color:#0c1f40b3;margin-top:.35rem;max-width:44rem;}
-    table.pm-table{display:table!important;border-collapse:collapse;width:auto!important;max-width:100%;font-size:.88rem;margin:.6rem 0;
+    .pm-fig figcaption{font-size:.95rem;color:#0c1f40b8;margin-top:.35rem;max-width:44rem;}
+    table.pm-table{display:table!important;border-collapse:collapse;width:auto!important;max-width:100%;font-size:1rem;margin:.6rem 0;
       border-top:2px solid var(--pm-navy);border-bottom:2px solid var(--pm-navy);}
     table.pm-table th{font-weight:600;text-align:right;padding:.45rem .7rem;
       border:none;background:transparent;}
@@ -124,34 +106,31 @@ def _():
     table.pm-table tbody th{font-weight:500;}
     table.pm-table td{text-align:right;padding:.38rem .7rem;border:none;font-variant-numeric:tabular-nums;}
     table.pm-table th:first-child,table.pm-table td:first-child{text-align:left;}
-    table.pm-table tbody tr:nth-child(even){background:var(--pm-soft);}
-    input[type=range],input[type=checkbox],input[type=radio]{accent-color:var(--pm-teal);}
+    input[type=range],input[type=checkbox],input[type=radio]{accent-color:var(--pm-indigo);}
     """
 
+    # The helpers keep their names so existing notebooks still run, but the
+    # output is plain: no pills, no cards, no coloured callout boxes.
     def badge(text, color="teal"):
-        return f'<span class="pm-badge {color}">{text}</span>'
-
+        """Plain status text (no pill). `color` is accepted and ignored."""
+        return f'<span class="pm-status">{text}</span>'
     def header(title, subtitle="", badges=(), accent=""):
-        """Page header: logo, title, subtitle, badges. `accent` = one word of the
-        title set in the serif accent (never body text). badges=[(text, 'teal'|'orange'|'indigo')]"""
-        t = title.replace(accent, f"<em>{accent}</em>", 1) if accent else title
-        bs = "".join(badge(b, c) for b, c in badges)
+        """Page header: small wordmark, a title that states the point, one lede line.
+        badges=[(text, _)] become one plain line of status text ("Example data · Draft").
+        `accent` is accepted for old notebooks and ignored: no styled words in titles."""
+        meta = " · ".join(b for b, _c in badges)
         return mo.Html(
             f"<style>{_CSS}</style><div class='pm-head'><img src='{_LOGO}' alt='PyMC Labs'/>"
-            f"<h1>{t}</h1>" + (f"<p>{subtitle}</p>" if subtitle else "")
-            + (f"<div class='pm-meta'>{bs}</div>" if bs else "") + "</div>"
+            f"<h1>{title}</h1>" + (f"<p>{subtitle}</p>" if subtitle else "")
+            + (f"<div class='pm-meta'>{meta}</div>" if meta else "") + "</div>"
         )
-
     def kpis(items):
-        """items = [(value, label), ...] -> key-number cards."""
-        cards = "".join(f"<div class='pm-kpi'><b>{v}</b><span>{l}</span></div>" for v, l in items)
-        return mo.Html(f"<div class='pm-kpis'>{cards}</div>")
-
+        """items = [(value, label), ...] -> a rules-only two-column table, not cards."""
+        rows = "".join(f"<tr><td>{l}</td><td>{v}</td></tr>" for v, l in items)
+        return mo.Html(f"<table class='pm-table pm-keytable'><tbody>{rows}</tbody></table>")
     def callout(md_text, kind="info"):
-        """Callout. Start with **Label.** — it is coloured. kind: 'info' (aqua/teal) | 'warn' (peach/dark-orange)."""
-        cls = "pm-callout warn" if kind == "warn" else "pm-callout"
-        return mo.Html(f"<div class='{cls}'>{mo.md(md_text).text}</div>")
-
+        """A plain paragraph where the caveat applies (no box). Start with **Label.** if needed."""
+        return mo.Html(f"<div class='pm-note'>{mo.md(md_text).text}</div>")
     def figure(fig, caption="", dpi=200):
         """Matplotlib figure -> inline PNG (fonts baked in) with a caption; closes the figure."""
         buf = _io.BytesIO()
