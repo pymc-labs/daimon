@@ -384,6 +384,14 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             )
         ):
             return False
+        # Added by the routine names migration (0176), the head.
+        if (
+            expected != HEAD
+            and kind == "column"
+            and name == "name"
+            and getattr(getattr(obj, "table", None), "name", None) == "routines"
+        ):
+            return False
         if (
             kind == "unique_constraint"
             and name in {"uq_routines_tenant_source_id", "uq_routines_tenant_internal_id"}
