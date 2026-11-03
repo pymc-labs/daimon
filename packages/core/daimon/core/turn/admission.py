@@ -1949,7 +1949,6 @@ async def require_current_spend(
     async with deps.sessionmaker() as session:
         block = await spend_gate(
             session,
-            billing_config=deps.billing_config,
             request=SpendRequest(
                 tenant_id=tenant_id,
                 platform_user_id=external_user_id,

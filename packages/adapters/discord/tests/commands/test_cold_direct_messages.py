@@ -574,7 +574,7 @@ async def test_failed_selector_send_does_not_leave_an_unanswerable_pending_choic
     [
         "backend_unsupported",
         "balance_depleted",
-        "cap_exceeded",
+        "allowance_exhausted",
         "channel_budget_exceeded",
         "invoker_not_allowed",
         "writers_none",

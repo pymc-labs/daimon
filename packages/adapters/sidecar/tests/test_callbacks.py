@@ -667,8 +667,9 @@ async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
         assert gate is not None
         await gate()
         if ending.startswith("spend_"):
+            from daimon.core.allowance_limits import set_person_limit
             from daimon.core.stores.tenants import get_tenant
-            from daimon.testing.factories import make_channel_budget, make_tenant_user_cap
+            from daimon.testing.factories import make_channel_budget
 
             async with db_session_factory.begin() as db:
                 tenant = await get_tenant(db, registered.tenant_id)
@@ -681,8 +682,12 @@ async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
                         idempotency_key=f"drain:{key}",
                     )
                 elif ending == "spend_member_cap":
-                    await make_tenant_user_cap(
-                        db, tenant=tenant, user_id=registered.owner_external_id, amount=Decimal(0)
+                    await set_person_limit(
+                        db,
+                        tenant_id=registered.tenant_id,
+                        platform_user_id=registered.owner_external_id,
+                        amount=Decimal(0),
+                        now=datetime.now(UTC),
                     )
                 else:
                     await make_channel_budget(

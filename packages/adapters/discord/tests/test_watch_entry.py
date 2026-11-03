@@ -276,11 +276,16 @@ async def test_watch_entry_rechecks_access_and_capabilities(
                         idempotency_key=f"drain:{tenant.id}",
                     )
                 else:
-                    from daimon.testing.factories import make_channel_budget, make_tenant_user_cap
+                    from daimon.core.allowance_limits import set_person_limit
+                    from daimon.testing.factories import make_channel_budget
 
                     if mode == "cap_after_admit":
-                        await make_tenant_user_cap(
-                            db, tenant=tenant, user_id="555", amount=Decimal(0)
+                        await set_person_limit(
+                            db,
+                            tenant_id=tenant.id,
+                            platform_user_id="555",
+                            amount=Decimal(0),
+                            now=datetime.now(UTC),
                         )
                     else:
                         await make_channel_budget(
