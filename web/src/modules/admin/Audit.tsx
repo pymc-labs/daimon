@@ -2,6 +2,8 @@ import { useQuery } from "@tanstack/react-query"
 
 import { Ago, Avatar } from "@/components/common"
 import { Drawer } from "@/components/Drawer"
+import { PersonLink } from "@/components/links"
+import { Link } from "react-router"
 import { Facet, FilterBar } from "@/components/filters"
 import { rowProps, useParam } from "@/lib/filters"
 import { LoadMore, QueryState } from "@/components/QueryState"
@@ -9,8 +11,9 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { api } from "@/lib/api"
 import { absolute } from "@/lib/format"
 import { usePaged } from "@/lib/hooks"
-import { Facts, PanelSection } from "./shared"
-import type { AdminPerson, AuditEntry, AuditKind, AuditSource } from "./types"
+import { ScrollText } from "lucide-react"
+import { Facts, PanelHead, PanelSection } from "@/components/panel"
+import type { AdminPerson, AuditEntry, AuditKind, AuditSource, AuditTarget } from "./types"
 
 // Audit
 
@@ -54,6 +57,12 @@ function query(filters: Record<string, string>) {
   return s ? `?${s}` : ""
 }
 
+function Target({ t }: { t: AuditTarget }) {
+  if (t.kind === "person") return <PersonLink id={t.id} name={t.name} />
+  if (t.kind === "invite" && t.id) return <Link to={`/admin/invites?invite=${encodeURIComponent(t.id)}`} className="hover:underline">{t.name}</Link>
+  return t.name || null
+}
+
 function AuditTable({ data }: { data: AuditEntry[] }) {
   const [, setEntry] = useParam("entry")
   return (
@@ -70,7 +79,7 @@ function AuditTable({ data }: { data: AuditEntry[] }) {
             <TableCell className="text-muted-foreground"><Ago iso={e.at} /></TableCell>
             <TableCell><span className="flex items-center gap-2"><Avatar name={e.who} className="size-5 text-[9px]" />{e.who}</span></TableCell>
             <TableCell>{e.action}</TableCell>
-            <TableCell className="font-medium">{e.target}</TableCell>
+            <TableCell className="font-medium">{e.target.name}</TableCell>
             <TableCell className="text-muted-foreground max-md:hidden">{e.detail ?? ""}</TableCell>
           </TableRow>
         ))}
@@ -81,12 +90,15 @@ function AuditTable({ data }: { data: AuditEntry[] }) {
         const e = data.find((x) => x.id === id)
         return e && (
           <div>
-            <div className="px-5 py-5">
-              <div className="text-base font-semibold">{e.action}</div>
-              <div className="text-sm text-muted-foreground">{e.target}</div>
-            </div>
-            <PanelSection title="Details">
-              <Facts rows={[["Source", SOURCES[e.source]], ["Who", e.who], ["When", absolute(e.at, true)], ...(e.facts ?? [["Detail", e.detail]])]} />
+            <PanelHead icon={<ScrollText className="size-4 text-muted-foreground" />} title={e.action} subtitle={e.target.name} />
+            <PanelSection>
+              <Facts rows={[
+                ["Source", SOURCES[e.source]],
+                ["Who", e.actor_id ? <PersonLink key="who" id={e.actor_id} name={e.who} /> : e.who],
+                ["Target", <Target key="target" t={e.target} />],
+                ["When", absolute(e.at, true)],
+                ...(e.facts ?? [["Detail", e.detail] as [string, string | undefined]]),
+              ]} />
             </PanelSection>
           </div>
         )

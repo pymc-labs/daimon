@@ -14,10 +14,10 @@ vi.mock("@/lib/api", async (importOriginal) => ({
 }))
 
 const event: AuditEntry = {
-  id: "s1", source: "security", at: "2026-03-10T12:00:00Z", who: "Maya", action: "Channel backend: clear pin", target: "", detail: "Refused",
+  id: "s1", source: "security", at: "2026-03-10T12:00:00Z", who: "Maya", actor_id: null, action: "Channel backend: clear pin", target: { kind: "other", id: null, name: "" }, detail: "Refused",
   facts: [["Tool", "Channel backend"], ["Reason", "needs_admin"], ["Channel", "1200000000000000009"]],
 }
-const change: AuditEntry = { id: "a1", source: "web", at: "2026-03-10T11:00:00Z", who: "Jonas", action: "Suspended", target: "Mia" }
+const change: AuditEntry = { id: "a1", source: "web", at: "2026-03-10T11:00:00Z", who: "Jonas", actor_id: "p2", action: "Suspended", target: { kind: "person", id: "p1", name: "Mia" } }
 
 function serve(rows: AuditEntry[]) {
   vi.mocked(api.page).mockImplementation(async (path: string) => ({ rows: path.includes("/people") ? [] : rows, next: null }))

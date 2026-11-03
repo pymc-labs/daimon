@@ -34,8 +34,9 @@ export type AgentAccess = {
 }
 
 export type AuditSource = "web" | "security"
+export type AuditTarget = { kind: "person" | "invite" | "other"; id: string | null; name: string }
 export type AuditEntry = {
-  id: string; source: AuditSource; at: string; who: string; action: string; target: string; detail?: string
+  id: string; source: AuditSource; at: string; who: string; actor_id: string | null; action: string; target: AuditTarget; detail?: string
   /** Security events only: every readable field the event stores. */
   facts?: [string, string][]
 }

@@ -1,7 +1,7 @@
 // Admin: people, invites, agent web access, audit log and workspace settings.
 import { http, HttpResponse, type HttpHandler } from "msw"
 
-import type { AdminPerson, AgentAccess, AuditEntry, AuditKind, Feedback, Invite, SettingsPatch, WorkspaceSettings } from "@/modules/admin/types"
+import type { AdminPerson, AgentAccess, AuditEntry, AuditKind, AuditTarget, Feedback, Invite, SettingsPatch, WorkspaceSettings } from "@/modules/admin/types"
 import { forbidden, notFound, paged, wait } from "./util"
 import { agent, AGENTS, DOMAIN, me } from "./world"
 import { face } from "./face"
@@ -47,7 +47,16 @@ const access: AgentAccess[] = [
     web: false, who: "everyone", groups: [], fixed_to: "1100000000000000001", fixed_name: "northwind-support" },
 ]
 
-const audit: AuditEntry[] = [
+type Raw = Omit<AuditEntry, "target" | "actor_id"> & { target: string }
+/** The server resolves ids; here the people and invites above stand in for its tables. */
+const entry = (r: Raw): AuditEntry => {
+  const person = people.find((p) => p.name === r.target), invite = invites.find((i) => i.email === r.target)
+  const target: AuditTarget = person ? { kind: "person", id: person.id, name: person.name }
+    : invite ? { kind: "invite", id: invite.id, name: invite.email } : { kind: "other", id: null, name: r.target }
+  return { ...r, actor_id: people.find((p) => p.name === r.who)?.id ?? null, target }
+}
+
+const audit: AuditEntry[] = ([
   { id: "s1", source: "security", at: ago(1), who: "Maya Lindqvist", action: "Panel: agent backend", target: "", detail: "Allowed",
     facts: [["Where", "Panel"], ["Tool", "Panel: agent backend"], ["Operation", "Agent backend"], ["Outcome", "Allowed"], ["Reason", "completed"], ["Platform", "discord"], ["Channel", "1200000000000000009"]] },
   { id: "s2", source: "security", at: ago(7), who: "MMM Analyst", action: "Channel backend: clear pin", target: "", detail: "Refused",
@@ -61,7 +70,7 @@ const audit: AuditEntry[] = [
   { id: "a7", source: "web", at: ago(51), who: "Jonas Weber", action: "Turned off web chat", target: "Code Reviewer" },
   { id: "a8", source: "web", at: ago(74), who: "Maya Lindqvist", action: "Changed role", target: "Jonas Weber", detail: "Member to Admin" },
   { id: "a9", source: "web", at: ago(98), who: "Jonas Weber", action: "Changed setting", target: "Web chat agent", detail: "Daimon" },
-]
+] satisfies Raw[]).map(entry)
 
 const settings: WorkspaceSettings = {
   modules: { chat: true, agents: true, channels: true, routines: true, credits: true, integrations: true },
@@ -76,7 +85,7 @@ const settings: WorkspaceSettings = {
 
 const admin = () => me()?.capabilities.includes("people.manage")
 const log = (action: string, target: string, detail?: string) =>
-  audit.unshift({ id: `a${Date.now()}`, source: "web", at: new Date().toISOString(), who: me()!.name, action, target, detail })
+  audit.unshift(entry({ id: `a${Date.now()}`, source: "web", at: new Date().toISOString(), who: me()!.name, action, target, detail }))
 
 export const adminHandlers: HttpHandler[] = [
   http.get("/api/admin/*", async () => { await wait(); if (!admin()) return forbidden() }),
