@@ -208,6 +208,20 @@ def test_window_start_is_the_later_of_month_start_and_the_allowance_start() -> N
     assert window_end(total, now=NOW) is None, "a total allowance has no renewal"
 
 
+def test_a_cap_set_mid_month_still_counts_the_whole_month() -> None:
+    cap = allowance(
+        kind="group",
+        subject="everyone",
+        amount="100",
+        is_cap=True,
+        starts_at=datetime(2026, 10, 14, tzinfo=UTC),
+    )
+    since = window_start(cap, now=NOW)
+    assert since == datetime(2026, 10, 1, tzinfo=UTC), "spend before the cap row counts"
+    verdict = allowance_verdict([], used={cap.id: Decimal(90)}, now=NOW, cap=cap)
+    assert verdict.left_usd == Decimal(10), "a $100 cap with $90 spent leaves $10"
+
+
 def test_a_cap_is_never_one_of_the_allowances_to_choose_among() -> None:
     cap = allowance(kind="group", subject="everyone", amount="5", is_cap=True)
     allowed = allowance(kind="group", subject="everyone", amount="50")

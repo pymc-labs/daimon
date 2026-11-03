@@ -104,10 +104,15 @@ def governing_cap(
 
 
 def window_start(allowance: SpendAllowanceRow, *, now: datetime) -> datetime:
-    """The start of the spend an allowance counts: its own start, or this month's if later."""
+    """The start of the spend an allowance counts: its own start, or this month's if later.
+
+    A cap always counts the whole month, whenever its row was set.
+    """
     if allowance.window == "total":
         return allowance.starts_at
     month = datetime(now.year, now.month, 1, tzinfo=UTC)
+    if allowance.is_cap:
+        return month
     return max(allowance.starts_at, month)
 
 
