@@ -25,6 +25,7 @@ from daimon.adapters.web.channels import (
     detail_of,
     one_row,
 )
+from daimon.adapters.web.routines import routine_title
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core import routine_service
 from daimon.core.agent_pins import agent_pin_names
@@ -73,7 +74,6 @@ ChannelViewer = Annotated[WebCaller, Depends(requires("channels.view"))]
 ChannelAdmin = Annotated[WebCaller, Depends(requires("channels.manage"))]
 Mode = Literal["on", "off", "disabled"]
 _SPEND_DAYS = 30
-_TITLE_CHARS = 60
 _NO_WEB = "Web chat has no such setting."
 _NO_AGENT = "Pick an agent from this workspace."
 
@@ -135,16 +135,11 @@ class SubscriptionJson(BaseModel):
 class RoutineJson(BaseModel):
     id: str
     title: str
-    """The first line of its prompt, up to 60 characters."""
+    """Its name, else the first line of its prompt."""
     agent: str
     cron: str
     enabled: bool
     relation: Literal["posts_here", "made_here", "both"]
-
-
-def _routine_title(message: str) -> str:
-    first = next((line.strip() for line in message.splitlines() if line.strip()), "")
-    return first if len(first) <= _TITLE_CHARS else f"{first[: _TITLE_CHARS - 1]}…"
 
 
 class AmountJson(BaseModel):
@@ -466,7 +461,7 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
             routines=[
                 RoutineJson(
                     id=str(r.id),
-                    title=_routine_title(r.trigger_message),
+                    title=routine_title(r.name, r.trigger_message),
                     agent=r.agent_name,
                     cron=r.cron_expr,
                     enabled=r.enabled,
