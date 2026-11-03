@@ -6,6 +6,7 @@ Rules are in `daimon.core.outbound`; the per-turn tally is a locked row
 
 from __future__ import annotations
 
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, cast
@@ -26,7 +27,7 @@ from daimon.core.outbound.mentions import (
     ping_users,
     render_post,
 )
-from daimon.core.outbound.opt_out import tag_opt_outs
+from daimon.core.outbound.opt_out import opt_out_names, tag_opt_outs
 from daimon.core.outbound.reach import (
     NO_CARD,
     SHORT_CAPTION,
@@ -124,24 +125,43 @@ async def turn_scope(runtime: McpRuntime, auth: AuthIdentity) -> TurnScope:
     )
 
 
+_NAME_TTL_SECONDS = 3600.0
+_NAME_CACHE_MAX = 2048
+_slack_names: dict[tuple[str, str], tuple[float, str]] = {}
+
+
+async def _slack_user_name(runtime: McpRuntime, team_id: str, user_id: str) -> str | None:
+    """A Slack person's name, looked up once an hour per person rather than once per post."""
+    key = (team_id, user_id)
+    hit = _slack_names.get(key)
+    if hit is not None and time.monotonic() - hit[0] < _NAME_TTL_SECONDS:
+        return hit[1]
+    from daimon.adapters.mcp.tools.slack._client import slack_web_client
+    from slack_sdk.errors import SlackApiError
+
+    try:
+        client = await slack_web_client(runtime, team_id=team_id)
+        response = await client.users_info(user=user_id)  # pyright: ignore[reportUnknownMemberType]
+    except (SlackApiError, ToolError, aiohttp.ClientError, TimeoutError):
+        # No name means no attribution line, never a refused post; a failure is not cached.
+        return None
+    user = cast("dict[str, Any]", response.get("user") or {})  # pyright: ignore[reportUnknownMemberType]
+    profile = cast("dict[str, Any]", user.get("profile") or {})
+    name = profile.get("display_name") or user.get("real_name")
+    if not name:
+        return None
+    if len(_slack_names) >= _NAME_CACHE_MAX:
+        _slack_names.clear()
+    _slack_names[key] = (time.monotonic(), str(name))
+    return str(name)
+
+
 async def _requester_name(
     runtime: McpRuntime, auth: AuthIdentity, place: str, user_id: str
 ) -> str | None:
     """A display name for Slack and Teams, which have no mention that does not ping."""
     if auth.platform == "slack" and auth.external_id:
-        from daimon.adapters.mcp.tools.slack._client import slack_web_client
-        from slack_sdk.errors import SlackApiError
-
-        try:
-            client = await slack_web_client(runtime, team_id=auth.external_id)
-            response = await client.users_info(user=user_id)  # pyright: ignore[reportUnknownMemberType]
-        except (SlackApiError, ToolError, aiohttp.ClientError, TimeoutError):
-            # No name means no attribution line, never a refused post.
-            return None
-        user = cast("dict[str, Any]", response.get("user") or {})  # pyright: ignore[reportUnknownMemberType]
-        profile = cast("dict[str, Any]", user.get("profile") or {})
-        name = profile.get("display_name") or user.get("real_name")
-        return str(name) if name else None
+        return await _slack_user_name(runtime, auth.external_id, user_id)
     if auth.platform == "teams" and runtime.teams_client is not None:
         try:
             member = await runtime.teams_client.get_member(place.split(";", 1)[0], user_id)
@@ -171,21 +191,34 @@ async def prepare_posts(
     skip = await tag_opt_outs(
         runtime.session_factory, tenant_id=auth.tenant_id, platform=platform, user_ids=mentioned
     )
+    names = await opt_out_names(
+        runtime.session_factory, tenant_id=auth.tenant_id, platform=platform, user_ids=skip
+    )
+    # An opted-out requester is credited by plain name, never by tag.
+    requester_name = (
+        names.get(scope.requester_id)
+        if scope.requester_id and scope.requester_id in skip
+        else (
+            await _requester_name(runtime, auth, posts[0].place, scope.requester_id)
+            if platform != "discord" and posts and scope.requester_id
+            else None
+        )
+    )
     line = attribution_line(
         platform,
         requester_id=(
             scope.requester_id if platform == "discord" and scope.requester_id not in skip else None
         ),
-        requester_name=(
-            await _requester_name(runtime, auth, posts[0].place, scope.requester_id)
-            if platform != "discord" and posts and scope.requester_id
-            else None
-        ),
+        requester_name=requester_name,
         routine_name=scope.routine_name,
     )
     rendered = [
         render_post(
-            post.text, platform, do_not_tag=skip, attribution=line if post.attribute else None
+            post.text,
+            platform,
+            do_not_tag=skip,
+            names=names,
+            attribution=line if post.attribute else None,
         )
         for post in posts
     ]
@@ -269,6 +302,15 @@ class ThreadDraft(BaseModel):
     content: str = Field(description="The thread's first message.")
 
 
+class MessageDraft(BaseModel):
+    """One more message for a batched send_message call."""
+
+    model_config = ConfigDict(frozen=True)
+
+    channel_id: str = Field(description="Where this message goes, as send_message takes it.")
+    content: str = Field(description="The message text.")
+
+
 async def any_media_upload(runtime: McpRuntime, auth: AuthIdentity, handles: Sequence[str]) -> bool:
     """True when a staged file is an image or video, so the post needs a real caption."""
     async with runtime.session_factory() as session:
@@ -302,6 +344,27 @@ class ReachApproved(BaseModel):
     plan: ReachPlan
 
 
+async def refuse_dm_to_opted_out(
+    runtime: McpRuntime, auth: AuthIdentity, recipient_id: str
+) -> None:
+    """A private message notifies its recipient, so it is not sent on someone else's behalf
+    to a person who asked never to be tagged. Their own request to hear from Daimon stands."""
+    if recipient_id == auth.platform_user_id:
+        return
+    skip = await tag_opt_outs(
+        runtime.session_factory,
+        tenant_id=auth.tenant_id,
+        platform=_platform(auth),
+        user_ids={recipient_id},
+    )
+    if skip:
+        record_denial("outbound_opted_out_dm")
+        raise ToolError(
+            "That person asked not to be tagged or pinged, so they are not messaged on "
+            "someone else's request. Tell the requester; do not retry."
+        )
+
+
 async def render_edit(runtime: McpRuntime, auth: AuthIdentity, text: str) -> str:
     """Edits notify nobody, so they are only rendered: no attribution and no count."""
     platform = _platform(auth)
@@ -312,4 +375,7 @@ async def render_edit(runtime: McpRuntime, auth: AuthIdentity, text: str) -> str
         user_ids=set(mentioned_user_ids(text, platform)),
     )
     ping_users.set(frozenset())
-    return render_post(text, platform, do_not_tag=skip, attribution=None).text
+    names = await opt_out_names(
+        runtime.session_factory, tenant_id=auth.tenant_id, platform=platform, user_ids=skip
+    )
+    return render_post(text, platform, do_not_tag=skip, names=names, attribution=None).text

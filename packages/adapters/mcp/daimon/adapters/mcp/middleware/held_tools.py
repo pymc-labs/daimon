@@ -42,6 +42,7 @@ HELD_TOOL_ALLOWLIST: Final[Mapping[str, str]] = MappingProxyType(
         "rename_thread": "renames a thread the channel policy lets the caller post in",
         "edit_message": "edits only a message the agent itself posted",
         "approve_reach": "asks the requester on a card; posts nothing itself",
+        "set_never_tag": "sets only the caller's own never-tag choice; touches nothing else",
         "delete_message": "deletes only a message the agent itself posted",
         "archive_thread": "archives only a thread the agent opened",
         "delete_thread": "removes only the agent's own messages from a thread it opened",

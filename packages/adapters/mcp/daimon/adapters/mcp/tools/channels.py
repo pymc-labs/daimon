@@ -18,12 +18,14 @@ from daimon.adapters.mcp.tools._channel_policy import (
 )
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._outbound import (
+    MessageDraft,
     OutgoingPost,
     ReachApproved,
     ThreadDraft,
     approve_reach_impl,
     is_media,
     prepare_posts,
+    refuse_dm_to_opted_out,
 )
 from daimon.adapters.mcp.tools._outbound import any_media_upload as _any_media_upload
 from daimon.adapters.mcp.tools.direct_messages import DirectMessageResult, send_direct_message_impl
@@ -145,6 +147,49 @@ async def _read_policy(
     return read
 
 
+async def _send_one(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    channel_id: str,
+    content: str,
+    files: tuple[list[dict[str, str]] | None, list[str] | None],
+) -> MessageRow | SlackMessageRow | TeamsMessageRow:
+    """Send one already-rendered message on the caller's platform."""
+    attachments, file_handles = files
+    if auth.platform == "teams":
+        return await _teams_send_message_impl(
+            runtime,
+            auth,
+            channel_id=channel_id,
+            content=content,
+            attachments=attachments,
+            file_handles=file_handles,
+        )
+    if auth.platform == "slack":
+        return await _slack_send_message_impl(
+            runtime,
+            auth,
+            channel_id=channel_id,
+            content=content,
+            attachments=attachments,
+            file_handles=file_handles,
+            read_policy=(
+                await _read_policy(runtime, auth, None)
+                if attachments or auth.hold is not None
+                else OPEN_READ_POLICY
+            ),
+        )
+    return await _send_message_impl(
+        runtime,
+        auth,
+        channel_id=channel_id,
+        content=content,
+        attachments=attachments,
+        file_handles=file_handles,
+    )
+
+
 def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
     async def send_direct_message(  # pyright: ignore[reportUnusedFunction]
@@ -153,6 +198,8 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """Privately message one human member of the current workspace.
 
         ``plan`` counts everything this turn will post: threads, places and people.
+        A person who asked never to be tagged is not messaged on someone else's
+        request; say so rather than retrying.
 
         Pass a user ID exactly as turn_controls or a read tool gives it, not a
         channel or mention. Both sender and recipient must still belong to this
@@ -165,6 +212,7 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """
         auth = await _auth(ctx)
         content = scrub_other_platforms(content, auth.platform)
+        await refuse_dm_to_opted_out(runtime, auth, recipient_id)
         [post] = await prepare_posts(
             runtime, auth, [OutgoingPost(text=content, place=recipient_id)], plan=plan
         )
@@ -527,12 +575,21 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         plan: ReachPlan,
         attachments: list[dict[str, str]] | None = None,
         file_handles: list[str] | None = None,
-    ) -> MessageRow | SlackMessageRow | TeamsMessageRow:
+        batch: list[MessageDraft] | None = None,
+    ) -> (
+        MessageRow
+        | SlackMessageRow
+        | TeamsMessageRow
+        | list[MessageRow | SlackMessageRow | TeamsMessageRow]
+    ):
         """Post a message to a channel.
 
         ``plan`` counts everything this turn will post: threads, places and people
         tagged. Past the limit the call is refused until approve_reach returns
         approved. Tags become plain names for people who asked not to be tagged.
+        ``batch`` sends more text messages, each to its own ``channel_id``, in the same
+        call, counted together; files go with the first message only, and the result is
+        then a list.
 
         For TEXT: only call this when the user explicitly asks you to send or
         post something to a channel. Do NOT call it to share results,
@@ -567,48 +624,39 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         unasked.
         """
         auth = await _auth(ctx)
-        content = scrub_other_platforms(content, auth.platform)
+        drafts = [
+            MessageDraft(
+                channel_id=channel_id, content=scrub_other_platforms(content, auth.platform)
+            ),
+            *(
+                MessageDraft(
+                    channel_id=d.channel_id,
+                    content=scrub_other_platforms(d.content, auth.platform),
+                )
+                for d in batch or []
+            ),
+        ]
         media = any(is_media(a.get("filename", "")) for a in attachments or []) or bool(
             file_handles and await _any_media_upload(runtime, auth, file_handles)
         )
-        [post] = await prepare_posts(
+        rendered = await prepare_posts(
             runtime,
             auth,
-            [OutgoingPost(text=content, place=channel_id, media=media)],
+            [
+                OutgoingPost(text=d.content, place=d.channel_id, media=media and i == 0)
+                for i, d in enumerate(drafts)
+            ],
             plan=plan,
         )
-        content = post.text
-        if auth.platform == "teams":
-            return await _teams_send_message_impl(
-                runtime,
-                auth,
-                channel_id=channel_id,
-                content=content,
-                attachments=attachments,
-                file_handles=file_handles,
+        rows: list[MessageRow | SlackMessageRow | TeamsMessageRow] = []
+        for i, (draft, post) in enumerate(zip(drafts, rendered, strict=True)):
+            files = (attachments, file_handles) if i == 0 else (None, None)
+            rows.append(
+                await _send_one(
+                    runtime, auth, channel_id=draft.channel_id, content=post.text, files=files
+                )
             )
-        if auth.platform == "slack":
-            return await _slack_send_message_impl(
-                runtime,
-                auth,
-                channel_id=channel_id,
-                content=content,
-                attachments=attachments,
-                file_handles=file_handles,
-                read_policy=(
-                    await _read_policy(runtime, auth, None)
-                    if attachments or auth.hold is not None
-                    else OPEN_READ_POLICY
-                ),
-            )
-        return await _send_message_impl(
-            runtime,
-            auth,
-            channel_id=channel_id,
-            content=content,
-            attachments=attachments,
-            file_handles=file_handles,
-        )
+        return rows if batch else rows[0]
 
     @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
     async def approve_reach(  # pyright: ignore[reportUnusedFunction]

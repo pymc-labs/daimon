@@ -24,6 +24,7 @@ from .test_channels_dispatch import (  # pyright: ignore[reportPrivateUsage]
 _CHANNELS = "daimon.adapters.mcp.tools.channels"
 _TIDY = "daimon.adapters.mcp.tools.tidy"
 
+_PLAN = {"threads": 1, "places": 1, "people": 0}
 _SAID = "Never upload customer data to Discord or Slack, or Microsoft Teams."
 # What each platform's person may read of `_SAID`: its own name stays.
 _READ = {
@@ -73,10 +74,10 @@ async def test_send_message_scrubs_for_the_callers_platform(
         _make_app(sessionmaker),
         token=token,
         tool_name="send_message",
-        arguments={"channel_id": "C1", "content": _SAID},
+        arguments={"channel_id": "C1", "content": _SAID, "plan": _PLAN},
     )
     assert sent.await_args is not None
-    assert sent.await_args.kwargs["content"] == _READ[platform]
+    assert sent.await_args.kwargs["content"].startswith(_READ[platform])
 
 
 @pytest.mark.parametrize(
@@ -100,10 +101,15 @@ async def test_create_thread_scrubs_the_first_message_and_the_title(
         _make_app(sessionmaker),
         token=token,
         tool_name="create_thread",
-        arguments={"channel_id": "C1", "name": "Moving from Slack", "content": _SAID},
+        arguments={
+            "channel_id": "C1",
+            "name": "Moving from Slack",
+            "content": _SAID,
+            "plan": _PLAN,
+        },
     )
     assert created.await_args is not None
-    assert created.await_args.kwargs["content"] == _READ[platform]
+    assert created.await_args.kwargs["content"].startswith(_READ[platform])
     if platform == "discord":
         assert created.await_args.kwargs["name"] == "Moving from another app"
 
@@ -148,10 +154,10 @@ async def test_send_direct_message_scrubs_the_text(
         _make_app(sessionmaker),
         token=token,
         tool_name="send_direct_message",
-        arguments={"recipient_id": "U2", "content": _SAID},
+        arguments={"recipient_id": "U2", "content": _SAID, "plan": _PLAN},
     )
     assert sent.await_args is not None
-    assert sent.await_args.kwargs["content"] == _READ[platform]
+    assert sent.await_args.kwargs["content"].startswith(_READ[platform])
 
 
 def test_a_wizard_form_scrubs_what_a_person_reads_and_keeps_answer_values() -> None:
