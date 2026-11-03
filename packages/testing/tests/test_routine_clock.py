@@ -43,7 +43,8 @@ _ANCHOR = datetime(2024, 1, 1, tzinfo=UTC)
 _EXPECTED_DELIVERY_CHUNKS = [
     "Result from daimon's routine (* * * * *, ",
     "UTC):\n\nROUTINE-PING" + "x" * 1977,
-    "x" * 523,
+    # Every routine post says who asked for it, without a ping.
+    "x" * 523 + "\n-# requested by <@103>",
 ]
 
 
