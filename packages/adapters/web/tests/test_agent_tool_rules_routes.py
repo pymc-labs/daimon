@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+from daimon.adapters.web import access
 from daimon.core.config import Settings
 from daimon.core.stores import web_audit
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -79,3 +81,23 @@ async def test_members_cannot_read_or_change_rules_and_off_means_no_changes(
         off = await client.put("/api/agents/ag_w/tool-rules", json=body, headers=OWN)
         state = await client.get("/api/agents/ag_w/tool-rules")
     assert off.status_code == 422 and state.json()["active"] is False
+
+
+async def test_a_rule_write_needs_the_edit_capability(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agents, owner, _other = await agent_people(db_session, mcp_servers=_SERVERS)
+    await make_admin(db_session_factory, owner)
+    view_only = access._BY_ROLE["owner"] - {"agents.edit"}  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setitem(access._BY_ROLE, "owner", view_only)  # pyright: ignore[reportPrivateUsage]
+    body = {"tool": "notes/write", "rule": "deny", "scope": "chat", "expected_revision": 0}
+    token = await sign_in_token(db_session_factory, owner)
+    async with agent_client(
+        agents, owner.tenant_id, db_session_factory, token, settings=_settings(True)
+    ) as client:
+        read = await client.get("/api/agents/ag_w/tool-rules")
+        write = await client.put("/api/agents/ag_w/tool-rules", json=body, headers=OWN)
+    assert read.status_code == 200, "the view capability reads"
+    assert write.status_code == 403, "a write needs the edit capability"

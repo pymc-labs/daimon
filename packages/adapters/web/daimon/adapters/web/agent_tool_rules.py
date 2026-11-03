@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from daimon.adapters.web.agent_access import Viewer, actor_of, change_deps, edit_refusal
+from daimon.adapters.web.agent_access import Editor, Viewer, actor_of, change_deps, edit_refusal
 from daimon.adapters.web.agent_audit import recorded
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core import agent_tool_rule_admin
@@ -42,7 +42,7 @@ def agent_tool_rules_router(runtime: WebRuntime) -> APIRouter:
         return RulesDoc(active=safety.enabled and safety.agent_rules, rules=rows)
 
     @router.put("/{agent_id}/tool-rules")
-    async def put_rule(caller: Viewer, agent_id: str, body: RuleBody) -> AgentRule:  # pyright: ignore[reportUnusedFunction]
+    async def put_rule(caller: Editor, agent_id: str, body: RuleBody) -> AgentRule:  # pyright: ignore[reportUnusedFunction]
         try:
             return await agent_tool_rule_admin.set_agent_rule(
                 change_deps(runtime).edit,
