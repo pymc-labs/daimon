@@ -120,3 +120,48 @@ async def _creator_labels(
         known = names.get(user_id)
         labels[account_id] = (known.label if known is not None else None) or user_id
     return labels
+
+
+@dataclasses.dataclass(frozen=True)
+class MyCodingKey:
+    """One of the person's own live coding keys, across every agent of the workspace."""
+
+    jti: uuid.UUID
+    agent_id: str | None
+    created_at: dt.datetime
+    expires_at: dt.datetime | None
+    bound: bool
+
+
+async def list_my_coding_keys(
+    session: AsyncSession, *, tenant_id: uuid.UUID, account_id: uuid.UUID, now: dt.datetime
+) -> list[MyCodingKey]:
+    """The person's live coding keys on any agent, newest first."""
+    rows = await mcp_tokens.list_account_coding_keys(
+        session, tenant_id=tenant_id, account_id=account_id, now=now
+    )
+    return [
+        MyCodingKey(
+            jti=row.jti,
+            agent_id=row.agent_id,
+            created_at=row.created_at,
+            expires_at=row.expires_at,
+            bound=row.channel_id is not None,
+        )
+        for row in rows
+    ]
+
+
+async def revoke_my_coding_key(
+    session: AsyncSession,
+    *,
+    jti: uuid.UUID,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    now: dt.datetime,
+) -> bool:
+    """Revoke one of the person's own coding keys; False when it is not theirs or is gone."""
+    row = await mcp_tokens.revoke_account_coding_key(
+        session, jti=jti, tenant_id=tenant_id, account_id=account_id, now=now
+    )
+    return row is not None

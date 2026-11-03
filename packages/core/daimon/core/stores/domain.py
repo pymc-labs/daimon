@@ -1050,6 +1050,16 @@ class McpOAuthFlowRow(BaseModel):
     completed_at: datetime | None
 
 
+class McpSignInRow(BaseModel):
+    """One of a person's finished MCP sign-ins: the agent, the server and where it lives."""
+
+    model_config = ConfigDict(frozen=True)
+
+    agent_id: uuid.UUID
+    server_name: str
+    mcp_server_url: str
+
+
 class McpOAuthGrantRow(BaseModel):
     """One person's finished OAuth sign-in to an MCP server URL on one agent.
 

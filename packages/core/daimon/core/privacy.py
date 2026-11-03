@@ -122,8 +122,8 @@ class PurgePreview(BaseModel):
     retained_accounting_records: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
 
 
-def summary_line(preview: PurgePreview) -> str:
-    """The non-zero held-data categories, comma-joined, for the privacy panels."""
+def held_lines(preview: PurgePreview) -> list[str]:
+    """The non-zero held-data categories, one counted phrase each."""
     categories = (
         (preview.linked_principals, "linked account"),
         (preview.routines, "routine"),
@@ -157,6 +157,12 @@ def summary_line(preview: PurgePreview) -> str:
         for row, label in categories
         if row.count > 0
     ]
+    return parts
+
+
+def summary_line(preview: PurgePreview) -> str:
+    """The non-zero held-data categories, comma-joined, for the privacy panels."""
+    parts = held_lines(preview)
     return ", ".join(parts) if parts else "nothing listed here"
 
 

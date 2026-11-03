@@ -201,3 +201,32 @@ async def test_list_completed_grants_lists_only_stored_grants(db_session: AsyncS
         )
         == ()
     ), "grants never cross a tenant boundary"
+
+
+async def test_account_sign_ins_list_once_per_server_and_forget_clears_them(
+    db_session: AsyncSession,
+) -> None:
+    flow = await _seed(db_session)
+    await store.mark_flow_completed(db_session, state=flow.state, now=_NOW)
+    mine = {"tenant_id": flow.tenant_id, "account_id": flow.account_id}
+
+    listed = await store.list_account_sign_ins(db_session, **mine)
+    assert [(s.agent_id, s.server_name) for s in listed] == [(flow.agent_id, "notion")], (
+        "a completed flow is one sign-in"
+    )
+    assert (
+        await store.list_account_sign_ins(
+            db_session, tenant_id=flow.tenant_id, account_id=uuid.uuid4()
+        )
+        == ()
+    ), "another person's sign-ins are not listed"
+
+    other = await store.forget_account_sign_in(
+        db_session, **mine, agent_id=uuid.uuid4(), server_url=flow.mcp_server_url
+    )
+    assert other == 0, "another agent's server is untouched"
+    cleared = await store.forget_account_sign_in(
+        db_session, **mine, agent_id=flow.agent_id, server_url=flow.mcp_server_url + "/"
+    )
+    assert cleared == 1, "the trailing slash does not matter"
+    assert await store.list_account_sign_ins(db_session, **mine) == (), "nothing is signed in"

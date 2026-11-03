@@ -15,6 +15,7 @@ from daimon.adapters.web.integrations import integrations_router
 from daimon.adapters.web.invites import invites_router
 from daimon.adapters.web.me import me_router
 from daimon.adapters.web.nodes import nodes_router
+from daimon.adapters.web.profile import profile_router
 from daimon.adapters.web.routines import routines_router
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.adapters.web.security import SecurityMiddleware
@@ -94,6 +95,7 @@ def create_app(runtime: WebRuntime) -> FastAPI:
     app.include_router(auth_router(runtime))
     app.include_router(avatars_router(runtime))
     app.include_router(me_router(runtime))
+    app.include_router(profile_router(runtime))
     app.include_router(nodes_router(runtime))
     app.include_router(agents_router(runtime))
     app.include_router(channels_router(runtime))

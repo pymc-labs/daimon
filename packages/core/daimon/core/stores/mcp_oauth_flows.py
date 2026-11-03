@@ -15,10 +15,11 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterable
 from datetime import datetime
+from typing import Any, cast
 
 from daimon.core._models import McpOAuthFlow
-from daimon.core.stores.domain import McpOAuthFlowRow, McpOAuthGrantRow
-from sqlalchemy import func, select, update
+from daimon.core.stores.domain import McpOAuthFlowRow, McpOAuthGrantRow, McpSignInRow
+from sqlalchemy import CursorResult, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -159,3 +160,57 @@ async def list_completed_grants(
         McpOAuthGrantRow(agent_id=agent_id, account_id=account_id, mcp_server_url=url)
         for agent_id, account_id, url in result.all()
     )
+
+
+async def list_account_sign_ins(
+    session: AsyncSession, *, tenant_id: uuid.UUID, account_id: uuid.UUID
+) -> tuple[McpSignInRow, ...]:
+    """The person's finished sign-ins in the workspace, one per agent and server URL.
+
+    A server's name is per agent; the newest completed flow names it. URLs compare
+    without a trailing slash, as everywhere else.
+    """
+    result = await session.execute(
+        select(McpOAuthFlow.agent_id, McpOAuthFlow.server_name, McpOAuthFlow.mcp_server_url)
+        .where(
+            McpOAuthFlow.tenant_id == tenant_id,
+            McpOAuthFlow.account_id == account_id,
+            McpOAuthFlow.completed_at.is_not(None),
+        )
+        .order_by(McpOAuthFlow.completed_at.desc())
+    )
+    seen: dict[tuple[uuid.UUID, str], McpSignInRow] = {}
+    for agent_id, name, url in result.all():
+        seen.setdefault(
+            (agent_id, url.rstrip("/")),
+            McpSignInRow(agent_id=agent_id, server_name=name, mcp_server_url=url),
+        )
+    return tuple(seen.values())
+
+
+async def forget_account_sign_in(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    server_url: str,
+) -> int:
+    """Clear the completed mark of the person's flows for one agent and server.
+
+    The rows stay as the handshake's record; without the mark the person no longer counts
+    as signed in. Returns how many flows were cleared.
+    """
+    result = await session.execute(
+        update(McpOAuthFlow)
+        .where(
+            McpOAuthFlow.tenant_id == tenant_id,
+            McpOAuthFlow.account_id == account_id,
+            McpOAuthFlow.agent_id == agent_id,
+            func.rtrim(McpOAuthFlow.mcp_server_url, "/") == server_url.rstrip("/"),
+            McpOAuthFlow.completed_at.is_not(None),
+        )
+        .values(completed_at=None)
+    )
+    await session.flush()
+    return cast(CursorResult[Any], result).rowcount

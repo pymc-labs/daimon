@@ -196,6 +196,20 @@ async def list_personal_memory_stores_for_account(
     return [(tenant_id, agent_id, store_id) for tenant_id, agent_id, store_id in rows.tuples()]
 
 
+async def list_live_personal_memory_stores(
+    session: AsyncSession, *, tenant_id: uuid.UUID, account_id: uuid.UUID
+) -> list[tuple[uuid.UUID, str]]:
+    """Each `(agent_id, memory_store_id)` one person has in a workspace; archived ones left out."""
+    rows = await session.execute(
+        select(AgentPersonalMemoryStore.agent_id, AgentPersonalMemoryStore.memory_store_id).where(
+            AgentPersonalMemoryStore.tenant_id == tenant_id,
+            AgentPersonalMemoryStore.account_id == account_id,
+            AgentPersonalMemoryStore.archived_at.is_(None),
+        )
+    )
+    return [(agent_id, store_id) for agent_id, store_id in rows.tuples()]
+
+
 async def mark_personal_memory_store_archived(
     session: AsyncSession,
     *,
