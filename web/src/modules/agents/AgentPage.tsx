@@ -11,10 +11,11 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { ApiError } from "@/lib/api"
 import { NotFound } from "@/pages/Status"
-import { useAgent, useCatalog, useDraft, useDraftEditor } from "./api"
+import { useAgent, useCatalog, useConnectNode, useDraft, useDraftEditor } from "./api"
 import { Canvas } from "./Canvas"
 import { DraftBar } from "./Draft"
 import { Inspector } from "./inspector/Inspector"
+import { nodeId, nodeUi } from "./nodes/registry"
 import { LifecycleMenu } from "./setup/LifecycleMenu"
 
 export function AgentPage() {
@@ -24,6 +25,7 @@ export function AgentPage() {
   const { data: draft } = useDraft(id, agent?.can_edit === true)
   const { data: catalog } = useCatalog()
   const { config, update } = useDraftEditor(agent, draft)
+  const connect = useConnectNode(id)
   const [node, setNode] = useParam("node")
   const changes = useMemo(() => draft?.changes ?? [], [draft])
   const changed = useMemo(() => new Set(changes.map((c) => c.key)), [changes])
@@ -52,6 +54,15 @@ export function AgentPage() {
               <DropdownMenuContent align="end" className="w-44">
                 <DropdownMenuItem onSelect={() => setNode("skills")}><Sparkles />Skill</DropdownMenuItem>
                 <DropdownMenuItem onSelect={() => setNode("mcp:new")}><Plug />MCP server</DropdownMenuItem>
+                {agent.nodes.filter((x) => x.server == null).map((x) => {
+                  const Icon = nodeUi(x.kind).icon
+                  return (
+                    <DropdownMenuItem key={x.kind} disabled={connect.isPending}
+                      onSelect={() => connect.mutate(x.kind, { onSuccess: () => setNode(nodeId(x.kind)) })}>
+                      <Icon />{x.label}
+                    </DropdownMenuItem>
+                  )
+                })}
                 <DropdownMenuItem onSelect={() => setNode("places")}><Blocks />Channel</DropdownMenuItem>
                 <DropdownMenuItem onSelect={() => setNode("helpers")}><Users />Helper</DropdownMenuItem>
               </DropdownMenuContent>

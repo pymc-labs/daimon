@@ -7,7 +7,7 @@ export type Box = Pt & Size
 /** A dashed line from a skill row (`y` inside the skills card) to the connection it calls. */
 export type Dep = { key: string; target: string; y: number }
 /** Card ids by place; `skills` is the card deps start from. */
-export type Plan = { left: string[]; right: string[]; hub: string | null; conns: string[]; skills: string | null; deps: Dep[] }
+export type Plan = { left: string[]; right: string[]; conns: string[]; skills: string | null; deps: Dep[] }
 export type Line = { source: string; target: string; points: Pt[]; dep?: boolean }
 export type Laid = { pos: Record<string, Pt>; edges: Record<string, Line> }
 
@@ -17,7 +17,7 @@ const line = (source: string, target: string, points: Pt[], dep = false): [strin
 const GAP_X = 72
 const GAP_Y = 20
 const HEAD = 20 // y of a card's connector, mid header
-const HUB_GAP = 32 // below the columns to the hub
+const BELOW = 32 // below the columns to the first connection bus
 const BUS = 24 // bus line above a row of connections
 const ROW_GAP = 48
 const GUTTER = 48 // gap the trunk passes through in rows above the last
@@ -69,15 +69,13 @@ export function layoutWide(agent: string, plan: Plan, size: (id: string) => Size
   }
   column(plan.left, (w) => wL - w, "left")
   column(plan.right, () => xR, "right")
-  if (!plan.hub) return { pos, edges }
+  if (!plan.conns.length) return { pos, edges }
 
-  const hub = size(plan.hub)
-  pos[plan.hub] = { x: Math.round(cx - hub.w / 2), y: H + HUB_GAP }
-  link(agent, plan.hub, [{ x: cx, y: pos[agent].y + a.h }, { x: cx, y: H + HUB_GAP }])
-  const hubBottom = H + HUB_GAP + hub.h
+  // Connections branch from the agent's bottom edge: a trunk down, then a bus over each row.
+  const trunk = pos[agent].y + a.h
   const topW = (plan.right.length ? xR + wR : xA + a.w)
   const rows = pack(plan.conns, size, Math.max(topW, colW(plan.conns) * 2 + GAP_Y + GUTTER) - GUTTER)
-  let top = hubBottom + BUS + 12
+  let top = H + BELOW + BUS
   const right: number[] = []
   rows.forEach((row, r) => {
     const last = r === rows.length - 1
@@ -98,7 +96,7 @@ export function layoutWide(agent: string, plan: Plan, size: (id: string) => Size
     const bus = top - BUS
     for (const id of row) {
       const c = pos[id]!.x + size(id).w / 2
-      link(plan.hub!, id, [{ x: cx, y: hubBottom }, { x: cx, y: bus }, { x: c, y: bus }, { x: c, y: top }])
+      link(agent, id, [{ x: cx, y: trunk }, { x: cx, y: bus }, { x: c, y: bus }, { x: c, y: top }])
       right.push(pos[id]!.x + size(id).w)
     }
     top += Math.max(...row.map((id) => size(id).h)) + ROW_GAP
@@ -127,7 +125,7 @@ export function layoutNarrow(agent: string, plan: Plan, size: (id: string) => Si
   const link = (...a: Parameters<typeof line>) => { const [k, v] = line(...a); edges[k] = v }
   const aMid = size(agent).h / 2
   let y = size(agent).h + GAP_Y
-  for (const id of [...plan.left, ...plan.right, ...(plan.hub ? [plan.hub] : []), ...plan.conns]) {
+  for (const id of [...plan.left, ...plan.right, ...plan.conns]) {
     pos[id] = { x: SPINE, y }
     link(agent, id, [{ x: SPINE, y: aMid }, { x: 0, y: aMid }, { x: 0, y: y + HEAD }, { x: SPINE, y: y + HEAD }])
     y += size(id).h + GAP_Y
