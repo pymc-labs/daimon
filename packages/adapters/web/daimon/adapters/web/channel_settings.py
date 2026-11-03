@@ -10,7 +10,7 @@ value the admin last read; members read only.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Annotated, Literal
 
 from anthropic.types.beta import BetaManagedAgentsAgent
@@ -44,6 +44,7 @@ from daimon.core.channel_settings import (
     set_workspace_default_agent,
 )
 from daimon.core.channel_switches import SWITCH_PLATFORMS, SwitchTarget, own_mode, set_switch
+from daimon.core.credit_views import recent_start
 from daimon.core.defaults.loader import load_platform_skills
 from daimon.core.defaults.metadata import MA_METADATA_KEY_CHANNEL_COPY
 from daimon.core.errors import SkillsListTruncatedError
@@ -213,10 +214,6 @@ def _mode(mode: CascadeMode | None) -> Mode | None:
     return None if mode is None else mode.value
 
 
-def _days_since() -> datetime:
-    return datetime.now(UTC) - timedelta(days=_SPEND_DAYS)
-
-
 def channel_settings_router(runtime: WebRuntime) -> APIRouter:
     router = APIRouter()
     settings = runtime.settings
@@ -305,7 +302,11 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
             )
             routines = await channel_routines(db, tenant_id=tenant_id, channel_id=channel_id)
             spend = await channel_spend(
-                db, tenant_id=tenant_id, channel_id=channel_id, since=_days_since()
+                db,
+                tenant_id=tenant_id,
+                channel_id=channel_id,
+                since=recent_start(datetime.now(UTC)),
+                markup=settings.billing.markup,
             )
             people = await get_user_names(
                 db,

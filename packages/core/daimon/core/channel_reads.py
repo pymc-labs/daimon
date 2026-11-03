@@ -1,4 +1,8 @@
-"""What a channel's page reads beyond its row: spend breakdown, routines, link, subscription."""
+"""What a channel's page reads beyond its row: spend breakdown, routines, link, subscription.
+
+Spend is billed dollars (model cost times the workspace markup), the unit Credits and
+channel budgets use.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +15,7 @@ from typing import Literal
 from urllib.parse import quote, urlencode
 
 from daimon.core.channel_directory import WEB_ROW_ID
+from daimon.core.credit_views import billed
 from daimon.core.permissions import WEB_PLACE_ID, WEB_PLACE_PREFIX
 from daimon.core.stores.domain import RoutineRow, TeamsChannelSubscriptionRow
 from daimon.core.stores.routines import list_routines_for_channel
@@ -21,20 +26,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 @dataclass(frozen=True)
 class SpendBreakdown:
-    """Spend since a day, in dollars, three ways. Keys are ids; None is unknown."""
+    """Billed spend since a day, in dollars, three ways. Keys are ids; None is unknown."""
 
     by_day: dict[date, Decimal]
     by_agent: dict[str | None, Decimal]
     by_person: dict[str | None, Decimal]
 
 
-def fold_spend(costs: dict[tuple[date, str | None, str | None], float]) -> SpendBreakdown:
-    """Sum (day, agent, person) costs along each axis. Pure."""
+def fold_spend(
+    costs: dict[tuple[date, str | None, str | None], float], markup: Decimal
+) -> SpendBreakdown:
+    """Sum (day, agent, person) costs, billed with `markup`, along each axis. Pure."""
     day: defaultdict[date, Decimal] = defaultdict(Decimal)
     agent: defaultdict[str | None, Decimal] = defaultdict(Decimal)
     person: defaultdict[str | None, Decimal] = defaultdict(Decimal)
     for (d, a, p), cost in costs.items():
-        value = Decimal(str(cost))
+        value = billed(cost, markup)
         day[d] += value
         agent[a] += value
         person[p] += value
@@ -42,9 +49,14 @@ def fold_spend(costs: dict[tuple[date, str | None, str | None], float]) -> Spend
 
 
 async def channel_spend(
-    session: AsyncSession, *, tenant_id: uuid.UUID, channel_id: str, since: datetime
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    channel_id: str,
+    since: datetime,
+    markup: Decimal,
 ) -> SpendBreakdown:
-    """The channel's spend since `since`; web chat gathers every person's web places."""
+    """The channel's billed spend since `since`; web chat gathers every person's web places."""
     web = channel_id == WEB_ROW_ID
     costs = await channel_costs_by_day_agent_user(
         session,
@@ -53,7 +65,7 @@ async def channel_spend(
         channel_prefix=WEB_PLACE_PREFIX if web else None,
         since=since,
     )
-    return fold_spend(costs)
+    return fold_spend(costs, markup)
 
 
 RoutineRelation = Literal["posts_here", "made_here", "both"]

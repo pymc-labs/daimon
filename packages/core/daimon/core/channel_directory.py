@@ -15,7 +15,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 
@@ -23,6 +23,7 @@ from daimon.core.access_policy import ChannelReaders, ChannelWriters, TenantAcce
 from daimon.core.answering_map import AnsweringMap, load_answering_map
 from daimon.core.billing import month_start
 from daimon.core.channel_budget import ChannelBudgetStatus, budget_period, is_budget_active
+from daimon.core.credit_views import recent_start
 from daimon.core.errors import StoreError
 from daimon.core.permissions import (
     WEB_PLACE_ID,
@@ -50,7 +51,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 WEB_ROW_ID = WEB_PLACE_ID
 """The one row web chat gets."""
-USAGE_DAYS = 30
 
 ValueSource = Literal["channel", "workspace", "deployment"]
 """Where a cascaded value comes from: the channel's own, the workspace default, or the
@@ -85,7 +85,7 @@ class ChannelSpend:
     month_usd: Decimal = Decimal(0)
     """Since the start of this UTC month."""
     recent_usd: Decimal = Decimal(0)
-    """In the last `USAGE_DAYS` days."""
+    """In the 30 days Credits counts as recent, today included."""
     last_active_at: datetime | None = None
     """The latest spend."""
 
@@ -249,7 +249,7 @@ async def _read(
         session,
         tenant_id=tenant_id,
         month_start=month_start(now),
-        days_start=now - timedelta(days=USAGE_DAYS),
+        days_start=recent_start(now),
     )
     return _Reads(
         platform=platform,

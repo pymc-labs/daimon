@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 from daimon.core.channel_reads import (
     channel_routines,
@@ -39,11 +40,20 @@ async def test_spend_splits_by_day_agent_and_person(db_session: AsyncSession) ->
         tenant_id=tenant.id,
         channel_id="c1",
         since=datetime.now(UTC) - timedelta(days=1),
+        markup=Decimal(1),
     )
     total = sum(spend.by_day.values())
     assert total > 0 and len(spend.by_day) == 1
     assert sum(spend.by_agent.values()) == total == sum(spend.by_person.values())
     assert spend.by_agent["a1"] == 2 * spend.by_agent["a2"], "c2's spend is not counted"
+    marked_up = await channel_spend(
+        db_session,
+        tenant_id=tenant.id,
+        channel_id="c1",
+        since=datetime.now(UTC) - timedelta(days=1),
+        markup=Decimal(3),
+    )
+    assert sum(marked_up.by_day.values()) == 3 * total, "the breakdown is billed, not raw cost"
 
 
 async def test_routines_here_say_whether_they_post_or_were_made_here(
