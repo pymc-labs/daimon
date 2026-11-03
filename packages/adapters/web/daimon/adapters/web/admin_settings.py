@@ -26,6 +26,7 @@ from daimon.core.stores.access_policy import PolicyBusyError
 from daimon.core.workspace_settings import SettingRefused
 from fastapi import APIRouter, HTTPException
 from mux.contracts.ids import Provider
+from mux.profiles import PROVIDER_LABELS
 from pydantic import BaseModel
 
 _SWITCHABLE: tuple[
@@ -38,13 +39,8 @@ _SWITCHABLE: tuple[
     "credits",
     "integrations",
 )
-_PROVIDERS: Final[tuple[tuple[Provider, str], ...]] = (
-    ("anthropic", "Anthropic"),
-    ("openai", "OpenAI"),
-    ("gemini", "Google"),
-    ("selfhosted", "Self-hosted"),
-)
-_PROVIDER_LABEL: Final = dict(_PROVIDERS)
+_PROVIDERS: Final[tuple[tuple[Provider, str], ...]] = tuple(PROVIDER_LABELS.items())
+_PROVIDER_LABEL: Final = PROVIDER_LABELS
 _BUSY = "Settings are being changed. Try again."
 
 

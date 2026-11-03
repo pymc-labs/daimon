@@ -36,7 +36,8 @@ class SkillUse(BaseModel):
 class LibrarySkill(BaseModel):
     id: str
     name: str
-    source: Literal["custom", "anthropic"]
+    source: str
+    """`custom` for the workspace's own, else the provider's name for a built-in skill."""
     version: str
     created_at: str
     default: bool
@@ -99,7 +100,7 @@ async def list_library(deps: AgentEditDeps, *, actor: AgentActor) -> list[Librar
             LibrarySkill(
                 id=row.id,
                 name=name,
-                source="custom" if row.source == "custom" else "anthropic",
+                source=row.source,
                 version=row.latest_version or "",
                 created_at=row.created_at,
                 default=name in seeded,
