@@ -24,8 +24,15 @@ their invite's, then a group's. Of several of that kind, the one with the most
 left wins. A member with no allowance is not limited. A visitor with none is
 blocked.
 
+## Caps
+
+A cap is a monthly ceiling that holds on top of whichever allowance governs, so a
+generous group or a lifetime allowance cannot step past it. A person's own cap
+replaces the one for everyone, which also covers visitors. Someone is blocked
+when either the allowance or the cap has no room left.
+
 ## From the command line
 
-`daimon tenants cap` sets one monthly allowance for everyone, or with `--user`
-for one person. A zero amount blocks every turn. See
+`daimon tenants cap` sets the monthly cap for everyone, or with `--user` for one
+person. A zero amount blocks every turn. See
 [Billing](billing.md#signup-credit-and-top-ups).

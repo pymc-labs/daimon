@@ -1200,7 +1200,9 @@ class SpendAllowance(Base):
     (a group name; `everyone` is built in) or an `invite` (a visitor's invite id).
     `agent_id` narrows it to one agent, else it covers every agent. The amount is each
     person's own limit, counted in billed dollars inside the window: `month` is the
-    current UTC calendar month, `total` everything since `starts_at`.
+    current UTC calendar month, `total` everything since `starts_at`. A row with `is_cap`
+    is a monthly ceiling for every agent, for `everyone` or one person, that holds on top
+    of whichever allowance governs; it is never one of the allowances to choose among.
     """
 
     __tablename__ = "spend_allowances"
@@ -1234,6 +1236,7 @@ class SpendAllowance(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    is_cap: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
 
 
 class ChannelBudget(Base):

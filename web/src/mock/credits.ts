@@ -62,11 +62,12 @@ const CHANNEL: SpendRow[] = [
 
 const MEMBERS = 10
 const allowances: Allowance[] = [
-  { id: "al1", subject: { kind: "group", id: "everyone", name: "Everyone" }, agent: null, amount_usd: 40, used_usd: 0, members: MEMBERS, window: "month", expires_at: null },
-  { id: "al2", subject: { kind: "group", id: "Leadership", name: "Leadership" }, agent: null, amount_usd: 100, used_usd: 0, members: 4, window: "month", expires_at: null },
-  { id: "al3", subject: { kind: "group", id: "MMM", name: "MMM" }, agent: agent("ag_mmm"), amount_usd: 60, used_usd: 0, members: 3, window: "month", expires_at: null },
-  { id: "al4", subject: { kind: "person", id: "p_maya", name: "Maya Lindqvist" }, agent: null, amount_usd: 100, used_usd: 36.8, window: "month", expires_at: null },
-  { id: "al5", subject: { kind: "invite", id: "inv_demo", name: "Jordan Ellis" }, agent: agent("ag_pricing"), amount_usd: 5, used_usd: 1.15, window: "total", expires_at: new Date(Date.now() + 14 * 86_400_000).toISOString() },
+  { id: "al1", subject: { kind: "group", id: "everyone", name: "Everyone" }, agent: null, amount_usd: 40, used_usd: 0, members: MEMBERS, window: "month", expires_at: null, cap: false },
+  { id: "al0", subject: { kind: "group", id: "everyone", name: "Everyone" }, agent: null, amount_usd: 150, used_usd: 0, members: MEMBERS, window: "month", expires_at: null, cap: true },
+  { id: "al2", subject: { kind: "group", id: "Leadership", name: "Leadership" }, agent: null, amount_usd: 100, used_usd: 0, members: 4, window: "month", expires_at: null, cap: false },
+  { id: "al3", subject: { kind: "group", id: "MMM", name: "MMM" }, agent: agent("ag_mmm"), amount_usd: 60, used_usd: 0, members: 3, window: "month", expires_at: null, cap: false },
+  { id: "al4", subject: { kind: "person", id: "p_maya", name: "Maya Lindqvist" }, agent: null, amount_usd: 100, used_usd: 36.8, window: "month", expires_at: null, cap: false },
+  { id: "al5", subject: { kind: "invite", id: "inv_demo", name: "Jordan Ellis" }, agent: agent("ag_pricing"), amount_usd: 5, used_usd: 1.15, window: "total", expires_at: new Date(Date.now() + 14 * 86_400_000).toISOString(), cap: false },
 ]
 
 const MY_TURNS = (uid: string): Turn[] => (SESSIONS[uid] ?? SESSIONS.p_maya!).flatMap((s, i) => [0, 1].map((k) => ({

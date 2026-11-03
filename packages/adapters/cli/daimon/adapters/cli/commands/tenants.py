@@ -521,7 +521,7 @@ def tenants_cap_command(
 ) -> None:
     """Set the monthly limit per member, or one person's own with --user.
 
-    It is stored as a monthly spend allowance for every agent, so it appears under Credits.
+    It is stored as a cap in the allowance table, so it appears under Credits.
     """
     settings = load_settings()
     console = Console(highlight=False)
@@ -565,7 +565,7 @@ async def tenants_cap(
             )
     console.print(
         f"{platform}:{workspace_id} monthly limit for {user or 'default'}: ${amount:.2f} "
-        "(an allowance, also shown in the web app under Credits)"
+        "(a cap, also shown in the web app under Credits)"
     )
 
 

@@ -13,6 +13,11 @@ rules, shared by every surface through `spend_gate`:
   others, which name no agent, govern it only when none names the agent.
 - Of the governing allowances the one with the most left wins: any room is room.
 - Nothing applies means no limit, except for a visitor, who is blocked.
+- A cap (`is_cap`) is a monthly ceiling, never one of the allowances to choose among, so
+  a generous allowance cannot step past it. The governing cap is the person's own if one
+  names any of their ids (the lowest, if several), else the `everyone` cap, which covers
+  visitors too. A person is blocked when the governing allowance or the cap has no room;
+  what is left is the smaller of the two, and the reset follows the one that binds.
 """
 
 from __future__ import annotations
@@ -61,7 +66,8 @@ def applicable(
     live = [
         row
         for row in allowances
-        if row.starts_at <= now
+        if not row.is_cap
+        and row.starts_at <= now
         and (row.expires_at is None or now < row.expires_at)
         and (row.agent_id is None or row.agent_id == agent_id)
     ]
@@ -76,6 +82,25 @@ def applicable(
     covering = next((rows for rows in by_kind if rows), None) or []
     for_agent = [row for row in covering if row.agent_id is not None]
     return for_agent or covering
+
+
+def governing_cap(
+    allowances: Sequence[SpendAllowanceRow], *, person_ids: Collection[str], now: datetime
+) -> SpendAllowanceRow | None:
+    """The cap that holds a person at `now`: their own, else the `everyone` cap.
+
+    Visitors are held by the `everyone` cap like anyone else. Of several caps of the same
+    kind the lowest holds.
+    """
+    live = [
+        row
+        for row in allowances
+        if row.is_cap and row.starts_at <= now and (row.expires_at is None or now < row.expires_at)
+    ]
+    own = [r for r in live if r.subject_kind == "person" and r.subject_id in person_ids]
+    everyone = [r for r in live if r.subject_kind == "group" and r.subject_id == EVERYONE]
+    held = own or everyone
+    return min(held, key=lambda r: (r.amount_usd, r.created_at, r.id), default=None)
 
 
 def window_start(allowance: SpendAllowanceRow, *, now: datetime) -> datetime:
@@ -100,12 +125,36 @@ def allowance_verdict(
     used: Mapping[uuid.UUID, Decimal],
     now: datetime,
     is_visitor: bool = False,
+    cap: SpendAllowanceRow | None = None,
 ) -> AllowanceVerdict:
-    """Whether the person is blocked, given what each governing allowance has used.
+    """Whether the person is blocked, given what each governing allowance and the cap used.
 
     `used` maps an allowance id to the billed dollars counted inside its window; a
-    missing id has used nothing. No governing allowance blocks a visitor only.
+    missing id has used nothing. No governing allowance blocks a visitor only. The cap
+    holds on top: with no room under it the person is blocked whatever the allowance says.
     """
+    verdict = _allowance_part(governing, used=used, now=now, is_visitor=is_visitor)
+    if cap is None:
+        return verdict
+    cap_left = max(cap.amount_usd - used.get(cap.id, Decimal(0)), Decimal(0))
+    if verdict.left_usd is not None and verdict.left_usd < cap_left:
+        return verdict
+    return AllowanceVerdict(
+        blocked=verdict.blocked or cap_left <= 0,
+        left_usd=cap_left,
+        total_usd=cap.amount_usd,
+        window=cap.window,
+        resets_at=window_end(cap, now=now),
+    )
+
+
+def _allowance_part(
+    governing: Sequence[SpendAllowanceRow],
+    *,
+    used: Mapping[uuid.UUID, Decimal],
+    now: datetime,
+    is_visitor: bool,
+) -> AllowanceVerdict:
     if not governing:
         return AllowanceVerdict(
             blocked=is_visitor,

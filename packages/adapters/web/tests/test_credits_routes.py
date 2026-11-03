@@ -471,6 +471,47 @@ async def test_allowance_input_is_checked(
         assert await post(subject=stranger) == 404, "a person outside the workspace is unknown"
 
 
+async def test_a_cap_is_listed_as_a_cap_and_limited_to_everyone_or_a_person(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    rig = Rig(db_session_factory, tmp_path, web_client)
+    everyone = {"kind": "group", "id": "everyone", "name": "Everyone"}
+    async with rig.open() as (client, ws, _):
+
+        async def post(**fields: Any) -> httpx.Response:
+            body = {"subject": everyone, "amount_usd": 30, "window": "month", "cap": True, **fields}
+            return await client.post("/api/credits/allowances", json=body)
+
+        staff = {"kind": "group", "id": "staff", "name": "staff"}
+        refused = [
+            (await post(subject=staff)).status_code,
+            (await post(window="total")).status_code,
+            (await post(agent={"id": AGENT_ID})).status_code,
+            (
+                await post(expires_at=(datetime.now(UTC) + timedelta(days=3)).isoformat())
+            ).status_code,
+        ]
+        made = await post()
+        twice = await post()
+        listed = (await client.get("/api/credits/allowances")).json()
+        removed = await client.delete(f"/api/credits/allowances/{made.json()['id']}")
+        async with db_session_factory() as db:
+            rows = await spend_allowances.list_for_tenant(db, tenant_id=ws.tenant_id)
+        trail = await shown_trail(db_session_factory, ws.tenant_id)
+
+    assert refused == [422] * 4, "a cap is monthly, for everyone or one person, for every agent"
+    assert made.status_code == 200 and made.json()["cap"] is True, made.text
+    assert twice.status_code == 409, "one cap per subject"
+    assert [(a["subject"]["id"], a["cap"]) for a in listed] == [("everyone", True)]
+    assert removed.status_code == 200 and rows == [], "the cap is removed like an allowance"
+    assert trail == [
+        ("Added cap", "Everyone", "$30.00 a month"),
+        ("Removed cap", "Everyone", "$30.00 a month"),
+    ], "caps are audited as caps"
+
+
 async def test_manual_topup_writes_a_ledger_row_naming_the_actor(
     web_client: WebClientFactory,
     db_session_factory: async_sessionmaker[AsyncSession],

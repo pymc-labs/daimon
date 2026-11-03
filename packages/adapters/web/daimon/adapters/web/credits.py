@@ -32,7 +32,7 @@ from daimon.adapters.web.chat_json import AgentRef, agent_ref
 from daimon.adapters.web.faces import avatars_of
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core import credit_views
-from daimon.core.allowances import window_start
+from daimon.core.allowances import EVERYONE, window_start
 from daimon.core.billing import (
     CheckoutAmountUnavailable,
     create_checkout_session,
@@ -157,6 +157,8 @@ class Allowance(BaseModel):
     members: int | None = Field(default=None, exclude_if=_omit_none)
     window: Literal["month", "total"]
     expires_at: str | None
+    cap: bool
+    """A monthly ceiling on top of the allowance that governs, not an allowance."""
 
 
 class AgentChoice(BaseModel):
@@ -169,6 +171,8 @@ class NewAllowance(BaseModel):
     amount_usd: Decimal = Field(gt=0, le=1_000_000, decimal_places=2)
     window: Literal["month", "total"]
     expires_at: datetime | None = None
+    cap: bool = False
+    """A cap is monthly, for everyone or one person, for every agent, with no end date."""
 
 
 class Redeem(BaseModel):
@@ -522,6 +526,7 @@ def credits_router(runtime: WebRuntime) -> APIRouter:
             members=members,
             window=row.window,
             expires_at=row.expires_at.isoformat() if row.expires_at else None,
+            cap=row.is_cap,
         )
 
     async def allowances_for(
@@ -549,7 +554,15 @@ def credits_router(runtime: WebRuntime) -> APIRouter:
         if body.expires_at is not None and body.expires_at.astimezone(UTC) <= now:
             raise HTTPException(status_code=422, detail="Pick a date in the future.")
         async with runtime.sessionmaker.begin() as db:
+            if body.cap:
+                _check_cap(body)
             subject_id = await _subject_id(db, tenant_id, body.subject)
+            if body.cap and await spend_allowances.find_month_cap(
+                db, tenant_id=tenant_id, subject_kind=body.subject.kind, subject_id=subject_id
+            ):
+                raise HTTPException(
+                    status_code=409, detail="This already has a cap. Remove it to set another."
+                )
             row = await spend_allowances.create_allowance(
                 db,
                 tenant_id=tenant_id,
@@ -561,13 +574,14 @@ def credits_router(runtime: WebRuntime) -> APIRouter:
                 starts_at=now,
                 expires_at=body.expires_at.astimezone(UTC) if body.expires_at else None,
                 created_by_account_id=caller.person.account_id,
+                is_cap=body.cap,
             )
             [made] = await allowances_for(db, tenant_id, [row])
             await audit(
                 db,
                 tenant_id=tenant_id,
                 actor_account_id=caller.person.account_id,
-                action="Added allowance",
+                action="Added cap" if made.cap else "Added allowance",
                 target=await _audit_target(db, tenant_id, made.subject),
                 detail=_allowance_words(made),
                 at=now,
@@ -590,7 +604,7 @@ def credits_router(runtime: WebRuntime) -> APIRouter:
                 db,
                 tenant_id=tenant_id,
                 actor_account_id=caller.person.account_id,
-                action="Removed allowance",
+                action="Removed cap" if gone.cap else "Removed allowance",
                 target=await _audit_target(db, tenant_id, gone.subject),
                 detail=_allowance_words(gone),
                 at=runtime.now(),
@@ -723,6 +737,17 @@ async def _audit_target(db: AsyncSession, tenant_id: uuid.UUID, subject: Subject
         db, tenant_id=tenant_id, invite_id=subject_id
     )
     return invite_target(known.id) if known else AuditTarget(INVITE_LABEL)
+
+
+def _check_cap(body: NewAllowance) -> None:
+    """A cap is monthly, for everyone or one person, for every agent, with no end date."""
+    everyone = body.subject.kind == "group" and body.subject.id == EVERYONE
+    if not (everyone or body.subject.kind == "person"):
+        raise HTTPException(status_code=422, detail="A cap is for everyone or one person.")
+    if body.agent is not None or body.window != "month" or body.expires_at is not None:
+        raise HTTPException(
+            status_code=422, detail="A cap is monthly, for every agent, with no end date."
+        )
 
 
 def _allowance_words(allowance: Allowance) -> str:

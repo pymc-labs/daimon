@@ -1,10 +1,9 @@
-"""A workspace's monthly limit per member, kept as spend allowances.
+"""A workspace's monthly limit per member, kept as caps in the allowance table.
 
-The limit a CLI or a panel shows as "the cap" is the monthly allowance for every agent:
-one for the built-in `everyone` group (the default) and one per person (an override).
-Setting one adds or changes that allowance, so the web Credits page and the gate see the
-same rows. Reading a person's limit follows the gate's own rules for which allowance
-governs them.
+The limit a CLI or a panel shows as "the cap" is a cap row (`is_cap`): one for the
+built-in `everyone` group (the default) and one per person (an override). Setting one adds
+or changes that row, so the web Credits page and the gate see the same rows. Reading a
+person's limit follows the gate's own rules for which cap and allowance govern them.
 """
 
 from __future__ import annotations
@@ -13,7 +12,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from daimon.core.allowances import EVERYONE, applicable
+from daimon.core.allowances import EVERYONE, applicable, governing_cap
 from daimon.core.spend_gate import resolve_spend_person
 from daimon.core.stores import spend_allowances
 from daimon.core.stores.domain import AllowanceSubjectKind, SpendAllowanceRow
@@ -30,7 +29,7 @@ async def _set(
     now: datetime,
     account_id: uuid.UUID | None,
 ) -> SpendAllowanceRow:
-    found = await spend_allowances.find_month_limit(
+    found = await spend_allowances.find_month_cap(
         session, tenant_id=tenant_id, subject_kind=kind, subject_id=subject_id
     )
     if found is not None:
@@ -49,6 +48,7 @@ async def _set(
         window="month",
         starts_at=now,
         created_by_account_id=account_id,
+        is_cap=True,
     )
 
 
@@ -96,10 +96,10 @@ async def set_person_limit(
 async def monthly_limit(
     session: AsyncSession, *, tenant_id: uuid.UUID, platform_user_id: str, now: datetime
 ) -> Decimal | None:
-    """The monthly dollars the person's governing allowances let them spend, None for no limit.
+    """The monthly dollars the person's governing allowances and cap let them spend, None for none.
 
     Only monthly allowances for every agent count; where several govern, the largest does,
-    as in the gate.
+    as in the gate. The cap, if lower, is the limit.
     """
     rows = await spend_allowances.list_for_tenant(session, tenant_id=tenant_id)
     if not rows:
@@ -117,4 +117,8 @@ async def monthly_limit(
         is_visitor=person.is_visitor,
     )
     amounts = [r.amount_usd for r in governing if r.window == "month" and r.agent_id is None]
-    return max(amounts, default=None)
+    allowed = max(amounts, default=None)
+    cap = governing_cap(rows, person_ids=person.identities | {platform_user_id}, now=now)
+    if cap is None:
+        return allowed
+    return cap.amount_usd if allowed is None else min(allowed, cap.amount_usd)

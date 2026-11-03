@@ -14,6 +14,8 @@ export type Allowance = {
   members?: number
   window: Window
   expires_at: string | null
+  /** A monthly ceiling on top of the allowance that governs, for everyone or one person. */
+  cap: boolean
 }
 
 export type LedgerEntry = { id: string; at: string; kind: "topup" | "promo" | "adjustment"; amount_usd: number; by: string; note: string }

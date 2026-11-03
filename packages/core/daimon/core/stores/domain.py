@@ -675,6 +675,8 @@ class SpendAllowanceRow(BaseModel):
     expires_at: datetime | None
     created_by_account_id: uuid.UUID | None
     created_at: datetime
+    is_cap: bool = False
+    """A monthly ceiling that holds on top of the governing allowance (see `SpendAllowance`)."""
 
 
 class PaymentEventRow(BaseModel):

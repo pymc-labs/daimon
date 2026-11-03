@@ -42,8 +42,9 @@ async def create_allowance(
     starts_at: datetime,
     expires_at: datetime | None = None,
     created_by_account_id: uuid.UUID | None = None,
+    is_cap: bool = False,
 ) -> SpendAllowanceRow:
-    """Add an allowance and return it."""
+    """Add an allowance (a cap when `is_cap`) and return it."""
     orm = SpendAllowance(
         tenant_id=tenant_id,
         subject_kind=subject_kind,
@@ -54,6 +55,7 @@ async def create_allowance(
         starts_at=starts_at,
         expires_at=expires_at,
         created_by_account_id=created_by_account_id,
+        is_cap=is_cap,
     )
     session.add(orm)
     await session.flush()
@@ -61,20 +63,21 @@ async def create_allowance(
     return SpendAllowanceRow.model_validate(orm)
 
 
-async def find_month_limit(
+async def find_month_cap(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
     subject_kind: AllowanceSubjectKind,
     subject_id: str,
 ) -> SpendAllowanceRow | None:
-    """The subject's open-ended monthly allowance for every agent, if it has one."""
+    """The subject's monthly cap, if it has one."""
     orm = await session.scalar(
         select(SpendAllowance)
         .where(
             SpendAllowance.tenant_id == tenant_id,
             SpendAllowance.subject_kind == subject_kind,
             SpendAllowance.subject_id == subject_id,
+            SpendAllowance.is_cap.is_(True),
             SpendAllowance.agent_id.is_(None),
             SpendAllowance.window == "month",
             SpendAllowance.expires_at.is_(None),

@@ -19,7 +19,13 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Literal, get_args
 
-from daimon.core.allowances import AllowanceVerdict, allowance_verdict, applicable, window_start
+from daimon.core.allowances import (
+    AllowanceVerdict,
+    allowance_verdict,
+    applicable,
+    governing_cap,
+    window_start,
+)
 from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.stores import identity, spend_allowances, web_identities, web_people
 from daimon.core.tenant_balance import is_over_balance
@@ -39,7 +45,7 @@ class SpendPerson:
 
     Allowances name a person by any platform user id of their account (`identities`),
     a group the person is in, or the invite a visitor came in by. A visitor with no
-    allowance is blocked; a member with none is not limited.
+    allowance is blocked; a member with none is not limited. Caps hold either way.
     """
 
     groups: frozenset[str] = field(default_factory=frozenset[str])
@@ -153,6 +159,7 @@ async def person_verdict(
         now=now,
         is_visitor=person.is_visitor,
     )
+    cap = governing_cap(rows, person_ids=person.identities | {user_id}, now=now)
     used = {
         row.id: await spend_allowances.used_since(
             session,
@@ -162,9 +169,9 @@ async def person_verdict(
             since=window_start(row, now=now),
             markup=markup,
         )
-        for row in governing
+        for row in [*governing, *([cap] if cap else [])]
     }
-    return allowance_verdict(governing, used=used, now=now, is_visitor=person.is_visitor)
+    return allowance_verdict(governing, used=used, now=now, is_visitor=person.is_visitor, cap=cap)
 
 
 async def spend_gate(

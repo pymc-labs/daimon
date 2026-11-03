@@ -1,4 +1,4 @@
-"""Folding caps into allowances keeps the stricter limit and leaves other tenants alone."""
+"""Folding caps adds them as cap rows, converted by the markup, and touches no other row."""
 
 import importlib.util
 import uuid
@@ -44,10 +44,10 @@ async def _allow(
     )
 
 
-async def _rows(db: AsyncSession, tenant: uuid.UUID) -> list[tuple[str, str, Decimal, str]]:
+async def _rows(db: AsyncSession, tenant: uuid.UUID) -> list[tuple[str, str, Decimal, str, bool]]:
     result = await db.execute(
         text(
-            'SELECT subject_kind, subject_id, amount_usd, "window" FROM spend_allowances '
+            'SELECT subject_kind, subject_id, amount_usd, "window", is_cap FROM spend_allowances '
             "WHERE tenant_id = :t ORDER BY 1, 2, 4, 3"
         ),
         {"t": tenant},
@@ -55,43 +55,43 @@ async def _rows(db: AsyncSession, tenant: uuid.UUID) -> list[tuple[str, str, Dec
     return [tuple(r) for r in result.tuples()]  # type: ignore[misc]
 
 
-async def test_caps_become_monthly_allowances_and_the_stricter_limit_wins(
-    db_session: AsyncSession,
-) -> None:
-    plain = (await make_tenant(db_session)).id
-    merged = (await make_tenant(db_session)).id
-    held = (await make_tenant(db_session)).id
-    bystander = (await make_tenant(db_session)).id
-    await _cap(db_session, plain, None, "10.00")
-    await _cap(db_session, plain, "u1", "40.00")
-    await _cap(db_session, merged, None, "10.00")
-    await _allow(db_session, merged, "group", "everyone", "20")
-    await _allow(db_session, merged, "group", "everyone", "50", "total")
-    await _allow(db_session, merged, "group", "staff", "3")
-    await _cap(db_session, held, "u1", "40.00")
-    await _allow(db_session, held, "group", "everyone", "8")
-    await _allow(db_session, bystander, "group", "everyone", "99")
-
+async def _upgrade(db: AsyncSession) -> None:
     def upgrade(sync_conn: Connection) -> None:
         with Operations.context(MigrationContext.configure(sync_conn)):
             _migration().upgrade()
 
-    await (await db_session.connection()).run_sync(upgrade)
+    await (await db.connection()).run_sync(upgrade)
+
+
+async def test_caps_become_monthly_cap_rows_and_no_allowance_is_changed(
+    db_session: AsyncSession,
+) -> None:
+    plain = (await make_tenant(db_session)).id
+    beside = (await make_tenant(db_session)).id
+    bystander = (await make_tenant(db_session)).id
+    await _cap(db_session, plain, None, "10.00")
+    await _cap(db_session, plain, "u1", "40.00")
+    await _cap(db_session, beside, None, "10.00")
+    await _allow(db_session, beside, "group", "everyone", "20")
+    await _allow(db_session, beside, "group", "everyone", "50", "total")
+    await _allow(db_session, beside, "group", "staff", "3")
+    await _allow(db_session, bystander, "group", "everyone", "99")
+
+    await _upgrade(db_session)
 
     assert await _rows(db_session, plain) == [
-        ("group", "everyone", Decimal("10.00"), "month"),
-        ("person", "u1", Decimal("40.00"), "month"),
-    ], "a default and an override each become a monthly allowance"
-    assert await _rows(db_session, merged) == [
-        ("group", "everyone", Decimal("10.00"), "month"),
-        ("group", "everyone", Decimal("10.00"), "total"),
-        ("group", "staff", Decimal("3.00"), "month"),
-    ], "existing allowances of the same group drop to the cap; no second one is added"
-    assert await _rows(db_session, held) == [
-        ("group", "everyone", Decimal("8.00"), "month"),
-        ("person", "u1", Decimal("8.00"), "month"),
-    ], "a person's override is held to the group allowance it would otherwise replace"
-    assert await _rows(db_session, bystander) == [("group", "everyone", Decimal("99.00"), "month")]
+        ("group", "everyone", Decimal("10.00"), "month", True),
+        ("person", "u1", Decimal("40.00"), "month", True),
+    ], "a default and an override each become a monthly cap row"
+    assert await _rows(db_session, beside) == [
+        ("group", "everyone", Decimal("10.00"), "month", True),
+        ("group", "everyone", Decimal("20.00"), "month", False),
+        ("group", "everyone", Decimal("50.00"), "total", False),
+        ("group", "staff", Decimal("3.00"), "month", False),
+    ], "allowances beside a cap keep their amounts and windows"
+    assert await _rows(db_session, bystander) == [
+        ("group", "everyone", Decimal("99.00"), "month", False)
+    ]
 
 
 async def test_caps_are_converted_by_the_markup_so_the_effective_limit_holds(
@@ -102,13 +102,9 @@ async def test_caps_are_converted_by_the_markup_so_the_effective_limit_holds(
     await _cap(db_session, tenant, None, "10.00")
     await _cap(db_session, tenant, "u1", "40.00")
 
-    def upgrade(sync_conn: Connection) -> None:
-        with Operations.context(MigrationContext.configure(sync_conn)):
-            _migration().upgrade()
-
-    await (await db_session.connection()).run_sync(upgrade)
+    await _upgrade(db_session)
 
     assert await _rows(db_session, tenant) == [
-        ("group", "everyone", Decimal("12.50"), "month"),
-        ("person", "u1", Decimal("50.00"), "month"),
+        ("group", "everyone", Decimal("12.50"), "month", True),
+        ("person", "u1", Decimal("50.00"), "month", True),
     ]

@@ -175,7 +175,7 @@ daimon tenants cap discord <guild-id> 5.00 --user <platform-user-id>
 
 Credit prints the new balance. Repeating the same arguments with the same
 `--id` adds nothing, and omitting `--id` generates a new one. `cap` sets a
-monthly [allowance](allowances.md): without `--user` it is the default for
+monthly [cap](allowances.md#caps): without `--user` it is the default for
 everyone, and a zero amount blocks all turns.
 
 ## Promo codes

@@ -135,7 +135,7 @@ async def test_credit_is_positive_and_idempotent(
 
 
 @pytest.mark.asyncio
-async def test_cap_sets_default_and_user_limit_as_allowances(
+async def test_cap_sets_default_and_user_limit_as_caps(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     rt = build_cli_runtime(db_session_factory)
@@ -168,10 +168,12 @@ async def test_cap_sets_default_and_user_limit_as_allowances(
     now = datetime.now(UTC)
     async with db_session_factory() as s:
         rows = await spend_allowances.list_for_tenant(s, tenant_id=result.tenant_id)
-        assert sorted((r.subject_kind, r.subject_id, r.amount_usd, r.window) for r in rows) == [
-            ("group", "everyone", Decimal("7.00"), "month"),
-            ("person", "U123", Decimal("5.00"), "month"),
-        ], "the default is one monthly allowance for everyone, reset in place; U123 has their own"
+        assert sorted(
+            (r.subject_kind, r.subject_id, r.amount_usd, r.window, r.is_cap) for r in rows
+        ) == [
+            ("group", "everyone", Decimal("7.00"), "month", True),
+            ("person", "U123", Decimal("5.00"), "month", True),
+        ], "the default is one monthly cap for everyone, reset in place; U123 has their own"
         for user, amount in (("other", "7.00"), ("U123", "5.00")):
             assert await allowance_limits.monthly_limit(
                 s, tenant_id=result.tenant_id, platform_user_id=user, now=now
