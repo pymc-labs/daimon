@@ -458,6 +458,10 @@ def test_core_platform_scopes_are_limited_to_workspace_operations() -> None:
             # Lists vaults to find one agent's copies of a detached server's token;
             # credential reads and deletes use the vault owner's tenant scope.
             ("agent_mcp_credentials.py", "forget_mirrored_mcp_token"): 1,
+            # Each lists vaults to find one person's or an agent's sign-in vaults by name;
+            # credential reads and deletes use the tenant scope.
+            ("integration_views.py", "check_mcp_expiry"): 1,
+            ("profile.py", "disconnect_mcp_sign_in"): 1,
             ("pending_file_sweeper.py", "sweep_pending_file_deletes"): 1,
             ("ma.py", "find_workspace_disposable_sentinel"): 1,
             ("ma.py", "delete_entire_workspace_for_testing"): 1,

@@ -24,7 +24,7 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Subject, authorize
 from daimon.core.errors import UserFacingError
 from daimon.core.mcp_server_url import canonical_mcp_url
-from daimon.core.mux_backend import platform_scope
+from daimon.core.mux_backend import platform_scope, resource_scope
 from daimon.core.mux_compat import list_credentials, list_vaults
 from daimon.core.stores import github_access_requests as requests_store
 from daimon.core.stores import integration_reads as reads
@@ -282,11 +282,12 @@ async def check_mcp_expiry(
     pairs = pairs[:MAX_VAULTS_CHECKED]
     if not pairs:
         return [], True
-    scope = platform_scope("integration_views.check_mcp_expiry")
+    listing = platform_scope("integration_views.check_mcp_expiry")
+    owner = resource_scope(tenant_id=str(tenant_id))
     wanted = {f"daimon-mcp:{account}:{agent}" for account, agent in pairs}
     vaults: dict[str, BetaManagedAgentsVault] = {}
     try:
-        async for vault in list_vaults(client, scope=scope):
+        async for vault in list_vaults(client, scope=listing):
             if vault.archived_at is None and vault.display_name in wanted:
                 oldest = vaults.get(vault.display_name)
                 if oldest is None or vault.created_at < oldest.created_at:
@@ -313,7 +314,7 @@ async def check_mcp_expiry(
         urls = by_pair[(account_id, agent_id)]
         async with gate:
             try:
-                async for credential in list_credentials(client, vault_id, scope=scope):
+                async for credential in list_credentials(client, vault_id, scope=owner):
                     auth = credential.auth
                     if not isinstance(auth, BetaManagedAgentsMCPOAuthAuthResponse):
                         continue
