@@ -1,5 +1,6 @@
 """The outbound gate on every platform: render, count and refuse before anything posts."""
 
+import asyncio
 import dataclasses
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -21,10 +22,17 @@ from daimon.core.config import OutboundSettings
 from daimon.core.confirmation import prompt_for_tool_call
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.outbound.mentions import ping_users
-from daimon.core.outbound.reach import NO_CARD, SHORT_CAPTION, TOO_LONG, ReachPlan, card_title
+from daimon.core.outbound.reach import (
+    NO_CARD,
+    SHORT_CAPTION,
+    TOO_LONG,
+    ReachPlan,
+    ReachTally,
+    card_title,
+)
 from daimon.core.stores.domain import Role, TurnOriginRow
 from daimon.core.stores.platform_names import KnownName, upsert_user_names
-from daimon.core.stores.reach_tallies import lock_tally
+from daimon.core.stores.reach_tallies import lock_tally, save_tally
 from daimon.core.stores.tag_opt_outs import set_opt_out
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.turn_origins import bind_origin_session, create_origin
@@ -391,3 +399,31 @@ async def test_prepare_posts_when_live_name_unknown_then_stored_name_else_someon
         scope=_scope(),
     )
     assert post.text == f"hello\nrequested by {expected}", "the attribution line is never dropped"
+
+
+async def test_prepare_posts_when_another_call_holds_the_tally_then_it_waits_and_sees_its_posts(
+    committing_sessionmaker,
+):
+    """Two MCP instances serve one turn: a call must wait for the other's tally, not read it stale."""
+    runtime, auth = await _setup(committing_sessionmaker, "discord")
+    scope = _scope()
+    plan = ReachPlan(threads=1, places=0, people=0)
+    async with committing_sessionmaker() as session, session.begin():
+        await lock_tally(session, tenant_id=auth.tenant_id, turn_key=scope.key)
+
+    async with committing_sessionmaker() as session, session.begin():
+        await lock_tally(session, tenant_id=auth.tenant_id, turn_key=scope.key)
+        racer = asyncio.ensure_future(
+            prepare_posts(runtime, auth, _threads(1), plan=plan, scope=scope)
+        )
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(asyncio.shield(racer), 1.0)
+        await save_tally(
+            session,
+            tenant_id=auth.tenant_id,
+            turn_key=scope.key,
+            tally=ReachTally(threads=1),
+        )
+
+    with pytest.raises(ToolError, match="."):
+        await racer
