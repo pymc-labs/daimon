@@ -5248,6 +5248,15 @@ class DaimonBot(commands.Bot):
                     guild_id=guild_id,
                     user_id=str(message.author.id),
                 )
+            elif err.reason == "backend_unsupported":
+                log.info(
+                    "turn.skipped.backend_unsupported",
+                    guild_id=guild_id,
+                    channel_id=parent_channel_id,
+                    cause=err.cause,
+                    provider=err.provider,
+                    site=err.site,
+                )
             else:
                 log.info(
                     "turn.skipped.over_cap",
