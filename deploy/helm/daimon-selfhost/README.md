@@ -241,7 +241,8 @@ processes, and removes it on exit. The helper never reads or changes
 server against the target cluster's Azure `fqdn`, `privateFqdn` or
 `azurePortalFqdn` before workload operations, including teardown. Credential or
 server verification failures stop the phase before Helm/kubectl mutations.
-For manual kubectl or Helm commands shown below, fetch a separate private kubeconfig explicitly with
+For manual kubectl or Helm commands shown below, fetch a separate private
+kubeconfig explicitly with
 `az aks get-credentials -g "$RG" -n "$AKS" --file "$KUBECONFIG"`; set
 `KUBECONFIG` to a file in your own `mktemp -d` directory first.
 
