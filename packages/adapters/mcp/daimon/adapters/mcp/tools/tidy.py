@@ -57,7 +57,9 @@ def register_tidy_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         escalation channel.
         """
         auth = await _auth(ctx)
-        content = await render_edit(runtime, auth, scrub_other_platforms(content, auth.platform))
+        content = await render_edit(
+            runtime, auth, scrub_other_platforms(content, auth.platform), place=channel_id
+        )
         if auth.platform == "teams":
             return await _teams_edit_message_impl(
                 runtime,

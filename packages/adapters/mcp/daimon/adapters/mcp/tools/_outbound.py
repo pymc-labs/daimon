@@ -388,9 +388,18 @@ async def refuse_dm_to_opted_out(
         )
 
 
-async def render_edit(runtime: McpRuntime, auth: AuthIdentity, text: str) -> str:
-    """Edits notify nobody, so they are only rendered: no attribution and no count."""
+async def render_edit(runtime: McpRuntime, auth: AuthIdentity, text: str, *, place: str) -> str:
+    """Edits notify nobody, so they get no attribution and no count, but the length rule holds.
+
+    An edit can turn a short post into a wall of text, so it meets R4 as a post would.
+    """
     platform = _platform(auth)
+    max_length = runtime.settings.outbound.max_length
+    if max_length and len(text) > max_length:
+        scope = await turn_scope(runtime, auth)
+        if scope.interactive and _outside(OutgoingPost(text=text, place=place), scope):
+            record_denial("outbound_too_long")
+            raise ToolError(TOO_LONG)
     skip = await tag_opt_outs(
         runtime.session_factory,
         tenant_id=auth.tenant_id,

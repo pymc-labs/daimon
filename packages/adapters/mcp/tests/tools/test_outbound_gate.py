@@ -197,7 +197,27 @@ async def test_prepare_posts_when_discord_then_attribution_never_pings(sessionma
 
 async def test_render_edit_when_broadcast_then_neutralised_without_attribution(sessionmaker):
     runtime, auth = await _setup(sessionmaker, "slack")
-    assert await render_edit(runtime, auth, "fixed <!here>") == "fixed @here", "edits too"
+    assert await render_edit(runtime, auth, "fixed <!here>", place="C1") == "fixed @here", (
+        "edits too"
+    )
+
+
+async def test_render_edit_when_too_long_elsewhere_then_refused_but_own_place_allowed(
+    sessionmaker, monkeypatch
+):
+    """An edit can grow a short post into a wall, so the length rule meets it too."""
+    runtime, auth = await _setup(sessionmaker, "slack")
+
+    async def scope_of(*_args: object, **_kwargs: object) -> TurnScope:
+        return _scope()
+
+    monkeypatch.setattr(_outbound, "turn_scope", scope_of)
+    long = "x" * 2000
+    with pytest.raises(ToolError, match="three-line summary"):
+        await render_edit(runtime, auth, long, place="C_OTHER")
+    assert await render_edit(runtime, auth, long, place="home") == long, (
+        "the requester's own conversation takes long edits"
+    )
 
 
 async def test_approve_when_card_built_from_same_args_then_card_equals_stored_plan(sessionmaker):
