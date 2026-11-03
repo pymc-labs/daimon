@@ -6,6 +6,7 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -498,7 +499,8 @@ async def test_the_audit_log_names_who_acted(
         [entry] = (await admin.client.get("/api/admin/audit")).json()
 
     assert (entry["who"], entry["action"], entry["target"]) == ("Ada", "Suspended", "Mia")
-    assert set(entry) == {"id", "at", "who", "action", "target"}, "no detail, no key"
+    assert entry["source"] == "web"
+    assert set(entry) == {"id", "source", "at", "who", "action", "target"}, "no detail, no key"
 
 
 async def test_the_audit_log_shows_an_erased_person_by_a_generic_label(
@@ -627,6 +629,143 @@ async def test_the_audit_log_pages_newest_first(
     assert [e["action"] for e in first.json()] == ["Suspended", "Restored"], "newest first"
     assert [e["action"] for e in second.json()] == ["Suspended"], "the rest follow"
     assert "X-Next-Cursor" not in second.headers, "the last page names no next one"
+
+
+async def _event(
+    admin: Admin,
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    tool: str,
+    at: datetime,
+    account: uuid.UUID | None,
+    agent_name: str | None = None,
+) -> None:
+    async with factory.begin() as db:
+        await security_audit.append_event(
+            db,
+            tenant_id=admin.ws.tenant_id,
+            account_id=account,
+            agent_id=None,
+            agent_name=agent_name,
+            platform="discord",
+            platform_user_id="1100000000000000001",
+            tool_name=tool,
+            operation="clear_pin",
+            outcome="denied",
+            reason="needs_admin",
+            token_kind="operator",
+            target_channel_id="1200000000000000009",
+            content_hmac="secret-hash",
+            occurred_at=at,
+        )
+
+
+async def test_the_audit_log_adds_chat_tool_calls_and_panel_writes_with_stored_fields_only(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    async with _admin(web_client, db_session_factory, tmp_path) as admin:
+        await admin.client.patch(
+            f"/api/admin/people/{admin.member.id}", json={"status": "suspended"}
+        )
+        at = datetime.now(UTC) + timedelta(minutes=1)
+        await _event(
+            admin,
+            db_session_factory,
+            tool="channel_backend",
+            at=at,
+            account=admin.member.account_id,
+        )
+        entries = (await admin.client.get("/api/admin/audit")).json()
+        only = (await admin.client.get("/api/admin/audit", params={"source": "security"})).json()
+
+    assert [e["source"] for e in entries] == ["security", "web"]
+    [event] = only
+    assert (event["who"], event["action"], event["detail"]) == (
+        "Mia",
+        "Channel backend: clear pin",
+        "Refused",
+    )
+    assert dict(event["facts"]) == {
+        "Where": "Chat tool",
+        "Tool": "Channel backend",
+        "Operation": "Clear pin",
+        "Outcome": "Refused",
+        "Reason": "needs_admin",
+        "Platform": "discord",
+        "Token": "operator",
+        "Channel": "1200000000000000009",
+    }, "only stored, readable fields; no hash, no chat user id"
+    assert "secret-hash" not in str(entries)
+
+
+async def test_the_audit_log_filters_by_source_actor_kind_and_date(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    async with _admin(web_client, db_session_factory, tmp_path) as admin:
+        await admin.client.patch(
+            f"/api/admin/people/{admin.member.id}", json={"status": "suspended"}
+        )
+        old = datetime(2026, 1, 5, 9, tzinfo=UTC)
+        await _event(
+            admin,
+            db_session_factory,
+            tool="panel:agent_backend",
+            at=old,
+            account=admin.member.account_id,
+        )
+        await _event(
+            admin,
+            db_session_factory,
+            tool="channel_backend",
+            at=old,
+            account=None,
+            agent_name="Helper",
+        )
+
+        async def get(**params: str) -> list[dict[str, Any]]:
+            return (await admin.client.get("/api/admin/audit", params=params)).json()
+
+        by_actor = await get(actor=str(admin.ws.person.id))
+        by_member = await get(actor=str(admin.member.id))
+        by_kind = await get(kind="panel:agent_backend")
+        by_day = await get(**{"from": "2026-01-05", "to": "2026-01-05"})
+        after = await get(**{"from": "2026-01-06"})
+        stranger = await get(actor=str(uuid.uuid4()))
+        kinds = (await admin.client.get("/api/admin/audit/kinds")).json()
+        bad_day = await admin.client.get("/api/admin/audit", params={"from": "soon"})
+        bad_source = await admin.client.get("/api/admin/audit", params={"source": "nope"})
+
+    assert [e["action"] for e in by_actor] == ["Suspended"]
+    assert [e["action"] for e in by_member] == ["Panel: agent backend"]
+    assert stranger == [], "a person who is not in this workspace has no rows"
+    assert [e["action"] for e in by_kind] == ["Panel: agent backend"]
+    assert sorted(e["who"] for e in by_day) == ["Helper", "Mia"]
+    assert [e["action"] for e in after] == ["Suspended"]
+    assert kinds == [
+        {"source": "web", "value": "Suspended", "label": "Suspended"},
+        {"source": "security", "value": "channel_backend", "label": "Channel backend"},
+        {"source": "security", "value": "panel:agent_backend", "label": "Panel: agent backend"},
+    ]
+    assert (bad_day.status_code, bad_source.status_code) == (422, 422)
+
+
+async def test_the_audit_log_and_its_kinds_stay_admin_only(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    async with _admin(web_client, db_session_factory, tmp_path) as admin:
+        admin.as_member()
+        refused = [
+            (await admin.client.get(path)).status_code
+            for path in ("/api/admin/audit", "/api/admin/audit/kinds")
+        ]
+
+    assert refused == [403, 403]
 
 
 async def test_an_id_in_the_path_that_is_no_uuid_is_not_found(

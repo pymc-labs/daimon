@@ -1,7 +1,7 @@
 // Admin: people, invites, agent web access, audit log and workspace settings.
 import { http, HttpResponse, type HttpHandler } from "msw"
 
-import type { AdminPerson, AgentAccess, AuditEntry, Invite, SettingsPatch, WorkspaceSettings } from "@/modules/admin/types"
+import type { AdminPerson, AgentAccess, AuditEntry, AuditKind, Invite, SettingsPatch, WorkspaceSettings } from "@/modules/admin/types"
 import { forbidden, notFound, paged, wait } from "./util"
 import { agent, AGENTS, DOMAIN, me } from "./world"
 import { face } from "./face"
@@ -48,15 +48,19 @@ const access: AgentAccess[] = [
 ]
 
 const audit: AuditEntry[] = [
-  { id: "a1", at: ago(0.4), who: "Maya Lindqvist", action: "Changed agent", target: "MMM Analyst", detail: "Instructions, version 14" },
-  { id: "a2", at: ago(2), who: "Jonas Weber", action: "Created invite", target: "sam.ortiz@larkspur.example", detail: "Visitor, MMM Analyst, $10.00" },
-  { id: "a3", at: ago(5), who: "Maya Lindqvist", action: "Added allowance", target: "MMM group", detail: "$60.00 a month, MMM Analyst" },
-  { id: "a4", at: ago(9), who: "Jordan Ellis", action: "Accepted invite", target: "Pricing Analyst" },
-  { id: "a5", at: ago(26), who: "Viktor Petrov", action: "Suspended", target: "Lena Fischer" },
-  { id: "a6", at: ago(30), who: "Maya Lindqvist", action: "Topped up", target: "Balance", detail: "$500.00" },
-  { id: "a7", at: ago(51), who: "Jonas Weber", action: "Turned off web chat", target: "Code Reviewer" },
-  { id: "a8", at: ago(74), who: "Maya Lindqvist", action: "Changed role", target: "Jonas Weber", detail: "Member to Admin" },
-  { id: "a9", at: ago(98), who: "Jonas Weber", action: "Changed setting", target: "Web chat agent", detail: "Daimon" },
+  { id: "s1", source: "security", at: ago(1), who: "Maya Lindqvist", action: "Panel: agent backend", target: "", detail: "Allowed",
+    facts: [["Where", "Panel"], ["Tool", "Panel: agent backend"], ["Operation", "Agent backend"], ["Outcome", "Allowed"], ["Reason", "completed"], ["Platform", "discord"], ["Channel", "1200000000000000009"]] },
+  { id: "s2", source: "security", at: ago(7), who: "MMM Analyst", action: "Channel backend: clear pin", target: "", detail: "Refused",
+    facts: [["Where", "Chat tool"], ["Tool", "Channel backend"], ["Operation", "Clear pin"], ["Outcome", "Refused"], ["Reason", "needs_admin"], ["Platform", "discord"], ["Agent", "MMM Analyst"]] },
+  { id: "a1", source: "web", at: ago(0.4), who: "Maya Lindqvist", action: "Changed agent", target: "MMM Analyst", detail: "Instructions, version 14" },
+  { id: "a2", source: "web", at: ago(2), who: "Jonas Weber", action: "Created invite", target: "sam.ortiz@larkspur.example", detail: "Visitor, MMM Analyst, $10.00" },
+  { id: "a3", source: "web", at: ago(5), who: "Maya Lindqvist", action: "Added allowance", target: "MMM group", detail: "$60.00 a month, MMM Analyst" },
+  { id: "a4", source: "web", at: ago(9), who: "Jordan Ellis", action: "Accepted invite", target: "Pricing Analyst" },
+  { id: "a5", source: "web", at: ago(26), who: "Viktor Petrov", action: "Suspended", target: "Lena Fischer" },
+  { id: "a6", source: "web", at: ago(30), who: "Maya Lindqvist", action: "Topped up", target: "Balance", detail: "$500.00" },
+  { id: "a7", source: "web", at: ago(51), who: "Jonas Weber", action: "Turned off web chat", target: "Code Reviewer" },
+  { id: "a8", source: "web", at: ago(74), who: "Maya Lindqvist", action: "Changed role", target: "Jonas Weber", detail: "Member to Admin" },
+  { id: "a9", source: "web", at: ago(98), who: "Jonas Weber", action: "Changed setting", target: "Web chat agent", detail: "Daimon" },
 ]
 
 const settings: WorkspaceSettings = {
@@ -72,7 +76,7 @@ const settings: WorkspaceSettings = {
 
 const admin = () => me()?.capabilities.includes("people.manage")
 const log = (action: string, target: string, detail?: string) =>
-  audit.unshift({ id: `a${Date.now()}`, at: new Date().toISOString(), who: me()!.name, action, target, detail })
+  audit.unshift({ id: `a${Date.now()}`, source: "web", at: new Date().toISOString(), who: me()!.name, action, target, detail })
 
 export const adminHandlers: HttpHandler[] = [
   http.get("/api/admin/*", async () => { await wait(); if (!admin()) return forbidden() }),
@@ -136,7 +140,17 @@ export const adminHandlers: HttpHandler[] = [
     log("Created sign-in link", p.name)
     return HttpResponse.json({ link: `${location.origin}/invite/inv_${Math.random().toString(36).slice(2, 10)}` })
   }),
-  http.get("/api/admin/audit", ({ request }) => paged(request, audit)),
+  http.get("/api/admin/audit", ({ request }) => {
+    const q = new URL(request.url).searchParams
+    const { source, actor, kind, from, to } = Object.fromEntries(q)
+    const day = (iso: string) => iso.slice(0, 10)
+    const who = actor && people.find((p) => p.id === actor)?.name
+    return paged(request, audit.filter((e) =>
+      (!source || e.source === source) && (!actor || e.who === who) && (!kind || e.action === kind)
+      && (!from || day(e.at) >= from) && (!to || day(e.at) <= to)))
+  }),
+  http.get("/api/admin/audit/kinds", () =>
+    HttpResponse.json([...new Map(audit.map((e) => [e.action, { source: e.source, value: e.action, label: e.action } satisfies AuditKind])).values()])),
   http.get("/api/admin/settings", () => HttpResponse.json(settings)),
   http.patch("/api/admin/settings", async ({ request }) => {
     const b = (await request.json()) as SettingsPatch

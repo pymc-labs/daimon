@@ -33,7 +33,13 @@ export type AgentAccess = {
   fixed_name: string | null
 }
 
-export type AuditEntry = { id: string; at: string; who: string; action: string; target: string; detail?: string }
+export type AuditSource = "web" | "security"
+export type AuditEntry = {
+  id: string; source: AuditSource; at: string; who: string; action: string; target: string; detail?: string
+  /** Security events only: every readable field the event stores. */
+  facts?: [string, string][]
+}
+export type AuditKind = { source: AuditSource; value: string; label: string }
 
 export type Access = {
   /** The people who may start turns; null when everyone may. */
