@@ -222,12 +222,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   workspace is funded. Admin > Audit adds chat tool calls and panel writes next to the web
   changes, with filters for source, person, action and date. A routine's panel has **Run
   now** for its owner or an admin.
-- **Monthly limits per member are allowances.** The per-member cap and the web Credits
-  allowances were two limits on the same spend. Migration 0159 converts each cap into a
-  monthly allowance (the default for everyone, or one for a person), keeping the stricter
-  limit where an allowance already existed, and the turn gate no longer has a separate cap
-  step. `daimon tenants cap` now writes the allowance. Allowances count billed dollars, so a
-  markup above 1 makes a converted limit stricter than the cap was.
+- **Monthly limits per member live in the allowance table.** The per-member cap and the web
+  Credits allowances were two limits on the same spend. Migration 0172 turns each cap into a
+  monthly cap row (the default for everyone, or one for a person) and changes no other row.
+  A cap is a ceiling: it binds even when a more generous allowance covers the person, it
+  covers visitors, and it counts the whole calendar month. `daimon tenants cap` writes the
+  cap row, and Credits > Allowances lists caps beside allowances. Caps count billed dollars,
+  so the migration multiplies each by `DAIMON_BILLING__MARKUP`; set it where migrations run.
+- **Channels in the web app.** A Channels page lists every channel Daimon knows, grouped by
+  category, with its default agent, kept agents, who may read and write, budget and recent
+  spend. Admins change these and the channel's participation, progress plans, environment,
+  skills and tool rules, clear threads, clear a provider pin, and copy or retire a channel's
+  agent copy; risky edits ask first and every change shows in the channel's history.
+  Workspace defaults live there too. Members see the channels they can see on their chat
+  platform, read-only and without spend. Migrations 0171 and 0173 add the change history and
+  the channel settings columns.
+- **Integrations in the web app.** Admins see the chat installs, GitHub repos per agent, MCP
+  servers with sign-in expiry, and API tokens, which they create (shown once), list and
+  revoke. Creating a token needs a recorded chat admin role.
+- **More of an agent in the web app.** The agent canvas adds its keys (names only; values are
+  write-only), coding keys, owners (editable by admins), shared and channel memory
+  (read-only), tool rules with routine scope, and a Google Workspace badge. Admins archive or
+  copy an agent. Agents gains Skills (sync from a public GitHub repo, versions, delete, where
+  used) and Environments (packages, network, archive) tabs.
+- **Profile in the web app.** The user menu opens a Profile page: personal memory per agent
+  with Forget, connected accounts and sign-ins with disconnect, your coding keys, and
+  deleting your data with the same preview as `/privacy`.
+- **Feedback in the web app.** Admin > Feedback counts thumbs and reasons by agent over 7, 30
+  or 90 days. It never shows message text or who voted, and hides counts under three.
+- The unused `channel_admins` table is dropped with its privacy entries (migration 0174).
 - **Routines in the web app.** A Routines page lists scheduled prompts with their schedule in
   words, destination, next run and last result. Members work with their own routines, admins
   with all, and a person needs a linked chat account on the workspace's platform to add one.
