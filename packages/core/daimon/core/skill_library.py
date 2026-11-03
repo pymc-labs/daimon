@@ -69,8 +69,6 @@ class LibrarySkill(BaseModel):
 class SkillDetail(LibrarySkill):
     source_url: str | None
     """Where a GitHub-synced skill lives, else None."""
-    requires: list[str]
-    """Tool servers the skill calls; none are recorded yet."""
 
 
 class SkillVersionDoc(BaseModel):
@@ -216,7 +214,6 @@ async def get_library_skill(
     return SkillDetail(
         **found.model_copy(update={"description": description}).model_dump(),
         source_url=source_url,
-        requires=[],
     )
 
 

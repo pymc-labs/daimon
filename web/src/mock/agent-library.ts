@@ -60,7 +60,7 @@ function library(): LibrarySkill[] {
 
 const detail = (id: string): SkillDetail | undefined => {
   const row = library().find((s) => s.id === id)
-  return row && { ...row, source_url: GITHUB[id] ?? null, requires: skills().find((s) => s.skill_id === id)?.requires ?? [] }
+  return row && { ...row, source_url: GITHUB[id] ?? null }
 }
 
 const filesDoc = (id: string, v: Ver) => ({

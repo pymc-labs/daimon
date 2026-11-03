@@ -7,7 +7,7 @@ import { AgentLink, ChannelLink } from "@/components/links"
 import { PanelMenu, PanelSection, SettingRow, Tag, type MenuAction } from "@/components/panel"
 import { Page } from "@/components/shell/Page"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
 import { useConfirm } from "@/lib/confirm"
 import { useParam } from "@/lib/filters"
 import { cn } from "@/lib/utils"
@@ -92,18 +92,16 @@ function Loaded({ skill, custom, files, filesLoading, versions, viewing }: {
         <aside className="shrink-0 border-t lg:w-80 lg:overflow-y-auto lg:border-t-0 lg:border-l">
           <PanelSection title="About" className="border-t-0">
             <div className="space-y-2.5">
-              <SettingRow label="Description" top>
-                {custom && !readOnly && files ? (
-                  <Input aria-label="Description" value={descriptionOf(markdown)} onChange={(e) => draft.setFile("SKILL.md", withDescription(markdown, e.target.value))} className="h-8" />
-                ) : <span>{skill.description || "–"}</span>}
-              </SettingRow>
+              {custom && !readOnly && files ? (
+                <div className="space-y-1 text-sm">
+                  <label htmlFor="skill-description" className="text-muted-foreground">Description</label>
+                  <Textarea id="skill-description" rows={3} value={descriptionOf(markdown)} onChange={(e) => draft.setFile("SKILL.md", withDescription(markdown, e.target.value))} />
+                </div>
+              ) : <SettingRow label="Description" top><span>{skill.description || "–"}</span></SettingRow>}
               <SettingRow label="Source">
                 {skill.source_url
                   ? <a href={skill.source_url} target="_blank" rel="noopener noreferrer" className="inline-flex max-w-full items-center gap-1 hover:underline"><span className="truncate">GitHub</span><ExternalLink className="size-3 shrink-0" /></a>
                   : sourceLabel(skill)}
-              </SettingRow>
-              <SettingRow label="Requires" top>
-                {skill.requires.length ? <span className="flex flex-wrap gap-1">{skill.requires.map((r) => <Tag key={r}>{r}</Tag>)}</span> : <span className="text-faint">–</span>}
               </SettingRow>
             </div>
           </PanelSection>

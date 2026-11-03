@@ -203,7 +203,7 @@ export type LibrarySkill = {
   default: boolean
   used_by: SkillUse[]
 }
-export type SkillDetail = LibrarySkill & { source_url: string | null; /** Tool server names. */ requires: string[] }
+export type SkillDetail = LibrarySkill & { source_url: string | null }
 export type SkillVersion = { version: string; created_at: string; author: string | null }
 export type SyncedSkill = { name: string; action: "created" | "updated" | "skipped" | "failed"; detail: string | null }
 
