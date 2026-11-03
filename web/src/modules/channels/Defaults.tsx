@@ -13,8 +13,8 @@ import { Notice } from "./shared"
 import type { ChannelDefaults, ChannelSwitch } from "./types"
 
 const Overrides = ({ what, n }: { what: string; n: number }) => (
-  <Link to={`/channels?override=${what}`} className="shrink-0 text-xs whitespace-nowrap text-muted-foreground hover:text-foreground hover:underline">
-    {n ? `Set in ${plural(n, "channel")}` : "Set in no channels"}
+  <Link to={`/channels?override=${what}`} className="w-28 shrink-0 text-right text-xs whitespace-nowrap text-muted-foreground hover:text-foreground hover:underline">
+    {n ? `Set in ${plural(n, "channel")}` : "Not overridden"}
   </Link>
 )
 

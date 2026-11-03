@@ -28,7 +28,7 @@ function subscriptionText(s: NonNullable<ChannelSettings["teams_subscription"]>)
 }
 
 /** The path above a channel, as `Ops team / ops-room`; a top-level channel reads as its platform. */
-const pathText = (c: ChannelDetail) => c.path.length ? c.path.map((n) => n.name ?? "Unnamed").join(" / ") : platformLabel(c.platform)
+const pathText = (c: ChannelDetail) => (c.path.length ? c.path.map((n) => n.name ?? "Unnamed").join(" / ") : c.platform === "web" ? undefined : platformLabel(c.platform))
 
 function Head({ c, s }: { c: ChannelDetail; s?: ChannelSettings }) {
   const platform = platformLabel(c.platform)
