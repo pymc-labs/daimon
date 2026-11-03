@@ -106,7 +106,7 @@ Each tick, 30 seconds apart by default, the scheduler:
 1. Rolls forward stale slots and slots that came due while the routine ran.
 2. Claims at most 20 due routines, stamping the run and computing the next
    slot in the same transaction.
-3. Checks the monthly cap, then starts each run as an independent task.
+3. Checks the spend allowance, then starts each run as an independent task.
 4. Runs housekeeping, such as [promo credit](billing.md#promo-codes)
    settlement, then sleeps.
 
@@ -270,7 +270,7 @@ fire. The process will not boot without `DAIMON_MCP__JWT_SECRET` and
 [public URL](configuration.md#daimon_mcp__public_url)).
 
 Four gates apply to every run: the invoker allowlist against the creator, the
-credit balance, the per-person monthly cap and, for a routine with a channel,
+credit balance, the owner's spend [allowance](allowances.md) and, for a routine with a channel,
 that channel's budget, checked last after the agent's rule
 ([billing.md](billing.md#channel-budgets)). A refused run records the reason and
 fires again at its next slot. On Discord each fire, and each delivery,
