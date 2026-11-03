@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -73,7 +73,11 @@ async def funded_workspace(factory: async_sessionmaker[AsyncSession]) -> Workspa
 
 
 async def visitor_of(
-    factory: async_sessionmaker[AsyncSession], ws: Workspace, *, allow_files: bool = False
+    factory: async_sessionmaker[AsyncSession],
+    ws: Workspace,
+    *,
+    allow_files: bool = False,
+    agent_ids: Sequence[str] = (),
 ) -> WebPersonRow:
     """A visitor from a fresh invite to the workspace, on an account of their own."""
     person_id = uuid.uuid4()
@@ -84,6 +88,7 @@ async def visitor_of(
             kind="invite",
             expires_at=datetime.now(UTC) + timedelta(days=7),
             allow_files=allow_files,
+            agent_ids=agent_ids,
             created_by_account_id=ws.person.account_id,
         )
         principal = await get_or_create_platform_principal(

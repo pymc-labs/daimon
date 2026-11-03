@@ -13,6 +13,7 @@ from daimon.adapters.web.access import Role, at_or_above, is_admin
 from daimon.adapters.web.admin_common import (
     ROLE_WORDS,
     AdminPerson,
+    AdminPersonDetail,
     Credit,
     PeopleAdmin,
     Pickers,
@@ -68,7 +69,7 @@ def people_router(runtime: WebRuntime) -> APIRouter:
             last_seen=person.last_seen_at.isoformat(),
         )
 
-    async def person_detail(db: AsyncSession, person: WebPersonRow) -> AdminPerson:
+    async def person_detail(db: AsyncSession, person: WebPersonRow) -> AdminPersonDetail:
         """One person with where they stand against their allowance, which costs the
         spend queries a listing leaves out."""
         identities = await identities_store.list_for_person(db, person_id=person.id)
@@ -79,7 +80,7 @@ def people_router(runtime: WebRuntime) -> APIRouter:
         credit = (
             None if meter is None else Credit(left_usd=meter.left_usd, total_usd=meter.total_usd)
         )
-        shown = person_json(person, role, identities, credit)
+        shown = AdminPersonDetail(**person_json(person, role, identities, credit).model_dump())
         invite = (
             await web_invites.get_invite(db, tenant_id=person.tenant_id, invite_id=person.invite_id)
             if role == "visitor" and person.invite_id is not None
@@ -134,14 +135,14 @@ def people_router(runtime: WebRuntime) -> APIRouter:
         ]
 
     @router.get("/people/{person_id}")
-    async def person(person_id: uuid.UUID, caller: PeopleAdmin) -> AdminPerson:  # pyright: ignore[reportUnusedFunction]
+    async def person(person_id: uuid.UUID, caller: PeopleAdmin) -> AdminPersonDetail:  # pyright: ignore[reportUnusedFunction]
         async with runtime.sessionmaker() as db:
             return await person_detail(db, await person_of(db, caller, person_id))
 
     @router.patch("/people/{person_id}")
     async def change_person(  # pyright: ignore[reportUnusedFunction]
         person_id: uuid.UUID, body: PersonChange, caller: PeopleAdmin
-    ) -> AdminPerson:
+    ) -> AdminPersonDetail:
         now, tenant_id = runtime.now(), caller.person.tenant_id
         async with runtime.sessionmaker.begin() as db:
             target = await person_of(db, caller, person_id)

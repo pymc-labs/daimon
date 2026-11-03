@@ -42,7 +42,7 @@ async def test_a_visitor_without_files_cannot_upload_or_send_an_earlier_upload(
     tmp_path: Path,
 ) -> None:
     ws = await funded_workspace(db_session_factory)
-    guest = await visitor_of(db_session_factory, ws, allow_files=True)
+    guest = await visitor_of(db_session_factory, ws, allow_files=True, agent_ids=(AGENT_ID,))
     turns = build_turns(db_session_factory, build_turn_router(str(ws.tenant_id)), tmp_path)
 
     async with web_client(web_settings(), sessionmaker=db_session_factory, turns=turns) as client:
@@ -73,7 +73,7 @@ async def test_a_visitor_with_files_uploads_and_sends_them(
     tmp_path: Path,
 ) -> None:
     ws = await funded_workspace(db_session_factory)
-    guest = await visitor_of(db_session_factory, ws, allow_files=True)
+    guest = await visitor_of(db_session_factory, ws, allow_files=True, agent_ids=(AGENT_ID,))
     turns = build_turns(db_session_factory, build_turn_router(str(ws.tenant_id)), tmp_path)
 
     async with web_client(web_settings(), sessionmaker=db_session_factory, turns=turns) as client:
