@@ -285,7 +285,7 @@ def gate_also(monkeypatch: pytest.MonkeyPatch, *names: str, ungate: tuple[str, .
 
 @pytest.mark.parametrize(("provider", "model"), COPIES)
 def test_a_consent_from_before_fleet_removal_still_holds(provider: Provider, model: str) -> None:
-    """Confirmed on 10-25: request_fleet_config gated, start_long_job not, get_long_job listed."""
+    """Then request_fleet_config was gated, start_long_job not, and get_long_job was listed."""
     from daimon.core.turn.runtime_manifest import _same_losses
 
     then = daimon_copy(
@@ -306,7 +306,7 @@ def test_a_consent_from_before_fleet_removal_still_holds(provider: Provider, mod
     )
 
 
-def test_the_staging_gemini_consent_from_10_25_still_holds() -> None:
+def test_a_gemini_default_model_consent_survives_newly_gated_tools() -> None:
     """Its stored losses in full, on the provider default, against today's gated set."""
     from daimon.core.turn.runtime_manifest import _model_consented, _same_losses
 
@@ -403,6 +403,35 @@ def test_a_gain_or_a_new_loss_still_asks_again(
         losses = ()
     today = daimon_copy(provider, model, asks=asks, runs=runs, losses=losses)
     assert not _same_losses(today, consent_for(then)), f"{change} needs a fresh confirmation"
+
+
+@pytest.mark.parametrize(("provider", "model"), COPIES)
+def test_a_self_carded_tool_newly_offered_asks_again(
+    monkeypatch: pytest.MonkeyPatch, provider: Provider, model: str
+) -> None:
+    """A gated tool Daimon starts carding itself runs on provider turns: a gain."""
+    from daimon.core import tool_safety
+    from daimon.core.turn.runtime_manifest import _same_losses
+
+    then = daimon_copy(provider, model, asks=("add_skill",), runs=("describe_agent",))
+    carded = tool_safety.self_carded_tools() | {"add_skill"}
+    monkeypatch.setattr(tool_safety, "self_carded_tools", lambda: carded)
+    today = daimon_copy(provider, model, runs=("add_skill", "describe_agent"))
+    assert not _same_losses(today, consent_for(then)), "add_skill now runs, never confirmed"
+
+
+@pytest.mark.parametrize(("provider", "model"), COPIES)
+def test_a_consent_with_the_switch_tool_off_holds_when_daimon_gates_more(
+    monkeypatch: pytest.MonkeyPatch, provider: Provider, model: str
+) -> None:
+    """The owner turned the switch tool off before confirming; it stays a loss on both sides."""
+    from daimon.core.turn.runtime_manifest import _same_losses
+
+    asks = ("add_skill", "request_agent_backend_switch")
+    then = daimon_copy(provider, model, asks=asks, runs=("describe_agent", "hand_off"))
+    gate_also(monkeypatch, "hand_off")
+    today = daimon_copy(provider, model, asks=(*asks, "hand_off"), runs=("describe_agent",))
+    assert _same_losses(today, consent_for(then)), "the switch tool is the same loss as confirmed"
 
 
 @pytest.mark.parametrize(

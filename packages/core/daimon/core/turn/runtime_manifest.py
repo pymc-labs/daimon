@@ -1333,11 +1333,17 @@ def _same_losses(target: AgentSpec, consent: _BackendDropConsent) -> bool:
         for drop in target.declared_drops
         if not drop.startswith(prefix) or drop.removeprefix(prefix) not in gated
     }
+    # A consent from before the switch tool was offered names it a loss; one the
+    # owner confirmed with it turned off still loses it.
+    switch_offered = _SWITCH_TOOL_DROP not in target.declared_drops
     accepted = {
         drop
         for drop in consent.declared_drops
         if not drop.startswith(prefix)
-        or (drop != _SWITCH_TOOL_DROP and drop.removeprefix(prefix) in served - gated)
+        or (
+            not (switch_offered and drop == _SWITCH_TOOL_DROP)
+            and drop.removeprefix(prefix) in served - gated
+        )
     }
     if "tools" in accepted and "tools" not in today and target.tools:
         # Before #1483 a template lost the source's tools whole; now it keeps
