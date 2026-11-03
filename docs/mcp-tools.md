@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 179 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 180 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -342,6 +342,14 @@ Register connect_microsoft and the Microsoft Graph tools (Teams only).
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `list_models` | all callers | List the models an agent here can run on: plain name, id, provider and list price. |
+
+## `never_tag`
+
+Never-tag tool: a person asks that Daimon never pings them, on any platform.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `set_never_tag` | Discord callers, Slack callers, Teams callers | Stop or resume Daimon tagging the person who is asking, only for themselves. |
 
 ## `notebook`
 

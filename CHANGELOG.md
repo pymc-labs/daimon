@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The agent posts for other people more carefully, and anyone can ask never to be tagged.**
+  Mentions of everyone, here, roles and groups no longer go out live on any platform, and
+  posts made for someone say who asked for them. One request that opens several threads,
+  posts in several places or tags many people now shows the requester an approval card
+  first, with limits an operator can change (`DAIMON_OUTBOUND__*`). `send_message` takes a
+  batch, so a request can go out in one call. A person can ask the agent to never tag them
+  with the new `set_never_tag` tool: their mentions turn into plain names in replies,
+  routines, tool posts, direct messages, cards and completion pings, they count toward no
+  limit, and the setting follows them through privacy export and erasure. The seeded agent
+  gains a short prompt block and a `team-etiquette` skill covering threads, routines and
+  shared media. Slack posts resolve names through a cache, so mentions cost fewer calls.
+
 - **A switched OpenAI or Gemini agent answers again after Daimon gates more of its own
   tools.** An agent whose switch was confirmed before such a release had every turn refused
   with a request to confirm the switch again. A switch now stays confirmed while the agent
