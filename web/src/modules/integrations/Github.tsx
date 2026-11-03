@@ -97,7 +97,7 @@ function Body({ d }: { d: Data }) {
                   <TableCell>
                     <span className="flex flex-wrap gap-1.5">
                       {a.repos.map((r) => (
-                        <Pill key={r.name} className={cn(r.status !== "active" && "text-destructive")}>
+                        <Pill key={r.name} className={cn("gap-1.5", r.status !== "active" && "text-destructive")}>
                           {r.working && <Star className="size-3 fill-current" aria-label="Working repo" />}
                           {r.name}
                           <span className="text-faint">{r.access === "write" ? "write" : "read"}</span>

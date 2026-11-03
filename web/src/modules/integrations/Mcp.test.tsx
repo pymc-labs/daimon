@@ -19,8 +19,8 @@ describe("Mcp", () => {
     render(<QueryClientProvider client={new QueryClient()}><Mcp /></QueryClientProvider>)
     expect(await screen.findByText("Warehouse")).toBeInTheDocument()
     expect(screen.getByText("shared sign-in")).toBeInTheDocument()
-    expect(await screen.findByText("2 sign-ins expired")).toBeInTheDocument()
-    expect(screen.getByText("All current")).toBeInTheDocument()
+    expect(await screen.findByText("2 expired")).toBeInTheDocument()
+    expect(screen.getByText("None")).toBeInTheDocument()
   })
 
   it("keeps the list when the expiry check fails", async () => {
