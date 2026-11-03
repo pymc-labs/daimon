@@ -86,7 +86,7 @@ function Loaded({ skill, custom, files, filesLoading, versions, viewing }: {
   return (
     <Page
       crumbs={[{ label: "Agents", to: "/agents" }, { label: "Skills", to: "/agents/skills" }, { label: skill.title }]}
-      flush
+      flush className="flex flex-col"
       actions={
         <>
           {showDirty && <Button size="sm" variant="ghost" disabled={draft.busy} onClick={draft.discard}>Discard</Button>}
