@@ -22,8 +22,8 @@ from decimal import Decimal
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0171_fold_caps_into_allowances"
-down_revision: str | None = "0170_channel_changes"
+revision: str = "0172_fold_caps_into_allowances"
+down_revision: str | None = "0171_channel_changes"
 branch_labels: str | None = None
 depends_on: str | None = None
 

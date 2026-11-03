@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 
 def _migration() -> ModuleType:
-    path = Path(__file__).parents[1] / "alembic/versions/0171_fold_caps_into_allowances.py"
+    path = Path(__file__).parents[1] / "alembic/versions/0172_fold_caps_into_allowances.py"
     spec = importlib.util.spec_from_file_location("migration_fold_caps_into_allowances", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

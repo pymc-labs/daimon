@@ -14,7 +14,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "0174_drop_channel_admins"
-down_revision: str | None = "0172_channel_settings"
+down_revision: str | None = "0173_channel_settings"
 branch_labels: str | None = None
 depends_on: str | None = None
 

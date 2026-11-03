@@ -131,9 +131,10 @@ MERGE = "0168_merge_main_preview"
 # Linear, oldest first; the first sits on MERGE and the last is the single head.
 TAIL = (
     "0169_continuation_reasons",
-    "0170_channel_changes",
-    "0171_fold_caps_into_allowances",
-    "0172_channel_settings",
+    "0170_helpers",
+    "0171_channel_changes",
+    "0172_fold_caps_into_allowances",
+    "0173_channel_settings",
     "0174_drop_channel_admins",
 )
 HEAD = TAIL[-1]
@@ -180,7 +181,7 @@ MAIN_BRANCH_COLUMNS = {
 }
 
 
-# Columns added after CONTINUATION_HEAD; heads below HEAD skip them.
+# Columns added after the continuation migration; heads below HEAD skip them.
 AFTER_MERGE_COLUMNS = {("turn_origins", "helper_of"), ("turn_origins", "serves_helpers")}
 
 
@@ -370,7 +371,7 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             and expected not in TOP
         ):
             return False
-        # Added by the channel settings migration (0172), after PREVIEW_HEAD.
+        # Added by the channel settings migration (0173), after PREVIEW_HEAD.
         if expected not in TAIL and (
             (kind == "column" and name == "made_in_channel_id")
             or (kind == "index" and name == "ix_progress_plan_scopes_parent")
