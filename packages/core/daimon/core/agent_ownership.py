@@ -18,6 +18,7 @@ import structlog
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores import agent_owners, security_audit
 from daimon.core.stores.agent_owners import ForeignOwnerError as ForeignOwnerError
+from daimon.core.stores.agent_owners import InactiveOwnerError as InactiveOwnerError
 from daimon.core.stores.identity import find_platform_principal
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -179,8 +180,9 @@ async def replace_agent_owners(
 
     An admin's change: a new owner is assigned, none clears it, co-owners are added
     and removed to match. Whether anything changed. Raises LookupError for an
-    account outside the tenant and `ForeignOwnerError` for a person from another
-    organisation.
+    account outside the tenant, `ForeignOwnerError` for a person from another
+    organisation and `InactiveOwnerError` for a new owner who is not an active
+    member; an owner who stays the same is not checked.
     """
     changed = False
     current = await agent_owners.owner_of(session, tenant_id, agent_id)
@@ -191,6 +193,8 @@ async def replace_agent_owners(
         else:
             if await agent_owners.has_foreign_principal(session, tenant_id, owner_account_id):
                 raise ForeignOwnerError("a person from another organisation cannot own an agent")
+            if await agent_owners.has_inactive_web_person(session, tenant_id, owner_account_id):
+                raise InactiveOwnerError("only an active member can own an agent")
             await agent_owners.set_owner(
                 session,
                 tenant_id=tenant_id,

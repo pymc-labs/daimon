@@ -106,6 +106,30 @@ async def test_an_inactive_member_cannot_be_made_the_owner(
 ) -> None:
     agents, owner, other = await agent_people(db_session)
     await make_admin(db_session_factory, other)
+    token = await sign_in_token(db_session_factory, other)
+    async with agent_client(agents, owner.tenant_id, db_session_factory, token) as client:
+        handed = await client.put(
+            "/api/agents/ag_w/owners", json={"owner": str(other.id), "co_owners": []}, headers=OWN
+        )
+    async with db_session_factory() as db, db.begin():
+        await db.execute(
+            update(WebPerson).where(WebPerson.id == owner.id).values(status="suspended")
+        )
+    async with agent_client(agents, owner.tenant_id, db_session_factory, token) as client:
+        put = await client.put(
+            "/api/agents/ag_w/owners",
+            json={"owner": str(owner.id), "co_owners": []},
+            headers=OWN,
+        )
+    assert handed.status_code == 204, handed.text
+    assert put.status_code == 422, "only an active member, as the options list"
+
+
+async def test_a_co_owner_only_save_keeps_a_suspended_recorded_owner(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    agents, owner, other = await agent_people(db_session)
+    await make_admin(db_session_factory, other)
     async with db_session_factory() as db, db.begin():
         await db.execute(
             update(WebPerson).where(WebPerson.id == owner.id).values(status="suspended")
@@ -113,6 +137,10 @@ async def test_an_inactive_member_cannot_be_made_the_owner(
     token = await sign_in_token(db_session_factory, other)
     async with agent_client(agents, owner.tenant_id, db_session_factory, token) as client:
         put = await client.put(
-            "/api/agents/ag_w/owners", json={"owner": str(owner.id), "co_owners": []}, headers=OWN
+            "/api/agents/ag_w/owners",
+            json={"owner": str(owner.id), "co_owners": [str(other.id)]},
+            headers=OWN,
         )
-    assert put.status_code == 422, "only an active member, as the options list"
+        agent = (await client.get("/api/agents/ag_w")).json()
+    assert put.status_code == 204, put.text
+    assert [p["name"] for p in agent["co_owners"]] == ["Other"], "the co-owner is saved"

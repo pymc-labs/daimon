@@ -82,6 +82,8 @@ async def set_owners(
         raise AgentEditError(
             "A person from another organisation cannot own an agent.", kind="invalid"
         ) from exc
+    except agent_ownership.InactiveOwnerError as exc:
+        raise AgentEditError("That person is not an active member.", kind="invalid") from exc
     return changed
 
 
