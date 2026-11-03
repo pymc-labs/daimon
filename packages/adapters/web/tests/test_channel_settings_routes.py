@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 from daimon.adapters.web import channels as channels_module
+from daimon.core import routine_service
+from daimon.core.routine_service import RoutineRefused
 from daimon.core.scope_cascade import CascadeMode, CascadeScope
 from daimon.core.stores.routines import create_routine
 from daimon.core.stores.switch_modes import set_switch_mode
@@ -125,6 +127,46 @@ async def test_a_thread_override_lists_and_clears(
     assert listed == [{"thread_id": "t1", "kind": "progress_plans", "value": "off"}]
     assert (cleared.status_code, again.status_code) == (200, 409)
     assert after == []
+
+
+async def test_a_members_drawer_opens_when_routines_cannot_be_checked(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def shown(
+        _runtime: object, *, channel_ids: Collection[str], **_: object
+    ) -> frozenset[str]:
+        return frozenset(channel_ids)
+
+    def refused(*_: object, **__: object) -> object:
+        raise RoutineRefused("not available")
+
+    monkeypatch.setattr(channels_module, "readable_channels", shown)
+    monkeypatch.setattr(routine_service, "isolation_view_loader", refused)
+    async with _channels(web_client, db_session_factory, tmp_path) as admin:
+        admin.as_member()
+        empty = await admin.client.get("/api/channels/c1/settings")
+        async with db_session_factory.begin() as db:
+            await create_routine(
+                db,
+                tenant_id=admin.ws.tenant_id,
+                created_by_user_id=str(admin.member.id),
+                agent_id=AGENT_ID,
+                agent_name=DEFAULT_AGENT_NAME,
+                cron_expr="0 9 * * *",
+                timezone_="UTC",
+                trigger_message="mine",
+                next_fire_at=datetime(2030, 1, 1, tzinfo=UTC),
+                destination_kind="channel",
+                destination_id="c1",
+                channel_id="c1",
+            )
+        refusal = await admin.client.get("/api/channels/c1/settings")
+
+    assert empty.status_code == 200 and empty.json()["routines"] == []
+    assert refusal.status_code == 200 and refusal.json()["routines"] == []
 
 
 async def test_a_member_reads_no_spend_or_budget_and_only_the_routines_they_may_list(

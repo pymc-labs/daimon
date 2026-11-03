@@ -54,7 +54,7 @@ from daimon.core.credit_views import recent_start
 from daimon.core.defaults.loader import load_platform_skills
 from daimon.core.defaults.metadata import MA_METADATA_KEY_CHANNEL_COPY
 from daimon.core.errors import SkillsListTruncatedError
-from daimon.core.routine_service import RoutineCaller
+from daimon.core.routine_service import RoutineCaller, RoutineRefused
 from daimon.core.scope_cascade import CascadeMode, CascadeScope, resolve_modes
 from daimon.core.stores import agent_tool_rules as tool_rules
 from daimon.core.stores.channel_changes import WORKSPACE_ID
@@ -261,15 +261,20 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
         caller: WebCaller, found: list[tuple[RoutineRow, RoutineRelation]]
     ) -> list[tuple[RoutineRow, RoutineRelation]]:
         """The routines a member may list in `routine_service.list_routines`, no others."""
+        if not found:
+            return []
         client = runtime.anthropic or (runtime.turns.deps.anthropic if runtime.turns else None)
         if client is None:
-            raise HTTPException(503, "Routines are not available right now.")
+            return []
         tenant_id = caller.person.tenant_id
         async with runtime.sessionmaker() as db:
             principal = await caller.principal(db)
-        view = await routine_service.isolation_view_loader(
-            runtime.sessionmaker, client, tenant_id
-        )()
+        try:
+            view = await routine_service.isolation_view_loader(
+                runtime.sessionmaker, client, tenant_id
+            )()
+        except RoutineRefused:
+            return []
         acting = RoutineCaller(
             tenant_id=tenant_id, subject=principal.subject, platform=principal.platform
         )
