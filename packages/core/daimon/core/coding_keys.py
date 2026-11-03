@@ -19,7 +19,7 @@ from typing import Literal
 
 from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError
 from daimon.core.agent_ownership import account_owns_agent
-from daimon.core.agent_target import ChangeRecorder, load_target
+from daimon.core.agent_target import ChangeRecorder, load_target, require_setup
 from daimon.core.agent_view import people_by_account
 from daimon.core.authz import build_agent_ref
 from daimon.core.mcp_auth import (
@@ -242,6 +242,7 @@ async def mint_coding_key(
     first call is not worth showing. The key acts as the actor.
     """
     target = await load_target(deps, actor=actor, ma_agent_id=ma_agent_id)
+    require_setup(target, "Coding keys")
     async with deps.session_factory() as session:
         policy = await load_access_policy(session, tenant_id=actor.tenant_id)
         standing = await holds_coding_key_standing(
@@ -295,6 +296,7 @@ async def list_agent_coding_keys(
 ) -> list[CodingKeyEntry]:
     """The coding keys of this agent the actor may see: all for an admin, their own for an owner."""
     target = await load_target(deps, actor=actor, ma_agent_id=ma_agent_id)
+    require_setup(target, "Coding keys")
     access = coding_key_access(is_admin=actor.subject.is_admin, owns_agent=target.owned)
     if access is None:
         return []

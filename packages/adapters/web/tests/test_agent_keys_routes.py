@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 
 from daimon.core.config import Settings
+from daimon.core.defaults.metadata import MA_METADATA_KEY_SETUP_HIDDEN
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores import web_audit
 from daimon.core.stores.agent_files import list_agent_files
@@ -213,7 +214,21 @@ async def test_a_member_sees_no_coding_keys_and_revokes_none(
         listed = await client.get("/api/agents/ag_w/coding-keys")
         revoked = await client.delete(f"/api/agents/ag_w/coding-keys/{key_id}", headers=OWN)
         minted = await client.post("/api/agents/ag_w/coding-keys", headers=OWN)
-    assert listed.json() == [], "someone who is not an owner sees none"
+    assert listed.status_code == 403, "someone who is not an owner may not list them"
     assert revoked.status_code == 404, "and cannot revoke the owner's key"
     assert minted.status_code in (403, 503), "and cannot make one"
     assert uuid.UUID(key_id), "the key id is a uuid"
+
+
+async def test_an_owner_of_a_hidden_setup_copy_cannot_make_or_list_coding_keys(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    agents, owner, _other = await agent_people(db_session)
+    agents.agent.metadata[MA_METADATA_KEY_SETUP_HIDDEN] = "true"
+    token = await sign_in_token(db_session_factory, owner)
+    async with agent_client(
+        agents, owner.tenant_id, db_session_factory, token, settings=_settings()
+    ) as client:
+        minted = await client.post("/api/agents/ag_w/coding-keys", headers=OWN)
+        listed = await client.get("/api/agents/ag_w/coding-keys")
+    assert (minted.status_code, listed.status_code) == (403, 403), "the setup is hidden from them"
