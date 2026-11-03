@@ -1,7 +1,7 @@
 """Exercise the canonical migration chain through real Alembic and PostgreSQL.
 
 Main's branch (0132..0158) and the preview branch (0134..0167) both descend from
-0131_usage_obs_tenant_idx; 0168 joins them and 0169 is the single head. The ORM
+0131_usage_obs_tenant_idx; 0168 joins them and the last of the linear tail 0169..0174 is the single head. The ORM
 describes the head, so below the merge the preview branch is compared without
 the objects main's branch changes.
 """
@@ -128,7 +128,15 @@ PREVIEW_HEAD = "0167_cost_footer"
 MERGE = "0168_merge_main_preview"
 
 
-HEAD = "0169_continuation_reasons"
+# Linear, oldest first; the first sits on MERGE and the last is the single head.
+TAIL = (
+    "0169_continuation_reasons",
+    "0170_channel_changes",
+    "0171_fold_caps_into_allowances",
+    "0172_channel_settings",
+    "0174_drop_channel_admins",
+)
+HEAD = TAIL[-1]
 
 
 # Main's branch after MAIN_HEAD, oldest first; it ends at one parent of MERGE.
@@ -215,7 +223,7 @@ CHAIN = [
 
 
 # Heads at which every compared table and column exists.
-TOP = (PREVIEW_HEAD, HEAD)
+TOP = (PREVIEW_HEAD, *TAIL)
 
 
 SANDBOX_COLUMNS = {
@@ -358,6 +366,17 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             and expected not in TOP
         ):
             return False
+        # Added by the channel settings migration (0172), after PREVIEW_HEAD.
+        if expected not in TAIL and (
+            (kind == "column" and name == "made_in_channel_id")
+            or (kind == "index" and name == "ix_progress_plan_scopes_parent")
+            or (
+                kind == "column"
+                and name == "parent_id"
+                and getattr(getattr(obj, "table", None), "name", None) == "progress_plan_scopes"
+            )
+        ):
+            return False
         if (
             kind == "unique_constraint"
             and name in {"uq_routines_tenant_source_id", "uq_routines_tenant_internal_id"}
@@ -437,8 +456,12 @@ def test_authoritative_chain() -> None:
             assert node is not None and node.down_revision == parent
             assert Path(node.path).stem == revision
             parent = revision
-    head = script.get_revision(HEAD)
-    assert head is not None and head.down_revision == MERGE
+    parent = MERGE
+    for revision in TAIL:
+        node = script.get_revision(revision)
+        assert node is not None and node.down_revision == parent
+        assert Path(node.path).stem == revision
+        parent = revision
     merge = script.get_revision(MERGE)
     assert merge is not None
     assert set(merge.down_revision or ()) == {MAIN_BRANCH[-1], PREVIEW_HEAD}
