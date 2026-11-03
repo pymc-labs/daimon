@@ -388,8 +388,11 @@ def test_handoff_block_carries_identity_files_and_the_demonstration_instruction(
         "files": ["HANDOFF.md", "churn.ipynb"],
         "not_carried": ["the running notebook kernel"],
     }, "the receiving agent is told who handed over what, and what did not come"
-    assert "at least one file listed in handoff.files" in rendered, (
-        "the first reply has to demonstrate the handoff against real state"
+    assert "don't announce the hand-over or list what came across" in rendered, (
+        "the person pressed Hand over, so the reply goes straight to the work"
+    )
+    assert "If a file listed in handoff.files is missing, say which" in rendered, (
+        "a missing file is still reported"
     )
     assert "Never claim a running process, notebook kernel or shell survived" in rendered, (
         "process survival is never promised"

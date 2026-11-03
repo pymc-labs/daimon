@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- After **Hand over**, the new agent's first reply goes straight to the person's request. Before, it opened by naming the work in progress and the files that came across. It still says when a file it needs is missing or when something could not be carried over.
+
 - On a self-hosted harness, when an MCP server's tool returns an error, the agent now sees the server's error message and can act on it, for example by calling the step it says is missing. Before, the agent saw only "Tool failed: ValueError". The result is still marked as an error, and credentials in it are still redacted.
 
 - Upgrading through `0142_watches` works when the migrator is not a superuser, as on Cloud SQL and other managed Postgres 16 and later. It failed with "must be able to SET ROLE daimon_watch_ingress_owner", because such a migrator only administers the roles it creates. The migration now grants the migrator that role first.

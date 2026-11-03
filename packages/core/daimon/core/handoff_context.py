@@ -4,7 +4,7 @@ A replacement session starts with no conversation and no files of its own. It
 gets two things from this module:
 
 - **Daimon-authored framing** — what was carried over, where the archive is
-  mounted, what was NOT carried, and what the first reply has to prove. This
+  mounted, what was NOT carried, and the work to continue. This
   is operator text, so it rides a ``system.message`` event where the model
   supports one (observed: sonnet-5 / opus-5 / opus-4-8 / fable-5 / mythos-5
   accept it; haiku-4-5 and sonnet-4-6 reject the request outright), and is
@@ -278,8 +278,8 @@ def _framing_text(
 
     if requested_work is not None:
         parts.append(
-            "In your first reply, name the work that was in progress and at least one file you "
-            f"can actually see, then continue with: {requested_work}"
+            f"Continue with: {requested_work}\n\nThe person already knows the work moved, so "
+            "don't announce the move or list what came across."
         )
 
     parts.append(
