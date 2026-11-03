@@ -2,7 +2,7 @@ import { useState } from "react"
 
 import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { useAgents, useCatalog } from "@/modules/agents/api"
+import { useAgent, useAgents } from "@/modules/agents/api"
 import { PanelSection } from "@/modules/admin/shared"
 import { useSave, type Outcome } from "./api"
 import { RULES, SCOPES, toolRuleChange } from "./lib"
@@ -29,14 +29,15 @@ const SCOPE_OPTIONS = Object.entries(SCOPES).map(([value, label]) => ({ value: v
 export function ToolRules({ c, s }: { c: ChannelDetail; s: ChannelSettings }) {
   const save = useSave(c.id)
   const { data: agents = [] } = useAgents()
-  const { data: catalog } = useCatalog()
   const [out, setOut] = useState<Outcome | null>(null)
   const [draft, setDraft] = useState<{ agent: string; tool: string; rule: Rule | ""; scope: Scope }>({ agent: "", tool: "", rule: "", scope: "chat" })
+  const picked = useAgent(agents.find((a) => a.name === draft.agent)?.id ?? "")
+  const toolOptions = (picked.data?.mcp_servers ?? []).flatMap((m) => m.tools.map((t) => ({ value: `${m.key}/${t.name}`, label: `${m.name} / ${t.name}` })))
   const { editable, rules } = s.tool_rules
   const edit = c.can_manage && editable
   if (!c.can_manage && !rules.length) return null
 
-  const toolLabel = (key: string) => catalog?.tools.find((t) => t.name === key)?.label ?? key
+  const toolLabel = (key: string) => key.replace("/", " / ")
   const apply = async (next: Pick<ToolRule, "agent" | "tool"> & { rule: ToolRule["rule"]; scope?: Scope }) => {
     const r = await save.run("put", "tool-rules", toolRuleChange(next, rules))
     setOut(r)
@@ -70,8 +71,8 @@ export function ToolRules({ c, s }: { c: ChannelDetail; s: ChannelSettings }) {
         {c.can_manage && !editable && <div className="text-xs text-muted-foreground">Read only</div>}
         {edit && (
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-[1fr_1fr_auto_auto]">
-            <Pick value={draft.agent} options={agents.map((a) => ({ value: a.name, label: a.name }))} label="Agent" onChange={(agent) => setDraft({ ...draft, agent })} />
-            <Pick value={draft.tool} options={(catalog?.tools ?? []).map((t) => ({ value: t.name, label: t.label }))} label="Tool" onChange={(tool) => setDraft({ ...draft, tool })} />
+            <Pick value={draft.agent} options={agents.map((a) => ({ value: a.name, label: a.name }))} label="Agent" onChange={(agent) => setDraft({ ...draft, agent, tool: "" })} />
+            <Pick value={draft.tool} options={toolOptions} label="Tool" disabled={!draft.agent} onChange={(tool) => setDraft({ ...draft, tool })} />
             <Pick value={draft.rule} options={RULE_OPTIONS} label="Rule" onChange={(rule) => setDraft({ ...draft, rule })} className="w-full sm:w-24" />
             <Button size="sm" className="max-sm:col-span-1" disabled={save.pending || !ready}
               onClick={() => void apply({ agent: draft.agent, tool: draft.tool, rule: draft.rule as Rule, scope: draft.scope }).then((ok) => ok && setDraft({ agent: "", tool: "", rule: "", scope: "chat" }))}>Add</Button>

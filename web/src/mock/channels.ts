@@ -53,8 +53,8 @@ const settingsOf = (c: Channel): ChannelSettings => ({
   progress_plans: sw("on", "workspace"),
   skills: c.id === "c_clv" ? [{ skill_id: "skill_pymc", name: "pymc-modeling" }, { skill_id: "skill_brief", name: "client-brief" }] : [],
   tool_rules: { editable: true, rules: c.id === "c_clv" ? [
-    { agent: "clv", tool: "web_search", rule: "ask", scope: "chat", revision: 2 },
-    { agent: "clv", tool: "send_email", rule: "deny", scope: "chat_and_routines", revision: 1 },
+    { agent: "clv", tool: "search/web_search", rule: "ask", scope: "chat", revision: 2 },
+    { agent: "clv", tool: "mail/send_email", rule: "deny", scope: "chat_and_routines", revision: 1 },
   ] : [] },
   provider_pin: c.id === "c_clv" ? { backend: "openai", model: "gpt-5", local: 3 } : null,
   channel_copy: c.id === "c_board" ? { name: "board-desk", agent_id: "agent_board" } : null,
