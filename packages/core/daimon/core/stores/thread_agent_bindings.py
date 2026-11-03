@@ -225,6 +225,27 @@ async def list_bound_parent_channel_ids(
     return list(ids.scalars())
 
 
+async def list_handoff_bindings(
+    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, parent_channel_id: str
+) -> list[ThreadAgentBindingRow]:
+    """Live hand-overs under a channel: threads answered by an agent handed to them."""
+    rows = (
+        await session.execute(
+            select(ThreadAgentBinding)
+            .where(
+                ThreadAgentBinding.tenant_id == tenant_id,
+                ThreadAgentBinding.platform == platform,
+                ThreadAgentBinding.parent_channel_id == parent_channel_id,
+                ThreadAgentBinding.kind == "handoff",
+                ThreadAgentBinding.archived.is_(False),
+                ThreadAgentBinding.deleted.is_(False),
+            )
+            .order_by(ThreadAgentBinding.thread_id)
+        )
+    ).scalars()
+    return [ThreadAgentBindingRow.model_validate(row) for row in rows]
+
+
 async def list_dm_bindings(
     session: AsyncSession, *, tenant_id: uuid.UUID
 ) -> list[tuple[str, str, str, str]]:

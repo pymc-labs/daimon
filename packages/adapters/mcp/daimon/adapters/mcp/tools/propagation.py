@@ -65,10 +65,10 @@ from daimon.core.scope import (
     merge,
 )
 from daimon.core.stores.access_policy import AccessPolicyUnreadable
+from daimon.core.stores.channel_changes import write_workspace_default
 from daimon.core.stores.domain import CHAT_PLATFORMS, ThreadAgentBindingRow
 from daimon.core.stores.github_connected_repos import agent_repo_summary
 from daimon.core.stores.scoped_config_read import get_scope
-from daimon.core.stores.scoped_config_write import set_fields, unset_fields
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_agent_bindings import get_binding, list_active_bindings
 from fastmcp import Context, FastMCP
@@ -187,16 +187,13 @@ async def _set_agent_default_impl(
         scope_label = "workspace"
         note_scope = space
         async with runtime.session_factory.begin() as session:
-            scope = TenantScopeRef(tenant_id=tenant_id)
-            prior = await get_scope(session, scope=scope)
-            prior_agent = prior.agent_name if prior is not None else None
-            await set_fields(
+            prior_agent = await write_workspace_default(
                 session,
-                scope=scope,
                 tenant_id=tenant_id,
+                platform=auth.platform or "",
                 agent_name=agent_name,
-                mode="agent",
                 actor_account_id=auth.account_id,
+                surface="chat",
                 set_by_admin=auth.is_admin and auth.agent_id is None,
             )
     # The agent answers in one more place, so its repos reach that place too.
@@ -243,19 +240,20 @@ async def _clear_agent_default_impl(
             raise channel_default_refusal(auth, exc, agent_name=None) from exc
         had_default = change.before is not None
     else:
-        scope = TenantScopeRef(tenant_id=auth.tenant_id)
         scope_label = "workspace"
         note_scope = space
         async with runtime.session_factory.begin() as session:
-            prior = await get_scope(session, scope=scope)
-            had_default = prior is not None and prior.agent_name is not None
-            if had_default:
-                await unset_fields(
+            had_default = (
+                await write_workspace_default(
                     session,
-                    scope=scope,
-                    fields=["agent_name"],
+                    tenant_id=auth.tenant_id,
+                    platform=auth.platform or "",
+                    agent_name=None,
                     actor_account_id=auth.account_id,
+                    surface="chat",
                 )
+                is not None
+            )
 
     return ClearDefaultResult(
         scope=scope_label,

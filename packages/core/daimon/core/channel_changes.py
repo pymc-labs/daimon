@@ -30,7 +30,7 @@ from daimon.core.channel_rules import (
 )
 from daimon.core.errors import DaimonError, StaleChannelValue
 from daimon.core.neutral_resources import NeutralResourceHost
-from daimon.core.permissions import ChannelRule, runs_only_in
+from daimon.core.permissions import ChannelRule, channel_rule, runs_only_in
 from daimon.core.rule_views import (
     BindingRefusal,
     binding_refusal,
@@ -116,6 +116,7 @@ def _budget_json(value: BudgetValue | None) -> JsonValue:
 
 
 NEEDS_ADMIN = "Only an admin can change this channel."
+CHOOSE_RELEASE_OR_KEEP = "Choose whether this channel's own agents keep their rule or are released."
 
 
 def require_channel_admin(actor: ChannelActor) -> None:
@@ -124,7 +125,7 @@ def require_channel_admin(actor: ChannelActor) -> None:
         raise ChannelChangeRefused(NEEDS_ADMIN, kind="forbidden")
 
 
-def _refused_binding(reason: BindingRefusal, agent_name: str | None) -> ChannelChangeRefused:
+def refused_binding(reason: BindingRefusal, agent_name: str | None) -> ChannelChangeRefused:
     return ChannelChangeRefused(
         f"{render_binding_refusal(reason, agent_name=agent_name)} Nothing was changed.",
         kind="invalid",
@@ -177,7 +178,7 @@ async def set_default_agent(
             raise StaleChannelValue("default_agent", current)
         refusal = binding_refusal(policy, agent_names=names, channel_id=channel_id)
         if refusal is not None:
-            raise _refused_binding(refusal, agent_name)
+            raise refused_binding(refusal, agent_name)
         prior = await write_channel_default(
             session,
             tenant_id=actor.tenant_id,
@@ -213,7 +214,7 @@ async def clear_default_agent(
             raise StaleChannelValue("default_agent", current)
         refusal = clear_refusal(policy, channel_id=channel_id)
         if refusal is not None:
-            raise _refused_binding(refusal, None)
+            raise refused_binding(refusal, None)
         prior = await write_channel_default(
             session,
             tenant_id=actor.tenant_id,
@@ -346,10 +347,21 @@ async def set_access(
     channel_label: str | None = None,
     public_url: str | None = None,
     release_agents: bool = False,
+    keep_rules: bool = False,
     resource_host: NeutralResourceHost | None = None,
 ) -> RuleChange:
     """Set who reads and who posts, with the own-agents copy and release steps
-    `set_channel_rule` runs; raises `ChannelRuleRefused` as it does."""
+    `set_channel_rule` runs; raises `ChannelRuleRefused` as it does.
+
+    Moving readers off own while agents run here alone needs a choice: `release_agents`
+    drops their rules, `keep_rules` keeps them; neither (or both) is refused."""
+    if release_agents and keep_rules:
+        raise ChannelChangeRefused(CHOOSE_RELEASE_OR_KEEP, kind="invalid", reason="choose")
+    if not release_agents and not keep_rules and readers not in (None, "own"):
+        async with sessionmaker() as session:
+            policy = await load_access_policy(session, tenant_id=actor.tenant_id)
+        if channel_rule(policy, channel_id).readers == "own" and runs_only_in(policy, channel_id):
+            raise ChannelChangeRefused(CHOOSE_RELEASE_OR_KEEP, kind="invalid", reason="choose")
     return await set_channel_rule(
         anthropic,
         sessionmaker,
