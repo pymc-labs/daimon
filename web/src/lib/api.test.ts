@@ -30,6 +30,13 @@ describe("refusal text", () => {
   })
 })
 
+describe("an answer with no body", () => {
+  it("is undefined, not a parse error", async () => {
+    fetchStub(() => new Response(null, { status: 204 }))
+    await expect(api.del("/api/integrations/tokens/t1")).resolves.toBeUndefined()
+  })
+})
+
 describe("stream", () => {
   it("passes each event and returns the last event id", async () => {
     fetchStub(() => events([{ type: "delta", text: "a" }, { type: "delta", text: "b" }]))
