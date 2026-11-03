@@ -28,6 +28,7 @@ async def create_invite(
     email: str = "",
     role: WebInviteRole = "visitor",
     credit_usd: Decimal = Decimal(0),
+    allow_files: bool = False,
     agent_ids: Sequence[str] = (),
     person_id: uuid.UUID | None = None,
     created_by_account_id: uuid.UUID | None = None,
@@ -39,6 +40,8 @@ async def create_invite(
         email=email,
         role=role,
         credit_usd=credit_usd,
+        # A member always may, so the setting is only ever stored for a visitor.
+        allow_files=allow_files and role == "visitor",
         person_id=person_id,
         created_by_account_id=created_by_account_id,
         expires_at=expires_at,
@@ -82,6 +85,40 @@ async def get_invite(
         select(WebInvite).where(WebInvite.id == invite_id, WebInvite.tenant_id == tenant_id)
     )
     return None if orm is None else (await _with_agents(session, [orm]))[0]
+
+
+async def set_allow_files(
+    session: AsyncSession, *, tenant_id: uuid.UUID, invite_id: uuid.UUID, allow: bool
+) -> WebInviteRow | None:
+    """Turn files on or off for a visitor invite, pending or accepted. None if there is none."""
+    orm = await session.scalar(
+        update(WebInvite)
+        .where(
+            WebInvite.id == invite_id,
+            WebInvite.tenant_id == tenant_id,
+            WebInvite.kind == "invite",
+            WebInvite.role == "visitor",
+            WebInvite.revoked_at.is_(None),
+        )
+        .values(allow_files=allow)
+        .returning(WebInvite)
+    )
+    return None if orm is None else (await _with_agents(session, [orm]))[0]
+
+
+async def invite_allows_files(
+    session: AsyncSession, *, tenant_id: uuid.UUID, invite_id: uuid.UUID
+) -> bool:
+    """Whether a live invite lets its visitor attach files; a missing or revoked one does not."""
+    return bool(
+        await session.scalar(
+            select(WebInvite.allow_files).where(
+                WebInvite.id == invite_id,
+                WebInvite.tenant_id == tenant_id,
+                WebInvite.revoked_at.is_(None),
+            )
+        )
+    )
 
 
 async def emails_by_id(

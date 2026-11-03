@@ -1,7 +1,7 @@
 """Exercise the canonical migration chain through real Alembic and PostgreSQL.
 
 Main's branch (0132..0158) and the preview branch (0134..0167) both descend from
-0131_usage_obs_tenant_idx; 0168 joins them and the last of the linear tail 0169..0176 is the single head. The ORM
+0131_usage_obs_tenant_idx; 0168 joins them and the last of the linear tail 0169..0177 is the single head. The ORM
 describes the head, so below the merge the preview branch is compared without
 the objects main's branch changes.
 """
@@ -138,6 +138,7 @@ TAIL = (
     "0174_drop_channel_admins",
     "0175_channel_name_status",
     "0176_routine_names",
+    "0177_invite_files",
 )
 HEAD = TAIL[-1]
 
@@ -390,6 +391,14 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             and kind == "column"
             and name == "name"
             and getattr(getattr(obj, "table", None), "name", None) == "routines"
+        ):
+            return False
+        # Added by the invite files migration (0177), the head.
+        if (
+            expected != HEAD
+            and kind == "column"
+            and name == "allow_files"
+            and getattr(getattr(obj, "table", None), "name", None) == "web_invites"
         ):
             return False
         if (

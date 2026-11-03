@@ -5474,6 +5474,8 @@ class WebInvite(Base):
     email: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
     role: Mapped[str] = mapped_column(Text, nullable=False, server_default="visitor")
     credit_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, server_default="0")
+    # Whether a visitor this invite brings in may attach files in web chat.
+    allow_files: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     # The person a sign-in link signs in.
     person_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("web_people.id", ondelete="CASCADE"), nullable=True

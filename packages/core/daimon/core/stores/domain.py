@@ -1609,6 +1609,7 @@ class WebInviteRow(BaseModel):
     email: str
     role: WebInviteRole
     credit_usd: Decimal
+    allow_files: bool
     person_id: uuid.UUID | None
     created_by_account_id: uuid.UUID | None
     created_at: datetime
