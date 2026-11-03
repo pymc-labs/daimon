@@ -8,7 +8,7 @@ import { Line, Notice } from "./shared"
 import type { ChannelDetail, ChannelSettings, ChannelSwitch } from "./types"
 
 const ROWS = [
-  { key: "participation", path: "participation", label: "Following threads" },
+  { key: "participation", path: "participation", label: "Joins threads" },
   { key: "progress_plans", path: "progress-plans", label: "Progress plans" },
 ] as const
 

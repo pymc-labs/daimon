@@ -121,7 +121,7 @@ export function Defaults() {
       <div className="grid grid-cols-2 gap-x-4 gap-y-3 lg:max-w-4xl lg:grid-cols-4">
         <AgentField d={d} {...p} />
         <SandboxField key={d.environment.value} d={d} {...p} />
-        <SwitchField label="Following threads" what="participation" s={d.participation} platform={d.platform} {...p} />
+        <SwitchField label="Joins threads" what="participation" s={d.participation} platform={d.platform} {...p} />
         <SwitchField label="Progress plans" what="progress_plans" s={d.progress_plans} platform={d.platform} {...p} />
       </div>
       <Notice out={out} />

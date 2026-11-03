@@ -58,7 +58,7 @@ export function ToolRules({ c, s }: { c: ChannelDetail; s: ChannelSettings }) {
                 {edit ? (
                   <div className="flex flex-wrap items-center gap-1.5">
                     <Pick value={r.rule ?? ""} options={RULE_OPTIONS} label="Rule" disabled={save.pending} className="w-24" onChange={(rule) => void apply({ ...r, rule })} />
-                    <Pick value={r.scope} options={SCOPE_OPTIONS} label="Applies to" disabled={save.pending} className="w-40" onChange={(scope) => void apply({ ...r, scope })} />
+                    <Pick value={r.scope} options={SCOPE_OPTIONS} label="Applies to" disabled={save.pending} className="w-44" onChange={(scope) => void apply({ ...r, scope })} />
                     <Button size="xs" variant="outline" disabled={save.pending} onClick={() => void apply({ ...r, rule: null })}>Clear</Button>
                   </div>
                 ) : <span className="text-muted-foreground">{r.rule ? RULES[r.rule] : "No rule"}, {SCOPES[r.scope].toLowerCase()}</span>}

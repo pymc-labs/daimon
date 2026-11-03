@@ -65,7 +65,7 @@ export function SpendBreakdown({ spend }: { spend: ChannelSettings["spend"] }) {
   return (
     <div className="mt-4 space-y-4">
       <div>
-        <h4 className="mb-1.5 text-xs font-medium text-muted-foreground">Last {spend.days} days</h4>
+        <h4 className="mb-1.5 text-xs font-medium text-muted-foreground">By day</h4>
         <Chart spend={spend} />
       </div>
       <Lines title="By agent" lines={spendLines(spend.by_agent, "No agent")} />

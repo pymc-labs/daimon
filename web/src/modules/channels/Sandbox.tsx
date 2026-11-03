@@ -30,7 +30,7 @@ export function Sandbox({ c }: { c: ChannelDetail }) {
     <PanelSection title="Sandbox">
       <div className="space-y-3 text-sm">
         {edit ? (
-          <Line label="Sandbox">
+          <Line label="Set here">
             <form className="flex flex-wrap items-center gap-2" onSubmit={(e) => { e.preventDefault(); if (draft.trim()) void run(draft.trim()) }}>
               <Input list={list} value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="Workspace default" aria-label="Sandbox" className="h-8 w-full max-w-52" />
               <datalist id={list}>{names.map((n) => <option key={n} value={n} />)}</datalist>
@@ -38,8 +38,8 @@ export function Sandbox({ c }: { c: ChannelDetail }) {
               {own && <Button size="sm" type="button" variant="outline" disabled={save.pending} onClick={() => void run(null)}>Use default</Button>}
             </form>
           </Line>
-        ) : <Line label="Sandbox"><span>{c.environment.value ?? "None"}</span></Line>}
-        <Line label="Applies">
+        ) : null}
+        <Line label={edit ? "Applies" : "Sandbox"}>
           <span className="flex flex-wrap items-center gap-1.5">
             <span>{c.environment.value ?? "None"}</span>{c.environment.source && <Tag>{SOURCE_LABELS[c.environment.source]}</Tag>}
           </span>
