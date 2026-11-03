@@ -14,6 +14,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { plural } from "@/lib/format"
 import { useCan, useMe } from "@/lib/hooks"
 import { useAgents } from "./api"
+import { LIBRARY_TABS } from "./library/tabs"
 import type { AgentSummary } from "./types"
 
 const RUNS: Record<AgentSummary["runs_in"][number], { label: string; icon: React.ReactNode }> = {
@@ -41,6 +42,7 @@ export function AgentList() {
   return (
     <Page
       crumbs={[{ label: "Agents" }]}
+      tabs={can("workspace.manage") ? LIBRARY_TABS : undefined}
       flush
       actions={can("agents.create") && <Button size="sm" asChild><Link to="/agents/new"><Plus />New agent</Link></Button>}
     >

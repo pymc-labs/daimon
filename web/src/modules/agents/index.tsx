@@ -7,6 +7,8 @@ import type { ModuleDef } from "../types"
 const AgentPage = lazyPage(() => import("./AgentPage"), "AgentPage")
 const AgentList = lazyPage(() => import("./List"), "AgentList")
 const NewAgent = lazyPage(() => import("./New"), "NewAgent")
+const Skills = lazyPage(() => import("./library/Skills"), "Skills")
+const Environments = lazyPage(() => import("./library/Environments"), "Environments")
 
 export const agents: ModuleDef = {
   key: "agents",
@@ -15,9 +17,11 @@ export const agents: ModuleDef = {
     <>
       <Route path="/agents" element={<AgentList />} />
       <Route path="/agents/new" element={<NewAgent />} />
+      <Route path="/agents/skills" element={<Skills />} />
+      <Route path="/agents/environments" element={<Environments />} />
       <Route path="/agents/:id" element={<AgentPage />} />
     </>
   ),
-  gates: [{ to: "/agents/new", cap: "agents.create" }],
+  gates: [{ to: "/agents/new", cap: "agents.create" }, { to: "/agents/skills", cap: "workspace.manage" }, { to: "/agents/environments", cap: "workspace.manage" }],
   actions: [{ label: "New agent", to: "/agents/new", icon: Plus, cap: "agents.create" }],
 }

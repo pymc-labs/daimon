@@ -187,3 +187,32 @@ export type CodingKey = { id: string; creator: string; created_at: string; expir
 
 /** A coding key as made: `token` appears here once. */
 export type MintedCodingKey = { id: string; token: string; command: string; config: string; expires_at: string }
+
+export type SkillUse = { kind: "agent" | "channel"; name: string }
+export type LibrarySkill = {
+  id: string; name: string; source: "custom" | "anthropic"; version: string; created_at: string
+  /** A skill the server ships. */
+  default: boolean
+  used_by: SkillUse[]
+}
+export type SkillVersion = { version: string; created_at: string }
+export type SyncedSkill = { name: string; action: "created" | "updated" | "skipped" | "failed"; detail: string | null }
+
+export const ECOSYSTEMS = ["pip", "npm", "apt", "cargo", "gem", "go"] as const
+export type Ecosystem = (typeof ECOSYSTEMS)[number]
+export type EnvironmentDoc = {
+  id: string; name: string; description: string; created_at: string
+  /** Read-only: a built-in agent runs in it. */
+  managed: boolean
+  cloud: boolean
+  network: "limited" | "unrestricted"
+  open_network: boolean
+  allowed_hosts: string[]
+  allow_package_managers: boolean
+  allow_mcp_servers: boolean
+  packages: Partial<Record<Ecosystem, string[]>>
+}
+export type EnvironmentInput = {
+  name: string; description: string; network: "limited" | "unrestricted"; allowed_hosts: string[]
+  allow_package_managers: boolean; allow_mcp_servers: boolean; packages: Partial<Record<Ecosystem, string[]>>
+}
