@@ -21,7 +21,9 @@ def derive_glyph(row: RoutineRow) -> Glyph:
         return "⏸"
     if row.last_fired_at is None:
         return "⏳"
-    if row.last_error is not None:
+    if row.last_error is not None or (
+        row.destination_kind == "dm" and row.delivery_status == "skipped"
+    ):
         return "❌"
     return "✅"
 
@@ -47,3 +49,40 @@ def can_manage_routine(row: RoutineRow, *, user_id: str | None, is_admin: bool) 
     ownerless routine is admin-only.
     """
     return is_admin or (user_id is not None and row.created_by_user_id == user_id)
+
+
+def mounts_personal_memory(row: RoutineRow) -> bool:
+    """Whether a headless fire mounts its owner's personal memory, read-only.
+
+    Only a routine whose result reaches nobody but its owner: no destination
+    and no channel. Decided from the row at each fire, so a destination added
+    later stops it at the next run. An owner-DM routine runs as a live DM turn
+    and gets personal memory there, not through this headless decision.
+    """
+    return row.destination_kind is None and row.destination_id is None and row.channel_id is None
+
+
+def has_private_output(row: RoutineRow) -> bool:
+    """DM results and destination-free runs, which mount personal memory."""
+    return row.destination_kind == "dm" or mounts_personal_memory(row)
+
+
+def can_read_routine_output(row: RoutineRow, *, user_id: str | None) -> bool:
+    """Private output requires an identified owner, including for admins."""
+    return not has_private_output(row) or (
+        user_id is not None and row.created_by_user_id == user_id
+    )
+
+
+def routine_for_reader(row: RoutineRow, *, user_id: str | None) -> RoutineRow:
+    """Keep management metadata while removing private previews and diagnostics."""
+    if can_read_routine_output(row, user_id=user_id):
+        return row
+    return row.model_copy(
+        update={
+            "last_result_tail": None,
+            "last_error": "Private routine run failed." if row.last_error is not None else None,
+            "delivery_payload": None,
+            "delivery_note": None,
+        }
+    )

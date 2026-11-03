@@ -77,6 +77,7 @@ from mux.drivers.anthropic.schemas import (
     mcp_permissions,
 )
 from mux.drivers.anthropic.sessions_lifecycle import (
+    SESSION_READS_NAMESPACE,
     AnthropicSessions,
     AnthropicWorkspaceTransfer,
     MemoryMount,
@@ -297,6 +298,7 @@ __all__ = [
     "ResourceWalk",
     "SecretResolver",
     "SessionCreateRequest",
+    "SESSION_READS_NAMESPACE",
     "SessionReads",
     "SessionResourceConfig",
     "SessionSend",

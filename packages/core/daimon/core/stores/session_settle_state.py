@@ -1,4 +1,5 @@
-"""Store for per-session settle state: pending settle requests and the backlog cutoff.
+"""Store for per-session settle state: pending settle requests, the backlog cutoff,
+and which turn an agent-chat send started (`unattended_turn`).
 
 Per `guideline:architecture`: this module does NOT swallow exceptions.
 """
@@ -164,3 +165,53 @@ async def touch_settle_request(session: AsyncSession, *, managed_session_id: str
         )
         .values(updated_at=func.now())
     )
+
+
+@dataclass(frozen=True)
+class UnattendedTurn:
+    """The latest turn an agent-chat send started on a session."""
+
+    turn_event_id: str
+    rules_channel_id: str | None
+
+
+async def record_unattended_turn(
+    session: AsyncSession,
+    *,
+    managed_session_id: str,
+    turn_event_id: str,
+    rules_channel_id: str | None,
+) -> None:
+    """Record, after its send was accepted, the turn agent chat just started."""
+    stmt = insert(SessionSettleState).values(
+        managed_session_id=managed_session_id,
+        unattended_turn_event_id=turn_event_id,
+        unattended_rules_channel_id=rules_channel_id,
+    )
+    await session.execute(
+        stmt.on_conflict_do_update(
+            index_elements=[SessionSettleState.managed_session_id],
+            set_={
+                "unattended_turn_event_id": stmt.excluded.unattended_turn_event_id,
+                "unattended_rules_channel_id": stmt.excluded.unattended_rules_channel_id,
+                "updated_at": func.now(),
+            },
+        )
+    )
+
+
+async def unattended_turn(
+    session: AsyncSession, *, managed_session_id: str
+) -> UnattendedTurn | None:
+    """The latest turn agent chat started on the session, if any."""
+    row = (
+        await session.execute(
+            select(
+                SessionSettleState.unattended_turn_event_id,
+                SessionSettleState.unattended_rules_channel_id,
+            ).where(SessionSettleState.managed_session_id == managed_session_id)
+        )
+    ).one_or_none()
+    if row is None or row[0] is None:
+        return None
+    return UnattendedTurn(turn_event_id=row[0], rules_channel_id=row[1])

@@ -487,6 +487,7 @@ async def run_wizard_submit_turn_observed(
         try:
             admission = await admit(
                 bot.runtime.turn_deps,
+                origin="chat",
                 tenant_id=row.tenant_id,
                 requester_org=RequesterOrg.HOST,
                 platform="discord",
@@ -550,6 +551,7 @@ async def run_wizard_submit_turn_observed(
                     )
                 )
             return
+        is_admin = admission.is_admin
 
         agent = admission.agent
         session_account_id = admission.account_id

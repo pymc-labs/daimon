@@ -48,6 +48,7 @@ from daimon.adapters.discord.thread_gone import ThreadStopped
 from daimon.core.agent_post_identity import fallback_name_prefix
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
+from daimon.core.cost_footer import cost_footer_shown
 from daimon.core.native_footer_cost import native_footer_text
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
@@ -55,6 +56,7 @@ from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.card_state import CardState as EmbedState
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
 from daimon.core.turn.notices import RefusalNouns, render_termination_notice
+from daimon.core.turn.output import OutputGate
 from daimon.core.turn.provider_events import ProviderDraft
 from daimon.core.turn.state import (
     ToolUseBlock,
@@ -349,7 +351,7 @@ def _without_adjacent_repeats(messages: list[str], previous: str | None) -> list
     return kept
 
 
-class DiscordTurnLifecycle:
+class DiscordTurnLifecycle(OutputGate):
     """TurnLifecycle implementation for Discord. Created fresh per turn.
 
     Receives SSE events, accumulates embed state, debounces Discord API calls.
@@ -415,7 +417,7 @@ class DiscordTurnLifecycle:
         self._notify_on_completion = notify_on_completion
         self._acknowledgment_managed = acknowledgment_managed
         self._render_tables = render_tables
-        self._send = send
+        self._send = self.guarded_output(send)
         self._request_id = request_id
         self._sessionmaker = sessionmaker
         self._tenant_id = tenant_id
@@ -424,8 +426,8 @@ class DiscordTurnLifecycle:
         self._alert_webhook_url = alert_webhook_url
         self._waiting_for_tenant_slot = waiting_for_tenant_slot
         self._queue_card_shown = False
-        self._edit = edit
-        self._urgent_edit = urgent_edit
+        self._edit = self.guarded_output(edit)
+        self._urgent_edit = self.guarded_output(urgent_edit) if urgent_edit is not None else None
         self._delete = delete
         # Nobody asked for an unprompted turn, so it stays invisible until it
         # has something to show: no up-front thinking embed, no "Turn
@@ -1103,26 +1105,33 @@ class DiscordTurnLifecycle:
         with the summary would show it twice until then, or for good if the delete fails.
         """
         if self._sessionmaker is not None and self._tenant_id is not None:
-            try:
-                async with self._sessionmaker() as session:
-                    footer = await balance_footer(
-                        session,
-                        tenant_id=self._tenant_id,
-                        platform="discord",
-                        budget_channel_id=self._budget_channel_id,
-                        now=datetime.now(UTC),
-                    )
-                if footer is not None:
-                    self._state = dataclasses.replace(self._state, balance_str=footer)
-            except Exception:
-                log.warning("turn.balance_footer_failed", exc_info=True)
+            if not await cost_footer_shown(self._sessionmaker, tenant_id=self._tenant_id):
+                self._state = dataclasses.replace(self._state, footer_hidden=True)
+            else:
+                try:
+                    async with self._sessionmaker() as session:
+                        footer = await balance_footer(
+                            session,
+                            tenant_id=self._tenant_id,
+                            platform="discord",
+                            budget_channel_id=self._budget_channel_id,
+                            now=datetime.now(UTC),
+                        )
+                    if footer is not None:
+                        self._state = dataclasses.replace(self._state, balance_str=footer)
+                except Exception:
+                    log.warning("turn.balance_footer_failed", exc_info=True)
         self._terminal = True
         now = self._clock()
         data = to_embed_data(self._state, now=now)
-        self._terminal_embed = build_discord_embed(data)
+        # A finished turn with its footer hidden has no summary to carry: the
+        # answer goes up bare, as an empty embed would be refused.
+        self._terminal_embed = (
+            build_discord_embed(data) if data.footer or data.title or data.description else None
+        )
         embed = (
             self._terminal_embed
-            if summary_on_card
+            if summary_on_card and self._terminal_embed is not None
             else build_discord_embed(dataclasses.replace(data, footer=None, description="Done."))
         )
         if self._message_ref is None:
@@ -1237,6 +1246,13 @@ class DiscordTurnLifecycle:
             self._ended_before = self._discord_mark + 1
         else:
             self._ended_before = discord.utils.time_snowflake(datetime.now(UTC), high=True)
+
+    async def on_output_refused(self) -> None:
+        """End a refused watch locally without an unauthorized platform write."""
+        self._terminal = True
+        if self._cancel_view is not None:
+            self._cancel_view.stop()
+        self._mark_ended()
 
     async def on_terminal_success(self, state: TurnState) -> None:
         self._discord_mark = None  # only the terminal sends and edits close the window
@@ -1478,6 +1494,24 @@ class DiscordTurnLifecycle:
         if self._summary_ref is None:
             return None
         return AnswerMessage(message_id=self._summary_ref.id, edit=self._edit)
+
+    @property
+    def requester_id(self) -> int | None:
+        """The Discord user whose turn this is, when the turn has one."""
+        return self._requester_id
+
+    def files_reply_to(self, channel_id: int) -> int | None:
+        """The message in ``channel_id`` a file posted apart from the answer replies to.
+
+        The person's own message when it is there, so the reply shows who asked
+        and what; otherwise the answer. A mention that opened a thread sits in
+        the parent channel, and a reply cannot cross channels.
+        """
+        trigger = self._trigger_message
+        if trigger is not None and trigger.channel.id == channel_id:
+            return trigger.id
+        answer = self.answer_message
+        return answer.message_id if answer is not None else None
 
     @property
     def turn_window(self) -> tuple[int, int] | None:

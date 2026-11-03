@@ -12,7 +12,7 @@ from daimon.adapters.discord.agent_setup.github_embed_panel import (
     GitHubEmbedPanel as PanelViewBase,
 )
 from daimon.adapters.discord.agent_setup.state import PanelState
-from daimon.adapters.discord.checks import admin_caller, is_guild_admin
+from daimon.adapters.discord.checks import admin_caller, is_platform_admin
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_reach import load_target_facts
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
@@ -106,12 +106,12 @@ class GitHubReposView(PanelViewBase):
         if live_agent is None:
             return False
         managed = live_agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-        admin = is_guild_admin(interaction)  # pyright: ignore[reportArgumentType]
+        admin = is_platform_admin(interaction)  # pyright: ignore[reportArgumentType]
         async with self.runtime.sessionmaker() as session:
             account = await get_account(session, self.state.account_id)
             if account is None or account.tenant_id != tenant_id:
                 return False
-            caller = admin_caller(interaction.user).model_copy(update={"is_server_admin": admin})
+            caller = admin_caller(interaction.user)
             facts = (
                 await load_target_facts(
                     session,
@@ -156,7 +156,7 @@ async def mint_agent_connect_url(
     An admin's link promotes nobody. A person who is not an admin gets one only while
     they own the agent, read now; otherwise no link is minted (`ValueError`).
     """
-    admin = is_guild_admin(interaction)  # pyright: ignore[reportArgumentType]
+    admin = is_platform_admin(interaction)  # pyright: ignore[reportArgumentType]
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(state.guild_id))
     agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.ma_agent_id)
     live_agent = (
@@ -187,7 +187,7 @@ async def mint_agent_connect_url(
                 tenant_id=tenant_id,
                 platform="discord",
                 platform_user_id=str(interaction.user.id),
-                verified_tenant_admin=True,
+                is_platform_admin=True,
             )
         return await connect_link(
             session,

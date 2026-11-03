@@ -274,9 +274,19 @@ def test_session_tools_gate_third_party_toolsets_only() -> None:
     assert out[0] == _tools()[0]
     assert out[1] == _tools()[1] | {
         "configs": [
-            {"name": "add_skill", "enabled": True, "permission_policy": {"type": "always_ask"}}
+            {"name": name, "enabled": True, "permission_policy": {"type": "always_ask"}}
+            for name in (
+                "add_skill",
+                "create_watch",
+                "fly_extend_session",
+                "fly_launch_session",
+                "resume_watch",
+                "rotate_watch_key",
+                "start_long_job",
+                "update_watch",
+            )
         ]
-    }, "daimon's own toolset stays trusted, except the one tool that confirms"
+    }, "Daimon confirms skill installation and standing watch authority"
     assert out[2]["default_config"] == {"permission_policy": {"type": "always_ask"}}
     assert out[2]["configs"] == [
         {"name": "create_issue", "permission_policy": {"type": "always_ask"}}
@@ -405,8 +415,18 @@ def test_a_disabled_daimon_toolset_keeps_add_skill_disabled() -> None:
     out = session_tools_for_policy(_ON, stored, trusted_servers=frozenset({DAIMON_SERVER_NAME}))
     assert out is not None
     assert out[0]["configs"] == [
-        {"name": "add_skill", "enabled": False, "permission_policy": {"type": "always_ask"}}
-    ], "add_skill is not switched on"
+        {"name": name, "enabled": False, "permission_policy": {"type": "always_ask"}}
+        for name in (
+            "add_skill",
+            "create_watch",
+            "fly_extend_session",
+            "fly_launch_session",
+            "resume_watch",
+            "rotate_watch_key",
+            "start_long_job",
+            "update_watch",
+        )
+    ], "confirmation gates must not enable a disabled toolset"
 
 
 def test_publish_tools_ask_only_in_a_session_that_asks_before_publishing() -> None:
@@ -529,6 +549,14 @@ async def test_another_daimons_agent_ask_still_needs_approval(attended: bool) ->
     assert not result.allow
     if attended:
         card.assert_awaited_once()
+
+
+def test_an_empty_trusted_annotations_is_left_out_of_the_dump() -> None:
+    """Session snapshots and the MA goldens dump the policy; an empty list
+    must not appear there, a non-empty one must."""
+    assert "trusted_annotations" not in ToolSafetyPolicy(enabled=True).model_dump(mode="json")
+    dumped = ToolSafetyPolicy(enabled=True, trusted_annotations=("bridge",)).model_dump(mode="json")
+    assert dumped["trusted_annotations"] == ["bridge"]
 
 
 # --- agent tool rules on daimon's own tools -------------------------------------
@@ -720,7 +748,18 @@ def test_a_daimon_rule_makes_call_tool_and_the_named_tool_ask() -> None:
     daimon = out[1]
     assert daimon["default_config"] == {"permission_policy": {"type": "always_allow"}}
     asked = {c["name"] for c in daimon["configs"] if c["permission_policy"]["type"] == "always_ask"}
-    assert asked == {"add_skill", "call_tool", "hubspot_update_objects"}
+    assert asked == {
+        "add_skill",
+        "call_tool",
+        "hubspot_update_objects",
+        "create_watch",
+        "fly_extend_session",
+        "fly_launch_session",
+        "resume_watch",
+        "rotate_watch_key",
+        "start_long_job",
+        "update_watch",
+    }
     assert has_confirmation_gate(out, tool_name="call_tool")
     assert not has_confirmation_gate(out, tool_name="search_tools"), "search never asks"
     plain = session_tools_for_policy(_ON, _tools(), trusted_servers=_TRUSTED)
@@ -736,7 +775,18 @@ def test_a_rule_naming_a_confirmed_tool_does_not_duplicate_its_config() -> None:
     )
     assert out is not None
     names = [c["name"] for c in out[1]["configs"]]
-    assert sorted(names) == ["add_skill", "call_tool", "publish_report"]
+    assert sorted(names) == [
+        "add_skill",
+        "call_tool",
+        "create_watch",
+        "fly_extend_session",
+        "fly_launch_session",
+        "publish_report",
+        "resume_watch",
+        "rotate_watch_key",
+        "start_long_job",
+        "update_watch",
+    ]
 
 
 def test_daimon_rules_are_inert_for_session_tools_until_both_switches_are_on() -> None:
@@ -779,7 +829,17 @@ def test_the_daimon_wildcard_gates_the_proxy_but_never_gets_a_config_of_its_own(
         _RULES_ON, _tools(), trusted_servers=_TRUSTED, daimon_rule_tools=frozenset({"*"})
     )
     assert only is not None
-    assert sorted(c["name"] for c in only[1]["configs"]) == ["add_skill", "call_tool"]
+    assert sorted(c["name"] for c in only[1]["configs"]) == [
+        "add_skill",
+        "call_tool",
+        "create_watch",
+        "fly_extend_session",
+        "fly_launch_session",
+        "resume_watch",
+        "rotate_watch_key",
+        "start_long_job",
+        "update_watch",
+    ]
     both = session_tools_for_policy(
         _RULES_ON,
         _tools(),
@@ -790,5 +850,109 @@ def test_the_daimon_wildcard_gates_the_proxy_but_never_gets_a_config_of_its_own(
     assert sorted(c["name"] for c in both[1]["configs"]) == [
         "add_skill",
         "call_tool",
+        "create_watch",
+        "fly_extend_session",
+        "fly_launch_session",
         "get_session",
+        "resume_watch",
+        "rotate_watch_key",
+        "start_long_job",
+        "update_watch",
     ]
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        ToolSafetyPolicy(enabled=True, unattended_writes=("linear/bridge",)),
+        ToolSafetyPolicy(enabled=True, unattended_writes=("linear/bridge/get_issue",)),
+        ToolSafetyPolicy(enabled=True, unattended_writes=("*",)),
+        ToolSafetyPolicy(enabled=True, effects={"linear/bridge": "read"}),
+        ToolSafetyPolicy(enabled=True, effects={"linear/bridge/get_issue": "read"}),
+        ToolSafetyPolicy(enabled=True),
+    ],
+    ids=["server_key", "tool_key", "any_key", "server_effect", "tool_effect", "read_name"],
+)
+@pytest.mark.parametrize(
+    "rule",
+    [None, ResolvedAgentToolRule(rule="allow", scope="chat_and_routines")],
+    ids=["no_rule", "allow_rule"],
+)
+def test_a_server_name_with_a_slash_is_never_allowed(
+    policy: ToolSafetyPolicy, rule: ResolvedAgentToolRule | None
+) -> None:
+    """`linear/bridge/get_issue` could be linear's `bridge/get_issue`; no key is trusted."""
+    call = _call("linear/bridge", "get_issue")
+    chat = decide_tool_call(policy, call, attended=True, agent_rule=rule)
+    unattended = decide_tool_call(policy, call, attended=False, agent_rule=rule)
+    assert (chat.outcome, chat.effect) == ("ask", "write")
+    assert (unattended.outcome, unattended.reason) == ("deny", "unattended_write")
+
+
+def test_a_server_name_with_a_slash_still_meets_the_deny_list() -> None:
+    policy = ToolSafetyPolicy(enabled=True, denied=("linear/bridge",))
+    for attended in (True, False):
+        verdict = decide_tool_call(policy, _call("linear/bridge", "get_issue"), attended=attended)
+        assert (verdict.outcome, verdict.reason) == ("deny", "denied_by_operator")
+
+
+@pytest.mark.parametrize("name", ["linear/bridge", "/", "linear/"])
+def test_server_names_with_a_slash_are_rejected(name: str) -> None:
+    from daimon.core.tool_safety import get_mcp_server_name_rejection
+
+    rejection = get_mcp_server_name_rejection(name)
+    assert rejection is not None and name in rejection
+    assert get_mcp_server_name_rejection("linear-bridge") is None
+
+
+@pytest.mark.parametrize("overrides", [False, True])
+@pytest.mark.parametrize("tool", ["set_branch_protection_rule", "configure_admin_panel"])
+@pytest.mark.parametrize(
+    ("authority", "effect", "reason"),
+    [
+        ("annotation", "read", "read"),
+        ("operator", "read", "read"),
+        ("agent", "write", "agent_rule_allow"),
+        ("combined", "read", "agent_rule_allow"),
+    ],
+)
+def test_protected_names_preserve_existing_decisions_without_deployment_opt_in(
+    overrides: bool, tool: str, authority: str, effect: str, reason: str
+) -> None:
+    rule = ResolvedAgentToolRule(rule="allow") if authority in {"agent", "combined"} else None
+    verdict = decide_tool_call(
+        ToolSafetyPolicy(
+            enabled=True,
+            allow_gate_overrides=overrides,
+            agent_rules=rule is not None,
+            effects={"third-party": "read"} if authority == "operator" else {},
+        ),
+        _call("third-party", tool),
+        attended=True,
+        annotations=ToolAnnotations(read_only_hint=True)
+        if authority in {"annotation", "combined"}
+        else None,
+        agent_rule=rule,
+    )
+    assert (verdict.outcome, verdict.effect, verdict.reason) == (
+        ("ask", "write", "protected_tool_name") if overrides else ("allow", effect, reason)
+    )
+
+
+@pytest.mark.parametrize(
+    "tool,arguments,expected",
+    [
+        ("fly_launch_session", {"template": "mmm"}, "ask"),
+        ("fly_extend_session", {"hours": 24}, "ask"),
+        ("fly_run_bash", {"command": "true"}, "allow"),
+        ("fly_write_file", {"content": "input"}, "allow"),
+    ],
+)
+def test_fly_only_lease_actions_force_a_card(tool, arguments, expected):
+    call = ToolCall(
+        tool_use_id="fly", server_name=DAIMON_SERVER_NAME, tool_name=tool, input=arguments
+    )
+    verdict = decide_tool_call(
+        _ON, call, attended=True, trusted_servers=frozenset({DAIMON_SERVER_NAME})
+    )
+    assert verdict.outcome == expected

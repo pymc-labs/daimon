@@ -33,7 +33,8 @@ import structlog
 from anthropic import APIError, APIStatusError
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from daimon.core import channel_backend
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import TenantAccessPolicy, agent_invoker_roles
+from daimon.core.approval_gate import ApprovalGate, resolve_approval_gate
 from daimon.core.authz import (
     Action,
     AgentRef,
@@ -55,6 +56,7 @@ from daimon.core.channel_backend import (
 from daimon.core.channel_backend import log_backend_unsupported as _log_backend_unsupported
 from daimon.core.channel_budget_notice import spawn_budget_notice
 from daimon.core.channel_skills import turn_channel_skills, turn_platform_skills
+from daimon.core.config import DirectMessagePolicy
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.ma_identity import derive_agent_uuid
@@ -65,6 +67,7 @@ from daimon.core.ma_resolver import (
     retrieve_agent_cached,
     retrieve_environment_cached,
 )
+from daimon.core.membership_subject import resolve_subject, resolve_subject_authority
 from daimon.core.permissions import (
     agent_permissions,
     at_home,
@@ -99,6 +102,7 @@ from daimon.core.stores.scoped_config_read import resolve as resolve_config
 from daimon.core.stores.scoped_config_write import clear_agent_references
 from daimon.core.stores.shared_channels import is_channel_shared, mark_channel_shared
 from daimon.core.stores.thread_sessions import get_thread_session_at
+from daimon.core.thread_models import apply_thread_model, conversation_key
 from daimon.core.thread_release import apply_thread_release, release_due, release_now
 from daimon.core.turn.approvals import daimon_rule_set_for
 from daimon.core.turn.deps import TurnDeps
@@ -173,6 +177,9 @@ class AdmissionGrant:
     channel_id: str
     thread_id: str | None
     is_dm: bool
+    cold_dm: bool = False
+    act_for_creator: bool = False
+    human_invocation: bool = False
     # Set by the DM path: the conversation's source, whose seal is re-checked.
     dm_source: DmSource | None = None
     # The channel the turn is held to; every question asked again carries it, so
@@ -270,6 +277,8 @@ class Admission:
     # The turn's agent may not publish freely (`AgentPermissions.publishes`): its
     # session's publish tools wait for the requester's Approve on a card.
     asks_before_publishing: bool = False
+    # The decider changes; the provider session keeps the same approval pauses.
+    approval_gate: ApprovalGate | None = field(default=None, compare=False)
     # Daimon tools this agent has an ask or deny rule on, read when the turn is
     # admitted (empty while rules are off): their session tools wait for the
     # driver's decision, so the set is part of the tools the session is bound to.
@@ -315,6 +324,8 @@ class Admission:
     # What admission was decided on; `reauthorize` decides it again at the
     # moment the session is built. None only for hand-built test admissions.
     grant: AdmissionGrant | None = field(default=None, compare=False, repr=False)
+    is_platform_admin: bool = False
+    effective_is_admin: bool | None = None
     observation: TurnObservation | None = field(default=None, compare=False, repr=False)
     # The channel's backend configuration and its admission, when the channel
     # has one and `DAIMON_TURN__CHANNEL_BACKENDS` is on; None otherwise.
@@ -340,6 +351,19 @@ class Admission:
     backend_agent_revision: AgentBackendRevision | None = field(
         default=None, compare=False, repr=False
     )
+    # The model this conversation's people chose (`daimon.core.thread_models`),
+    # already in `agent`; the session is created with it. None runs the agent's own.
+    model_override: str | None = None
+    # A choice was kept but can't run here, so this turn runs the agent's own
+    # model and says so.
+    model_fell_back: bool = False
+
+    @property
+    def is_admin(self) -> bool:
+        """The effective authority admitted for this turn; absent evidence denies."""
+        if self.effective_is_admin is not None:
+            return self.effective_is_admin
+        return self.grant is not None and self.grant.subject.is_admin
 
     def __post_init__(self) -> None:
         if self.backend_revision is not None and self.backend_revision_origin not in (
@@ -440,14 +464,20 @@ async def admit(
     now: datetime,
     thread_id: str | None = None,
     role: Role | None = None,
+    role_ids: tuple[str, ...] = (),
+    verified_membership: bool | None = None,
     is_dm: bool = False,
     dm_source_channel_id: str | None = None,
+    dm_agent_name: str | None = None,
+    cold_dm: bool = False,
     category_id: str | None = None,
     category_unresolved: bool = False,
     observer: AdmissionObserver | None = None,
     requester_org: RequesterOrg,
     requester_home_id: str | None = None,
     channel_shared: bool | None = None,
+    origin: str,
+    attended: bool | None = None,
     spend_person: SpendPerson | None = None,
     surface: Surface | None = None,
     principal_platform: str | None = None,
@@ -480,13 +510,19 @@ async def admit(
                 now=now,
                 thread_id=thread_id,
                 role=role,
+                role_ids=role_ids,
+                verified_membership=verified_membership,
                 is_dm=is_dm,
                 dm_source_channel_id=dm_source_channel_id,
+                dm_agent_name=dm_agent_name,
+                cold_dm=cold_dm,
                 category_id=category_id,
                 category_unresolved=category_unresolved,
                 requester_org=requester_org,
                 requester_home_id=requester_home_id,
                 channel_shared=channel_shared,
+                origin=origin,
+                attended=attended,
                 spend_person=spend_person,
                 surface=surface,
                 principal_platform=principal_platform,
@@ -546,13 +582,19 @@ async def admit_impl(
     now: datetime,
     thread_id: str | None = None,
     role: Role | None = None,
+    role_ids: tuple[str, ...] = (),
+    verified_membership: bool | None = None,
     is_dm: bool = False,
     dm_source_channel_id: str | None = None,
+    dm_agent_name: str | None = None,
+    cold_dm: bool = False,
     category_id: str | None = None,
     category_unresolved: bool = False,
     requester_org: RequesterOrg,
     requester_home_id: str | None = None,
     channel_shared: bool | None = None,
+    origin: str,
+    attended: bool | None = None,
     spend_person: SpendPerson | None = None,
     surface: Surface | None = None,
     principal_platform: str | None = None,
@@ -575,13 +617,19 @@ async def admit_impl(
         now=now,
         thread_id=thread_id,
         role=role,
+        role_ids=role_ids,
+        verified_membership=verified_membership,
         is_dm=is_dm,
         dm_source_channel_id=dm_source_channel_id,
+        dm_agent_name=dm_agent_name,
+        cold_dm=cold_dm,
         category_id=category_id,
         category_unresolved=category_unresolved,
         requester_org=requester_org,
         requester_home_id=requester_home_id,
         channel_shared=channel_shared,
+        origin=origin,
+        attended=attended,
         spend_person=spend_person,
         surface=surface,
         principal_platform=principal_platform,
@@ -606,13 +654,19 @@ async def _admit_gates(
     now: datetime,
     thread_id: str | None = None,
     role: Role | None = None,
+    role_ids: tuple[str, ...] = (),
+    verified_membership: bool | None = None,
     is_dm: bool = False,
     dm_source_channel_id: str | None = None,
+    dm_agent_name: str | None = None,
+    cold_dm: bool = False,
     category_id: str | None = None,
     category_unresolved: bool = False,
     requester_org: RequesterOrg,
     requester_home_id: str | None = None,
     channel_shared: bool | None = None,
+    origin: str,
+    attended: bool | None = None,
     spend_person: SpendPerson | None = None,
     surface: Surface | None = None,
     principal_platform: str | None = None,
@@ -689,15 +743,63 @@ async def _admit_gates(
         # Read after the role commit, so a refused turn still records the role.
         policy = await load_access_policy(session, tenant_id=tenant_id)
         mark("policy_and_admins")
+        from daimon.core.native_admins import is_daimon_admin
 
-        # Refusals must happen before config is read. Keeping the session here
-        # reuses its connection for the config cascade after authorization.
-        # A held turn has no admin exemption anywhere in admission.
-        subject = build_subject(
-            is_admin=role is Role.ADMIN and hold is None,
+        platform_admin = role is Role.ADMIN and not client
+        admin = await is_daimon_admin(
+            session,
+            tenant_id=tenant_id,
+            platform=platform,
             platform_user_id=external_user_id,
-            client=client,
+            is_platform_admin=platform_admin,
+            role_ids=role_ids,
         )
+        subject = build_subject(
+            is_admin=admin and hold is None,
+            client=client,
+            platform_user_id=external_user_id,
+            role_ids=role_ids,
+            verified_membership=verified_membership,
+        )
+        if (
+            platform == "discord"
+            and (is_dm or verified_membership is None)
+            and (is_dm or policy.invoker_role_ids or deps.membership_resolver is not None)
+        ):
+            subject, platform_admin = await resolve_subject_authority(
+                deps.sessionmaker,
+                deps.membership_resolver,
+                tenant_id=tenant_id,
+                user_id=external_user_id,
+                require_fresh=is_dm,
+                session=session,
+            )
+        platform_admin = platform_admin and not client
+        effective_admin = subject.is_admin and hold is None and not client
+        # Turn admission is not a delegated configuration action. Preserve the
+        # effective verdict for the UI without granting runtime exemptions.
+        subject = replace(subject, is_admin=platform_admin and hold is None, client=client)
+        # Stored authority belongs only to live platform admins. A grant affects
+        # this subject, never the hub's account/transcript admin exception.
+        if role is not None and requester_org is RequesterOrg.HOST:
+            await set_role(
+                session, principal.account_id, Role.ADMIN if platform_admin else Role.USER
+            )
+        await session.commit()
+        if (
+            platform == "discord"
+            and (
+                (
+                    verified_membership is None
+                    and (policy.invoker_role_ids or deps.membership_resolver is not None)
+                )
+                or is_dm
+            )
+            and subject.verified_membership is not True
+        ):
+            raise AdmissionDenied(reason="invoker_not_allowed")
+        if hold is not None:
+            subject = replace(subject, is_admin=False, client=client)
         turn_place = build_turn_place(
             channel_id=channel_id,
             thread_id=thread_id,
@@ -718,6 +820,12 @@ async def _admit_gates(
             thread_id=thread_id,
         )
         config = await resolve_config(session, context=scope, default=deps.deployment_default)
+        if dm_agent_name is not None:
+            if not is_dm or thread_id is not None:
+                raise ValueError("A cold DM agent override requires a fresh private scope")
+            config = config.model_copy(
+                update={"agent_name": dm_agent_name, "responder_ma_agent_id": None}
+            )
         # Feature-disabled turns retain the existing channel read and skip all
         # agent preference, materialization and thread-pinning work.
         channel = channel_ref(tenant_id, platform, channel_id) if deps.channel_backends else None
@@ -934,6 +1042,8 @@ async def _admit_gates(
     else:
 
         async def _apply() -> object:
+            if dm_agent_name is not None:
+                return None
             return await reconcile_tenant_defaults(
                 deps.anthropic,
                 deps.sessionmaker,
@@ -1035,9 +1145,12 @@ async def _admit_gates(
     # only in a DM, where the reply reaches no one else; in a channel or
     # thread other members would see it, so the pin holds for them too. The
     # role is the adapter's live one, never a stored role. ---
+    from daimon.core.turn.invocation import human_invocation
+
     grant = AdmissionGrant(
         tenant_id=tenant_id,
         subject=subject,
+        human_invocation=human_invocation(origin, attended),
         surface=surface or (Surface.DM if is_dm else Surface.CHANNEL),
         turn_place=turn_place,
         agent=build_agent_ref(agent.name, agent.metadata, config.agent_name),
@@ -1050,9 +1163,23 @@ async def _admit_gates(
         channel_id=channel_id,
         thread_id=thread_id,
         is_dm=is_dm,
-        hold=hold,
         platform=platform,
+        cold_dm=cold_dm or dm_agent_name is not None,
+        hold=hold,
     )
+    if agent_invoker_roles(policy, grant.agent.names):
+        # Role gates always use fresh registered Discord membership, including
+        # bound threads and routing/default changes discovered after selection.
+        subject = await resolve_subject(
+            deps.sessionmaker,
+            deps.membership_resolver,
+            tenant_id=tenant_id,
+            user_id=external_user_id,
+            require_fresh=True,
+        )
+        if hold is not None:
+            subject = replace(subject, is_admin=False, client=hold.client)
+        grant = replace(grant, subject=subject)
     _require_run_agent(policy, grant)
     mark("agent_policy")
 
@@ -1092,6 +1219,8 @@ async def _admit_gates(
         from daimon.core.turn.runtimes import scope_channel_runtimes
 
         provisional = Admission(
+            is_platform_admin=platform_admin,
+            effective_is_admin=effective_admin,
             account_id=principal.account_id,
             agent=agent,
             environment=environment,
@@ -1099,6 +1228,7 @@ async def _admit_gates(
             grant=grant,
             memory_read_only=memory_read_only,
             asks_before_publishing=_asks_before_publishing(policy, grant),
+            approval_gate=_approval_gate_for(deps, policy, grant),
             daimon_rule_tools=daimon_rules.tools,
             daimon_rules_need_driver=daimon_rules.needs_driver,
             source_sealed=source_sealed,
@@ -1366,7 +1496,24 @@ async def _admit_gates(
     )
     channel_skills = (*platform_skills, *channel_skills)
 
+    # The model this conversation's people chose, read fresh for every turn.
+    async with deps.sessionmaker() as session:
+        thread_model = await apply_thread_model(
+            session,
+            agent=agent,
+            tenant_id=tenant_id,
+            platform=platform,
+            conversation_id=conversation_key(
+                channel_id=channel_id, thread_id=thread_id, is_dm=is_dm
+            ),
+            anthropic_backend=backend_revision is None or backend_revision.model is None,
+        )
+    agent = thread_model.agent
+    mark("thread_model")
+
     result = Admission(
+        is_platform_admin=platform_admin,
+        effective_is_admin=effective_admin,
         backend_revision=backend_revision,
         backend_revision_origin=backend_revision_origin,
         backend_counterpart=backend_counterpart,
@@ -1377,6 +1524,7 @@ async def _admit_gates(
         backend=backend,
         memory_read_only=memory_read_only,
         asks_before_publishing=_asks_before_publishing(policy, grant),
+        approval_gate=_approval_gate_for(deps, policy, grant),
         daimon_rule_tools=daimon_rules.tools,
         daimon_rules_need_driver=daimon_rules.needs_driver,
         source_sealed=source_sealed,
@@ -1398,6 +1546,8 @@ async def _admit_gates(
         channel_skills=channel_skills,
         platform_skill_ids=frozenset(skill.skill_id for skill in platform_skills),
         grant=grant,
+        model_override=thread_model.model_override,
+        model_fell_back=thread_model.fell_back,
     )
     if follow_generation is not None:
         # Admitted: this conversation follows its agent (M03), only if its slot is
@@ -1509,9 +1659,22 @@ def _require_turn_start(
 
 def _require_run_agent(policy: TenantAccessPolicy, grant: AdmissionGrant) -> None:
     """The agent pin, then channel isolation; any denial refuses the turn."""
+    if (grant.act_for_creator or not grant.human_invocation) and agent_invoker_roles(
+        policy, grant.agent.names
+    ):
+        raise AdmissionDenied(reason="invoker_not_allowed")
+    subject = replace(grant.subject, is_admin=False) if grant.cold_dm else grant.subject
+    if grant.cold_dm and not authorize(
+        policy,
+        subject=subject,
+        action=Action.DIRECT_MESSAGE,
+        agent=grant.agent,
+        recipient_id=subject.platform_user_id,
+    ):
+        raise AdmissionDenied(reason="own_agents_only")
     decision = authorize(
         policy,
-        subject=grant.subject,
+        subject=subject,
         action=Action.RUN_AGENT,
         surface=grant.surface,
         agent=grant.agent,
@@ -1520,8 +1683,40 @@ def _require_run_agent(policy: TenantAccessPolicy, grant: AdmissionGrant) -> Non
     )
     if not decision:
         raise AdmissionDenied(
-            reason="own_agents_only" if decision.reason == "own_agents_only" else "runs_elsewhere"
+            reason=decision.reason
+            if decision.reason in ("own_agents_only", "invoker_not_allowed")
+            else "runs_elsewhere"
         )
+
+
+def _approval_gate_for(
+    deps: TurnDeps, policy: TenantAccessPolicy, grant: AdmissionGrant
+) -> ApprovalGate | None:
+    if (
+        grant.is_dm
+        or grant.platform is None
+        or not (deps.tool_safety.enabled and deps.tool_safety.allow_gate_overrides)
+    ):
+        return None
+    gate = resolve_approval_gate(
+        policy, platform=grant.platform, channel_id=grant.channel_id, thread_id=grant.thread_id
+    )
+    return replace(gate, tenant_id=grant.tenant_id)
+
+
+async def refresh_approval_gate(deps: TurnDeps, admission: Admission) -> ApprovalGate | None:
+    """Read the effective gate for this admitted tenant and actual origin, uncached."""
+    grant = admission.grant
+    if (
+        grant is None
+        or grant.platform is None
+        or grant.is_dm
+        or not (deps.tool_safety.enabled and deps.tool_safety.allow_gate_overrides)
+    ):
+        return None
+    async with deps.sessionmaker() as session:
+        policy = await load_access_policy(session, tenant_id=grant.tenant_id)
+    return _approval_gate_for(deps, policy, grant)
 
 
 def _asks_before_publishing(policy: TenantAccessPolicy, grant: AdmissionGrant) -> bool:
@@ -1590,12 +1785,7 @@ async def _tightened_hold(
     hold = TurnHold(grant.platform, grant.channel_id, client)
     if grant.hold is not None:
         hold = TurnHold(hold.platform, grant.hold.channel_id, client or grant.hold.client)
-    subject = build_subject(
-        is_admin=False,
-        platform_user_id=external_id,
-        via_agent_key=grant.subject.via_agent_key,
-        client=hold.client,
-    )
+    subject = replace(grant.subject, is_admin=False, client=hold.client)
     return replace(grant, subject=subject, hold=hold), shared
 
 
@@ -1618,7 +1808,49 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
         return admission
     async with deps.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=grant.tenant_id)
+        # The opt-in conversation policy is separate from native personal-chat
+        # surfaces (for example Teams), which also admit with is_dm=True.
+        if grant.is_dm and (grant.cold_dm or grant.dm_source is not None):
+            from daimon.core.stores.direct_messages import dm_enabled
+            from daimon.core.stores.tenants import get_tenant
+
+            tenant = await get_tenant(session, grant.tenant_id)
+            if (
+                tenant is None
+                or tenant.archived_at is not None
+                or tenant.provision_status != "ready"
+                or not await dm_enabled(session, tenant_id=grant.tenant_id)
+            ):
+                raise AdmissionDenied(reason="invoker_not_allowed")
         grant, shared_channel = await _tightened_hold(session, admission, grant)
+    if grant.subject.platform_user_id is not None and (
+        policy.invoker_role_ids
+        or agent_invoker_roles(policy, grant.agent.names)
+        or (deps.membership_resolver is not None and grant.subject.verified_membership is not None)
+    ):
+        subject = await resolve_subject(
+            deps.sessionmaker,
+            deps.membership_resolver,
+            tenant_id=grant.tenant_id,
+            user_id=grant.subject.platform_user_id,
+            require_fresh=grant.act_for_creator
+            or bool(agent_invoker_roles(policy, grant.agent.names)),
+        )
+        if subject.verified_membership is not True:
+            raise AdmissionDenied(reason="invoker_not_allowed")
+        if grant.hold is not None:
+            subject = replace(subject, is_admin=False, client=grant.hold.client)
+        grant = replace(grant, subject=subject)
+        admission = replace(admission, grant=grant)
+    if grant.act_for_creator and (
+        not authorize(
+            policy, subject=grant.subject, action=Action.ACT_FOR_CREATOR, surface=Surface.ROUTINE
+        )
+        or not deps.direct_message_policies.get(grant.tenant_id, DirectMessagePolicy()).allows(
+            grant.subject.platform_user_id or ""
+        )
+    ):
+        raise AdmissionDenied(reason="invoker_not_allowed")
     _require_turn_start(policy, grant.subject, grant.turn_place, grant.hold)
     _require_run_agent(policy, grant)
     if deps.backend_selection_enabled and admission.backend_revision is not None:
@@ -1648,6 +1880,7 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
         policy, grant, bool(seal_ids)
     )
     asks_before_publishing = _asks_before_publishing(policy, grant)
+    approval_gate = _approval_gate_for(deps, policy, grant)
     rules = await daimon_rule_set_for(
         deps.sessionmaker, deps.tool_safety, tenant_id=grant.tenant_id, agent_id=admission.agent.id
     )
@@ -1657,6 +1890,7 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
         and seal_ids == admission.origin_seal_ids
         and memory_read_only == admission.memory_read_only
         and asks_before_publishing == admission.asks_before_publishing
+        and approval_gate == admission.approval_gate
         and rules.tools == admission.daimon_rule_tools
         and rules.needs_driver == admission.daimon_rules_need_driver
     ):
@@ -1670,6 +1904,7 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
         source_sealed=admission.source_sealed or bool(seal_ids),
         memory_read_only=memory_read_only,
         asks_before_publishing=asks_before_publishing,
+        approval_gate=approval_gate,
         daimon_rule_tools=rules.tools,
         daimon_rules_need_driver=rules.needs_driver,
     )
@@ -1700,7 +1935,40 @@ async def restrict_inherited_memory(
     return admission if own else replace(admission, memory_read_only=True)
 
 
-def decide_before_send(deps: TurnDeps, admission: Admission) -> Callable[[], Awaitable[None]]:
+async def require_current_spend(
+    deps: TurnDeps,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    external_user_id: str,
+    budget_channel_id: str,
+    agent_id: str,
+    now: datetime,
+) -> None:
+    """The fresh spend gate for a watch send or report."""
+    async with deps.sessionmaker() as session:
+        block = await spend_gate(
+            session,
+            billing_config=deps.billing_config,
+            request=SpendRequest(
+                tenant_id=tenant_id,
+                platform_user_id=external_user_id,
+                platform=platform,
+                channel_id=budget_channel_id,
+                agent_id=agent_id,
+            ),
+            markup=deps.markup,
+            now=now,
+        )
+    if block == "budget_exceeded":
+        raise AdmissionDenied(reason="channel_budget_exceeded")
+    if block is not None:
+        raise AdmissionDenied(reason=block)
+
+
+def decide_before_send(
+    deps: TurnDeps, admission: Admission, *, attended: bool = True
+) -> Callable[[], Awaitable[None]]:
     """A last decision to run right before a message is sent into a session.
 
     Opening the stream and building the message await network calls after the
@@ -1718,6 +1986,12 @@ def decide_before_send(deps: TurnDeps, admission: Admission) -> Callable[[], Awa
             or current.hold != admission.hold
             or current.shared_channel != admission.shared_channel
             or (current.asks_before_publishing and not admission.asks_before_publishing)
+            or (
+                attended
+                and admission.approval_gate is not None
+                and admission.approval_gate.value == "off"
+                and (current.approval_gate is None or current.approval_gate.value != "off")
+            )
         ):
             raise SessionBusyError(
                 pending_reasons=("seal",), retry_after=datetime.now(UTC) + timedelta(seconds=1)
@@ -1917,6 +2191,7 @@ async def capture_backend_source(
                 channel_id=context.channel_id or "",
                 thread_id=context.thread_id,
                 is_dm=is_dm,
+                platform=context.platform or account.platform,
             )
             if (
                 place.category_unresolved
@@ -1956,6 +2231,7 @@ async def capture_backend_source(
                 grant=grant,
                 memory_read_only=_memory_read_only(policy, grant, bool(seals)),
                 asks_before_publishing=_asks_before_publishing(policy, grant),
+                approval_gate=_approval_gate_for(deps, policy, grant),
                 daimon_rule_tools=rule_set.tools,
                 daimon_rules_need_driver=rule_set.needs_driver,
                 source_sealed=bool(seals),

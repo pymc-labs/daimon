@@ -223,6 +223,7 @@ async def _setup(db_session: AsyncSession) -> AuthIdentity:
         role=Role.USER,
         platform="teams",
         platform_user_id=_CALLER,
+        chat_session_id="test-session",
     )
 
 
@@ -628,7 +629,11 @@ async def test_channel_reads_are_refused_from_a_group_chat_turn(
 
     monkeypatch.setattr(channels, "load_read_policy", from_a_group_chat)
     auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role=Role.USER, platform="teams"
+        account_id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        role=Role.USER,
+        platform="teams",
+        chat_session_id="test-session",
     )
     with pytest.raises(ToolError, match="group chats"):
         await channels._read_policy(MagicMock(), auth, "origin")  # pyright: ignore[reportPrivateUsage]
@@ -663,6 +668,7 @@ async def test_reads_naming_no_origin_are_refused_while_a_group_chat_turn_runs(
         shared_channel=False,
         expires_at=now + timedelta(minutes=10),
         now=now,
+        chat_session_id="test-session",
     )
     await db_session.commit()
     auth = AuthIdentity(
@@ -671,6 +677,7 @@ async def test_reads_naming_no_origin_are_refused_while_a_group_chat_turn_runs(
         role=Role.USER,
         platform="teams",
         chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_chat"),
+        chat_session_id="test-session",
     )
     runtime = _runtime(_Fake(), sessionmaker)
     read = channels._read_policy(runtime, auth, None)  # pyright: ignore[reportPrivateUsage]

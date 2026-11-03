@@ -18,6 +18,7 @@ from cryptography.fernet import Fernet
 from daimon.adapters.slack.runtime import SlackRuntime, build_runtime
 from daimon.core.channel_budget_notice import BudgetNotice, spawn_budget_notice
 from daimon.core.config import Settings
+from daimon.core.context_provider import McpProvider
 from daimon.core.github_credentials import decrypt_token, encrypt_token
 from daimon.testing.turn_fakes import deps_for
 from pydantic import SecretStr
@@ -122,6 +123,12 @@ async def test_build_runtime_yields_wired_runtime(
         assert runtime.sessionmaker is not None, "build_runtime must wire a non-None sessionmaker"
         assert runtime.anthropic is not None, "build_runtime must wire a non-None anthropic client"
         assert runtime.http_client is not None, "build_runtime wires an http_client"
+        provider = runtime.turn_deps.context_providers.provider
+        assert isinstance(provider, McpProvider)
+        task = provider._keepwarm_task
+        assert task is not None and not task.done()
+    assert task.done()
+    assert provider.client.is_closed
 
 
 async def test_build_runtime_opens_one_slack_session_and_closes_it_on_exit(

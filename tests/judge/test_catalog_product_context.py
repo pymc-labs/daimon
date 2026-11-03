@@ -13,6 +13,7 @@ from daimon.core.config import McpSettings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.thread_sessions import get_live_thread_session
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.deps import TurnDeps
 from daimon.testing.admin_bindings import AdminBindings
 from daimon.testing.anthropic_fixtures import (
@@ -226,6 +227,7 @@ def deps(binding: AdminBindings, client: AsyncAnthropic) -> TurnDeps:
         public_url=None,
         turn_path="mux",
         channel_backends=True,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
 

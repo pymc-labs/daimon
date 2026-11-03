@@ -46,6 +46,7 @@ from _settings_walk import (
     stringify_default,
 )
 from daimon.adapters.scheduler.settings import SchedulerSettings
+from daimon.adapters.sidecar.settings import SidecarSettings
 from daimon.core.config import Settings
 from pydantic import BaseModel
 from pydantic_core import PydanticUndefined
@@ -417,7 +418,20 @@ def _header(sections: typing.Sequence[Section]) -> list[str]:
 
 
 def render_reference() -> str:
-    sections = [*_core_sections(), _scheduler_section()]
+    sections = [
+        *_core_sections(),
+        _scheduler_section(),
+        _leaf_section(
+            title="Sidecar",
+            intro=_model_intro(
+                SidecarSettings,
+                "daimon.adapters.sidecar.settings.SidecarSettings",
+                "DAIMON_SIDECAR__",
+            ),
+            leaves=collect_leaves(SidecarSettings, "DAIMON_SIDECAR__"),
+            source_path="packages/adapters/sidecar/daimon/adapters/sidecar/settings.py",
+        ),
+    ]
     documented = {
         line.removeprefix("### `").removesuffix("`")
         for section in sections

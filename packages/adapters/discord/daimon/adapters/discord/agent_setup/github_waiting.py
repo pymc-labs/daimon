@@ -12,7 +12,7 @@ from daimon.adapters.discord.agent_setup.github_embed_panel import (
     GitHubEmbedPanel as PanelViewBase,
 )
 from daimon.adapters.discord.agent_setup.state import PanelState
-from daimon.adapters.discord.checks import is_guild_admin
+from daimon.adapters.discord.checks import is_platform_admin
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
@@ -299,7 +299,7 @@ class GitHubWaitingView(PanelViewBase):
                 embed=build_notice_embed("This panel is private."), ephemeral=True
             )
             return False
-        server_admin = is_guild_admin(interaction)  # pyright: ignore[reportArgumentType]
+        server_admin = is_platform_admin(interaction)  # pyright: ignore[reportArgumentType]
         if admin and not server_admin:
             await interaction.response.send_message(
                 embed=build_notice_embed("This request is unavailable."), ephemeral=True
@@ -373,7 +373,7 @@ class GitHubWaitingView(PanelViewBase):
                         tenant_id=tenant_id,
                         platform="discord",
                         platform_user_id=str(interaction.user.id),
-                        verified_tenant_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
+                        is_platform_admin=is_platform_admin(interaction),  # pyright: ignore[reportArgumentType]
                     )
                     url = await connect_link(
                         session,
@@ -381,7 +381,7 @@ class GitHubWaitingView(PanelViewBase):
                         tenant_id=tenant_id,
                         platform="discord",
                         platform_user_id=str(interaction.user.id),
-                        verified_tenant_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
+                        verified_tenant_admin=is_platform_admin(interaction),  # pyright: ignore[reportArgumentType]
                         workspace_label=interaction.guild.name if interaction.guild else None,
                         requester_label=interaction.user.display_name,
                         origin_parent_channel_id=str(interaction.channel_id),

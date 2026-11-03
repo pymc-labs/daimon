@@ -40,6 +40,7 @@ from daimon.adapters.mcp.tools.setup_target import (
     origin_channel_id,
     resolve_setup_agent,
 )
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
 from daimon.core.channel_changes import (
     ChannelActor,
@@ -114,7 +115,7 @@ async def _require_scope_admin(
     if channel_id is None:
         if auth.is_operator:
             raise ToolError("An operator token changes only a channel's default; pass channel_id.")
-        _require_admin(auth)
+        _require_admin(auth, action=DelegatedAction.AGENT_SETTINGS)
     else:
         await require_admin(runtime, auth, channel_id=channel_id)
 
@@ -123,7 +124,7 @@ def _channel_actor(auth: AuthIdentity) -> ChannelActor:
     return ChannelActor(
         tenant_id=auth.tenant_id,
         account_id=auth.account_id,
-        subject=mcp_subject(auth, is_admin=auth.is_admin),
+        subject=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.CHANNEL_PERMISSIONS)),
         surface="chat",
     )
 
@@ -194,7 +195,8 @@ async def _set_agent_default_impl(
                 agent_name=agent_name,
                 actor_account_id=auth.account_id,
                 surface="chat",
-                set_by_admin=auth.is_admin and auth.agent_id is None,
+                set_by_admin=auth.admin_for(DelegatedAction.AGENT_SETTINGS)
+                and auth.agent_id is None,
             )
     # The agent answers in one more place, so its repos reach that place too.
     async with runtime.session_factory() as session:

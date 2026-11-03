@@ -412,7 +412,14 @@ async def _run_mention(
     return _Mention(kwargs, admission, account.role if account else None, ephemerals)
 
 
-_EXTERNAL_ADMIN = {"id": _EXTERNAL, "name": "visitor", "team_id": _OTHER, "is_admin": True}
+_EXTERNAL_ADMIN = {
+    "deleted": False,
+    "is_bot": False,
+    "id": _EXTERNAL,
+    "name": "visitor",
+    "team_id": _OTHER,
+    "is_admin": True,
+}
 
 
 @pytest.mark.parametrize(
@@ -748,7 +755,15 @@ async def test_an_external_stop_on_their_own_turn_works_and_on_someone_elses_is_
     other["container"]["message_ts"] = "2.2"
     # An admin of their own workspace is not an admin of the host's.
     client.users_info = AsyncMock(
-        return_value={"user": {"id": _EXTERNAL, "team_id": _OTHER, "is_admin": True}}
+        return_value={
+            "user": {
+                "deleted": False,
+                "is_bot": False,
+                "id": _EXTERNAL,
+                "team_id": _OTHER,
+                "is_admin": True,
+            }
+        }
     )
     await _deliver(app, other, client)
     assert not theirs.is_set()

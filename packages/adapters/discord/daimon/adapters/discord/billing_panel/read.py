@@ -5,7 +5,7 @@ shows (the member cache, else one member fetch each under a short shared
 timeout, else the name stored when they were last seen, else their account's
 own name), assembles a BillingPanelState.
 
-`is_guild_admin` is Discord-native: manage_guild | administrator | owner_id.
+`is_platform_admin` is Discord-native: manage_guild | administrator | owner_id.
 Gating on a daimon-DB role would block legitimate guild admins, so we resolve
 permissions from Discord at click time instead.
 """
@@ -20,7 +20,7 @@ from daimon.adapters.discord.billing_panel.state import (
     BillingPanelState,
     MemberRow,
 )
-from daimon.adapters.discord.checks import is_member_guild_admin
+from daimon.adapters.discord.checks import is_platform_admin as is_platform_admin
 from daimon.core.allowance_limits import monthly_limit
 from daimon.core.billing_panel import TOP_SPENDERS_SHOWN, stored_name_labels
 from daimon.core.channel_budget import get_channel_budget_status, list_channel_budget_statuses
@@ -51,20 +51,6 @@ _log = structlog.get_logger()
 _TOP_MEMBERS_CAP = 25  # same number as _PICKER_CAP, different semantics
 # The panel waits at most this long for the member fetches, all together.
 NAME_FETCH_TIMEOUT_S = 1.5
-
-
-def is_guild_admin(interaction: BotInteraction) -> bool:
-    """Discord-native admin check: owner OR manage_guild OR administrator.
-
-    Resolves at every render/click (not cached) so role flips take effect
-    immediately and we never rely on a daimon-DB role gate.
-    """
-    member = interaction.user
-    if not isinstance(member, discord.Member):
-        return False
-    guild = interaction.guild
-    owner_id = guild.owner_id if guild is not None else None
-    return is_member_guild_admin(member, guild_owner_id=owner_id)
 
 
 def invoking_channel_id(interaction: BotInteraction) -> str | None:

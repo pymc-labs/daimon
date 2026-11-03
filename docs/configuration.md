@@ -16,6 +16,8 @@ typo is silent — check the spelling here.
 ## Contents
 
 - [Core](#core)
+- [Compute](#compute)
+- [Long Jobs](#long-jobs)
 - [Database](#database)
 - [Anthropic](#anthropic)
 - [Privacy](#privacy)
@@ -38,6 +40,7 @@ typo is silent — check the spelling here.
 - [Web](#web)
 - [GitHub](#github)
 - [GitHub App](#github-app)
+- [Repo Memory](#repo-memory)
 - [Microsoft Accounts](#microsoft-accounts)
 - [Crypto](#crypto)
 - [Credentials](#credentials)
@@ -51,10 +54,12 @@ typo is silent — check the spelling here.
 - [Turn](#turn)
 - [Thread Naming](#thread-naming)
 - [Turn Queue](#turn-queue)
+- [Watches](#watches)
 - [Private Channel Messages](#private-channel-messages)
 - [Tool Safety](#tool-safety)
 - [Artifacts](#artifacts)
 - [Scheduler](#scheduler)
+- [Sidecar](#sidecar)
 - [Notebook host (standalone service)](#notebook-host-standalone-service)
 - [Report host (standalone service)](#report-host-standalone-service)
 - [Billing (Stripe)](#billing-stripe)
@@ -129,6 +134,102 @@ process cwd — works for in-repo dev (repo root) and the deployed container lay
 (working dir contains defaults/ at root). Single source of truth shared by the
 scheduler, Discord/Slack adapters, CLI session bootstrap, and MCP routine tools. Do NOT
 add adapter-local defaults_root fields — they invite drift.
+
+## Compute
+
+Read from `daimon.core.config.ComputeSettings`. Prefix `DAIMON_COMPUTE__`.
+
+### `DAIMON_COMPUTE__ENABLED`
+
+`bool` · optional · default `False`
+
+Allow attended owners to launch Fly sessions. Disabling launch does not disable cleanup.
+
+### `DAIMON_COMPUTE__DEPLOYMENT_ID`
+
+`str` · optional · default unset
+
+Stable unique deployment identifier fencing Fly resources. Required to use compute.
+
+### `DAIMON_COMPUTE__API_TOKEN`
+
+`SecretStr | None` · optional · default unset · secret
+
+Fly API token, control plane and scheduler only. Never mounted in compute machines.
+
+### `DAIMON_COMPUTE__ORG_SLUG`
+
+`str` · optional · default unset
+
+Fly organization for this deployment's disposable sessions.
+
+### `DAIMON_COMPUTE__SESSION_AUTH_KEY`
+
+`SecretStr | None` · optional · default unset · secret
+
+Stable control-plane HMAC key deriving per-session MCP tokens. Never mounted on
+machines.
+
+### `DAIMON_COMPUTE__PER_PERSON_SESSIONS`
+
+`int` · optional · default `2`
+
+Maximum active sessions per person within a tenant, including pending deletion.
+
+### `DAIMON_COMPUTE__DEFAULT_IDLE_TTL_HOURS`
+
+`int` · optional · default `24`
+
+Default idle lifetime in hours; bounded by max_ttl_hours.
+
+### `DAIMON_COMPUTE__MAX_TTL_HOURS`
+
+`int` · optional · default `168`
+
+Maximum launch or extension lifetime in hours. No dollar cap or metering is provided.
+
+### `DAIMON_COMPUTE__PER_SESSION_TASKS`
+
+`int` · optional · default `4`
+
+Maximum background commands running at once on one session. A background command may run
+for at most max_ttl_hours.
+
+### `DAIMON_COMPUTE__PROFILES`
+
+`dict[str, ComputeProfile]` · optional · default `{}`
+
+Operator-managed image profiles. Empty means no images can be launched. No environment
+or credentials are copied from template apps.
+
+## Long Jobs
+
+Read from `daimon.core.config.LongJobsSettings`. Prefix `DAIMON_LONG_JOBS__`.
+
+### `DAIMON_LONG_JOBS__MAX_DEADLINE_MINUTES`
+
+`int` · optional · default `70`
+
+Operator hard ceiling for long-job deadlines in minutes. Durations above 70 min are not
+yet validated on MA.
+
+### `DAIMON_LONG_JOBS__MAX_USD`
+
+`Decimal` · optional · default `20`
+
+Operator hard ceiling in USD per long job; tenant and agent policy may only lower it.
+
+### `DAIMON_LONG_JOBS__PER_TENANT_RUNNING`
+
+`int` · optional · default `3`
+
+Maximum launching and running long jobs per tenant.
+
+### `DAIMON_LONG_JOBS__PER_OWNER_RUNNING`
+
+`int` · optional · default `2`
+
+Maximum launching and running long jobs per owner within a tenant.
 
 ## Database
 
@@ -548,7 +649,8 @@ Discord bot token. Required to run the Discord adapter.
 `list[int]` · optional · default unset
 
 Guilds allowed to receive commands and events when the environment name is set. An empty
-list disables all Discord ingress, including DMs, in non-production.
+list disables all guild ingress in non-production. DMs are not filtered by guild; the
+bot answers one only for a verified member of one of its tenants.
 
 ### `DAIMON_DISCORD__STARTUP_REPLAY_MINUTES`
 
@@ -1129,6 +1231,24 @@ GitHub App client ID for user authorization.
 
 GitHub App client secret for user authorization.
 
+## Repo Memory
+
+Read from `daimon.core.config.RepoMemorySettings`. Prefix `DAIMON_REPO_MEMORY__`.
+
+### `DAIMON_REPO_MEMORY__ENABLED`
+
+`bool` · optional · default `False`
+
+Enable native repository memory tools and turn injection after a verified import.
+
+### `DAIMON_REPO_MEMORY__LEGACY_MCP_SERVER_NAMES`
+
+`tuple[str, ...]` · optional · default unset
+
+Legacy MCP server names whose repo_memory_list and repo_memory_view tools are disabled
+in sessions when native repository memory is enabled. Set these before cutover so the
+agent sees one memory source.
+
 ## Microsoft Accounts
 
 Read from `daimon.core.config.MicrosoftAccountsSettings`. Prefix
@@ -1198,8 +1318,8 @@ Read from `daimon.core.config.CredentialsSettings`. Prefix `DAIMON_CREDENTIALS__
 
 Tenant-level credentials for the token broker.
 
-Optional — the Google Workspace provider raises a config error when `google_sa_json` is
-unset.
+Optional — Google Workspace requires a matching authorized-user credential or a service-
+account credential with domain-wide delegation.
 
 ### `DAIMON_CREDENTIALS__GOOGLE_SA_JSON`
 
@@ -1207,6 +1327,21 @@ unset.
 
 Full JSON contents of a Google service-account key, used by the token broker to mint
 delegated Google Workspace credentials.
+
+### `DAIMON_CREDENTIALS__GOOGLE_USER_JSON`
+
+`SecretStr | None` · optional · default unset · secret
+
+Full authorized_user JSON containing client_id, client_secret and refresh_token. Used
+only for agents bound to google_user_email, with the binding's scopes; requires no
+domain-wide delegation.
+
+### `DAIMON_CREDENTIALS__GOOGLE_USER_EMAIL`
+
+`str | None` · optional · default unset
+
+Google account email belonging to google_user_json (the JSON does not contain it). Only
+matching agent bindings, compared without case sensitivity, may use that credential.
 
 ## Selfhosted
 
@@ -1650,6 +1785,56 @@ refused with the plain capacity notice.
 Seconds a queued turn may wait for a slot. A safeguard only: the turn then leaves the
 queue and its card ends with the ordinary error.
 
+## Watches
+
+Read from `daimon.core.config.WatchesSettings`. Prefix `DAIMON_WATCHES__`.
+
+### `DAIMON_WATCHES__EXECUTOR_SECRET`
+
+`SecretStr | None` · optional · default unset · secret
+
+Private poll executor shared secret, also supplied as DAIMON_SIDECAR__EXECUTOR_SECRET.
+Unset disables executor transport. Never expose the private listener through the public
+proxy.
+
+### `DAIMON_WATCHES__ENABLED`
+
+`bool` · optional · default `False`
+
+Enable polling of the listed read tools and watch dispatch. Page-event watches are not
+yet delivered. Keep disabled until the execution-bound unattended origin grants, non-
+gateable cleanup and watch release are reviewed. The database global gate must also be
+explicitly enabled by an operator.
+
+### `DAIMON_WATCHES__POLLABLE_TOOLS`
+
+`list[PollableTool]` · optional · default `[{"server":"daimon-mcp","tool":"read_thread","credential":"none","returns_chat":true,"max_interval_floor_s":60,"label":"Discord thread"},{"server":"daimon-mcp","tool":"read_channel","credential":"none","returns_chat":true,"max_interval_floor_s":60,"label":"Discord channel"}]`
+
+JSON list of the tools a watch may poll in this deployment. Only a listed tool can be
+polled: a watch on a tool taken off the list pauses at its next poll and its owner is
+told. Each entry has server ("daimon-mcp" for a native reader, otherwise an https MCP
+server URL, never a server name), tool (exact name), credential ("none" for native
+readers; "agent" or "owner" for MCP servers), returns_chat (required: true only for
+native readers, which drop Daimon's own messages), max_interval_floor_s (shortest
+interval, at least 60, default 300) and label (shown on the approval card). Native
+entries must be read_thread or read_channel. Daimon's chat readers and chat_tools are
+refused on MCP servers. Credential owner polls with each watch owner's own read-only
+key, which they send once through a private form: for example a read-scoped API key the
+person creates on that server. A server's read-only annotation never allows a poll; only
+this list does, and a server can still write when it says it only reads. A watch below a
+raised floor polls at the floor. Default (also used when the value is empty):
+read_thread and read_channel on daimon-mcp, credential none, returns_chat true, floor
+60. Set [] to allow no polls.
+
+### `DAIMON_WATCHES__CHAT_TOOLS`
+
+`list[str]` · optional · default unset
+
+JSON list of tool names on MCP servers that return chat or archive text, such as a chat
+archive search. A watch could fire on its own report through them, so POLLABLE_TOOLS
+refuses them on any MCP server, whatever returns_chat says. Daimon's own read_thread,
+read_channel and search_messages are always refused there. Default: none.
+
 ## Private Channel Messages
 
 Read from `daimon.core.config.PrivateChannelMessagesSettings`. Prefix
@@ -1690,9 +1875,12 @@ ToolSafetyPolicy.
 
 Classify attached (third-party) MCP tools as read or write and gate the writes: a write
 in chat waits for the requester to press Approve on a confirmation card, and a write in
-a routine or other unattended run is refused unless listed in unattended_writes. Applies
-to sessions created after it is set; a chat thread keeps its current session until that
-is replaced. Off keeps every tool auto-approved.
+a routine or other unattended run is refused unless listed in unattended_writes. A new
+session gets it when created; an existing chat session gets it at its next bind, and an
+unattended turn (agent chat, daimon run, a routine, a checkpoint) sets it on the session
+before each send. Off lets ordinary third-party calls run, but Daimon's card-only
+actions still ask (lead resolution, a backend switch and Microsoft mail and invites;
+file changes only with it on).
 
 ### `DAIMON_TOOL_SAFETY__AGENT_RULES`
 
@@ -1702,14 +1890,39 @@ Apply workspace-admin tool rules for individual agents and MCP tools: third-part
 and Daimon's own daimon-mcp/&lt;tool&gt; (ask and deny). Off by default; stored rules
 remain editable but inactive until enabled.
 
+### `DAIMON_TOOL_SAFETY__ALLOW_GATE_OVERRIDES`
+
+`bool` · optional · default `False`
+
+Let native server admins change third-party MCP write approvals from /here at server,
+channel or thread scope. The most specific explicit on/off setting wins. Stored settings
+are ignored while off. Fixed confirmation and permission-setter names never receive an
+override, regardless of server host. Deny rules, direct messages and unattended_writes
+retain their existing behavior.
+
 ### `DAIMON_TOOL_SAFETY__EFFECTS`
 
 `dict[str, 'read' | 'write']` · optional · default `{}`
 
 Override the read/write class, e.g. {"linear/get_team": "read", "notion": "write"}. Keys
-are a server name or server/tool. Unlisted tools are classified from their name: a plain
-get_, list_, search_ ... is a read; a compound name (get_or_create, search_and_replace,
-run_query) and anything unknown is a write.
+are a server name or server/tool. Unlisted tools are classified from the server's own
+MCP annotations when the server is listed in trusted_annotations and sends them
+(readOnlyHint true is a read unless destructiveHint is also true), otherwise from their
+name: a plain get_, list_, search_ ... is a read; a compound name (get_or_create,
+search_and_replace, run_query) and anything unknown is a write.
+
+### `DAIMON_TOOL_SAFETY__TRUSTED_ANNOTATIONS`
+
+`tuple[str, ...]` · optional · default unset
+
+MCP server names whose own tool annotations count, e.g. ["bridge"]. For a listed server
+Daimon lists its tools once per turn and runs a tool marked readOnlyHint true (without
+destructiveHint true) as a read, and one marked destructiveHint true or readOnlyHint
+false as a write; each such auto-allow is logged. An effects pin or a denied entry still
+wins. An unlisted server's annotations are never read, so its tools are classified by
+name. Empty (the default) reads none. Trust is by server name across every agent in the
+deployment: any agent that attaches a server with a listed name has its hints counted,
+so list only names you control. Names are matched exactly; there is no '*' wildcard.
 
 ### `DAIMON_TOOL_SAFETY__DENIED`
 
@@ -1817,6 +2030,13 @@ hosted client cannot accept image content.
 Read from `daimon.adapters.scheduler.settings.SchedulerSettings`. Prefix
 `DAIMON_SCHEDULER__`.
 
+### `DAIMON_SCHEDULER__MAX_AGE_S`
+
+`float` · optional · default `900.0`
+
+Freshness window for routines with catch_up_policy=skip. Older slots are recorded as
+skipped and advanced; run-once routines ignore this window.
+
 ### `DAIMON_SCHEDULER__TICK_INTERVAL_S`
 
 `float` · optional · default `30.0`
@@ -1832,13 +2052,6 @@ Run the headless usage sweep: settle the MCP agent-chat sessions whose turns nob
 to the end (each headless send leaves a settle request; a status read that sees the turn
 end settles it first). It reads only the sessions those requests name. When off, such a
 session is billed the next time a read sees its last turn ended.
-
-### `DAIMON_SCHEDULER__MAX_AGE_S`
-
-`float` · optional · default `900.0`
-
-Freshness window for routines with catch_up_policy=skip. Older slots are recorded as
-skipped and advanced; run-once routines ignore this window.
 
 ### `DAIMON_SCHEDULER__MAX_CONCURRENT_FIRES`
 
@@ -1875,6 +2088,68 @@ exits non-zero.
 
 Port for the stdlib liveness responder (used by the platform health check). Must not
 collide with mcp's 8080 or discord's 8081 on the shared host.
+
+## Sidecar
+
+Read from `daimon.adapters.sidecar.settings.SidecarSettings`. Prefix `DAIMON_SIDECAR__`.
+
+### `DAIMON_SIDECAR__DATABASE_URL`
+
+`SecretStr` · **required** · secret
+
+Database URL for a dedicated login granted only daimon_sidecar. Require TLS for remote
+databases.
+
+### `DAIMON_SIDECAR__SIGNING_KEYS`
+
+`dict[str, SecretStr]` · optional · default unset · secret
+
+Page-event HMAC keys for page hosts, by key ID, each at least 32 random bytes. Supply
+from your secret manager; keys never enter browser HTML or watch rows. Only configured
+page hosts may sign events; outside senders are unsupported.
+
+### `DAIMON_SIDECAR__HOST`
+
+`str` · optional · default `0.0.0.0`
+
+Private listen address behind the callback-only TLS proxy.
+
+### `DAIMON_SIDECAR__PORT`
+
+`int` · optional · default `8780`
+
+Private callback and health HTTP port.
+
+### `DAIMON_SIDECAR__MAX_CONCURRENT`
+
+`int` · optional · default `8`
+
+Maximum concurrent callback transactions; excess requests receive 429.
+
+### `DAIMON_SIDECAR__REQUEST_TIMEOUT_S`
+
+`float` · optional · default `10`
+
+Total callback body and database deadline in seconds.
+
+### `DAIMON_SIDECAR__EXECUTOR_SECRET`
+
+`SecretStr | None` · optional · default unset · secret
+
+Private poll executor shared secret, matching DAIMON_WATCHES__EXECUTOR_SECRET. Unset
+disables polling transport.
+
+### `DAIMON_SIDECAR__OS_EXECUTOR_ORIGIN`
+
+`'http://watch-executor:8767' | 'http://127.0.0.1:8767'` · optional · default `http://watch-executor:8767`
+
+Fixed private watch executor origin. No outside hosts, redirects or source URLs.
+
+### `DAIMON_SIDECAR__POLL_INTERVAL_S`
+
+`float` · optional · default `5`
+
+Seconds between bounded scheduling ticks. Disabled producers never poll.
 
 ## Notebook host (standalone service)
 

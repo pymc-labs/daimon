@@ -678,16 +678,16 @@ async def _held_origin(
 ) -> TurnOriginRow | None:
     """The origin that holds a chat-turn call, else `passed`.
 
-    A chat token is shared by every turn of its account and agent and names
-    none, so a held turn could leave out its origin, or name another. Any of
-    them running in a channel kept to its own agents holds the call there; two in
-    different ones refuse it.
+    The signed session grant determines which live execution may hold this
+    call, even if the model omits or names another origin. Another session's
+    origin never supplies a hold or read authority.
     """
     if (
         not any_own_readers(policy)
         or auth.chat_agent_id is None
         or auth.agent_id is not None
         or auth.platform is None
+        or auth.chat_session_id is None
         # An agent of its own channel is held there already.
         or home_hold(policy, agent, None) is not None
         or (passed is not None and home_hold(policy, agent, turn_origin_place(passed)))
@@ -707,7 +707,11 @@ async def _held_origin(
             tenant_id=auth.tenant_id, ma_agent_id=origin.responder_ma_agent_id
         )
         hold = home_hold(policy, agent, turn_origin_place(origin))
-        if responder == auth.chat_agent_id and hold is not None:
+        if (
+            responder == auth.chat_agent_id
+            and origin.chat_session_id == auth.chat_session_id
+            and hold is not None
+        ):
             held.setdefault(hold, origin)
     if len(held) > 1:
         raise ToolError(_AMBIGUOUS_HOLD_MSG)
@@ -717,7 +721,7 @@ async def _held_origin(
 async def list_running_origins(runtime: McpRuntime, auth: AuthIdentity) -> list[TurnOriginRow]:
     """The active turn origins of the caller's account and executing agent, wherever they run."""
     executing_agent = auth.agent_id or auth.chat_agent_id
-    if auth.platform is None or executing_agent is None:
+    if auth.platform is None or executing_agent is None or auth.chat_session_id is None:
         return []
     async with runtime.session_factory() as session:
         running = await list_active_origins(
@@ -730,7 +734,8 @@ async def list_running_origins(runtime: McpRuntime, auth: AuthIdentity) -> list[
     return [
         origin
         for origin in running
-        if executing_agent
+        if origin.chat_session_id == auth.chat_session_id
+        and executing_agent
         == derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=origin.responder_ma_agent_id)
     ]
 
@@ -763,10 +768,15 @@ async def get_verified_origin(
     runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str | None
 ) -> TurnOriginRow | None:
     """The caller's active turn origin, verified as `load_read_policy` describes; None
-    when none was named or it is malformed, expired, another account's or another
-    responder's."""
+    when none was named or it is malformed, expired, another account's,
+    another responder's, or not granted to the calling provider session."""
     executing_agent = auth.agent_id or auth.chat_agent_id
-    if not origin_context_id or auth.platform is None or executing_agent is None:
+    if (
+        not origin_context_id
+        or auth.platform is None
+        or executing_agent is None
+        or auth.chat_session_id is None
+    ):
         return None
     try:
         origin_id = uuid.UUID(origin_context_id)
@@ -781,8 +791,11 @@ async def get_verified_origin(
             platform=auth.platform,
             now=datetime.now(UTC),
         )
-    if origin is None or executing_agent != derive_agent_uuid(
-        tenant_id=auth.tenant_id, ma_agent_id=origin.responder_ma_agent_id
+    if (
+        origin is None
+        or origin.chat_session_id != auth.chat_session_id
+        or executing_agent
+        != derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=origin.responder_ma_agent_id)
     ):
         return None
     if auth.hold is not None and not auth.hold.contains(

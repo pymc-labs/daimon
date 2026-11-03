@@ -36,7 +36,12 @@ class LedgerDate(ast.NodeTransformer):
 
 class DmDelivery(ast.NodeTransformer):
     def visit_Subscript(self, node: ast.Subscript) -> ast.expr:
-        if isinstance(node.value, ast.Name) and node.value.id == "answer":
+        if (
+            isinstance(node.value, ast.Name)
+            and node.value.id == "chunks"
+            and isinstance(node.slice, ast.Constant)
+            and node.slice.value == 0
+        ):
             return ast.copy_location(ast.Constant("mutated private delivery"), node)
         return node
 
@@ -56,9 +61,9 @@ def apply(patch: pytest.MonkeyPatch, mutation: str) -> None:
             function = cast(FunctionType, module.record_turn_usage)
             transformer = LedgerDate()
         elif mutation == "dm_delivery":
-            module = importlib.import_module("daimon.adapters.discord.commands.direct_messages")
-            # Main #823 moved the unchanged answer slicing into the drain-tracked helper.
-            function = cast(FunctionType, module.DirectMessageCog._reply)
+            # A DM answer is written into the turn's progress card, as in a thread.
+            module = importlib.import_module("daimon.adapters.discord.lifecycle")
+            function = cast(FunctionType, module.DiscordTurnLifecycle._deliver_success)
             transformer = DmDelivery()
         else:
             raise AssertionError(f"Unknown oracle mutation: {mutation}")

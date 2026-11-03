@@ -4,7 +4,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Literal, cast
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import httpx
 import pytest
@@ -13,9 +13,12 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsTextBlock,
 )
 from daimon.core import workspace_transfer
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import load_turn_settings
 from daimon.core.errors import TurnError
 from daimon.core.session_snapshot import SessionSnapshot, snapshot_from_retrieved_session
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
+from daimon.core.turn.posture import PolicyApproval
 from daimon.core.turn.state import TurnState
 from daimon.core.workspace_ports_compat import restore_transfer_records
 from mux.contracts.ids import Scope
@@ -33,7 +36,7 @@ def snapshot() -> SessionSnapshot:
 
 
 def factory() -> async_sessionmaker[AsyncSession]:
-    return cast(async_sessionmaker[AsyncSession], AsyncMock())
+    return cast(async_sessionmaker[AsyncSession], MagicMock())
 
 
 def set_path(monkeypatch: pytest.MonkeyPatch, path: Literal["legacy", "mux"]) -> None:
@@ -50,6 +53,10 @@ async def test_checkpoint_passes_real_scope_and_preserves_the_existing_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     set_path(monkeypatch, path)
+    monkeypatch.setattr(
+        "daimon.core.stores.access_policy.load_access_policy",
+        AsyncMock(return_value=TenantAccessPolicy()),
+    )
     turn = AsyncMock(
         return_value=TurnState(error=TurnError(kind="upstream", message="test failure"))
     )
@@ -74,6 +81,14 @@ async def test_checkpoint_passes_real_scope_and_preserves_the_existing_read(
                 ),
             )
         )
+    # Then the checkpoint reads the old session it gates and decides on.
+    new.queue(
+        ScriptedReply(
+            "GET",
+            "/v1/sessions/sess_old",
+            httpx.Response(200, json=ma_session(id="sess_old").model_dump(mode="json")),
+        )
+    )
     async with old.client() as legacy, new.client() as client:
         _ = [
             item
@@ -92,11 +107,14 @@ async def test_checkpoint_passes_real_scope_and_preserves_the_existing_read(
             checkpoint_deadline=NOW + timedelta(seconds=30),
             from_agent_name="source",
             before_send=before_send,
+            tool_safety=OPEN_TOOL_SAFETY,
+            public_url=None,
+            platform="discord",
         )
     old.assert_consumed()
     new.assert_consumed()
-    assert old.requests == new.requests
-    assert len(new.requests) == 1
+    assert old.requests == new.requests[:1]
+    assert len(new.requests) == 2
     assert isinstance(result, workspace_transfer.TranscriptOnly)
     assert "Existing work" in result.transcript
     assert result.gap_reason == "checkpoint_failed"
@@ -113,7 +131,10 @@ async def test_checkpoint_passes_real_scope_and_preserves_the_existing_read(
         if account_id is not None
         else None
     )
-    assert turn.await_args.kwargs["before_send"] is before_send
+    # The caller's check still runs right before the send, then the gate.
+    await turn.await_args.kwargs["before_send"]()
+    before_send.assert_awaited_once()
+    assert isinstance(turn.await_args.kwargs["tool_confirmation"], PolicyApproval)
     replay.assert_awaited_once()
     assert replay.await_args is not None
     assert replay.await_args.kwargs.get("scope") == scope
@@ -136,6 +157,9 @@ async def test_runner_carries_the_authorized_account_to_transfer_and_restore(
             account_id=ACCOUNT,
             external_user_id="user",
             markup=Decimal("1.2"),
+            tool_safety=OPEN_TOOL_SAFETY,
+            public_url=None,
+            platform="discord",
         )
         await runner(
             old_session_id="sess_old",

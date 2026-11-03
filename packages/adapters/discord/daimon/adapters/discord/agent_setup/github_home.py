@@ -11,7 +11,7 @@ from daimon.adapters.discord.agent_setup.github_embed_panel import (
 )
 from daimon.adapters.discord.agent_setup.roster_view import RosterView
 from daimon.adapters.discord.agent_setup.state import PanelState
-from daimon.adapters.discord.checks import is_guild_admin
+from daimon.adapters.discord.checks import is_platform_admin
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.github_connect_cards import (
@@ -125,7 +125,7 @@ class GitHubHomeView(PanelViewBase):
                 embed=build_notice_embed("This panel is private."), ephemeral=True
             )
             return
-        if not is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]
+        if not is_platform_admin(interaction):  # pyright: ignore[reportArgumentType]
             await interaction.response.send_message(
                 embed=build_notice_embed("Ask a server admin to connect GitHub."), ephemeral=True
             )
@@ -138,7 +138,7 @@ class GitHubHomeView(PanelViewBase):
                     tenant_id=tenant_id,
                     platform="discord",
                     platform_user_id=str(interaction.user.id),
-                    verified_tenant_admin=True,
+                    is_platform_admin=True,
                 )
                 url = await connect_link(
                     session,

@@ -36,6 +36,7 @@ from daimon.adapters.mcp.tools._ctx import (
 )
 from daimon.adapters.mcp.tools.discord import verify_participation_scope
 from daimon.adapters.mcp.tools.teams._participation import verify_teams_participation_scope
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.channel_switches import SwitchTarget, set_switch, switch_refusal
 from daimon.core.stores.thread_participation import get_participation_modes
@@ -121,7 +122,7 @@ def _refusals(auth: AuthIdentity) -> Iterator[None]:
         yield
     except ChannelChangeRefused as exc:
         if exc.reason == "admin_required":
-            _require_admin(auth)
+            _require_admin(auth, action=DelegatedAction.CHANNEL_PERMISSIONS)
         raise ToolError(str(exc)) from exc
 
 
@@ -155,7 +156,7 @@ async def _set_thread_participation_impl(
     deployment = _deployment_mode(runtime, auth.platform)
     scope, scope_id = _target_scope(thread_id, channel_id)
     requested = None if mode == "inherit" else ParticipationMode(mode)
-    actor = chat_actor(auth)
+    actor = chat_actor(auth, DelegatedAction.CHANNEL_PERMISSIONS)
     platform = auth.platform or ""
     with _refusals(auth):
         refusal = switch_refusal(

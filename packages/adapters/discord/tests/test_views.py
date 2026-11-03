@@ -217,7 +217,7 @@ class TestCancelView:
         assert await view.interaction_check(interaction) is False
         interaction.response.send_message.assert_called_once_with(
             embed=build_notice_embed(
-                "Only the person who asked, or someone with Manage Server, can stop this reply."
+                "Only the person who asked, or a Daimon admin, can stop this reply."
             ),
             ephemeral=True,
         )

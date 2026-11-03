@@ -1,0 +1,106 @@
+# Watch-aware selection fixture; old compatible floor remains separately frozen.
+ContinuationReason = Literal[
+    "task_handoff", "private_input_applied", "timer", "github_access_ready", "worker_finished", "watch_fired"
+]
+
+
+_READABLE_REASON = TaskContinuation.reason.in_(get_args(ContinuationReason))
+
+
+def _dispatchable(now: datetime, *, max_attempts: int) -> ColumnElement[bool]:
+    """Rows a dispatcher may claim at `now`.
+
+    Pending and due, or claimed by a process whose lease ran out before it
+    committed the start fence — nothing can have run for such a row, so taking
+    it over cannot repeat a turn. A claim with `started_at` set is never
+    dispatchable again, however stale.
+    """
+    return and_(
+        _READABLE_REASON,
+        or_(
+            and_(
+                TaskContinuation.status == "pending",
+                or_(TaskContinuation.available_at.is_(None), TaskContinuation.available_at <= now),
+            ),
+            and_(
+                TaskContinuation.status == "claimed",
+                TaskContinuation.lease_expires_at.is_not(None),
+                TaskContinuation.lease_expires_at < now,
+                TaskContinuation.started_at.is_(None),
+                TaskContinuation.attempts < max_attempts,
+            ),
+        ),
+    )
+
+
+async def list_dispatchable_continuations(
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    platform: str,
+    thread_id: str,
+    now: datetime,
+    max_attempts: int,
+) -> list[TaskContinuationRow]:
+    """Rows in one thread a dispatcher may claim now, oldest first."""
+    rows = (
+        await session.execute(
+            select(TaskContinuation)
+            .where(
+                TaskContinuation.tenant_id == tenant_id,
+                TaskContinuation.platform == platform,
+                TaskContinuation.thread_id == thread_id,
+                _dispatchable(now, max_attempts=max_attempts),
+            )
+            .order_by(TaskContinuation.created_at, TaskContinuation.id)
+        )
+    ).scalars()
+    return [TaskContinuationRow.model_validate(row) for row in rows]
+
+
+async def list_due_wake_rows(
+    session: AsyncSession,
+    *,
+    platform: str,
+    now: datetime,
+    max_attempts: int,
+    limit: int,
+) -> list[TaskContinuationRow]:
+    """The oldest actionable row of up to `limit` threads, longest-waiting thread first.
+
+    Actionable: a due wake, or a claim to take over. A pending row with no
+    `available_at` is left to the next turn in its thread, as it always was;
+    an expired unstarted claim is taken over whatever its origin, since that
+    is the only way it would ever settle. One row per thread, so a thread with
+    many rows cannot crowd the others out of the batch; a thread the adapter
+    could not open is pushed back (`defer_wake_rows`), so the scan moves on.
+    """
+    actionable = and_(
+        TaskContinuation.platform == platform,
+        _dispatchable(now, max_attempts=max_attempts),
+        or_(
+            TaskContinuation.status == "claimed",
+            TaskContinuation.available_at.is_not(None),
+        ),
+    )
+    first_per_thread = (
+        select(TaskContinuation.id)
+        .where(actionable)
+        .distinct(TaskContinuation.tenant_id, TaskContinuation.thread_id)
+        .order_by(
+            TaskContinuation.tenant_id,
+            TaskContinuation.thread_id,
+            TaskContinuation.available_at.nulls_first(),
+            TaskContinuation.id,
+        )
+        .subquery()
+    )
+    rows = (
+        await session.execute(
+            select(TaskContinuation)
+            .where(TaskContinuation.id.in_(select(first_per_thread.c.id)))
+            .order_by(TaskContinuation.available_at.nulls_first(), TaskContinuation.id)
+            .limit(limit)
+        )
+    ).scalars()
+    return [TaskContinuationRow.model_validate(row) for row in rows]

@@ -31,10 +31,11 @@ from anthropic.types.beta.vaults.beta_managed_agents_credential import (
 from anthropic.types.beta.vaults.beta_managed_agents_environment_variable_auth_response import (
     BetaManagedAgentsEnvironmentVariableAuthResponse,
 )
+from daimon.core.lead_intake_execution import current_intake_execution
 from daimon.core.mcp_auth import CHAT_TOKEN_REFRESH_MARGIN, chat_token_label, mint_chat_mcp_token
 from daimon.core.mcp_hold import hold_from_metadata, hold_metadata_value, hold_vault_suffix
 from daimon.core.mcp_identity import RelayBinding
-from daimon.core.mcp_server_url import canonical_mcp_url, same_mcp_url
+from daimon.core.mcp_server_url import canonical_mcp_url, is_session_mcp_url, same_mcp_url
 from daimon.core.mux_compat import (
     archive_vault,
     create_vault,
@@ -45,7 +46,7 @@ from daimon.core.mux_compat import (
     store_credential,
     update_credential,
 )
-from daimon.core.stores.accounts import get_account_with_tenant
+from daimon.core.stores.accounts import account_exists, get_account_with_tenant
 from daimon.core.stores.mcp_tokens import get_mcp_token
 from daimon.core.turn_hold import TurnHold
 from mux.contracts.ids import Scope
@@ -57,6 +58,17 @@ GITHUB_COPILOT_MCP_URL = "https://api.githubcopilot.com/mcp"
 # Namespace prefix for the pg_advisory_xact_lock key — keeps this subsystem's
 # lock keys distinct from any other advisory-lock user in the same database.
 LOCK_NAMESPACE = "mcp_vault"
+
+# A shared thread's vault: `daimon-shared:<shared_owner>:<agent_uuid>`. Its own
+# prefix keeps it out of everything that walks `daimon-mcp:` vaults (the orphan
+# janitor, the credential sweep, `ensure_agent_mcp_vault`), none of which knows
+# a shared owner is never an account.
+SHARED_VAULT_PREFIX = "daimon-shared:"
+
+
+def shared_vault_name(owner: uuid.UUID, agent_id: uuid.UUID) -> str:
+    return f"{SHARED_VAULT_PREFIX}{owner}:{agent_id}"
+
 
 #: Credential metadata key that records the hold a held credential was minted with.
 HOLD_METADATA_KEY = "daimon_chat_hold"
@@ -129,10 +141,14 @@ async def hold_agent_vault_lock(
     - ``ensure_agent_mcp_vault`` (the daimon-mcp JWT at ``public_url``) and
       ``add_external_mcp_credential`` (a person's pasted token) take it
       themselves;
+    - ``ensure_shared_mcp_vault`` (a shared thread's vault, keyed on its
+      synthetic owner) takes it itself;
     - the OAuth grant (``complete_mcp_oauth_flow`` around
       ``put_mcp_oauth_credential``), the mirror of the agent's shared tokens
       (``create_session`` and ``sync_agent_mcp_credentials`` around
-      ``mirror_credentials_into_vault``) and the Copilot PAT
+      ``mirror_credentials_into_vault``, and the shared vault's prune and
+      mirror in ``sync_shared_mcp_credentials`` and
+      ``resync_mounted_shared_vault``) and the Copilot PAT
       (``create_session`` around ``add_github_copilot_credential``) take it
       through this block.
 
@@ -170,6 +186,8 @@ async def chat_mcp_credential(
     public_url: str,
     now: dt.datetime,
     slack_turn_context_id: uuid.UUID | None = None,
+    chat_session_id: str | None = None,
+    routine_execution: tuple[uuid.UUID, uuid.UUID] | None = None,
     hold: TurnHold | None = None,
     relay: RelayBinding | None = None,
 ) -> dict[str, Any]:
@@ -178,6 +196,7 @@ async def chat_mcp_credential(
     A ``hold`` or ``relay`` binding is signed into the JWT and recorded in the
     credential's metadata, where a refresh finds it again.
     """
+    execution = (routine_execution or current_intake_execution.get()) if chat_session_id else None
     token, jti, expires_at = await mint_chat_mcp_token(
         session,
         account_id=account_id,
@@ -185,6 +204,8 @@ async def chat_mcp_credential(
         secret=jwt_secret,
         now=now,
         slack_turn_context_id=slack_turn_context_id,
+        chat_session_id=chat_session_id,
+        routine_execution=execution,
         hold=hold,
         relay=relay,
     )
@@ -193,6 +214,12 @@ async def chat_mcp_credential(
         "daimon_chat_jti": str(jti),
         "daimon_chat_expires_at": expires_at.isoformat(),
     }
+    if execution is not None:
+        metadata["daimon_routine_id"] = str(execution[0])
+        metadata["daimon_routine_execution"] = str(execution[1])
+    if chat_session_id is not None:
+        metadata["daimon_chat_session"] = chat_session_id
+
     if slack_turn_context_id is not None:
         metadata["daimon_chat_context"] = str(slack_turn_context_id)
     if hold is not None:
@@ -220,21 +247,38 @@ async def _refresh_chat_credential_locked(
     now: dt.datetime,
     scope: Scope,
     slack_turn_context_id: uuid.UUID | None = None,
+    chat_session_id: str | None = None,
+    routine_execution: tuple[uuid.UUID, uuid.UUID] | None = None,
     hold: TurnHold | None = None,
     preserve_context: bool = False,
     registered_payload: dict[str, Any] | None = None,
     create_missing: bool = True,
 ) -> None:
+    execution = (routine_execution or current_intake_execution.get()) if chat_session_id else None
     target = None
     metadata: dict[str, str] = {}
     async for cred in list_credentials(client, vault_id, scope=scope):
         if isinstance(cred.auth, BetaManagedAgentsEnvironmentVariableAuthResponse):
             continue
         if not same_server_url(cred.auth.mcp_server_url, public_url):
-            continue
+            if not (preserve_context and is_session_mcp_url(cred.auth.mcp_server_url, public_url)):
+                continue
+            public_url = cred.auth.mcp_server_url
         if cred.auth.type != "static_bearer":
             return  # A person's OAuth credential retains its slot and authority.
         metadata = cred.metadata or {}
+        if preserve_context:
+            chat_session_id = metadata.get("daimon_chat_session")
+        if chat_session_id and metadata.get("daimon_routine_execution"):
+            saved_execution = (
+                uuid.UUID(metadata["daimon_routine_id"]),
+                uuid.UUID(metadata["daimon_routine_execution"]),
+            )
+            if execution is not None and execution != saved_execution:
+                raise ValueError("routine_execution_grant_mismatch")
+            execution = saved_execution
+        if chat_session_id is None:
+            execution = None
         if preserve_context and metadata.get("daimon_chat_context") is not None:
             slack_turn_context_id = uuid.UUID(metadata["daimon_chat_context"])
         if preserve_context and metadata.get(HOLD_METADATA_KEY) is not None:
@@ -250,6 +294,8 @@ async def _refresh_chat_credential_locked(
         identity = await get_account_with_tenant(session, account_id=account_id)
         if (
             identity is not None
+            and metadata.get("daimon_routine_execution")
+            == (str(execution[1]) if execution else None)
             and row is not None
             and row.kind == "agent"
             and row.label == chat_token_label(row.jti, held=hold is not None)
@@ -260,6 +306,7 @@ async def _refresh_chat_credential_locked(
             and row.expires_at is not None
             and row.expires_at > now + CHAT_TOKEN_REFRESH_MARGIN
             and metadata.get("daimon_chat_identity") == str(agent_id)
+            and metadata.get("daimon_chat_session") == chat_session_id
             and metadata.get("daimon_chat_context")
             == (None if slack_turn_context_id is None else str(slack_turn_context_id))
             and metadata.get(HOLD_METADATA_KEY)
@@ -282,6 +329,8 @@ async def _refresh_chat_credential_locked(
             public_url=public_url,
             now=now,
             slack_turn_context_id=slack_turn_context_id,
+            chat_session_id=chat_session_id,
+            routine_execution=execution,
             hold=hold,
         )
         # A running session can observe the provider write before its response
@@ -300,6 +349,8 @@ async def _refresh_chat_credential_locked(
             now=now,
             scope=scope,
             slack_turn_context_id=slack_turn_context_id,
+            chat_session_id=chat_session_id,
+            routine_execution=execution,
             hold=hold,
             registered_payload=payload,
             create_missing=create_missing,
@@ -313,7 +364,14 @@ async def _refresh_chat_credential_locked(
         **{
             key: value
             for key, value in metadata.items()
-            if key not in ("daimon_chat_context", HOLD_METADATA_KEY)
+            if key
+            not in {
+                "daimon_chat_context",
+                HOLD_METADATA_KEY,
+                "daimon_chat_session",
+                "daimon_routine_id",
+                "daimon_routine_execution",
+            }
         },
         **registered_payload["metadata"],
     }
@@ -408,10 +466,13 @@ async def _ensure_agent_mcp_vault_locked(
     public_url: str,
     now: dt.datetime,
     slack_turn_context_id: uuid.UUID | None = None,
+    chat_session_id: str | None = None,
     hold: TurnHold | None = None,
     scope: Scope,
 ) -> str:
     display_name = f"daimon-mcp:{account_id}:{agent_id}"
+    if chat_session_id is not None:
+        display_name += f":session:{chat_session_id}"
     if slack_turn_context_id is not None:
         display_name += f":slack-turn:{slack_turn_context_id}"
     if hold is not None:
@@ -429,6 +490,7 @@ async def _ensure_agent_mcp_vault_locked(
             now=now,
             scope=scope,
             slack_turn_context_id=slack_turn_context_id,
+            chat_session_id=chat_session_id,
             hold=hold,
         )
         return oldest.id
@@ -441,6 +503,7 @@ async def _ensure_agent_mcp_vault_locked(
         public_url=public_url,
         now=now,
         slack_turn_context_id=slack_turn_context_id,
+        chat_session_id=chat_session_id,
         hold=hold,
     )
     await store_credential(client, vault.id, payload, scope=scope)
@@ -602,10 +665,16 @@ async def ensure_agent_mcp_vault(
     now: dt.datetime,
     session_factory: async_sessionmaker[AsyncSession],
     slack_turn_context_id: uuid.UUID | None = None,
+    chat_session_id: str | None = None,
     hold: TurnHold | None = None,
     scope: Scope | None = None,
 ) -> str:
     """Return the ``ma_vault_id`` for this agent's daimon-mcp vault.
+
+    `chat_session_id` selects an isolated identity vault and signed session grant.
+    Its URL has a distinct session selector; personal OAuth stays in the shared
+    vault and is mounted separately. It cannot lend origin authority to another
+    session of the same account and agent.
 
     A Slack DM execution ID selects a separate vault namespace and signed claim;
     it never modifies the shared agent vault. Only sessions for that logical turn
@@ -665,10 +734,47 @@ async def ensure_agent_mcp_vault(
             public_url=public_url,
             now=now,
             slack_turn_context_id=slack_turn_context_id,
+            chat_session_id=chat_session_id,
             hold=hold,
             scope=scope,
         )
 
+        await session.commit()
+        return vault_id
+
+
+async def ensure_shared_mcp_vault(
+    client: AsyncAnthropic,
+    *,
+    owner: uuid.UUID,
+    agent_id: uuid.UUID,
+    session_factory: async_sessionmaker[AsyncSession],
+    scope: Scope,
+) -> str:
+    """Return the ``ma_vault_id`` of a shared thread's vault for this agent.
+
+    ``owner`` is the thread's synthetic owner (``shared_threads.shared_owner``).
+    The vault holds the agent's shared MCP tokens and nothing else: no
+    daimon-mcp JWT (a shared workspace never acts as anyone), no OAuth grant
+    and no pasted token, so it is created empty and
+    ``sync_shared_mcp_credentials`` and ``resync_mounted_shared_vault`` are its
+    only writers. Get-or-create runs under the same advisory lock as
+    ``ensure_agent_mcp_vault``, keyed on ``(owner, agent_id)``.
+
+    Refuses an ``owner`` that is an account: that would put the agent's
+    tokens in a vault named for a person, outside their own.
+    """
+    async with session_factory() as session:
+        await _lock_vault_namespace(session, account_id=owner, agent_id=agent_id)
+        if await account_exists(session, account_id=owner):
+            raise ValueError("a shared thread's owner is never an account")
+        display_name = shared_vault_name(owner, agent_id)
+        oldest = await _find_vault_by_name(client, display_name=display_name)
+        vault_id = (
+            oldest.id
+            if oldest is not None
+            else (await create_vault(client, display_name, scope=scope)).id
+        )
         await session.commit()
         return vault_id
 

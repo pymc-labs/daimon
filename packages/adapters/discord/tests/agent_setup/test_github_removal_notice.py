@@ -24,7 +24,7 @@ async def test_removal_notice_uses_ephemeral_reconnect_button_without_dm(
     def is_admin(_interaction: object) -> bool:
         return True
 
-    monkeypatch.setattr(github_removal, "is_guild_admin", is_admin)
+    monkeypatch.setattr(github_removal, "is_platform_admin", is_admin)
     monkeypatch.setattr(
         github_removal,
         "claim_notice",

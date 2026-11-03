@@ -944,7 +944,9 @@ async def test_queued_followup_drains_even_when_originating_turn_fails(
 
     release.set()
     # must not raise -- _handle_mention's own boundary absorbs the failure
-    await asyncio.wait_for(task, timeout=2.0)
+    # The drain includes two failure renderings and database cleanup; bound the
+    # whole operation without making a shared host's SQL latency the assertion.
+    await asyncio.wait_for(task, timeout=10.0)
 
     assert orchestrate_calls == [None, "queued-during-failure"], (
         "the queued follow-up must still run its drain turn after the "
@@ -1426,3 +1428,49 @@ async def test_cancelled_drain_clears_unrun_authors_in_popped_batch(queued_bot):
     for message in messages:
         message.remove_reaction.assert_awaited_with("⌛", queued_bot.user)
     assert not queued_bot._queued_reactions
+
+
+async def test_long_turn_queue_notice_posts_once(queued_bot: DaimonBot) -> None:
+    from daimon.core.turn.thread_queue import QUEUE_NOTICE, QUEUE_NOTICE_AFTER_S, HeldThreads
+
+    now = [0.0]
+    queued_bot._processing = HeldThreads(clock=lambda: now[0])
+    thread_id = 789
+    queued_bot._processing.add(thread_id)
+    first = _make_thread_message(thread_id=thread_id, content="first")
+    second = _make_thread_message(thread_id=thread_id, content="second")
+    third = _make_thread_message(thread_id=thread_id, content="third")
+    await queued_bot._queue_behind_inflight_turn(thread_id, first)
+    first.channel.send.assert_not_awaited()
+    now[0] = QUEUE_NOTICE_AFTER_S
+    await queued_bot._queue_behind_inflight_turn(thread_id, second)
+    await queued_bot._queue_behind_inflight_turn(thread_id, third)
+    second.channel.send.assert_awaited_once_with(QUEUE_NOTICE)
+    third.channel.send.assert_not_awaited()
+    for message in (first, second, third):
+        message.add_reaction.assert_awaited_once_with("⌛")
+
+
+@pytest.mark.parametrize("transition", ["released", "next_turn"])
+async def test_queue_notice_delayed_by_reaction_is_fenced_to_held_turn(
+    queued_bot: DaimonBot, transition: str
+) -> None:
+    from daimon.core.turn.thread_queue import QUEUE_NOTICE_AFTER_S, HeldThreads
+
+    now = [0.0]
+    queued_bot._processing = HeldThreads(clock=lambda: now[0])
+    queued_bot._processing.add(789)
+    now[0] = QUEUE_NOTICE_AFTER_S
+    message = _make_thread_message(thread_id=789)
+
+    async def react(_emoji: str) -> None:
+        await asyncio.sleep(0)
+        if transition == "released":
+            queued_bot._processing.discard(789)
+        else:
+            queued_bot._processing.start_turn(789)
+
+    message.add_reaction = AsyncMock(side_effect=react)
+    await queued_bot._queue_behind_inflight_turn(789, message)
+    message.channel.send.assert_not_awaited()
+    message.add_reaction.assert_awaited_once_with("⌛")

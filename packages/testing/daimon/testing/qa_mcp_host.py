@@ -37,18 +37,17 @@ from __future__ import annotations
 import asyncio
 import base64
 import datetime as dt
-import hmac
 import ipaddress
 import json
 import os
 import re
 import secrets
 import uuid
-from collections.abc import AsyncIterator, Iterator, Mapping
+from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
@@ -65,6 +64,8 @@ from daimon.testing.db import (
 )
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
+from daimon.testing.qa_mcp_gate import McpGate as McpGate
+from daimon.testing.qa_mcp_gate import RunBearer as RunBearer
 from mux.testing.conformance.default_capability import MCP_TOOLS
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from mux.testing.drivers.anthropic.ma_models import ma_session
@@ -72,7 +73,6 @@ from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
-from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 # The F1 default-capability contract's MCP pair, so the host cannot drift from it.
 ALLOWED_TOOLS: tuple[str, ...] = tuple(sorted(MCP_TOOLS))
@@ -80,7 +80,6 @@ QA_AGENT_ID = "agent_qa_synthetic"
 QA_ENVIRONMENT_ID = "env_qa_synthetic"
 QA_SESSION_ID = "sesn_qa_synthetic"
 DEFAULT_ROOT = Path("/tmp/daimon-qa-mcp")
-MAX_BODY_BYTES = 256 * 1024
 _SCRUBBED_PREFIXES = ("DAIMON_", "STRIPE_", "MCP_", "ANTHROPIC_", "OPENAI_", "GEMINI_", "GOOGLE_")
 
 # Bounded, synthetic read data: what `list_events` returns for the seeded session.
@@ -147,24 +146,6 @@ class Manifest:
             return cls(**json.loads(path.read_text()))
         except TypeError as err:
             raise QaHostError(f"manifest {path} has fields this host does not own: {err}") from None
-
-
-@dataclass(frozen=True)
-class RunBearer:
-    """The run's gate credential: random, short-lived, revocable by a marker file."""
-
-    token: str
-    expires_at: dt.datetime
-    revoked_marker: Path
-
-    def accepts(self, presented: str | None, now: dt.datetime) -> bool:
-        if presented is None or self.revoked_marker.exists() or now >= self.expires_at:
-            return False
-        return hmac.compare_digest(presented.encode(), self.token.encode())
-
-    def revoke(self) -> None:
-        self.revoked_marker.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        self.revoked_marker.touch()
 
 
 def _sanitized(database_url: str) -> str:
@@ -267,114 +248,6 @@ def synthetic_anthropic(
             )
 
     return build_fake_anthropic(dispatch)
-
-
-class McpGate:
-    """The host's only surface: `POST /mcp`, the run bearer, the two F1 tools."""
-
-    def __init__(
-        self,
-        app: ASGIApp,
-        *,
-        bearer: RunBearer,
-        daimon_token: str,
-        allowed_tools: tuple[str, ...] = ALLOWED_TOOLS,
-        clock: Any = None,  # noqa: ANN401 - a zero-argument callable returning an aware datetime
-    ) -> None:
-        self._app = app
-        self._bearer = bearer
-        self._daimon_token = daimon_token
-        self._allowed = frozenset(allowed_tools)
-        self._clock = clock or (lambda: dt.datetime.now(dt.UTC))
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] == "lifespan":
-            await self._app(scope, receive, send)
-            return
-        if scope["type"] != "http":
-            await send({"type": "websocket.close", "code": 1008})
-            return
-        if scope["path"] not in ("/mcp", "/mcp/"):
-            await _reply(send, 404, {"error": "not found"})
-            return
-        if scope["method"] != "POST":
-            await _reply(send, 405, {"error": "method not allowed"})
-            return
-        headers = {k.decode().lower(): v.decode() for k, v in scope["headers"]}
-        authorization = headers.get("authorization", "")
-        presented = authorization[7:] if authorization.lower().startswith("bearer ") else None
-        if not self._bearer.accepts(presented, self._clock()):
-            await _reply(send, 401, {"error": "unauthorized"})
-            return
-        body = await _read_body(receive)
-        if body is None:
-            await _reply(send, 413, {"error": "request too large"})
-            return
-        refusal = self._refusal(body)
-        if refusal is not None:
-            await _reply(send, 403, refusal)
-            return
-        forwarded = [
-            (k, v) for k, v in scope["headers"] if k.lower() not in (b"authorization", b"cookie")
-        ]
-        forwarded.append((b"authorization", f"Bearer {self._daimon_token}".encode()))
-        inner_scope = {**scope, "headers": forwarded, "path": "/mcp", "raw_path": b"/mcp"}
-
-        delivered = False
-
-        async def replay() -> Message:
-            nonlocal delivered
-            if delivered:
-                return await receive()
-            delivered = True
-            return {"type": "http.request", "body": body, "more_body": False}
-
-        await self._app(inner_scope, replay, send)
-
-    def _refusal(self, body: bytes) -> dict[str, Any] | None:
-        try:
-            message = json.loads(body)
-        except ValueError:
-            return {"error": "invalid json"}
-        if not isinstance(message, dict):
-            return {"error": "batch requests are not accepted"}
-        message = cast(dict[str, Any], message)
-        if message.get("method") == "tools/call":
-            params: object = message.get("params")
-            name = cast(dict[str, Any], params).get("name") if isinstance(params, dict) else None
-            if name not in self._allowed:
-                return {
-                    "jsonrpc": "2.0",
-                    "id": message.get("id"),
-                    "error": {"code": -32601, "message": f"tool {name!r} is not available"},
-                }
-        return None
-
-
-async def _read_body(receive: Receive) -> bytes | None:
-    chunks: list[bytes] = []
-    size = 0
-    while True:
-        message = await receive()
-        chunk = message.get("body", b"")
-        size += len(chunk)
-        if size > MAX_BODY_BYTES:
-            return None
-        chunks.append(chunk)
-        if not message.get("more_body", False):
-            return b"".join(chunks)
-
-
-async def _reply(send: Send, status: int, payload: Mapping[str, Any]) -> None:
-    body = json.dumps(payload).encode()
-    await send(
-        {
-            "type": "http.response.start",
-            "status": status,
-            "headers": [(b"content-type", b"application/json")],
-        }
-    )
-    await send({"type": "http.response.body", "body": body})
 
 
 @dataclass
@@ -631,7 +504,7 @@ async def _build_run(
     )
     manifest.status = "built"
     manifest.save(root)
-    gate = McpGate(app, bearer=bearer, daimon_token=daimon_token)
+    gate = McpGate(app, bearer=bearer, daimon_token=daimon_token, allowed_tools=ALLOWED_TOOLS)
     return QaHost(
         gate=gate,
         bearer=bearer,

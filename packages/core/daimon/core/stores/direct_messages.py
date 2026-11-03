@@ -9,13 +9,15 @@ from daimon.core._models import (
     DirectMessageConversation,
     DirectMessagePolicy,
     ThreadAgentBinding,
-    ThreadSession,
 )
 from daimon.core.errors import DaimonError, UserFacingError
+from daimon.core.stores.thread_sessions import retire_dm_scope
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import delete, func, select, union, update
+from sqlalchemy import delete, func, select, text, union
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
+
+COLD_DM_ORIGIN = "Private conversation"
 
 DM_SCOPE_PREFIX = "dm:"
 """Thread id prefix of a private conversation's scope."""
@@ -45,6 +47,11 @@ class DirectMessageRow(BaseModel):
     history: list[dict[str, str]]
     recent_message_ids: list[str]
     active_until: datetime | None
+
+    @property
+    def is_cold(self) -> bool:
+        """Source-free provenance, distinct from legacy moves with missing source fields."""
+        return self.source_url == COLD_DM_ORIGIN and self.source_channel_id is None
 
 
 class DmOrigin(BaseModel):
@@ -83,9 +90,30 @@ async def get_conversation(
     return None if row is None else DirectMessageRow.model_validate(row)
 
 
+async def get_conversation_by_scope(
+    session: AsyncSession, *, tenant_id: uuid.UUID, account_id: uuid.UUID, scope_id: str
+) -> DirectMessageRow | None:
+    """Resolve only the caller's current private scope in this tenant."""
+    row = await session.scalar(
+        select(DirectMessageConversation).where(
+            DirectMessageConversation.tenant_id == tenant_id,
+            DirectMessageConversation.account_id == account_id,
+            DirectMessageConversation.scope_id == scope_id,
+        )
+    )
+    return None if row is None else DirectMessageRow.model_validate(row)
+
+
 async def start_conversation(
     session: AsyncSession, *, conversation: DirectMessageRow, now: datetime
 ) -> None:
+    # Lock even an absent row, so concurrent first starts cannot both insert.
+    await lock_route(
+        session,
+        platform=conversation.platform,
+        route_key=conversation.route_key,
+        external_user_id=conversation.external_user_id,
+    )
     row = await session.get(
         DirectMessageConversation,
         (conversation.platform, conversation.route_key, conversation.external_user_id),
@@ -196,22 +224,41 @@ async def quarantine_conversation(
             DirectMessageConversation.scope_id == conversation.scope_id,
         )
     )
-    retired = (
-        await session.execute(
-            update(ThreadSession)
-            .where(
-                ThreadSession.tenant_id == conversation.tenant_id,
-                ThreadSession.platform == conversation.platform,
-                ThreadSession.thread_id == conversation.scope_id,
-                ThreadSession.status == "live",
-            )
-            .values(status="dead")
-            .returning(ThreadSession.ma_session_id)
-        )
-    ).scalars()
-    ids = list(retired)
+    return await retire_dm_scope(
+        session,
+        tenant_id=conversation.tenant_id,
+        platform=conversation.platform,
+        scope_id=conversation.scope_id,
+    )
+
+
+async def lock_route(
+    session: AsyncSession, *, platform: str, route_key: str, external_user_id: str
+) -> None:
+    """Serialize routing writes, including a route that has no conversation yet."""
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"dm:{platform}:{route_key}:{external_user_id}"},
+    )
+
+
+async def get_dm_agent_name(session: AsyncSession, *, tenant_id: uuid.UUID) -> str | None:
+    return await session.scalar(
+        select(DirectMessagePolicy.dm_agent_name).where(DirectMessagePolicy.tenant_id == tenant_id)
+    )
+
+
+async def set_dm_agent_name(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_name: str | None
+) -> None:
+    if agent_name is not None and not agent_name.strip():
+        raise UserFacingError("The DM agent name must not be empty.")
+    await session.execute(
+        insert(DirectMessagePolicy)
+        .values(tenant_id=tenant_id, dm_agent_name=agent_name)
+        .on_conflict_do_update(index_elements=["tenant_id"], set_={"dm_agent_name": agent_name})
+    )
     await session.flush()
-    return ids
 
 
 async def dm_enabled(session: AsyncSession, *, tenant_id: uuid.UUID) -> bool:

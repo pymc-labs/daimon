@@ -45,7 +45,7 @@ from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.testing.db import require_owned_sessionmaker
 from daimon.testing.discord_ingress import ConcurrentCheckpoint, DiscordIngress, IngressHTTP
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.contracts.config import BackendConfig
 from mux.contracts.ids import Provider, Scope
@@ -101,6 +101,9 @@ async def owned(
     async with db_session_factory() as session, session.begin():
         tenant = await make_tenant(session, platform="discord", workspace_id="100")
         account = await make_account(session, tenant=tenant)
+        await make_platform_principal(
+            session, tenant=tenant, account=account, platform="discord", external_id="103"
+        )
         await scoped_config_write.set_fields(
             session,
             scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="101"),

@@ -14,6 +14,7 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import json
 import re
@@ -86,6 +87,7 @@ from daimon.core.stores.github_links import save_verified_link
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.security_audit import list_events
 from daimon.core.tenant_balance import debit_amount
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.testing.asgi import call_mcp_tool, mcp_session
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from daimon.testing.ma_models import ma_agent
@@ -199,6 +201,7 @@ def _runtime(
     environment_name: str | None = None,
 ) -> McpRuntime:
     settings = MagicMock()
+    settings.tool_safety = OPEN_TOOL_SAFETY
     settings.mcp.public_url = None
     settings.mcp.jwt_secret = None
     settings.github.fallback_pat = None
@@ -236,7 +239,9 @@ def _session_json(
         agent_id=agent_id,
         environment_id=_ENV_ID,
         status=status,
-        metadata=None if account_id is None else {MA_METADATA_KEY_ACCOUNT: str(account_id)},
+        metadata=None
+        if account_id is None
+        else {"daimon_agent_chat": "true", MA_METADATA_KEY_ACCOUNT: str(account_id)},
     ).model_dump(mode="json")
 
 
@@ -310,7 +315,7 @@ async def _tools_list_via_http(app: ASGIApp, token: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-async def test_narrowing_agent_id_claim_returns_only_agent_chat_tools() -> None:
+async def test_narrowing_agent_id_claim_returns_only_agent_chat_tools(sessionmaker) -> None:
     """With an agent_id-claim token, tools/list returns only agent-chat tools.
 
     Verifies that admin/CRUD tools are excluded from the visible set and that only
@@ -329,7 +334,7 @@ async def test_narrowing_agent_id_claim_returns_only_agent_chat_tools() -> None:
     router = MARouter()
     router.add("GET", r"/v1/agents", lambda _r, _m: list_response([]))
     client = build_fake_anthropic(router.dispatch)
-    mock_sessionmaker: async_sessionmaker[AsyncSession] = MagicMock()  # type: ignore[assignment]
+    mock_sessionmaker = sessionmaker
 
     mcp = FastMCP(
         name="narrowing-test",
@@ -386,7 +391,7 @@ async def test_narrowing_agent_id_claim_returns_only_agent_chat_tools() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _full_stack_mcp(token: str, claims: dict[str, str]) -> FastMCP:
+def _full_stack_mcp(token: str, claims: dict[str, str], sessionmaker) -> FastMCP:
     """Assemble the prod transform stack: both Visibility baselines + the
     agent-chat-aware BM25 search transform + IdentityMiddleware narrowing.
 
@@ -395,7 +400,7 @@ def _full_stack_mcp(token: str, claims: dict[str, str]) -> FastMCP:
     collapses the listing to search_tools/call_tool, which the per-agent
     match_all disable then hides — the subclass must yield to the narrowing.
     """
-    mock_sessionmaker: async_sessionmaker[AsyncSession] = MagicMock()  # type: ignore[assignment]
+    mock_sessionmaker = sessionmaker
     mcp = FastMCP(name="full-stack-181", auth=StaticTokenVerifier(tokens={token: claims}))
     mcp.add_middleware(
         IdentityMiddleware(
@@ -430,7 +435,7 @@ def _full_stack_mcp(token: str, claims: dict[str, str]) -> FastMCP:
     return mcp
 
 
-async def test_narrowing_lists_agent_chat_tools_through_bm25_search_transform() -> None:
+async def test_narrowing_lists_agent_chat_tools_through_bm25_search_transform(sessionmaker) -> None:
     """A narrowed agent token's tools/list returns exactly the agent-chat tools
     even with the BM25 search transform in the stack (issue #181).
 
@@ -448,7 +453,9 @@ async def test_narrowing_lists_agent_chat_tools_through_bm25_search_transform() 
         "client_id": "test",
     }
 
-    tool_names = await _tools_list_via_http(_full_stack_mcp(token, claims).http_app(), token)
+    tool_names = await _tools_list_via_http(
+        _full_stack_mcp(token, claims, sessionmaker).http_app(), token
+    )
 
     expected = {
         "ask",
@@ -469,7 +476,7 @@ async def test_narrowing_lists_agent_chat_tools_through_bm25_search_transform() 
     )
 
 
-async def test_non_narrowed_token_still_gets_bm25_search_surface() -> None:
+async def test_non_narrowed_token_still_gets_bm25_search_surface(sessionmaker) -> None:
     """A non-narrowed (no agent_id) token still gets the collapsed search surface.
 
     Guards against the fix over-reaching: only per-agent sessions bypass the
@@ -484,7 +491,9 @@ async def test_non_narrowed_token_still_gets_bm25_search_surface() -> None:
         "client_id": "test",
     }
 
-    tool_names = await _tools_list_via_http(_full_stack_mcp(token, claims).http_app(), token)
+    tool_names = await _tools_list_via_http(
+        _full_stack_mcp(token, claims, sessionmaker).http_app(), token
+    )
 
     assert set(tool_names) == {"search_tools", "call_tool"}, (
         "non-narrowed token should get the BM25 search/call surface, not a full "
@@ -1835,7 +1844,7 @@ async def test_describe_agent_returns_none_repo_url_for_unbound_agent(
 # ---------------------------------------------------------------------------
 
 
-async def test_list_events_admits_thread_status_events_through_fastmcp() -> None:
+async def test_list_events_admits_thread_status_events_through_fastmcp(sessionmaker) -> None:
     """list_events must return a transcript containing session.thread_status_idle
     (a variant the pinned SDK's event union does NOT model) without a FastMCP
     output-validation error.
@@ -1877,7 +1886,7 @@ async def test_list_events_admits_thread_status_events_through_fastmcp() -> None
         lambda _r, _m: httpx.Response(200, json=_session_json(status="idle")),
     )
 
-    mock_sessionmaker: async_sessionmaker[AsyncSession] = MagicMock()  # type: ignore[assignment]
+    mock_sessionmaker = sessionmaker
     mcp = FastMCP(name="list-events-schema", auth=StaticTokenVerifier(tokens={token: claims}))
     mcp.add_middleware(
         IdentityMiddleware(
@@ -1934,6 +1943,13 @@ async def test_turn_tools_refuse_over_balance_tenant_before_creating_session(
             session, platform="discord", workspace_id=str(tenant_id), id=tenant_id
         )
         account = await make_account(session, tenant=tenant)
+        await make_platform_principal(
+            session,
+            tenant=tenant,
+            account=account,
+            platform="discord",
+            external_id="discord-user-over-balance",
+        )
 
     agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=_MA_AGENT_ID)
     token = "over-balance-agent-token"
@@ -2255,6 +2271,7 @@ async def test_continue_turn_by_billed_caller_leaves_exempt_stamp_in_place(
         environment_id=_ENV_ID,
         status="idle",
         metadata={
+            "daimon_agent_chat": "true",
             MA_METADATA_KEY_ACCOUNT: str(_ACCOUNT_ID),
             MA_METADATA_KEY_BILLING_EXEMPT: "mcp-internal-caller",
         },
@@ -2270,6 +2287,7 @@ async def test_continue_turn_by_billed_caller_leaves_exempt_stamp_in_place(
 
     router = MARouter()
     router.add("POST", r"/v1/sessions/([^/]+)/events", on_send)
+    router.add("GET", r"/v1/sessions/([^/]+)/events", lambda _r, _m: list_response([]))
     router.add("GET", r"/v1/sessions/([^/]+)", on_retrieve)
     client = build_fake_anthropic(router.dispatch)
     billed_caller = AuthIdentity(
@@ -2285,10 +2303,15 @@ async def test_continue_turn_by_billed_caller_leaves_exempt_stamp_in_place(
     )
 
     assert result["handle"] == "ses_exempt", "a same-account billed caller may continue"
-    assert requests == [
+    # Re-read inside the fence, then the message; the tool gate (policy off)
+    # leaves the session as it is.
+    sent = requests.index(("POST", "/v1/sessions/ses_exempt/events"))
+    assert requests[: sent + 1] == [
+        ("GET", "/v1/sessions/ses_exempt"),
         ("GET", "/v1/sessions/ses_exempt"),
         ("POST", "/v1/sessions/ses_exempt/events"),
     ], f"continue_turn must not rewrite session metadata; saw {requests!r}"
+    assert ("POST", "/v1/sessions/ses_exempt") not in requests
 
 
 async def test_start_turn_with_bundle_preserves_the_boundary_return_shape(
@@ -2528,8 +2551,25 @@ async def test_start_turn_with_bundle_when_jwt_secret_unset_is_refused(
         await _start_turn_impl(runtime, auth, "hi", handle)
 
 
+@pytest.fixture
+def sender_workers(monkeypatch: pytest.MonkeyPatch) -> list[asyncio.Task[bool]]:
+    """Capture the real sender workers so each oracle scenario drains its own tasks."""
+    from daimon.adapters.mcp.tools import _agent_chat_safety
+
+    workers: list[asyncio.Task[bool]] = []
+
+    def watch(*args: Any, **kwargs: Any) -> asyncio.Task[bool]:
+        worker = _agent_chat_safety.watch_turn(*args, **kwargs)
+        workers.append(worker)
+        return worker
+
+    monkeypatch.setattr("daimon.adapters.mcp.tools.agent_chat.watch_turn", watch)
+    return workers
+
+
 async def test_start_turn_returns_the_accepted_events_boundary(
     db_session_factory: async_sessionmaker[AsyncSession],
+    sender_workers: list[asyncio.Task[bool]],
 ) -> None:
     """turn_event_id comes from events.send's data[0]; turn_started_at from the
     caller's own clock, captured before the send, not from the echo.
@@ -2568,11 +2608,22 @@ async def test_start_turn_returns_the_accepted_events_boundary(
         id="ses_test001", agent_id=_MA_AGENT_ID, environment_id=_ENV_ID, status="running"
     )
 
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/]+)$",
+        lambda _r, _m: httpx.Response(
+            200,
+            json=fake_session.model_copy(update={"status": "terminated"}).model_dump(mode="json"),
+        ),
+    )
+
     with patch(
         "daimon.adapters.mcp.tools.agent_chat.create_session",
         new=AsyncMock(return_value=fake_session),
     ) as mock_create_session:
         result = await _start_turn_impl(runtime, auth, "hi", now=now)
+        (worker,) = sender_workers
+        assert await asyncio.wait_for(worker, 5), "the sender's worker must finish before recording"
 
     assert result["turn_event_id"] == "sevt_boundary_001", (
         f"turn_event_id should be the send response's accepted event id; got {result!r}"
@@ -2595,6 +2646,8 @@ async def test_start_turn_returns_the_accepted_events_boundary(
         "session_factory",
         "fernet",
         "app_session_unmapped",
+        "agent_chat",
+        "tool_safety",
         "github_fallback_pat",
         "github_app_id",
         "github_app_private_key",
@@ -2606,6 +2659,7 @@ async def test_start_turn_returns_the_accepted_events_boundary(
         "origin_seal_ids",
         "personal_memory",
         "before_create",
+        "legacy_memory_servers",
     }, f"the non-bundle path must keep passing its full argument set; got {sorted(call_kwargs)!r}"
     assert call_kwargs["app_session_unmapped"] is True
     assert call_kwargs["personal_memory"] is False, (
@@ -2625,11 +2679,13 @@ async def test_continue_turn_gates_on_the_sessions_own_budget_channel(billed: bo
         environment_id=_ENV_ID,
         status="idle",
         metadata={
+            "daimon_agent_chat": "true",
             MA_METADATA_KEY_ACCOUNT: str(_ACCOUNT_ID),
             MA_METADATA_KEY_BUDGET_CHANNEL: "chan-spent",
         },
     ).model_dump(mode="json")
     router = MARouter()
+    router.add("GET", r"/v1/sessions/([^/]+)/events", lambda _r, _m: list_response([]))
     router.add("GET", r"/v1/sessions/([^/]+)", lambda _r, _m: httpx.Response(200, json=session))
     router.add(
         "POST",
@@ -2667,6 +2723,7 @@ async def test_continue_turn_gates_on_the_sessions_own_budget_channel(billed: bo
 @pytest.mark.parametrize("touch_result", [None, True], ids=["mapped-vault", "unmapped-vault"])
 async def test_continue_turn_returns_boundary_from_its_own_send(
     touch_result: bool | None,
+    sender_workers: list[asyncio.Task[bool]],
 ) -> None:
     """continue_turn's turn_event_id is THIS send's accepted event, not session
     history; turn_started_at is the caller's own clock, captured before THIS
@@ -2679,14 +2736,20 @@ async def test_continue_turn_returns_boundary_from_its_own_send(
         call_order.append("now")
         return own_clock_at
 
+    sent = False
     router = MARouter()
+    router.add("GET", r"/v1/sessions/([^/]+)/events", lambda _r, _m: list_response([]))
     router.add(
         "GET",
         r"/v1/sessions/([^/]+)",
-        lambda _r, _m: httpx.Response(200, json=_session_json(status="idle")),
+        lambda _r, _m: httpx.Response(
+            200, json=_session_json(status="terminated" if sent else "idle")
+        ),
     )
 
     def on_send(_r: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        nonlocal sent
+        sent = True
         call_order.append("send")
         return send_events_response(
             data=[
@@ -2709,6 +2772,8 @@ async def test_continue_turn_returns_boundary_from_its_own_send(
         new=AsyncMock(return_value=touch_result),
     ) as touch_app:
         result = await _continue_turn_impl(runtime, auth, "ses_test001", "again", now=now)
+        (worker,) = sender_workers
+        assert await asyncio.wait_for(worker, 5), "the sender's worker must finish before recording"
 
     assert result == {
         "handle": "ses_test001",
@@ -3019,9 +3084,9 @@ async def test_cancel_turn_issues_no_status_precheck_between_ownership_and_send(
 
     result = await _cancel_turn_impl(runtime, auth, "ses_test001")
 
-    assert calls == ["retrieve", "send", "retrieve"], (
-        "expected ownership-retrieve, send, status-retrieve in that order with no "
-        f"extra status read between the ownership check and the send; got {calls!r}"
+    assert calls == ["retrieve", "retrieve", "send", "retrieve"], (
+        "expected ownership before and inside the fence, then unconditional send and status; "
+        f"got {calls!r}"
     )
     assert result == {"handle": "ses_test001", "status": "running"}
 
@@ -3207,7 +3272,7 @@ async def test_get_turn_cost_returns_none_but_still_counts_events_for_unpriced_m
         agent_id=_MA_AGENT_ID,
         model="claude-unpriced-model-x",
         environment_id=_ENV_ID,
-        metadata={MA_METADATA_KEY_ACCOUNT: str(_ACCOUNT_ID)},
+        metadata={"daimon_agent_chat": "true", MA_METADATA_KEY_ACCOUNT: str(_ACCOUNT_ID)},
     ).model_dump(mode="json")
     usage = ma_model_usage(input_tokens=100, output_tokens=50)
     router = MARouter()
@@ -3566,6 +3631,9 @@ async def test_turn_tools_refuse_an_invoker_outside_the_allowlist_before_creatin
             session, platform="discord", workspace_id=str(tenant_id), id=tenant_id
         )
         account = await make_account(session, tenant=tenant)
+        await make_platform_principal(
+            session, tenant=tenant, account=account, platform="discord", external_id="guest"
+        )
         await set_access_policy(
             session, tenant_id=tenant_id, policy=TenantAccessPolicy(invoker_user_ids=("staff",))
         )
@@ -4175,6 +4243,7 @@ async def test_start_then_continue_rotates_the_mounted_chat_token_inside_the_rea
         )
 
     router.add("POST", r"/v1/sessions/ses_test001/events$", send)
+    router.add("GET", r"/v1/sessions/ses_test001/events$", lambda _r, _m: list_response([]))
     client = build_fake_anthropic(router.dispatch)
     runtime = _runtime(client, session_factory=factory, environment_name=_ENV_NAME)
     runtime.settings.mcp = McpSettings(

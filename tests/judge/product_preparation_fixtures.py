@@ -17,6 +17,7 @@ from daimon.core.config import McpSettings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.stores.identity import find_platform_principal, get_or_create_platform_principal
 from daimon.core.stores.thread_sessions import get_live_thread_session
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.deps import TurnDeps
 from daimon.testing.anthropic_fixtures import (
     AnthropicTape,
@@ -359,6 +360,7 @@ async def publish_preparation(
                 public_url=None,
                 turn_path="mux",
                 channel_backends=True,
+                tool_safety=OPEN_TOOL_SAFETY,
             )
             prepared = await scratch.prepare(deps, invocation, revision, timeout_s)
             if (

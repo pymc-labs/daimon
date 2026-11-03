@@ -15,7 +15,7 @@ from daimon.core.agent_pins import (
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import CredentialRequestRow, Role
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from daimon.testing.ma_models import ma_agent
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -52,8 +52,11 @@ def _row(
 async def _setup(
     db_session: AsyncSession, *, pins: dict[str, tuple[str, ...]] | None, role: Role = Role.USER
 ) -> tuple[uuid.UUID, uuid.UUID]:
-    tenant = await make_tenant(db_session)
+    tenant = await make_tenant(db_session, platform="slack")
     account = await make_account(db_session, tenant=tenant)
+    await make_platform_principal(
+        db_session, tenant=tenant, account=account, platform="slack", external_id="U1"
+    )
     await set_role(db_session, account.id, role)
     if pins is not None:
         await set_access_policy(

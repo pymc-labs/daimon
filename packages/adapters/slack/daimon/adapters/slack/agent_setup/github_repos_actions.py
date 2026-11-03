@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Any, cast
 
-from daimon.adapters.slack.admin import resolve_is_admin
+from daimon.adapters.slack.admin import resolve_is_platform_admin
 from daimon.adapters.slack.agent_setup import github_repos
 from daimon.adapters.slack.agent_setup.read import load_panel_roster
 from daimon.adapters.slack.agent_setup.state import PanelMetadata
@@ -56,7 +56,10 @@ async def handle(
                 tenant_id=derive_tenant_uuid(platform="slack", workspace_id=team_id),
                 meta=meta,
                 agent_name=meta.agent_name,
-                is_admin=await resolve_is_admin(client, user_id=user_id, host_team_id=team_id),
+                is_admin=await resolve_is_platform_admin(
+                    client, user_id=user_id, host_team_id=team_id
+                ),
+                viewer_user_id=user_id,
             )
             if view is not None:
                 await client.views_update(  # pyright: ignore[reportUnknownMemberType]
@@ -66,7 +69,7 @@ async def handle(
         return True
     name = str(action.get("value") or meta.agent_name or "")
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
-    is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
+    is_admin = await resolve_is_platform_admin(client, user_id=user_id, host_team_id=team_id)
     async with runtime.sessionmaker() as session:
         roster = await load_panel_roster(
             session,
@@ -99,7 +102,7 @@ async def handle(
                         tenant_id=tenant_id,
                         platform="slack",
                         platform_user_id=user_id,
-                        verified_tenant_admin=True,
+                        is_platform_admin=True,
                     )
                 # An owner's link promotes nobody; it is for this one agent and the
                 # owner is read again when it is saved.

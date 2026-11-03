@@ -1,4 +1,4 @@
-"""Routines tools: create / list / get / update / delete.
+"""Routines tools: create / list / get / update / delete, and an admin's sandbox opt-in.
 
 ``register_routines_tools(mcp, runtime)`` wires the ``@mcp.tool`` closures for
 this group; each closure delegates to a module-private ``_*_impl`` function
@@ -13,7 +13,7 @@ leaked.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from typing import cast
 from uuid import UUID
@@ -54,6 +54,14 @@ from daimon.adapters.mcp.tools.teams._directory import (
     split_thread,
 )
 from daimon.core import routine_service
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.admin_actions import DelegatedAction
+from daimon.core.authz import Action, Subject, authorize, build_subject
+from daimon.core.discord_membership import verify_discord_source
+from daimon.core.errors import StoreError
+from daimon.core.membership_subject import resolve_subject
+from daimon.core.permissions import dm_source_limited
+from daimon.core.routine_sandbox import SandboxPinUnavailable, current_pin
 from daimon.core.routine_service import (
     CallView,
     ChannelAgentName,
@@ -64,15 +72,28 @@ from daimon.core.routine_service import (
     RoutineChange,
     RoutineEnv,
     RoutineRefused,
+    RoutineSource,
+    SourceResolver,
 )
+from daimon.core.routines import routine_for_reader
 from daimon.core.scope import ScopeContext
-from daimon.core.stores.domain import CatchUpPolicy, RoutineDestinationKind, RoutineRow
+from daimon.core.security_audit import record_authz_denial, record_policy_decision
+from daimon.core.stores import routines as routines_store
+from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
+from daimon.core.stores.direct_messages import DM_SCOPE_PREFIX, get_conversation_by_scope
+from daimon.core.stores.domain import (
+    CatchUpPolicy,
+    RoutineDestinationKind,
+    RoutineRow,
+    TurnOriginRow,
+)
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.teams_graph import GraphUnavailable
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel
 from slack_sdk.errors import SlackApiError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class DeleteResult(BaseModel):
@@ -208,7 +229,7 @@ def _caller(auth: AuthIdentity) -> RoutineCaller:
         tenant_id=auth.tenant_id,
         subject=mcp_subject(auth),
         platform=auth.platform or "",
-        is_admin=auth.is_admin,
+        is_admin=auth.admin_for(DelegatedAction.ROUTINES),
         hold=auth.hold,
         own_agent_ids=frozenset(i for i in (auth.agent_id or auth.chat_agent_id,) if i is not None),
         admin_noun=admin_noun(auth.platform),
@@ -261,6 +282,104 @@ def _channel_agent_name(runtime: McpRuntime, auth: AuthIdentity) -> ChannelAgent
     return name
 
 
+_UNSOURCED = "The private conversation's source could not be established."
+
+
+def _source_resolver(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    origin_context_id: str | None,
+    verified: Callable[[], Awaitable[TurnOriginRow | None]],
+) -> SourceResolver:
+    """Where a chat-made routine comes from: the channel and thread of the turn it names.
+
+    A routine made in a private conversation comes from the channel that conversation
+    was moved from. On Discord, a DM routine's source, and any source not read from a
+    verified turn, is checked against the server.
+    """
+
+    async def resolve(
+        kind: RoutineDestinationKind | None, destination_id: str | None, budget: str | None
+    ) -> RoutineSource:
+        origin = await verified()
+        if origin_context_id is not None and origin is None:
+            raise ToolError("The routine's source origin could not be verified.")
+        channel_id = budget
+        thread_id = destination_id if kind == "thread" else None
+        source_id: str | None = None
+        private = (
+            auth.platform == "discord"
+            and origin is not None
+            and origin.thread_id.startswith(DM_SCOPE_PREFIX)
+        )
+        if private and origin is not None:
+            user_id = auth.platform_user_id
+            async with runtime.session_factory() as session:
+                conversation = await get_conversation_by_scope(
+                    session,
+                    tenant_id=auth.tenant_id,
+                    account_id=auth.account_id,
+                    scope_id=origin.thread_id,
+                )
+                policy = await _policy(session, auth)
+            if (
+                conversation is None
+                or conversation.external_user_id != user_id
+                or conversation.platform != "discord"
+                or conversation.workspace_id != _require_guild_id(auth)
+            ):
+                raise ToolError(_UNSOURCED)
+            if conversation.source_channel_id is None:
+                if (
+                    not conversation.is_cold
+                    or conversation.source_thread_id is not None
+                    or conversation.source_thread_keys
+                ):
+                    raise ToolError(_UNSOURCED)
+                channel_id, thread_id = None, None
+            else:
+                source_id = conversation.source_thread_id or conversation.source_channel_id
+                channel_id = conversation.source_channel_id
+                thread_id = conversation.source_thread_id
+                if kind == "dm" and dm_source_limited(
+                    policy,
+                    source_channel_id=channel_id,
+                    source_thread_id=thread_id,
+                    source_thread_keys=conversation.source_thread_keys or (),
+                ):
+                    raise ToolError("A routine from a restricted source cannot deliver by DM.")
+        elif origin is not None and not origin.thread_id.startswith(DM_SCOPE_PREFIX):
+            channel_id = origin.parent_channel_id
+            thread_id = origin.thread_id if origin.thread_id != origin.parent_channel_id else None
+            source_id = thread_id or channel_id
+        elif kind in (None, "dm"):
+            source_id = channel_id
+        if source_id is not None and (
+            kind == "dm" or private or (origin is None and auth.platform == "discord")
+        ):
+            try:
+                verified_channel, thread_id = await verify_discord_source(
+                    _require_bot_token(runtime),
+                    guild_id=_require_guild_id(auth),
+                    channel_id=source_id,
+                )
+            except StoreError as exc:
+                raise ToolError(str(exc)) from exc
+            if private and verified_channel != channel_id:
+                raise ToolError("The private conversation's source parent could not be verified.")
+            channel_id = verified_channel
+        return RoutineSource(channel_id=channel_id, thread_id=thread_id)
+
+    return resolve
+
+
+async def _policy(session: AsyncSession, auth: AuthIdentity) -> TenantAccessPolicy:
+    try:
+        return await load_access_policy(session, tenant_id=auth.tenant_id)
+    except AccessPolicyUnreadable as err:
+        raise ToolError("the access settings here could not be read; nothing was saved") from err
+
+
 def _env(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -269,11 +388,15 @@ def _env(
     verified_origin: bool = False,
 ) -> RoutineEnv:
     """The service's view of this call. `verified_origin` reads the turn the call names."""
+    origins: list[TurnOriginRow | None] = []
+
+    async def verified() -> TurnOriginRow | None:
+        if not origins:
+            origins.append(await get_verified_origin(runtime, auth, origin_context_id))
+        return origins[0]
 
     async def load_view() -> CallView:
-        origin = (
-            await get_verified_origin(runtime, auth, origin_context_id) if verified_origin else None
-        )
+        origin = await verified() if verified_origin else None
         viewer = await load_isolation_view(
             runtime,
             auth,
@@ -293,6 +416,9 @@ def _env(
         channel_agent_name=_channel_agent_name(runtime, auth),
         load_view=load_view,
         origin_budget_channel=origin_budget,
+        resolve_source=_source_resolver(runtime, auth, origin_context_id, verified)
+        if verified_origin
+        else None,
         require_destination=runtime.settings.mcp.require_routine_destination,
     )
 
@@ -400,6 +526,106 @@ async def _delete_routine_impl(
     return DeleteResult(deleted=True, routine_id=str(routine_id))
 
 
+_SANDBOX_PERSON_ONLY = (
+    "A routine's sandbox tools are changed by the operator with "
+    "`daimon routines sandbox-tools`, the supported way today. This tool does not "
+    "accept an agent, an agent in a conversation, an operator token or a legacy "
+    "token. Do not retry."
+)
+_SANDBOX_ADMIN_ONLY = (
+    "A routine's sandbox tools are changed by the operator with "
+    "`daimon routines sandbox-tools`, the supported way today. This tool accepts "
+    "only a live platform admin's own token, which no Daimon surface issues "
+    "yet; the routine's owner cannot. Do not retry."
+)
+
+
+async def _sandbox_admin(runtime: McpRuntime, auth: AuthIdentity) -> Subject:
+    """The caller, only if they are a person and a Discord Daimon admin right now.
+
+    An allowlist, not a denylist: the token must carry a jti (no legacy
+    vault token from before the sweep), must not be an operator token, an
+    agent key or an agent in a conversation, and its holder must be a
+    verified member and admin of the Discord server on a fresh membership
+    read. Any other platform fails closed, as `watches.fresh_admin` does; the
+    operator uses the CLI there.
+    """
+    if (
+        auth.token_jti is None
+        or auth.is_operator
+        or auth.agent_id is not None
+        or auth.chat_agent_id is not None
+    ):
+        record_authz_denial(Action.SET_ROUTINE_SANDBOX_TOOLS, "person_only")
+        raise ToolError(_SANDBOX_PERSON_ONLY)
+    admin = False
+    if (
+        auth.admin_for(DelegatedAction.ROUTINES)
+        and auth.platform == "discord"
+        and auth.platform_user_id is not None
+    ):
+        live = await resolve_subject(
+            runtime.session_factory,
+            runtime.membership_resolver,
+            tenant_id=auth.tenant_id,
+            user_id=auth.platform_user_id,
+            require_fresh=True,
+            action=DelegatedAction.ROUTINES,
+        )
+        admin = live.is_admin and live.verified_membership is True
+    subject = build_subject(is_admin=admin, platform_user_id=auth.platform_user_id)
+    decision = authorize(
+        TenantAccessPolicy(), subject=subject, action=Action.SET_ROUTINE_SANDBOX_TOOLS
+    )
+    if not decision:
+        record_authz_denial(Action.SET_ROUTINE_SANDBOX_TOOLS, decision.reason)
+        raise ToolError(_SANDBOX_ADMIN_ONLY)
+    record_policy_decision(Action.SET_ROUTINE_SANDBOX_TOOLS, "allow")
+    return subject
+
+
+async def _set_routine_sandbox_tools_impl(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    routine_id: UUID,
+    enabled: bool,
+) -> RoutineRow:
+    actor = await _sandbox_admin(runtime, auth)
+    viewer = await load_isolation_view(runtime, auth)
+    async with runtime.session_factory() as session:
+        row = await routines_store.get_routine(session, routine_id, tenant_id=auth.tenant_id)
+    if row is None or not routine_service.sees_routine(viewer, row):
+        raise ToolError(routine_service.NOT_FOUND)
+    # The opt-in covers the agent version and environment the routine would
+    # run with now; the scheduler keeps built-ins off once either changes.
+    pin = None
+    if enabled:
+        try:
+            pin = await current_pin(
+                runtime.client, runtime.session_factory, row, default=runtime.deployment_default
+            )
+        except SandboxPinUnavailable as exc:
+            raise ToolError(routines_store.PIN_UNAVAILABLE_REFUSAL) from exc
+    async with runtime.session_factory.begin() as session:
+        try:
+            result = await routines_store.set_sandbox_tools(
+                session,
+                routine_id,
+                tenant_id=auth.tenant_id,
+                enabled=enabled,
+                set_by=str(auth.account_id),
+                actor=actor,
+                via="mcp",
+                pin=pin,
+            )
+        except StoreError as exc:
+            raise ToolError(str(exc)) from exc
+    if result is None:
+        raise ToolError(routine_service.NOT_FOUND)
+    return routine_for_reader(result[0], user_id=auth.platform_user_id)
+
+
 def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool
     async def create_routine(  # pyright: ignore[reportUnusedFunction]
@@ -414,17 +640,32 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         destination_id: str | None = None,
         origin_context_id: str | None = None,
     ) -> RoutineRow:
-        """Create a routine in the caller's tenant partition.
+        """Create a recurring routine; owner DMs run as unattended live-DM turns.
+
+        Owner-DM routines are scheduled live-DM turns, using the owner's normal
+        personal/shared memory, credentials and DM tool authority in a fresh private
+        scope. They support Managed Agents only and run unattended: calls needing
+        a person are refused, and nobody watches intermediate actions. Permitted
+        tools retain ordinary DM side-effect risk. Crash and stop guarantees are
+        exactly those of live DMs. A slot skips if the owner has a DM turn running.
+        A routine with no destination or channel also mounts its owner's personal
+        memory, read-only; every other routine mounts shared memory only. Sources
+        must be supported
+        channels/threads in this tenant's guild; the original thread and parent
+        remain subject to reader restrictions.
 
         ``catch_up_policy`` is ``skip`` (default) or ``run-once`` after downtime.
 
-        ``destination_kind`` (``channel`` or ``thread``) and ``destination_id``
-        optionally name where each run's result goes. The run is told where,
-        and if the agent does not post there itself, daimon posts the end of
-        its final reply there. A thread is its id exactly as turn_controls
-        or a read tool gives it, and a malformed id is refused with the form to
-        use; the channel must be one you are in. A protected channel is refused.
-        Without a destination the
+        ``destination_kind`` (``channel``, ``thread`` or ``dm``) and ``destination_id``
+        optionally name where each run's result goes. Channel/thread runs are
+        told where; if the agent does not post there itself, Daimon posts its full
+        final reply there. Owner-DM runs queue their successful final reply
+        privately for the owner. Use the canonical thread identifier returned by
+        this platform's read tools, in a channel you are in. Where DM delivery is
+        supported, ``dm`` delivers only to the authenticated owner; omit
+        ``destination_id`` to derive their user ID. Unsupported destinations are
+        refused. Delivery status and failure reasons are returned by list/get.
+        A protected channel is refused. Without a destination the
         result is only recorded (``last_result_tail``), as before. A run's
         spend counts toward the destination channel's budget, or without a
         destination the budget of the channel named by ``origin_context_id``
@@ -493,11 +734,16 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         destination_id: str | None = None,
         clear_destination: bool = False,
     ) -> RoutineRow:
-        """PATCH-update a routine. Only provided fields are changed.
+        """PATCH-update a routine, including owner-only DM delivery where supported.
+
+        Only provided fields are changed.
 
         ``destination_kind`` + ``destination_id`` set where results go (see
         ``create_routine``); ``clear_destination=true`` removes it, and the
-        routine's spend still counts toward the same channel's budget.
+        routine's spend still counts toward the same channel's budget. Saved
+        creation-time source channel/thread restrictions survive every edit.
+        Legacy routines with unknown provenance keep ordinary destination edits
+        but must be recreated from the source channel/thread to select DM delivery.
 
         ``catch_up_policy`` selects ``skip`` or one coalesced ``run-once`` after downtime.
 
@@ -523,3 +769,27 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def delete_routine(ctx: Context, routine_id: UUID) -> DeleteResult:  # pyright: ignore[reportUnusedFunction]
         """Delete a routine (hard delete, tenant-scoped)."""
         return await _delete_routine_impl(runtime, await _auth(ctx), routine_id=routine_id)
+
+    @mcp.tool(tags={"admin"})
+    async def set_routine_sandbox_tools(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, routine_id: UUID, enabled: bool
+    ) -> RoutineRow:
+        """Turn built-in sandbox tools (bash, file reads and edits and the rest) on or off
+        for one routine's own scheduled runs. Admin only.
+
+        They are off for every unattended run by default. The supported way today is the
+        operator's ``daimon routines sandbox-tools``. This tool accepts only a live platform
+        admin's own token, re-checked against the server on each call; no Daimon
+        surface issues such a token yet, and the tool is kept for a future admin surface.
+        Owning the routine is not enough, and agent keys, agents in a conversation, operator
+        tokens, legacy tokens and other platforms are refused. DM routines cannot be opted
+        in. An opt-in covers exactly the routine's current agent version and environment:
+        once either changes, runs go without built-ins and the opt-in is cleared. Each
+        change records who made it and when, and ``get_routine``/``list_routines`` show it
+        as ``sandbox_tools_enabled``. It takes effect from the routine's next run. Setting
+        the value a routine already has changes nothing. Timers, watches, agent chat,
+        ``daimon run`` and checkpoints cannot be opted in.
+        """
+        return await _set_routine_sandbox_tools_impl(
+            runtime, await _auth(ctx), routine_id=routine_id, enabled=enabled
+        )

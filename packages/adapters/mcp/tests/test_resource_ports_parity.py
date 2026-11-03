@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any, Literal, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -63,7 +63,11 @@ SCOPE = resource_ports.mcp_scope(AUTH)
 SESSION = ma_session(
     id="session",
     agent=AGENT,
-    metadata={"daimon_tenant": str(TENANT), "daimon_account": str(ACCOUNT)},
+    metadata={
+        "daimon_tenant": str(TENANT),
+        "daimon_account": str(ACCOUNT),
+        "daimon_agent_chat": "true",
+    },
 )
 BODY = SESSION.model_dump(mode="json")
 MESSAGE = [{"type": "user.message", "content": [{"type": "text", "text": 'hi "世界"\n'}]}]
@@ -387,6 +391,9 @@ def host_guards(monkeypatch: pytest.MonkeyPatch) -> list[Scope]:
     monkeypatch.setattr(agent_chat, "close_headless_app_session", AsyncMock())
     monkeypatch.setattr(agent_chat, "touch_unmapped_app_session", AsyncMock(return_value=True))
     monkeypatch.setattr(agent_chat, "_bound_seal", AsyncMock(return_value=frozenset()))
+    # A send's confirmation worker polls on its own schedule; its reads are
+    # covered in test_agent_chat_safety.py, not in this request-order script.
+    monkeypatch.setattr(agent_chat, "watch_turn", MagicMock())
     # The settle request written before a headless send is database-only; its own
     # tests cover it, and it sends no provider request.
     settle = agent_chat.session_settle_state
@@ -404,6 +411,8 @@ async def test_agent_session_tools_keep_ownership_then_mutation_order(
     session_read_body: dict[str, Any],
 ) -> None:
     replies = [("GET", "/v1/sessions/session", 200, session_read_body)]
+    if operation in ("cancel", "archive"):
+        replies.append(("GET", "/v1/sessions/session", 200, session_read_body))
     if operation == "cancel":
         replies += [
             ("POST", "/v1/sessions/session/events", 200, ECHO),
@@ -411,9 +420,14 @@ async def test_agent_session_tools_keep_ownership_then_mutation_order(
         ]
     elif operation == "archive":
         replies += [("POST", "/v1/sessions/session/archive", 200, {"id": "session"})]
+    else:
+        # An idle read checks whether its turn is paused on confirmations.
+        replies += [("GET", "/v1/sessions/session/events", 200, {"data": [], "next_page": None})]
     old, new = script(replies), script(replies)
     async with old.client() as before, new.client() as after:
         expected = await before.beta.sessions.retrieve("session")
+        if operation in ("cancel", "archive"):
+            await before.beta.sessions.retrieve("session")
         if operation == "cancel":
             await before.beta.sessions.events.send("session", events=[{"type": "user.interrupt"}])
             expected = await before.beta.sessions.retrieve("session")
@@ -423,6 +437,9 @@ async def test_agent_session_tools_keep_ownership_then_mutation_order(
             await before.beta.sessions.archive("session")
             await _archive_my_session_impl(runtime(after), AUTH, "session")  # pyright: ignore[reportPrivateUsage]
         else:
+            await before.beta.sessions.events.list(
+                "session", order="desc", limit=1, types=["session.status_idle"]
+            )
             actual = await _get_session_impl(runtime(after), AUTH, "session")  # pyright: ignore[reportPrivateUsage]
             assert actual == sessions.SessionInfo.from_ma(expected)
     assert host_guards
@@ -584,11 +601,18 @@ async def test_public_continue_turn_keeps_ownership_recheck_send_and_clock(
     clock = dt.datetime(2026, 10, 9, 12, tzinfo=dt.UTC)
     replies: list[tuple[str, str, int, dict[str, Any]]] = [
         ("GET", "/v1/sessions/session", 200, BODY),
+        # Read again inside the fence, then checked for a paused turn.
+        ("GET", "/v1/sessions/session", 200, BODY),
+        ("GET", "/v1/sessions/session/events", 200, {"data": [], "next_page": None}),
         ("POST", "/v1/sessions/session/events", 200, ECHO),
     ]
     old, new = script(replies), script(replies)
     async with old.client() as before, new.client() as after:
         await before.beta.sessions.retrieve("session")
+        await before.beta.sessions.retrieve("session")
+        await before.beta.sessions.events.list(
+            "session", order="desc", limit=1, types=["session.status_idle"]
+        )
         await before.beta.sessions.events.send("session", events=cast(Any, MESSAGE))
 
         async def recheck() -> None:

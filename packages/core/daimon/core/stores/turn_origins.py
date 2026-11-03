@@ -8,7 +8,9 @@ from typing import Any, cast
 
 from daimon.core._models import TurnOrigin
 from daimon.core.stores.domain import Role, TurnOriginRow
-from sqlalchemy import CursorResult, delete, select, update
+from daimon.core.stores.mux_state import require_lease
+from mux.state.lease import Lease
+from sqlalchemy import CursorResult, delete, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -30,6 +32,8 @@ async def create_origin(
     sender_foreign: bool,
     shared_channel: bool,
     is_setup: bool = False,
+    attended: bool = True,
+    chat_session_id: str | None = None,
     platform_channel_id: str | None = None,
     platform_message_id: str | None = None,
 ) -> TurnOriginRow:
@@ -37,6 +41,8 @@ async def create_origin(
     origin = TurnOrigin(
         id=uuid.uuid4(),
         is_setup=is_setup,
+        attended=attended,
+        chat_session_id=chat_session_id,
         sender_foreign=sender_foreign,
         shared_channel=shared_channel,
         created_at=now,
@@ -80,6 +86,32 @@ async def get_active_origin(
         statement = statement.with_for_update()
     origin = await session.scalar(statement)
     return TurnOriginRow.model_validate(origin) if origin is not None else None
+
+
+async def get_session_origin(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    platform: str,
+    chat_session_id: str,
+    now: datetime,
+) -> TurnOriginRow | None:
+    """Resolve exactly one live origin bound to the signed execution grant."""
+    rows = list(
+        await session.scalars(
+            select(TurnOrigin)
+            .where(
+                TurnOrigin.tenant_id == tenant_id,
+                TurnOrigin.account_id == account_id,
+                TurnOrigin.platform == platform,
+                TurnOrigin.chat_session_id == chat_session_id,
+                TurnOrigin.expires_at > now,
+            )
+            .limit(2)
+        )
+    )
+    return TurnOriginRow.model_validate(rows[0]) if len(rows) == 1 else None
 
 
 async def thread_requester_accounts(
@@ -145,6 +177,44 @@ async def update_origin_target(
         )
     ).scalar_one()
     return TurnOriginRow.model_validate(origin)
+
+
+async def bind_origin_session(
+    session: AsyncSession,
+    *,
+    origin_id: uuid.UUID,
+    chat_session_id: str | None,
+    human_invocation: bool | None = None,
+    memory_read_only: bool | None = None,
+    attended: bool | None = None,
+    lease: Lease | None = None,
+) -> None:
+    """Bind the live execution to its server-prepared session's signed grant."""
+    if chat_session_id is not None:
+        if lease is not None:
+            await require_lease(session, lease)
+        # Session reuse after a crashed turn must not retain its attended origin.
+        # Serialize binders for the grant so two origins cannot both gain it.
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": f"turn-origin-session:{chat_session_id}"},
+        )
+        await session.execute(
+            update(TurnOrigin)
+            .where(TurnOrigin.chat_session_id == chat_session_id, TurnOrigin.id != origin_id)
+            .values(chat_session_id=None)
+        )
+    values: dict[str, Any] = {
+        "chat_session_id": chat_session_id,
+    }
+    # Native runtimes rebind the signed grant without changing its admission stamp.
+    if chat_session_id is None or memory_read_only is not None:
+        values["memory_read_only"] = memory_read_only if chat_session_id is not None else None
+    if attended is not None:
+        values["attended"] = TurnOrigin.attended & attended
+    if human_invocation is not None:
+        values["human_invocation"] = human_invocation
+    await session.execute(update(TurnOrigin).where(TurnOrigin.id == origin_id).values(**values))
 
 
 async def delete_origin(

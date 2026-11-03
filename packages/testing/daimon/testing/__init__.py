@@ -36,7 +36,13 @@ if TYPE_CHECKING:
         require_api_key,
         resolved_agent_env_router,
     )
-    from daimon.testing.ma_models import ma_agent, ma_environment, tenant_metadata
+    from daimon.testing.ma_models import (
+        ma_agent,
+        ma_environment,
+        tenant_metadata,
+        with_coordinator,
+        with_hidden_capability,
+    )
     from daimon.testing.ma_sessions import (
         FakeSessionsState,
         make_fake_sessions_handler,
@@ -52,6 +58,8 @@ if TYPE_CHECKING:
     )
 
 _LAZY_MODULES_BY_NAME = {
+    "with_coordinator": "daimon.testing.ma_models",
+    "with_hidden_capability": "daimon.testing.ma_models",
     "link_principals": "daimon.testing.factories",
     "make_account": "daimon.testing.factories",
     "make_agent_memory_store": "daimon.testing.factories",
@@ -115,6 +123,8 @@ __all__ = [
     "link_principals",
     "ma_agent",
     "ma_environment",
+    "with_coordinator",
+    "with_hidden_capability",
     "make_account",
     "make_agent_env_echo_handler",
     "make_agent_memory_store",

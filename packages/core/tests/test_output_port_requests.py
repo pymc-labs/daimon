@@ -206,7 +206,7 @@ async def test_partial_listing_keeps_sdk_fields_and_poll_filtering(
         for _ in range(3):
             page = await legacy.beta.files.list(scope_id="sess_output", betas=[MA_BETA], limit=1000)
             originals = page.data
-        polled = await output_delivery._poll_until_settled(  # pyright: ignore[reportPrivateUsage]
+        polled = await output_delivery.poll_output_files(
             client, session_id="sess_output", sleep=sleep, scope=SCOPE
         )
         if record["downloadable"] is True:

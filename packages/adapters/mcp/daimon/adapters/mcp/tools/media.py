@@ -32,6 +32,7 @@ from daimon.adapters.mcp.tools.channel_budgets import OriginSpend, origin_spend
 from daimon.core.billing import BillingConfig
 from daimon.core.media.filenames import display_filename_for
 from daimon.core.media.youtube_url import extract_video_id
+from daimon.core.membership import MembershipResolver
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.stores.file_uploads import MAX_UPLOAD_BYTES, create_upload
 from daimon.core.untrusted import render_untrusted
@@ -115,11 +116,13 @@ def register_media_tools(
     sessionmaker: async_sessionmaker[AsyncSession],
     billing_config: BillingConfig | None,
     markup: Decimal,
+    membership_resolver: MembershipResolver | None = None,
 ) -> None:
     """Register the Gemini-backed media tools on ``mcp``."""
     _register_youtube(
         mcp,
         youtube_service=YouTubeService(client=gemini_client),
+        membership_resolver=membership_resolver,
         sessionmaker=sessionmaker,
         billing_config=billing_config,
         markup=markup,
@@ -133,6 +136,7 @@ def _register_youtube(
     sessionmaker: async_sessionmaker[AsyncSession],
     billing_config: BillingConfig | None,
     markup: Decimal,
+    membership_resolver: MembershipResolver | None = None,
 ) -> None:
     @mcp.tool
     async def fetch_youtube_transcript(  # pyright: ignore[reportUnusedFunction]
@@ -171,6 +175,7 @@ def _register_youtube(
         """
         auth = await _check_admission(
             ctx,
+            membership_resolver=membership_resolver,
             sessionmaker=sessionmaker,
             billing_config=billing_config,
             markup=markup,

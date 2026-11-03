@@ -18,6 +18,7 @@ from daimon.core.config import Settings
 from daimon.core.ma_resolver import ResolverCache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.smoke import SmokeCheckError, SmokeResult
+from daimon.core.tool_safety import ToolSafetyPolicy
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from typer.testing import CliRunner
 
@@ -33,6 +34,7 @@ class _BillingSettings:
 class _FakeSettings:
     mcp = _McpSettings()
     billing = _BillingSettings()
+    tool_safety = ToolSafetyPolicy(enabled=True)
 
 
 def _make_rt(
@@ -218,3 +220,15 @@ def test_smoke_defaults_tags_when_deployment_default_unset(
     assert result.exit_code == 0, result.stdout
     assert captured["agent_tag"] == "daimon", captured["agent_tag"]
     assert captured["environment_tag"] == "default", captured["environment_tag"]
+
+
+def test_smoke_runs_under_the_deployments_tool_safety_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Design test 6: the CLI passes settings.tool_safety, never a default."""
+    _install_runtime(monkeypatch, rt=_make_rt())
+    captured: dict[str, Any] = {}
+    _install_run_smoke_check(monkeypatch, captured=captured, outcome=_smoke_result())
+    result = _invoke([])
+    assert result.exit_code == 0, result.stdout
+    assert captured["tool_safety"] == ToolSafetyPolicy(enabled=True)

@@ -71,6 +71,15 @@ def test_partition_ignores_non_daimon_mcp_vaults() -> None:
     assert unparseable == [], "non-daimon-mcp vaults must not appear in unparseable either"
 
 
+def test_partition_never_touches_a_shared_thread_vault() -> None:
+    """A shared thread's owner is never an account, so its vault keeps its own prefix."""
+    from daimon.core.mcp_vault import shared_vault_name
+
+    vaults = [_vault("vlt_shared", shared_vault_name(uuid.uuid4(), uuid.uuid4()))]
+    orphans, unparseable = partition_orphan_vault_ids(vaults, live_account_ids=set())
+    assert orphans == [] and unparseable == []
+
+
 def test_partition_flags_unparseable_display_names_separately() -> None:
     """daimon-mcp:<non-uuid> is suspicious but not safely orphan — log, don't archive."""
     vaults = [_vault("vlt_garbage", "daimon-mcp:not-a-uuid")]

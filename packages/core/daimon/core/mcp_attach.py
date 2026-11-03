@@ -40,7 +40,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.mcp_server_url import same_mcp_url
 from daimon.core.mux_compat import update_agent
-from daimon.core.native_admins import AdminCaller
+from daimon.core.native_admins import AdminCaller, load_live_subject
 from daimon.core.operation_policy import (
     PolicyOutcome,
     TargetFacts,
@@ -49,6 +49,7 @@ from daimon.core.operation_policy import (
 )
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import agent_mcp_credentials as cred_store
+from daimon.core.tool_safety import get_mcp_server_name_rejection
 from mux.contracts.ids import Scope
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -98,12 +99,22 @@ async def decide_mcp_replacement(
     session counts, the caller's own included. The facts are read only when the
     answer depends on them.
     """
+    async with session_factory() as session:
+        is_admin = (
+            await load_live_subject(
+                session,
+                tenant_id=tenant_id,
+                platform=platform,
+                caller=caller,
+                action=None,
+            )
+        ).is_admin
     is_daimon_managed = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
     facts = TargetFacts(
         is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=False, owned_by_caller=owned
     )
     if needs_reachability_read(
-        "mcp_replace", is_admin=caller.is_server_admin, is_daimon_managed=is_daimon_managed
+        "mcp_replace", is_admin=is_admin, is_daimon_managed=is_daimon_managed
     ):
         async with session_factory() as session:
             facts = await load_target_facts(
@@ -118,7 +129,7 @@ async def decide_mcp_replacement(
                 is_daimon_managed=is_daimon_managed,
             )
             facts = facts.model_copy(update={"owned_by_caller": owned or facts.owned_by_caller})
-    return decide_operation("mcp_replace", is_admin=caller.is_server_admin, target=facts)
+    return decide_operation("mcp_replace", is_admin=is_admin, target=facts)
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,7 +279,8 @@ async def attach_mcp_server_to_agent(
     boundary decide how to surface it.
 
     Callers are responsible for any policy gate (reserved-server rejection,
-    admin checks). ``replace_allowed`` is the caller's `mcp_replace` decision:
+    admin checks); a ``server_name`` holding ``/`` raises ``ValueError``
+    before any read. ``replace_allowed`` is the caller's `mcp_replace` decision:
     when it is False and the fresh agent already has ``server_name`` at another
     URL, raise `McpServerReplaceRefusedError` and write nothing. With
     ``shares_token`` (a pasted token that became the agent-wide credential),
@@ -276,6 +288,10 @@ async def attach_mcp_server_to_agent(
     attached after the caller decided, and its users would now run on the
     caller's token. The caller withdraws that token.
     """
+    if (rejection := get_mcp_server_name_rejection(server_name)) is not None:
+        # Every caller refuses this first; a credential request made before
+        # the refusal existed still lands here.
+        raise ValueError(rejection)
     backend_scope = scope or Scope.legacy_host_authorized(
         call_site="daimon.core.mcp_attach:attach_mcp_server_to_agent"
     )

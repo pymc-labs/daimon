@@ -186,5 +186,7 @@ class AnthropicSessionAdmin:
 
     async def archive(self, scope: Scope, session: ResourceRef, *, key: str) -> Operation:
         self._check(scope, session)
-        await provider_call(mutation_client(self._client).beta.sessions.archive(session.id))
+        await provider_call(
+            mutation_client(self._client, single_attempt=True).beta.sessions.archive(session.id)
+        )
         return operation(session, key, "archive_session")

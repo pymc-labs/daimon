@@ -26,6 +26,7 @@ from daimon.adapters.mcp.resource_ports import (
     walk_sessions,
 )
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._agent_chat_safety import turn_status
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._pagination import Page
 from daimon.adapters.mcp.tools._session_access import (
@@ -53,6 +54,8 @@ class SessionInfo(BaseModel):
     created_at: datetime.datetime
     updated_at: datetime.datetime
     archived_at: datetime.datetime | None
+    # Set with status "paused": what the caller must do for the turn to go on.
+    hint: str | None = None
 
     @classmethod
     def from_ma(cls, s: BetaManagedAgentsSession) -> SessionInfo:
@@ -214,7 +217,13 @@ async def _get_session_impl(
     s = await _verify_caller_owns_session(
         runtime, auth, session_id, origin_context_id=origin_context_id
     )
-    return SessionInfo.from_ma(s)
+    info = SessionInfo.from_ma(s)
+    # A read: reports a pause on tool confirmations, never answers one.
+    paused = await turn_status(runtime, auth, s)
+    if paused is not None:
+        status, hint = paused
+        return info.model_copy(update={"status": status, "hint": hint})
+    return info
 
 
 async def _list_session_events_impl(
@@ -267,6 +276,10 @@ def register_sessions_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context, session_id: str, origin_context_id: str | None = None
     ) -> SessionInfo:
         """Look up one of your sessions by id (tenant-scoped).
+
+        ``status`` ``paused`` means the turn waits on tool confirmations;
+        ``hint`` says who can let it go on. List tools report the provider's
+        own status, so a paused turn lists as ``idle``.
 
         A conversation from a sealed channel is refused unless
         ``origin_context_id`` is this turn's origin inside that channel.

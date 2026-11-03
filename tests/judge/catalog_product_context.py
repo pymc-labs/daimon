@@ -22,6 +22,7 @@ from daimon.core.session_preparation import (
 )
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.stores.thread_sessions import get_live_thread_session
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.admission import admit
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.prepare import (
@@ -178,6 +179,7 @@ class ProductContext:
         try:
             admission = await admit(
                 deps,
+                origin="chat",
                 requester_org=RequesterOrg.HOST,
                 tenant_id=tenant,
                 platform=self.admin.platform,
@@ -279,6 +281,7 @@ class ProductContext:
                 public_url=None,
                 turn_path="mux",
                 channel_backends=True,
+                tool_safety=OPEN_TOOL_SAFETY,
             )
             prepared = await self.prepare(deps, invocation, revision, timeout_s)
             admission = prepared.admission

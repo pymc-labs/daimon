@@ -6,10 +6,10 @@ import asyncio
 import json
 import os
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
@@ -21,7 +21,7 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core import direct_messages as core_direct_messages
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import McpSettings, TurnQueueSettings
-from daimon.core.direct_messages import reply_to_dm, start_dm
+from daimon.core.direct_messages import cold_dm_text, reply_to_dm, start_dm
 from daimon.core.errors import DaimonError
 from daimon.core.handoff_context import TranscriptTurn
 from daimon.core.ma_resolver import new_resolver_cache
@@ -38,6 +38,7 @@ from daimon.core.stores.direct_messages import (
 )
 from daimon.core.stores.domain import Role
 from daimon.core.stores.thread_sessions import create_thread_session, get_live_thread_session
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.admission import AdmissionDenied, admit
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn_hold import RequesterOrg
@@ -45,6 +46,7 @@ from daimon.core.turn_queue import TurnQueue
 from daimon.testing import build_turn_router
 from daimon.testing.db import build_test_engine
 from daimon.testing.factories import make_ledger_entry, make_tenant
+from daimon.testing.membership import FixtureMembershipResolver
 from fastmcp.server.context import Context
 from mux.testing.drivers.anthropic.ma import (
     build_fake_anthropic,
@@ -190,6 +192,7 @@ async def _setup(
             api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(transport))
         )
     deps = TurnDeps(
+        membership_resolver=FixtureMembershipResolver("42"),
         anthropic=client,
         sessionmaker=sessionmaker,
         deployment_default=DeploymentDefault(agent_name="test-agent", environment_name="test-env"),
@@ -203,9 +206,11 @@ async def _setup(
         github_app_id=None,
         github_app_private_key=None,
         public_url=None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     admission = await admit(
         deps,
+        origin="chat",
         requester_org=RequesterOrg.HOST,
         tenant_id=tenant.id,
         platform=platform,
@@ -399,7 +404,7 @@ async def test_discord_refuses_a_departed_member_before_running_a_dm(
     bot = MagicMock()
     bot.draining = False
     bot.runtime.sessionmaker = db_session_factory
-    bot.runtime.turn_deps = deps
+    bot.runtime.turn_deps = replace(deps, membership_resolver=FixtureMembershipResolver())
     bot.get_guild.return_value = None
     message = MagicMock(spec=discord.Message)
     message.author.bot = False
@@ -409,20 +414,44 @@ async def test_discord_refuses_a_departed_member_before_running_a_dm(
     message.channel.send = AsyncMock()
     await DirectMessageCog(bot).on_message(message)
     assert not created
-    message.channel.send.assert_awaited_once()
+    # Revoked membership is a silent private-route denial.
+    message.channel.send.assert_not_awaited()
+
+
+@pytest.fixture
+async def pooled_dm_sessionmaker(db_schema):
+    # Concurrent membership, reply and pre-delivery reads need independent
+    # connections; the ordinary fixture deliberately shares one transaction.
+    engine = build_test_engine(
+        os.environ["DAIMON_DATABASE__TEST_URL"], db_schema, pool_size=8, max_overflow=0
+    )
+    try:
+        yield async_sessionmaker(engine, expire_on_commit=False)
+    finally:
+        await engine.dispose()
 
 
 async def test_discord_dm_waits_for_a_global_slot_and_releases_on_success_and_error(
-    db_session, db_session_factory
+    db_session, pooled_dm_sessionmaker
 ):
+    db_session_factory = pooled_dm_sessionmaker
     tenant, deps, admission, *_ = await _setup(db_session, db_session_factory)
     await _start(tenant, deps, admission)
-    runtime = MagicMock()
-    runtime.sessionmaker = db_session_factory
-    runtime.turn_deps = deps
-    runtime.settings.discord.max_concurrent_turns = 1
-    runtime.settings.turn_queue = TurnQueueSettings()
-    bot = DaimonBot(runtime=cast(DiscordRuntime, runtime), intents=discord.Intents.default())
+    settings = MagicMock()
+    settings.discord.max_concurrent_turns = 1
+    settings.turn_queue = TurnQueueSettings()
+    runtime = DiscordRuntime(
+        settings=settings,
+        anthropic=deps.anthropic,
+        sessionmaker=db_session_factory,
+        notebook_rate_limiter=MagicMock(),
+        billing_config=None,
+        deployment_default=deps.deployment_default,
+        resolver_cache=deps.resolver_cache,
+        turn_deps=deps,
+    )
+    bot = DaimonBot(runtime=runtime, intents=discord.Intents.default())
+    bot.runtime = replace(bot.runtime, turn_deps=deps)
     guild = MagicMock(spec=discord.Guild)
     member = MagicMock(spec=discord.Member)
     member.id = 42
@@ -459,12 +488,13 @@ async def test_discord_dm_waits_for_a_global_slot_and_releases_on_success_and_er
         entered.set()
         if len(replies) == 1:
             await release.wait()
-        return "answer"
+        return await core_direct_messages.reply_to_dm_result(*_args, **_kwargs)
 
     with (
         patch.object(bot, "get_guild", return_value=guild),
         patch(
-            "daimon.adapters.discord.commands.direct_messages.reply_to_dm", side_effect=slow_reply
+            "daimon.adapters.discord.commands.direct_messages.reply_to_dm_result",
+            side_effect=slow_reply,
         ),
     ):
         first = asyncio.create_task(DirectMessageCog(bot).on_message(message(1)))
@@ -489,7 +519,7 @@ async def test_discord_dm_waits_for_a_global_slot_and_releases_on_success_and_er
     with (
         patch.object(bot, "get_guild", return_value=guild),
         patch(
-            "daimon.adapters.discord.commands.direct_messages.reply_to_dm",
+            "daimon.adapters.discord.commands.direct_messages.reply_to_dm_result",
             side_effect=DaimonError("failed"),
         ),
     ):
@@ -550,12 +580,21 @@ async def test_discord_drain_stops_a_running_dm_and_never_starts_a_queued_one(
     db_session_factory = async_sessionmaker(engine, expire_on_commit=False)
     tenant, deps, admission, sent, *_ = await _setup(db_session, db_session_factory)
     route = await _start(tenant, deps, admission)
-    runtime = MagicMock()
-    runtime.sessionmaker = db_session_factory
-    runtime.turn_deps = deps
-    runtime.settings.discord.max_concurrent_turns = 1
-    runtime.settings.turn_queue = TurnQueueSettings()
-    bot = DaimonBot(runtime=cast(DiscordRuntime, runtime), intents=discord.Intents.default())
+    settings = MagicMock()
+    settings.discord.max_concurrent_turns = 1
+    settings.turn_queue = TurnQueueSettings()
+    runtime = DiscordRuntime(
+        settings=settings,
+        anthropic=deps.anthropic,
+        sessionmaker=db_session_factory,
+        notebook_rate_limiter=MagicMock(),
+        billing_config=None,
+        deployment_default=deps.deployment_default,
+        resolver_cache=deps.resolver_cache,
+        turn_deps=deps,
+    )
+    bot = DaimonBot(runtime=runtime, intents=discord.Intents.default())
+    bot.runtime = replace(bot.runtime, turn_deps=deps)
     bot.close = AsyncMock()  # type: ignore[method-assign]
     guild = MagicMock(spec=discord.Guild)
     member = MagicMock(spec=discord.Member)
@@ -1125,6 +1164,7 @@ async def test_dm_from_a_sealed_source_is_refused_before_any_dm_exists(
         )
     admission = await admit(
         deps,
+        origin="chat",
         requester_org=RequesterOrg.HOST,
         tenant_id=tenant.id,
         platform="discord",
@@ -1167,8 +1207,12 @@ async def test_dm_tightening_memory_policy_replaces_the_writable_session(
 
 
 async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_mcp_callers(
-    db_session, db_session_factory, monkeypatch
+    db_session,
+    pooled_dm_sessionmaker,
+    monkeypatch,
 ):
+    # Nested HTTP calls and headless drivers need independent transactions.
+    db_session_factory = pooled_dm_sessionmaker
     import contextvars
     import re
     from dataclasses import replace
@@ -1230,11 +1274,14 @@ async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_
                 token_db, account_id=account_id, secret=secret, now=datetime.now(UTC)
             )
 
-    async def check(token, *, allowed, agent=False):
+    async def check(token, *, allowed, agent=False, authentication_refused=False):
         result = await call_mcp_tool(app, token=token, name="agent_probe" if agent else "probe")
         rendered = json.dumps(result)
         assert ("private source content" in rendered) is allowed, rendered
-        if not allowed:
+        if authentication_refused:
+            assert not allowed
+            assert result["error"]["code"] == -32602, rendered
+        elif not allowed:
             assert "ask me there" in rendered, rendered
 
     async def check_sessions(token, handle, *, allowed=False, agent=False):
@@ -1304,7 +1351,11 @@ async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_
             {"slack_turn_context_id": "malformed"},
             {"slack_turn_context_id": "00000000-0000-0000-0000-000000000000"},
         ):
-            await check(jwt.encode(claims | extra, secret, algorithm="HS256"), allowed=False)
+            await check(
+                jwt.encode(claims | extra, secret, algorithm="HS256"),
+                allowed=False,
+                authentication_refused=extra["slack_turn_context_id"] == "malformed",
+            )
         for previous in private_tokens:
             await check(previous, allowed=False)
             await check_sessions(previous, handle)
@@ -1316,6 +1367,7 @@ async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_
         # rightly refuses a session it does not own.
         await asyncio.create_task(
             headless_turn(
+                tool_safety=OPEN_TOOL_SAFETY,
                 anthropic=deps.anthropic,
                 agent_id=admission.agent.id,
                 environment_id=admission.environment.id,
@@ -1364,12 +1416,21 @@ async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_
         other_tokens.append((agent_token, True))
         # No tool argument can select the row; unknown parameters never grant access.
 
+    observer_errors = []
+
+    async def checked_observe(request):
+        try:
+            return await observe(request)
+        except Exception as exc:
+            observer_errors.append(repr(exc))
+            raise
+
     tenant, deps, admission, _, _, created = await _setup(
         db_session,
         db_session_factory,
         platform="slack",
         workspace="T1",
-        on_event=observe,
+        on_event=checked_observe,
         vault_state=vaults,
         session_state=session_state,
     )
@@ -1473,6 +1534,7 @@ async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_
         for other, is_agent in other_tokens:
             for handle in private_handles:
                 await check_sessions(other, handle, agent=is_agent)
+    assert not observer_errors, observer_errors
     assert len(private_tokens) == 2 and private_tokens[0] != private_tokens[1]
     assert len(denied_headless) == 2
     assert len(vaults["vaults"]) == 3, "two isolated DM grants and one shared non-DM vault"
@@ -1855,7 +1917,7 @@ async def test_a_stalled_shutdown_interrupt_is_bounded_and_retires_the_dm_mappin
         await asyncio.Event().wait()
 
     with (
-        patch.object(deps.anthropic.beta.sessions.events, "send", stalled),
+        patch("mux.drivers.anthropic.transport.LegacyTurnTransport.send", stalled),
         patch.object(core_direct_messages, "_SHUTDOWN_INTERRUPT_TIMEOUT_S", 0.05),
     ):
         await asyncio.wait_for(core_direct_messages._settle_shutdown_cancelled_dm(deps, row), 2)
@@ -1876,4 +1938,22 @@ async def test_a_stalled_shutdown_interrupt_is_bounded_and_retires_the_dm_mappin
         )
     assert stored is not None and stored.active_until == row.active_until, (
         "settling leaves releasing the claim to finish_message"
+    )
+
+
+async def test_discord_generic_guidance_does_not_resolve_guild_or_run_a_model(db_session_factory):
+    bot = MagicMock()
+    bot.draining = False
+    bot.runtime.sessionmaker = db_session_factory
+    message = MagicMock(spec=discord.Message)
+    message.author.bot = False
+    message.author.id = 42
+    message.channel = MagicMock(spec=discord.DMChannel)
+    message.channel.id = 99
+    message.channel.send = AsyncMock()
+    await DirectMessageCog(bot).on_message(message)
+    bot.get_guild.assert_not_called()
+    message.channel.send.assert_awaited_once()
+    assert message.channel.send.await_args.kwargs["embed"].description == cold_dm_text(
+        "discord", dms_on=None
     )

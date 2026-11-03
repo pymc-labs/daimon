@@ -1,4 +1,4 @@
-"""Adapter wrappers over core pause/resume helpers."""
+"""Adapter wrappers over core routine writes."""
 
 from __future__ import annotations
 
@@ -16,11 +16,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 
 async def pause_routine_via_panel(
-    session: AsyncSession, routine_id: uuid.UUID, *, tenant_id: uuid.UUID
+    session: AsyncSession,
+    routine_id: uuid.UUID,
+    *,
+    tenant_id: uuid.UUID,
+    expected_updated_at: datetime | None = None,
 ) -> RoutineRow | None:
     """Adapter wrapper. Exists so panel imports never reach into core directly,
     keeping the routines_panel/* surface symmetrical with agent_setup/write.py."""
-    return await _pause_core(session, routine_id, tenant_id=tenant_id)
+    return await _pause_core(
+        session, routine_id, tenant_id=tenant_id, expected_updated_at=expected_updated_at
+    )
 
 
 async def resume_routine_via_panel(
@@ -29,5 +35,8 @@ async def resume_routine_via_panel(
     *,
     tenant_id: uuid.UUID,
     now: datetime,
+    expected_updated_at: datetime | None = None,
 ) -> RoutineRow | None:
-    return await _resume_core(session, routine_id, tenant_id=tenant_id, now=now)
+    return await _resume_core(
+        session, routine_id, tenant_id=tenant_id, now=now, expected_updated_at=expected_updated_at
+    )

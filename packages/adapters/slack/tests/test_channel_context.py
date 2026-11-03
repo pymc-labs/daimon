@@ -83,6 +83,7 @@ def _grant(agent: str = _AGENT) -> AdmissionGrant:
         channel_id=_CHANNEL,
         thread_id=_TRIGGER,
         is_dm=False,
+        human_invocation=True,
     )
 
 
@@ -420,7 +421,7 @@ async def _first_turn(
     }
     if thread_id != _TRIGGER:
         event["thread_ts"] = thread_id
-    admission = MagicMock()
+    admission = MagicMock(is_admin=False, is_platform_admin=False)
     # What the turn controls read: on the default provider, no move (M03).
     admission.backend_revision = None
     admission.backend_follow = None

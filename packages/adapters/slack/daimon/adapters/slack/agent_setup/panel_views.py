@@ -91,6 +91,7 @@ __all__ = [
     "ACTION_ROUTING",
     "ACTION_RULE_COPY",
     "ACTION_RULE_READERS",
+    "ACTION_RULE_CONFIDENTIAL",
     "ACTION_RULE_RELEASE",
     "ACTION_RULE_WRITERS",
     "CALLBACK_AGENTS",
@@ -198,6 +199,7 @@ ACTION_CHANNEL_SKILLS: Final = "agent_setup__channel_skills"
 ACTION_ENVIRONMENT: Final = "agent_setup__environment"
 """This channel's environment select on Who answers where."""
 
+ACTION_RULE_CONFIDENTIAL: Final = "agent_setup__rule:confidential"
 ACTION_RULE_READERS: Final = "agent_setup__rule:readers"
 ACTION_RULE_WRITERS: Final = "agent_setup__rule:writers"
 ACTION_RULE_COPY: Final = "agent_setup__rule:copy"
@@ -435,6 +437,7 @@ def build_agents_view(
     page: Page[RosterAgent],
     meta: PanelMetadata,
     is_admin: bool,
+    is_platform_admin: bool = False,
     attributions: Mapping[uuid.UUID, str],
     channel_id: str,
     routed_agent_names: Collection[str] | None = None,
@@ -479,7 +482,7 @@ def build_agents_view(
     )
     elements.append(_button(action_id=ACTION_NEW, label=NEW_AGENT_LABEL))
     elements.append(_button(action_id=ACTION_ROUTING, label=ROUTING_LABEL))
-    if is_admin:
+    if is_platform_admin:
         elements.append(_button(action_id=ACTION_GITHUB_CONNECT, label="🐙 GitHub"))
     blocks.append({"type": "actions", "elements": elements})
     blocks.extend(_pager_blocks(page, meta=meta))
@@ -526,6 +529,7 @@ def build_details_view(
     *,
     meta: PanelMetadata,
     is_admin: bool,
+    is_platform_admin: bool = False,
     coding_tools_available: bool,
     channel_id: str,
     attribution: str | None,
@@ -537,9 +541,10 @@ def build_details_view(
 ) -> dict[str, Any]:
     """One agent's whole readable state, in the order the roster promised.
 
-    `is_admin` controls the avatar and Add skill buttons; `is_admin` or `viewer_owns`
-    (the reader owns this agent) the coding-tool buttons. Each click reads both
-    again, so this only decides what to offer. The core phrases
+    `is_admin` controls the avatar and Add skill buttons; `is_platform_admin` or
+    `viewer_owns` (the reader owns this agent) the GitHub repos and coding-tool
+    buttons. Each click reads both again, so this only decides what to offer. The
+    core phrases
     `details.unrouted_note` in the reader's voice. Key values are not a
     parameter: the model carries names and attribution only.
     """
@@ -619,7 +624,11 @@ def build_details_view(
         if current is not None:
             picker["initial_option"] = current
         blocks.append(_section("*Model provider*", accessory=picker))
-    actions = [_button(action_id=ACTION_GITHUB_REPOS, label="🐙 GitHub repos", value=details.name)]
+    actions: list[dict[str, Any]] = []
+    if is_platform_admin or viewer_owns:
+        actions.append(
+            _button(action_id=ACTION_GITHUB_REPOS, label="🐙 GitHub repos", value=details.name)
+        )
     # Only the buttons that can work for this reader: adding a skill and minting
     # a coding-tool token are admin changes, the token also an owner's (a built-in
     # agent takes no skill even from an admin), so a member is not offered a
@@ -628,7 +637,7 @@ def build_details_view(
         actions.append(
             _button(action_id=ACTION_ADD_SKILL, label=ADD_SKILL_LABEL, value=details.name)
         )
-    may_use_coding_tools = is_admin or viewer_owns
+    may_use_coding_tools = is_platform_admin or viewer_owns
     if may_use_coding_tools:
         keys_button = _button(
             action_id=ACTION_CODING_KEYS, label=CODING_KEYS_LABEL, value=details.name
@@ -839,12 +848,15 @@ def build_routing_view(
     page: Page[ChannelAnswer],
     meta: PanelMetadata,
     is_admin: bool,
+    is_platform_admin: bool = False,
     attributions: Mapping[uuid.UUID, str],
     setup_links: Sequence[str],
     channel_id: str,
     unrouted_agent_name: str | None,
     environment_picker: EnvironmentPicker | None = None,
     rule_status: ChannelRuleStatus | None = None,
+    outsider_lines: tuple[str, ...] = (),
+    outsider_warning: bool = False,
     operator_tokens: Sequence[McpTokenRow] | None = None,
     channel_skills: Sequence[ChannelSkillRow] | None = None,
 ) -> dict[str, Any]:
@@ -897,17 +909,40 @@ def build_routing_view(
         blocks.append(_section(line))
     else:
         blocks.append(_section("_no Daimon-wide default_"))
+    blocks.append(
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "action_id": "agent_setup__admins:open",
+                    "text": {"type": "plain_text", "text": "Admins"},
+                }
+            ],
+        }
+    )
     blocks.append({"type": "divider"})
     blocks.extend(_environment_blocks(answering_map, picker=environment_picker))
     links = list(setup_links[:MAX_SETUP_LINKS])
     listing = "\n".join(links) if links else "_none open_"
     blocks.append(_section(f"*Setup conversations*\n{listing}"))
     blocks.append({"type": "divider"})
+    if outsider_lines and _is_channel(channel_id):
+        blocks.append(_section("\n".join(escape_mrkdwn(line) for line in outsider_lines)))
+        if outsider_warning and is_admin:
+            blocks.append(
+                {
+                    "type": "actions",
+                    "elements": [
+                        _button(action_id=ACTION_RULE_CONFIDENTIAL, label="Make confidential")
+                    ],
+                }
+            )
     if rule_status is not None and _is_channel(channel_id):
         blocks.extend(_permissions_blocks(channel_id=channel_id, status=rule_status))
     if channel_skills is not None and _is_channel(channel_id):
         blocks.extend(_channel_skills_blocks(channel_skills, channel_id=channel_id))
-    if operator_tokens is not None:
+    if is_platform_admin and operator_tokens is not None:
         blocks.extend(_operator_token_blocks(operator_tokens))
     blocks.append(
         _context(

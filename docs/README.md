@@ -13,23 +13,30 @@ server](https://daimon.decision.ai/) instead.
 - **Try it locally:** [Quickstart](quickstart.md) gets a bot answering in
   Discord with Docker Compose.
 - **Run it for a team:** [Self-hosting](self-hosting.md) covers a production
-  install, then [Model providers](providers.md) and
-  [Operations](operations.md).
+  install, then [Model providers](providers.md),
+  [Operations](operations.md) and [Fly compute](compute.md).
 - **Add a platform or tool:** [Slack](slack.md),
   [Microsoft Teams](teams.md), the [web app](web.md), [GitHub](github.md),
   [MCP servers](mcp-servers.md) and the
   [Claude Code plugin](plugin.md).
 - **Shape what it does:** [Defaults](defaults.md) for agents and skills,
-  [Routines](routines.md) for scheduled work.
+  [Routines](routines.md) and [Watches](watches.md) for scheduled work,
+  [Direct messages](direct-messages.md),
+  [Repository memory](repo-memory.md),
+  [Context providers](context-providers.md) and
+  [Lead intake](lead-intake.md). [Move routines in](routine-migration.md)
+  from another system.
 
 ## Understand it
 
 - [Architecture](architecture.md): the packages and how a message becomes a
   turn.
-- [Isolation](isolation.md) and [Permissions](permissions.md): who can see
-  and do what.
+- [Isolation](isolation.md), [Permissions](permissions.md) and
+  [Admins](admins.md): who can see and do what.
+- [Unattended turns](unattended.md): what runs with nobody watching.
 - [Billing](billing.md): how model calls are metered and gated.
 - [Allowances](allowances.md): per-person spend limits.
+- [Long jobs](long-jobs.md): approved work that runs on its own worker.
 - [Agent identity](agent-identity.md) and
   [Managed agents](mux.md): how agents appear and run.
 

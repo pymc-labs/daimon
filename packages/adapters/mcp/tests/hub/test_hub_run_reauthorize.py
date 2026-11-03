@@ -82,7 +82,7 @@ async def _hub_call(
             session_id=m.group(1),
             status="idle",
             agent_id=AGENT_ID,
-            metadata={"daimon_account": str(principal.account_id)},
+            metadata={"daimon_agent_chat": "true", "daimon_account": str(principal.account_id)},
         ),
     )
 

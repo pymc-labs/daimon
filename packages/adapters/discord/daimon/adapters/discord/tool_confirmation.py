@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 import structlog
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.theme import COLOR_AMBER, COLOR_GREEN, COLOR_GREYPLE
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Subject
 from daimon.core.confirmation import (
     ApprovedConfirmation,
@@ -74,6 +75,14 @@ log = structlog.get_logger(__name__)
 #: Most time a card edit may take while retiring it.
 RETIRE_TIMEOUT_S = 2.0
 INTERACTION_TOKEN_LIFETIME_S = 15 * 60
+#: Details are sent as at most this many ephemeral messages of Discord's size.
+DETAILS_PAGE_LIMIT = 2000
+DETAILS_MAX_PAGES = 4
+DETAILS_UNAVAILABLE_MESSAGE = "Details unavailable; deny and retry with shorter evidence."
+LEAD_DETAILS_REFUSED_MESSAGE = "You can't read this lead, so its details aren't shown."
+
+#: Whether the clicker may read the lead behind a card's Details.
+type LeadDetailsCheck = Callable[[ConfirmationPrompt, str], Awaitable[tuple[str, ...]]]
 
 
 def _body(card: ConfirmationCard) -> list[str]:
@@ -89,6 +98,37 @@ def _safe_text(value: str) -> str:
     """Keep tool-provided words literal in Discord text displays and replies."""
     escaped = discord.utils.escape_mentions(discord.utils.escape_markdown(value))
     return re.sub(r"<#(?=\d+>)", "<#\u200b", escaped)
+
+
+def details_pages(lines: tuple[str, ...]) -> list[str] | None:
+    """Escaped Details split on line boundaries into Discord-sized pages; None past the cap.
+
+    Escaping comes first, so no page grows past the limit when it is sent. A
+    line longer than a page fills pages of its own, never cut between a
+    backslash and the character it escapes.
+    """
+    pages: list[str] = []
+    current = ""
+    for line in (_safe_text(line) for line in lines):
+        while len(line) > DETAILS_PAGE_LIMIT:
+            cut = DETAILS_PAGE_LIMIT
+            run = len(line[:cut]) - len(line[:cut].rstrip("\\"))
+            if run % 2:
+                cut -= 1
+            if current:
+                pages.append(current)
+                current = ""
+            pages.append(line[:cut])
+            line = line[cut:]
+        joined = f"{current}\n{line}" if current else line
+        if len(joined) <= DETAILS_PAGE_LIMIT:
+            current = joined
+            continue
+        pages.append(current)
+        current = line
+    if current:
+        pages.append(current)
+    return pages if len(pages) <= DETAILS_MAX_PAGES else None
 
 
 def _footer(card: ConfirmationCard, prompt: ConfirmationPrompt) -> str | None:
@@ -112,10 +152,12 @@ class _ConfirmationView(discord.ui.LayoutView):
         check_admin: Callable[[ConfirmationPrompt, str], Awaitable[str | None]] | None = None,
         rule_factory: async_sessionmaker[AsyncSession] | None = None,
         rule_subject: Callable[[str], Awaitable[Subject]] | None = None,
+        lead_details: LeadDetailsCheck | None = None,
         note: str | None = None,
     ) -> None:
         super().__init__(timeout=None)
         self._prompt = prompt
+        self._lead_details = lead_details
         self._answer = answer
         self._check_admin = check_admin
         self._rule_factory = rule_factory
@@ -136,6 +178,11 @@ class _ConfirmationView(discord.ui.LayoutView):
         )
         for text in _body(card):
             container.add_item(discord.ui.TextDisplay(text))
+        # Shown in every state: what was approved stays inspectable on the card.
+        if prompt.visible_lines:
+            container.add_item(
+                discord.ui.TextDisplay("\n".join(_safe_text(line) for line in prompt.visible_lines))
+            )
         if prompt.admin:
             for text in card.detail_lines:
                 container.add_item(discord.ui.TextDisplay(_safe_text(text)))
@@ -261,15 +308,53 @@ class _ConfirmationView(discord.ui.LayoutView):
         )
 
     async def _on_details(self, interaction: discord.Interaction) -> None:
-        await interaction.response.send_message(
-            embed=build_notice_embed(
-                "\n".join(_safe_text(line) for line in self._prompt.detail_lines)
-                or "No additional details.",
-                neutral=True,
-            ),
-            ephemeral=True,
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+        none = discord.AllowedMentions.none()
+        deferred = self._prompt.lead_intake_id is not None
+        lines = self._prompt.detail_lines
+        if deferred:
+            lines = ()
+            # A lead's evidence is read under the lead's own readers, by whoever clicks.
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            try:
+                if self._lead_details is None:
+                    raise PermissionError("missing lead reader")
+                lines = await self._lead_details(self._prompt, str(interaction.user.id))
+            except LookupError:
+                await interaction.followup.send(
+                    embed=build_notice_embed("This lead is no longer available."),
+                    ephemeral=True,
+                    allowed_mentions=none,
+                )
+                return
+            except Exception:
+                lines = ()
+            if not lines:
+                await interaction.followup.send(
+                    embed=build_notice_embed(LEAD_DETAILS_REFUSED_MESSAGE),
+                    ephemeral=True,
+                    allowed_mentions=none,
+                )
+                return
+        pages = details_pages(lines)
+        if pages is None:
+            embeds = [build_notice_embed(DETAILS_UNAVAILABLE_MESSAGE)]
+        else:
+            embeds = [
+                build_notice_embed(page, neutral=True)
+                for page in (pages or ["No additional details."])
+            ]
+        try:
+            for index, embed in enumerate(embeds):
+                if index == 0 and not deferred:
+                    await interaction.response.send_message(
+                        embed=embed, ephemeral=True, allowed_mentions=none
+                    )
+                else:
+                    await interaction.followup.send(
+                        embed=embed, ephemeral=True, allowed_mentions=none
+                    )
+        except discord.HTTPException:
+            log.warning("tool_confirmation.details_failed")
 
     async def authorize(self, clicker: str, answer: ConfirmationAnswer) -> str | None:
         """Take `clicker`'s answer through every check a click runs; the refusal, or None.
@@ -401,12 +486,31 @@ def discord_confirmation_hook(
             if tenant_id is None or account_id is None:
                 raise ValueError("Backend confirmation requires an admitted account and tenant")
 
-            async def current_admin(clicker: str) -> bool:
+            async def current_platform_admin(clicker: str) -> bool:
                 guild = await role_guild()
                 if guild is None:
                     return False
                 role, _ = await requester_role(guild, clicker)
                 return role is Role.ADMIN
+
+            async def current_admin(clicker: str) -> bool:
+                guild = await role_guild()
+                if guild is None:
+                    return False
+                role, _roles = await requester_role(guild, clicker)
+                async with runtime.sessionmaker() as session:
+                    subject = await load_live_subject(
+                        session,
+                        tenant_id=tenant_id,
+                        platform="discord",
+                        caller=AdminCaller(
+                            platform_user_id=clicker,
+                            is_server_admin=role is Role.ADMIN,
+                            role_ids=tuple(_roles),
+                        ),
+                        action=DelegatedAction.AGENT_SETTINGS,
+                    )
+                return subject.is_admin
 
             from daimon.core.turn.admission import capture_admitted_backend_source
 
@@ -428,6 +532,7 @@ def discord_confirmation_hook(
                 tenant_id=tenant_id,
                 account_id=account_id,
                 current_admin=current_admin,
+                current_platform_admin=current_platform_admin,
                 answering_agent_name=(
                     getattr(getattr(admission, "config", None), "agent_name", None)
                 ),
@@ -451,6 +556,30 @@ def discord_confirmation_hook(
 
     rule_factory = runtime.sessionmaker if runtime is not None else None
 
+    async def lead_details(prompt: ConfirmationPrompt, clicker: str) -> tuple[str, ...]:
+        from daimon.adapters.discord.lead_access import require_lead_readable
+
+        fernet = runtime.turn_deps.fernet if runtime is not None else None
+        resolver = runtime.turn_deps.membership_resolver if runtime is not None else None
+        if (
+            runtime is None
+            or fernet is None
+            or resolver is None
+            or tenant_id is None
+            or prompt.lead_intake_id is None
+            or not isinstance(channel, (discord.Thread, discord.TextChannel))
+        ):
+            raise PermissionError("missing lead reader")
+        return await require_lead_readable(
+            sessionmaker=runtime.sessionmaker,
+            fernet=fernet,
+            resolver=resolver,
+            tenant_id=tenant_id,
+            channel=channel,
+            user_id=clicker,
+            intake_id=prompt.lead_intake_id,
+        )
+
     async def rule_subject(clicker: str) -> Subject:
         from daimon.adapters.discord.bot import requester_role
         from daimon.core.stores.domain import Role
@@ -469,7 +598,9 @@ def discord_confirmation_hook(
                 caller=AdminCaller(
                     platform_user_id=clicker,
                     is_server_admin=role is Role.ADMIN,
+                    role_ids=tuple(_roles),
                 ),
+                action=DelegatedAction.TOOL_RULES,
             )
 
     async def _qa_auto_approve(
@@ -548,7 +679,9 @@ def discord_confirmation_hook(
             token=secrets.token_urlsafe(12),
             allow_always=prompt.tool_rule is not None,
         )
-        view = _ConfirmationView(pending, prompt, answer, check_admin, rule_factory, rule_subject)
+        view = _ConfirmationView(
+            pending, prompt, answer, check_admin, rule_factory, rule_subject, lead_details
+        )
         if (approved := await _qa_auto_approve(view, prompt)) is not None:
             return approved
         message = await channel.send(view=view, allowed_mentions=discord.AllowedMentions.none())

@@ -13,7 +13,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Literal, TypedDict, Unpack
 
-from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
+from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent, BetaManagedAgentsSession
 from anthropic.types.beta.beta_environment import Config as EnvironmentConfig
 from anthropic.types.beta.beta_managed_agents_agent import Skill as AgentSkill
 from anthropic.types.beta.beta_managed_agents_agent import Tool as AgentTool
@@ -26,6 +26,7 @@ from mux.testing.drivers.anthropic import ma_models as mux_ma_models
 from mux.testing.drivers.anthropic.ma_models import (
     DEFAULT_AGENT_NAME,
     DEFAULT_ENV_NAME,
+    ma_session_agent,
 )
 
 
@@ -102,3 +103,40 @@ def ma_environment(
         metadata=_merge_metadata(tenant_id=tenant_id, name=name, metadata=metadata),
         **fields,
     )
+
+
+def with_coordinator(session: BetaManagedAgentsSession) -> BetaManagedAgentsSession:
+    """`session` with a coordinator roster of one child that may do anything.
+
+    The child is a full agent definition, as the provider resolves one: the
+    root's tools and servers plus a built-in toolset and an MCP write, all on
+    `always_allow`. Validated against the SDK's real shape.
+    """
+    allow = {"enabled": True, "permission_policy": {"type": "always_allow"}}
+    child = ma_session_agent(
+        id="agent_child",
+        tools=[
+            {
+                "type": "agent_toolset_20260401",
+                "default_config": allow,
+                "configs": [{"name": name, **allow} for name in ("bash", "write", "edit")],
+            },
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": "child_linear",
+                "default_config": allow,
+                "configs": [{"name": "create_issue", **allow}],
+            },
+        ],
+        mcp_servers=[{"name": "child_linear", "type": "url", "url": "https://linear.example/mcp"}],
+    ).model_dump(mode="json", exclude={"multiagent"})
+    dumped = session.model_dump(mode="json")
+    dumped["agent"]["multiagent"] = {"type": "coordinator", "agents": [child]}
+    return BetaManagedAgentsSession.model_validate(dumped)
+
+
+def with_hidden_capability(session: BetaManagedAgentsSession) -> BetaManagedAgentsSession:
+    """`session` carrying an unreviewed field in the agent capability container."""
+    dumped = session.model_dump(mode="json")
+    dumped["agent"]["future_capability"] = True
+    return BetaManagedAgentsSession.model_validate(dumped)

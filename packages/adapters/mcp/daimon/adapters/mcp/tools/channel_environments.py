@@ -26,6 +26,7 @@ from daimon.adapters.mcp.tools._rule_view import load_caller_hidden_environments
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.adapters.mcp.tools._words import admin_noun, space_noun
 from daimon.adapters.mcp.tools.environments import CONFIRM_OPEN_NETWORK_ASK
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
 from daimon.core.authz import Action
 from daimon.core.channel_environments import (
@@ -112,7 +113,7 @@ async def _require_pick_allowed(
                 session,
                 runtime.client,
                 tenant_id=auth.tenant_id,
-                subject=mcp_subject(auth, is_admin=auth.is_admin),
+                subject=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.ENVIRONMENTS)),
                 channel_id=target.channel_id,
                 thread_id=target.thread_id,
                 environment_name=environment_name,
@@ -124,7 +125,9 @@ async def _require_pick_allowed(
         record_authz_denial(Action.SET_CHANNEL_ENVIRONMENT, pick.decision.reason)
     if not pick.decision and pick.decision.reason != "not_a_reader":
         if target.channel_id is None:
-            _require_admin(auth)  # the workspace default's own copy
+            _require_admin(
+                auth, action=DelegatedAction.ENVIRONMENTS
+            )  # the workspace default's own copy
         raise ToolError(_needs_admin(auth))
     # Only a caller who may make the change learns whether a name exists, and never a hidden one.
     hidden = await load_caller_hidden_environments(runtime, auth)

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from email import policy
@@ -22,6 +23,7 @@ from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import mux_state
 from daimon.core.stores.mux_state import PostgresStateStore
+from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.openai_deployment import OpenAIDeployment, build_openai_runtime
 from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevisions
 from daimon.core.turn.prepare import admitted_session_scope, bind_session_impl
@@ -537,11 +539,17 @@ async def test_full_default_public_switch_real_factory_and_authenticated_session
     body = wire.posts[0]
     assert len(body["environment"]["skills"]) == 11
     mcp = body["agent"]["tools"][0]
+    import jwt
+
     assert "authorization" not in mcp["transport"]
     assert body["vault_ids"] == ["caller-session-vault"]
     assert mcp["credential_id"] == "caller-mcp-credential"
-    assert wire.vault_credential["auth"]["token"] == token
-    assert token not in json.dumps(body)
+    installed = wire.vault_credential["auth"]["token"]
+    assert installed not in json.dumps(body) and token not in json.dumps(body)
+    claims = jwt.decode(installed, options={"verify_signature": False})
+    original = jwt.decode(token, options={"verify_signature": False})
+    assert claims.pop("chat_session_id") == prepared.native_chat_session_id
+    assert claims == original, "installed derivative retains source expiry and revocation"
     assert mcp["allowed_tools"] == ["search_tools", "call_tool"]
     from daimon.testing.asgi import mcp_session
 
@@ -741,6 +749,277 @@ NATIVE_DEFAULT_PARAMS = {
 async def test_live_native_defaults_drop_gated_tools_and_preserve_siblings(full_openai):
     """A pinned row with the full live catalogue still admits and runs: its skills,
     builtins and non-gated MCP tools stay executable; gated/publishing tools are losses."""
+    request, _, canonical, wire, *_ = full_openai
+    target = canonical.target_spec
+    assert {tool.name for tool in target.tools} == {"bash", "web_search"}
+    assert len(target.skills) == 11
+    assert target.declared_drops == (
+        "builtin_tool:web_fetch",
+        "mcp_tool:daimon-mcp:add_skill",
+        "mcp_tool:daimon-mcp:create_attachment_upload_url",
+        "mcp_tool:daimon-mcp:create_notebook_upload_url",
+        "mcp_tool:daimon-mcp:publish_report",
+        "memory",
+    )
+    assert "builtin_tool:web_fetch" in target.system
+    expected = ["call_tool", "search_tools"]
+    assert target.mcp_servers[0].tool_policy["allowed_tools"] == expected
+    prepared = await bind_session_impl(
+        request.deps,
+        request.admission,
+        tenant_id=request.tenant_id,
+        platform=request.platform,
+        external_user_id=request.external_user_id,
+        thread_id=request.thread_id,
+        session_account_id=request.session_account_id,
+        reuse_existing=False,
+    )
+    assert prepared.session_ref.provider == "openai"
+    tools = wire.posts[0]["agent"]["tools"]
+    assert any(tool["type"] == "web_search" for tool in tools)
+    assert next(tool for tool in tools if tool["type"] == "mcp")["allowed_tools"] == expected
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_native_creation_grant_human_reuse_and_unattended_handoffs(full_openai):
+    """Capture the real creation bearer, then use it through registered MCP in the driver."""
+    from typing import cast
+
+    import jwt
+    from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
+    from daimon.adapters.mcp.server import create_mcp_app
+    from daimon.core._models import Account, Tenant
+    from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
+    from daimon.core.stores.domain import AccountRow, Role, TenantRow
+    from daimon.core.stores.task_continuations import list_pending_continuations
+    from daimon.core.stores.turn_origins import get_active_origin
+    from daimon.core.turn.prepare import ProviderPreparationRequest
+    from daimon.core.turn_origin import execution_origin, turn_origin
+    from daimon.testing.asgi import call_mcp_tool
+    from daimon.testing.factories import make_platform_principal
+    from daimon.testing.ma_models import ma_agent
+    from mux.testing.drivers.anthropic.ma import list_response
+    from pydantic import SecretStr
+
+    request, _, _, wire, source_token, *rest = full_openai
+    request = cast(ProviderPreparationRequest, request)
+    router = rest[4]
+    sessions = request.deps.sessionmaker
+    account_id = request.session_account_id
+    async with sessions.begin() as db:
+        tenant = await db.get(Tenant, request.tenant_id)
+        account = await db.get(Account, account_id)
+        assert tenant is not None and account is not None
+        tenant.platform = request.platform
+        await make_platform_principal(
+            db,
+            tenant=TenantRow.model_validate(tenant),
+            account=AccountRow.model_validate(account),
+            platform=request.platform,
+            external_id="caller",
+        )
+    target = ma_agent(id="handoff-target", name="daimon", tenant_id=request.tenant_id)
+    # This test exercises signed-origin authorization, so the destination
+    # shares the source provider. Cross-provider handoffs retain their own fence.
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores import agent_backends
+
+    async with sessions.begin() as db:
+        await agent_backends.put_revision(
+            db,
+            tenant_id=request.tenant_id,
+            agent_id=derive_agent_uuid(tenant_id=request.tenant_id, ma_agent_id=target.id),
+            local=1,
+            backend="openai",
+            digest="d" * 64,
+            previous_local=None,
+            agent_name=target.name,
+            preview_digest="p" * 64,
+        )
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda *_: list_response(
+            [request.admission.agent.model_dump(mode="json"), target.model_dump(mode="json")]
+        ),
+    )
+    router.routes.insert(0, router.routes.pop())
+    secret = request.deps.mcp.jwt_secret
+    assert secret is not None
+    app = create_mcp_app(
+        settings=Settings(
+            database=DatabaseSettings(url="postgresql+asyncpg://offline/db"),
+            anthropic=AnthropicSettings(api_key=SecretStr("offline")),
+            mcp=request.deps.mcp,
+        ),
+        sessionmaker=sessions,
+        anthropic=request.deps.anthropic,
+        auth=DaimonJWTVerifier(secret=secret.get_secret_value().encode(), sessionmaker=sessions),
+    )
+    from .test_run_prepared_turn import with_invocation
+
+    previous_grant = None
+    for index, kind in enumerate(("human", "human", "timer")):
+        thread_id = request.thread_id
+        admitted = with_invocation(
+            request.admission,
+            request.tenant_id,
+            human=kind == "human",
+            external_user_id="caller",
+            channel_id="channel",
+            thread_id=thread_id,
+        )
+        async with turn_origin(
+            sessions,
+            tenant_id=request.tenant_id,
+            account_id=account_id,
+            platform=request.platform,
+            parent_channel_id="channel",
+            thread_id=thread_id,
+            responder_ma_agent_id=request.admission.agent.id,
+            responder_name="test-agent",
+            role=Role.USER,
+            attended=True,
+            sender_foreign=False,
+            shared_channel=False,
+        ) as origin:
+            with execution_origin(None):
+                prepared = await bind_session_impl(
+                    request.deps,
+                    admitted,
+                    tenant_id=request.tenant_id,
+                    platform=request.platform,
+                    external_user_id="caller",
+                    thread_id=thread_id,
+                    session_account_id=account_id,
+                    reuse_existing=index in (1, 2),
+                )
+            mcp = wire.posts[-1]["agent"]["tools"][0]
+            assert "authorization" not in mcp["transport"]
+            installed = wire.vault_credential["auth"]["token"]
+            assert installed not in json.dumps(wire.posts[-1])
+            grant = jwt.decode(installed, options={"verify_signature": False})["chat_session_id"]
+            assert grant == prepared.native_chat_session_id and grant != str(origin.id)
+            if index in (1, 2):
+                assert grant == previous_grant and prepared.reused
+            previous_grant = grant
+
+            async def live_origin():
+                async with sessions() as db:
+                    return await get_active_origin(
+                        db,
+                        origin_id=origin.id,
+                        tenant_id=request.tenant_id,
+                        account_id=account_id,
+                        platform=request.platform,
+                        now=datetime.now(UTC),
+                    )
+
+            assert (await live_origin()).chat_session_id is None, (
+                "preparation alone grants no origin authority"
+            )
+
+            async def handoff(installed=installed, index=index):
+                return await call_mcp_tool(
+                    app,
+                    token=installed,
+                    name="call_tool",
+                    arguments={
+                        "name": "hand_off_task",
+                        "arguments": {
+                            "origin_context_id": str(origin.id),
+                            "agent_id": target.id,
+                            "continuation": f"finish requested chart {index}",
+                        },
+                    },
+                )
+
+            async def before_send(grant=grant, thread_id=thread_id, index=index, kind=kind):
+                bound = await live_origin()
+                assert bound.chat_session_id == grant
+                result = await handoff()
+                assert not result.get("result", result).get("isError", False), result
+                async with sessions() as db:
+                    rows = await list_pending_continuations(
+                        db,
+                        tenant_id=request.tenant_id,
+                        platform=request.platform,
+                        thread_id=thread_id,
+                    )
+                assert len(rows) == index + 1, result
+                assert rows[-1].attended is (kind == "human")
+
+            async def no_recovery():
+                pytest.fail("native session must not recover into another backend")
+
+            # Main's signed-grant assertions above still run at before_send.
+            # Preview's default refuses this source's automatic sandbox tools
+            # before a provider message, including timer and child execution.
+            refused = kind != "human"
+            if refused:
+                # Exercise the same signed-grant/handoff assertions independently:
+                # a denied profile never opens its stream or reaches before_send.
+                from daimon.core.stores.turn_origins import bind_origin_session
+
+                async with sessions.begin() as db:
+                    await bind_origin_session(
+                        db,
+                        origin_id=origin.id,
+                        chat_session_id=grant,
+                        attended=False,
+                        human_invocation=False,
+                    )
+                await before_send()
+                async with sessions.begin() as db:
+                    await bind_origin_session(db, origin_id=origin.id, chat_session_id=None)
+            sent_before = [
+                call
+                for call in wire.requests
+                if call.method == "POST" and call.url.path.endswith("/events")
+            ]
+            with (
+                pytest.raises(AdmissionDenied, match="backend_unsupported")
+                if refused
+                else nullcontext()
+            ):
+                outcome = await run_prepared_turn(
+                    request.deps,
+                    prepared,
+                    tenant_id=request.tenant_id,
+                    platform=request.platform,
+                    thread_id=thread_id,
+                    external_user_id="caller",
+                    user_message="do requested work",
+                    lifecycle=RecordingLifecycle(),
+                    cancel=asyncio.Event(),
+                    reseed_user_message=no_recovery,
+                    recovery_lifecycle=lambda _: RecordingLifecycle(),
+                    before_send=before_send,
+                    attended=kind == "human",
+                    origin="chat",
+                    operation_key=f"origin-lifecycle:{index}",
+                )
+                assert outcome.state.error is None, (index, kind, outcome.state.error)
+            if refused:
+                assert [
+                    call
+                    for call in wire.requests
+                    if call.method == "POST" and call.url.path.endswith("/events")
+                ] == sent_before
+            assert (await live_origin()).chat_session_id is None
+            assert "isError" in str(await handoff()), (
+                "an ended execution cannot reuse its installed bearer"
+            )
+
+    assert len(wire.posts) == 1, "every turn reuses one provider session"
+    assert (
+        jwt.decode(source_token, options={"verify_signature": False}).get("chat_session_id") is None
+    )
+
+
+@pytest.mark.parametrize("consent_request", [NATIVE_DEFAULT_PARAMS], indirect=True)
+@pytest.mark.parametrize("full_openai", ["native-defaults"], indirect=True)
+async def test_live_native_defaults_declare_only_fetch_loss_and_preserve_siblings(full_openai):
     request, _, canonical, wire, *_ = full_openai
     target = canonical.target_spec
     assert {tool.name for tool in target.tools} == {"bash", "web_search"}

@@ -69,13 +69,14 @@ from typing import Any, Final, Self, cast
 
 import structlog
 from daimon.adapters.discord.bot import DaimonBot
-from daimon.adapters.discord.checks import is_guild_admin
+from daimon.adapters.discord.checks import is_platform_admin
 from daimon.adapters.discord.credential_modals import (
     EnvCredentialModal,
     EnvFileModal,
     McpCredentialModal,
     RepoBindModal,
     SkillRepoModal,
+    WatchCredentialModal,
 )
 from daimon.adapters.discord.credential_oauth import start_mcp_oauth_from_click
 from daimon.adapters.discord.credential_origin import is_credential_interaction_valid
@@ -317,6 +318,11 @@ class CredentialRequestButton(
                 await interaction.response.send_modal(
                     SkillRepoModal(runtime=bot.runtime, request_row=request_row)
                 )
+            elif request_row.kind == "watch_credential":
+                # The requester's own read key for their watches; changes no agent.
+                await interaction.response.send_modal(
+                    WatchCredentialModal(runtime=bot.runtime, request_row=request_row)
+                )
             else:
                 await interaction.response.send_modal(
                     McpCredentialModal(runtime=bot.runtime, request_row=request_row)
@@ -338,13 +344,13 @@ class CredentialRequestButton(
     ) -> None:
         """The repo kind's dispatch arm: an admin pre-filter, then the modal.
 
-        A live guild admin (`is_guild_admin`, zero I/O) reaches `send_modal`
+        A live guild admin (`is_platform_admin`, zero I/O) reaches `send_modal`
         immediately. A non-admin instead runs the full
         `refuse_if_shared_and_not_admin_for_request` gate, bounded by
         `_PRE_FILTER_TIMEOUT_SECONDS` — see the module docstring for why
         falling through to `send_modal` on a timeout is sound.
         """
-        if is_guild_admin(interaction):
+        if is_platform_admin(interaction):
             await interaction.response.send_modal(RepoBindModal(runtime=runtime, request_row=row))
             return
         try:

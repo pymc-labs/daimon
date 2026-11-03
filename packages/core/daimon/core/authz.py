@@ -7,7 +7,12 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Literal
 
-from daimon.core.access_policy import DM_SCOPE_PREFIX, TenantAccessPolicy, is_invoker_allowed
+from daimon.core.access_policy import (
+    DM_SCOPE_PREFIX,
+    TenantAccessPolicy,
+    agent_invoker_roles,
+    is_invoker_allowed,
+)
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_NAME,
     MA_METADATA_KEY_READER_OF,
@@ -56,7 +61,7 @@ class Action(StrEnum):
     # notice around a turn, or a routine's delivery post.
     POST = "post"
     # Run or deliver a routine on its creator's behalf: only while the creator
-    # may still start a turn (the invoker allowlist; admins always may). A
+    # may still start a turn (the invoker allowlist and optional admin bypass). A
     # routine with no recorded creator speaks for no one.
     ACT_FOR_CREATOR = "act_for_creator"
     # Send a direct message to a workspace member as the executing agent.
@@ -85,6 +90,7 @@ class Action(StrEnum):
     SET_CHANNEL_ENVIRONMENT = "set_channel_environment"
     # Set one channel's rule (`Place.channel_id`).
     SET_CHANNEL_RULE = "set_channel_rule"
+    SET_APPROVAL_GATE = "set_approval_gate"
     # Set one agent's rule.
     SET_AGENT_RULE = "set_agent_rule"
     # Change a workspace-wide access setting: who may start turns, DMs, DM memory,
@@ -100,6 +106,11 @@ class Action(StrEnum):
     SET_AGENT_TOOL_RULE = "set_agent_tool_rule"
     # Set or clear one agent's tool rule for a parent channel.
     SET_CHANNEL_AGENT_TOOL_RULE = "set_channel_agent_tool_rule"
+    # Turn built-in sandbox tools on or off for one routine's own runs:
+    # current human admins only, never the routine's owner as such.
+    SET_LONG_JOB_POLICY = "set_long_job_policy"
+    SET_ROUTINE_SANDBOX_TOOLS = "set_routine_sandbox_tools"
+    SET_CONTEXT_PROVIDER = "set_context_provider"
     # Hand a thread's conversation to another agent (`Place` is the thread).
     # Writers and the invoker allowlist as START_TURN, then RUN_AGENT on the
     # handoff surface, then who may bring that agent here: anyone when it is
@@ -147,6 +158,8 @@ class Subject:
     # The caller holds an agent-scoped key: never exempt as an admin, whoever
     # minted it, because the key is long-lived and its role may be stale.
     via_agent_key: bool = False
+    role_ids: tuple[str, ...] = ()
+    verified_membership: bool | None = None
     # The requester belongs to another organisation (or the platform could not
     # say): never an admin, and refused everything outside the held channel.
     client: bool = False
@@ -548,19 +561,42 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         if _writers_none(place):
             return _deny("writers_none")
         if subject.platform_user_id is not None and not is_invoker_allowed(
-            policy, external_user_id=subject.platform_user_id, is_admin=subject.is_admin
+            policy,
+            external_user_id=subject.platform_user_id,
+            is_admin=subject.is_admin,
+            role_ids=subject.role_ids,
+            verified_membership=subject.verified_membership,
         ):
             return _deny("invoker_not_allowed")
         return ALLOW
 
     if req.action is Action.ACT_FOR_CREATOR:
         if subject.platform_user_id is None or not is_invoker_allowed(
-            policy, external_user_id=subject.platform_user_id, is_admin=subject.is_admin
+            policy,
+            external_user_id=subject.platform_user_id,
+            is_admin=subject.is_admin,
+            role_ids=subject.role_ids,
+            verified_membership=subject.verified_membership,
         ):
             return _deny("invoker_not_allowed")
         return ALLOW
 
     if req.action is Action.RUN_AGENT:
+        roles = agent_invoker_roles(policy, agent.names)
+        if roles and (
+            req.surface is Surface.ROUTINE
+            or subject.platform_user_id is None
+            or subject.verified_membership is not True
+            or not all(set(subject.role_ids).intersection(required) for required in roles)
+            or not is_invoker_allowed(
+                policy,
+                external_user_id=subject.platform_user_id,
+                is_admin=subject.is_admin,
+                role_ids=subject.role_ids,
+                verified_membership=subject.verified_membership,
+            )
+        ):
+            return _deny("invoker_not_allowed")
         # A web chat is in no channel, so an agent kept to channels never answers there,
         # whoever asks, unless every rule on it names the web chat.
         if req.surface is Surface.WEB and agent.resolved:
@@ -585,6 +621,8 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         return ALLOW if refusal is None else _deny(refusal)
 
     if req.action is Action.SAVE_ROUTINE:
+        if agent_invoker_roles(policy, agent.names):
+            return _deny("invoker_not_allowed")
         here = place.permissions.home
         if here is not None and agent.permissions.home != here:
             return _deny("own_agents_only")
@@ -625,6 +663,7 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
     if req.action in (
         Action.ARCHIVE_CHANNEL_COPY,
         Action.SET_CHANNEL_RULE,
+        Action.SET_APPROVAL_GATE,
         Action.SET_AGENT_RULE,
         Action.SET_WORKSPACE_SETTINGS,
     ):
@@ -637,6 +676,13 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         return ALLOW if subject.is_admin and not subject.via_agent_key else _deny("admin_required")
 
     if req.action is Action.SET_CHANNEL_AGENT_TOOL_RULE:
+        return ALLOW if subject.is_admin and not subject.via_agent_key else _deny("admin_required")
+
+    if req.action in (
+        Action.SET_ROUTINE_SANDBOX_TOOLS,
+        Action.SET_LONG_JOB_POLICY,
+        Action.SET_CONTEXT_PROVIDER,
+    ):
         return ALLOW if subject.is_admin and not subject.via_agent_key else _deny("admin_required")
 
     if req.action in (Action.SET_CHANNEL_BUDGET, Action.SET_CHANNEL_SKILLS):
@@ -820,6 +866,8 @@ def build_subject(
     is_admin: bool,
     platform_user_id: str | None,
     via_agent_key: bool = False,
+    role_ids: tuple[str, ...] = (),
+    verified_membership: bool | None = None,
     client: bool = False,
 ) -> Subject:
     """Who is acting. The one place a caller's identity becomes a `Subject`.
@@ -831,6 +879,8 @@ def build_subject(
         platform_user_id=platform_user_id,
         via_agent_key=via_agent_key,
         client=client,
+        role_ids=role_ids,
+        verified_membership=verified_membership,
     )
 
 

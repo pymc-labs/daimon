@@ -92,10 +92,16 @@ should know:
 ### Send and receive files
 
 For Managed Agents turns, files in `/mnt/session/outputs` upload to the thread
-after an interactive turn, a few seconds after the reply. Routines deliver
-nothing. Files over 200 MB are not uploaded. The thread gets a notice naming
+after an interactive turn, a few seconds after the reply. The first file of each
+delivery says "For @name", naming the person whose turn made it. A routine with
+a destination sends its files with its result, through the same uploader (see
+[routines](routines.md#generated-files)).
+
+Files over 200 MB are not uploaded. The thread gets a notice naming
 the file and offering a smaller version. Self-hosted turns skip this sweep, and
-agents deliver files through the MCP message tools instead.
+agents deliver files through the MCP message tools instead. A watch report
+rechecks access before every post, edit and upload, and stops at the first
+refusal.
 
 Read tools (`read_channel`, `read_thread`, `get_message`, `search_messages`)
 list file names, types and sizes. Download links go through Daimon's file proxy
@@ -186,6 +192,11 @@ channel.
 card with the agent that answers in the channel. Members see only agents whose
 rules allow them to answer at that location, while admins see all. Knowing an
 agent's name does not grant edit rights.
+
+When a channel's readers are not `own`, `/here` and the Permissions screen warn
+that guest accounts aren't checked on Slack. A channel shared with another
+workspace gets a sharing warning and, for admins, a **Make confidential**
+button. If Slack can't answer, the card says **Outsider check skipped**.
 
 `/memory` shows an agent's shared memory, `/memory mine` your personal memory
 with it, and `/memory forget-mine` clears yours after you confirm a code.

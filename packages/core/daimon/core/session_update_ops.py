@@ -44,6 +44,7 @@ from cryptography.fernet import MultiFernet
 from daimon.core.agent_mcp_credentials import (
     McpVaultIds,
     resolve_hidden_mcp_server_names,
+    resync_mounted_shared_vault,
     sync_agent_mcp_credentials,
 )
 from daimon.core.config import GithubAppSettings, McpSettings
@@ -78,6 +79,7 @@ from daimon.core.session_snapshot import (
     session_mcp_servers,
     session_tools,
 )
+from daimon.core.stores.agent_daimon_tools import record_enabled_daimon_tools
 from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.tool_safety import ToolSafetyPolicy
 from mux.contracts.ids import Revision, Scope
@@ -245,6 +247,7 @@ async def apply_update_ops(
     daimon_rule_tools: frozenset[str] = frozenset(),
     mcp_vault_ids: McpVaultIds | None = None,
     shared_owner: uuid.UUID | None = None,
+    legacy_memory_servers: tuple[str, ...] = (),
 ) -> AppliedOps | SessionBusy:
     """Run `ops` against the live session and return what it runs afterwards.
 
@@ -274,7 +277,7 @@ async def apply_update_ops(
         )
         mounted_vaults = (snapshot.vault_id,)
         # A session's relay vault is mounted beside its Daimon one, never recorded.
-        if snapshot.github_mode == "app" or relay_urls:
+        if snapshot.github_mode == "app" or snapshot.chat_session_id is not None or relay_urls:
             live = await retrieve_session_record(anthropic, session_id, scope=scope)
             mounted_vaults = tuple(dict.fromkeys(live.vault_ids))
         await refresh_mounted_mcp_vaults(
@@ -321,6 +324,13 @@ async def apply_update_ops(
                     asks_before_publishing=asks_before_publishing,
                     confirmed_tools=confirmed_tools,
                     daimon_rule_tools=daimon_rule_tools,
+                    legacy_memory_servers=legacy_memory_servers,
+                )
+                await record_enabled_daimon_tools(
+                    sessionmaker,
+                    tenant_id=tenant_id,
+                    agent_id=agent_uuid,
+                    tools=[tool.model_dump(mode="json") for tool in tools],
                 )
                 servers = session_mcp_servers(
                     agent,
@@ -328,6 +338,7 @@ async def apply_update_ops(
                     tool_safety=tool_safety,
                     public_url=public_url,
                     confirmed_tools=confirmed_tools,
+                    chat_session_id=recorded.chat_session_id,
                 )
                 try:
                     await update_session_record(
@@ -396,7 +407,29 @@ async def apply_update_ops(
                 )
                 applied.append("repo_token_age")
             case RemirrorVaultCredentials():
-                if fernet is not None and mcp.public_url is not None and mcp.jwt_secret is not None:
+                # A shared thread re-mirrors its own vault, never a caller's.
+                if shared_owner is not None:
+                    # Only into a vault this session mounts; see the callee.
+                    if fernet is not None and snapshot.vault_id is not None:
+                        mounted: tuple[str, ...] = (snapshot.vault_id,)
+                        if snapshot.github_mode == "app":
+                            live = await retrieve_session_record(anthropic, session_id, scope=scope)
+                            mounted = tuple(live.vault_ids)
+                        await resync_mounted_shared_vault(
+                            anthropic,
+                            sessionmaker=sessionmaker,
+                            fernet=fernet,
+                            tenant_id=tenant_id,
+                            agent_id=agent_uuid,
+                            owner=shared_owner,
+                            mounted_vault_ids=mounted,
+                            exclude_github_copilot=snapshot.github_mode == "app",
+                            vault_ids=mcp_vault_ids,
+                        )
+                # The organisation's tokens never reach an external caller's vault.
+                elif (
+                    fernet is not None and mcp.public_url is not None and mcp.jwt_secret is not None
+                ):
                     await sync_agent_mcp_credentials(
                         anthropic,
                         sessionmaker=sessionmaker,

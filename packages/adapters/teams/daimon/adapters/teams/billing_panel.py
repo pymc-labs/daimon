@@ -151,10 +151,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 log = structlog.get_logger()
 
 VERB = "billing"
-ADMIN_ONLY = "Only an admin can top up credit."
+ADMIN_ONLY = "Only a platform admin can top up credit."
 UNKNOWN_AMOUNT = "That top-up amount is not offered."
 NOT_CONFIGURED = "Card payments aren't set up here.\n\nAsk the team running Daimon to add credit."
-LOOKUP_ADMIN_ONLY = "Only an admin can look up a person's spend."
+LOOKUP_ADMIN_ONLY = "Only a platform admin can look up a person's spend."
 PICK_A_PERSON = "Pick a person to look up."
 PERSON_INPUT = "person"
 # Teams' people picker: the choices come from the organisation's directory.
@@ -399,7 +399,7 @@ def _actions(state: BillingPanelState, place: str | None) -> list[Action]:
     if state.is_admin:
         amounts = ColumnSet(columns=[_topup(amount, state, place) for amount in TOPUP_AMOUNTS])
         actions.append(ShowCardAction(title=ADD_CREDIT, card=_sub_card(amounts)))
-    if state.has_redeemable_promo_code:
+    if state.is_admin and state.has_redeemable_promo_code:
         code = TextInput(id=CODE_INPUT, placeholder="XXXXX-XXXXX-XXXXX-XXXXX", max_length=100)
         redeem = ActionSet(actions=[button(VERB, "Redeem", "redeem", place=place or "")])
         actions.append(ShowCardAction(title=REDEEM_CODE, card=_sub_card(code, redeem)))
@@ -575,7 +575,13 @@ class BillingPanel:
             while len(held) > _MAX_PLACES:
                 held.popitem(last=False)
         user_id = context.inbound.user_id
-        card = await self._panel(context.tenant_id, user_id, context.is_admin, place=place)
+        from daimon.adapters.teams.deployment_admins import admin_team_owners, is_platform_admin
+
+        teams = self._runtime.settings.teams
+        platform_admin = teams is not None and await is_platform_admin(
+            teams, admin_team_owners(self._runtime, fresh=True), user_id=user_id
+        )
+        card = await self._panel(context.tenant_id, user_id, platform_admin, place=place)
         await context.send_card(card)
 
     async def on_action(
@@ -684,9 +690,11 @@ class BillingPanel:
         if data.get("op") == "lookup":
             return await self._lookup(actor, cast(object, data.get(PERSON_INPUT)), place)
         if data.get("op") != "topup":
-            card = await self._panel(actor.tenant_id, actor.user_id, actor.is_admin, place=place)
+            card = await self._panel(
+                actor.tenant_id, actor.user_id, actor.is_platform_admin, place=place
+            )
             return replace_card(card)
-        if not actor.is_admin:
+        if not actor.is_platform_admin:
             return toast(ADMIN_ONLY)
         amount = next((a for a in TOPUP_AMOUNTS if str(a) == str(data.get("amount"))), None)
         if amount is None:
@@ -714,7 +722,7 @@ class BillingPanel:
         Per-person spend is what a member's snapshot withholds, so admin is
         re-checked before any usage read.
         """
-        if not actor.is_admin:
+        if not actor.is_platform_admin:
             return toast(LOOKUP_ADMIN_ONLY)
         user_id = canonical_uuid(picked)
         if user_id is None:
@@ -752,8 +760,8 @@ class BillingPanel:
     ) -> AdaptiveCardInvokeResponse:
         """Redeem a code; a refusal leaves the card, and the typed code, as it was.
 
-        A server-wide code needs a live admin; a channel code credits the channel
-        the command was typed in, for anyone, and is refused in a personal chat.
+        All codes require a live platform admin; a channel code credits the channel
+        the command was typed in and is refused in a personal chat.
         """
         channel_id = self._channel_of(place, actor.user_id)
         audit = functools.partial(
@@ -778,7 +786,7 @@ class BillingPanel:
                 channel=None
                 if channel_id is None
                 else PromoChannel(platform="teams", channel_id=channel_id),
-                is_admin=actor.is_admin,
+                is_admin=actor.is_platform_admin,
             )
         except (DaimonError, SQLAlchemyError):
             # `guarded` answers the click; the audit trail records the failure.
@@ -791,7 +799,7 @@ class BillingPanel:
         card = await self._panel(
             actor.tenant_id,
             actor.user_id,
-            actor.is_admin,
+            actor.is_platform_admin,
             notice=redeemed_card_text(result),
             place=place,
         )

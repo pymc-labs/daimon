@@ -7,7 +7,8 @@ pin an agent to one, or let clients into a shared channel.
 Two rules say what reaches whom. A **channel rule** says whose turns may read a
 channel and who may write in it. An **agent rule** says where an agent may run.
 Every limit below follows from these two. Who owns what is on
-[isolation.md](isolation.md).
+[isolation.md](isolation.md), and who counts as an admin on
+[admins.md](admins.md).
 
 ## Channel rules
 
@@ -33,10 +34,9 @@ thread takes the strictest of its own, its channel's and its category's rule.
 
 On Discord, a direct @mention in a `writers: none` channel gets a lock
 reaction and a DM naming the rule, so "not allowed here" does not look like
-"Daimon is down". It is bounded: at most one notice per person per channel
-within
+"Daimon is down". It sends at most one per person per channel within
 [the cooldown](configuration.md#daimon_discord__protected_channel_notice_cooldown_min),
-nothing is posted in the channel, no turn runs, and failed lookups stay silent.
+and posts nothing in the channel.
 
 ## What a channel rule limits
 
@@ -91,8 +91,8 @@ allow.
 
 ## Agent tool rules
 
-A current human workspace admin can set `allow`, `ask` or `deny` for one
-third-party MCP tool on one agent:
+A current human admin can set `allow`, `ask` or `deny` for one third-party
+MCP tool on one agent:
 
 ```bash
 daimon agents tool-rules --help
@@ -100,6 +100,7 @@ daimon agents tool-rules --help
 
 The MCP tool `set_agent_tool_rule` does the same. The key is exactly
 `server/tool`, bound to the agent and the server URL attached under that name.
+A server name never contains `/`, and attaching one is refused.
 Changing either makes the rule stop matching. Only a person can edit rules: an
 agent key, or an agent acting for an admin, is refused. Every edit is audited.
 Rules are inactive until both `DAIMON_TOOL_SAFETY__ENABLED`
@@ -126,7 +127,14 @@ tools added later. Wildcards work only there, and only as an agent-wide
 The rule must name the agent's own Daimon endpoint. If the server cannot read
 the rules, it refuses the call. The tool part of the key allows letters,
 digits, `_`, `.` and `-`, up to 128 characters. Other names are refused on
-save, and stored ones are ignored and logged.
+save, and stored ones are ignored and logged. An agent whose Daimon toolset
+enables tools by name sees exactly those tools, listed under their own names.
+
+A third-party tool is a read or a write by its name, unless
+[`DAIMON_TOOL_SAFETY__EFFECTS`](configuration.md#daimon_tool_safety__effects)
+pins it. For a server listed in
+[`DAIMON_TOOL_SAFETY__TRUSTED_ANNOTATIONS`](configuration.md#daimon_tool_safety__trusted_annotations),
+the server's own read-only and destructive hints decide instead.
 
 A rule on a publish tool makes it ask in every channel and refuse in routines,
 even where the rule does not name the channel.
@@ -134,12 +142,33 @@ even where the rule does not name the channel.
 > **Warning:** Gemini and OpenAI cannot pause for a card. A turn for an agent
 > on one of them is refused when the agent has an `ask` rule or a
 > channel-scoped `deny` on a Daimon tool. Agent-wide `deny` rules still work.
-> The person sees the same "this agent can't run here" notice as for any
-> unusable backend, and the operator log records `turn.backend_unsupported`.
+> The operator log records `turn.backend_unsupported`.
+
+## Approval overrides
+
+Admins can choose whether attended chat asks before a third-party MCP write,
+for the server, a channel or a thread. Each takes ask, allow writes or
+inherit, and the most specific choice wins. An inherited server default asks.
+Overrides work only while both `DAIMON_TOOL_SAFETY__ENABLED` and
+[`DAIMON_TOOL_SAFETY__ALLOW_GATE_OVERRIDES`](configuration.md#daimon_tool_safety__allow_gate_overrides)
+are on.
+
+Only platform admins change them, on the `/here` card (`here` on Teams). Each
+click rechecks their authority; there is no CLI or MCP tool. On Slack a
+thread choice asks for the thread's root message link.
+
+An override relaxes only an ordinary third-party write. Deny and `ask` rules
+still apply, and Daimon's own confirmed actions, publishing and permission
+changes always ask. DMs and unattended turns ignore overrides. An unreadable
+setting asks.
+
+> **Warning:** Older builds cannot read a policy with saved overrides and
+> refuse that server's turns. Before rolling back, set every saved override to
+> **Inherit**, or restore a policy backup.
 
 ## Change agent setup
 
-Server or workspace admins may change an agent's setup, and so may the agent's
+Admins may change an agent's setup, and so may the agent's
 **owners**. The first owner is the person who created or forked the agent. A
 channel's own copy keeps that agent's owner. Nobody from another organisation
 can be an owner, and agents created before owners existed have none and stay
@@ -167,8 +196,7 @@ GitHub repos for their own agent only:
 | Installation notices, GitHub home, new-repo cards, approvals | yes | no | no |
 | Add or remove owners | yes | no | no |
 
-Removing a repo from one agent leaves a server-wide repo connected for the
-others. Owners cannot change what the whole workspace shares: the provider
+Owners cannot change what the whole workspace shares: the provider
 allowlist, channel budgets, server-wide repos, deleting a skill from the
 workspace, archiving or copying the agent, and its tool rules stay with
 admins.
@@ -223,17 +251,17 @@ answers them in the channel they share.
 
 A person verified as belonging to another organisation is marked foreign, and
 the mark is never cleared. A channel found to be shared is remembered, so every
-later turn in it is held. The hold travels in the turn's MCP credential and is
-applied before any rule. The default agent and agents bound to several channels
+later turn in it is held. The default agent and agents bound to several channels
 still run inside a held channel.
 
 ## Exemptions
 
-- **Server admins** are exempt where the output reaches them alone: their own
-  DM and hub turns, and hub reads of sessions inside limited channels. They
-  configure agents with rules from anywhere and see every agent listed. Agent
-  rules and `readers: own` still hold for them in channels, threads, routines
-  and handoffs. Nothing writes where `writers` is `none`.
+- **Admins** are exempt where the output reaches them alone: their own DM and
+  hub turns. Platform admins also read hub sessions inside limited channels.
+  Admins configure agents with rules from anywhere and see every agent listed.
+  Agent rules and `readers: own` still hold for them in channels, threads,
+  routines, handoffs and Discord DMs. Nothing writes where `writers` is
+  `none`.
 - A **setup thread** under a `readers: own` channel answers as the built-in
   agent.
 
@@ -241,9 +269,29 @@ Agent keys and tokens with no person behind them are never exempt, and no
 exemption applies to a held turn. The [trust model](architecture.md#trust-model)
 has the full table.
 
+## Warn about outsiders
+
+On Discord and Slack, `/here` and a channel's Permissions screen warn when
+people outside the organisation can view a channel whose readers are not
+`own`. Admins can press **Make confidential** to set readers to `own`.
+
+On Discord, admins name the organisation's internal roles with **Name your
+internal roles** on the Permissions screen. Any other role that can view the
+channel triggers the warning. Without internal roles the check is not made.
+Operators can set them too:
+
+```bash
+daimon tenants access-policy set discord GUILD_ID --internal-role ROLE_ID
+daimon tenants access-policy set discord GUILD_ID --clear-internal-roles
+```
+
+On Slack the warning follows the channel's sharing flags, read fresh each
+time. Slack guests are never checked, so the screen always says so when readers
+are not `own`. If Slack cannot answer, it says **Outsider check skipped**.
+
 ## Change the rules
 
-Channel and agent rules are server or workspace admins' calls. Set them from:
+Channel and agent rules are admins' calls. Set them from:
 
 - chat: `set_channel_rule` and `set_agent_rule` ([MCP tools](mcp-tools.md));
 - panels: a channel's **Permissions** screen, from Who answers where in the
@@ -257,13 +305,21 @@ daimon tenants access-policy rules <platform> <workspace-id> --json
 ```
 
 The last command lists every channel, category and agent rule, and each
-agent's home.
+agent's home. To list the Discord channels where Daimon may answer at all:
+
+```bash
+daimon channels answerable discord GUILD_ID --expect handed-over.txt --json
+```
+
+It counts every channel not under `writers: none`, plus bound threads, and
+writes nothing. With `--expect`, a file of channel ids one per line, any
+difference exits 1. Use it when another bot hands some channels to Daimon.
 
 Setting `readers: own` makes the channel's default agent its own, or copies an
 agent for it (`copy_from`). Moving readers off `own` keeps its agents' rules, so
 they still run only there, unless `release_agents` drops them. A write that no
 rule would enforce is refused.
 
-The invoker allowlist, read-only DM memory, environments, budgets and operator
-tokens are not channel or agent rules. They say who may act and who may change
+The [invoker allowlist](admins.md#who-may-start-a-turn), read-only DM memory,
+environments, budgets and operator tokens are not channel or agent rules. They say who may act and who may change
 the rules.

@@ -50,6 +50,7 @@ async def _admit(
 ) -> Admission:
     return await admit(
         _deps_for(factory, tmp_path, tenant),
+        origin="chat",
         tenant_id=tenant.id,
         platform=PLATFORM,
         external_user_id=user,
@@ -350,6 +351,7 @@ async def test_a_dm_move_from_a_shared_channel_is_refused_before_history_is_read
     async def move(*, channel_shared: bool | None) -> Admission:
         return await admit(
             deps,
+            origin="chat",
             tenant_id=tenant.id,
             platform=PLATFORM,
             external_user_id="U_MEMBER",
@@ -445,6 +447,7 @@ async def test_reauthorize_never_relaxes_a_hold(
 async def _admit_dm(deps: TurnDeps, tenant: TenantRow) -> Admission:
     return await admit(
         deps,
+        origin="chat",
         tenant_id=tenant.id,
         platform=PLATFORM,
         external_user_id=USER,

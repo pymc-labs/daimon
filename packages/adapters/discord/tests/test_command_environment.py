@@ -19,6 +19,7 @@ from daimon.core.config import (
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
+from discord import app_commands
 from discord.ext import commands
 from pydantic import PostgresDsn, SecretStr
 
@@ -26,7 +27,7 @@ from .harness import make_bot
 
 
 async def _ready_bot(
-    name: str, guild_ids: list[int]
+    name: str, guild_ids: list[int], *, dm_only: bool = False
 ) -> tuple[DaimonBot, AsyncMock, AsyncMock, MagicMock]:
     settings = Settings(
         _env_file=None,  # pyright: ignore[reportCallIssue]  # BaseSettings accepts this
@@ -53,6 +54,14 @@ async def _ready_bot(
     }
     bot._retire_orphaned_turns = AsyncMock()  # type: ignore[method-assign]
     bot._provision_joined_guild = AsyncMock(return_value=None)  # type: ignore[method-assign]
+    if dm_only:
+
+        @app_commands.command(name="dm-only", description="d")
+        @app_commands.allowed_contexts(guilds=False, dms=True, private_channels=False)
+        async def dm_only_command(interaction: discord.Interaction) -> None: ...
+
+        bot.tree.add_command(dm_only_command)
+    bot.tree.remove_command = MagicMock()  # type: ignore[method-assign]
     bot.tree.sync = AsyncMock()  # type: ignore[method-assign]
     bot.tree.clear_commands = MagicMock()  # type: ignore[method-assign]
     bot.tree.copy_global_to = MagicMock()  # type: ignore[method-assign]
@@ -112,13 +121,11 @@ async def test_empty_non_production_allowlist_registers_no_commands() -> None:
 
 
 @pytest.mark.asyncio
-async def test_non_allowlisted_messages_interactions_and_dms_are_ignored() -> None:
+async def test_non_allowlisted_messages_and_interactions_are_ignored() -> None:
     bot, _, _, _ = await _ready_bot("staging", [111])
     with patch("daimon.adapters.discord.bot.remember_guild_user") as remember:
         await bot.on_message(SimpleNamespace(guild=SimpleNamespace(id=222)))  # type: ignore[arg-type]
-        await bot.on_message(SimpleNamespace(guild=None))  # type: ignore[arg-type]
         await bot.on_interaction(SimpleNamespace(guild_id=222))  # type: ignore[arg-type]
-        await bot.on_interaction(SimpleNamespace(guild_id=None))  # type: ignore[arg-type]
     remember.assert_not_called()
     # The SDK otherwise routes slash commands, buttons, and modals before
     # on_interaction; invalid stubs here prove rejection before SDK parsing.
@@ -129,13 +136,60 @@ async def test_non_allowlisted_messages_interactions_and_dms_are_ignored() -> No
     with patch("discord.state.Interaction") as make_interaction:
         for kind in (2, 3, 5):
             parse({"type": kind, "guild_id": "222"})
-            parse({"type": kind})
         make_interaction.assert_not_called()
     with patch.object(commands.Bot, "dispatch") as inherited_dispatch:
         bot.dispatch("message", SimpleNamespace(guild=SimpleNamespace(id=222)))
         bot.dispatch("interaction", SimpleNamespace(guild_id=222))
-        bot.dispatch("message", SimpleNamespace(guild=None))
         inherited_dispatch.assert_not_called()
         bot.dispatch("message", SimpleNamespace(guild=SimpleNamespace(id=111)))
         inherited_dispatch.assert_called_once()
+    await bot.close()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_non_production_dms_and_their_buttons_reach_the_listeners() -> None:
+    bot, _, _, _ = await _ready_bot("lane-preview", [111])
+    with patch.object(commands.Bot, "dispatch") as inherited_dispatch:
+        bot.dispatch("message", SimpleNamespace(guild=None))
+        bot.dispatch("interaction", SimpleNamespace(guild_id=None, guild=None))
+    assert [call.args[0] for call in inherited_dispatch.call_args_list] == [
+        "message",
+        "interaction",
+    ], "a lane bot must pass guildless DM events to the direct-message cog"
+    parse = cast(
+        Callable[[dict[str, object]], None],
+        bot._connection.parsers["INTERACTION_CREATE"],  # pyright: ignore[reportPrivateUsage]
+    )
+    with patch("discord.state.Interaction") as make_interaction:
+        parse({"type": 3, "data": {"custom_id": "dm-switch", "component_type": 2}})
+        make_interaction.assert_called_once()
+    await bot.close()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_non_production_dms_reach_only_allowlisted_tenants() -> None:
+    lane, _, _, _ = await _ready_bot("lane-preview", [111])
+    production, _, _, _ = await _ready_bot("", [])
+    allowed = SimpleNamespace(external_id="111")
+    other = SimpleNamespace(external_id="222")
+    assert lane.allows_tenant(allowed)  # type: ignore[arg-type]
+    assert not lane.allows_tenant(other), "a lane must not answer DMs for a guild off its list"  # type: ignore[arg-type]
+    assert not lane.allows_tenant(None)
+    assert production.allows_tenant(other)  # type: ignore[arg-type]
+    await lane.close()  # type: ignore[attr-defined]
+    await production.close()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_non_production_registers_dm_only_commands_globally_and_not_in_guilds() -> None:
+    bot, _, global_overwrite, copy = await _ready_bot("lane-preview", [111], dm_only=True)
+    payload = global_overwrite.await_args.kwargs["payload"]
+    assert [command["name"] for command in payload] == ["dm-only"], (
+        "only the global scope reaches DMs, so a lane registers its DM-only commands there"
+    )
+    removed = bot.tree.remove_command.call_args_list  # type: ignore[attr-defined]
+    assert [(call.args[0], call.kwargs["guild"].id) for call in removed] == [("dm-only", 111)], (
+        "a DM-only command is dropped from the allowlisted guild's copy"
+    )
+    copy.assert_called_once()
     await bot.close()  # type: ignore[attr-defined]

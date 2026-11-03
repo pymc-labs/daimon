@@ -53,7 +53,7 @@ _REFUSAL_TEXT: dict[PromoRefusal, str] = {
     "exhausted": "That code has been fully redeemed.",
     "already_redeemed": "That code was already redeemed here.",
     "throttled": "Too many failed attempts. Try again in a few minutes.",
-    "admin_only": "Only an admin can redeem that code, because it adds credit for everyone here.",
+    "admin_only": "Only a platform admin can redeem that code.",
     "needs_channel": "That code adds to a channel's budget. Redeem it from the channel, not a DM.",
     "already_redeemed_in_channel": "You already redeemed that code in this channel.",
     "channel_cap_reached": "That code has already added all it can to this channel.",

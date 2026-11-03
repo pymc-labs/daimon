@@ -65,6 +65,8 @@ def test_require_admin_passes_when_admin() -> None:
         tenant_id=uuid.uuid4(),
         role=Role.USER,
         is_admin=True,
+        is_platform_admin=True,
+        token_kind="cli",
     )
     result = _require_admin(auth)
     assert result is None, "admin caller passes the gate"

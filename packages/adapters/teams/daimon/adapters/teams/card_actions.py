@@ -15,14 +15,15 @@ from typing import cast
 
 import anthropic
 import structlog
-from daimon.adapters.teams.deployment_admins import admin_team_owners, is_deployment_admin
+from daimon.adapters.teams.deployment_admins import admin_team_owners, is_platform_admin
 from daimon.adapters.teams.identity import canonical_uuid, foreign_tenant, live_tenant_id
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.adapters.teams.runtime import TeamsRuntime
+from daimon.core.admin_actions import DelegatedAction, admin_for_action
 from daimon.core.errors import DaimonError
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.platform_names import remember_user_name
-from daimon.core.stores.identity import get_or_create_platform_principal
+from daimon.core.stores.identity import find_platform_principal, get_or_create_platform_principal
 from microsoft_teams.api import (
     AdaptiveCardActionCardResponse,
     AdaptiveCardActionMessageResponse,
@@ -66,9 +67,17 @@ class Actor:
     tenant_id: uuid.UUID
     is_admin: bool
     conversation_id: str
+    is_platform_admin: bool = False
+
+    def admin_for(self, action: DelegatedAction | None = None) -> bool:
+        return admin_for_action(
+            platform_admin=self.is_platform_admin, daimon_admin=self.is_admin, action=action
+        )
 
 
-async def card_actor(runtime: TeamsRuntime, activity: InvokeActivity) -> Actor | None:
+async def card_actor(
+    runtime: TeamsRuntime, activity: InvokeActivity, *, remember_name: bool = True
+) -> Actor | None:
     """The clicker, or None when the org, the id or the tenant does not check out.
 
     The conversation must be the configured tenant's. Teams opens no 1:1 chat
@@ -87,18 +96,40 @@ async def card_actor(runtime: TeamsRuntime, activity: InvokeActivity) -> Actor |
     tenant_id = await live_tenant_id(runtime.sessionmaker, teams.tenant_id)
     if tenant_id is None:
         return None
-    # For the billing card's names; in the background, never failing the click.
-    remember_user_name(
-        runtime.sessionmaker,
-        tenant_id=tenant_id,
-        platform="teams",
-        user_id=user_id,
-        display_name=activity.from_.name,
+    platform_admin = await is_platform_admin(
+        teams, admin_team_owners(runtime, fresh=True), user_id=user_id
     )
+    from daimon.core.native_admins import is_daimon_admin
+
+    async with runtime.sessionmaker() as session:
+        principal = await find_platform_principal(
+            session, tenant_id=tenant_id, platform="teams", external_id=user_id
+        )
+        foreign = home is not None or (
+            principal is not None and principal.foreign_home_id is not None
+        )
+        platform_admin = platform_admin and not foreign
+        daimon_admin = not foreign and await is_daimon_admin(
+            session,
+            tenant_id=tenant_id,
+            platform="teams",
+            platform_user_id=user_id,
+            is_platform_admin=platform_admin,
+        )
+    # For the billing card's names; in the background, never failing the click.
+    if remember_name:
+        remember_user_name(
+            runtime.sessionmaker,
+            tenant_id=tenant_id,
+            platform="teams",
+            user_id=user_id,
+            display_name=activity.from_.name,
+        )
     return Actor(
         user_id=user_id,
         tenant_id=tenant_id,
-        is_admin=await is_deployment_admin(teams, admin_team_owners(runtime), user_id=user_id),
+        is_admin=daimon_admin,
+        is_platform_admin=platform_admin,
         conversation_id=conversation.id,
     )
 

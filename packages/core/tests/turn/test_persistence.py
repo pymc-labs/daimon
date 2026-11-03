@@ -770,8 +770,9 @@ async def test_production_retries_cannot_duplicate_a_claimed_native_mutation(kin
     assert record is not None and record.operation.status == "outcome_unknown"
 
 
-async def test_a_claim_keeps_the_default_retry_policy_for_reads_and_legacy_mutations() -> None:
+async def test_reads_retry_but_legacy_mutations_never_retry_without_a_claim() -> None:
     import httpx
+    from anthropic import APIConnectionError
     from daimon.core.turn.io import LegacyTurnIO
     from mux.testing.drivers.anthropic.ma import session_response
 
@@ -784,8 +785,7 @@ async def test_a_claim_keeps_the_default_retry_policy_for_reads_and_legacy_mutat
         ScriptedReply(
             "GET", "/v1/sessions/session", session_response(session_id=SESSION.id, status="idle")
         ),
-        ScriptedReply("POST", "/v1/sessions/session/events", httpx.ReadError("legacy retry")),
-        ScriptedReply("POST", "/v1/sessions/session/events", send_events_response()),
+        ScriptedReply("POST", "/v1/sessions/session/events", httpx.ReadError("lost ack")),
     )
     async with transport.client(max_retries=MA_MAX_RETRIES) as client:
         io = default_mux_turn_io(
@@ -802,12 +802,13 @@ async def test_a_claim_keeps_the_default_retry_policy_for_reads_and_legacy_mutat
             )
         )
         legacy = LegacyTurnIO(client, SESSION.id, scope=SCOPE)
-        await legacy.send(
-            ({"type": "user.message", "content": [{"type": "text", "text": "legacy"}]},)
-        )
+        with pytest.raises(APIConnectionError):
+            await legacy.send(
+                ({"type": "user.message", "content": [{"type": "text", "text": "legacy"}]},)
+            )
         assert client.max_retries == MA_MAX_RETRIES
     transport.assert_consumed()
-    assert [request.method for request in transport.requests] == ["GET", "GET", "POST", "POST"]
+    assert [request.method for request in transport.requests] == ["GET", "GET", "POST"]
 
 
 async def test_bulk_snapshot_keeps_revisions_preview_identity_and_completed_cursor(
@@ -976,6 +977,139 @@ async def test_worker_allocation_does_not_change_key_after_a_definite_native_ref
     assert len(traffic.requests) == 1
     assert (await store.get_operation(SCOPE, "worker:agent_create:0")).operation.status == "failed"
     assert await store.get_operation(SCOPE, "worker:agent_create:1") is None
+
+
+@pytest.mark.parametrize("phase", ["pump", "release"])
+async def test_repeated_cancellation_finishes_cleanup(
+    phase: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = MemoryStateStore()
+    await store.put_binding(BINDING, expected_generation=0)
+    persistence = context(store)
+    entered, cleaning, finish, released = (asyncio.Event() for _ in range(4))
+    release = store.release_lease
+
+    async def release_lease(lease: Lease) -> None:
+        if phase == "release":
+            cleaning.set()
+            await finish.wait()
+        await release(lease)
+        released.set()
+
+    monkeypatch.setattr(store, "release_lease", release_lease)
+
+    async def pump() -> None:
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            if phase == "pump":
+                cleaning.set()
+                await finish.wait()
+
+    task = asyncio.create_task(persistence.run(pump))
+    try:
+        async with asyncio.timeout(5):
+            await entered.wait()
+            task.cancel()
+            await cleaning.wait()
+            task.cancel()
+            done, _ = await asyncio.wait({task}, timeout=1)
+            assert task in done and task.cancelled()
+            with pytest.raises(asyncio.CancelledError):
+                task.result()
+            assert not released.is_set()
+            finish.set()
+            await released.wait()
+        assert next(iter(store.data.leases.values())).active is None
+    finally:
+        finish.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_hung_pump_cleanup_has_a_bounded_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("daimon.core.turn.persistence._CLEANUP_TIMEOUT_S", 0.01)
+    store = MemoryStateStore()
+    await store.put_binding(BINDING, expected_generation=0)
+    entered, finish, released = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    release = store.release_lease
+
+    async def release_lease(lease: Lease) -> None:
+        await release(lease)
+        released.set()
+
+    monkeypatch.setattr(store, "release_lease", release_lease)
+
+    async def pump() -> None:
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await finish.wait()
+
+    task = asyncio.create_task(context(store).run(pump))
+    try:
+        async with asyncio.timeout(1):
+            await entered.wait()
+        task.cancel()
+        done, _ = await asyncio.wait({task}, timeout=1)
+        assert task in done
+        assert task.cancelled()
+        with pytest.raises(asyncio.CancelledError):
+            task.result()
+    finally:
+        finish.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        async with asyncio.timeout(1):
+            await released.wait()
+    assert next(iter(store.data.leases.values())).active is None
+
+
+@pytest.mark.parametrize("fails", [False, True])
+async def test_cleanup_timeout_preserves_pump_outcome(
+    fails: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("daimon.core.turn.persistence._CLEANUP_TIMEOUT_S", 0.01)
+    store = MemoryStateStore()
+    await store.put_binding(BINDING, expected_generation=0)
+    cleaning, finish, released = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    release = store.release_lease
+    error = RuntimeError("pump failed")
+
+    async def release_lease(lease: Lease) -> None:
+        cleaning.set()
+        await finish.wait()
+        await release(lease)
+        released.set()
+
+    monkeypatch.setattr(store, "release_lease", release_lease)
+
+    async def pump() -> str:
+        if fails:
+            raise error
+        return "completed"
+
+    task = asyncio.create_task(context(store).run(pump))
+    try:
+        async with asyncio.timeout(1):
+            await cleaning.wait()
+        done, _ = await asyncio.wait({task}, timeout=1)
+        assert task in done
+        if fails:
+            with pytest.raises(RuntimeError) as caught:
+                task.result()
+            assert caught.value is error
+        else:
+            assert task.result() == "completed"
+        assert not released.is_set()
+    finally:
+        finish.set()
+        await asyncio.gather(task, return_exceptions=True)
+        async with asyncio.timeout(1):
+            await released.wait()
+    assert next(iter(store.data.leases.values())).active is None
 
 
 class BlippingStore(MemoryStateStore):

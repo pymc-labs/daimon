@@ -260,6 +260,7 @@ def test_agents_view_when_agent_answers_here_lists_it_first_then_stable_name_ord
         page=_page(roster),
         meta=_meta(),
         is_admin=True,
+        is_platform_admin=True,
         attributions={},
         channel_id=_CHANNEL_ID,
     )
@@ -291,8 +292,10 @@ def test_agents_view_connect_github_is_admin_only() -> None:
         "attributions": {_MAKER: "<@U1>"},
         "channel_id": _CHANNEL_ID,
     }
-    admin_view = build_agents_view(roster, is_admin=True, **shared)
-    member_view = build_agents_view(roster, is_admin=False, **shared)
+    admin_view = build_agents_view(roster, is_admin=True, is_platform_admin=True, **shared)
+    member_view = build_agents_view(roster, is_admin=False, is_platform_admin=False, **shared)
+    delegate_view = build_agents_view(roster, is_admin=True, is_platform_admin=False, **shared)
+    assert delegate_view == member_view
     admin_actions = admin_view["blocks"][-1]["elements"]
     assert admin_actions[-1]["action_id"] == "agent_setup__github_connect"
     admin_actions.pop()
@@ -306,6 +309,7 @@ def test_agents_view_when_roster_empty_shows_empty_state_and_setup_action() -> N
         page=_page(roster),
         meta=_meta(),
         is_admin=False,
+        is_platform_admin=False,
         attributions={},
         channel_id=_CHANNEL_ID,
     )
@@ -328,6 +332,7 @@ def test_agents_view_when_over_page_size_renders_pager_and_stays_under_100_block
         page=page,
         meta=_meta(),
         is_admin=True,
+        is_platform_admin=True,
         attributions={},
         channel_id=_CHANNEL_ID,
     )
@@ -347,6 +352,7 @@ def test_agents_view_never_renders_made_by_for_workspace_stamp() -> None:
         page=_page(roster),
         meta=_meta(),
         is_admin=True,
+        is_platform_admin=True,
         attributions={},
         channel_id=_CHANNEL_ID,
     )
@@ -370,6 +376,7 @@ def test_agents_view_when_routed_names_given_distinguishes_unrouted_from_elsewhe
         page=_page(roster),
         meta=_meta(),
         is_admin=True,
+        is_platform_admin=True,
         attributions={},
         channel_id=_CHANNEL_ID,
         routed_agent_names={"growth-bot"},
@@ -394,6 +401,7 @@ def test_details_view_when_name_exceeds_24_chars_truncates_title_and_keeps_full_
         _details(name=long_name),
         meta=_meta(),
         is_admin=True,
+        is_platform_admin=True,
         coding_tools_available=True,
         channel_id=_CHANNEL_ID,
         attribution=None,
@@ -411,6 +419,7 @@ def test_details_avatar_row_and_admin_controls() -> None:
         _details(name="research-bot"),
         meta=_meta(),
         is_admin=True,
+        is_platform_admin=True,
         coding_tools_available=True,
         channel_id=_CHANNEL_ID,
         attribution=None,
@@ -441,6 +450,7 @@ def test_details_avatar_row_and_admin_controls() -> None:
         _details(name="research-bot"),
         meta=_meta(),
         is_admin=False,
+        is_platform_admin=False,
         coding_tools_available=True,
         channel_id=_CHANNEL_ID,
         attribution=None,
@@ -452,6 +462,7 @@ def test_details_avatar_row_and_admin_controls() -> None:
         _details(name="research-bot"),
         meta=_meta(),
         is_admin=True,
+        is_platform_admin=True,
         coding_tools_available=True,
         channel_id=_CHANNEL_ID,
         attribution=None,
@@ -464,6 +475,7 @@ def test_details_avatar_row_and_admin_controls() -> None:
         _details(name="research-bot"),
         meta=_meta(),
         is_admin=True,
+        is_platform_admin=True,
         coding_tools_available=True,
         channel_id=_CHANNEL_ID,
         attribution=None,
@@ -485,6 +497,7 @@ def _details_action_ids(
         details,
         meta=_meta(),
         is_admin=is_admin,
+        is_platform_admin=is_admin,
         coding_tools_available=coding_tools_available,
         channel_id=_CHANNEL_ID,
         attribution=None,
@@ -522,6 +535,7 @@ def test_details_hides_the_unconfigured_coding_tools_note_from_a_member() -> Non
         _details(is_admin=False),
         meta=_meta(),
         is_admin=False,
+        is_platform_admin=False,
         coding_tools_available=False,
         channel_id=_CHANNEL_ID,
         attribution=None,
@@ -530,6 +544,7 @@ def test_details_hides_the_unconfigured_coding_tools_note_from_a_member() -> Non
         _details(),
         meta=_meta(),
         is_admin=True,
+        is_platform_admin=True,
         coding_tools_available=False,
         channel_id=_CHANNEL_ID,
         attribution=None,
@@ -614,6 +629,7 @@ def test_details_view_when_short_name_does_not_repeat_it_in_the_body() -> None:
         _details(name="research-bot"),
         meta=_meta(),
         is_admin=True,
+        is_platform_admin=True,
         coding_tools_available=True,
         channel_id=_CHANNEL_ID,
         attribution=None,
@@ -631,6 +647,7 @@ def test_details_view_when_unrouted_shows_note(is_admin: bool) -> None:
         details,
         meta=_meta(),
         is_admin=is_admin,
+        is_platform_admin=is_admin,
         coding_tools_available=True,
         channel_id=_CHANNEL_ID,
         attribution=None,
@@ -658,6 +675,7 @@ def test_details_view_orders_identity_then_configuration_and_collections() -> No
         ),
         meta=_meta(),
         is_admin=True,
+        is_platform_admin=True,
         coding_tools_available=True,
         channel_id=_CHANNEL_ID,
         attribution=None,
@@ -685,6 +703,7 @@ def test_details_view_never_renders_key_values() -> None:
         _details(files=files),
         meta=_meta(),
         is_admin=True,
+        is_platform_admin=True,
         coding_tools_available=True,
         channel_id=_CHANNEL_ID,
         attribution=None,
@@ -713,6 +732,7 @@ def test_details_view_renders_multiple_answering_places_one_per_line() -> None:
         ),
         meta=_meta(),
         is_admin=True,
+        is_platform_admin=True,
         coding_tools_available=True,
         channel_id=_CHANNEL_ID,
         attribution=None,
@@ -735,6 +755,7 @@ def test_details_view_sanitizes_connection_names_inside_slack_links() -> None:
         ),
         meta=_meta(),
         is_admin=True,
+        is_platform_admin=True,
         coding_tools_available=True,
         channel_id=_CHANNEL_ID,
         attribution=None,
@@ -750,6 +771,7 @@ def test_details_view_when_many_keys_collapses_and_offers_expand() -> None:
         _details(files=files),
         meta=_meta(),
         is_admin=True,
+        is_platform_admin=True,
         coding_tools_available=True,
         channel_id=_CHANNEL_ID,
         attribution=None,
@@ -764,6 +786,7 @@ def test_details_view_when_many_keys_collapses_and_offers_expand() -> None:
         _details(files=files),
         meta=_meta(expanded="keys"),
         is_admin=True,
+        is_platform_admin=True,
         coding_tools_available=True,
         channel_id=_CHANNEL_ID,
         attribution=None,
@@ -802,6 +825,7 @@ def test_details_view_bounds_each_collection_consistently(
         details,
         meta=_meta(),
         is_admin=True,
+        is_platform_admin=True,
         coding_tools_available=True,
         channel_id=_CHANNEL_ID,
         attribution=None,
@@ -820,6 +844,7 @@ def test_details_view_bounds_each_collection_consistently(
             details,
             meta=_meta(expanded=kind),
             is_admin=True,
+            is_platform_admin=True,
             coding_tools_available=True,
             channel_id=_CHANNEL_ID,
             attribution=None,
@@ -839,6 +864,7 @@ def test_details_view_when_coding_tools_unconfigured_renders_note_not_button() -
         _details(),
         meta=_meta(),
         is_admin=True,
+        is_platform_admin=True,
         coding_tools_available=True,
         channel_id=_CHANNEL_ID,
         attribution=None,
@@ -852,6 +878,7 @@ def test_details_view_when_coding_tools_unconfigured_renders_note_not_button() -
         _details(),
         meta=_meta(),
         is_admin=True,
+        is_platform_admin=True,
         coding_tools_available=False,
         channel_id=_CHANNEL_ID,
         attribution=None,
@@ -903,6 +930,7 @@ def test_details_view_renders_each_repo_access_kind(
         details,
         meta=_meta(),
         is_admin=True,
+        is_platform_admin=True,
         coding_tools_available=True,
         channel_id=_CHANNEL_ID,
         attribution=None,
@@ -924,6 +952,7 @@ def test_details_view_when_no_repo_omits_the_optional_section() -> None:
         _details(binding=None),
         meta=_meta(),
         is_admin=True,
+        is_platform_admin=True,
         coding_tools_available=True,
         channel_id=_CHANNEL_ID,
         attribution=None,
@@ -939,6 +968,7 @@ def test_details_view_when_skills_truncated_says_names_may_be_missing() -> None:
         _details(skills=skills, skills_truncated=True),
         meta=_meta(),
         is_admin=True,
+        is_platform_admin=True,
         coding_tools_available=True,
         channel_id=_CHANNEL_ID,
         attribution=None,
@@ -953,6 +983,7 @@ def test_details_view_when_skill_source_truncated_but_empty_keeps_the_warning() 
         _details(skills=[], skills_truncated=True),
         meta=_meta(),
         is_admin=True,
+        is_platform_admin=True,
         coding_tools_available=True,
         channel_id=_CHANNEL_ID,
         attribution=None,
@@ -987,6 +1018,7 @@ def test_routing_view_renders_channel_mentions_not_raw_ids_and_names_deployment_
         page=paginate(answering_map.channel_overrides, page=0, page_size=PANEL_PAGE_SIZE),
         meta=_meta(),
         is_admin=True,
+        is_platform_admin=True,
         attributions={_MAKER: "<@U1>"},
         setup_links=[],
         channel_id=_CHANNEL_ID,
@@ -1020,6 +1052,7 @@ def test_routing_view_when_member_asks_an_admin_for_the_change() -> None:
         page=paginate(answering_map.channel_overrides, page=0, page_size=PANEL_PAGE_SIZE),
         meta=_meta(),
         is_admin=False,
+        is_platform_admin=False,
         attributions={},
         setup_links=[],
         channel_id=_CHANNEL_ID,
@@ -1042,6 +1075,7 @@ def test_routing_view_paginates_channel_overrides() -> None:
         page=page,
         meta=_meta(),
         is_admin=True,
+        is_platform_admin=True,
         attributions={},
         setup_links=[],
         channel_id=_CHANNEL_ID,
@@ -1068,6 +1102,7 @@ def test_routing_view_lists_setup_conversations_separately() -> None:
         page=paginate(answering_map.channel_overrides, page=0, page_size=PANEL_PAGE_SIZE),
         meta=_meta(),
         is_admin=True,
+        is_platform_admin=True,
         attributions={},
         setup_links=links,
         channel_id=_CHANNEL_ID,
@@ -1089,6 +1124,7 @@ def test_routing_view_when_nothing_is_set_says_so() -> None:
         page=paginate(answering_map.channel_overrides, page=0, page_size=PANEL_PAGE_SIZE),
         meta=_meta(),
         is_admin=True,
+        is_platform_admin=True,
         attributions={},
         setup_links=[],
         channel_id=_CHANNEL_ID,
@@ -1180,6 +1216,7 @@ def test_every_panel_view_private_metadata_under_limit_and_without_tenant_id() -
             page=_page(roster),
             meta=meta,
             is_admin=True,
+            is_platform_admin=True,
             attributions={_MAKER: "<@U1>"},
             channel_id=_CHANNEL_ID,
         ),
@@ -1187,6 +1224,7 @@ def test_every_panel_view_private_metadata_under_limit_and_without_tenant_id() -
             _details(name=long_name),
             meta=meta,
             is_admin=True,
+            is_platform_admin=True,
             coding_tools_available=True,
             channel_id=_CHANNEL_ID,
             attribution="<@U1>",
@@ -1196,6 +1234,7 @@ def test_every_panel_view_private_metadata_under_limit_and_without_tenant_id() -
             page=paginate(answering_map.channel_overrides, page=0, page_size=PANEL_PAGE_SIZE),
             meta=meta,
             is_admin=True,
+            is_platform_admin=True,
             attributions={},
             setup_links=[],
             channel_id=_CHANNEL_ID,
@@ -1287,6 +1326,7 @@ def _all_views() -> list[dict[str, Any]]:
             page=_page(roster),
             meta=meta,
             is_admin=True,
+            is_platform_admin=True,
             attributions={_MAKER: "<@U1>"},
             channel_id=_CHANNEL_ID,
         ),
@@ -1294,6 +1334,7 @@ def _all_views() -> list[dict[str, Any]]:
             _details(),
             meta=meta,
             is_admin=True,
+            is_platform_admin=True,
             coding_tools_available=True,
             channel_id=_CHANNEL_ID,
             attribution="<@U1>",
@@ -1303,6 +1344,7 @@ def _all_views() -> list[dict[str, Any]]:
             page=paginate((), page=0, page_size=PANEL_PAGE_SIZE),
             meta=meta,
             is_admin=True,
+            is_platform_admin=True,
             attributions={},
             setup_links=[],
             channel_id=_CHANNEL_ID,
@@ -1310,3 +1352,60 @@ def _all_views() -> list[dict[str, Any]]:
         ),
         build_creating_view(agent_name="new-agent", meta=meta),
     ]
+
+
+def test_delegated_routing_hides_operator_tokens() -> None:
+    answering_map = _answering_map()
+    common = dict(
+        page=paginate(answering_map.channel_overrides, page=0, page_size=PANEL_PAGE_SIZE),
+        meta=_meta(),
+        is_admin=True,
+        attributions={},
+        setup_links=[],
+        channel_id=_CHANNEL_ID,
+        unrouted_agent_name=None,
+        operator_tokens=[],
+    )
+    delegated = build_routing_view(answering_map, is_platform_admin=False, **common)
+    native = build_routing_view(answering_map, is_platform_admin=True, **common)
+    assert "agent_setup__operator_token:mint" not in json.dumps(delegated)
+    assert "agent_setup__operator_token:mint" in json.dumps(native)
+
+
+def test_delegated_details_hide_github_controls() -> None:
+    common = dict(
+        meta=_meta(),
+        is_admin=True,
+        coding_tools_available=True,
+        channel_id=_CHANNEL_ID,
+        attribution=None,
+    )
+    delegated = build_details_view(_details(), is_platform_admin=False, **common)
+    native = build_details_view(_details(), is_platform_admin=True, **common)
+    assert "agent_setup__github_repos" not in json.dumps(delegated)
+    assert "agent_setup__github_repos" in json.dumps(native)
+
+
+@pytest.mark.parametrize("admin", [True, False])
+@pytest.mark.parametrize("readers", ["any", "inside", "own"])
+def test_current_channel_outsider_warning_and_fix(admin: bool, readers: str) -> None:
+    from daimon.adapters.slack.outsiders import SLACK_GUESTS_UNCHECKED
+    from daimon.core.outsiders import OutsiderVisibility
+
+    visibility = OutsiderVisibility(outsiders_can_view=True, note=SLACK_GUESTS_UNCHECKED)
+    view = build_routing_view(
+        _answering_map(),
+        page=paginate((), page=0, page_size=PANEL_PAGE_SIZE),
+        meta=_meta(),
+        is_admin=admin,
+        is_platform_admin=admin,
+        attributions={},
+        setup_links=[],
+        channel_id=_CHANNEL_ID,
+        unrouted_agent_name=None,
+        outsider_lines=visibility.lines(readers=readers),
+        outsider_warning=readers != "own",
+    )
+    assert ("outside your organisation" in str(view)) is (readers != "own")
+    assert (SLACK_GUESTS_UNCHECKED in str(view)) is (readers != "own")
+    assert ("Make confidential" in str(view)) is (admin and readers != "own")

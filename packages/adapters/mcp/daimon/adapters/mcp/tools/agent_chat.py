@@ -18,13 +18,15 @@ Headless loop (primitives plus the bounded ``ask`` convenience tool):
   runs the same balance/cap checks as the billed media tools before creating
   a session.
 - ``continue_turn`` sends a follow-up ``user.message``. Admission-gated,
-  same as ``start_turn``.
+  same as ``start_turn``. On a paused session it first resumes the paused
+  turn (see below); the message is then optional.
 - ``get_session`` returns status/metadata (poll until idle). Read-only, not
   gated.
 - ``list_events`` returns the transcript; the caller reads the reply from the
-  ``agent.message`` events. Agents run ``permission_policy=always_allow``
-  (``specs.py``), so sessions reach idle without tool confirmations.
-  Read-only, not gated.
+  ``agent.message`` events. Read-only, not gated.
+
+Nobody watches these turns, so they run under the unattended tool policy;
+``_agent_chat_safety`` says how their pauses are answered.
 - ``list_sessions`` enumerates this agent's sessions for resume. Read-only,
   not gated.
 - ``ask`` starts a turn, polls until idle for at most two minutes, and returns
@@ -77,12 +79,23 @@ from daimon.adapters.mcp.resource_ports import (
     walk_sessions,
 )
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._agent_chat_safety import (
+    gate,
+    record_turn,
+    require_session_driver,
+    resume_paused,
+    rules_channel,
+    single_attempt,
+    turn_status,
+    watch_turn,
+)
 from daimon.adapters.mcp.tools._channel_policy import load_channel_policy
 from daimon.adapters.mcp.tools._ctx import (
     _admission_recheck,  # pyright: ignore[reportPrivateUsage]
     _auth,  # pyright: ignore[reportPrivateUsage]
     _check_admission,  # pyright: ignore[reportPrivateUsage]
     _gate_origin_spend,  # pyright: ignore[reportPrivateUsage]
+    _policy_gate,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools._pagination import Page
 from daimon.adapters.mcp.tools._session_access import (
@@ -96,6 +109,7 @@ from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
 from daimon.core import bundle_handle
 from daimon.core.agent_pins import agent_pin_names as core_agent_pin_names
 from daimon.core.billing import BillingConfig
+from daimon.core.config import get_repo_memory_settings
 from daimon.core.defaults.ma_index import find_environment_by_daimon_tag
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_BUDGET_CHANNEL,
@@ -181,8 +195,9 @@ async def _send_billed(runtime: McpRuntime, session_id: str, message: str, *, sc
             db, managed_session_id=session_id
         )
     try:
+        # One attempt: an SDK retry would resend after this send's gate.
         sent = await send_session_events(
-            runtime.client,
+            single_attempt(runtime),
             session_id,
             scope=scope,
             events=[{"type": "user.message", "content": [{"type": "text", "text": message}]}],
@@ -346,6 +361,25 @@ _SEALED_SINCE_START_MSG = (
 _CHANNEL_BUDGET_SPENT_MSG = (
     "TERMINAL ERROR: this conversation's channel has used its spending budget. "
     "An admin can raise or clear it."
+)
+
+# How long a follow-up waits for a resumed paused turn to end before its send.
+_RESUME_WAIT_S = 90.0
+
+_RESUMED_STILL_RUNNING_MSG = (
+    "this conversation was paused on tool confirmations; they are answered and the "
+    "reply is running again, so your message was not sent. Poll get_session "
+    "until idle, then call continue_turn again."
+)
+
+_RESUME_FAILED_MSG = (
+    "this conversation is paused on tool confirmations and could not be resumed. "
+    "Call continue_turn again."
+)
+
+_MESSAGE_REQUIRED_MSG = (
+    "a message is required: only a conversation paused on tool confirmations "
+    "can be resumed without one."
 )
 
 _SEAL_CHANGED_DURING_START_MSG = (
@@ -662,7 +696,9 @@ async def _start_turn_impl(
             account_id=auth.account_id,
             tenant_id=auth.tenant_id,
             resources=resources,
+            tool_safety=runtime.settings.tool_safety,
             billing_exempt=billing_exempt,
+            agent_chat=True,
             memory_read_only=memory_read_only,
             budget_channel_id=budget_channel_id,
             origin_channel_id=channel_id,
@@ -702,11 +738,18 @@ async def _start_turn_impl(
             session_factory=runtime.session_factory,
             fernet=runtime.fernet,
             app_session_unmapped=True,
+            tool_safety=runtime.settings.tool_safety,
+            legacy_memory_servers=(
+                get_repo_memory_settings(runtime.settings).legacy_mcp_server_names
+                if get_repo_memory_settings(runtime.settings).enabled
+                else ()
+            ),
             github_fallback_pat=github_fallback_pat,
             github_app_id=github_app_id,
             github_app_private_key=github_app_private_key,
             agent_github_app=runtime.settings.github_app,
             billing_exempt=billing_exempt,
+            agent_chat=True,
             memory_read_only=memory_read_only,
             budget_channel_id=budget_channel_id,
             origin_channel_id=channel_id,
@@ -723,8 +766,12 @@ async def _start_turn_impl(
         observation.agent_id = str(ma_agent.id)
     if recheck is not None:
         await recheck()
+    await gate(runtime, auth, session)
     turn_started_at = now()
     turn_event_id = await _send_billed(runtime, session.id, message, scope=mcp_scope(auth))
+    channel = rules_channel(auth, session)
+    await record_turn(runtime, session.id, turn_event_id=turn_event_id, rules_channel_id=channel)
+    watch_turn(runtime, auth, session.id, turn_event_id=turn_event_id, rules_channel_id=channel)
 
     return {
         "handle": session.id,
@@ -738,12 +785,21 @@ async def _continue_turn_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
     handle: str,
-    message: str,
+    message: str | None,
     *,
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
     recheck: Callable[[], Awaitable[None]] | None = None,
 ) -> dict[str, str]:
     """Send a follow-up message on an existing session.
+
+    Before the send the session is re-gated from the current tool policy
+    (``_agent_chat_safety.gate``). A session paused on tool confirmations
+    nobody is answering (after a restart) is resumed first: its owner's call
+    answers the paused turn's calls from the current policy. With no
+    ``message`` that is all it does, and the paused turn's boundary is
+    returned. With one, the message is sent once the resumed turn ends, which
+    is waited for up to ``_RESUME_WAIT_S``; past that the call is refused and
+    the resumed turn keeps running.
 
     Returns ``{"handle": handle, "turn_event_id": ..., "turn_started_at": ...}``,
     the same three-key shape as ``start_turn``. ``turn_event_id`` is taken
@@ -753,6 +809,8 @@ async def _continue_turn_impl(
     used). ``_verify_agent_owns_session`` guards against cross-tenant AND
     same-tenant cross-agent handles (Tampering threat mitigation). A
     chat turn's own credential is refused (``require_outside_chat_turn``).
+    Only a session opened through agent chat can be mutated here; a platform
+    conversation never lends its attended execution grant to this caller.
     ``recheck`` runs the access decision again immediately before the send.
 
     A channel-bound key's channel sealed since the session opened refuses the
@@ -762,6 +820,7 @@ async def _continue_turn_impl(
     """
     require_outside_chat_turn(auth)
     session = await _verify_agent_owns_session(runtime, auth, handle)
+    require_session_driver(session, auth)
     if (observation := current_outcome.get()) is not None:
         observation.session_id = handle
         observation.agent_id = str(session.agent.id)
@@ -773,38 +832,38 @@ async def _continue_turn_impl(
         name=session.agent.name,
         nothing="Nothing was sent.",
     )
-    if not await _bound_seal(runtime, auth) <= seal_ids(session.metadata):
-        raise ToolError(_SEALED_SINCE_START_MSG)
-    await _gate_origin_spend(
-        auth,
-        sessionmaker=runtime.session_factory,
-        markup=runtime.settings.billing.markup,
-        tool_name="continue_turn",
-        channel_id=(session.metadata or {}).get(MA_METADATA_KEY_BUDGET_CHANNEL),
-        agent_id=session.agent.id,
-        budget_message=_CHANNEL_BUDGET_SPENT_MSG,
-    )
-    turn_started_at = now()
-    async with session_mutation_fence(runtime.session_factory, handle):
-        # The fence may have waited behind a transfer or another send.
+
+    async def ready() -> BetaManagedAgentsSession:
+        """Every check a send needs, then the gate, right before the send."""
         if recheck is not None:
             await recheck()
-        if not await _bound_seal(runtime, auth) <= seal_ids(session.metadata):
+        # Read inside the fence: the gate rewrites this snapshot.
+        current = await _verify_agent_owns_session(runtime, auth, handle)
+        require_session_driver(current, auth)
+        if not await _bound_seal(runtime, auth) <= seal_ids(current.metadata):
             raise ToolError(_SEALED_SINCE_START_MSG)
-        if session.archived_at is not None:
+        if current.archived_at is not None:
             raise ToolError("This conversation is archived.")
+        await _gate_origin_spend(
+            auth,
+            sessionmaker=runtime.session_factory,
+            markup=runtime.settings.billing.markup,
+            tool_name="continue_turn",
+            channel_id=(current.metadata or {}).get(MA_METADATA_KEY_BUDGET_CHANNEL),
+            agent_id=current.agent.id,
+            budget_message=_CHANNEL_BUDGET_SPENT_MSG,
+        )
         async with runtime.session_factory.begin() as db:
             touched = await touch_unmapped_app_session(db, session_id=handle)
             if touched is False:
                 raise ToolError("This conversation is closed.")
         mcp = runtime.settings.mcp
         if mcp.public_url is not None and mcp.jwt_secret is not None:
-            mounted = await _verify_agent_owns_session(runtime, auth, handle)
             assert auth.agent_id is not None  # verified above, including after fence acquisition
             public_url = str(mcp.public_url)
             await refresh_mounted_mcp_vaults(
                 runtime.client,
-                vault_ids=mounted.vault_ids,
+                vault_ids=current.vault_ids,
                 account_id=auth.account_id,
                 agent_id=auth.agent_id,
                 jwt_secret=mcp.jwt_secret.get_secret_value().encode(),
@@ -813,11 +872,40 @@ async def _continue_turn_impl(
                 session_factory=runtime.session_factory,
                 scope=mcp_scope(auth),
                 relay_urls=identity_relay_urls(
-                    (server.url for server in mounted.agent.mcp_servers), public_url=public_url
+                    (server.url for server in current.agent.mcp_servers), public_url=public_url
                 ),
             )
+        await gate(runtime, auth, current)
+        return current
+
+    async with session_mutation_fence(runtime.session_factory, handle):
+        # The fence may have waited behind a transfer or another send.
+        current = await ready()
+        resumed = await resume_paused(runtime, auth, current)
+        if resumed is not None:
+            if message is None:
+                return {
+                    "handle": handle,
+                    "turn_event_id": resumed.turn_event_id,
+                    "turn_started_at": now().isoformat(),
+                }
+            try:
+                ended = await asyncio.wait_for(asyncio.shield(resumed.worker), _RESUME_WAIT_S)
+            except TimeoutError:
+                raise ToolError(_RESUMED_STILL_RUNNING_MSG) from None
+            if not ended:
+                raise ToolError(_RESUME_FAILED_MSG)
+            # The wait may have outlived a policy, rule, access or budget
+            # change: decide and gate again for the new message.
+            current = await ready()
+        elif message is None:
+            raise ToolError(_MESSAGE_REQUIRED_MSG)
+        turn_started_at = now()
         # Inside the fence, so settle requests follow the order of the sends.
         turn_event_id = await _send_billed(runtime, handle, message, scope=mcp_scope(auth))
+        channel = rules_channel(auth, current)
+        await record_turn(runtime, handle, turn_event_id=turn_event_id, rules_channel_id=channel)
+        watch_turn(runtime, auth, handle, turn_event_id=turn_event_id, rules_channel_id=channel)
     return {
         "handle": handle,
         "turn_event_id": turn_event_id,
@@ -856,11 +944,21 @@ async def _get_session_impl(
     ``_verify_agent_owns_session`` guards cross-tenant AND same-tenant
     cross-agent handles. ``on_read`` (the tool's
     ``_settle_when_finished``) sees the session read.
+
+    A turn whose tool confirmations this process is answering reads as
+    ``running``; one paused on confirmations nobody is answering reads as
+    ``paused`` with a hint to resume it. Either way the turn has not ended,
+    so ``on_read`` does not see it. This is a read: it answers nothing.
     """
     s = await _verify_agent_owns_session(runtime, auth, handle)
+    info = SessionInfo.from_ma(s)
+    paused = await turn_status(runtime, auth, s)
+    if paused is not None:
+        status, hint = paused
+        return info.model_copy(update={"status": status, "hint": hint})
     if on_read is not None:
         await on_read(s)
-    return SessionInfo.from_ma(s)
+    return info
 
 
 async def _archive_my_session_impl(
@@ -876,8 +974,11 @@ async def _archive_my_session_impl(
     ``_verify_agent_owns_session`` guards cross-tenant AND same-tenant
     cross-agent handles.
     """
+    require_outside_chat_turn(auth)
     mounted = await _verify_agent_owns_session(runtime, auth, handle)
+    require_session_driver(mounted, auth)
     async with session_mutation_fence(runtime.session_factory, handle):
+        require_session_driver(await _verify_agent_owns_session(runtime, auth, handle), auth)
         await archive_session_record(runtime.client, handle, scope=mcp_scope(auth))
     try:
         await archive_relay_vaults(runtime.client, mounted.vault_ids, scope=mcp_scope(auth))
@@ -922,8 +1023,10 @@ async def _cancel_turn_impl(
     ``_verify_agent_owns_session`` guards cross-tenant AND same-tenant
     cross-agent handles before any send.
     """
-    await _verify_agent_owns_session(runtime, auth, handle)
+    require_outside_chat_turn(auth)
+    require_session_driver(await _verify_agent_owns_session(runtime, auth, handle), auth)
     async with session_mutation_fence(runtime.session_factory, handle):
+        require_session_driver(await _verify_agent_owns_session(runtime, auth, handle), auth)
         await send_session_events(
             runtime.client, handle, events=[{"type": "user.interrupt"}], scope=mcp_scope(auth)
         )
@@ -1007,6 +1110,20 @@ async def _get_turn_cost_impl(
     }
 
 
+async def _require_live_result_access(runtime: McpRuntime, auth: AuthIdentity) -> None:
+    """A private Discord result requires current membership, even after a long turn."""
+    if auth.platform == "discord" and auth.platform_user_id is not None:
+        await _policy_gate(
+            auth,
+            sessionmaker=runtime.session_factory,
+            membership_resolver=runtime.membership_resolver,
+            tool_name="list_events",
+            agent_names=None,
+            pin_exempt=False,
+            require_fresh=True,
+        )
+
+
 async def _list_events_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -1048,6 +1165,7 @@ async def _list_events_impl(
     cursor = await list_events_page(
         runtime.client, handle, query=list_kwargs, scope=mcp_scope(auth)
     )
+    await _require_live_result_access(runtime, auth)
     return Page[SessionEventOut](
         items=[SessionEventOut.from_event(event) for event in cursor.data],
         next_page=cursor.next_page,
@@ -1119,6 +1237,7 @@ async def _deliver_turn_charts_impl(
     cache_key = (handle, turn_started_at.isoformat())
     cached = _delivery_cache.get(cache_key)
     if cached is not None:
+        await _require_live_result_access(runtime, auth)
         return cached
 
     delivery = await deliver_hosted_charts(
@@ -1143,6 +1262,7 @@ async def _deliver_turn_charts_impl(
         earliest = min(chart.expires_at for chart in result.chart_urls)
         ttl = min(ttl, (earliest - dt.datetime.now(dt.UTC)).total_seconds())
     _delivery_cache.put(cache_key, result, ttl_seconds=ttl)
+    await _require_live_result_access(runtime, auth)
     return result
 
 
@@ -1192,6 +1312,8 @@ async def _ask_impl(
         # upstream-controlled (see SessionInfo.status), so an unmodeled
         # transient status keeps polling until the deadline instead of
         # failing a turn that admission already billed.
+        if current.status == "paused":
+            raise ToolError(f"Daimon turn on handle {handle} is {current.hint}")
         if current.status == "terminated":
             if (observation := current_outcome.get()) is not None:
                 observation.finish(reason=TerminationReason.SESSION_TERMINATED)
@@ -1250,6 +1372,7 @@ async def _ask_impl(
                 )
                 if (observation := current_outcome.get()) is not None:
                     observation.finish(reason=TerminationReason.COMPLETED)
+                await _require_live_result_access(runtime, auth)
                 return AskResult(
                     handle=handle,
                     message=delivery.message,
@@ -1312,7 +1435,11 @@ def register_agent_chat_tools(
             return await pin_names(auth)
 
         return _admission_recheck(
-            auth, sessionmaker=runtime.session_factory, tool_name=tool_name, agent_names=names
+            auth,
+            sessionmaker=runtime.session_factory,
+            membership_resolver=runtime.membership_resolver,
+            tool_name=tool_name,
+            agent_names=names,
         )
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
@@ -1365,6 +1492,7 @@ def register_agent_chat_tools(
         auth = await _check_admission(
             ctx,
             sessionmaker=runtime.session_factory,
+            membership_resolver=runtime.membership_resolver,
             billing_config=billing_config,
             markup=runtime.settings.billing.markup,
             tool_name="start_turn",
@@ -1380,14 +1508,18 @@ def register_agent_chat_tools(
     ) -> AskResult:
         """Ask one question and wait for the final answer and any chart images. Starts a
         persistent turn, waits up to about 120 seconds for idle, and
-        returns the final text plus a resumable handle. Chart images are
-        embedded by default; short-lived download links are added when private
+        returns the final text plus a resumable handle. Callers need current
+        membership and invoker-policy access before reply delivery where required. Chart
+        images are embedded by default; short-lived download links are added when private
         artifact storage is configured. Pass ``handle`` from a previous result to
         continue that conversation instead of starting a new one.
+        Use a handle opened through agent chat. Platform conversations and
+        older sessions without headless creation provenance cannot be driven here.
         """
         auth = await _check_admission(
             ctx,
             sessionmaker=runtime.session_factory,
+            membership_resolver=runtime.membership_resolver,
             billing_config=billing_config,
             markup=runtime.settings.billing.markup,
             tool_name="ask",
@@ -1405,8 +1537,10 @@ def register_agent_chat_tools(
         )
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
-    async def continue_turn(ctx: Context, handle: str, message: str) -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]
-        """Send a follow-up message on an existing session.
+    async def continue_turn(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, handle: str, message: str | None = None
+    ) -> dict[str, str]:
+        """Send a follow-up message on an existing session, or resume a paused one.
 
         Use this to continue a multi-turn conversation. Returns
         ``{"handle": "<session_id>", "turn_event_id": "<event_id>",
@@ -1415,10 +1549,25 @@ def register_agent_chat_tools(
         the session's earlier turns. Poll ``list_events`` with
         ``created_at_gte=turn_started_at`` and discard events up to and
         including ``turn_event_id`` to read only this turn's transcript.
+
+        When ``get_my_session`` reports ``status`` ``paused`` with the hint
+        to call ``continue_turn``, a turn this tool started is waiting on tool
+        confirmations nobody is answering (the service restarted). This call
+        resumes it: the waiting calls are decided by the current tool policy
+        (reads run; writes are refused unless the operator allowed them in
+        unattended runs). ``message`` is then optional: without one, the
+        paused turn's boundary is returned; with one, it is sent once the
+        resumed turn ends, or the call is refused if that takes more than
+        about 90 seconds. A turn waiting on someone's approval card in chat
+        is refused: only that card answers it. Any other session needs a
+        ``message``.
+        Use a handle opened through agent chat. Platform conversations and
+        older sessions without headless creation provenance cannot be driven here.
         """
         auth = await _check_admission(
             ctx,
             sessionmaker=runtime.session_factory,
+            membership_resolver=runtime.membership_resolver,
             billing_config=billing_config,
             markup=runtime.settings.billing.markup,
             tool_name="continue_turn",
@@ -1434,7 +1583,10 @@ def register_agent_chat_tools(
 
         Use this to check whether a turn has finished (``status`` becomes
         ``idle``/``terminated``) before reading the transcript with
-        ``list_events``.
+        ``list_events``. ``status`` ``paused`` means the turn waits on tool
+        confirmations; ``hint`` says whether ``continue_turn`` resumes it or
+        it waits for an approval in the chat where it was asked. Reading
+        never answers them.
         """
         return await _get_session_impl(
             runtime, await _auth(ctx), handle, on_read=_settle_when_finished(runtime)
@@ -1448,6 +1600,8 @@ def register_agent_chat_tools(
         usage collection. This is NOT a cancel — to stop a running turn, use
         the cancel tool instead. Returns ``{"handle": "<session_id>",
         "archived": "true"}``.
+        Use a handle opened through agent chat. Platform conversations and
+        older sessions without headless creation provenance cannot be driven here.
         """
         return await _archive_my_session_impl(runtime, await _auth(ctx), handle)
 
@@ -1463,6 +1617,8 @@ def register_agent_chat_tools(
         ``terminated``. An interrupted turn is still billed for what it
         already consumed before the interrupt landed: the model work already
         done is real work and is not refunded.
+        Use a handle opened through agent chat. Platform conversations and
+        older sessions without headless creation provenance cannot be driven here.
         """
         return await _cancel_turn_impl(runtime, await _auth(ctx), handle)
 
@@ -1500,6 +1656,8 @@ def register_agent_chat_tools(
         types: list[str] | None = None,
     ) -> Page[SessionEventOut]:
         """List a session's events — the transcript.
+
+        Callers must still pass current membership and invoker-policy checks where required.
 
         The agent's reply is in the ``agent.message`` events. Call this once
         ``get_session`` reports the session is idle to read what the agent said.

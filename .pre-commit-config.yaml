@@ -21,6 +21,13 @@ repos:
         exclude: (^|/)__snapshots__/.*\.ambr$
       - id: end-of-file-fixer
       - id: check-yaml
+        exclude: ^mkdocs\.yml$
+      - id: check-yaml
+        name: check mkdocs yaml
+        files: ^mkdocs\.yml$
+        # MkDocs uses an existing !!python/name formatter tag. Parse syntax
+        # without constructing that tag; keep safe loading for other YAML.
+        args: [--unsafe]
       - id: check-toml
       - id: check-merge-conflict
       - id: check-added-large-files

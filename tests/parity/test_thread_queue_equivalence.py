@@ -18,7 +18,7 @@ from daimon.adapters.teams import app as teams
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.reactions import TeamsReactions
 from daimon.core.errors import DaimonError
-from daimon.core.turn.thread_queue import ThreadQueue
+from daimon.core.turn.thread_queue import HeldThreads, ThreadQueue
 from daimon.core.turn_queue import TurnQueue
 
 TENANT = UUID(int=1)
@@ -44,7 +44,7 @@ class Replay:
         cls, namespace = base(platform) if old else (CLASSES[platform], vars(MODULES[platform]))
         self.namespace = namespace
         self.obj = SimpleNamespace(
-            _processing=set(),
+            _processing=HeldThreads(),
             _pending={},
             _queued_reactions=set(),
             # Teams' reactions, with no client: every call does nothing.
@@ -69,7 +69,9 @@ class Replay:
             _processing_tasks={},
             _track_processing_task=lambda thread_id: None,
         )
-        self.obj._thread_queue = ThreadQueue(self.obj._processing, self.obj._pending)
+        self.obj._thread_queue = ThreadQueue(
+            self.obj._processing, self.obj._pending, start_turn=self.obj._processing.start_turn
+        )
         # Teams' admission fence and drain hold: always clear here, and recorded if reached.
         self.obj._replay_queued = {}
         self.obj._finish = self.finish

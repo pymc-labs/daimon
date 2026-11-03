@@ -137,6 +137,7 @@ async def test_handoff_binds_the_thread_and_writes_no_channel_or_workspace_routi
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
+        chat_session_id="test-session",
     )
 
     async with turn_origin(
@@ -149,6 +150,7 @@ async def test_handoff_binds_the_thread_and_writes_no_channel_or_workspace_routi
         responder_ma_agent_id=_RESPONDER_ID,
         responder_name="daimon",
         role=Role.USER,
+        chat_session_id="test-session",
         sender_foreign=False,
         shared_channel=False,
     ) as origin:
@@ -182,7 +184,11 @@ async def test_handoff_binds_the_thread_and_writes_no_channel_or_workspace_routi
     assert pending == [], "no continuation is queued when none was asked for"
 
 
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
+@pytest.mark.parametrize("attended", [False, True])
 async def test_handoff_with_a_continuation_queues_the_work_bounded_to_its_limit(
+    platform: str,
+    attended: bool,
     db_session: AsyncSession,
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -194,8 +200,9 @@ async def test_handoff_with_a_continuation_queues_the_work_bounded_to_its_limit(
         account_id=caller.id,
         tenant_id=tenant.id,
         role=Role.USER,
-        platform="discord",
+        platform=platform,
         platform_user_id="42",
+        chat_session_id="test-session",
     )
     long_request = "finish the churn writeup " * 40
 
@@ -203,12 +210,14 @@ async def test_handoff_with_a_continuation_queues_the_work_bounded_to_its_limit(
         committing_sessionmaker,
         tenant_id=tenant.id,
         account_id=caller.id,
-        platform="discord",
+        platform=platform,
         parent_channel_id="C_PARENT",
         thread_id="T_THREAD",
         responder_ma_agent_id=_RESPONDER_ID,
         responder_name="daimon",
         role=Role.USER,
+        attended=attended,
+        chat_session_id="test-session",
         sender_foreign=False,
         shared_channel=False,
     ) as origin:
@@ -223,7 +232,7 @@ async def test_handoff_with_a_continuation_queues_the_work_bounded_to_its_limit(
     assert result.continuation_recorded is True, "work was queued for the destination"
     async with committing_sessionmaker() as session:
         pending = await list_pending_continuations(
-            session, tenant_id=tenant.id, platform="discord", thread_id="T_THREAD"
+            session, tenant_id=tenant.id, platform=platform, thread_id="T_THREAD"
         )
     assert len(pending) == 1, "exactly one continuation is queued per handoff"
     queued = pending[0]
@@ -235,6 +244,11 @@ async def test_handoff_with_a_continuation_queues_the_work_bounded_to_its_limit(
         "the person's words are bounded before they reach a turn"
     )
     assert queued.requested_work == long_request[:500], "and otherwise preserved verbatim"
+
+    from daimon.core.continuity.continuation import continuation_attended
+
+    assert queued.attended is attended
+    assert continuation_attended(queued) is attended
 
 
 @pytest.mark.parametrize(
@@ -262,6 +276,7 @@ async def test_handoff_nulls_a_fabricated_or_switch_only_continuation(
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
+        chat_session_id="test-session",
     )
 
     async with turn_origin(
@@ -274,6 +289,7 @@ async def test_handoff_nulls_a_fabricated_or_switch_only_continuation(
         responder_ma_agent_id=_RESPONDER_ID,
         responder_name="daimon",
         role=Role.USER,
+        chat_session_id="test-session",
         sender_foreign=False,
         shared_channel=False,
     ) as origin:
@@ -324,6 +340,7 @@ async def test_handoff_confirmation_omits_the_raw_channel_id(
         role=Role.USER,
         platform=platform,
         platform_user_id="42",
+        chat_session_id="test-session",
     )
 
     async with turn_origin(
@@ -336,6 +353,7 @@ async def test_handoff_confirmation_omits_the_raw_channel_id(
         responder_ma_agent_id=_RESPONDER_ID,
         responder_name="daimon",
         role=Role.USER,
+        chat_session_id="test-session",
         sender_foreign=False,
         shared_channel=False,
     ) as origin:
@@ -363,6 +381,7 @@ async def test_handoff_unreachable_refusal_renders_the_channel_as_a_mention(
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
+        chat_session_id="test-session",
     )
 
     async with turn_origin(
@@ -375,6 +394,7 @@ async def test_handoff_unreachable_refusal_renders_the_channel_as_a_mention(
         responder_ma_agent_id=_RESPONDER_ID,
         responder_name="daimon",
         role=Role.USER,
+        chat_session_id="test-session",
         sender_foreign=False,
         shared_channel=False,
     ) as origin:
@@ -401,6 +421,7 @@ async def test_handoff_refuses_an_agent_nobody_can_reach_and_writes_nothing(
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
+        chat_session_id="test-session",
     )
 
     async with turn_origin(
@@ -413,6 +434,7 @@ async def test_handoff_refuses_an_agent_nobody_can_reach_and_writes_nothing(
         responder_ma_agent_id=_RESPONDER_ID,
         responder_name="daimon",
         role=Role.USER,
+        chat_session_id="test-session",
         sender_foreign=False,
         shared_channel=False,
     ) as origin:
@@ -456,6 +478,7 @@ async def test_handoff_refuses_inside_a_setup_conversation(
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
+        chat_session_id="test-session",
     )
 
     async with turn_origin(
@@ -471,6 +494,7 @@ async def test_handoff_refuses_inside_a_setup_conversation(
         sender_foreign=False,
         shared_channel=False,
         is_setup=True,
+        chat_session_id="test-session",
     ) as origin:
         with pytest.raises(ToolError, match="Setup conversations always answer as Daimon"):
             await _hand_off_task_impl(
@@ -508,6 +532,7 @@ async def test_handoff_refuses_a_recreated_namesakes_old_id(
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
+        chat_session_id="test-session",
     )
 
     async with turn_origin(
@@ -520,6 +545,7 @@ async def test_handoff_refuses_a_recreated_namesakes_old_id(
         responder_ma_agent_id=_RESPONDER_ID,
         responder_name="daimon",
         role=Role.USER,
+        chat_session_id="test-session",
         sender_foreign=False,
         shared_channel=False,
     ) as origin:
@@ -553,6 +579,7 @@ async def test_handoff_refuses_the_agent_that_already_answers_here(
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
+        chat_session_id="test-session",
     )
 
     async with turn_origin(
@@ -565,6 +592,7 @@ async def test_handoff_refuses_the_agent_that_already_answers_here(
         responder_ma_agent_id=_DESTINATION_ID,
         responder_name=_DESTINATION_NAME,
         role=Role.USER,
+        chat_session_id="test-session",
         sender_foreign=False,
         shared_channel=False,
     ) as origin:
@@ -599,6 +627,7 @@ async def test_handoff_asks_once_about_uncommitted_work_then_proceeds_with_the_a
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
+        chat_session_id="test-session",
     )
 
     async with turn_origin(
@@ -611,6 +640,7 @@ async def test_handoff_asks_once_about_uncommitted_work_then_proceeds_with_the_a
         responder_ma_agent_id=_RESPONDER_ID,
         responder_name="daimon",
         role=Role.USER,
+        chat_session_id="test-session",
         sender_foreign=False,
         shared_channel=False,
     ) as origin:
@@ -675,6 +705,7 @@ async def test_handoff_never_asks_about_uncommitted_work_when_no_repo_is_bound(
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
+        chat_session_id="test-session",
     )
 
     async with turn_origin(
@@ -687,6 +718,7 @@ async def test_handoff_never_asks_about_uncommitted_work_when_no_repo_is_bound(
         responder_ma_agent_id=_RESPONDER_ID,
         responder_name="daimon",
         role=Role.USER,
+        chat_session_id="test-session",
         sender_foreign=False,
         shared_channel=False,
     ) as origin:
@@ -724,6 +756,7 @@ async def test_handoff_rejects_a_wrong_or_expired_origin_before_touching_ma(
         shared_channel=False,
         now=now,
         expires_at=now + timedelta(minutes=-1 if mismatch == "expired" else 10),
+        chat_session_id="test-session",
     )
     await db_session.commit()
     auth = AuthIdentity(
@@ -732,6 +765,7 @@ async def test_handoff_rejects_a_wrong_or_expired_origin_before_touching_ma(
         role=Role.USER,
         platform="slack",
         platform_user_id="U1",
+        chat_session_id="test-session",
     )
     if mismatch == "caller":
         auth = replace(auth, account_id=uuid.uuid4())
@@ -782,6 +816,7 @@ async def test_fresh_start_marks_the_callers_live_session_without_tearing_it_dow
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
+        chat_session_id="test-session",
     )
 
     async with turn_origin(
@@ -794,6 +829,7 @@ async def test_fresh_start_marks_the_callers_live_session_without_tearing_it_dow
         responder_ma_agent_id=_RESPONDER_ID,
         responder_name="daimon",
         role=Role.USER,
+        chat_session_id="test-session",
         sender_foreign=False,
         shared_channel=False,
     ) as origin:
@@ -842,6 +878,7 @@ async def test_fresh_start_confirms_even_when_the_caller_has_no_live_session(
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
+        chat_session_id="test-session",
     )
 
     async with turn_origin(
@@ -854,6 +891,7 @@ async def test_fresh_start_confirms_even_when_the_caller_has_no_live_session(
         responder_ma_agent_id=_RESPONDER_ID,
         responder_name="daimon",
         role=Role.USER,
+        chat_session_id="test-session",
         sender_foreign=False,
         shared_channel=False,
     ) as origin:
@@ -888,6 +926,7 @@ async def test_fresh_start_does_not_change_who_answers_in_the_thread(
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
+        chat_session_id="test-session",
     )
 
     async with turn_origin(
@@ -900,6 +939,7 @@ async def test_fresh_start_does_not_change_who_answers_in_the_thread(
         responder_ma_agent_id=_DESTINATION_ID,
         responder_name=_DESTINATION_NAME,
         role=Role.USER,
+        chat_session_id="test-session",
         sender_foreign=False,
         shared_channel=False,
     ) as origin:
@@ -937,6 +977,7 @@ async def test_handoff_with_an_answer_and_no_live_session_still_switches_the_res
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
+        chat_session_id="test-session",
     )
 
     async with turn_origin(
@@ -949,6 +990,7 @@ async def test_handoff_with_an_answer_and_no_live_session_still_switches_the_res
         responder_ma_agent_id=_RESPONDER_ID,
         responder_name="daimon",
         role=Role.USER,
+        chat_session_id="test-session",
         sender_foreign=False,
         shared_channel=False,
     ) as origin:
@@ -1013,6 +1055,7 @@ async def test_handoff_stays_on_its_side_of_an_isolated_channel(
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
+        chat_session_id="test-session",
     )
 
     async with turn_origin(
@@ -1025,6 +1068,7 @@ async def test_handoff_stays_on_its_side_of_an_isolated_channel(
         responder_ma_agent_id=_RESPONDER_ID,
         responder_name="room-bot",
         role=Role.USER,
+        chat_session_id="test-session",
         sender_foreign=False,
         shared_channel=False,
     ) as origin:
@@ -1059,8 +1103,11 @@ async def test_handoff_refuses_an_agent_pinned_to_other_channels_and_writes_noth
         account_id=caller.id,
         tenant_id=tenant.id,
         role=Role.ADMIN,
+        is_platform_admin=Role.ADMIN is Role.ADMIN,
+        is_admin=Role.ADMIN is Role.ADMIN,
         platform="discord",
         platform_user_id="42",
+        chat_session_id="test-session",
     )
 
     async with turn_origin(
@@ -1073,6 +1120,7 @@ async def test_handoff_refuses_an_agent_pinned_to_other_channels_and_writes_noth
         responder_ma_agent_id=_RESPONDER_ID,
         responder_name="daimon",
         role=Role.ADMIN,
+        chat_session_id="test-session",
         sender_foreign=False,
         shared_channel=False,
     ) as origin:
@@ -1111,6 +1159,7 @@ async def test_handoff_admits_a_pinned_agent_inside_its_own_channel(
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
+        chat_session_id="test-session",
     )
 
     async with turn_origin(
@@ -1123,6 +1172,7 @@ async def test_handoff_admits_a_pinned_agent_inside_its_own_channel(
         responder_ma_agent_id=_RESPONDER_ID,
         responder_name="daimon",
         role=Role.USER,
+        chat_session_id="test-session",
         sender_foreign=False,
         shared_channel=False,
     ) as origin:
@@ -1161,6 +1211,8 @@ async def test_handoff_to_another_channels_agent_is_admin_only(
         platform="discord",
         platform_user_id="42",
         is_admin=role is Role.ADMIN,
+        is_platform_admin=role is Role.ADMIN,
+        chat_session_id="test-session",
     )
 
     async with turn_origin(
@@ -1173,6 +1225,7 @@ async def test_handoff_to_another_channels_agent_is_admin_only(
         responder_ma_agent_id=_RESPONDER_ID,
         responder_name="daimon",
         role=role,
+        chat_session_id="test-session",
         sender_foreign=False,
         shared_channel=False,
     ) as origin:
@@ -1222,6 +1275,8 @@ async def test_handoff_from_a_dm_is_outside_every_pin(
         platform="discord",
         platform_user_id="42",
         is_admin=True,
+        is_platform_admin=True,
+        chat_session_id="test-session",
     )
 
     async with turn_origin(
@@ -1234,6 +1289,7 @@ async def test_handoff_from_a_dm_is_outside_every_pin(
         responder_ma_agent_id=_RESPONDER_ID,
         responder_name="daimon",
         role=Role.ADMIN,
+        chat_session_id="test-session",
         sender_foreign=False,
         shared_channel=False,
     ) as origin:
@@ -1270,6 +1326,8 @@ async def test_handoff_refuses_an_agent_pinned_by_its_display_name(
         platform="discord",
         platform_user_id="42",
         is_admin=True,
+        is_platform_admin=True,
+        chat_session_id="test-session",
     )
 
     async with turn_origin(
@@ -1282,6 +1340,7 @@ async def test_handoff_refuses_an_agent_pinned_by_its_display_name(
         responder_ma_agent_id=_RESPONDER_ID,
         responder_name="daimon",
         role=Role.ADMIN,
+        chat_session_id="test-session",
         sender_foreign=False,
         shared_channel=False,
     ) as origin:
@@ -1327,6 +1386,7 @@ async def test_a_member_hands_the_thread_to_an_agent_pinned_to_this_channel(
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
+        chat_session_id="test-session",
     )
     async with turn_origin(
         committing_sessionmaker,
@@ -1338,6 +1398,7 @@ async def test_a_member_hands_the_thread_to_an_agent_pinned_to_this_channel(
         responder_ma_agent_id=_RESPONDER_ID,
         responder_name="daimon",
         role=Role.USER,
+        chat_session_id="test-session",
         sender_foreign=False,
         shared_channel=False,
     ) as origin:
@@ -1399,6 +1460,7 @@ async def test_queued_work_follows_the_carry_rule_for_the_callers_old_session(
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
+        chat_session_id="test-session",
     )
 
     async with turn_origin(
@@ -1411,6 +1473,7 @@ async def test_queued_work_follows_the_carry_rule_for_the_callers_old_session(
         responder_ma_agent_id=_RESPONDER_ID,
         responder_name="daimon",
         role=Role.USER,
+        chat_session_id="test-session",
         sender_foreign=False,
         shared_channel=False,
     ) as origin:
@@ -1453,6 +1516,7 @@ async def test_a_policy_refused_handoff_is_audited_as_an_authz_denial(
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
+        chat_session_id="test-session",
     )
     async with turn_origin(
         committing_sessionmaker,
@@ -1464,6 +1528,7 @@ async def test_a_policy_refused_handoff_is_audited_as_an_authz_denial(
         responder_ma_agent_id=_RESPONDER_ID,
         responder_name="daimon",
         role=Role.USER,
+        chat_session_id="test-session",
         sender_foreign=False,
         shared_channel=False,
     ) as origin:
@@ -1576,8 +1641,10 @@ async def test_a_hand_off_to_another_provider_moves_only_with_a_summary(
         tenant_id=tenant.id,
         role=Role.ADMIN,
         is_admin=True,
+        is_platform_admin=True,
         platform="discord",
         platform_user_id="42",
+        chat_session_id="provider-handoff-grant",
     )
     async with turn_origin(
         committing_sessionmaker,
@@ -1591,6 +1658,7 @@ async def test_a_hand_off_to_another_provider_moves_only_with_a_summary(
         role=Role.ADMIN,
         sender_foreign=False,
         shared_channel=False,
+        chat_session_id="provider-handoff-grant",
     ) as origin:
         moves = pinned == "older_session" and summary is not None
         if pinned == "unpinned" or moves:
@@ -1685,8 +1753,10 @@ async def test_hand_off_then_switch_moves_the_copy_with_its_summary_too(
         tenant_id=tenant.id,
         role=Role.ADMIN,
         is_admin=True,
+        is_platform_admin=True,
         platform="discord",
         platform_user_id="42",
+        chat_session_id="test-session",
     )
     async with turn_origin(
         committing_sessionmaker,
@@ -1700,6 +1770,7 @@ async def test_hand_off_then_switch_moves_the_copy_with_its_summary_too(
         role=Role.ADMIN,
         sender_foreign=False,
         shared_channel=False,
+        chat_session_id="test-session",
     ) as origin:
         result = await _hand_off_task_impl(
             runtime,
@@ -1793,8 +1864,10 @@ async def test_a_move_is_refused_when_the_summary_may_not_reach_the_destination(
         tenant_id=tenant.id,
         role=Role.ADMIN,
         is_admin=True,
+        is_platform_admin=True,
         platform="discord",
         platform_user_id="42",
+        chat_session_id="test-session",
     )
     async with turn_origin(
         committing_sessionmaker,
@@ -1808,6 +1881,7 @@ async def test_a_move_is_refused_when_the_summary_may_not_reach_the_destination(
         role=Role.ADMIN,
         sender_foreign=False,
         shared_channel=False,
+        chat_session_id="test-session",
     ) as origin:
         match = "can't read this conversation" if why == "sealed_elsewhere" else "shared on"
         with pytest.raises(ToolError, match=match):
@@ -1890,8 +1964,10 @@ async def test_a_same_provider_hand_off_says_when_its_summary_cant_go(
         tenant_id=tenant.id,
         role=Role.ADMIN,
         is_admin=True,
+        is_platform_admin=True,
         platform="discord",
         platform_user_id="42",
+        chat_session_id="test-session",
     )
     async with turn_origin(
         committing_sessionmaker,
@@ -1905,6 +1981,7 @@ async def test_a_same_provider_hand_off_says_when_its_summary_cant_go(
         role=Role.ADMIN,
         sender_foreign=False,
         shared_channel=False,
+        chat_session_id="test-session",
     ) as origin:
         result = await _hand_off_task_impl(
             runtime,
@@ -1930,3 +2007,98 @@ async def test_a_same_provider_hand_off_says_when_its_summary_cant_go(
             )
             is None
         )
+
+
+@pytest.mark.parametrize(
+    "human", [None, False, True], ids=["legacy-null-refused", "wake-refused", "human-allowed"]
+)
+async def test_handoff_uses_calling_principal_before_binding_or_queueing(
+    human: bool | None,
+    db_session: AsyncSession,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from daimon.core.access_policy import AgentRule
+    from daimon.core.membership import CachedMembershipResolver, Membership
+
+    tenant = await make_tenant(db_session)
+    caller = await make_account(db_session, tenant=tenant)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(
+            agent_rules={_DESTINATION_NAME: AgentRule(invoker_role_ids=("123",))},
+        ),
+    )
+    await db_session.commit()
+    runtime = replace(
+        _runtime(committing_sessionmaker, _client([_destination(tenant.id)])),
+        membership_resolver=CachedMembershipResolver(
+            AsyncMock(
+                return_value=Membership(
+                    is_member=True,
+                    role_ids=("123",),
+                    is_admin=True,
+                )
+            )
+        ),
+    )
+    auth = AuthIdentity(
+        account_id=caller.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        platform="discord",
+        platform_user_id="42",
+        chat_session_id="test-session",
+    )
+    async with turn_origin(
+        committing_sessionmaker,
+        tenant_id=tenant.id,
+        account_id=caller.id,
+        platform="discord",
+        parent_channel_id="C_PARENT",
+        thread_id="T_THREAD",
+        responder_ma_agent_id=_RESPONDER_ID,
+        responder_name="daimon",
+        role=Role.USER,
+        attended=True,
+        chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
+    ) as origin:
+        from daimon.core.stores.turn_origins import bind_origin_session
+
+        async with committing_sessionmaker() as db:
+            await bind_origin_session(
+                db, origin_id=origin.id, chat_session_id="test-session", human_invocation=human
+            )
+            await db.commit()
+        call = _hand_off_task_impl(
+            runtime,
+            auth,
+            origin_context_id=str(origin.id),
+            agent_id=_DESTINATION_ID,
+            continuation="run this task",
+        )
+        if human:
+            await call
+        else:
+            with pytest.raises(ToolError, match="limited to certain people"):
+                await call
+    async with committing_sessionmaker() as session:
+        binding = await get_binding(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            parent_channel_id="C_PARENT",
+            thread_id="T_THREAD",
+        )
+        assert (binding is not None) is bool(human)
+        queued = await list_pending_continuations(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="T_THREAD",
+        )
+        assert bool(queued) is bool(human)

@@ -132,7 +132,7 @@ def test_a_dm_scope_is_outside_every_pin() -> None:
 
 
 async def _seed(session: AsyncSession, *, policy: TenantAccessPolicy | None = None) -> TenantRow:
-    tenant = await make_tenant(session)
+    tenant = await make_tenant(session, platform="slack")
     # research-bot answers in C2, so it is reachable in the workspace.
     await set_fields(
         session,
@@ -200,6 +200,7 @@ def _caller(account_id: uuid.UUID | None = None, *, admin: bool = False) -> Hand
     return HandoffCaller(
         account_id=account_id,
         admin=AdminCaller(platform_user_id="U1", is_server_admin=admin),
+        human_invocation=True,
     )
 
 
@@ -585,6 +586,102 @@ async def test_selfhosted_handover_click_refuses_before_anthropic(
     )
     assert not result.switched
     assert "self-hosted" in result.text and "Nothing was changed" in result.text
+
+
+@pytest.mark.parametrize("seed", [None, "yes", " research-bot ", "x" * 600])
+def test_button_seed_is_sanitized_and_bounded(seed: str | None) -> None:
+    from daimon.core.thread_handoff import HANDOVER_FALLBACK_SEED, handover_seed
+
+    assert handover_seed(seed, agent_name="research-bot") == (
+        "x" * 500 if seed and len(seed) > 500 else HANDOVER_FALLBACK_SEED
+    )
+
+
+async def test_racing_button_clickers_switch_once_and_queue_no_continuation(
+    db_session: AsyncSession, race_engine: AsyncEngine
+) -> None:
+    from daimon.core.stores.task_continuations import list_pending_continuations
+
+    tenant = await _seed(db_session)
+    factory = async_sessionmaker(race_engine, expire_on_commit=False)
+    router = MARouter()
+    router.add_agent(ma_agent(id="agt_research", name="research-bot", tenant_id=tenant.id))
+    client = build_fake_anthropic(router.dispatch)
+
+    async def click(user: str) -> bool:
+        outcome = await switch_thread_on_request(
+            client,
+            factory,
+            tenant_id=tenant.id,
+            platform="slack",
+            parent_channel_id="C1",
+            thread_id="T1",
+            ma_agent_id="agt_research",
+            caller=AdminCaller(platform_user_id=user, is_server_admin=True),
+            default=_DEFAULT,
+            channel="#c1",
+            now=_NOW,
+        )
+        return outcome.switched
+
+    assert sum(await asyncio.gather(click("U1"), click("U2"))) == 1
+    async with factory() as session:
+        assert (
+            await list_pending_continuations(
+                session, tenant_id=tenant.id, platform="slack", thread_id="T1"
+            )
+            == []
+        )
+
+
+async def test_handoff_role_gate_fetches_target_invoker_membership_before_binding(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.access_policy import AgentRule
+    from daimon.core.membership import CachedMembershipResolver, Membership
+
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="111")
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(
+            agent_rules={"research-bot": AgentRule(invoker_role_ids=("123",))}
+        ),
+    )
+    await db_session.commit()
+    facts = [Membership(is_member=True, is_admin=True)]
+
+    async def fetch(*_args: object) -> Membership:
+        return facts[0]
+
+    resolver = CachedMembershipResolver(fetch)
+    async with db_session_factory() as session:
+        with pytest.raises(ThreadHandoffRefused) as exc:
+            await hand_over_thread(
+                session,
+                tenant_id=tenant.id,
+                platform="discord",
+                parent_channel_id="C1",
+                thread_id="T1",
+                caller=_caller(admin=True),
+                destination=_RESEARCH,
+                current_responder_ma_agent_id="agt_daimon",
+                default=_DEFAULT,
+                now=_NOW,
+                membership_resolver=resolver,
+            )
+        assert exc.value.refusal.reason == "invoker_not_allowed"
+        assert (
+            await get_binding(
+                session,
+                tenant_id=tenant.id,
+                platform="discord",
+                parent_channel_id="C1",
+                thread_id="T1",
+            )
+            is None
+        )
 
 
 # --- A person hands this thread to an agent they own (TARGET-V2 J1/J2) ------------------

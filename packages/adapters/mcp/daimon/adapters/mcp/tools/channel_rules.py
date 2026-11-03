@@ -1,11 +1,9 @@
-"""Rule tools: who reads a channel and who posts there, and where an agent runs.
+"""Channel and agent rules.
 
-``register_channel_rule_tools(mcp, runtime)`` wires the ``@mcp.tool``
-closures; they delegate to ``_set_channel_rule_impl`` and
-``_set_agent_rule_impl``, which tests call without a FastMCP Context.
-`authorize(SET_CHANNEL_RULE)` and `SET_AGENT_RULE` decide who may
-(``daimon.core.channel_rules``): server admins and operator tokens with
-``channels:write`` only, never a channel's admins.
+``register_channel_rule_tools`` wires the closures. Channel and agent rules
+use ``SET_CHANNEL_RULE`` and ``SET_AGENT_RULE``: server admins and operator
+credentials with ``channels:write`` only. Approval-gate changes are deliberately
+absent: only native /here controls may change them.
 """
 
 from __future__ import annotations
@@ -33,6 +31,7 @@ from daimon.adapters.mcp.tools.slack._client import (
 )
 from daimon.adapters.mcp.tools.teams._directory import locate_channel, require_client
 from daimon.core.access_policy import ChannelReaders, ChannelWriters
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
 from daimon.core.authz import Action
 from daimon.core.channel_ids import InvalidChannelId, normalize_channel_id
@@ -170,7 +169,7 @@ async def _set_channel_rule_impl(
             channel_id=channel,
             readers=readers,
             writers=writers,
-            subject=mcp_subject(auth, is_admin=auth.is_admin),
+            subject=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.CHANNEL_PERMISSIONS)),
             default=runtime.deployment_default,
             actor_account_id=auth.account_id,
             copy=copy_from is not None,
@@ -223,7 +222,7 @@ async def _set_agent_rule_impl(
             platform=_platform(auth),
             agent_name=agent_name.strip(),
             runs_in=channels,
-            subject=mcp_subject(auth, is_admin=auth.is_admin),
+            subject=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.CHANNEL_PERMISSIONS)),
             actor_account_id=auth.account_id,
             surface="chat",
             default=runtime.deployment_default,

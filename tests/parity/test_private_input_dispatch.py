@@ -146,6 +146,7 @@ async def _queue_private_input_continuation(
             target_ma_agent_id=AGENT_ID,
             target_name="test-agent",
             reason="private_input_applied",
+            attended=True,  # A trusted person submitted the private input.
             idempotency_key=idempotency_key,
             requested_work=requested_work,
         )

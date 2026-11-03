@@ -21,6 +21,7 @@ from __future__ import annotations
 from typing import Literal
 
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Action, AgentReach, OperationFamily, Subject, Surface, authorize
 from daimon.core.security_audit import record_policy_decision
 from pydantic import BaseModel
@@ -83,6 +84,15 @@ class TargetFacts(BaseModel):
     owned_by_caller: bool = False
 
 
+def delegated_action_for_operation(operation: OperationKind) -> DelegatedAction | None:
+    """Only spec/skill edits admit grants; credential/connection admin gates are native."""
+    if operation == "agent_spec_edit":
+        return DelegatedAction.AGENT_SETTINGS
+    if operation in {"skill_add", "skill_remove"}:
+        return DelegatedAction.SKILLS
+    return None
+
+
 def _family(operation: OperationKind) -> OperationFamily:
     if operation in _POSTED_TOKEN_OPERATIONS:
         return "posted_token"
@@ -112,6 +122,8 @@ def _decide_operation(
         if is_admin or (target.owned_by_caller and not target.is_daimon_managed):
             return "allow"
         return "needs_admin"
+    if operation == "repo_bind":
+        return "allow" if is_admin else "needs_admin"
     decision = authorize(
         _NO_POLICY,
         subject=Subject(is_admin=is_admin),
@@ -161,5 +173,6 @@ __all__ = [
     "PolicyOutcome",
     "TargetFacts",
     "decide_operation",
+    "delegated_action_for_operation",
     "needs_reachability_read",
 ]

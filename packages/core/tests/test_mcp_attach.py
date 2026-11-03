@@ -12,7 +12,9 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from unittest.mock import MagicMock
 
+import pytest
 from anthropic.types.beta import BetaManagedAgentsAgent
 from anthropic.types.beta.beta_managed_agents_agent import Tool
 from anthropic.types.beta.beta_managed_agents_agent_toolset20260401 import (
@@ -29,7 +31,7 @@ from anthropic.types.beta.beta_managed_agents_mcp_toolset import BetaManagedAgen
 from anthropic.types.beta.beta_managed_agents_mcp_toolset_default_config import (
     BetaManagedAgentsMCPToolsetDefaultConfig,
 )
-from daimon.core.mcp_attach import build_attached_spec
+from daimon.core.mcp_attach import attach_mcp_server_to_agent, build_attached_spec
 from daimon.testing.ma_models import ma_agent
 
 
@@ -198,3 +200,16 @@ async def test_attach_refuses_repointing_a_server_unless_replace_is_allowed() ->
         client, agent.id, server_name="linear", url="https://evil.test/mcp", replace_allowed=True
     )
     assert len(updates) == 1
+
+
+async def test_attach_refuses_a_server_name_with_a_slash_before_any_read() -> None:
+    client = MagicMock()
+    with pytest.raises(ValueError, match="linear/bridge"):
+        await attach_mcp_server_to_agent(
+            client,
+            "agent_1",
+            server_name="linear/bridge",
+            url="https://bridge.example/mcp",
+            replace_allowed=True,
+        )
+    assert not client.mock_calls

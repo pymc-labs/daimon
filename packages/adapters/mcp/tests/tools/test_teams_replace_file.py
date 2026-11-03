@@ -171,6 +171,7 @@ async def _setup(db_session: AsyncSession, filename: str) -> tuple[AuthIdentity,
         shared_channel=False,
         expires_at=now + dt.timedelta(minutes=10),
         now=now,
+        chat_session_id="test-session",
     )
     auth = AuthIdentity(
         account_id=account.id,
@@ -179,6 +180,7 @@ async def _setup(db_session: AsyncSession, filename: str) -> tuple[AuthIdentity,
         platform="teams",
         platform_user_id=_CALLER,
         chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_x"),
+        chat_session_id="test-session",
     )
     return auth, row.id, str(origin.id)
 

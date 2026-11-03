@@ -47,7 +47,7 @@ async def test_connect_returns_ephemeral_url_button(monkeypatch: pytest.MonkeyPa
         sessionmaker=_Sessions(),
     )
     monkeypatch.setattr(github_command, "resolve_web_client", AsyncMock(return_value=client))
-    monkeypatch.setattr(github_command, "resolve_is_admin", AsyncMock(return_value=True))
+    monkeypatch.setattr(github_command, "resolve_is_platform_admin", AsyncMock(return_value=True))
     monkeypatch.setattr(
         github_command,
         "list_agents_by_tenant",

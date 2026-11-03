@@ -20,10 +20,10 @@ from typing import TYPE_CHECKING, Annotated, Literal, cast
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from daimon.core.mcp_server_url import canonical_mcp_url
+from daimon.core.mcp_server_url import ascii_mcp_url, canonical_mcp_url
 from daimon.core.scope_cascade import CascadeMode
 from daimon.core.thread_participation import ParticipationMode
-from daimon.core.tool_safety import ToolSafetyPolicy
+from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolSafetyPolicy
 from pydantic import (
     AwareDatetime,
     BaseModel,
@@ -687,7 +687,8 @@ class DiscordSettings(BaseModel):
         default_factory=list[int],
         description=(
             "Guilds allowed to receive commands and events when the environment name is set. "
-            "An empty list disables all Discord ingress, including DMs, in non-production."
+            "An empty list disables all guild ingress in non-production. DMs are not filtered "
+            "by guild; the bot answers one only for a verified member of one of its tenants."
         ),
     )
     startup_replay_minutes: int = Field(
@@ -1436,8 +1437,8 @@ class MicrosoftAccountsSettings(BaseModel):
 class CredentialsSettings(BaseModel):
     """Tenant-level credentials for the token broker.
 
-    Optional — the Google Workspace provider raises a config error when
-    `google_sa_json` is unset.
+    Optional — Google Workspace requires a matching authorized-user credential
+    or a service-account credential with domain-wide delegation.
     """
 
     google_sa_json: SecretStr | None = Field(
@@ -1445,6 +1446,23 @@ class CredentialsSettings(BaseModel):
         description=(
             "Full JSON contents of a Google service-account key, used by the "
             "token broker to mint delegated Google Workspace credentials."
+        ),
+    )
+
+    google_user_json: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Full authorized_user JSON containing client_id, client_secret and "
+            "refresh_token. Used only for agents bound to google_user_email, "
+            "with the binding's scopes; requires no domain-wide delegation."
+        ),
+    )
+    google_user_email: str | None = Field(
+        default=None,
+        description=(
+            "Google account email belonging to google_user_json (the JSON does "
+            "not contain it). Only matching agent bindings, compared without "
+            "case sensitivity, may use that credential."
         ),
     )
 
@@ -2386,7 +2404,344 @@ class TurnQueueSettings(BaseModel):
     )
 
 
+#: Daimon's own readers, which return chat text, Daimon's own replies included.
+#: Only native readers drop Daimon's rows, so these and the operator's
+#: `chat_tools` are refused on an MCP server whatever `returns_chat` says: a
+#: report must never fire its watch.
+CHAT_TOOLS: frozenset[str] = frozenset({"read_channel", "read_thread", "search_messages"})
+
+
+class PollableTool(BaseModel):
+    """One operator-listed tool a watch may poll. The list is the only thing that allows a poll."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    server: str = Field(
+        description=(
+            '"daimon-mcp" for a native reader, or the https URL of an MCP server. Never a '
+            "server name: names are chosen per agent."
+        )
+    )
+    tool: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$", description="Exact tool name.")
+    credential: Literal["agent", "owner", "none"] = Field(
+        description='The one credential a poll may use; native readers use "none".'
+    )
+    returns_chat: bool = Field(
+        description=(
+            "Whether the tool can return chat or archive text Daimon posts. Required; "
+            "refused for MCP servers, since only native readers drop Daimon's own rows."
+        )
+    )
+    max_interval_floor_s: int = Field(
+        default=300, ge=60, le=86400, description="Shortest poll interval allowed for this tool."
+    )
+    label: str = Field(default="", max_length=80, description="Shown on the approval card.")
+
+    @field_validator("server")
+    @classmethod
+    def _canonical_server(cls, value: str) -> str:
+        if value == DAIMON_SERVER_NAME:
+            return value
+        # Punycode, so two spellings of one host are one entry.
+        url = ascii_mcp_url(value)
+        parts = urlsplit(url)
+        if (
+            parts.scheme != "https"
+            or not parts.hostname
+            or not parts.hostname.isascii()
+            or parts.username
+            or parts.password
+        ):
+            raise ValueError('server must be "daimon-mcp" or an https URL without credentials')
+        return url
+
+    @model_validator(mode="after")
+    def _reviewed(self) -> PollableTool:
+        # Lazy: the catalogue reads these settings.
+        from daimon.core.continuity.poll_tools import POLL_TOOLS
+
+        if self.server == DAIMON_SERVER_NAME:
+            if self.tool not in POLL_TOOLS or self.credential != "none":
+                raise ValueError(
+                    f"daimon-mcp/{self.tool} is not a reviewed native poll tool "
+                    "with credential none"
+                )
+        elif self.returns_chat or self.tool in CHAT_TOOLS:
+            raise ValueError(f"{self.tool} returns chat; MCP server tools that do cannot be polled")
+        return self
+
+
+def _default_pollable_tools() -> list[PollableTool]:
+    return [
+        PollableTool(
+            server="daimon-mcp",
+            tool=tool,
+            credential="none",
+            returns_chat=True,
+            max_interval_floor_s=60,
+            label=label,
+        )
+        for tool, label in (("read_thread", "Discord thread"), ("read_channel", "Discord channel"))
+    ]
+
+
+class WatchesSettings(BaseModel):
+    @field_validator("executor_secret", mode="before")
+    @classmethod
+    def empty_executor_secret(cls, value: object) -> object:
+        return None if value == "" else value
+
+    executor_secret: SecretStr | None = Field(
+        default=None,
+        min_length=32,
+        max_length=256,
+        description=(
+            "Private poll executor shared secret, also supplied as "
+            "DAIMON_SIDECAR__EXECUTOR_SECRET. Unset disables executor transport. "
+            "Never expose the private listener through the public proxy."
+        ),
+    )
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable polling of the listed read tools and watch dispatch. "
+            "Page-event watches are not yet delivered. "
+            "Keep disabled "
+            "until the execution-bound unattended origin grants, non-gateable cleanup "
+            "and watch release are reviewed. "
+            "The database global gate must also be explicitly enabled by an operator."
+        ),
+    )
+    pollable_tools: Annotated[list[PollableTool], NoDecode] = Field(
+        default_factory=_default_pollable_tools,
+        description=(
+            "JSON list of the tools a watch may poll in this deployment. Only a listed "
+            "tool can be polled: a watch on a tool taken off the list pauses at its next "
+            'poll and its owner is told. Each entry has server ("daimon-mcp" for a native '
+            "reader, otherwise an https MCP server URL, never a server name), tool (exact "
+            'name), credential ("none" for native readers; "agent" or "owner" for '
+            "MCP servers), returns_chat (required: true only for native readers, which "
+            "drop Daimon's own messages), max_interval_floor_s (shortest interval, at "
+            "least 60, default 300) and label (shown on the approval card). Native "
+            "entries must be read_thread or read_channel. Daimon's chat readers and chat_tools "
+            "are refused on MCP servers. Credential owner polls with each watch owner's "
+            "own read-only key, which they send once through a private form: for example "
+            "a read-scoped API key the person creates on that server. A server's read-only "
+            "annotation never allows a poll; only this "
+            "list does, and a server can still write when it says it only reads. A "
+            "watch below a raised floor polls at the "
+            "floor. Default (also used when the value is empty): read_thread and "
+            "read_channel on daimon-mcp, credential none, returns_chat true, floor 60. "
+            "Set [] to allow no polls."
+        ),
+    )
+
+    chat_tools: Annotated[list[str], NoDecode] = Field(
+        default_factory=list,
+        description=(
+            "JSON list of tool names on MCP servers that return chat or archive text, "
+            "such as a chat archive search. A watch could fire on its own report through "
+            "them, so POLLABLE_TOOLS refuses them on any MCP server, whatever returns_chat "
+            "says. Daimon's own read_thread, read_channel and search_messages are always "
+            "refused there. Default: none."
+        ),
+    )
+
+    @field_validator("pollable_tools", mode="before")
+    @classmethod
+    def _parse_pollable_tools(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        if not value.strip():
+            # A blanked variable means "use the default", never "allow nothing".
+            return _default_pollable_tools()
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError as err:
+            raise ValueError(
+                f"DAIMON_WATCHES__POLLABLE_TOOLS is not valid JSON "
+                f"(line {err.lineno}, column {err.colno})"
+            ) from None
+
+    @field_validator("chat_tools", mode="before")
+    @classmethod
+    def _parse_chat_tools(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        if not value.strip():
+            return []
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError as err:
+            raise ValueError(
+                f"DAIMON_WATCHES__CHAT_TOOLS is not valid JSON "
+                f"(line {err.lineno}, column {err.colno})"
+            ) from None
+
+    @field_validator("pollable_tools")
+    @classmethod
+    def _unique_pollable_tools(cls, value: list[PollableTool]) -> list[PollableTool]:
+        seen: set[tuple[str, str]] = set()
+        for entry in value:
+            if (entry.server, entry.tool) in seen:
+                raise ValueError(f"{entry.server}/{entry.tool} is listed more than once")
+            seen.add((entry.server, entry.tool))
+        return value
+
+    @model_validator(mode="after")
+    def _no_chat_tools_on_mcp_servers(self) -> WatchesSettings:
+        chat = set(self.chat_tools)
+        for entry in self.pollable_tools:
+            if entry.server != DAIMON_SERVER_NAME and entry.tool in chat:
+                raise ValueError(
+                    f"{entry.tool} returns chat; MCP server tools that do cannot be polled"
+                )
+        return self
+
+
+class ComputeProfile(BaseModel):
+    image: str = Field(
+        description="Operator-reviewed thin MCP image reference, preferably a digest."
+    )
+    regions: list[str] = Field(default_factory=lambda: ["iad"], description="Allowed Fly regions.")
+    cpu_kind: Literal["shared", "performance"] = Field(
+        default="shared", description="Fly CPU class."
+    )
+    cpus: int = Field(default=2, gt=0, le=16, description="Fixed CPU count for this image profile.")
+    memory_mb: int = Field(default=4096, ge=256, le=131072, description="Fixed RAM in MB.")
+
+
+class ComputeSettings(BaseModel):
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Allow attended owners to launch Fly sessions. Disabling launch does not "
+            "disable cleanup."
+        ),
+    )
+    deployment_id: str = Field(
+        default="",
+        description=(
+            "Stable unique deployment identifier fencing Fly resources. Required to use compute."
+        ),
+    )
+    api_token: SecretStr | None = Field(
+        default=None,
+        repr=False,
+        description=(
+            "Fly API token, control plane and scheduler only. Never mounted in compute machines."
+        ),
+    )
+    org_slug: str = Field(
+        default="", description="Fly organization for this deployment's disposable sessions."
+    )
+    session_auth_key: SecretStr | None = Field(
+        default=None,
+        repr=False,
+        description=(
+            "Stable control-plane HMAC key deriving per-session MCP tokens. Never "
+            "mounted on machines."
+        ),
+    )
+    per_person_sessions: int = Field(
+        default=2,
+        gt=0,
+        description=(
+            "Maximum active sessions per person within a tenant, including pending deletion."
+        ),
+    )
+    default_idle_ttl_hours: int = Field(
+        default=24,
+        ge=1,
+        le=168,
+        description="Default idle lifetime in hours; bounded by max_ttl_hours.",
+    )
+    max_ttl_hours: int = Field(
+        default=168,
+        ge=1,
+        le=168,
+        description=(
+            "Maximum launch or extension lifetime in hours. No dollar cap or metering is provided."
+        ),
+    )
+    per_session_tasks: int = Field(
+        default=4,
+        gt=0,
+        le=32,
+        description=(
+            "Maximum background commands running at once on one session. A background "
+            "command may run for at most max_ttl_hours."
+        ),
+    )
+    profiles: dict[str, ComputeProfile] = Field(
+        default_factory=dict,
+        description=(
+            "Operator-managed image profiles. Empty means no images can be launched. "
+            "No environment or credentials are copied from template apps."
+        ),
+    )
+
+
+class LongJobsSettings(BaseModel):
+    max_deadline_minutes: int = Field(
+        default=70,
+        gt=0,
+        description=(
+            "Operator hard ceiling for long-job deadlines in minutes. "
+            "Durations above 70 min are not yet validated on MA."
+        ),
+    )
+    max_usd: Decimal = Field(
+        default=Decimal("20"),
+        gt=0,
+        allow_inf_nan=False,
+        description=(
+            "Operator hard ceiling in USD per long job; tenant and agent policy may only lower it."
+        ),
+    )
+    per_tenant_running: int = Field(
+        default=3, gt=0, description="Maximum launching and running long jobs per tenant."
+    )
+    per_owner_running: int = Field(
+        default=2,
+        gt=0,
+        description="Maximum launching and running long jobs per owner within a tenant.",
+    )
+
+
+class RepoMemorySettings(BaseModel):
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable native repository memory tools and turn injection after a verified import."
+        ),
+    )
+    legacy_mcp_server_names: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Legacy MCP server names whose repo_memory_list and repo_memory_view tools "
+            "are disabled in sessions when native repository memory is enabled. "
+            "Set these before cutover so the agent sees one memory source."
+        ),
+    )
+
+    @field_validator("legacy_mcp_server_names")
+    @classmethod
+    def _legacy_names(cls, names: tuple[str, ...]) -> tuple[str, ...]:
+        if "daimon-mcp" in names:
+            raise ValueError("The native daimon-mcp server cannot be a legacy memory server.")
+        return names
+
+
+def get_repo_memory_settings(settings: object) -> RepoMemorySettings:
+    """Absent or undeclared settings keep the optional feature disabled."""
+    value = getattr(settings, "repo_memory", None)
+    return value if isinstance(value, RepoMemorySettings) else RepoMemorySettings()
+
+
 class Settings(BaseSettings):
+    compute: ComputeSettings = Field(default_factory=ComputeSettings)
+    long_jobs: LongJobsSettings = Field(default_factory=LongJobsSettings)
     security_audit_retention_days: int = Field(
         default=90,
         ge=0,
@@ -2476,6 +2831,7 @@ class Settings(BaseSettings):
     web: WebSettings | None = None
     github: GithubSettings = Field(default_factory=GithubSettings)
     github_app: GithubAppSettings = Field(default_factory=GithubAppSettings)
+    repo_memory: RepoMemorySettings = Field(default_factory=RepoMemorySettings)
     microsoft_accounts: MicrosoftAccountsSettings = Field(default_factory=MicrosoftAccountsSettings)
     crypto: CryptoSettings = Field(default_factory=CryptoSettings)
     credentials: CredentialsSettings = Field(default_factory=CredentialsSettings)
@@ -2489,6 +2845,7 @@ class Settings(BaseSettings):
     turn: TurnSettings = Field(default_factory=TurnSettings)
     thread_naming: ThreadNamingSettings = Field(default_factory=ThreadNamingSettings)
     turn_queue: TurnQueueSettings = Field(default_factory=TurnQueueSettings)
+    watches: WatchesSettings = Field(default_factory=WatchesSettings)
     private_channel_messages: PrivateChannelMessagesSettings = Field(
         default_factory=PrivateChannelMessagesSettings
     )
@@ -2630,6 +2987,18 @@ def load_turn_settings(*, _env_file: str | None = ".env") -> TurnSettings:
 
         validate_configured_runtime_manifest()
     return turn
+
+
+class _WatchesSettingsSource(BaseSettings):
+    watches: WatchesSettings = Field(default_factory=WatchesSettings)
+    model_config = SettingsConfigDict(
+        env_prefix="DAIMON_", env_nested_delimiter="__", extra="ignore", hide_input_in_errors=True
+    )
+
+
+def load_watches_settings() -> WatchesSettings:
+    """Read the producer gate without loading unrelated credentials or local dotenv files."""
+    return _WatchesSettingsSource().watches
 
 
 class _SelfHostedSettingsSource(BaseSettings):

@@ -12,6 +12,7 @@ from __future__ import annotations
 import itertools
 from typing import get_args
 
+import pytest
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize, build_subject
 from daimon.core.operation_policy import OperationKind
@@ -215,3 +216,21 @@ def test_every_operation_kind_is_in_one_old_family() -> None:
     assert (
         set(get_args(OperationKind)) == attachment | _OLD_SPEC | _OLD_POSTED_TOKEN | _NEW_ADMIN_ONLY
     )
+
+
+@pytest.mark.parametrize(
+    "roles,member", [(("123",), True), ((), True), (("123",), False), (("123",), None)]
+)
+def test_role_gate_agrees_for_turns_and_creator_clearance(roles, member):  # type: ignore[no-untyped-def]
+    policy = TenantAccessPolicy(invoker_role_ids=("123",))
+    subject = Subject(platform_user_id="U1", role_ids=roles, verified_membership=member)
+    start = authorize(policy, subject=subject, action=Action.START_TURN)
+    creator = authorize(policy, subject=subject, action=Action.ACT_FOR_CREATOR)
+    refusal = creator_refusal_for(
+        policy,
+        creator_platform_user_id="U1",
+        creator_is_admin=False,
+        creator_role_ids=roles,
+        creator_verified_membership=member,
+    )
+    assert bool(start) == bool(creator) == (refusal is None)

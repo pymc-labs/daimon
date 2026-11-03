@@ -22,7 +22,8 @@ parameter (confused-deputy mitigation). Path B (most-recent-active-session
 walks) and Path C (re-call MA `sessions.retrieve`) are explicitly REJECTED.
 
 The separate ``chat_agent_id`` claim populates ``chat_agent_id`` only. Ordinary
-chat keeps ``agent_id=None``; only the Google token path consumes chat identity.
+chat keeps ``agent_id=None``. Origin tools additionally require the signed
+``chat_session_id`` grant to match the live origin's server-prepared session.
 
 ``hold`` comes from the signed hold claim of a held turn's chat credential, which the
 verifier admitted only because it matched the token row's channel binding. A held
@@ -39,6 +40,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
+from daimon.core.admin_actions import DelegatedAction, admin_for_action, is_personal_user_credential
 from daimon.core.stores.domain import McpTokenKind, Role
 from daimon.core.turn_hold import TurnHold
 
@@ -51,14 +53,19 @@ class AuthIdentity:
     platform: str | None = None
     external_id: str | None = None  # guild snowflake from tenant.external_id
     agent_id: uuid.UUID | None = None
-    # Ordinary chat execution identity; consumed only by the Google token broker.
+    # Signed lead-intake routine execution grant, never a tool argument.
+    routine_id: uuid.UUID | None = None
+    execution_id: uuid.UUID | None = None
+    # Ordinary chat execution identity (see the module docstring).
     chat_agent_id: uuid.UUID | None = None
     platform_user_id: str | None = None
-    # True when the minted JWT carries is_admin=True.
-    # Derived by the adapter from Discord owner/manage_guild/administrator or CLI context.
-    # Always False for a held identity, whatever `role` stores.
+    # Resolved from current platform authority and grants at the request boundary.
+    # Platform callers never inherit a baked JWT admin claim.
     is_admin: bool = False
-    # The channel this turn is held to, from the signed claim the verifier checked
+    # Separately attested; delegated admins never acquire this bit.
+    is_platform_admin: bool = False
+    # Live membership evidence, never copied from token claims or account role ids.
+    verified_role_ids: tuple[str, ...] = ()
     # against the token row; None for every unheld credential.
     hold: TurnHold | None = None
     # The principal was verified to belong to another organisation (read live from
@@ -66,8 +73,12 @@ class AuthIdentity:
     foreign_home_id: str | None = None
     # Signed execution grant; never supplied as a tool parameter.
     slack_turn_context_id: uuid.UUID | None = None
+    # Signed grant for one isolated provider session, never a tool argument.
+    chat_session_id: str | None = None
     # Set from the token's `mcp_tokens` row by the verifier; None for jti-less tokens.
+    is_chat_execution: bool = False
     token_kind: McpTokenKind | None = None
+    token_label: str | None = None
     token_jti: uuid.UUID | None = None
     # What an operator token may call, read from its row on every request.
     scopes: frozenset[str] = frozenset()
@@ -78,6 +89,49 @@ class AuthIdentity:
     anthropic_disabled: bool = False
     # A provider turn with no confirmation card: confirmation-gated tools refuse.
     no_confirmation_surface: bool = False
+    # The daimon tools a chat agent enables by name (`stores.agent_daimon_tools`);
+    # None when its toolset enables every tool.
+    daimon_tools: frozenset[str] | None = None
+
+    def admin_for(self, action: DelegatedAction | None = None) -> bool:
+        return (
+            admin_for_action(
+                platform_admin=self.is_platform_admin,
+                daimon_admin=self.is_admin,
+                action=action,
+            )
+            and not self.is_external_agent
+            and self.hold is None
+            and not self.client
+        )
+
+    @property
+    def is_personal_user(self) -> bool:
+        """Human-held user credentials only; execution shape never confers human intent."""
+        return (
+            self.hold is None
+            and not self.client
+            and is_personal_user_credential(
+                token_kind=self.token_kind,
+                token_label=self.token_label,
+                is_chat_execution=self.is_chat_execution,
+                execution_bindings=(
+                    self.agent_id,
+                    self.chat_agent_id,
+                    self.routine_id,
+                    self.execution_id,
+                    self.chat_session_id,
+                    self.slack_turn_context_id,
+                ),
+            )
+        )
+
+    @property
+    def is_external_agent(self) -> bool:
+        """External keys cannot inherit their owner's configuration authority."""
+        return self.agent_id is not None or (
+            self.token_kind == "agent" and not self.is_chat_execution
+        )
 
     @property
     def is_operator(self) -> bool:

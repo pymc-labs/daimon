@@ -23,10 +23,11 @@ from daimon.core.agent_pins import agent_aliases
 from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize, build_agent_ref
 from daimon.core.cron import InvalidScheduleError, validated_next_slot
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
-from daimon.core.errors import UserFacingError
+from daimon.core.errors import StoreError, UserFacingError
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.permissions import any_agent_rules, any_own_readers, home_of
+from daimon.core.permissions import any_agent_rules, any_own_readers, home_of, limiting_ids_at
 from daimon.core.routine_delivery import destination_shape_error
+from daimon.core.routines import routine_for_reader
 from daimon.core.rule_views import RuleViewer, routine_destination_channel
 from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores import routines as routines_store
@@ -102,6 +103,23 @@ ChannelAgentName = Callable[[str], Awaitable[str | None]]
 
 
 @dataclass(frozen=True)
+class RoutineSource:
+    """Where a routine was made, as its surface verified it. It never changes after."""
+
+    channel_id: str | None = None
+    thread_id: str | None = None
+
+
+SourceResolver = Callable[
+    [RoutineDestinationKind | None, str | None, str | None], Awaitable[RoutineSource]
+]
+"""The verified source of a new routine, from its destination kind and id and budget channel."""
+
+DM_PLATFORMS = frozenset({"discord"})
+"""Where a routine can deliver its result to its owner by direct message."""
+
+
+@dataclass(frozen=True)
 class RoutineCaller:
     """Who changes routines, and what their surface knows about the call."""
 
@@ -144,6 +162,8 @@ class RoutineEnv:
     """Loaded when needed, so a surface pays for it only after the cheap checks pass."""
     origin_budget_channel: Callable[[], Awaitable[str | None]] | None = None
     """The channel a destination-less routine's spend counts against."""
+    resolve_source: SourceResolver | None = None
+    """None where the surface has no conversation; the store then derives the source."""
     require_destination: bool = False
     on_change: OnChange | None = None
     now: Callable[[], datetime] = lambda: datetime.now(UTC)
@@ -185,7 +205,7 @@ def destination_channel_of(
 
     A Discord thread's channel needs the platform to look it up, so it reads as unknown.
     """
-    if kind is None or destination_id is None:
+    if kind in (None, "dm") or destination_id is None:
         return None
     if kind == "channel":
         return destination_id
@@ -205,6 +225,11 @@ def may_read(caller: RoutineCaller, row: RoutineRow) -> bool:
     if caller.is_admin:
         return True
     return caller.user_id is not None and caller.user_id == row.created_by_user_id
+
+
+def for_reader(caller: RoutineCaller, row: RoutineRow) -> RoutineRow:
+    """The row as the caller may read it: a private result is its owner's alone, admins too."""
+    return routine_for_reader(row, user_id=caller.user_id)
 
 
 def sees_routine(viewer: RuleViewer, row: RoutineRow) -> bool:
@@ -323,7 +348,16 @@ async def check_destination(
     platform's shape; the surface's resolver confirms the channel exists with the
     caller able to post; and the tenant's access policy must not protect it. The
     adapter re-checks at post time, so a channel protected or removed later still holds.
+    A direct message goes only to the caller, and only where the platform supports it.
     """
+    if kind == "dm":
+        if caller.platform not in DM_PLATFORMS:
+            raise RoutineRefused("DM routines are not supported here")
+        if caller.user_id is None:
+            raise RoutineRefused("creating a routine requires a platform user identity")
+        if destination_id is not None and destination_id != caller.user_id:
+            raise RoutineRefused("a DM routine can deliver only to its authenticated owner")
+        return None
     if (kind is None) != (destination_id is None):
         raise RoutineRefused("destination_kind and destination_id must be given together")
     if kind is None or destination_id is None:
@@ -374,8 +408,21 @@ def _check_agent_pin(
     A pinned agent's routine must post straight into one of its pinned channels: the
     scheduler can't resolve a Discord thread's parent at fire time, so a thread
     destination is refused here rather than skipped later. The scheduler re-checks at
-    every fire, so a pin added later still holds.
+    every fire, so a pin added later still holds. A routine made in a restricted channel
+    or thread never delivers by direct message.
     """
+    source_channel = (origin.parent_channel_id or origin.channel_id) if origin else None
+    if (
+        kind == "dm"
+        and origin is not None
+        and source_channel is not None
+        and limiting_ids_at(
+            policy,
+            channel_id=source_channel,
+            thread_id=origin.channel_id if origin.parent_channel_id else None,
+        )
+    ):
+        raise RoutineRefused("A routine from a restricted source cannot deliver by DM.")
     decision = authorize(
         policy,
         subject=caller.subject,
@@ -391,6 +438,10 @@ def _check_agent_pin(
     )
     if not decision:
         record_authz_denial(Action.SAVE_ROUTINE, decision.reason)
+    if decision.reason == "invoker_not_allowed":
+        raise RoutineRefused(
+            "This agent requires a human invocation, so it cannot run routines. Nothing was saved."
+        )
     if decision.reason == "own_agents_only":
         if origin is not None and home_of(policy, origin.channel_id, origin.parent_channel_id):
             raise RoutineRefused(
@@ -445,14 +496,23 @@ async def _require_agent_in_scope(
     )
 
 
+def _store_refusal(err: StoreError) -> RoutineRefused:
+    return RoutineRefused(str(err))
+
+
 async def create_routine(env: RoutineEnv, caller: RoutineCaller, new: NewRoutine) -> RoutineRow:
     """Save a routine for the caller, after every check."""
     _require_allowed(caller)
     if caller.user_id is None:
         raise RoutineRefused("creating a routine requires a platform user identity")
     next_fire_at = next_fire(env, new.cron_expr, new.timezone)
+    destination_id = new.destination_id
+    if new.destination_kind == "dm":
+        if destination_id is not None and destination_id != caller.user_id:
+            raise RoutineRefused("a DM routine can deliver only to its authenticated owner")
+        destination_id = caller.user_id
     destination_channel_id = await check_destination(
-        env, caller, kind=new.destination_kind, destination_id=new.destination_id
+        env, caller, kind=new.destination_kind, destination_id=destination_id
     )
     if env.require_destination and new.destination_kind is None:
         raise RoutineRefused(
@@ -462,8 +522,13 @@ async def create_routine(env: RoutineEnv, caller: RoutineCaller, new: NewRoutine
     async with env.sessionmaker() as session:
         policy = await _load_policy(session, caller.tenant_id)
     budget_channel_id = destination_channel_id
-    if new.destination_kind is None and env.origin_budget_channel is not None:
+    if new.destination_kind in (None, "dm") and env.origin_budget_channel is not None:
         budget_channel_id = await env.origin_budget_channel()
+    source: RoutineSource | None = None
+    if env.resolve_source is not None:
+        source = await env.resolve_source(new.destination_kind, destination_id, budget_channel_id)
+        if new.destination_kind in (None, "dm"):
+            budget_channel_id = source.channel_id
     view = await _view(env)
     match = await find_agent_by_daimon_tag(
         env.anthropic, tenant_id=caller.tenant_id, name=new.agent_name
@@ -476,7 +541,7 @@ async def create_routine(env: RoutineEnv, caller: RoutineCaller, new: NewRoutine
         agent_name=new.agent_name,
         agent=build_agent_ref(match.name, match.metadata, new.agent_name),
         kind=new.destination_kind,
-        destination_id=new.destination_id,
+        destination_id=destination_id,
         destination_channel_id=destination_channel_id,
         origin=view.origin,
     )
@@ -488,28 +553,35 @@ async def create_routine(env: RoutineEnv, caller: RoutineCaller, new: NewRoutine
         destination_channel_id=destination_channel_id,
     )
     async with env.sessionmaker() as session, session.begin():
-        created = await routines_store.create_routine(
-            session,
-            tenant_id=caller.tenant_id,
-            created_by_user_id=caller.user_id,
-            agent_id=match.id,
-            agent_name=new.agent_name,
-            cron_expr=new.cron_expr,
-            timezone_=new.timezone,
-            trigger_message=new.trigger_message,
-            enabled=new.enabled,
-            catch_up_policy=new.catch_up_policy,
-            next_fire_at=next_fire_at,
-            destination_kind=new.destination_kind,
-            destination_id=new.destination_id,
-            channel_id=budget_channel_id,
-            made_in_channel_id=new.made_in_channel_id
-            or (
-                (view.origin.parent_channel_id or view.origin.channel_id)
-                if view.origin is not None
-                else None
-            ),
-        )
+        try:
+            created = await routines_store.create_routine(
+                session,
+                tenant_id=caller.tenant_id,
+                created_by_user_id=caller.user_id,
+                agent_id=match.id,
+                agent_name=new.agent_name,
+                cron_expr=new.cron_expr,
+                timezone_=new.timezone,
+                trigger_message=new.trigger_message,
+                enabled=new.enabled,
+                catch_up_policy=new.catch_up_policy,
+                next_fire_at=next_fire_at,
+                destination_kind=new.destination_kind,
+                destination_id=destination_id,
+                channel_id=budget_channel_id,
+                made_in_channel_id=new.made_in_channel_id
+                or (
+                    (view.origin.parent_channel_id or view.origin.channel_id)
+                    if view.origin is not None
+                    else None
+                ),
+                # Without a verified source the store derives one from where it posts.
+                source_channel_id=source.channel_id if source is not None else None,
+                source_thread_id=source.thread_id if source is not None else None,
+                source_provenance_known=True if source is not None else None,
+            )
+        except StoreError as err:
+            raise _store_refusal(err) from err
         await _record(env, session, "created", created)
         return created
 
@@ -520,7 +592,11 @@ async def list_routines(env: RoutineEnv, caller: RoutineCaller) -> list[RoutineR
     viewer = (await _view(env)).viewer
     async with env.sessionmaker() as session:
         rows = await routines_store.list_routines_for_tenant(session, tenant_id=caller.tenant_id)
-    return [row for row in rows if may_read(caller, row) and sees_routine(viewer, row)]
+    return [
+        for_reader(caller, row)
+        for row in rows
+        if may_read(caller, row) and sees_routine(viewer, row)
+    ]
 
 
 async def get_routine(env: RoutineEnv, caller: RoutineCaller, routine_id: uuid.UUID) -> RoutineRow:
@@ -531,7 +607,7 @@ async def get_routine(env: RoutineEnv, caller: RoutineCaller, routine_id: uuid.U
         raise RoutineNotFound()
     if not sees_routine((await _view(env)).viewer, row):
         raise RoutineNotFound()
-    return row
+    return for_reader(caller, row)
 
 
 async def update_routine(
@@ -553,6 +629,17 @@ async def update_routine(
         if row is None or not sees_routine(viewer, row):
             raise RoutineNotFound()
         _require_owner(caller, row)
+        destination_id = change.destination_id
+        if (
+            row.destination_kind == "dm"
+            and (change.clear_destination or change.destination_kind is not None)
+            and row.created_by_user_id != caller.user_id
+        ):
+            raise RoutineRefused("only the authenticated owner can change private delivery")
+        if change.destination_kind == "dm":
+            if row.created_by_user_id is None or row.created_by_user_id != caller.user_id:
+                raise RoutineRefused("only the authenticated owner can select DM delivery")
+            destination_id = row.created_by_user_id
         if change.clear_destination:
             destination_channel_id = None
         elif change.destination_id is not None:
@@ -565,7 +652,7 @@ async def update_routine(
         if change.clear_destination:
             effective_kind, effective_id = None, None
         elif change.destination_kind is not None:
-            effective_kind, effective_id = change.destination_kind, change.destination_id
+            effective_kind, effective_id = change.destination_kind, destination_id
         else:
             effective_kind, effective_id = row.destination_kind, row.destination_id
         policy = await _load_policy(session, tenant_id)
@@ -630,27 +717,32 @@ async def update_routine(
             ma_agent_id=new_agent_id if new_agent_id is not None else row.agent_id,
             destination_channel_id=effective_channel_id,
         )
-        updated = await routines_store.update_routine(
-            session,
-            routine_id,
-            tenant_id=tenant_id,
-            cron_expr=change.cron_expr,
-            timezone_=change.timezone,
-            trigger_message=change.trigger_message,
-            enabled=change.enabled,
-            catch_up_policy=change.catch_up_policy,
-            agent_id=new_agent_id,
-            agent_name=change.agent_name if new_agent_id is not None else None,
-            next_fire_at=next_fire_at,
-            destination_kind=change.destination_kind,
-            destination_id=change.destination_id,
-            clear_destination=change.clear_destination,
-            channel_id=new_destination_channel_id,
-        )
+        try:
+            updated = await routines_store.update_routine(
+                session,
+                routine_id,
+                tenant_id=tenant_id,
+                expected_updated_at=row.updated_at,
+                cron_expr=change.cron_expr,
+                timezone_=change.timezone,
+                trigger_message=change.trigger_message,
+                enabled=change.enabled,
+                catch_up_policy=change.catch_up_policy,
+                agent_id=new_agent_id,
+                agent_name=change.agent_name if new_agent_id is not None else None,
+                next_fire_at=next_fire_at,
+                destination_kind=change.destination_kind,
+                destination_id=destination_id,
+                clear_destination=change.clear_destination,
+                channel_id=new_destination_channel_id,
+                edited_by=caller.user_id or "unknown",
+            )
+        except StoreError as err:
+            raise _store_refusal(err) from err
         if updated is None:
             raise RoutineNotFound()
         await _record(env, session, "changed", updated)
-        return updated
+        return for_reader(caller, updated)
 
 
 async def set_enabled(
@@ -664,17 +756,29 @@ async def set_enabled(
         if row is None or not sees_routine(viewer, row):
             raise RoutineNotFound()
         _require_owner(caller, row)
-        changed = (
-            await routines_store.resume_routine(
-                session, routine_id, tenant_id=caller.tenant_id, now=env.now()
+        try:
+            changed = (
+                await routines_store.resume_routine(
+                    session,
+                    routine_id,
+                    tenant_id=caller.tenant_id,
+                    now=env.now(),
+                    expected_updated_at=row.updated_at,
+                )
+                if enabled
+                else await routines_store.pause_routine(
+                    session,
+                    routine_id,
+                    tenant_id=caller.tenant_id,
+                    expected_updated_at=row.updated_at,
+                )
             )
-            if enabled
-            else await routines_store.pause_routine(session, routine_id, tenant_id=caller.tenant_id)
-        )
+        except StoreError as err:
+            raise _store_refusal(err) from err
         if changed is None:
             raise RoutineNotFound()
         await _record(env, session, "resumed" if enabled else "paused", changed)
-        return changed
+        return for_reader(caller, changed)
 
 
 async def run_now(env: RoutineEnv, caller: RoutineCaller, routine_id: uuid.UUID) -> RoutineRow:
@@ -698,7 +802,7 @@ async def run_now(env: RoutineEnv, caller: RoutineCaller, routine_id: uuid.UUID)
         if due is None:
             raise RoutineNotFound()
         await _record(env, session, "run_now", due)
-        return due
+        return for_reader(caller, due)
 
 
 async def delete_routine(env: RoutineEnv, caller: RoutineCaller, routine_id: uuid.UUID) -> None:

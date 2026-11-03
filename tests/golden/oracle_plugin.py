@@ -667,10 +667,11 @@ def pytest_runtest_setup(item: Any) -> None:
                 "mcp_settings",
                 "agent_github_app",
                 "on_state",
+                "on_session",
             }
             recorded: dict[str, Any] = {}
             for key, value in kwargs.items():
-                if key in TURN_CONTROL_KWARGS:
+                if key in TURN_CONTROL_KWARGS or key == "repo_memory":
                     continue
                 if key in opaque:
                     recorded[key] = (

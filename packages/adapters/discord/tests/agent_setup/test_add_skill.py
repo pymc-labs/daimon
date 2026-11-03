@@ -273,7 +273,7 @@ async def test_an_unbound_agent_refuses_a_members_form(
 
     interaction.response.send_modal.assert_not_awaited()
     assert (
-        "needs someone with Manage Server"
+        "needs a Daimon admin"
         in interaction.response.send_message.await_args.kwargs["embed"].description
     )
 
@@ -303,7 +303,7 @@ async def test_a_server_default_needs_a_server_admin(
     await _details_view(world, agent)._on_add_skill(member)
     member.response.send_modal.assert_not_awaited()
     assert (
-        "needs someone with Manage Server"
+        "needs a Daimon admin"
         in member.response.send_message.await_args.kwargs["embed"].description
     )
 

@@ -82,7 +82,9 @@ def test_a_turns_controls_name_only_its_own_platform(platform: ChatPlatform, pla
     thread = {"dm": "D1:1" if platform == "slack" else "dm:1", "channel": "T_THREAD"}[place]
     channel = "D1" if place == "dm" else "C_PARENT"
     rendered = render_turn_origin(
-        _origin(platform, parent_channel_id=channel, thread_id=thread), responder_handle="@daimon"
+        _origin(platform, parent_channel_id=channel, thread_id=thread),
+        effective_is_admin=False,
+        responder_handle="@daimon",
     )
     controls = json.loads(rendered.split("\n")[1])
 
@@ -220,6 +222,9 @@ _MAY_NAME: dict[str, frozenset[str]] = {
     "packages/adapters/mcp/daimon/adapters/mcp/tools/direct_messages.py": frozenset(
         {"discord", "slack"}
     ),
+    # Explicit platform availability is required before registration or billing.
+    # Platform-specific start tests lock this refusal to avoid charging without a wake.
+    "packages/adapters/mcp/daimon/adapters/mcp/tools/long_jobs.py": frozenset({"discord"}),
     "packages/adapters/mcp/daimon/adapters/mcp/tools/routines.py": frozenset({"slack"}),
     "packages/adapters/mcp/daimon/adapters/mcp/tools/skill_uploads.py": frozenset(_APPS),
     "packages/adapters/scheduler/daimon/adapters/scheduler/settings.py": frozenset({"discord"}),

@@ -318,6 +318,7 @@ async def test_routine_base_and_new(platform, op, scenario, monkeypatch):
         trace = []
         row = SimpleNamespace(
             id=ROUTINE,
+            updated_at=AT,
             tenant_id=UUID(int=9) if scenario == "wrong_tenant" else TENANT,
             enabled=(op == "pause") != (scenario == "stale"),
             created_by_user_id=(
@@ -380,15 +381,22 @@ async def test_routine_base_and_new(platform, op, scenario, monkeypatch):
             member = MagicMock(spec=discord.Member)
             member.id = USER
             member.guild_permissions.manage_guild = scenario == "admin"
+            member.guild_permissions.administrator = False
             interaction = SimpleNamespace(
                 user=member,
                 guild_id="1",
+                guild=SimpleNamespace(owner_id=None),
                 response=SimpleNamespace(send_message=client.chat_postEphemeral),
             )
             view = SimpleNamespace(
                 state=SimpleNamespace(selected=SimpleNamespace(routine=row)), runtime=runtime
             )
+
+            async def discord_admin(*args, **kwargs):
+                return scenario == "admin"
+
             scope.update(
+                checks=SimpleNamespace(is_guild_admin=discord_admin),
                 pause_routine_via_panel=scope["pause_routine"],
                 resume_routine_via_panel=scope["resume_routine"],
                 _rerender=AsyncMock(side_effect=lambda *a: trace.append("render")),
@@ -422,7 +430,10 @@ async def test_routine_base_and_new(platform, op, scenario, monkeypatch):
             scope.update(
                 card_actor=AsyncMock(
                     return_value=SimpleNamespace(
-                        tenant_id=TENANT, user_id=USER, is_admin=scenario == "admin"
+                        tenant_id=TENANT,
+                        user_id=USER,
+                        is_admin=scenario == "admin",
+                        admin_for=lambda _action: scenario == "admin",
                     )
                 ),
                 store=SimpleNamespace(
@@ -452,6 +463,28 @@ async def test_routine_base_and_new(platform, op, scenario, monkeypatch):
         return trace
 
     expected, actual = await run(old), await run(module)
+    # Routine transitions now pass the revision checked by the permission
+    # callback. The archived handlers predate that CAS argument; every other
+    # effect (including errors, rollback and rendering) remains equivalent.
+    for item in expected:
+        if isinstance(item, tuple) and item[0] == "write":
+            assert "expected_updated_at" not in item[2]
+            item[2]["expected_updated_at"] = AT
+    if scenario == "stale" and op == "resume" and platform in ("slack", "teams"):
+        # Slot-safe cutover refuses a repeated resume instead of replacing the
+        # seeded next slot. The archived handlers wrote and rendered again.
+        assert not any(isinstance(item, tuple) and item[0] == "write" for item in actual)
+        if platform == "slack":
+            refusal = ("refusal", "This routine is already on.", {"channel": "C1", "user": USER})
+            assert refusal in actual
+            assert expected[4][0] == "write"
+            expected = expected[:4] + [refusal] + expected[5:7] + [("response", None)]
+        else:
+            assert ("response", "This routine is already on.") in actual
+            expected = [
+                item for item in expected if not (isinstance(item, tuple) and item[0] == "write")
+            ]
+            expected[-1] = ("response", "This routine is already on.")
     if platform == "discord":
         # Main e7a70df78 reworded these refusals; compare where and how they go.
         expected, actual = (

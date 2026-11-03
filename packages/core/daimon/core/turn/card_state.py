@@ -72,6 +72,8 @@ class CardState:
     started_at: float = 0.0
     cost_str: str | None = None
     balance_str: str | None = None
+    footer_hidden: bool = False
+    """An admin hid the finished-turn footer: the terminal card shows no summary line."""
     text_preview: str | None = None
     """The latest draft line."""
     earlier_drafts: tuple[str, ...] = ()

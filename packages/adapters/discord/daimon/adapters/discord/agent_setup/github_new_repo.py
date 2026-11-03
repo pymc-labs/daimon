@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 import httpx
 from daimon.adapters.discord.agent_setup.github_card_ui import github_embed
 from daimon.adapters.discord.agent_setup.github_home import GitHubLinkView, connect_button_view
-from daimon.adapters.discord.checks import is_guild_admin, is_member_guild_admin
+from daimon.adapters.discord.checks import is_member_guild_admin, is_platform_admin
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.github_credentials import build_multifernet
@@ -79,10 +79,13 @@ async def handle_dm_notice(interaction: discord.Interaction, runtime: DiscordRun
             tenant_id=tenant_id,
             platform="discord",
             platform_user_id=str(interaction.user.id),
-            verified_tenant_admin=True,
+            is_platform_admin=True,
         )
         account_id = await admin_account_for_platform_user(
-            session, tenant_id=tenant_id, external_id=str(interaction.user.id)
+            session,
+            tenant_id=tenant_id,
+            external_id=str(interaction.user.id),
+            is_platform_admin=is_member_guild_admin(member, guild_owner_id=member.guild.owner_id),
         )
     visible: tuple[str, ...] = ()
     if runtime.settings.crypto.keys:
@@ -124,7 +127,9 @@ async def handle_dm_notice(interaction: discord.Interaction, runtime: DiscordRun
                 tenant_id=tenant_id,
                 platform="discord",
                 platform_user_id=str(interaction.user.id),
-                verified_tenant_admin=is_member_guild_admin(member, guild_owner_id=guild.owner_id),
+                is_platform_admin=is_member_guild_admin(
+                    member, guild_owner_id=member.guild.owner_id
+                ),
             )
             url = await connect_link(
                 session,
@@ -132,7 +137,9 @@ async def handle_dm_notice(interaction: discord.Interaction, runtime: DiscordRun
                 tenant_id=tenant_id,
                 platform="discord",
                 platform_user_id=str(interaction.user.id),
-                verified_tenant_admin=is_member_guild_admin(member, guild_owner_id=guild.owner_id),
+                verified_tenant_admin=is_member_guild_admin(
+                    member, guild_owner_id=member.guild.owner_id
+                ),
                 workspace_label=guild.name,
                 requester_label=member.display_name,
                 origin_parent_channel_id=str(interaction.channel_id),
@@ -210,7 +217,7 @@ class NewRepoCard(discord.ui.View):
             or interaction.guild_id is None
             or derive_tenant_uuid(platform="discord", workspace_id=str(interaction.guild_id))
             != self.group.tenant_id
-            or not is_guild_admin(interaction)  # pyright: ignore[reportArgumentType]
+            or not is_platform_admin(interaction)  # pyright: ignore[reportArgumentType]
         ):
             await interaction.response.send_message(
                 embed=build_notice_embed(
@@ -230,7 +237,7 @@ class NewRepoCard(discord.ui.View):
                     tenant_id=self.group.tenant_id,
                     platform="discord",
                     platform_user_id=str(interaction.user.id),
-                    verified_tenant_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
+                    is_platform_admin=is_platform_admin(interaction),  # pyright: ignore[reportArgumentType]
                 )
                 url = await connect_link(
                     session,
@@ -238,7 +245,7 @@ class NewRepoCard(discord.ui.View):
                     tenant_id=self.group.tenant_id,
                     platform="discord",
                     platform_user_id=str(interaction.user.id),
-                    verified_tenant_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
+                    verified_tenant_admin=is_platform_admin(interaction),  # pyright: ignore[reportArgumentType]
                     workspace_label=interaction.guild.name if interaction.guild else None,
                     requester_label=interaction.user.display_name,
                     origin_parent_channel_id=str(interaction.channel_id),
@@ -277,6 +284,7 @@ class NewRepoCard(discord.ui.View):
                     session,
                     tenant_id=self.group.tenant_id,
                     external_id=str(interaction.user.id),
+                    is_platform_admin=is_platform_admin(interaction),
                 )
                 for notice in self.group.notices:
                     await dismiss_notice(
@@ -319,7 +327,7 @@ async def send_pending_notice(
     tenant_id: uuid.UUID,
 ) -> None:
     """Try one queued card after an admin opens the setup panel."""
-    if not is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]
+    if not is_platform_admin(interaction):  # pyright: ignore[reportArgumentType]
         return
     async with runtime.sessionmaker.begin() as session:
         group = await claim_notice_group(session, tenant_id=tenant_id, now=datetime.now(UTC))
@@ -333,6 +341,7 @@ async def send_pending_notice(
                     session,
                     tenant_id=tenant_id,
                     external_id=str(interaction.user.id),
+                    is_platform_admin=is_platform_admin(interaction),
                 )
             except ValueError:
                 account_id = None

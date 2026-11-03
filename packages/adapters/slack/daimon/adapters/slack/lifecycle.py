@@ -77,6 +77,7 @@ from daimon.core.agent_identity import AgentIdentity
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
 from daimon.core.channel_tidy import record_turn_post
+from daimon.core.cost_footer import cost_footer_shown
 from daimon.core.native_footer_cost import native_footer_text
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_alerts import alert_ops
@@ -85,6 +86,7 @@ from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.card_state import CardState as State
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
 from daimon.core.turn.notices import RefusalNouns, fit_notice, render_termination_notice
+from daimon.core.turn.output import OutputGate
 from daimon.core.turn.provider_events import ProviderDraft
 from daimon.core.turn.slots import QUEUE_TIMED_OUT_TEXT
 from daimon.core.turn.state import (
@@ -149,7 +151,7 @@ def _map_sse_event(event: RawMessageStreamEvent) -> EmbedEvent | None:
     return EmbedEvent(kind="message", label=text)
 
 
-class SlackTurnLifecycle:
+class SlackTurnLifecycle(OutputGate):
     """TurnLifecycle implementation for Slack. Created fresh per turn.
 
     Accumulates Block Kit state from SSE events, debounces chat.update at
@@ -207,6 +209,7 @@ class SlackTurnLifecycle:
         self._answer_ts: str | None = None
         self._render_tables = render_tables
         self._client = client
+        self._post_as_agent = self.guarded_output(post_as_agent)
         self._request_id = request_id
         self._sessionmaker = sessionmaker
         self._tenant_id = tenant_id
@@ -338,7 +341,7 @@ class SlackTurnLifecycle:
             kwargs["text"] = text
             if blocks is not None:
                 kwargs["blocks"] = blocks
-        resp = await post_as_agent(self._client, self._identity, **kwargs)
+        resp = await self._post_as_agent(self._client, self._identity, **kwargs)
         ts = cast(str, resp["ts"])
         await self.record_post(ts)
         return ts
@@ -423,7 +426,7 @@ class SlackTurnLifecycle:
                 self._register_pending(self._cancel_key, self._cancel, self._author_id)
                 self._pending_registered = True
             try:
-                resp = await post_as_agent(
+                resp = await self._post_as_agent(
                     self._client,
                     self._identity,
                     on_customized=self._set_header_customized,
@@ -450,6 +453,7 @@ class SlackTurnLifecycle:
             self._last_flush = now
         else:
             # Debounce elapsed — update the status message in place.
+            await self.check_output()
             await self._client.chat_update(  # pyright: ignore[reportUnknownMemberType]
                 channel=self._channel,
                 ts=self._status_ts,
@@ -507,7 +511,7 @@ class SlackTurnLifecycle:
         prior SSE flush.
         """
         if self._status_ts is None:
-            resp = await post_as_agent(
+            resp = await self._post_as_agent(
                 self._client,
                 self._identity,
                 on_customized=self._set_header_customized,
@@ -520,6 +524,7 @@ class SlackTurnLifecycle:
             self._register(self._status_ts, self._cancel, self._author_id)
             await self.record_post(self._status_ts)
         else:
+            await self.check_output()
             await self._client.chat_update(  # pyright: ignore[reportUnknownMemberType]
                 channel=self._channel,
                 ts=self._status_ts,
@@ -528,7 +533,11 @@ class SlackTurnLifecycle:
             )
 
     async def _apply_balance(self) -> None:
+        """Put the money left on the footer, or hide the footer where an admin did."""
         if self._sessionmaker is not None and self._tenant_id is not None:
+            if not await cost_footer_shown(self._sessionmaker, tenant_id=self._tenant_id):
+                self._state = dataclasses.replace(self._state, footer_hidden=True)
+                return
             try:
                 async with self._sessionmaker() as session:
                     footer = await balance_footer(
@@ -738,7 +747,7 @@ class SlackTurnLifecycle:
                         await self._post_or_update(blocks, _notification_text(notification_chunk))
                         current_ts = self._status_ts
                     else:
-                        resp = await post_as_agent(
+                        resp = await self._post_as_agent(
                             self._client,
                             self._identity,
                             channel=self._channel,

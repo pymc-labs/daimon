@@ -161,6 +161,7 @@ async def approve_connected_request(
             target_ma_agent_id=request.ma_agent_id,
             target_name=request.agent_name,
             reason="github_access_ready",
+            attended=True,
             idempotency_key=uuid.uuid5(request.id, "agent-grant"),
             requested_work=request.requested_work,
             available_at=datetime.now(UTC),

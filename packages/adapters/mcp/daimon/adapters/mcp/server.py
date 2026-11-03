@@ -49,6 +49,8 @@ from daimon.adapters.mcp.tools import (
     agent_chat,
     agents,
     environments,
+    fly,
+    long_jobs,
     routines,
     self_edit,
     sessions,
@@ -56,6 +58,7 @@ from daimon.adapters.mcp.tools import (
     time,
     vault,
 )
+from daimon.adapters.mcp.tools.admins import register_admin_tools
 from daimon.adapters.mcp.tools.agent_removal import register_agent_removal_tools
 from daimon.adapters.mcp.tools.agent_tool_rules import register_agent_tool_rule_tools
 from daimon.adapters.mcp.tools.channel_budgets import register_channel_budget_tools
@@ -65,6 +68,7 @@ from daimon.adapters.mcp.tools.channel_rules import register_channel_rule_tools
 from daimon.adapters.mcp.tools.channel_skills import register_channel_skill_tools
 from daimon.adapters.mcp.tools.channels import register_channel_tools
 from daimon.adapters.mcp.tools.cli_token import register_cli_token_tool
+from daimon.adapters.mcp.tools.cost_footer import register_cost_footer_tools
 from daimon.adapters.mcp.tools.credential_requests import register_credential_request_tools
 from daimon.adapters.mcp.tools.github_app import register_github_app_tools
 from daimon.adapters.mcp.tools.github_connect import register_github_connect_tools
@@ -72,6 +76,7 @@ from daimon.adapters.mcp.tools.github_remove_repo import register_github_remove_
 from daimon.adapters.mcp.tools.github_requests import register_github_request_tools
 from daimon.adapters.mcp.tools.github_working_repo import register_github_working_repo_tools
 from daimon.adapters.mcp.tools.here import register_here_tools
+from daimon.adapters.mcp.tools.lead_intake import register_lead_intake_tools
 from daimon.adapters.mcp.tools.media import register_media_tools, register_upload_tool
 from daimon.adapters.mcp.tools.microsoft._access import MicrosoftGraph
 from daimon.adapters.mcp.tools.microsoft.register import register_microsoft_tools
@@ -83,11 +88,13 @@ from daimon.adapters.mcp.tools.promo_codes import register_promo_code_tools
 from daimon.adapters.mcp.tools.promo_issuing import register_promo_issuing_tools
 from daimon.adapters.mcp.tools.propagation import register_propagation_tools
 from daimon.adapters.mcp.tools.publish import register_publish_tools
+from daimon.adapters.mcp.tools.repo_memory import register_repo_memory_tools
 from daimon.adapters.mcp.tools.setup_target import register_setup_target_tools
 from daimon.adapters.mcp.tools.skill_uploads import register_skill_upload_tools
 from daimon.adapters.mcp.tools.task_continuity import register_task_continuity_tools
 from daimon.adapters.mcp.tools.teams._client import build_teams_client
 from daimon.adapters.mcp.tools.tenant_summary import register_tenant_summary_tools
+from daimon.adapters.mcp.tools.thread_model import register_thread_model_tools
 from daimon.adapters.mcp.tools.thread_participation import register_thread_participation_tools
 from daimon.adapters.mcp.tools.tidy import register_tidy_tools
 from daimon.adapters.mcp.tools.timers import register_timer_tools
@@ -374,6 +381,7 @@ def create_mcp_app(
         is_admin_resolver=effective_is_admin_resolver,
         internal_resolver=effective_internal_resolver,
         sessionmaker=effective_sessionmaker,
+        settings=effective_settings,
         operator_rate_limiter=RateLimiter(
             max_requests=effective_settings.mcp.operator_calls_per_minute,
             window=timedelta(minutes=1),
@@ -440,6 +448,7 @@ def create_mcp_app(
     mcp.add_transform(
         AgentChatAwareBM25SearchTransform(
             max_results=5,
+            always_visible=["get_long_job"],
             search_result_serializer=serialize_tools_for_output_markdown,
         )
     )
@@ -488,6 +497,7 @@ def create_mcp_app(
     register_credential_request_tools(mcp, runtime)
     register_setup_target_tools(mcp, runtime)
     register_task_continuity_tools(mcp, runtime)  # hand off a task / start fresh
+    register_thread_model_tools(mcp, runtime)  # switch this conversation's model
     register_github_app_tools(mcp, runtime)
     register_github_connect_tools(mcp, runtime)
     if microsoft is not None:
@@ -497,6 +507,7 @@ def create_mcp_app(
         log.warning("microsoft_accounts.disabled", missing=list(missing))
     register_github_request_tools(mcp, runtime)
     register_github_working_repo_tools(mcp, runtime)
+    register_repo_memory_tools(mcp, runtime)
     register_github_remove_repo_tools(mcp, runtime)
     register_wizard_tools(mcp, runtime)
     skills.register_skill_tools(mcp, runtime)
@@ -506,6 +517,12 @@ def create_mcp_app(
     time.register_time_tools(mcp, runtime)
     register_model_tools(mcp, runtime)  # list_models: names, ids and list prices
     routines.register_routines_tools(mcp, runtime)
+    long_jobs.register_long_job_tools(mcp, runtime)
+    fly.register_fly_tools(mcp, runtime)
+    register_lead_intake_tools(mcp, runtime)
+    from daimon.adapters.mcp.tools.watches import register_watch_tools
+
+    register_watch_tools(mcp, runtime)
     register_timer_tools(mcp, runtime)  # one-shot timers on the wake queue
     register_cli_token_tool(mcp, runtime)
     if any((effective_settings.discord, effective_settings.slack, effective_settings.teams)):
@@ -519,6 +536,7 @@ def create_mcp_app(
     register_publish_tools(mcp, runtime)  # report publish/delete (raises when unconfigured)
     register_propagation_tools(mcp, runtime)  # set/clear agent default
     register_here_tools(mcp, runtime)
+    register_admin_tools(mcp, runtime)
     register_promo_code_tools(mcp, runtime)  # redeem a promo code for tenant credit
     register_channel_rule_tools(mcp, runtime)  # who reads and posts in a channel; where agents run
     register_channel_copy_tools(mcp, runtime)  # archive a closing channel's copy
@@ -526,6 +544,7 @@ def create_mcp_app(
     register_thread_participation_tools(mcp, runtime)  # follow/unfollow threads
     register_progress_plan_tools(mcp, runtime)  # the plan on the progress card, and its switch
     register_plain_text_mentions_tools(mcp, runtime)  # typed "@<name>" starts a turn
+    register_cost_footer_tools(mcp, runtime)  # the line under each finished answer
     register_channel_budget_tools(mcp, runtime)  # per-channel spend budgets
     register_channel_skill_tools(mcp, runtime)  # per-channel extra skills
     register_agent_tool_rule_tools(mcp, runtime)
@@ -538,6 +557,7 @@ def create_mcp_app(
         register_media_tools(
             mcp,
             gemini_client=gemini_client,
+            membership_resolver=runtime.membership_resolver,
             sessionmaker=effective_sessionmaker,
             billing_config=effective_billing_config,
             markup=effective_settings.billing.markup,
@@ -634,6 +654,8 @@ def create_mcp_app(
                 stripe_client=stripe_client,
                 billing_config=effective_billing_config,
                 auth=effective_auth,
+                sessionmaker=effective_sessionmaker,
+                settings=effective_settings,
             ),
             methods=["POST"],
         )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 
 import pytest
@@ -46,6 +47,8 @@ class Pumped:
     def __init__(self, persistence: TurnPersistence) -> None:
         self.persistence = persistence
         self.lease: Lease | None = None
+        self.execution_entered = False
+        self.execution_exited = False
 
     async def __call__(self) -> str:
         self.lease = self.persistence._fence()  # pyright: ignore[reportPrivateUsage]
@@ -63,10 +66,27 @@ def waiter(
     clock: Callable[[], datetime] = lambda: NOW,
     key: str = "waiter",
 ) -> tuple[TurnPersistence, Pumped]:
+    @asynccontextmanager
+    async def execution(lease: Lease) -> AsyncIterator[None]:
+        assert lease == persistence._fence()  # pyright: ignore[reportPrivateUsage]
+        pump.execution_entered = True
+        try:
+            yield
+        finally:
+            pump.execution_exited = True
+
     persistence = TurnPersistence(
-        store, BINDING, SCOPE, operation_key=key, now=clock, lease_wait=wait, ttl=TTL
+        store,
+        BINDING,
+        SCOPE,
+        operation_key=key,
+        now=clock,
+        lease_wait=wait,
+        ttl=TTL,
+        execution_context=execution,
     )
-    return persistence, Pumped(persistence)
+    pump = Pumped(persistence)
+    return persistence, pump
 
 
 async def hold(store: StateStore, *, at: datetime = NOW) -> Lease:
@@ -96,6 +116,7 @@ async def test_waiter_acquires_after_the_holder_releases(
     assert await asyncio.wait_for(task, timeout=5) == "ran"
     assert pump.lease is not None and pump.lease.fence == held.fence + 1
     assert persistence.lease_acquired
+    assert pump.execution_entered and pump.execution_exited
 
 
 async def test_waiter_times_out_at_its_bound_and_leaves_the_holder_alone(
@@ -110,6 +131,7 @@ async def test_waiter_times_out_at_its_bound_and_leaves_the_holder_alone(
         await persistence.run(pump)
 
     assert 0.15 <= asyncio.get_running_loop().time() - started < 3
+    assert not pump.execution_entered and not pump.execution_exited
     assert pump.lease is None and not persistence.lease_acquired
     assert await holder_still_owns(store, held)
 
@@ -129,6 +151,7 @@ async def test_waiter_stopped_while_waiting_releases_nothing_it_does_not_own(
         await asyncio.wait_for(task, timeout=5)
 
     assert pump.lease is None
+    assert not pump.execution_entered and not pump.execution_exited
     assert await holder_still_owns(store, held)
 
 
@@ -146,6 +169,7 @@ async def test_waiter_task_cancelled_while_waiting_releases_nothing_it_does_not_
         await task
 
     assert pump.lease is None
+    assert not pump.execution_entered and not pump.execution_exited
     assert await holder_still_owns(store, held)
 
 
@@ -186,6 +210,7 @@ async def test_a_waiter_whose_binding_was_replaced_meanwhile_does_not_run_on_it(
     with pytest.raises(BindingSuperseded):
         await asyncio.wait_for(task, timeout=5)
     assert pump.lease is None
+    assert not pump.execution_entered and not pump.execution_exited
     # The waiter took and released the lease; it is free for the next turn.
     free = await store.acquire_lease(
         binding_slot(BINDING), holder="next", turn_id="next-root", now=NOW, ttl=TTL
@@ -204,3 +229,53 @@ async def test_without_a_wait_a_busy_lease_is_still_refused(
 
     with pytest.raises(LeaseBusy):
         await persistence.run(Pumped(persistence))
+
+
+async def test_stop_arriving_during_acquisition_never_enters_execution(
+    stores: Callable[[], StateStore], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = stores()
+    await store.put_binding(BINDING, expected_generation=0)
+    cancel = asyncio.Event()
+    persistence, pump = waiter(store, quick(10, cancel))
+    acquire = store.acquire_lease
+
+    async def stopped_acquire(*args: object, **kwargs: object) -> Lease:
+        lease = await acquire(*args, **kwargs)
+        cancel.set()
+        return lease
+
+    monkeypatch.setattr(store, "acquire_lease", stopped_acquire)
+    with pytest.raises(LeaseWaitCancelled):
+        await persistence.run(pump)
+    assert not pump.execution_entered and not pump.execution_exited
+    assert pump.lease is None
+    # Acquisition won the race, but its unused lease was still released.
+    free = await acquire(
+        binding_slot(BINDING), holder="next", turn_id="next-root", now=NOW, ttl=TTL
+    )
+    assert free.fence == 2
+
+
+async def test_expiry_during_acquisition_never_enters_execution(
+    stores: Callable[[], StateStore], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = stores()
+    await store.put_binding(BINDING, expected_generation=0)
+    persistence, pump = waiter(store, quick(0.01))
+    acquire = store.acquire_lease
+
+    async def slow_acquire(*args: object, **kwargs: object) -> Lease:
+        lease = await acquire(*args, **kwargs)
+        await asyncio.sleep(0.02)
+        return lease
+
+    monkeypatch.setattr(store, "acquire_lease", slow_acquire)
+    with pytest.raises(TimeoutError):
+        await persistence.run(pump)
+    assert not pump.execution_entered and not pump.execution_exited
+    assert pump.lease is None
+    free = await acquire(
+        binding_slot(BINDING), holder="next", turn_id="next-root", now=NOW, ttl=TTL
+    )
+    assert free.fence == 2

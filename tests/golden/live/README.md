@@ -178,3 +178,16 @@ whole-record provenance in that document. The 33 recipe bodies, source nodes,
 setup, assertions, judge prompts, statuses, admission and budget bounds remain
 unchanged. This metadata refresh runs no live scenario and changes no canonical
 golden bytes.
+
+## Preview canonical hash refresh
+
+Refresh seventeen `golden_sha256` pins against the merged recordings at preview
+`f9743af21`. The latest canonical changes are admin delegation (#1556,
+`64fcd405f`, nine scenarios), no-credit-yet billing copy (#1446, `50b6d2dbb`,
+one), full/transcript handoff session gates (#1190, `95c1489f2` and `233a1c7af`,
+two), staffing removal (#1366, `cb2371862`, two), MCP sender safety reads
+(#1156, `131bc0245`, one), and MCP execution provenance (#1195, `a8560ce1b`,
+two). With no pin-refresh command in the repository, a one-off script computes
+SHA-256 from each canonical file's raw bytes, exactly as `load_manifest` does,
+and replaces only stale pin fields. No canonical JSON, recipes, statuses or
+assertions change; no scenario is re-recorded or executed live.

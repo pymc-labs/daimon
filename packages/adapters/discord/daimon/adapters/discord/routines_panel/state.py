@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import dataclasses
 import uuid
-from typing import Literal
 
 from daimon.adapters.discord import theme
+from daimon.core.routines import Glyph, derive_glyph
 from daimon.core.stores.domain import RoutineRow
 
 __all__ = [
@@ -22,23 +22,18 @@ __all__ = [
     "state_label",
 ]
 
-Glyph = Literal["⏸", "⏳", "❌", "✅"]
+_COLOR: dict[Glyph, int] = {
+    "⏸": theme.COLOR_PAUSED,
+    "⏳": theme.COLOR_BLURPLE,
+    "❌": theme.COLOR_RED,
+    "✅": theme.COLOR_GREEN,
+}
 
 
 def derive_state(row: RoutineRow) -> tuple[Glyph, int]:
-    """Single-glyph precedence: Paused > Never-run > Error > Success.
-
-    ``record_result`` writes ``last_error`` and ``last_result_tail`` in one
-    UPDATE, clearing ``last_error`` on success — so ``last_error is not None``
-    always reflects the most recent run, never a stale older failure.
-    """
-    if not row.enabled:
-        return "⏸", theme.COLOR_PAUSED
-    if row.last_fired_at is None:
-        return "⏳", theme.COLOR_BLURPLE
-    if row.last_error is not None:
-        return "❌", theme.COLOR_RED
-    return "✅", theme.COLOR_GREEN
+    """`derive_glyph`'s state glyph and the embed accent color that goes with it."""
+    glyph = derive_glyph(row)
+    return glyph, _COLOR[glyph]
 
 
 def picker_label(row: RoutineRow) -> str:

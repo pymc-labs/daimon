@@ -398,7 +398,16 @@ async def test_a_real_turn_revokes_its_credential_however_it_ends(template, monk
         ), "the credential travels only in the MCP server entry"
 
 
-GATED = ("add_skill", "publish_report", "create_notebook_upload_url")
+GATED = (
+    "add_skill",
+    "publish_report",
+    "create_notebook_upload_url",
+    "create_watch",
+    "resume_watch",
+    "rotate_watch_key",
+    "lead_intake_resolve",
+    "set_routine_sandbox_tools",
+)
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
@@ -425,6 +434,17 @@ async def test_gated_and_publishing_tools_stay_unavailable_in_a_template(templat
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
 @pytest.mark.parametrize(
+    "tool_name",
+    [
+        "add_skill",
+        "create_watch",
+        "resume_watch",
+        "rotate_watch_key",
+        "lead_intake_resolve",
+        "set_routine_sandbox_tools",
+    ],
+)
+@pytest.mark.parametrize(
     ("credential", "surface", "refused"),
     [
         # #1313's per-turn template credential and a pinned row's F2-bound one.
@@ -436,7 +456,7 @@ async def test_gated_and_publishing_tools_stay_unavailable_in_a_template(templat
     ],
 )
 async def test_the_server_refuses_gated_tools_for_a_provider_turn_credential(
-    template, credential, surface, refused
+    template, credential, surface, refused, tool_name
 ):
     from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
     from daimon.adapters.mcp.middleware.mcp_identity import (
@@ -479,7 +499,7 @@ async def test_the_server_refuses_gated_tools_for_a_provider_turn_credential(
         ran.append("describe_agent")
         return "ok"
 
-    app.tool(add_skill, name="add_skill")
+    app.tool(add_skill, name=tool_name)
     app.tool(describe_agent, name="describe_agent")
     app.add_transform(AgentChatAwareBM25SearchTransform(max_results=5))
     http = app.http_app()
@@ -508,8 +528,8 @@ async def test_the_server_refuses_gated_tools_for_a_provider_turn_credential(
             )
             return await mcp_session(http, token=token, method="tools/call", params=params)
 
-        gated = await call("add_skill")
-        proxied = await call("add_skill", proxied=True)
+        gated = await call(tool_name)
+        proxied = await call(tool_name, proxied=True)
         harmless = await call("describe_agent", proxied=True)
     finally:
         await identity.drain_audit()
@@ -565,6 +585,9 @@ async def test_a_second_cancel_cannot_abandon_credential_revocation(monkeypatch)
         admission=SimpleNamespace(
             observation=observation,
             account_id=None,
+            grant=None,
+            origin_channel_id=None,
+            origin_thread_id=None,
             agent=SimpleNamespace(id="agent"),
             backend_footer_profile=None,
             backend_revision=None,
@@ -769,6 +792,9 @@ async def test_a_finalizer_outliving_its_wait_stays_referenced_and_its_failure_i
         admission=SimpleNamespace(
             observation=observation,
             account_id=None,
+            grant=None,
+            origin_channel_id=None,
+            origin_thread_id=None,
             agent=SimpleNamespace(id="agent"),
             backend_footer_profile=None,
             backend_revision=None,

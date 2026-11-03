@@ -67,6 +67,10 @@ def test_plain_privacy_summary_plural_and_pause_spacing() -> None:
     )
     preview = PurgePreview(**values)
     assert summary_line(preview) == "1 linked account, 2 routines, saved settings"
+    assert (
+        summary_line(preview.model_copy(update={"watches": PurgePreviewRow(count=2, example=None)}))
+        == "1 linked account, 2 routines, 2 page watches, saved settings"
+    )
     assert summary_line(PurgePreview(**{name: empty for name in values})) == "nothing listed here"
     assert DELETE_PAUSED == (
         "Deleting your account is paused during the event.\n\n"
@@ -926,7 +930,9 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "cli_principals": "linked_principals",
         "platform_principals": "linked_principals",
         "principal_links": "principal_links",
+        "lead_intakes": "lead_intakes",
         "routines": "routines",
+        "watches": "watches",
         "user_configs": "user_configs",
         "accounts": "account",
         "user_skills": "user_skills",
@@ -943,6 +949,7 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "wizard_sessions": "wizard_sessions",
         "message_feedback": "message_feedback",
         "support_escalations": "support_escalations",
+        "daimon_admins": "daimon_admins",
         "channel_admins": "channel_admins",
         "agent_post_requesters": "agent_post_requesters",
         "platform_user_names": "platform_user_names",
@@ -992,7 +999,11 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
     """
     # Tables the orchestrator deletes, keyed by why they are in scope.
     purged: dict[str, str] = {
+        "watches": "owner_account_id FK; explicit erasure also deletes evidence and pending wakes",
+        "watch_notice_receipts": "owner_account_id FK cascade; watches.delete_for_account deletes receipts",
+        "watch_credentials": "owner_account_id FK cascade; watches.delete_for_account deletes keys",
         "selfhosted_resource_operations": "account UUID stored as account_id text",
+        "long_job": "accounts.id FK cascade; cancellation audit cascades from the job",
         "neutral_agent_revisions": "accounts.id FK cascade",
         "neutral_skill_versions": "accounts.id FK cascade",
         "cli_principals": "account_id FK -> accounts.id",
@@ -1011,6 +1022,7 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         "web_people": "account_id FK -> accounts.id",
         "workspace_admins": "account_id FK -> accounts.id",
         # The person's user id leaves every grant; updated_by is SET NULL.
+        "daimon_admins": "subject_id and granted_by are erased by platform principal",
         "channel_admins": "user_ids + updated_by_account_id FK -> accounts.id",
         # Text account_id / principal_id with no FK: erased by `stores.mux_erasure`,
         # except operations against a shared slot, which are counted as retained.
@@ -1029,10 +1041,21 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # Shared setup binding attribution uses SET NULL on creator erasure;
             # deleting the conversation would destroy other participants' work.
             "thread_agent_bindings",
+            # delete_account explicitly removes this person's user-scope directives;
+            # shared entries belong to the repo and retain content with attribution
+            # severed by ON DELETE SET NULL. Never erase other participants' memories.
+            "repo_memory",
             # Active-turn authority is ephemeral, carries no conversation content,
             # and is automatically erased by accounts.id ON DELETE CASCADE.
             # The store tests verify this; it needs no separately reported category.
             "turn_origins",
+            # Owner records cascade with account erasure, including conversation
+            # metadata. Tagged Fly apps then have no registration and are deleted
+            # by the scheduler orphan sweep; Daimon calls lose their owner authority.
+            "compute_sessions",
+            # Background command rows (with their output tail) cascade with the
+            # account and with their session; the machine files go with the app.
+            "compute_tasks",
             # Who may edit an agent: no content, and ON DELETE CASCADE with
             # accounts.id, after which the agent is admin-only again.
             "agent_owner",
@@ -1251,3 +1274,26 @@ async def test_account_purge_removes_selfhosted_receipts_and_keeps_shared_resour
     assert (
         await purge_account(sm=db_session_factory, account_id=first.id)
     ).db.selfhosted_operations == 0
+
+
+async def test_collect_purge_preview_linked_principals_example_omits_platform_names(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await make_platform_principal(
+        db_session,
+        platform="discord",
+        external_id="42",
+        tenant=tenant,
+        account=account,
+    )
+    await db_session.commit()
+
+    preview = await collect_purge_preview(sm=db_session_factory, account_id=account.id)
+
+    assert preview.linked_principals.example is not None
+    assert preview.linked_principals.example == "42", (
+        "linked account examples must not name another chat platform"
+    )

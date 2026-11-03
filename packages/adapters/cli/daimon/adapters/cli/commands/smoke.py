@@ -67,6 +67,7 @@ def smoke_command(
                 resolver_cache=rt.resolver_cache,
                 topup_key=topup_key,
                 markup=rt.settings.billing.markup,
+                tool_safety=rt.settings.tool_safety,
                 timeout_s=timeout,
                 on_stage=on_stage,
             )

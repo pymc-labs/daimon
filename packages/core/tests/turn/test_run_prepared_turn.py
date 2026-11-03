@@ -36,6 +36,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_user_message_event import
 from daimon.core._models import ThreadSession
 from daimon.core.config import McpSettings
 from daimon.core.errors import TurnError
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.stores import usage_events
@@ -44,13 +45,14 @@ from daimon.core.stores.thread_sessions import (
     get_live_thread_session,
     get_thread_session_by_id,
 )
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn import run as run_module
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason, TurnLifecycle
 from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn, bind_recorder
 from daimon.core.turn.run import RunOutcome, _is_dead_session, run_prepared_turn
-from daimon.core.turn.state import TurnState
+from daimon.core.turn.state import TextBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.db import build_test_engine
 from daimon.testing.ma_models import ma_agent, ma_environment
@@ -93,6 +95,37 @@ def _admission(
     )
 
 
+def with_invocation(
+    admission: Admission,
+    tenant_id: uuid.UUID,
+    *,
+    human: bool,
+    external_user_id: str,
+    channel_id: str = "C1",
+    thread_id: str = "thread-1",
+) -> Admission:
+    """A host-admitted principal for tests of signed execution binding."""
+    from daimon.core.authz import AgentRef, Place, Subject, Surface
+    from daimon.core.turn.admission import AdmissionGrant
+
+    place = Place(channel_id=thread_id, parent_channel_id=channel_id)
+    return dataclasses.replace(
+        admission,
+        grant=AdmissionGrant(
+            tenant_id=tenant_id,
+            subject=Subject(platform_user_id=external_user_id),
+            surface=Surface.CHANNEL,
+            turn_place=place,
+            run_place=place,
+            agent=AgentRef.of(admission.agent.name),
+            channel_id=channel_id,
+            thread_id=thread_id,
+            is_dm=False,
+            human_invocation=human,
+        ),
+    )
+
+
 def _deps(
     *,
     sessionmaker: async_sessionmaker[AsyncSession],
@@ -112,6 +145,7 @@ def _deps(
         github_app_id=None,
         github_app_private_key=None,
         public_url=None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
 
@@ -354,6 +388,73 @@ async def test_happy_path_runs_once_and_returns_recovered_false(
     assert outcome.state.error is None, "a clean idle-end-turn run has no error"
     assert outcome.termination is TerminationReason.COMPLETED
     assert len(session_bodies) == 0, "no create_session call on the happy path"
+
+
+@pytest.mark.parametrize("recovers", [False, True])
+async def test_a_failed_memory_state_record_never_fails_a_completed_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    recovers: bool,
+) -> None:
+    from daimon.core.turn import run as run_module
+    from sqlalchemy.exc import OperationalError
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-memory-record",
+        ma_session_id="sess_old",
+    )
+    await db_session.commit()
+
+    attempts: list[str] = []
+
+    async def failing_record(*args: object, session_id: str, **kwargs: object) -> None:
+        attempts.append(session_id)
+        raise OperationalError("upsert repo_memory_sessions", {}, Exception("connection lost"))
+
+    monkeypatch.setattr(run_module, "record_memory_prefix", failing_record)
+    router = _router(session_bodies=[], dead_session_ids={"sess_old"} if recovers else set())
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
+    admission = _admission(account_id=account.id, agent=agent, env=env)
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_old",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+
+    lifecycle = RecordingLifecycle()
+    outcome = await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-memory-record",
+        external_user_id="user-1",
+        user_message="hello",
+        lifecycle=lifecycle,
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+    )
+
+    assert attempts == [outcome.ma_session_id]
+    assert outcome.recovered is recovers
+    assert outcome.state.error is None
+    assert outcome.termination is TerminationReason.COMPLETED
+    assert lifecycle.terminal_failures == []
 
 
 async def test_every_log_line_of_a_turn_names_its_backend(
@@ -1951,6 +2052,7 @@ async def test_cancel_set_before_recovery_starts_aborts_recovery_and_flushes_hel
         billing: object,
         image_blocks: object,
         system_blocks: object = (),
+        context_hook: object = None,
         tool_confirmation: object = None,
         before_send: object = None,
         send_guard: object = None,
@@ -2060,6 +2162,7 @@ async def test_cancel_during_recovery_mirrors_into_the_recovery_turn_and_interru
         billing: object,
         image_blocks: object,
         system_blocks: object = (),
+        context_hook: object = None,
         tool_confirmation: object = None,
         before_send: object = None,
         send_guard: object = None,
@@ -2896,7 +2999,7 @@ async def _run_turn_behind_a_busy_lease(
     *,
     thread_id: str,
     cancel: asyncio.Event,
-    deadline: datetime | None,
+    ceiling_after_s: float | None,
     stop_after_s: float | None = None,
 ) -> _QueuedTurn:
     """Run user B's mux turn on a thread whose lease user A's turn always holds.
@@ -2990,7 +3093,12 @@ async def _run_turn_behind_a_busy_lease(
             reseed_user_message=_reseed,
             recovery_lifecycle=_recovery_lifecycle,
             render_interval_s=0.001,
-            deadline=deadline,
+            # Fixture setup must not consume the lease-wait deadline.
+            deadline=(
+                datetime.now(UTC) + timedelta(seconds=ceiling_after_s)
+                if ceiling_after_s is not None
+                else None
+            ),
         )
         async with sessionmaker() as s:
             rows = list(
@@ -3058,7 +3166,7 @@ async def test_a_turn_queued_behind_a_lease_ends_at_the_ceiling_without_retiring
         monkeypatch,
         thread_id="thread-queued-ceiling",
         cancel=asyncio.Event(),
-        deadline=datetime.now(UTC) + timedelta(seconds=0.5),
+        ceiling_after_s=2.0,
     )
     waited = asyncio.get_running_loop().time() - started
     outcome, rows, requests = queued.outcome, queued.rows, queued.requests
@@ -3087,7 +3195,7 @@ async def test_a_turn_stopped_while_queued_behind_a_lease_ends_as_an_interrupt(
         monkeypatch,
         thread_id="thread-queued-stop",
         cancel=asyncio.Event(),
-        deadline=None,
+        ceiling_after_s=None,
         stop_after_s=0.2,
     )
 
@@ -3406,11 +3514,12 @@ async def main() -> None:
 
 asyncio.run(main())
 """
+    # Interpreter startup and shutdown also run under this outer watchdog.
     result = subprocess.run(
-        [sys.executable, "-c", script], capture_output=True, text=True, timeout=8.0, check=False
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=30.0, check=False
     )
     assert result.returncode == 0, (
-        "a successful archive should finish within eight seconds; "
+        "a successful archive should finish within the subprocess startup allowance; "
         f"stdout={result.stdout!r}, stderr={result.stderr!r}"
     )
 
@@ -3458,13 +3567,26 @@ async def test_orphan_archive_second_cancel_preserves_the_unwinding_error(
         await anthropic_client.close()
 
 
+@pytest.mark.parametrize(
+    "gate_scope,overrides_enabled",
+    [
+        (None, True),
+        ("server", True),
+        ("channel:chan-1", True),
+        ("thread:thread-hook-threading", True),
+        ("server", False),
+    ],
+)
 async def test_the_confirmation_hook_reaches_the_turn_through_the_observing_wrapper(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
+    gate_scope: str | None,
+    overrides_enabled: bool,
 ) -> None:
     """SYS-038 x SYS-081: `run_prepared_turn` observes, `run_prepared_turn_impl`
     runs; the adapter's card hook and `attended` must survive the hop."""
+    from daimon.core.approval_gate import ApprovalGate
     from daimon.core.confirmation import ConfirmationAnswer, ConfirmationPrompt
     from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
     from daimon.core.turn.posture import PolicyApproval
@@ -3483,14 +3605,23 @@ async def test_the_confirmation_hook_reaches_the_turn_through_the_observing_wrap
     router = _router(session_bodies=[], dead_session_ids=set())
     deps = dataclasses.replace(
         _deps(sessionmaker=db_session_factory, router=router),
-        tool_safety=ToolSafetyPolicy(enabled=True),
+        tool_safety=ToolSafetyPolicy(enabled=True, allow_gate_overrides=overrides_enabled),
     )
     prepared = _prepared_turn(
         deps=deps,
-        admission=_admission(
-            account_id=account.id,
-            agent=ma_agent(id="ag_1", tenant_id=tenant.id),
-            env=ma_environment(id="env_1", tenant_id=tenant.id),
+        admission=dataclasses.replace(
+            _admission(
+                account_id=account.id,
+                agent=ma_agent(
+                    id="ag_1",
+                    tenant_id=tenant.id,
+                    mcp_servers=[
+                        {"type": "url", "name": "linear", "url": "https://linear.example/mcp"}
+                    ],
+                ),
+                env=ma_environment(id="env_1", tenant_id=tenant.id),
+            ),
+            approval_gate=ApprovalGate("off", gate_scope, "admin") if gate_scope else None,
         ),
         tenant_id=tenant.id,
         external_user_id="user-1",
@@ -3498,6 +3629,10 @@ async def test_the_confirmation_hook_reaches_the_turn_through_the_observing_wrap
         mapping_id=row.id,
         session_account_id=account.id,
     )
+    from unittest.mock import AsyncMock
+
+    refresh = AsyncMock(return_value=prepared.admission.approval_gate)
+    monkeypatch.setattr("daimon.core.turn.run.refresh_approval_gate", refresh)
     postures: list[object] = []
 
     async def _fake_run_turn(**kwargs: object) -> TurnState:
@@ -3532,7 +3667,1084 @@ async def test_the_confirmation_hook_reaches_the_turn_through_the_observing_wrap
     result = await posture.decide(
         ToolCall(tool_use_id="tu", server_name="linear", tool_name="create_issue")
     )
-    assert result.allow and len(prompts) == 1, "the adapter's card hook answered the write"
+    assert result.allow
+    assert len(prompts) == (0 if gate_scope is not None and overrides_enabled else 1)
+
+
+@pytest.mark.parametrize("attended", [True, False], ids=["chat", "unattended"])
+@pytest.mark.parametrize(
+    "trusted", [("bridge",), (), ("other",)], ids=["trusted", "empty", "other-server-trusted"]
+)
+async def test_a_prepared_turn_reads_trusted_server_annotations_with_the_agent_token(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    trusted: tuple[str, ...],
+    attended: bool,
+) -> None:
+    """The production wiring: `run_prepared_turn` hands the decider a lookup that
+    reads a trusted server's catalogue, so a `readOnlyHint` read runs without
+    a card.
+    With an empty `trusted_annotations`, or one naming another server, the
+    server is never listed and its name decides."""
+    from cryptography.fernet import Fernet, MultiFernet
+    from daimon.core import mcp_tool_annotations
+    from daimon.core.agent_mcp_credentials import ResolvedMcpCredential
+    from daimon.core.confirmation import ConfirmationAnswer, ConfirmationPrompt
+    from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
+    from daimon.core.turn.posture import PolicyApproval
+
+    bridge_url = "https://bridge.example.com/mcp"
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-annotations",
+        ma_session_id="sess_annotations",
+    )
+    await db_session.commit()
+    router = _router(session_bodies=[], dead_session_ids=set())
+    deps = dataclasses.replace(
+        _deps(sessionmaker=db_session_factory, router=router),
+        tool_safety=ToolSafetyPolicy(enabled=True, trusted_annotations=trusted),
+        fernet=MultiFernet([Fernet(Fernet.generate_key())]),
+    )
+    admission = _admission(
+        account_id=account.id,
+        agent=ma_agent(
+            id="ag_1",
+            tenant_id=tenant.id,
+            mcp_servers=[{"name": "bridge", "type": "url", "url": bridge_url}],
+        ),
+        env=ma_environment(id="env_1", tenant_id=tenant.id),
+    )
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_annotations",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+    credential_reads: list[uuid.UUID] = []
+
+    async def _credentials(**kwargs: Any) -> tuple[ResolvedMcpCredential, ...]:
+        credential_reads.append(kwargs["agent_id"])
+        return (ResolvedMcpCredential(mcp_server_url=bridge_url, token="agent-wide", version="v"),)
+
+    tokens: list[str | None] = []
+
+    async def _catalogue(url: str, token: str | None) -> list[dict[str, Any]]:
+        tokens.append(token)
+        return [{"name": "memory_flag_list", "annotations": {"readOnlyHint": True}}]
+
+    monkeypatch.setattr(mcp_tool_annotations, "resolve_agent_mcp_credentials", _credentials)
+    monkeypatch.setattr(mcp_tool_annotations, "read_mcp_catalogue", _catalogue)
+    postures: list[object] = []
+
+    async def _fake_run_turn(**kwargs: object) -> TurnState:
+        postures.append(kwargs["tool_confirmation"])
+        return TurnState()
+
+    monkeypatch.setattr("daimon.core.turn.run.run_turn", _fake_run_turn)
+    prompts: list[ConfirmationPrompt] = []
+
+    async def card(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        prompts.append(prompt)
+        return "denied"
+
+    await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-annotations",
+        external_user_id="user-1",
+        user_message="hello",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+        confirm_write=card,
+        attended=attended,
+    )
+
+    (posture,) = postures
+    assert isinstance(posture, PolicyApproval)
+    result = await posture.decide(
+        ToolCall(tool_use_id="tu", server_name="bridge", tool_name="memory_flag_list")
+    )
+    if "bridge" not in trusted:
+        assert not result.allow and len(prompts) == int(attended), (
+            "the name decides: a noun-first write"
+        )
+        assert tokens == [] and credential_reads == [], "no tools/list for an untrusted server"
+        return
+    assert result.allow and prompts == [], "readOnlyHint ran the read without a card"
+    assert tokens == ["agent-wide"]
+    assert credential_reads == [derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_1")]
+
+
+@pytest.mark.parametrize("microsoft", [False, True], ids=["plain", "selected-tools"])
+async def test_an_unattended_prepared_turn_uses_the_unattended_decider_with_safety_off(
+    microsoft: bool,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review B, finding 6: a fleet worker or wake (attended=False) on a session
+    still asking from an earlier policy gets the explicit off allow for an
+    ordinary call, and Daimon's card-only actions are still refused."""
+    from daimon.core.confirmation import ConfirmationAnswer, ConfirmationPrompt
+    from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
+    from daimon.core.turn.posture import PolicyApproval
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-unattended",
+        ma_session_id="sess_unattended",
+    )
+    await db_session.commit()
+    router = _router(session_bodies=[], dead_session_ids=set())
+    deps = dataclasses.replace(
+        _deps(sessionmaker=db_session_factory, router=router),
+        tool_safety=ToolSafetyPolicy(enabled=False),
+        microsoft_send=microsoft,
+        public_url="https://daimon.example/mcp",
+    )
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=_admission(
+            account_id=account.id,
+            agent=ma_agent(id="ag_1", tenant_id=tenant.id),
+            env=ma_environment(id="env_1", tenant_id=tenant.id),
+        ),
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_unattended",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+    postures: list[object] = []
+
+    async def _fake_run_turn(**kwargs: object) -> TurnState:
+        postures.append(kwargs["tool_confirmation"])
+        return TurnState()
+
+    monkeypatch.setattr("daimon.core.turn.run.run_turn", _fake_run_turn)
+    prompts: list[ConfirmationPrompt] = []
+
+    async def card(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        prompts.append(prompt)
+        return "approved"
+
+    await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-unattended",
+        external_user_id="user-1",
+        user_message="hello",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+        attended=False,
+    )
+
+    (posture,) = postures
+    assert isinstance(posture, PolicyApproval)
+    ordinary = await posture.decide(
+        ToolCall(tool_use_id="tu", server_name="linear", tool_name="create_issue")
+    )
+    assert ordinary.allow, "safety off allows an ordinary third-party call"
+    protected = await posture.decide(
+        ToolCall(
+            tool_use_id="tu2",
+            server_name="daimon-mcp",
+            tool_name="microsoft_send",
+            input={"action": "send_mail"},
+        )
+    )
+    assert not protected.allow and prompts == []
+
+
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
+@pytest.mark.parametrize(
+    ("runtime", "failed_batch"),
+    [
+        ("legacy", None),
+        ("legacy", 1),
+        ("legacy", 2),
+        ("mux", None),
+        ("mux", 1),
+        ("mux-with-read", None),
+        ("mux-without-read", None),
+        ("non-anthropic", None),
+    ],
+)
+async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_read(
+    platform: str,
+    runtime: str,
+    failed_batch: int | None,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.core.mux_backend import managed_agents, resource_ref
+    from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
+    from daimon.core.turn.posture import PolicyApproval
+    from daimon.core.turn.prepare import admitted_session_scope
+    from mux.contracts.config import ConfigRevision, ResolvedBackend
+    from mux.contracts.ids import ChannelRef, ResourceRef
+    from mux.errors import UnsupportedCapability
+    from mux.testing.drivers.anthropic.ma_models import ma_session
+
+    from .conftest import make_end_turn, make_mcp_tool_use, make_requires_action
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    gateable = runtime in ("legacy", "mux", "mux-with-read")
+    agent = ma_agent(
+        id="ag_wake",
+        tenant_id=tenant.id,
+        tools=[
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": "linear",
+                "configs": [],
+                "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+            }
+        ],
+        mcp_servers=[{"type": "url", "name": "linear", "url": "https://linear.example/mcp"}],
+    )
+    snapshot = ma_session(id="sess_wake_gate", agent=agent)
+    order: list[str] = []
+    confirmations: list[dict[str, Any]] = []
+    events = []
+    for i in (1, 2):
+        events.extend(
+            [
+                make_mcp_tool_use(event_id=f"call_{i}", name="get_issue", mcp_server_name="linear"),
+                make_status_idle(
+                    event_id=f"pause_{i}", stop_reason=make_requires_action(event_ids=[f"call_{i}"])
+                ),
+            ]
+        )
+    events.append(make_status_idle(event_id="end", stop_reason=make_end_turn()))
+    wire_events = [event.model_dump(mode="json") for event in events]
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions/sess_wake_gate",
+        lambda r, m: httpx.Response(200, json=snapshot.model_dump(mode="json")),
+    )
+    router.add(
+        "GET", r"/v1/sessions/sess_wake_gate/events/stream", lambda r, m: sse_response(wire_events)
+    )
+    router.add(
+        "GET", r"/v1/sessions/sess_wake_gate/events", lambda r, m: list_response(wire_events)
+    )
+    updates = 0
+
+    def update(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        nonlocal updates
+        updates += 1
+        body = json.loads(request.content)
+        assert body["agent"]["tools"][0]["default_config"]["permission_policy"] == {
+            "type": "always_ask"
+        }
+        if failed_batch is not None and updates == failed_batch + 1:
+            order.append("update refused")
+            return httpx.Response(
+                400,
+                json={
+                    "type": "error",
+                    "error": {"type": "invalid_request_error", "message": "gate refused"},
+                },
+            )
+        order.append("update")
+        return httpx.Response(200, json=snapshot.model_dump(mode="json"))
+
+    def send(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        for event in json.loads(request.content)["events"]:
+            if event["type"] == "user.tool_confirmation":
+                confirmations.append(event)
+                order.append(event["result"])
+            elif event["type"] == "user.message":
+                order.append("message")
+        return send_events_response()
+
+    router.add("POST", r"/v1/sessions/sess_wake_gate", update)
+    router.add("POST", r"/v1/sessions/sess_wake_gate/events", send)
+    deps = dataclasses.replace(
+        _deps(sessionmaker=db_session_factory, router=router),
+        turn_path="legacy" if runtime == "legacy" else "mux",
+        tool_safety=ToolSafetyPolicy(enabled=gateable),
+    )
+    # A timer's genuine chat origin can call MCP hand_off_task. Queueing that
+    # tool's continuation must retain attendance through the destination run.
+    from daimon.adapters.mcp.auth.resolver import AuthIdentity
+    from daimon.adapters.mcp.runtime import McpRuntime
+    from daimon.adapters.mcp.tools.task_continuity import (
+        _hand_off_task_impl,  # pyright: ignore[reportPrivateUsage]
+    )
+    from daimon.core.config import DatabaseSettings, Settings
+    from daimon.core.continuity.continuation import continuation_attended
+    from daimon.core.stores.domain import Role
+    from daimon.core.stores.task_continuations import list_pending_continuations
+    from daimon.core.turn_origin import turn_origin
+    from pydantic import PostgresDsn
+
+    router.add("GET", r"/v1/agents", lambda r, m: list_response([agent.model_dump(mode="json")]))
+    handoff_runtime = McpRuntime(
+        session_factory=db_session_factory,
+        client=deps.anthropic,
+        settings=Settings(
+            database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://test/test"))
+        ),
+        deployment_default=DeploymentDefault(agent_name=agent.name),
+    )
+    async with turn_origin(
+        db_session_factory,
+        tenant_id=tenant.id,
+        account_id=account.id,
+        platform=platform,
+        parent_channel_id="C1",
+        thread_id="wake-gate",
+        responder_ma_agent_id="ag_timer",
+        responder_name="timer-agent",
+        role=Role.USER,
+        attended=False,
+        chat_session_id="timer-session",
+        sender_foreign=False,
+        shared_channel=False,
+    ) as origin:
+        await _hand_off_task_impl(
+            handoff_runtime,
+            AuthIdentity(
+                tenant_id=tenant.id,
+                account_id=account.id,
+                role=Role.USER,
+                platform=platform,
+                platform_user_id="user-1",
+                chat_session_id="timer-session",
+            ),
+            origin_context_id=str(origin.id),
+            agent_id=agent.id,
+            continuation="continue the timer's work",
+        )
+    async with db_session_factory() as session:
+        [queued] = await list_pending_continuations(
+            session, tenant_id=tenant.id, platform=platform, thread_id="wake-gate"
+        )
+    assert queued.reason == "task_handoff" and not queued.attended
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform=platform,
+        thread_id="wake-gate",
+        ma_session_id="sess_wake_gate",
+    )
+    await db_session.commit()
+    admission = _admission(account_id=account.id, agent=agent, env=ma_environment())
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id=row.ma_session_id,
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+    if runtime in ("mux-with-read", "mux-without-read"):
+        scope = admitted_session_scope(admission, tenant_id=tenant.id, session_id=row.ma_session_id)
+        backend = managed_agents(
+            deps.anthropic, scope=scope, resources=frozenset({("session", row.ma_session_id)})
+        )
+
+        def no_read(port: object, *, namespace: str, version: int) -> Any:
+            raise UnsupportedCapability((namespace,), "anthropic.managed_agents")
+
+        if runtime == "mux-without-read":
+            monkeypatch.setattr(backend, "extension", no_read)
+        prepared = dataclasses.replace(
+            prepared,
+            backend=backend,
+            session_ref=resource_ref(backend, "session", row.ma_session_id, scope=scope),
+        )
+    elif runtime == "non-anthropic":
+        revision = ConfigRevision.create(
+            ChannelRef(tenant_id=str(tenant.id), platform=platform, channel_id="C1"),
+            1,
+            ResolvedBackend(
+                backend="openai", profile="openai.conversation_only", model="gpt-6-luna"
+            ),
+        )
+        from mux.contracts.ids import ModelRef
+        from mux.contracts.resources import AgentSpec
+
+        prepared = dataclasses.replace(
+            prepared,
+            # A supported tool-less profile may run, but even an unexpected
+            # provider confirmation must still be refused without a host gate.
+            _native_spec=AgentSpec(
+                name="native-wake", model=ModelRef(provider="openai", id="gpt-6-luna"), tools=()
+            ),
+            admission=dataclasses.replace(
+                admission, backend_revision=revision, backend_revision_origin="channel"
+            ),
+            session_ref=ResourceRef(
+                id=row.ma_session_id,
+                kind="session",
+                provider="openai",
+                account_scope_id="workspace",
+                tenant_id=str(tenant.id),
+                account_id=str(account.id),
+            ),
+        )
+
+        class NativePersistence:
+            lease_acquired = True
+
+            def activate(self) -> contextlib.AbstractContextManager[None]:
+                return contextlib.nullcontext()
+
+        async def native_persistence(*args: Any, **kwargs: Any) -> NativePersistence:
+            return NativePersistence()
+
+        monkeypatch.setattr(run_module, "prepared_persistence", native_persistence)
+
+        async def native_turn(**kwargs: Any) -> TurnState:
+            assert "provider_actions" not in kwargs
+            posture = kwargs["tool_confirmation"]
+            assert isinstance(posture, PolicyApproval)
+            decision = await posture.decide(
+                ToolCall(tool_use_id="native-call", server_name="linear", tool_name="get_issue")
+            )
+            assert not decision.allow and decision.deny_message is not None
+            assert "cannot refresh the conversation's tool safety gate" in decision.deny_message
+            order.append("native denied")
+            return TurnState()
+
+        monkeypatch.setattr(run_module, "run_turn", native_turn)
+
+    async def unused_provider_action(prompt: Any) -> None:
+        raise AssertionError("unattended turns must never invoke a human provider-action hook")
+
+    turn = run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform=platform,
+        thread_id="wake-gate",
+        external_user_id="user-1",
+        user_message="wake up",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        origin="chat",
+        attended=continuation_attended(queued),
+        provider_action=unused_provider_action,
+        render_interval_s=0.001,
+    )
+    if runtime == "mux-without-read":
+        # A Managed Agents session that cannot be read cannot be checked or
+        # constrained, so nothing is sent at all.
+        from daimon.core.turn.errors import AdmissionDenied
+
+        with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+            await turn
+        assert order == []
+        return
+    outcome = await turn
+    if runtime == "non-anthropic":
+        assert order == ["native denied"]
+    elif failed_batch is None:
+        assert outcome.state.error is None
+        assert order == ["update", "message", "update", "allow", "update", "allow"]
+    else:
+        assert outcome.state.error is not None
+        assert order == ["update", "message"] + ["update", "allow"] * (failed_batch - 1) + [
+            "update refused"
+        ]
+        assert len(confirmations) == failed_batch - 1
+
+
+@pytest.mark.parametrize("origin", ["chat"], ids=["wake"])
+@pytest.mark.parametrize("snapshot_kind", ["always_allow", "coordinator"])
+async def test_prepared_runtime_without_session_reads_refuses_before_the_message(
+    origin: Any,
+    snapshot_kind: str,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Managed Agents runtime that cannot read its live session cannot check
+    or constrain it: an always_allow MCP write, or a coordinator roster, would
+    run on the first message. Nothing is sent, no confirmation, no recovery."""
+    from daimon.core.mux_backend import managed_agents, resource_ref
+    from daimon.core.tool_safety import ToolSafetyPolicy
+    from daimon.core.turn.errors import AdmissionDenied
+    from daimon.core.turn.prepare import admitted_session_scope
+    from daimon.testing.ma_models import with_coordinator
+    from mux.drivers.anthropic.sessions_lifecycle import SessionReads
+    from mux.errors import UnsupportedCapability
+    from mux.testing.drivers.anthropic.ma_models import ma_session
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    mapping = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="ungated",
+        ma_session_id="sess_ungated",
+    )
+    await db_session.commit()
+    agent = ma_agent(
+        id="ag_ungated",
+        tools=[
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": "linear",
+                "configs": [],
+                "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+            }
+        ],
+        mcp_servers=[{"type": "url", "name": "linear", "url": "https://linear.example/mcp"}],
+    )
+    live = ma_session(id="sess_ungated", agent=agent)
+    if snapshot_kind == "coordinator":
+        live = with_coordinator(live)
+    requests: list[str] = []
+    router = MARouter()
+
+    def record(request: httpx.Request, _match: re.Match[str]) -> httpx.Response:
+        requests.append(f"{request.method} {request.url.path}")
+        if request.method == "GET":
+            return httpx.Response(200, json=live.model_dump(mode="json"))
+        return send_events_response()
+
+    router.add("GET", r"/v1/sessions/sess_ungated.*", record)
+    router.add("POST", r"/v1/sessions.*", record)
+    deps = dataclasses.replace(
+        _deps(sessionmaker=db_session_factory, router=router),
+        turn_path="mux",
+        tool_safety=ToolSafetyPolicy(enabled=True),
+    )
+    admission = _admission(account_id=account.id, agent=agent, env=ma_environment())
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user",
+        ma_session_id=mapping.ma_session_id,
+        mapping_id=mapping.id,
+        session_account_id=account.id,
+    )
+    scope = admitted_session_scope(admission, tenant_id=tenant.id, session_id=mapping.ma_session_id)
+    backend = managed_agents(
+        deps.anthropic, scope=scope, resources=frozenset({("session", mapping.ma_session_id)})
+    )
+    original_extension = backend.extension
+
+    def extension(port: Any, *, namespace: str, version: int) -> Any:
+        if port is SessionReads:
+            raise UnsupportedCapability((namespace,), "anthropic.managed_agents")
+        return original_extension(port, namespace=namespace, version=version)
+
+    monkeypatch.setattr(backend, "extension", extension)
+    prepared = dataclasses.replace(
+        prepared,
+        backend=backend,
+        session_ref=resource_ref(backend, "session", mapping.ma_session_id, scope=scope),
+    )
+
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        await run_prepared_turn(
+            deps,
+            prepared,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="ungated",
+            external_user_id="user",
+            user_message="wake up",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            reseed_user_message=_reseed,
+            recovery_lifecycle=_recovery_lifecycle,
+            origin=origin,
+            attended=False,
+            render_interval_s=0.001,
+        )
+
+    assert not [r for r in requests if r.startswith("POST")], requests
+
+
+@pytest.mark.parametrize("cancel_during_cleanup", [False, True])
+@pytest.mark.parametrize(
+    "kind,origin_attended,caller_attended",
+    [
+        ("chat", True, True),
+        ("chat", True, False),
+        ("chat", False, True),
+        ("github_access_ready", True, True),
+        ("private_input_applied", True, True),
+    ],
+)
+@pytest.mark.parametrize("path", ["legacy", "mux"])
+async def test_prepared_turn_binds_only_its_recorded_session_origin_grant(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    path: str,
+    cancel_during_cleanup: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    origin_attended: bool,
+    caller_attended: bool,
+) -> None:
+    from daimon.core.session_snapshot import (
+        fingerprint_identity,
+        fingerprint_mutable,
+        snapshot_from_created_session,
+    )
+    from daimon.core.stores.domain import Role
+    from daimon.core.stores.thread_sessions import record_snapshot
+    from daimon.core.stores.turn_origins import create_origin, get_active_origin
+    from daimon.core.turn import persistence as persistence_module
+    from daimon.core.turn_origin import current_execution_origin_id, turn_origin
+    from mux.testing.drivers.anthropic.ma_models import ma_session
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    grant = str(uuid.uuid4())
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-1",
+        ma_session_id="sess_1",
+    )
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    snapshot = snapshot_from_created_session(
+        ma_session(id="sess_1", agent=agent, metadata={"daimon_chat_session_id": grant}),
+        env_sha256=None,
+        env_file_id=None,
+        repo_token_issued_at=None,
+        vault_id="vlt_own",
+        sent_skills=(),
+    )
+    await record_snapshot(
+        db_session,
+        id=row.id,
+        snapshot=snapshot,
+        identity_fingerprint=fingerprint_identity(snapshot),
+        mutable_fingerprint=fingerprint_mutable(snapshot),
+    )
+    stale = await create_origin(
+        db_session,
+        tenant_id=tenant.id,
+        account_id=account.id,
+        platform="discord",
+        parent_channel_id="C1",
+        thread_id="thread-1",
+        responder_ma_agent_id=agent.id,
+        responder_name="daimon",
+        role=Role.USER,
+        configuration_target_ma_agent_id=None,
+        configuration_target_name=None,
+        now=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+        attended=True,
+        chat_session_id=grant,
+        sender_foreign=False,
+        shared_channel=False,
+    )
+    await db_session.commit()
+    router = _router(session_bodies=[], dead_session_ids=set())
+    router.add(
+        "GET",
+        r"/v1/sessions/sess_1",
+        lambda _r, _m: httpx.Response(
+            200, json=ma_session(id="sess_1", agent=agent).model_dump(mode="json")
+        ),
+    )
+    deps = dataclasses.replace(
+        _deps(sessionmaker=db_session_factory, router=router), turn_path=path
+    )
+    admission = with_invocation(
+        _admission(account_id=account.id, agent=agent, env=ma_environment()),
+        tenant.id,
+        human=kind == "chat" and caller_attended,
+        external_user_id="user-1",
+    )
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id=row.ma_session_id,
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+    seen = []
+    entered, cleaning, finish = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    original_bind = run_module.bind_origin_session
+
+    async def bind(db: AsyncSession, **kwargs: Any) -> None:
+        if cancel_during_cleanup and kwargs["chat_session_id"] is None:
+            cleaning.set()
+            await finish.wait()
+        await original_bind(db, **kwargs)
+
+    monkeypatch.setattr(run_module, "bind_origin_session", bind)
+    async with turn_origin(
+        db_session_factory,
+        tenant_id=tenant.id,
+        account_id=account.id,
+        platform="discord",
+        parent_channel_id="C1",
+        thread_id="thread-1",
+        responder_ma_agent_id=agent.id,
+        responder_name="daimon",
+        role=Role.USER,
+        attended=origin_attended,
+        sender_foreign=False,
+        shared_channel=False,
+    ) as origin:
+
+        async def read_origin():
+            async with db_session_factory() as session:
+                return await get_active_origin(
+                    session,
+                    origin_id=origin.id,
+                    tenant_id=tenant.id,
+                    account_id=account.id,
+                    platform="discord",
+                    now=datetime.now(UTC),
+                )
+
+        async def before_send() -> None:
+            bound = await read_origin()
+            assert bound is not None
+            assert bound.chat_session_id == (None if kind == "worker" else grant)
+            assert bound.attended is (
+                origin_attended if kind == "worker" else origin_attended and caller_attended
+            )
+            if kind in ("github_access_ready", "private_input_applied"):
+                assert bound.attended is True
+                assert bound.human_invocation is False
+            assert current_execution_origin_id.get() == (None if kind == "worker" else origin.id)
+            async with db_session_factory() as db:
+                previous = await get_active_origin(
+                    db,
+                    origin_id=stale.id,
+                    tenant_id=tenant.id,
+                    account_id=account.id,
+                    platform="discord",
+                    now=datetime.now(UTC),
+                )
+            assert previous is not None
+            assert previous.chat_session_id == (grant if kind == "worker" else None)
+            seen.append(bound.id)
+            if cancel_during_cleanup:
+                entered.set()
+                await asyncio.Event().wait()
+
+        invocation = run_prepared_turn(
+            deps,
+            prepared,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-1",
+            external_user_id="user-1",
+            user_message="hello",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            reseed_user_message=_reseed,
+            recovery_lifecycle=_recovery_lifecycle,
+            attended=caller_attended,
+            # Continuation reasons decide the grant; their rendering context stays chat.
+            origin="worker" if kind == "worker" else "chat",
+            render_interval_s=0.001,
+            before_send=before_send,
+        )
+        if cancel_during_cleanup:
+            task = asyncio.create_task(invocation)
+            try:
+                async with asyncio.timeout(5):
+                    await entered.wait()
+                    task.cancel()
+                    if kind != "worker":
+                        await cleaning.wait()
+                        task.cancel()
+                    finish.set()
+                    with pytest.raises(asyncio.CancelledError):
+                        await task
+            finally:
+                finish.set()
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                # A second cancel releases the caller before persistence cleanup finishes.
+                await asyncio.gather(*tuple(persistence_module._PENDING_FINALIZERS))
+        else:
+            outcome = await invocation
+            assert outcome.state.error is None
+        released = await read_origin()
+        assert released is not None and released.chat_session_id is None
+    assert seen == [origin.id]
+
+
+@pytest.mark.parametrize(("origin", "entry_point"), [("chat", "wake")])
+@pytest.mark.parametrize("unconstrainable", ["with_coordinator", "with_hidden_capability"])
+async def test_unattended_prepared_turn_refuses_a_coordinator_and_builtins(
+    origin: Any,
+    entry_point: str,
+    unconstrainable: str,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wakes and fleet workers gate through their own entry point's capability policy.
+
+    The gate the driver runs before the message refuses a coordinator session
+    before any update; the decider always refuses built-in calls.
+    """
+    from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
+    from daimon.core.turn import mutation_gate
+    from daimon.core.turn.errors import AdmissionDenied
+    from daimon.core.turn.posture import PolicyApproval
+    from daimon.core.turn.unattended import session_gate
+    from mux.testing.drivers.anthropic.ma_models import ma_session
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-coordinator",
+        ma_session_id="sess_coordinator",
+    )
+    await db_session.commit()
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    from daimon.testing import ma_models
+
+    snapshot = getattr(ma_models, unconstrainable)(ma_session(id="sess_coordinator", agent=agent))
+    updates: list[object] = []
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions/sess_coordinator$",
+        lambda _r, _m: httpx.Response(200, json=snapshot.model_dump(mode="json")),
+    )
+    router.add(
+        "POST",
+        r"/v1/sessions/sess_coordinator$",
+        lambda r, _m: updates.append(r) or httpx.Response(500),
+    )
+    deps = dataclasses.replace(
+        _deps(sessionmaker=db_session_factory, router=router),
+        tool_safety=ToolSafetyPolicy(enabled=True),
+    )
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=_admission(
+            account_id=account.id, agent=agent, env=ma_environment(id="env_1", tenant_id=tenant.id)
+        ),
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_coordinator",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+    gates: list[object] = []
+    monkeypatch.setattr(
+        run_module,
+        "session_gate",
+        lambda *args, **kwargs: (
+            gates.append(kwargs["entry_point"]) or session_gate(*args, **kwargs)
+        ),
+    )
+    postures: list[object] = []
+    refusals: list[BaseException] = []
+
+    async def _fake_run_turn(**kwargs: object) -> TurnState:
+        postures.append(kwargs["tool_confirmation"])
+        gate = mutation_gate.unattended_gate.get()
+        assert gate is not None
+        try:
+            await gate()
+        except AdmissionDenied as err:
+            refusals.append(err)
+        return TurnState()
+
+    monkeypatch.setattr("daimon.core.turn.run.run_turn", _fake_run_turn)
+    await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-coordinator",
+        external_user_id="user-1",
+        user_message="wake up",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+        attended=False,
+        origin=origin,
+    )
+
+    assert gates == [entry_point]
+    assert [getattr(e, "reason", None) for e in refusals] == ["backend_unsupported"]
+    assert updates == []
+    (posture,) = postures
+    assert isinstance(posture, PolicyApproval)
+    bash = await posture.decide(ToolCall(tool_use_id="tu", server_name=None, tool_name="bash"))
+    assert bash.allow is False
+
+
+@pytest.mark.parametrize("origin", ["chat"], ids=["wake"])
+@pytest.mark.parametrize(
+    ("server", "enabled"),
+    [("linear", False), ("daimon-mcp", True), ("daimon-mcp", False)],
+    ids=["foreign-safety-off", "trusted-safety-on", "trusted-safety-off"],
+)
+async def test_unattended_prepared_turn_makes_every_mcp_call_pause(
+    origin: Any,
+    server: str,
+    enabled: bool,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wakes and fleet workers: trusted Daimon tools, and foreign ones with
+    safety off, pause before running; the decider allows them as before."""
+    from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
+    from daimon.core.turn import mutation_gate
+    from daimon.core.turn.posture import PolicyApproval
+    from mux.testing.drivers.anthropic.ma_models import ma_session
+
+    public_url = "https://daimon.example/mcp"
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-mcp",
+        ma_session_id="sess_mcp",
+    )
+    await db_session.commit()
+    url = public_url if server == "daimon-mcp" else "https://linear.example/mcp"
+    agent = ma_agent(
+        id="ag_1",
+        tenant_id=tenant.id,
+        tools=[
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": server,
+                "configs": [
+                    {
+                        "name": "list_agents",
+                        "enabled": True,
+                        "permission_policy": {"type": "always_allow"},
+                    }
+                ],
+                "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+            }
+        ],
+        mcp_servers=[{"type": "url", "name": server, "url": url}],
+    )
+    snapshot = ma_session(id="sess_mcp", agent=agent)
+    updates: list[dict[str, Any]] = []
+
+    def update(request: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        updates.append(json.loads(request.content)["agent"])
+        return httpx.Response(200, json=snapshot.model_dump(mode="json"))
+
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions/sess_mcp$",
+        lambda _r, _m: httpx.Response(200, json=snapshot.model_dump(mode="json")),
+    )
+    router.add("POST", r"/v1/sessions/sess_mcp$", update)
+    deps = dataclasses.replace(
+        _deps(sessionmaker=db_session_factory, router=router),
+        tool_safety=ToolSafetyPolicy(enabled=enabled),
+        public_url=public_url,
+    )
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=_admission(
+            account_id=account.id, agent=agent, env=ma_environment(id="env_1", tenant_id=tenant.id)
+        ),
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_mcp",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+    postures: list[object] = []
+
+    async def _fake_run_turn(**kwargs: object) -> TurnState:
+        postures.append(kwargs["tool_confirmation"])
+        gate = mutation_gate.unattended_gate.get()
+        assert gate is not None
+        await gate()
+        return TurnState()
+
+    monkeypatch.setattr("daimon.core.turn.run.run_turn", _fake_run_turn)
+    await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-mcp",
+        external_user_id="user-1",
+        user_message="wake up",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+        attended=False,
+        origin=origin,
+    )
+
+    [sent] = updates
+    [toolset] = sent["tools"]
+    assert toolset["default_config"]["permission_policy"] == {"type": "always_ask"}
+    assert all(c["permission_policy"] == {"type": "always_ask"} for c in toolset["configs"])
+    (posture,) = postures
+    assert isinstance(posture, PolicyApproval)
+    decision = await posture.decide(
+        ToolCall(tool_use_id="tu", server_name=server, tool_name="list_agents")
+    )
+    assert decision.allow
 
 
 async def test_a_card_posted_inside_the_turn_never_shows_a_time_past_its_deadline(
@@ -3618,3 +4830,446 @@ async def test_a_card_posted_inside_the_turn_never_shows_a_time_past_its_deadlin
     assert prompt.expires_at <= deadline - CARD_TURN_MARGIN
     assert prompt.expires_at > deadline - CARD_TURN_MARGIN - timedelta(seconds=5)
     assert current_turn_deadline.get() is None
+
+
+@pytest.mark.parametrize("waiter_end", ["acquire", "stop", "cancel"])
+async def test_queued_attended_turn_cannot_borrow_or_revoke_unattended_holders_grant(
+    db_committing_engine: AsyncEngine,
+    db_clean: None,
+    monkeypatch: pytest.MonkeyPatch,
+    waiter_end: str,
+) -> None:
+    """Two real mux executions share a Postgres slot and a signed session grant."""
+    from daimon.core.session_snapshot import (
+        fingerprint_identity,
+        fingerprint_mutable,
+        snapshot_from_created_session,
+    )
+    from daimon.core.stores import mux_state
+    from daimon.core.stores.domain import Role
+    from daimon.core.stores.thread_sessions import record_snapshot
+    from daimon.core.stores.turn_origins import get_active_origin, get_session_origin
+    from daimon.core.turn_origin import current_execution_origin_id, turn_origin
+    from mux.state.lease import LeaseBusy
+    from mux.testing.drivers.anthropic.ma_models import ma_session
+
+    sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
+    async with sessions.begin() as db_session:
+        tenant = await make_tenant(db_session)
+        account = await make_account(db_session, tenant=tenant)
+        grant = str(uuid.uuid4())
+        row = await make_thread_session(
+            db_session,
+            tenant=tenant,
+            account=account,
+            platform="discord",
+            thread_id="thread-1",
+            ma_session_id="sess_1",
+        )
+        agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+        snapshot = snapshot_from_created_session(
+            ma_session(id="sess_1", agent=agent, metadata={"daimon_chat_session_id": grant}),
+            env_sha256=None,
+            env_file_id=None,
+            repo_token_issued_at=None,
+            vault_id="vlt_own",
+            sent_skills=(),
+        )
+        await record_snapshot(
+            db_session,
+            id=row.id,
+            snapshot=snapshot,
+            identity_fingerprint=fingerprint_identity(snapshot),
+            mutable_fingerprint=fingerprint_mutable(snapshot),
+        )
+    sent: list[tuple[str, list[dict[str, object]]]] = []
+    router = _router(session_bodies=[], dead_session_ids=set(), sent_batches=sent)
+    router.add(
+        "GET",
+        r"/v1/sessions/sess_1",
+        lambda _r, _m: httpx.Response(
+            200, json=ma_session(id="sess_1", agent=agent).model_dump(mode="json")
+        ),
+    )
+    deps = dataclasses.replace(_deps(sessionmaker=sessions, router=router), turn_path="mux")
+    admission = _admission(account_id=account.id, agent=agent, env=ma_environment())
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id=row.ma_session_id,
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+    running = {name: asyncio.Event() for name in ("holder", "waiter")}
+    finish = {name: asyncio.Event() for name in running}
+    ids: dict[str, uuid.UUID] = {}
+    queued = asyncio.Event()
+    stop = asyncio.Event()
+    real_acquire = mux_state.PostgresStateStore.acquire_lease
+    real_release = mux_state.PostgresStateStore.release_lease
+    released: list[uuid.UUID] = []
+
+    async def observe_acquire(self: Any, slot: Any, **kwargs: Any) -> Any:
+        assert current_execution_origin_id.get() is None
+        try:
+            return await real_acquire(self, slot, **kwargs)
+        except LeaseBusy:
+            queued.set()
+            raise
+
+    async def observe_release(self: Any, lease: Any) -> None:
+        # Revocation must precede release, not happen later in the outer shell.
+        assert current_execution_origin_id.get() is None
+        name = "holder" if lease.turn_id.endswith(":holder") else "waiter"
+        async with sessions() as db:
+            origin = await get_active_origin(
+                db,
+                origin_id=ids[name],
+                tenant_id=tenant.id,
+                account_id=account.id,
+                platform="discord",
+                now=datetime.now(UTC),
+            )
+        assert origin is not None and origin.chat_session_id is None
+        released.append(origin.id)
+        await real_release(self, lease)
+
+    monkeypatch.setattr(mux_state.PostgresStateStore, "acquire_lease", observe_acquire)
+    monkeypatch.setattr(mux_state.PostgresStateStore, "release_lease", observe_release)
+
+    async def assert_grant(name: str) -> None:
+        async with sessions() as db:
+            active = await get_session_origin(
+                db,
+                tenant_id=tenant.id,
+                account_id=account.id,
+                platform="discord",
+                chat_session_id=grant,
+                now=datetime.now(UTC),
+            )
+            own = await get_active_origin(
+                db,
+                origin_id=ids[name],
+                tenant_id=tenant.id,
+                account_id=account.id,
+                platform="discord",
+                now=datetime.now(UTC),
+            )
+            if name == "holder" and "waiter" in ids:
+                waiter = await get_active_origin(
+                    db,
+                    origin_id=ids["waiter"],
+                    tenant_id=tenant.id,
+                    account_id=account.id,
+                    platform="discord",
+                    now=datetime.now(UTC),
+                )
+                assert waiter is None or waiter.chat_session_id is None
+        assert own is not None and own.chat_session_id == grant
+        assert active is not None and active.id == ids[name]
+        assert active.attended is (name == "waiter")
+
+    async def run(name: str) -> RunOutcome:
+        async with turn_origin(
+            sessions,
+            tenant_id=tenant.id,
+            account_id=account.id,
+            platform="discord",
+            parent_channel_id="C1",
+            thread_id="thread-1",
+            responder_ma_agent_id=agent.id,
+            responder_name="daimon",
+            role=Role.USER,
+            attended=name == "waiter",
+            sender_foreign=False,
+            shared_channel=False,
+        ) as origin:
+            ids[name] = origin.id
+
+            async def before_send() -> None:
+                assert current_execution_origin_id.get() == ids[name]
+                await assert_grant(name)
+                running[name].set()
+                await finish[name].wait()
+
+            admitted = with_invocation(
+                prepared.admission, tenant.id, human=name == "waiter", external_user_id="user-1"
+            )
+            return await run_prepared_turn(
+                deps,
+                dataclasses.replace(prepared, admission=admitted),
+                tenant_id=tenant.id,
+                platform="discord",
+                thread_id="thread-1",
+                external_user_id="user-1",
+                user_message=name,
+                lifecycle=RecordingLifecycle(),
+                cancel=stop if name == "waiter" else asyncio.Event(),
+                reseed_user_message=_reseed,
+                recovery_lifecycle=_recovery_lifecycle,
+                attended=name == "waiter",
+                origin="chat",
+                operation_key=name,
+                render_interval_s=0.001,
+                before_send=before_send,
+            )
+
+    tasks = [asyncio.create_task(run("holder"))]
+    try:
+        await asyncio.wait_for(running["holder"].wait(), timeout=30)
+        tasks.append(asyncio.create_task(run("waiter")))
+        await asyncio.wait_for(queued.wait(), timeout=30)
+        assert not running["waiter"].is_set()
+        await assert_grant("holder")
+        assert sent == [], "neither blocked pump has sent input"
+        if waiter_end == "acquire":
+            finish["holder"].set()
+            assert (await asyncio.wait_for(tasks[0], timeout=30)).state.error is None
+            await asyncio.wait_for(running["waiter"].wait(), timeout=30)
+            await assert_grant("waiter")
+            assert released == [ids["holder"]]
+            finish["waiter"].set()
+            assert (await asyncio.wait_for(tasks[1], timeout=30)).state.error is None
+            assert released == [ids["holder"], ids["waiter"]]
+            assert len(sent) == 2
+        else:
+            if waiter_end == "stop":
+                stop.set()
+                outcome = await asyncio.wait_for(tasks[1], timeout=30)
+                assert outcome.state.termination == TerminationReason.INTERRUPTED
+            else:
+                tasks[1].cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await tasks[1]
+            assert not running["waiter"].is_set()
+            assert released == [], "a waiter never releases the holder's lease"
+            await assert_grant("holder")
+            assert sent == []
+            finish["holder"].set()
+            assert (await asyncio.wait_for(tasks[0], timeout=30)).state.error is None
+            assert released == [ids["holder"]]
+            assert len(sent) == 1
+        async with sessions() as db:
+            assert (
+                await get_session_origin(
+                    db,
+                    tenant_id=tenant.id,
+                    account_id=account.id,
+                    platform="discord",
+                    chat_session_id=grant,
+                    now=datetime.now(UTC),
+                )
+                is None
+            )
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
+async def test_job_completion_wake_only_reads_job_and_restores_parent_tools(
+    db_session,
+    db_session_factory,
+    platform,
+):
+    from daimon.core.stores.task_continuations import record_continuation
+    from mux.testing.drivers.anthropic.ma_models import ma_session
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    allow = {"enabled": True, "permission_policy": {"type": "always_allow"}}
+    agent = ma_agent(
+        id="agent_job_parent",
+        tools=[
+            {"type": "agent_toolset_20260401", "default_config": allow, "configs": []},
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": "daimon-mcp",
+                "default_config": allow,
+                "configs": [{"name": "start_long_job", **allow}],
+            },
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": "linear",
+                "default_config": allow,
+                "configs": [],
+            },
+        ],
+        mcp_servers=[
+            {"type": "url", "name": "daimon-mcp", "url": "https://daimon.example/mcp"},
+            {"type": "url", "name": "linear", "url": "https://linear.example/mcp"},
+        ],
+    )
+    snapshot = ma_session(id="ses_job_parent", agent=agent)
+    state = snapshot.model_dump(mode="json")
+    original_tools, original_servers = (
+        list(state["agent"]["tools"]),
+        list(state["agent"]["mcp_servers"]),
+    )
+    mapping = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform=platform,
+        thread_id="job-thread",
+        ma_session_id=snapshot.id,
+    )
+    wake = await record_continuation(
+        db_session,
+        tenant_id=tenant.id,
+        platform=platform,
+        parent_channel_id="channel",
+        thread_id="job-thread",
+        requester_account_id=account.id,
+        requester_external_user_id="owner",
+        target_ma_agent_id=agent.id,
+        target_name=agent.name,
+        reason="job_finished",
+        idempotency_key=uuid.uuid4(),
+        requested_work="Read the completed job",
+        attended=False,
+        available_at=datetime.now(UTC),
+    )
+    await db_session.commit()
+    at_send = []
+    router = MARouter()
+    router.add(
+        "GET", r"/v1/sessions/ses_job_parent$", lambda _r, _m: httpx.Response(200, json=state)
+    )
+    idle = make_status_idle(event_id="job_wake_done").model_dump(mode="json")
+    router.add(
+        "GET", r"/v1/sessions/ses_job_parent/events/stream$", lambda _r, _m: sse_response([idle])
+    )
+    router.add("GET", r"/v1/sessions/ses_job_parent/events$", lambda _r, _m: list_response([idle]))
+
+    def update(request, _match):
+        state["agent"].update(json.loads(request.content)["agent"])
+        return httpx.Response(200, json=state)
+
+    def send(request, _match):
+        at_send.append(json.loads(json.dumps(state["agent"])))
+        return send_events_response()
+
+    router.add("POST", r"/v1/sessions/ses_job_parent$", update)
+    router.add("POST", r"/v1/sessions/ses_job_parent/events$", send)
+    deps = dataclasses.replace(
+        _deps(sessionmaker=db_session_factory, router=router),
+        public_url="https://daimon.example/mcp",
+        turn_path="legacy",
+    )
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=_admission(account_id=account.id, agent=agent, env=ma_environment()),
+        tenant_id=tenant.id,
+        external_user_id="owner",
+        ma_session_id=snapshot.id,
+        mapping_id=mapping.id,
+        session_account_id=account.id,
+    )
+    try:
+        result = await run_prepared_turn(
+            deps,
+            prepared,
+            tenant_id=tenant.id,
+            platform=platform,
+            thread_id="job-thread",
+            external_user_id="owner",
+            user_message="Read and report",
+            attended=False,
+            job_row=wake,
+            reseed_user_message=_reseed,
+            recovery_lifecycle=_recovery_lifecycle,
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+        )
+        assert result.state.error is None
+        [sent] = at_send
+        assert [server["name"] for server in sent["mcp_servers"]] == ["daimon-mcp"]
+        [builtin] = [t for t in sent["tools"] if t["type"] == "agent_toolset_20260401"]
+        assert not builtin["default_config"]["enabled"]
+        [mcp] = [t for t in sent["tools"] if t["type"] == "mcp_toolset"]
+        assert [c["name"] for c in mcp["configs"] if c["enabled"]] == ["get_long_job"]
+        assert state["agent"]["tools"] == original_tools
+        assert state["agent"]["mcp_servers"] == original_servers
+    finally:
+        await deps.anthropic.close()
+
+
+async def test_attended_accepted_post_with_lost_ack_is_replayed_without_resend(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An ordinary attended legacy turn has no durable send claim to disable retries."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-1",
+        ma_session_id="sess_1",
+    )
+    await db_session.commit()
+    from .conftest import make_agent_message
+
+    answer = make_agent_message(event_id="accepted_answer", text="Accepted exactly once")
+    done = make_status_idle(event_id="accepted_done")
+    router = _router(
+        session_bodies=[],
+        dead_session_ids=set(),
+        events_by_session={
+            "sess_1": [answer.model_dump(mode="json"), done.model_dump(mode="json")]
+        },
+    )
+    accepted_posts: list[httpx.Request] = []
+
+    def accept_then_lose_ack(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/sessions/sess_1/events":
+            accepted_posts.append(request)
+            raise httpx.ReadTimeout(
+                "provider accepted input; acknowledgement lost", request=request
+            )
+        return router.dispatch(request)
+
+    client = build_fake_anthropic(accept_then_lose_ack).with_options(max_retries=8)
+    deps = dataclasses.replace(
+        _deps(sessionmaker=db_session_factory, router=router), anthropic=client, turn_path="legacy"
+    )
+    admission = _admission(
+        account_id=account.id,
+        agent=ma_agent(id="ag_1", tenant_id=tenant.id),
+        env=ma_environment(id="env_1", tenant_id=tenant.id),
+    )
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_1",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+    outcome = await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-1",
+        external_user_id="user-1",
+        user_message="hello",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+    )
+    assert len(accepted_posts) == 1, "lost acknowledgement must never repeat the accepted POST"
+    assert accepted_posts[0].extensions["timeout"]["read"] == 600.0
+    assert client.max_retries == 8, "turn mutation policy must not change the shared client"
+    assert not outcome.recovered and outcome.state.error is None
+    assert outcome.state.content == [TextBlock(kind="text", text="Accepted exactly once")]

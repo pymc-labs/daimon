@@ -48,6 +48,7 @@ from daimon.core.stores import credential_requests as requests_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import McpOAuthFlowRow, Role
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.testing.crypto import make_fernet
 from daimon.testing.db import build_test_engine
 from daimon.testing.factories import make_account, make_tenant
@@ -454,6 +455,7 @@ async def test_a_sign_in_survives_three_turns_mirroring_while_the_grant_is_writt
                 agent_uuid=flow.agent_id,
                 session_factory=factories[nth],
                 fernet=fernet,
+                tool_safety=OPEN_TOOL_SAFETY,
             )
 
         grant_result, *turn_results = await asyncio.gather(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+from daimon.adapters.slack.admin import resolve_is_platform_admin
 from daimon.adapters.slack.agent_setup.github_link import send_link
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.github_panel import connect_link, sync_connect_admin
@@ -22,6 +23,8 @@ async def send_pending_notice(
     response_url: str | None = None,
 ) -> None:
     """Deliver one queued removal notice ephemerally in the setup channel."""
+    if not await resolve_is_platform_admin(client, user_id=user_id):
+        return
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
     async with runtime.sessionmaker.begin() as session:
         notice = await claim_notice(session, tenant_id=tenant_id, now=datetime.now(UTC))
@@ -34,7 +37,7 @@ async def send_pending_notice(
                 tenant_id=tenant_id,
                 platform="slack",
                 platform_user_id=user_id,
-                verified_tenant_admin=True,
+                is_platform_admin=True,
             )
             url = await connect_link(
                 session,

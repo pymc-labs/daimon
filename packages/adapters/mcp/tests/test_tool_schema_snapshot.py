@@ -13,8 +13,10 @@ workers only persist a subset of newly generated snapshots.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import Any, cast
 
+import pytest
 from cryptography.fernet import Fernet
 from daimon.adapters.mcp.hub.app import build_hub_app
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -28,6 +30,7 @@ from daimon.core.config import (
     McpSettings,
     MicrosoftAccountsSettings,
     NotebookSettings,
+    RepoMemorySettings,
     Settings,
     SlackSettings,
     TurnSettings,
@@ -36,7 +39,7 @@ from daimon.core.scope import DeploymentDefault
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from pydantic import HttpUrl, PostgresDsn, SecretStr
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from syrupy.assertion import SnapshotAssertion
 
 # Tool names whose absence would mean a whole registration group silently
@@ -44,12 +47,24 @@ from syrupy.assertion import SnapshotAssertion
 # leaves a group unconfigured) — checked before the snapshot comparison so
 # that failure mode is loud rather than a quietly smaller snapshot.
 _MUST_CONTAIN = {
+    "create_watch",
+    "list_watches",
+    "lead_intake_resolve",
+    "set_routine_sandbox_tools",
     "create_environment",
     "send_message",
     "sync_skills",
     "set_agent_default",
     "update_agent",
+    "repo_memory_save",
+    "repo_memory_delete",
 }
+
+
+@pytest.fixture
+def schema_sessionmaker() -> async_sessionmaker[AsyncSession]:
+    """Registration and introspection must not connect to a database."""
+    return async_sessionmaker()
 
 
 def _fully_configured_settings() -> Settings:
@@ -57,6 +72,8 @@ def _fully_configured_settings() -> Settings:
     registers — a partially-configured Settings would silently omit tools,
     which is the exact partial-truth failure this test exists to catch."""
     return Settings(
+        _env_file=None,  # pyright: ignore[reportCallIssue]
+        repo_memory=RepoMemorySettings(enabled=True),
         database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
         turn=TurnSettings(path="mux", channel_backends=True, agent_backends=True),
         anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
@@ -116,8 +133,18 @@ def _normalize_snapshot_value[T](value: T) -> T:
     return value
 
 
+@pytest.fixture
+async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Registry introspection constructs an engine but never opens a connection."""
+    engine = create_async_engine("postgresql+asyncpg://placeholder:placeholder@localhost/unused")
+    try:
+        yield async_sessionmaker(engine)
+    finally:
+        await engine.dispose()
+
+
 async def test_rendered_tool_schema_matches_snapshot(
-    sessionmaker: async_sessionmaker[AsyncSession],
+    schema_sessionmaker: async_sessionmaker[AsyncSession],
     snapshot: SnapshotAssertion,
 ) -> None:
     """The full rendered tool registry — name, description, parameters — is
@@ -126,7 +153,7 @@ async def test_rendered_tool_schema_matches_snapshot(
     network or real key is required."""
     app = create_mcp_app(
         settings=_fully_configured_settings(),
-        sessionmaker=sessionmaker,
+        sessionmaker=schema_sessionmaker,
         auth=StaticTokenVerifier(tokens={}),
         anthropic=build_stub_anthropic(),
     )
@@ -146,11 +173,15 @@ async def test_rendered_tool_schema_matches_snapshot(
     missing = _MUST_CONTAIN - rendered.keys()
     assert not missing, f"expected tool group(s) missing from the rendered registry: {missing}"
 
+    create = next(tool for tool in tools if tool.name == "create_watch")
+    assert create.parameters["properties"]["source"]["const"] == "poll"
+    assert "page_id" not in create.parameters["properties"]
+
     assert rendered == snapshot, "rendered tool schema drifted from the committed snapshot"
 
 
 async def test_rendered_hub_tool_schema_matches_snapshot(
-    sessionmaker: async_sessionmaker[AsyncSession],
+    schema_sessionmaker: async_sessionmaker[AsyncSession],
     snapshot: SnapshotAssertion,
 ) -> None:
     """The hub mounts render a different surface from ``/mcp`` — a smaller tool
@@ -161,7 +192,7 @@ async def test_rendered_hub_tool_schema_matches_snapshot(
     mcp = build_hub_app(
         platform="discord",
         runtime=McpRuntime(
-            session_factory=sessionmaker,
+            session_factory=schema_sessionmaker,
             client=build_stub_anthropic(),
             settings=_fully_configured_settings(),
             deployment_default=DeploymentDefault(environment_name=None),
@@ -216,7 +247,7 @@ def _resolve_ref(schema: dict[str, Any], ref: str) -> dict[str, Any]:
 
 
 async def test_create_environment_exposes_nested_pip_package_list(
-    sessionmaker: async_sessionmaker[AsyncSession],
+    schema_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     """create_environment takes one nested model, and the whole reason a
     prose docstring can be the complete fix for "the model never sets pip
@@ -226,7 +257,7 @@ async def test_create_environment_exposes_nested_pip_package_list(
     just be regenerated around the new (broken) shape."""
     app = create_mcp_app(
         settings=_fully_configured_settings(),
-        sessionmaker=sessionmaker,
+        sessionmaker=schema_sessionmaker,
         auth=StaticTokenVerifier(tokens={}),
         anthropic=build_stub_anthropic(),
     )

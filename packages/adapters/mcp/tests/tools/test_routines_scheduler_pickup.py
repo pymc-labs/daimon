@@ -202,3 +202,42 @@ async def test_disabled_routine_created_via_mcp_tool_is_not_claimed(
     assert all(r.id != row.id for r in claimed), (
         "an enabled=False routine must NOT be claimed even when next_fire_at is past"
     )
+
+
+async def test_owner_dm_created_via_mcp_is_picked_up_without_recipient_channel_lookup(
+    committing_sessionmaker, db_session
+):
+    from dataclasses import replace
+
+    from daimon.core.stores.routines import update_routine
+
+    tenant = await make_tenant(db_session, platform="discord")
+    await db_session.commit()
+    client = _client_resolving("daimon", tenant.id, "agent_a")
+    runtime = _runtime(committing_sessionmaker, client=client)
+    auth = replace(_auth_identity(tenant_id=tenant.id), platform_user_id="123")
+    created = await _create_routine_impl(
+        runtime,
+        auth,
+        agent_name="daimon",
+        cron_expr="*/5 * * * *",
+        timezone="UTC",
+        trigger_message="private summary",
+        destination_kind="dm",
+    )
+    now = datetime.now(UTC).replace(microsecond=0)
+    async with committing_sessionmaker.begin() as session:
+        await update_routine(
+            session,
+            created.id,
+            edited_by=created.created_by_user_id,
+            tenant_id=tenant.id,
+            next_fire_at=now - timedelta(minutes=1),
+        )
+        claimed = await claim_due_fireable(
+            session, now=now, max_age=timedelta(minutes=15), limit=20
+        )
+    assert len(claimed) == 1 and claimed[0].id == created.id
+    assert claimed[0].destination_kind == "dm" and claimed[0].destination_id == "123"
+    assert claimed[0].channel_id is None
+    await client.close()

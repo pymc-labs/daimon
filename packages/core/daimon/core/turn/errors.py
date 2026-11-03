@@ -87,10 +87,12 @@ class AdmissionDenied(DaimonError):
         self,
         *,
         reason: AdmissionDenialReason,
+        detail: str | None = None,
         cause: BackendRefusalCause | None = None,
         provider: str | None = None,
     ) -> None:
-        super().__init__(reason)
+        super().__init__(reason if detail is None else f"{reason}: {detail}")
+        self.detail: str | None = detail
         self.reason: AdmissionDenialReason = reason
         self.cause: BackendRefusalCause | None = cause
         self.provider: str | None = provider

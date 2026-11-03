@@ -13,6 +13,7 @@ id without a root starts a new thread, the way a new post does.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import os
 import re
@@ -417,6 +418,8 @@ class TeamsDriver:
             external_id=workspace_id,
             platform_user_id=user_id,
             is_admin=True,
+            is_platform_admin=True,
+            token_kind="cli",
         )
 
     async def delete_agent(
@@ -505,7 +508,10 @@ class TeamsDriver:
             tenant_id=workspace_id,
         )
         runtime = self._mcp_runtime(router, sessionmaker, teams_client=client)
-        auth = self._auth(tenant_id, workspace_id=workspace_id, user_id=user_id)
+        auth = dataclasses.replace(
+            self._auth(tenant_id, workspace_id=workspace_id, user_id=user_id),
+            chat_session_id="parity-card-session",
+        )
         agent_id = await pin_agent(runtime.client, tenant_id=tenant_id, name=agent_name)
         now = datetime.now(UTC)
         async with sessionmaker.begin() as session:
@@ -525,6 +531,7 @@ class TeamsDriver:
                 shared_channel=False,
                 expires_at=now + timedelta(minutes=30),
                 now=now,
+                chat_session_id="parity-card-session",
             )
         common: dict[str, Any] = {
             "agent_name": agent_name,

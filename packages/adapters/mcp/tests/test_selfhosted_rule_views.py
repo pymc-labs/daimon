@@ -22,7 +22,7 @@ from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.selfhosted_resources import SelfHostedAgents, list_live_agent_facts
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.auth import AccessToken
@@ -47,6 +47,9 @@ async def test_real_neutral_tools_resolve_local_isolation(
     tenant = await make_tenant(db_session, platform="slack")
     foreign = await make_tenant(db_session, platform="slack")
     account = await make_account(db_session, tenant=tenant)
+    await make_platform_principal(
+        db_session, tenant=tenant, account=account, platform="slack", external_id="U_CALLER"
+    )
     await set_access_policy(
         db_session,
         tenant_id=tenant.id,
@@ -195,7 +198,6 @@ async def test_real_neutral_tools_resolve_local_isolation(
             for tool, args in (
                 ("list_timers", {}),
                 ("where_am_i", {"channel_id": "C_HOME"}),
-                ("get_tenant_summary", {}),
             ):
                 with pytest.raises(ToolError, match="agent could not be found"):
                     await client.call_tool(tool, args)
@@ -209,8 +211,6 @@ async def test_real_neutral_tools_resolve_local_isolation(
         assert card.data.agent_home == "C_HOME"
         with pytest.raises(ToolError, match="outside this conversation's home"):
             await client.call_tool("where_am_i", {"channel_id": "C_SECRET"})
-        summary = await client.call_tool("get_tenant_summary", {})
-        channels = {row.channel_id: row for row in summary.data.channels}
-        assert channels["C_HOME"].agent_name == "local"
-        assert channels["C_SECRET"].agent_name is None
+        with pytest.raises(ToolError, match="personal user credential"):
+            await client.call_tool("get_tenant_summary", {})
     await middleware.drain_audit()

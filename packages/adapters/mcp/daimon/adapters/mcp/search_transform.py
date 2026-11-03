@@ -17,6 +17,11 @@ catalog unchanged, letting the visibility filter narrow it to exactly the
 agent-chat-tagged tools. An operator token is narrowed the same way, to the
 tools tagged with its scopes, and lists them directly too.
 
+A chat agent whose daimon toolset enables tools one by one (its identity's
+``daimon_tools``) lists exactly those tools. Managed Agents only exposes the
+names a toolset enables, so a tool reached only through ``call_tool`` would be
+dropped from such an agent unless the list named the proxy too.
+
 Tools that can wait for the person's Approve (`APPROVAL_TOOLS`) stay listed by
 name and refuse the ``call_tool`` proxy. Managed Agents applies a session's
 per-tool ``always_ask`` to the name the model calls; through the proxy that
@@ -106,8 +111,20 @@ class AgentChatAwareBM25SearchTransform(BM25SearchTransform):
             # No active request context (no narrowing info) — use search.
             return await super().transform_tools(tools)
         auth = await ctx.get_state("auth")
+        if isinstance(auth, AuthIdentity) and auth.daimon_tools is not None:
+            return await self._enabled_by_name(tools, auth.daimon_tools)
         if isinstance(auth, AuthIdentity) and (auth.agent_id is not None or auth.is_operator):
             # Narrowed agent or operator session: skip the search collapse so
             # the visibility filter can surface the tools it was narrowed to.
             return tools
         return await super().transform_tools(tools)
+
+    async def _enabled_by_name(self, tools: Sequence[Tool], names: frozenset[str]) -> list[Tool]:
+        """`names` listed directly, with the search proxies only when `names` holds them."""
+        listed = [tool for tool in tools if tool.name in names]
+        proxies = names & {self._search_tool_name, self._call_tool_name}
+        if proxies:
+            listed.extend(
+                tool for tool in await super().transform_tools(tools) if tool.name in proxies
+            )
+        return listed

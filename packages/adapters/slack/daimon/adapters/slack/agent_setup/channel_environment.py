@@ -15,6 +15,7 @@ import anthropic
 import structlog
 from daimon.adapters.slack.admin_caller import admin_caller
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.answering_map import AnsweringMap
 from daimon.core.authz import Subject
 from daimon.core.channel_environments import (
@@ -56,15 +57,16 @@ async def load_picker_subject(
     *,
     tenant_id: uuid.UUID,
     user_id: str,
-    is_admin: bool,
 ) -> Subject:
-    """The caller as `authorize` sees them. `is_admin` is resolved live."""
-    caller = await admin_caller(
-        runtime, client, tenant_id=tenant_id, user_id=user_id, is_admin=is_admin
-    )
+    """The caller as `authorize` sees them, using live native admin authority."""
+    caller = await admin_caller(client, user_id=user_id)
     async with runtime.sessionmaker() as session:
         return await load_live_subject(
-            session, tenant_id=tenant_id, platform="slack", caller=caller
+            session,
+            tenant_id=tenant_id,
+            platform="slack",
+            caller=caller,
+            action=DelegatedAction.ENVIRONMENTS,
         )
 
 
@@ -101,7 +103,7 @@ async def load_environment_picker(
             tenant_id=tenant_id,
             channel_id=channel_id,
             subject=await load_picker_subject(
-                runtime, client, tenant_id=tenant_id, user_id=user_id, is_admin=False
+                runtime, client, tenant_id=tenant_id, user_id=user_id
             ),
         )
     ):

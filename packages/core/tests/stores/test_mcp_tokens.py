@@ -426,10 +426,10 @@ async def test_ephemeral_token_retention_preserves_grace_and_external_history(
 ) -> None:
     from datetime import timedelta
 
+    from daimon.core.admin_actions import BILLING_PANEL_TOKEN_LABEL
     from daimon.core.mcp_auth import (
         CHAT_TOKEN_LABEL_PREFIX,
         HELD_CHAT_TOKEN_LABEL_PREFIX,
-        PANEL_TOKEN_LABEL,
         chat_token_label,
     )
 
@@ -450,7 +450,7 @@ async def test_ephemeral_token_retention_preserves_grace_and_external_history(
     ):
         jti = ids[name] = uuid.uuid4()
         label = (
-            PANEL_TOKEN_LABEL
+            BILLING_PANEL_TOKEN_LABEL
             if name == "panel"
             else "vault-chat:operator-label"
             if name == "external"
@@ -476,7 +476,7 @@ async def test_ephemeral_token_retention_preserves_grace_and_external_history(
             db_session,
             expires_before=now - timedelta(days=1),
             chat_label_prefixes=(CHAT_TOKEN_LABEL_PREFIX, HELD_CHAT_TOKEN_LABEL_PREFIX),
-            panel_label=PANEL_TOKEN_LABEL,
+            panel_label=BILLING_PANEL_TOKEN_LABEL,
         )
         == 4
     )
@@ -488,7 +488,7 @@ async def test_ephemeral_token_retention_preserves_grace_and_external_history(
             db_session,
             expires_before=now - timedelta(days=1),
             chat_label_prefixes=(CHAT_TOKEN_LABEL_PREFIX, HELD_CHAT_TOKEN_LABEL_PREFIX),
-            panel_label=PANEL_TOKEN_LABEL,
+            panel_label=BILLING_PANEL_TOKEN_LABEL,
         )
         == 0
     )

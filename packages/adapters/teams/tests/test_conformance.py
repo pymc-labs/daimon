@@ -244,8 +244,12 @@ async def test_production_mutation_rejects_the_same_independent_platform_fixture
     else:
 
         def flatten(
-            pending: list[TeamsInbound], _author: Callable[[TeamsInbound], str | None]
+            pending: list[TeamsInbound],
+            _author: Callable[[TeamsInbound], str | None],
+            *,
+            separate: Callable[[TeamsInbound], bool] = lambda _: False,
         ) -> list[list[TeamsInbound]]:
+            del separate  # This mutation deliberately ignores all grouping boundaries.
             return [pending] if pending else []
 
         monkeypatch.setattr(app_module, "group_by_author", flatten)

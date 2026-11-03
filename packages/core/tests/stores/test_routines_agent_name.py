@@ -63,8 +63,15 @@ async def test_update_routine_writes_agent_name(
     )
     assert row.agent_name == "daimon", "precondition: row was created with agent_name='daimon'"
 
-    updated = await update_routine(db_session, row.id, tenant_id=tenant_id, agent_name="other")
+    updated = await update_routine(
+        db_session,
+        row.id,
+        edited_by="editor",
+        tenant_id=tenant_id,
+        agent_name="other",
+    )
     assert updated is not None, "update_routine should return the row for an existing id"
+    assert updated.created_by_user_id == "editor", "a legacy routine acquires its behavior author"
     assert updated.agent_name == "other", "update_routine should rewrite agent_name when provided"
 
 
@@ -84,7 +91,13 @@ async def test_update_routine_omits_agent_name_when_none(
     assert row.agent_name == "daimon", "precondition: row was created with agent_name='daimon'"
 
     # Update only cron_expr; agent_name=None should mean "no change" (PATCH semantics).
-    updated = await update_routine(db_session, row.id, tenant_id=tenant_id, cron_expr="*/5 * * * *")
+    updated = await update_routine(
+        db_session,
+        row.id,
+        edited_by=row.created_by_user_id,
+        tenant_id=tenant_id,
+        cron_expr="*/5 * * * *",
+    )
     assert updated is not None
     assert updated.cron_expr == "*/5 * * * *", "cron_expr should be updated"
     assert updated.agent_name == "daimon", (

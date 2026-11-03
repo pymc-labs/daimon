@@ -22,6 +22,7 @@ from daimon.adapters.mcp.tools._ctx import (
 from daimon.adapters.mcp.tools._rule_view import load_isolation_view
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.adapters.mcp.tools._words import admin_noun
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Action
 from daimon.core.channel_skills import REFUSALS, add_skill_to_channel, may_set_channel_skills
 from daimon.core.defaults.loader import load_platform_skills
@@ -96,7 +97,9 @@ async def _target(runtime: McpRuntime, auth: AuthIdentity, channel_id: str) -> t
 
 
 def _require_write(auth: AuthIdentity, channel_id: str) -> None:
-    decision = may_set_channel_skills(mcp_subject(auth, is_admin=auth.is_admin), channel_id)
+    decision = may_set_channel_skills(
+        mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.SKILLS)), channel_id
+    )
     if not decision:
         record_authz_denial(Action.SET_CHANNEL_SKILLS, decision.reason)
         raise ToolError(_needs_skills_admin(auth))
@@ -105,7 +108,7 @@ def _require_write(auth: AuthIdentity, channel_id: str) -> None:
 
 async def _list(runtime: McpRuntime, auth: AuthIdentity, channel_id: str) -> ChannelSkillsResult:
     require_scope(auth, "tenant:read")
-    _require_admin(auth)
+    _require_admin(auth, action=DelegatedAction.SKILLS)
     platform, target = await _target(runtime, auth, channel_id)
     async with runtime.session_factory() as session:
         rows = await store.list_channel_skills(

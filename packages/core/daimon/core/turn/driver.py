@@ -49,7 +49,7 @@ import contextlib
 import dataclasses
 import functools
 import time
-from collections.abc import Awaitable, Callable, Coroutine, Sequence, Set
+from collections.abc import Awaitable, Callable, Coroutine, Iterator, Sequence, Set
 from contextlib import AbstractAsyncContextManager
 from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
@@ -74,8 +74,9 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsUserToolConfirmationEventParams,
 )
 from daimon.core.config import load_turn_settings
+from daimon.core.context_provider import ContextHook, ContextInput
 from daimon.core.errors import TurnError
-from daimon.core.ma import SessionEvent, terminal_stop_reason
+from daimon.core.ma import REPLAY_TIMEOUT_S, SessionEvent, terminal_stop_reason
 from daimon.core.mux_backend import TurnBackendRequest
 from daimon.core.tool_safety import ToolCall
 from daimon.core.turn.approvals import (
@@ -84,7 +85,7 @@ from daimon.core.turn.approvals import (
     pending_confirmation_ids,
     tool_calls_for,
 )
-from daimon.core.turn.ceiling import ceiling_error, remaining_s
+from daimon.core.turn.ceiling import ceiling_error, current_turn_deadline, remaining_s
 from daimon.core.turn.degraded import degraded_failure_message
 from daimon.core.turn.io import (
     LegacyTurnIO,
@@ -95,6 +96,11 @@ from daimon.core.turn.io import (
     turn_io,
 )
 from daimon.core.turn.lifecycle import ReconnectReason, TurnLifecycle, acknowledge, stop_rendering
+from daimon.core.turn.mutation_gate import (
+    initial_send_check,
+    unattended_execution,
+    unattended_gate,
+)
 from daimon.core.turn.outcomes import current_outcome
 from daimon.core.turn.persistence import LeaseWaitCancelled, current_persistence
 from daimon.core.turn.posture import (
@@ -123,7 +129,7 @@ from mux.contracts.events import Event
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.usage import UsageObservation
-from mux.drivers.anthropic import LegacyTurnTransport
+from mux.drivers.anthropic import LegacyTurnTransport, single_attempt_mutation
 from mux.errors import ProviderError
 from tenacity import AsyncRetrying, RetryCallState, retry_if_exception_type
 
@@ -134,7 +140,9 @@ log = structlog.get_logger(__name__)
 # turn ever sent it (and may put back what it would have carried).
 SEND_ATTEMPTED: ContextVar[list[bool] | None] = ContextVar("turn_send_attempted", default=None)
 
-InterruptPhase = Literal["pre-stream", "stream-open", "send-initial", "replay", "reattach"]
+InterruptPhase = Literal[
+    "pre-stream", "stream-open", "send-initial", "replay", "reattach", "confirmation-gate"
+]
 
 # Module-level singleton so `run_turn`'s default arg isn't a function call in
 # the signature (ruff B008) — `RequireApproval()` is a frozen, field-less
@@ -263,10 +271,9 @@ USAGE_RECONCILIATION_TIMEOUT_S: float = 30.0
 async def _bounded(task: asyncio.Task[Any], *, what: str, session_id: str) -> None:
     """Wait for `task` at most `CLEANUP_BUDGET_S`; cancel it after that.
 
-    Never raises and never waits longer than the budget: `asyncio.wait` with a
-    timeout returns instead of raising, and a task still running then is
-    cancelled and left to unwind on its own — its next await raises
-    `CancelledError`, so it does not linger.
+    Child failures are logged; cancellation of the caller still propagates.
+    `asyncio.wait` returns on timeout, and a task still running then is cancelled
+    and left to unwind on its own.
     """
     done, _pending = await asyncio.wait({task}, timeout=CLEANUP_BUDGET_S)
     if task in done:
@@ -285,12 +292,27 @@ async def _bounded(task: asyncio.Task[Any], *, what: str, session_id: str) -> No
     log.warning("turn.cleanup_timed_out", session_id=session_id, step=what)
 
 
-async def _refuse_blocked(io: TurnIO, session_id: str, fresh: list[str], *, message: str) -> None:
-    """Send `deny` for every id in `fresh`, best effort.
+async def _refuse_blocked(
+    io: TurnIO,
+    session_id: str,
+    fresh: list[str],
+    *,
+    message: str,
+    interrupt_unattended: bool = False,
+) -> None:
+    """Leave unattended calls paused on abort; attended cleanup sends denials.
 
-    The session is on a `requires_action` idle, so the send is accepted and
-    the session does not stay paused on calls nobody will answer.
+    Attendance is independent of gate capability. The normal Stop handler
+    interrupts, or cleanup interrupts here on outside cancellation or failure.
+    A denial resumes execution too, even on runtimes without session reads.
     """
+    if unattended_execution.get():
+        # A denial resumes execution too. Once cancellation or a gate failure
+        # ends the decision boundary, leave calls paused and only interrupt.
+        if interrupt_unattended:
+            with contextlib.suppress(_anthropic.APIError, ProviderError, TurnConnectionLost):
+                await io.interrupt(timeout_s=CLEANUP_BUDGET_S)
+        return
     refusals = build_decision_events(
         (tool_use_id, ToolConfirmationResult(allow=False, deny_message=message))
         for tool_use_id in fresh
@@ -312,35 +334,75 @@ async def _decide_or_refuse_on_cancel(
 
     The one place blocked calls are decided, for the live stream and the
     replay/eventless path alike. A cancel — before the decision, or landing
-    in the same tick as it — refuses every fresh id instead and raises
-    `_InterruptInConsume` for the normal interrupt path: a stop request never
+    in the same tick as it — leaves unattended calls paused (or refuses attended
+    calls) and raises `_InterruptInConsume` for the normal interrupt path:
+    a stop request never
     lets an `allow` out.
 
     This function owns the decide task and its cancel waiter. Whatever ends
     the wait — a decision, a cancel, or this coroutine itself being cancelled
-    by the turn ceiling or a caller — the `finally` cancels and joins both, so
+    by the turn ceiling or a caller — cleanup cancels and joins both, so
     a card hook never outlives the turn; the hooks retire their cards on that
-    cancellation. An outside cancellation also refuses the pending ids
-    (shielded, so the refusal lands even though this task is being torn down)
-    before it propagates.
+    cancellation. An outside cancellation also cleans up pending ids: unattended
+    calls stay paused and the session is interrupted; attended calls are refused.
+    Cleanup is shielded before cancellation propagates.
     """
     answered: dict[str, ToolConfirmationResult] = {}
     decide_task = asyncio.create_task(
         _decide_blocked(tool_confirmation, state, fresh, answered), name="turn.decide_blocked"
     )
     cancel_task = asyncio.create_task(cancel.wait(), name="turn.decide_cancel_waiter")
-    # Set once the wait ends on its own (a decision or the cancel event); if
-    # the `finally` runs with it unset, this coroutine is being torn down from
-    # outside (the turn ceiling, a caller) and the pending ids are refused.
-    settled = False
-    ready = False
+    retire_task: asyncio.Task[None] | None = None
+
+    async def join_children() -> None:
+        for task in (decide_task, cancel_task):
+            # A Stop may already have cancelled the decider. Let its cleanup
+            # finish rather than injecting another cancellation into its hooks.
+            if not task.done() and not task.cancelling():
+                task.cancel()
+            await _bounded(task, what="decide_task_join", session_id=session_id)
+
+    async def retire() -> None:
+        nonlocal retire_task
+        # Reuse this task if cancellation interrupts the wait for card cleanup.
+        # _bounded leaves its child alive until the budget expires.
+        if retire_task is None:
+            retire_task = asyncio.create_task(
+                _retire_unsent(
+                    tuple(
+                        result.retire_unsent
+                        for result in answered.values()
+                        if result.allow and result.retire_unsent is not None
+                    ),
+                    session_id=session_id,
+                ),
+                name="turn.retire_unsent_confirmations",
+            )
+        await _bounded(retire_task, what="retire_unsent_confirmations", session_id=session_id)
+
+    async def abort() -> None:
+        await join_children()
+        await retire()
+        await _bounded(
+            asyncio.create_task(
+                _refuse_blocked(
+                    io,
+                    session_id,
+                    fresh,
+                    message="This reply ended before the call was approved; it did not run.",
+                    interrupt_unattended=True,
+                ),
+                name="turn.refuse_blocked",
+            ),
+            what="deadline_refusal",
+            session_id=session_id,
+        )
+
     try:
         await asyncio.wait({decide_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED)
-        settled = True
         if decide_task.done() and not cancel.is_set():
             events = decide_task.result()
-            ready = True
-            return _DecisionBatch(
+            batch = _DecisionBatch(
                 events,
                 tuple(
                     result.retire_unsent
@@ -348,59 +410,55 @@ async def _decide_or_refuse_on_cancel(
                     if result.allow and result.retire_unsent is not None
                 ),
             )
-    finally:
-        # Cleanup is bounded: a card hook retiring its card, or the deny
-        # below, talks to a chat API or MA, and an outage there must not hold
-        # the turn past its ceiling or a Stop. Each step gets
-        # `CLEANUP_BUDGET_S`, then is cancelled and abandoned.
-        for task in (decide_task, cancel_task):
-            if not task.done():
-                task.cancel()
-            await _bounded(task, what="decide_task_join", session_id=session_id)
-        if not ready:
-            await _bounded(
-                asyncio.create_task(
-                    _retire_unsent(
-                        tuple(
-                            result.retire_unsent
-                            for result in answered.values()
-                            if result.allow and result.retire_unsent is not None
-                        ),
-                        session_id=session_id,
-                    ),
-                    name="turn.retire_unsent_confirmations",
+            await join_children()
+            return batch
+        await join_children()
+        await retire()
+        await _bounded(
+            asyncio.create_task(
+                _refuse_blocked(
+                    io,
+                    session_id,
+                    fresh,
+                    message="The user stopped this reply; the call did not run.",
                 ),
-                what="retire_unsent_confirmations",
-                session_id=session_id,
-            )
-        if not settled:
-            await _bounded(
-                asyncio.create_task(
-                    _refuse_blocked(
-                        io,
-                        session_id,
-                        fresh,
-                        message="The reply ended before the call was approved; it did not run.",
-                    ),
-                    name="turn.refuse_blocked",
-                ),
-                what="deadline_refusal",
-                session_id=session_id,
-            )
-    await _bounded(
-        asyncio.create_task(
-            _refuse_blocked(
-                io,
-                session_id,
-                fresh,
-                message="The user stopped the reply; the call did not run.",
+                name="turn.refuse_blocked",
             ),
-            name="turn.refuse_blocked",
-        ),
-        what="stop_refusal",
-        session_id=session_id,
-    )
+            what="stop_refusal",
+            session_id=session_id,
+        )
+    except BaseException:
+        # Cancellation can first arrive during any cleanup await, after the
+        # decision has already settled. Keep the entire handoff inside this
+        # handler, and finish bounded abort cleanup even on repeated cancellation.
+        abort_task = asyncio.create_task(abort(), name="turn.decision_abort")
+        while not abort_task.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.shield(abort_task)
+        abort_task.result()
+        raise
     raise _InterruptInConsume()
+
+
+@contextlib.contextmanager
+def unattended_sends(gate: Callable[[], Awaitable[None]] | None) -> Iterator[None]:
+    """Run unattended, with an optional refresh gate before every send.
+
+    The gate runs before the message and every confirmation batch, including
+    reconnects. A gate that raises stops that send.
+
+    Every send is a single attempt. A missing gate is used only with a
+    refusal posture on runtimes without session reads; abort cleanup still
+    leaves pending calls unanswered and interrupts those runs.
+    """
+    token = unattended_gate.set(gate)
+    execution_token = unattended_execution.set(True)
+    try:
+        with single_attempt_mutation():
+            yield
+    finally:
+        unattended_gate.reset(token)
+        unattended_execution.reset(execution_token)
 
 
 async def _send_decision_batch(
@@ -415,6 +473,24 @@ async def _send_decision_batch(
     try:
         if cancel.is_set():
             raise _InterruptInConsume()
+        if (gate := unattended_gate.get()) is not None:
+
+            async def run_gate() -> None:
+                await gate()
+
+            cancel_task = asyncio.create_task(cancel.wait(), name="turn.gate_cancel_waiter")
+            try:
+                await _await_or_cancel(
+                    run_gate(), cancel_task=cancel_task, phase="confirmation-gate"
+                )
+            except _InterruptedDuringRecovery:
+                raise _InterruptInConsume() from None
+            finally:
+                cancel_task.cancel()
+                with _suppress_task_exc():
+                    await cancel_task
+            if cancel.is_set():
+                raise _InterruptInConsume()
         await io.send(batch.events)
     except BaseException as err:
         await _bounded(
@@ -425,7 +501,11 @@ async def _send_decision_batch(
             what="retire_unsent_confirmations",
             session_id=session_id,
         )
-        if cancel.is_set() or isinstance(err, asyncio.CancelledError | _InterruptInConsume):
+        if (
+            unattended_execution.get()
+            or cancel.is_set()
+            or isinstance(err, asyncio.CancelledError | _InterruptInConsume)
+        ):
             await _bounded(
                 asyncio.create_task(
                     _refuse_blocked(
@@ -433,6 +513,7 @@ async def _send_decision_batch(
                         session_id,
                         fresh,
                         message="The reply ended before the call was approved; it did not run.",
+                        interrupt_unattended=not isinstance(err, _InterruptInConsume),
                     ),
                     name="turn.refuse_blocked",
                 ),
@@ -527,6 +608,18 @@ async def _watch_silence(
 # clients retry reads eight times) could otherwise hold the turn until its
 # ceiling on a single question; a read that runs out is a transient failure.
 _STATUS_READ_TIMEOUT_S = 30.0
+
+# A replay walks the session's whole log, so a long-lived thread can outgrow the
+# default budget. Inside a turn it may use what the ceiling leaves, less this
+# margin, so a replay that runs out ends the turn as itself, not as the ceiling.
+_REPLAY_CEILING_MARGIN_S = 30.0
+
+
+def _replay_timeout_s(now: datetime) -> float:
+    deadline = current_turn_deadline.get()
+    if deadline is None:
+        return REPLAY_TIMEOUT_S
+    return max(REPLAY_TIMEOUT_S, remaining_s(deadline, now=now) - _REPLAY_CEILING_MARGIN_S)
 
 
 _DROPS_WITHOUT_PROGRESS = 2
@@ -705,6 +798,7 @@ async def run_turn(
     anthropic: AsyncAnthropic,
     session_id: str,
     user_message: str,
+    resume_existing: bool = False,
     lifecycle: TurnLifecycle,
     cancel: asyncio.Event,
     render_interval_s: float = 0.05,
@@ -715,6 +809,7 @@ async def run_turn(
     tool_confirmation: ToolConfirmation = _DEFAULT_TOOL_CONFIRMATION,
     image_blocks: Sequence[BetaManagedAgentsImageBlockParam] | None = None,
     system_blocks: Sequence[BetaManagedAgentsSystemContentBlockParam] = (),
+    context_hook: ContextHook | None = None,
     deadline: datetime | None = None,
     before_send: Callable[[], Awaitable[None]] | None = None,
     send_guard: Callable[[], AbstractAsyncContextManager[None]] | None = None,
@@ -808,39 +903,60 @@ async def run_turn(
     # before opening a stream, so `_pump` finalizes it as an upstream error.
     unwedge_failure: list[BaseException | None] = [None]
 
+    context_input = ContextInput()
+
     async def _send_initial() -> None:
+        provider_system = context_input.response.system_fragment
+        privileged = context_hook is not None and context_hook.system_message_supported
+        # Older MA models reject mid-session system events. Follow continuity
+        # framing: deliver the once-only fragment in user input on those models.
+        context_prefix = context_input.response.turn_fragment
+        if provider_system and not privileged:
+            context_prefix = provider_system + "\n\n" + context_prefix
         content: list[BetaManagedAgentsImageBlockParam | BetaManagedAgentsTextBlockParam] = [
             *(image_blocks or []),
-            BetaManagedAgentsTextBlockParam(type="text", text=user_message),
+            BetaManagedAgentsTextBlockParam(
+                type="text",
+                text=f"{context_prefix}\n\n{user_message}" if context_prefix else user_message,
+            ),
         ]
         event: BetaManagedAgentsUserMessageEventParams = {
             "type": "user.message",
             "content": content,
         }
         batch: list[BetaManagedAgentsEventParams] = [event]
-        if system_blocks:
+        combined_system = list(system_blocks)
+        if provider_system and privileged:
+            combined_system.append({"type": "text", "text": provider_system})
+        if combined_system:
             # LAST, and immediately after the user.message: the live API
             # rejects the whole request otherwise (at most one per request,
             # must be final, must follow a user.message / tool result).
             system_event: BetaManagedAgentsSystemMessageEventParams = {
                 "type": "system.message",
-                "content": list(system_blocks),
+                "content": combined_system,
             }
             batch.append(system_event)
         async with send_guard() if send_guard is not None else contextlib.nullcontext():
             if before_send is not None:
                 # A last check by the caller, after the stream is open (`run_prepared_turn`).
                 await before_send()
+            if (gate := unattended_gate.get()) is not None:
+                await gate()
             mark = SEND_ATTEMPTED.get()
             if mark is not None:
                 mark.append(True)  # from here the message may have been delivered
+            send_check_token = initial_send_check.set(before_send)
             try:
                 await io.send(batch)
+                context_input.accepted()
             except _anthropic.BadRequestError as err:
                 if _AWAITING_CONFIRMATIONS in str(err) and unwedge_attempts[0] == 0:
                     unwedge_attempts[0] += 1
                     raise _SessionAwaitingConfirmations() from err
                 raise
+            finally:
+                initial_send_check.reset(send_check_token)
         await acknowledge(lifecycle, "accepted")
 
     if (observation := current_outcome.get()) is not None:
@@ -860,7 +976,7 @@ async def run_turn(
             interrupt_timeout_s=interrupt_timeout_s,
             stream_read_timeout_s=stream_read_timeout_s,
             now=now,
-            entry="run",
+            entry="resume" if resume_existing else "run",
             billing=billing,
             tool_confirmation=tool_confirmation,
             preset_error=unwedge_failure[0],
@@ -965,10 +1081,18 @@ async def run_turn(
             await abandon_native()
         return state
 
+    async def contextual_pump() -> TurnState:
+        nonlocal context_input
+        if context_hook is None:
+            return await pump()
+        async with context_hook.turn(session_id) as injection:
+            context_input = injection
+            return await pump()
+
     async def _run_leased() -> TurnState:
         assert persistence is not None
         try:
-            return await persistence.run(pump)
+            return await persistence.run(contextual_pump)
         except LeaseWaitCancelled:
             # Stopped while queued behind another turn: nothing was sent, so
             # this ends as an interrupt, like a Stop before the stream opens.
@@ -978,7 +1102,7 @@ async def run_turn(
             await lifecycle.on_terminal_failure(queued_state, err)
             return queued_state
 
-    pump_coro = pump() if persistence is None else _run_leased()
+    pump_coro = contextual_pump() if persistence is None else _run_leased()
     if deadline is None:
         return await pump_coro
 
@@ -1236,7 +1360,9 @@ async def _pump(
                                 attempt_is_retry = True
                                 attempt_reason: ReconnectReason = eventless_reason
                             else:
-                                attempt_is_retry = not first_attempt_of_generation
+                                attempt_is_retry = (
+                                    not first_attempt_of_generation or entry == "resume"
+                                )
                                 attempt_reason = "connection_dropped"
                             await _consume_with_reconnect(
                                 io=io,
@@ -1259,6 +1385,7 @@ async def _pump(
                                 delivered_provider_event_ids=delivered_provider_event_ids,
                                 billed_event_ids=billed_event_ids,
                                 stream_read_timeout_s=stream_read_timeout_s,
+                                now=now,
                                 silence=silence,
                             )
                     break  # a terminal event was found — exit the outer loop too
@@ -1294,10 +1421,13 @@ async def _pump(
                         status=status,
                     )
                     replayed = (
-                        await io.replay()
+                        await io.replay(timeout_s=_replay_timeout_s(now()))
                         if getattr(io, "replay_may_send", False)
                         else await _read_after_quiet(
-                            io.replay, name="replay", session_id=session_id, cancel=cancel
+                            lambda: io.replay(timeout_s=_replay_timeout_s(now())),
+                            name="replay",
+                            session_id=session_id,
+                            cancel=cancel,
                         )
                     )
                     current_turn_events = _events_since_last_turn_boundary(
@@ -1785,6 +1915,7 @@ async def _consume_with_reconnect(
     delivered_provider_event_ids: set[str],
     billed_event_ids: set[str],
     stream_read_timeout_s: float,
+    now: Callable[[], datetime],
     silence: _Silence | None = None,
 ) -> None:
     """One attempt at the consume leg. On retry, replay + re-fold first."""
@@ -1823,11 +1954,14 @@ async def _consume_with_reconnect(
             )
             await lifecycle.on_reconnect(reconnect_reason)
             if getattr(io, "replay_may_send", False):
-                replayed = await io.replay()
+                replayed = await io.replay(timeout_s=_replay_timeout_s(now()))
             else:
                 try:
                     replayed = await _read_after_quiet(
-                        io.replay, name="replay", session_id=session_id, cancel=cancel
+                        lambda: io.replay(timeout_s=_replay_timeout_s(now())),
+                        name="replay",
+                        session_id=session_id,
+                        cancel=cancel,
                     )
                 except _InterruptInConsume:
                     # Same as a Stop seen right after the replay, below.

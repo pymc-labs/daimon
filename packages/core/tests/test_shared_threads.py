@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import re
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -50,6 +51,7 @@ from daimon.core.stores import mux_state, tenant_ledger, usage_events
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import TenantRow
 from daimon.core.stores.thread_sessions import create_thread_session, get_live_thread_session
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.admission import Admission, admit
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied
@@ -86,21 +88,51 @@ _SHARED = BackendConfig(thread_mode="shared")
 
 
 class _Fake:
-    """MA for `create_session`: memory store, vault and session create; records requests."""
+    """MA for `create_session`: memory store, vaults with their credentials and
+    session create; records requests. Credential tokens are kept apart in
+    `tokens`, as MA never returns them."""
 
     def __init__(self) -> None:
         self.requests: list[httpx.Request] = []
         self.sessions = 0
         self.created: dict[str, dict[str, object]] = {}
+        self.vaults: dict[str, dict[str, Any]] = {}
+        self.credentials: dict[str, dict[str, dict[str, Any]]] = {}
+        self.tokens: dict[str, str] = {}
         self.router = MARouter()
         memory = make_fake_memory_store_handler()
         self.router.add("POST", r"/v1/memory_stores", lambda request, _m: memory(request))
         self.router.add("POST", r"/v1/vaults$", self._vault)
+        self.router.add(
+            "GET",
+            r"/v1/vaults$",
+            lambda _request, _m: httpx.Response(
+                200, json={"data": list(self.vaults.values()), "next_page": None}
+            ),
+        )
+        self.router.add(
+            "GET",
+            r"/v1/vaults/(?P<vid>[^/]+)$",
+            lambda _request, match: httpx.Response(200, json=self.vaults[match["vid"]]),
+        )
         self.router.add("POST", r"/v1/vaults/[^/]+/archive", self._vault)
         self.router.add(
             "GET",
-            r"/v1/vaults/[^/]+/credentials",
-            lambda _request, _m: httpx.Response(200, json={"data": [], "next_page": None}),
+            r"/v1/vaults/(?P<vid>[^/]+)/credentials",
+            lambda _request, match: httpx.Response(
+                200,
+                json={
+                    "data": list(self.credentials.get(match["vid"], {}).values()),
+                    "next_page": None,
+                },
+            ),
+        )
+        self.router.add("POST", r"/v1/vaults/(?P<vid>[^/]+)/credentials$", self._credential)
+        self.router.add(
+            "POST", r"/v1/vaults/(?P<vid>[^/]+)/credentials/(?P<cid>[^/]+)$", self._credential
+        )
+        self.router.add(
+            "DELETE", r"/v1/vaults/(?P<vid>[^/]+)/credentials/(?P<cid>[^/]+)$", self._delete
         )
         self.router.add("POST", r"/v1/sessions$", self._session)
         self.router.add(
@@ -108,6 +140,7 @@ class _Fake:
             r"/v1/sessions/(?P<sid>[^/]+)/archive$",
             lambda _request, match: httpx.Response(200, json=self.created[match["sid"]]),
         )
+        self.router.add("POST", r"/v1/sessions/(?P<sid>[^/]+)$", self._update_session)
         self.router.add(
             "GET",
             r"/v1/sessions/(?P<sid>[^/]+)$",
@@ -120,17 +153,62 @@ class _Fake:
 
     def _vault(self, request: httpx.Request, _match: object) -> httpx.Response:
         body: dict[str, Any] = json.loads(request.content) if request.content else {}
-        return httpx.Response(
-            200,
-            json={
-                "id": f"vlt_{len(self.requests)}",
-                "type": "vault",
-                "display_name": body.get("display_name", "v"),
-                "metadata": body.get("metadata"),
-                "archived_at": None,
+        vault = {
+            "id": f"vlt_{len(self.requests)}",
+            "type": "vault",
+            "display_name": body.get("display_name", "v"),
+            "metadata": body.get("metadata"),
+            "archived_at": None,
+            "created_at": "2026-10-10T00:00:00Z",
+            "updated_at": "2026-10-10T00:00:00Z",
+        }
+        self.vaults[vault["id"]] = vault
+        return httpx.Response(200, json=vault)
+
+    def vault_named(self, prefix: str) -> list[str]:
+        return [v["id"] for v in self.vaults.values() if v["display_name"].startswith(prefix)]
+
+    def urls(self, vault_id: str) -> dict[str, str]:
+        """Each credential's URL in `vault_id`, mapped to its token."""
+        return {
+            cred["auth"]["mcp_server_url"]: self.tokens[cred["id"]]
+            for cred in self.credentials.get(vault_id, {}).values()
+        }
+
+    def _credential(self, request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        body: dict[str, Any] = json.loads(request.content)
+        slots = self.credentials.setdefault(match["vid"], {})
+        auth = {k: v for k, v in body["auth"].items() if k not in {"token", "secret_value"}}
+        if (credential_id := match.groupdict().get("cid")) is not None:
+            cred = slots[credential_id]
+            cred["auth"] = {**cred["auth"], **auth}
+            cred["metadata"] = body.get("metadata", cred["metadata"])
+        else:
+            cred = {
+                "id": f"cred_{len(self.requests)}",
+                "type": "vault_credential",
+                "vault_id": match["vid"],
+                "auth": auth,
+                "metadata": body.get("metadata", {}),
                 "created_at": "2026-10-10T00:00:00Z",
-            },
-        )
+                "updated_at": "2026-10-10T00:00:00Z",
+            }
+            slots[cred["id"]] = cred
+        if "token" in body["auth"]:
+            self.tokens[cred["id"]] = body["auth"]["token"]
+        return httpx.Response(200, json=cred)
+
+    def _update_session(self, request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        body: dict[str, Any] = json.loads(request.content)
+        created = self.created[match["sid"]]
+        agent = created["agent"]
+        assert isinstance(agent, dict)
+        agent.update({k: v for k, v in body.get("agent", {}).items() if k != "type"})
+        return httpx.Response(200, json=created)
+
+    def _delete(self, _request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        del self.credentials[match["vid"]][match["cid"]]
+        return httpx.Response(200, json={"id": match["cid"], "type": "vault_credential_deleted"})
 
     def _session(self, request: httpx.Request, _match: object) -> httpx.Response:
         body: dict[str, Any] = json.loads(request.content)
@@ -182,6 +260,7 @@ def _deps(sessionmaker: async_sessionmaker[AsyncSession], fake: _Fake) -> TurnDe
         github_app_private_key=None,
         public_url=None,
         channel_backends=True,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
 
@@ -638,6 +717,7 @@ async def test_access_policy_and_protection_refuse_before_a_shared_thread_is_con
     with pytest.raises(AdmissionDenied) as raised:
         await admit(
             deps,
+            origin="chat",
             tenant_id=tenant.id,
             requester_org=RequesterOrg.HOST,
             platform="discord",
@@ -875,6 +955,301 @@ async def test_a_shared_session_carries_no_personally_connected_server(
     assert b"mcp.example.com/docs" not in create.content
 
 
+_TEAM = "https://mcp.example.com/team"
+_DOCS = "https://mcp.example.com/docs"
+
+
+def _token_agent(tenant: TenantRow) -> BetaManagedAgentsAgent:
+    """`docs` is somebody's personal OAuth server; `team` takes the agent's token."""
+    toolset: dict[str, object] = {
+        "type": "mcp_toolset",
+        "configs": [],
+        "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+    }
+    return ma_agent(
+        id="ag_personal",
+        tenant_id=tenant.id,
+        mcp_servers=[
+            {"name": "docs", "type": "url", "url": _DOCS},
+            {"name": "team", "type": "url", "url": _TEAM},
+        ],
+        tools=[{**toolset, "mcp_server_name": "docs"}, {**toolset, "mcp_server_name": "team"}],
+    )
+
+
+def _vault_deps(sessionmaker: async_sessionmaker[AsyncSession], fake: _Fake) -> TurnDeps:
+    from cryptography.fernet import Fernet, MultiFernet
+    from pydantic import SecretStr
+
+    return replace(
+        _deps(sessionmaker, fake),
+        fernet=MultiFernet([Fernet(Fernet.generate_key())]),
+        mcp=McpSettings(public_url="https://daimon.example/mcp", jwt_secret=SecretStr("s" * 32)),
+    )
+
+
+def _seed_vault(fake: _Fake, display_name: str, *creds: tuple[str, str, str]) -> str:
+    """Put a vault holding `(auth type, url, token)` credentials on the fake."""
+    vault_id = f"vlt_seed_{len(fake.vaults)}"
+    fake.vaults[vault_id] = {
+        "id": vault_id,
+        "type": "vault",
+        "display_name": display_name,
+        "metadata": None,
+        "archived_at": None,
+        "created_at": "2026-10-01T00:00:00Z",
+        "updated_at": "2026-10-01T00:00:00Z",
+    }
+    for index, (kind, url, token) in enumerate(creds):
+        cred_id = f"cred_seed_{vault_id}_{index}"
+        auth: dict[str, Any] = {"type": kind, "mcp_server_url": url}
+        if kind == "mcp_oauth":
+            auth["expires_at"] = None
+        fake.credentials.setdefault(vault_id, {})[cred_id] = {
+            "id": cred_id,
+            "type": "vault_credential",
+            "vault_id": vault_id,
+            "auth": auth,
+            "metadata": {},
+            "created_at": "2026-10-01T00:00:00Z",
+            "updated_at": "2026-10-01T00:00:00Z",
+        }
+        fake.tokens[cred_id] = token
+    return vault_id
+
+
+async def test_a_shared_session_authenticates_agent_wide_servers_only(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
+
+    tenant = await make_tenant(db_session)
+    alice = await make_account(db_session, tenant=tenant)
+    agent = _token_agent(tenant)
+    agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=agent.id)
+    await _record_personal_sign_in(
+        db_session, tenant_id=tenant.id, account_id=alice.id, agent_uuid=agent_uuid
+    )
+    revision = await set_channel_backend(
+        db_session, channel_ref(tenant.id, "discord", "chan-1"), _SHARED
+    )
+    await db_session.commit()
+    fake = _Fake()
+    deps = _vault_deps(db_session_factory, fake)
+    assert deps.fernet is not None
+    await save_agent_mcp_credential(
+        sessionmaker=db_session_factory,
+        fernet=deps.fernet,
+        tenant_id=tenant.id,
+        agent_id=agent_uuid,
+        mcp_server_url=_TEAM,
+        plaintext_token="team-agent-token",
+    )
+    # Alice's own vault: her OAuth grant for `docs` and a token she pasted for `team`.
+    personal = _seed_vault(
+        fake,
+        f"daimon-mcp:{alice.id}:{agent_uuid}",
+        ("mcp_oauth", _DOCS, "alice-oauth"),
+        ("static_bearer", _TEAM, "alice-pasted"),
+    )
+    owner = shared_owner(_slot(tenant))
+    # A stray grant in the thread's vault is pruned: it holds the agent's tokens only.
+    stray = _seed_vault(
+        fake, f"daimon-shared:{owner}:{agent_uuid}", ("mcp_oauth", _DOCS, "alice-oauth")
+    )
+
+    prepared = await _bind(
+        deps,
+        tenant,
+        _admission(alice.id, agent, ma_environment(id="env_1"), revision),
+        user="alice",
+    )
+
+    assert fake.created[prepared.ma_session_id]["vault_ids"] == [stray]
+    assert fake.urls(stray) == {_TEAM: "team-agent-token"}
+    assert fake.urls(personal) == {_DOCS: "alice-oauth", _TEAM: "alice-pasted"}
+    # No daimon-mcp vault and no JWT for the synthetic owner, nor anything of Alice's.
+    assert fake.vault_named("daimon-mcp:") == [personal]
+    assert not any(personal in r.url.path for r in fake.requests)
+    assert not any(str(alice.id).encode() in (r.content or b"") for r in fake.requests)
+    (create,) = [r for r in fake.requests if r.method == "POST" and r.url.path == "/v1/sessions"]
+    sent = json.loads(create.content)["agent"]
+    assert [server["name"] for server in sent["mcp_servers"]] == ["team"]
+
+
+async def test_a_reused_shared_session_follows_agent_token_changes(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
+    from daimon.core.stores import agent_mcp_credentials as cred_store
+
+    tenant = await make_tenant(db_session)
+    alice = await make_account(db_session, tenant=tenant)
+    bob = await make_account(db_session, tenant=tenant)
+    agent = _token_agent(tenant)
+    agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=agent.id)
+    revision = await set_channel_backend(
+        db_session, channel_ref(tenant.id, "discord", "chan-1"), _SHARED
+    )
+    await db_session.commit()
+    fake = _Fake()
+    deps = _vault_deps(db_session_factory, fake)
+    assert deps.fernet is not None
+    env = ma_environment(id="env_1")
+
+    # Created while the agent holds no token: the vault is mounted empty.
+    first = await _bind(deps, tenant, _admission(alice.id, agent, env, revision), user="alice")
+    (vault,) = fake.vault_named("daimon-shared:")
+    assert fake.created[first.ma_session_id]["vault_ids"] == [vault]
+    assert fake.urls(vault) == {}
+
+    async def save(url: str, token: str) -> None:
+        assert deps.fernet is not None
+        await save_agent_mcp_credential(
+            sessionmaker=db_session_factory,
+            fernet=deps.fernet,
+            tenant_id=tenant.id,
+            agent_id=agent_uuid,
+            mcp_server_url=url,
+            plaintext_token=token,
+        )
+
+    async def turn(account: uuid.UUID, user: str) -> None:
+        prepared = await _bind(deps, tenant, _admission(account, agent, env, revision), user=user)
+        assert prepared.reused and prepared.ma_session_id == first.ma_session_id
+
+    await save(_TEAM, "team-v1")
+    await save(_DOCS, "docs-v1")
+    await turn(bob.id, "bob")
+    assert fake.urls(vault) == {_TEAM: "team-v1", _DOCS: "docs-v1"}
+
+    await save(_TEAM, "team-v2")
+    async with db_session_factory() as db, db.begin():
+        await cred_store.delete_credential(
+            db, tenant_id=tenant.id, agent_id=agent_uuid, mcp_server_url=_DOCS
+        )
+    await turn(alice.id, "alice")
+    assert fake.urls(vault) == {_TEAM: "team-v2"}
+    assert fake.vault_named("daimon-shared:") == [vault]
+    assert not fake.vault_named("daimon-mcp:")
+
+
+async def test_a_shared_session_without_a_shared_vault_is_left_alone(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A session created before shared vaults existed mounts none; MA fixes
+    `vault_ids` at create, so reuse never creates or fills one it cannot see."""
+    from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
+
+    tenant = await make_tenant(db_session)
+    alice = await make_account(db_session, tenant=tenant)
+    bob = await make_account(db_session, tenant=tenant)
+    agent = _token_agent(tenant)
+    agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=agent.id)
+    revision = await set_channel_backend(
+        db_session, channel_ref(tenant.id, "discord", "chan-1"), _SHARED
+    )
+    await db_session.commit()
+    fake = _Fake()
+    deps = _vault_deps(db_session_factory, fake)
+    assert deps.fernet is not None
+    env = ma_environment(id="env_1")
+    # No encryption key at create: the session mounts no vault, as before this change.
+    first = await _bind(
+        replace(deps, fernet=None), tenant, _admission(alice.id, agent, env, revision), user="alice"
+    )
+    assert fake.created[first.ma_session_id]["vault_ids"] == []
+    await save_agent_mcp_credential(
+        sessionmaker=db_session_factory,
+        fernet=deps.fernet,
+        tenant_id=tenant.id,
+        agent_id=agent_uuid,
+        mcp_server_url=_TEAM,
+        plaintext_token="team-agent-token",
+    )
+    previous = len(fake.requests)
+
+    second = await _bind(deps, tenant, _admission(bob.id, agent, env, revision), user="bob")
+
+    assert second.reused and second.ma_session_id == first.ma_session_id
+    assert not fake.vaults
+    assert not any("/vaults" in r.url.path for r in fake.requests[previous:])
+
+
+async def test_two_shared_threads_get_separate_vaults(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session)
+    alice = await make_account(db_session, tenant=tenant)
+    agent = _token_agent(tenant)
+    revision = await set_channel_backend(
+        db_session, channel_ref(tenant.id, "discord", "chan-1"), _SHARED
+    )
+    await db_session.commit()
+    fake = _Fake()
+    deps = _vault_deps(db_session_factory, fake)
+    env = ma_environment(id="env_1")
+    one = await _bind(deps, tenant, _admission(alice.id, agent, env, revision), user="alice")
+    two = await _bind(
+        deps, tenant, _admission(alice.id, agent, env, revision), user="alice", thread_id="t-2"
+    )
+    vaults = fake.vault_named("daimon-shared:")
+    assert len(vaults) == 2
+    assert (
+        fake.created[one.ma_session_id]["vault_ids"] != fake.created[two.ma_session_id]["vault_ids"]
+    )
+
+
+async def test_a_per_caller_session_never_gets_a_shared_vault(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
+
+    tenant = await make_tenant(db_session)
+    alice = await make_account(db_session, tenant=tenant)
+    agent = _token_agent(tenant)
+    agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=agent.id)
+    fake = _Fake()
+    deps = _vault_deps(db_session_factory, fake)
+    assert deps.fernet is not None
+    await save_agent_mcp_credential(
+        sessionmaker=db_session_factory,
+        fernet=deps.fernet,
+        tenant_id=tenant.id,
+        agent_id=agent_uuid,
+        mcp_server_url=_TEAM,
+        plaintext_token="team-agent-token",
+    )
+    prepared = await _bind(
+        deps, tenant, _admission(alice.id, agent, ma_environment(id="env_1"), None), user="alice"
+    )
+    (personal,) = fake.vault_named(f"daimon-mcp:{alice.id}:{agent_uuid}")
+    assert fake.created[prepared.ma_session_id]["vault_ids"] == [personal]
+    assert fake.urls(personal)[_TEAM] == "team-agent-token"
+    assert not fake.vault_named("daimon-shared:")
+
+
+async def test_a_shared_vault_is_never_named_for_an_account(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    from daimon.core.mcp_vault import ensure_shared_mcp_vault
+    from daimon.core.mux_backend import resource_scope
+
+    tenant = await make_tenant(db_session)
+    alice = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    fake = _Fake()
+    with pytest.raises(ValueError, match="never an account"):
+        await ensure_shared_mcp_vault(
+            build_fake_anthropic(fake.dispatch),
+            owner=alice.id,
+            agent_id=uuid.uuid4(),
+            session_factory=db_session_factory,
+            scope=resource_scope(tenant_id=str(tenant.id), account_id=str(alice.id)),
+        )
+    assert not fake.vaults
+
+
 async def _record_personal_sign_in(
     session: AsyncSession, *, tenant_id: uuid.UUID, account_id: uuid.UUID, agent_uuid: uuid.UUID
 ) -> None:
@@ -977,32 +1352,8 @@ async def test_shared_app_repo_session_reuse_never_refreshes_a_caller_identity(
         )
         .decode()
     )
-    fake = _Fake()
     # The real admission/preparation path creates the App workspace offline.
-    from anthropic.types.beta.vaults.beta_managed_agents_credential import (
-        BetaManagedAgentsCredential,
-    )
-
-    def credential(request: httpx.Request, _match: object) -> httpx.Response:
-        body = json.loads(request.content)
-        wire = BetaManagedAgentsCredential.model_validate(
-            {
-                "id": f"cred_github_{len(fake.requests)}",
-                "type": "vault_credential",
-                "vault_id": request.url.path.split("/")[3],
-                "auth": {
-                    key: value
-                    for key, value in body["auth"].items()
-                    if key not in {"token", "secret_value"}
-                },
-                "metadata": body.get("metadata", {}),
-                "created_at": "2026-10-10T00:00:00Z",
-                "updated_at": "2026-10-10T00:00:00Z",
-            }
-        )
-        return httpx.Response(200, json=wire.model_dump(mode="json"))
-
-    fake.router.add("POST", r"/v1/vaults/[^/]+/credentials", credential)
+    fake = _Fake()
     deps = replace(
         _deps(db_session_factory, fake),
         fernet=MultiFernet([Fernet(Fernet.generate_key())]),
@@ -1024,11 +1375,25 @@ async def test_shared_app_repo_session_reuse_never_refreshes_a_caller_identity(
         lambda **kw: original_client(**kw, transport=httpx.MockTransport(github)),
     )
     first = await _bind(deps, tenant, _admission(alice.id, agent, env, revision), user="alice")
-    assert len(fake.created[first.ma_session_id]["vault_ids"]) == 1
+    # The thread's own vault for the agent's shared tokens, then the App vault.
+    (shared_vault,) = fake.vault_named("daimon-shared:")
+    mounted = fake.created[first.ma_session_id]["vault_ids"]
+    assert isinstance(mounted, list) and len(mounted) == 2 and mounted[0] == shared_vault
     async with db_session_factory() as db:
         assert await get_account(db, shared_owner(_slot(tenant))) is None
     previous = len(fake.requests)
     second = await _bind(deps, tenant, _admission(bob.id, agent, env, revision), user="bob")
     assert second.reused and second.ma_session_id == first.ma_session_id
-    assert not any("/vaults/" in request.url.path for request in fake.requests[previous:])
-    assert not any("/credentials" in request.url.path for request in fake.requests[previous:])
+    # Reuse touches the thread's own vault only: no caller vault and no JWT.
+    touched = {
+        request.url.path.split("/")[3]
+        for request in fake.requests[previous:]
+        if request.url.path.startswith("/v1/vaults/")
+    }
+    assert touched == {shared_vault}
+    assert not any(
+        request.method == "POST"
+        for request in fake.requests[previous:]
+        if "/credentials" in request.url.path
+    )
+    assert not fake.vault_named("daimon-mcp:")

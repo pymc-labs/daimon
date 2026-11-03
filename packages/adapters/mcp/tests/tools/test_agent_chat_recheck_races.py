@@ -60,7 +60,7 @@ async def test_pin_changed_during_recheck_agent_lookup_prevents_send(
             session_id=m.group(1),
             status=("terminated" if sent and tool == "ask" else "idle"),
             agent_id=AGENT_ID,
-            metadata={"daimon_account": str(account.id)},
+            metadata={"daimon_agent_chat": "true", "daimon_account": str(account.id)},
         ),
     )
     lookups = 0

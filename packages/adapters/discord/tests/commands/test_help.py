@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import discord
 from daimon.adapters.discord.commands.agent_setup import AgentSetupCog
 from daimon.adapters.discord.commands.billing import BillingCog
+from daimon.adapters.discord.commands.cost_footer import CostFooterCog
 from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
 from daimon.adapters.discord.commands.github import GitHubCog
 from daimon.adapters.discord.commands.help import (
@@ -17,6 +18,7 @@ from daimon.adapters.discord.commands.help import (
 )
 from daimon.adapters.discord.commands.here import HereCog
 from daimon.adapters.discord.commands.memory import MemoryCog
+from daimon.adapters.discord.commands.model import ModelCog
 from daimon.adapters.discord.commands.privacy import PrivacyCog
 from daimon.adapters.discord.commands.routines import RoutinesCog
 from daimon.core.platform_words import DESCRIPTIONS, WORDS
@@ -90,16 +92,17 @@ class TestBuildHelpView:
             "view must include the conversational group '💬 Or just ask'"
         )
 
-    def test_approved_command_list_includes_dm(self) -> None:
+    def test_approved_command_list_includes_dm_and_model(self) -> None:
         content = _joined_content(build_help_view("Daimon"))
         commands = next(
             text
             for text in _collect_text_display_content(build_help_view())
             if text.startswith("/here")
         )
-        assert len(commands.splitlines()) == 10
+        assert len(commands.splitlines()) == 14
         assert all(line.startswith("/") for line in commands.splitlines())
         assert "/dm-me" in content
+        assert "/model" in content
         assert "## 📖 Commands\n\n-# Only you can see this." in content
         assert "@Daimon help me set up" in content
 
@@ -154,11 +157,13 @@ class TestSharedDescriptions:
         cogs = [
             AgentSetupCog,
             BillingCog,
+            CostFooterCog,
             DirectMessageCog,
             GitHubCog,
             HelpCog,
             HereCog,
             MemoryCog,
+            ModelCog,
             PrivacyCog,
             RoutinesCog,
         ]

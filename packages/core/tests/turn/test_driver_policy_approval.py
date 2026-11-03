@@ -24,12 +24,10 @@ from daimon.core.tool_safety import (
 )
 from daimon.core.turn.approvals import (
     chat_tool_confirmation,
-    headless_tool_confirmation,
     interactive_decider,
     unattended_decider,
 )
 from daimon.core.turn.posture import (
-    AutoApprove,
     BillingExempt,
     PolicyApproval,
     RequireApproval,
@@ -109,7 +107,7 @@ async def test_routine_write_is_denied_and_read_is_allowed() -> None:
         cancel=asyncio.Event(),
         render_interval_s=0.001,
         billing=_EXEMPT,
-        tool_confirmation=headless_tool_confirmation(_ON),
+        tool_confirmation=PolicyApproval(decide=unattended_decider(_ON)),
     )
 
     assert final.error is None
@@ -333,7 +331,6 @@ async def test_cancel_while_the_card_is_up_refuses_the_write() -> None:
 
 
 def test_disabled_policy_keeps_the_old_postures() -> None:
-    assert isinstance(headless_tool_confirmation(OPEN_TOOL_SAFETY), AutoApprove)
     assert isinstance(
         chat_tool_confirmation(OPEN_TOOL_SAFETY, requester_platform_user_id="U1", confirm=None),
         RequireApproval,
@@ -1065,11 +1062,13 @@ async def test_an_unattended_run_refuses_an_ask_ruled_daimon_tool_behind_call_to
         cancel=asyncio.Event(),
         render_interval_s=0.001,
         billing=_EXEMPT,
-        tool_confirmation=headless_tool_confirmation(
-            ToolSafetyPolicy(enabled=True, agent_rules=True),
-            trusted_servers=frozenset({DAIMON_SERVER_NAME}),
-            daimon_rules=True,
-            rules_for=rules_for,
+        tool_confirmation=PolicyApproval(
+            decide=unattended_decider(
+                ToolSafetyPolicy(enabled=True, agent_rules=True),
+                trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+                daimon_rules=True,
+                rules_for=rules_for,
+            )
         ),
     )
 
@@ -1150,3 +1149,450 @@ async def test_an_approval_tool_sent_through_call_tool_is_refused_without_a_card
     [sent] = _confirmations(fa)
     assert sent["result"] == "deny" and "Call publish_report directly" in str(sent["deny_message"])
     assert prompts == []
+
+
+async def test_an_unattended_turn_gates_before_its_message_and_each_confirmation() -> None:
+    """Review B, finding 1: one boundary for every unattended send."""
+    from daimon.core.turn.driver import unattended_sends
+
+    fa = FakeAnthropic()
+    _script(fa, ("tu_read", "linear", "get_issue"))
+    order: list[str] = []
+
+    async def gate() -> None:
+        order.append(f"gate@{len(fa.beta.sessions.events.sent_events)}")
+
+    with unattended_sends(gate):
+        final = await run_turn_on_leg(
+            anthropic=_cast(fa),
+            session_id="sess_1",
+            user_message="nightly",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            render_interval_s=0.001,
+            billing=_EXEMPT,
+            tool_confirmation=PolicyApproval(decide=unattended_decider(_ON)),
+        )
+    assert final.error is None
+    # Before the message (nothing sent yet), then before the confirmation.
+    assert order == ["gate@0", "gate@1"]
+    assert [e["result"] for e in _confirmations(fa)] == ["allow"]
+    # Finding 2: every send asked for a client with no SDK retry.
+    assert sum(o == {"max_retries": 0} for o in fa.options) == 2
+    assert all(o["max_retries"] in {0, 2} for o in fa.options)
+
+
+async def test_a_failed_confirmation_gate_sends_no_confirmation() -> None:
+    from daimon.core.turn.driver import unattended_sends
+
+    fa = FakeAnthropic()
+    _script(fa, ("tu_read", "linear", "get_issue"))
+    calls = 0
+
+    async def gate() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("session update refused")
+
+    with unattended_sends(gate), pytest.raises(RuntimeError, match="refused"):
+        await run_turn_on_leg(
+            anthropic=_cast(fa),
+            session_id="sess_1",
+            user_message="nightly",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            render_interval_s=0.001,
+            billing=_EXEMPT,
+            tool_confirmation=PolicyApproval(decide=unattended_decider(_ON)),
+        )
+    assert not [e for e in _confirmations(fa) if e["result"] == "allow"]
+
+
+@pytest.mark.parametrize("replay", [False, True], ids=["live", "replay"])
+@pytest.mark.parametrize(
+    "stop", ["decision_cancel", "gate_cancel", "gate_ceiling", "gate_failure", "gate_task_cancel"]
+)
+async def test_unattended_stops_leave_calls_paused_and_interrupt(replay: bool, stop: str) -> None:
+    from daimon.core.turn.driver import unattended_sends
+    from daimon.core.turn.posture import ToolConfirmationResult
+
+    fa = FakeAnthropic()
+    if replay:
+        _replay_script(fa)
+    else:
+        _script(fa, ("tu_write", "linear", "create_issue"))
+    fa.beta.sessions.events.stream_scripts.append(
+        [YieldEvent(make_status_idle(event_id="interrupt_ack", stop_reason=make_end_turn()))]
+    )
+    entered = asyncio.Event()
+    cancel = asyncio.Event()
+    calls = 0
+    cancelled_gate = False
+
+    async def gate() -> None:
+        nonlocal calls, cancelled_gate
+        calls += 1
+        if calls == 1:
+            return  # Initial message is gated successfully.
+        entered.set()
+        if stop == "gate_failure":
+            raise RuntimeError("gate failed")
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled_gate = True
+            raise
+
+    async def decide(call: ToolCall) -> ToolConfirmationResult:
+        if stop == "decision_cancel":
+            entered.set()
+            await asyncio.Event().wait()
+        return ToolConfirmationResult(allow=True)
+
+    async def run():
+        with unattended_sends(gate):
+            return await run_turn_on_leg(
+                anthropic=_cast(fa),
+                session_id="sess_1",
+                user_message="nightly",
+                lifecycle=RecordingLifecycle(),
+                cancel=cancel,
+                render_interval_s=0.001,
+                interrupt_timeout_s=0.05,
+                billing=_EXEMPT,
+                tool_confirmation=PolicyApproval(decide=decide),
+                deadline=(datetime.now(UTC) + timedelta(seconds=0.3))
+                if stop == "gate_ceiling"
+                else None,
+            )
+
+    turn = asyncio.create_task(run())
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    if stop in ("decision_cancel", "gate_cancel"):
+        cancel.set()
+    elif stop == "gate_task_cancel":
+        turn.cancel()
+    if stop == "gate_failure":
+        with pytest.raises(RuntimeError, match="gate failed"):
+            await turn
+    elif stop == "gate_task_cancel":
+        with pytest.raises(asyncio.CancelledError):
+            await turn
+    else:
+        result = await asyncio.wait_for(turn, timeout=3)
+        if stop == "gate_ceiling":
+            assert result.error is not None and result.error.kind == "ceiling"
+    assert _confirmations(fa) == [], (
+        "an unsuccessful boundary must send no confirmations, even denials"
+    )
+    assert any(
+        event["type"] == "user.interrupt"
+        for _, batch in fa.beta.sessions.events.sent_events
+        for event in batch
+    ), "stopping a gated boundary interrupts the session"
+    if stop in ("gate_cancel", "gate_ceiling", "gate_task_cancel"):
+        assert cancelled_gate
+    assert not [
+        task
+        for task in asyncio.all_tasks()
+        if task.get_name().startswith("turn.") and not task.done()
+    ]
+
+
+@pytest.mark.parametrize("replay", [False, True], ids=["live", "replay"])
+@pytest.mark.parametrize("stop", ["stop", "cancel", "ceiling", "normal"])
+async def test_ungated_unattended_abort_never_answers_pending_calls(
+    replay: bool, stop: str
+) -> None:
+    from daimon.core.turn.driver import unattended_sends
+    from daimon.core.turn.posture import ToolConfirmationResult
+    from daimon.core.turn.unattended import refuse_ungated_confirmation
+
+    fa = FakeAnthropic()
+    if replay:
+        _replay_script(fa)
+    else:
+        _script(fa, ("tu_write", "linear", "create_issue"))
+    fa.beta.sessions.events.stream_scripts.append(
+        [YieldEvent(make_status_idle(event_id="interrupt_ack", stop_reason=make_end_turn()))]
+    )
+    entered = asyncio.Event()
+    cancel = asyncio.Event()
+
+    async def decide(call: ToolCall) -> ToolConfirmationResult:
+        entered.set()
+        if stop != "normal":
+            await asyncio.Event().wait()
+        return await refuse_ungated_confirmation(call)
+
+    async def run():
+        # The actual non-gateable prepared context: there is no refresh gate,
+        # and the normal decision is always the plain refusal above.
+        with unattended_sends(None):
+            return await run_turn_on_leg(
+                anthropic=_cast(fa),
+                session_id="sess_1",
+                user_message="wake up",
+                lifecycle=RecordingLifecycle(),
+                cancel=cancel,
+                render_interval_s=0.001,
+                interrupt_timeout_s=0.05,
+                billing=_EXEMPT,
+                tool_confirmation=PolicyApproval(decide=decide),
+                deadline=datetime.now(UTC) + timedelta(seconds=0.3) if stop == "ceiling" else None,
+            )
+
+    turn = asyncio.create_task(run())
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    if stop == "stop":
+        cancel.set()
+    elif stop == "cancel":
+        turn.cancel()
+    if stop == "cancel":
+        with pytest.raises(asyncio.CancelledError):
+            await turn
+    else:
+        state = await asyncio.wait_for(turn, timeout=3)
+        if stop == "ceiling":
+            assert state.error is not None and state.error.kind == "ceiling"
+    if stop == "normal":
+        confirmations = _confirmations(fa)
+        assert confirmations and all(event["result"] == "deny" for event in confirmations)
+        assert all("cannot refresh" in str(event["deny_message"]) for event in confirmations)
+    else:
+        assert _confirmations(fa) == []
+        assert any(
+            event["type"] == "user.interrupt"
+            for _, batch in fa.beta.sessions.events.sent_events
+            for event in batch
+        ), "every unattended abort interrupts, whether or not a gate exists"
+    assert not [
+        task
+        for task in asyncio.all_tasks()
+        if task.get_name().startswith("turn.") and not task.done()
+    ]
+
+
+@pytest.mark.parametrize("replay", [False, True], ids=["live", "replay"])
+async def test_outside_cancel_during_stop_drain_preserves_decider_cleanup(
+    monkeypatch: pytest.MonkeyPatch, replay: bool
+) -> None:
+    from daimon.core.turn import driver
+    from daimon.core.turn.posture import ToolConfirmationResult
+
+    fa = FakeAnthropic()
+    if replay:
+        _replay_script(fa)
+    else:
+        _script(fa, ("tu_write", "linear", "create_issue"))
+    fa.beta.sessions.events.stream_scripts.append(
+        [YieldEvent(make_status_idle(event_id="interrupt_ack", stop_reason=make_end_turn()))]
+    )
+    entered = asyncio.Event()
+    draining = asyncio.Event()
+    abort_joined = asyncio.Event()
+    release = asyncio.Event()
+    cancel = asyncio.Event()
+    retired = False
+    original_bounded = driver._bounded
+
+    async def bounded(task: asyncio.Task[object], *, what: str, session_id: str) -> None:
+        current = asyncio.current_task()
+        if (
+            what == "decide_task_join"
+            and current is not None
+            and current.get_name() == "turn.decision_abort"
+        ):
+            abort_joined.set()
+        await original_bounded(task, what=what, session_id=session_id)
+
+    monkeypatch.setattr(driver, "_bounded", bounded)
+
+    async def decide(call: ToolCall) -> ToolConfirmationResult:
+        nonlocal retired
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            draining.set()
+            await release.wait()
+            retired = True
+            raise
+        return ToolConfirmationResult(allow=False)
+
+    async def run() -> None:
+        with driver.unattended_sends(None):
+            await run_turn_on_leg(
+                anthropic=_cast(fa),
+                session_id="sess_1",
+                user_message="wake up",
+                lifecycle=RecordingLifecycle(),
+                cancel=cancel,
+                render_interval_s=0.001,
+                interrupt_timeout_s=0.05,
+                billing=_EXEMPT,
+                tool_confirmation=PolicyApproval(decide=decide),
+            )
+
+    turn = asyncio.create_task(run())
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    cancel.set()
+    await asyncio.wait_for(draining.wait(), timeout=2)
+    turn.cancel()
+    await asyncio.wait_for(abort_joined.wait(), timeout=2)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await turn
+    assert retired, "outside cancellation must not cancel the decider's cleanup again"
+    assert _confirmations(fa) == []
+    assert any(
+        event["type"] == "user.interrupt"
+        for _, batch in fa.beta.sessions.events.sent_events
+        for event in batch
+    )
+    assert not [
+        task
+        for task in asyncio.all_tasks()
+        if task.get_name().startswith("turn.") and not task.done()
+    ]
+
+
+@pytest.mark.parametrize("cap", ["balance", "member_cap", "channel_budget"])
+async def test_watch_confirmation_send_rechecks_each_spend_gate(db_session_factory, cap):
+    from decimal import Decimal
+
+    from daimon.core.stores import tenant_ledger
+    from daimon.core.turn.admission import require_current_spend
+    from daimon.core.turn.driver import unattended_sends
+    from daimon.core.turn.errors import AdmissionDenied
+    from daimon.core.turn.posture import ToolConfirmationResult
+    from daimon.testing.factories import make_channel_budget, make_tenant, make_tenant_user_cap
+    from daimon.testing.turn_fakes import deps_for
+
+    async with db_session_factory.begin() as db:
+        tenant = await make_tenant(db)
+        await tenant_ledger.insert_entry(
+            db,
+            tenant_id=tenant.id,
+            delta_usd=Decimal(100),
+            reason="trial",
+            idempotency_key=f"initial:{tenant.id}",
+        )
+    fa = FakeAnthropic()
+    _script(fa, ("tu_read", "linear", "get_issue"))
+    fa.beta.sessions.events.stream_scripts.append(
+        [YieldEvent(make_status_idle(event_id="interrupt_ack", stop_reason=make_end_turn()))]
+    )
+    deps = deps_for(client=_cast(fa), sm=db_session_factory)
+    decisions = []
+
+    async def decide(call):
+        # Spend changes after the first model send, while a read awaits its answer.
+        async with db_session_factory.begin() as db:
+            if cap == "balance":
+                await tenant_ledger.insert_entry(
+                    db,
+                    tenant_id=tenant.id,
+                    delta_usd=Decimal(-101),
+                    reason="usage",
+                    idempotency_key=f"drain:{tenant.id}",
+                )
+            elif cap == "member_cap":
+                await make_tenant_user_cap(db, tenant=tenant, user_id="owner", amount=Decimal(0))
+            else:
+                await make_channel_budget(
+                    db, tenant=tenant, channel_id="budget-channel", limit_usd=Decimal(0)
+                )
+        decisions.append(call)
+        return ToolConfirmationResult(allow=True)
+
+    async def gate():
+        await require_current_spend(
+            deps,
+            tenant_id=tenant.id,
+            platform=tenant.platform,
+            external_user_id="owner",
+            budget_channel_id="budget-channel",
+            agent_id="agent-watch",
+            now=datetime.now(UTC),
+        )
+
+    with unattended_sends(gate), pytest.raises(AdmissionDenied):
+        await run_turn_on_leg(
+            anthropic=_cast(fa),
+            session_id="sess_1",
+            user_message="read and report",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            render_interval_s=0.001,
+            interrupt_timeout_s=0.05,
+            billing=_EXEMPT,
+            tool_confirmation=PolicyApproval(decide=decide),
+        )
+    assert decisions
+    assert any(
+        event["type"] == "user.message"
+        for _, batch in fa.beta.sessions.events.sent_events
+        for event in batch
+    )
+    assert not _confirmations(fa), "fresh spend denial must precede the real tool-confirmation POST"
+
+
+async def test_watch_send_stops_on_the_owners_used_up_allowance(db_session_factory):
+    from decimal import Decimal
+
+    from daimon.core.stores import spend_allowances, tenant_ledger, usage_events
+    from daimon.core.turn.admission import require_current_spend
+    from daimon.core.turn.errors import AdmissionDenied
+    from daimon.testing.factories import make_tenant
+    from daimon.testing.turn_fakes import deps_for
+    from mux.testing.drivers.anthropic.ma_models import ma_model_usage
+
+    now = datetime.now(UTC)
+    async with db_session_factory.begin() as db:
+        tenant = await make_tenant(db)
+        await tenant_ledger.insert_entry(
+            db,
+            tenant_id=tenant.id,
+            delta_usd=Decimal(100),
+            reason="trial",
+            idempotency_key=f"initial:{tenant.id}",
+        )
+        await usage_events.record(
+            db,
+            tenant_id=tenant.id,
+            platform_user_id="owner",
+            managed_session_id="s-owner",
+            model="claude-opus-4-7",
+            model_usage=ma_model_usage(input_tokens=1_000_000, output_tokens=0),
+            event_id="e-owner",
+            agent_id="agent-watch",
+        )
+        await spend_allowances.create_allowance(
+            db,
+            tenant_id=tenant.id,
+            subject_kind="group",
+            subject_id="everyone",
+            agent_id="agent-watch",
+            amount_usd=Decimal(1),
+            window="month",
+            starts_at=now - timedelta(days=40),
+        )
+    deps = deps_for(sm=db_session_factory)
+
+    async def send(agent_id: str) -> None:
+        await require_current_spend(
+            deps,
+            tenant_id=tenant.id,
+            platform=tenant.platform,
+            external_user_id="owner",
+            budget_channel_id="budget-channel",
+            agent_id=agent_id,
+            now=now,
+        )
+
+    with pytest.raises(AdmissionDenied) as denied:
+        await send("agent-watch")
+    assert denied.value.reason == "allowance_exhausted"
+    await send("another-agent")

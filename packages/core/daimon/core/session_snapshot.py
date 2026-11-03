@@ -53,9 +53,10 @@ from anthropic.types.beta.sessions.beta_managed_agents_github_repository_resourc
     BetaManagedAgentsGitHubRepositoryResource,
 )
 from daimon.core.mcp_personal_servers import visible_mcp_servers, visible_tools
+from daimon.core.mcp_server_url import session_mcp_url
 from daimon.core.model_presets import model_choice_id
+from daimon.core.repo_memory_tools import suppress_legacy_readers
 from daimon.core.tool_safety import (
-    OPEN_TOOL_SAFETY,
     ToolSafetyPolicy,
     heal_reserved_server,
     session_tools_for_policy,
@@ -118,6 +119,7 @@ class SessionSnapshot(BaseModel):
         # stored and compared JSON unchanged while they are empty.
         data: dict[str, Any] = handler(self)
         for name in (
+            "chat_session_id",
             "unavailable_repos",
             "unavailable_notice_pending",
             "unavailable_notice_sent",
@@ -174,6 +176,7 @@ class SessionSnapshot(BaseModel):
     # session only to add it.
     personal_memory_store_id: str | None = None
     vault_id: str | None
+    chat_session_id: str | None = None
     # The hold (`daimon.core.mcp_hold.hold_key`) of the Daimon credential the
     # session mounts. None for the ordinary credential, a shared thread's
     # credential-free session and every session from before holds existed. Held
@@ -492,6 +495,7 @@ def _snapshot_from_session(
         memory_read_only=memory_read_only,
         personal_memory_store_id=personal_memory_store_id,
         vault_id=vault_id if vault_id is not None else next(iter(session.vault_ids), None),
+        chat_session_id=session.metadata.get("daimon_chat_session_id"),
         tools_sha256=hash_tools(agent.tools),
         mcp_servers_sha256=hash_mcp_servers(agent.mcp_servers),
         env_sha256=env_sha256,
@@ -534,6 +538,7 @@ def session_tools(
     asks_before_publishing: bool = False,
     confirmed_tools: frozenset[str] = frozenset(),
     daimon_rule_tools: frozenset[str] = frozenset(),
+    legacy_memory_servers: tuple[str, ...] = (),
 ) -> Sequence[MaTool]:
     """The tools a session for this caller runs: the visible ones, tool safety applied,
     and the publish tools asking first when the turn's agent may not publish freely.
@@ -550,11 +555,16 @@ def session_tools(
     gated = session_tools_for_policy(
         tool_safety,
         [tool.model_dump(mode="json") for tool in visible],
-        trusted_servers=trusted_servers_for(public_url),
+        trusted_servers=trusted_servers_for(
+            public_url, {s.name: s.url for s in visible_mcp_servers(agent, hidden_mcp_server_names)}
+        ),
         asks_before_publishing=asks_before_publishing,
         confirmed_tools=confirmed_tools,
         daimon_rule_tools=daimon_rule_tools,
     )
+    payload = gated if gated is not None else [tool.model_dump(mode="json") for tool in visible]
+    if legacy_memory_servers:
+        return _TOOLS.validate_python(suppress_legacy_readers(payload, legacy_memory_servers))
     return visible if gated is None else _TOOLS.validate_python(gated)
 
 
@@ -565,6 +575,7 @@ def session_mcp_servers(
     tool_safety: ToolSafetyPolicy,
     public_url: str | None,
     confirmed_tools: frozenset[str] = frozenset(),
+    chat_session_id: str | None = None,
 ) -> Sequence[BetaManagedAgentsMCPServerURLDefinition]:
     """The MCP servers a session for this caller runs, a foreign `daimon-mcp` re-pointed."""
     visible = visible_mcp_servers(agent, hidden_mcp_server_names)
@@ -574,7 +585,15 @@ def session_mcp_servers(
         public_url=public_url,
         confirmed_tools=confirmed_tools,
     )
-    return visible if healed is None else _MCP_SERVERS.validate_python(healed)
+    servers = visible if healed is None else _MCP_SERVERS.validate_python(healed)
+    if public_url is not None and chat_session_id is not None:
+        return [
+            server.model_copy(update={"url": session_mcp_url(public_url, chat_session_id)})
+            if server.name == "daimon-mcp"
+            else server
+            for server in servers
+        ]
+    return servers
 
 
 def desired_snapshot(
@@ -593,18 +612,20 @@ def desired_snapshot(
     repo_branch: str | None,
     memory_store_id: str | None,
     vault_id: str | None,
+    chat_session_id: str | None = None,
     env_file_id: str | None = None,
     memory_read_only: bool = False,
     personal_memory_store_id: str | None = None,
     asks_before_publishing: bool = False,
     confirmed_tools: frozenset[str] = frozenset(),
     daimon_rule_tools: frozenset[str] = frozenset(),
+    legacy_memory_servers: tuple[str, ...] = (),
     mcp_hold: str | None = None,
     memory_scope: str | None = None,
     repo_mount_path: str | None = None,
     repo_token_issued_at: int | None = None,
     token_issued_at_by_installation: dict[int, int] | None = None,
-    tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
+    tool_safety: ToolSafetyPolicy,
     public_url: str | None = None,
     channel_skills: Sequence[MaSkill] = (),
     system_override: str | None = None,
@@ -650,6 +671,7 @@ def desired_snapshot(
         and (memory_store_id is not None or personal_memory_store_id is not None),
         personal_memory_store_id=personal_memory_store_id,
         vault_id=vault_id,
+        chat_session_id=chat_session_id,
         mcp_hold=mcp_hold,
         memory_scope=memory_scope,
         tools_sha256=hash_tools(
@@ -661,6 +683,7 @@ def desired_snapshot(
                 asks_before_publishing=asks_before_publishing,
                 confirmed_tools=confirmed_tools,
                 daimon_rule_tools=daimon_rule_tools,
+                legacy_memory_servers=legacy_memory_servers,
             )
         ),
         mcp_servers_sha256=hash_mcp_servers(
@@ -670,6 +693,7 @@ def desired_snapshot(
                 tool_safety=tool_safety,
                 public_url=public_url,
                 confirmed_tools=confirmed_tools,
+                chat_session_id=chat_session_id,
             )
         ),
         env_sha256=env_sha256,

@@ -159,6 +159,7 @@ async def chat(request: pytest.FixtureRequest, db_preflight, db_committing_engin
             shared_channel=False,
             now=datetime.now(UTC),
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            chat_session_id="test-session",
         )
     gated = ma_agent(
         id="agent_owned",
@@ -224,8 +225,11 @@ async def chat(request: pytest.FixtureRequest, db_preflight, db_committing_engin
             account_id=account.id,
             role=Role.ADMIN,
             is_admin=True,
+            is_platform_admin=True,
+            external_id=tenant.external_id,
             platform=platform,  # pyright: ignore[reportArgumentType]
             platform_user_id=requester,
+            chat_session_id="test-session",
             chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_owned"),
         )
         service = make_backend_service(sessions, settings.turn)
@@ -253,6 +257,7 @@ async def chat(request: pytest.FixtureRequest, db_preflight, db_committing_engin
                 channel_id="channel",
                 thread_id="thread",
                 is_dm=False,
+                human_invocation=True,
             ),
             origin_channel_id="channel",
             origin_thread_id="thread",
@@ -333,7 +338,7 @@ class Card:
         runtime = SimpleNamespace(
             settings=SimpleNamespace(
                 turn=chat.runtime.settings.turn,
-                teams=SimpleNamespace(admin_team_id="admin-team", tenant_id=""),
+                teams=SimpleNamespace(admin_team_id="admin-team", tenant_id=chat.auth.external_id),
             ),
             team_owners=owners,
             group_members=GroupMembersCache(ttl_s=0),
@@ -353,8 +358,8 @@ class Card:
         import discord
         from daimon.adapters.discord.tool_confirmation import discord_confirmation_hook
 
-        async def requester_role(guild: object, clicker: str) -> tuple[Role, None]:
-            return (Role.ADMIN if clicker in self.admins else Role.USER), None
+        async def requester_role(guild: object, clicker: str) -> tuple[Role, list[str]]:
+            return (Role.ADMIN if clicker in self.admins else Role.USER), []
 
         monkeypatch.setattr("daimon.adapters.discord.bot.requester_role", requester_role)
         self.channel = MagicMock(spec=discord.Thread)
@@ -364,10 +369,15 @@ class Card:
     def _slack(self, monkeypatch, runtime, admission, ids):
         from daimon.adapters.slack.tool_confirmation import SlackConfirmationCards
 
-        async def resolve_is_admin(client: object, *, user_id: str, host_team_id: str) -> bool:
+        async def resolve_is_admin(
+            client: object, *, user_id: str, host_team_id: str = "T1", action=None
+        ) -> bool:
             return host_team_id == "T1" and user_id in self.admins
 
         monkeypatch.setattr("daimon.adapters.slack.admin.resolve_is_admin", resolve_is_admin)
+        monkeypatch.setattr(
+            "daimon.adapters.slack.admin.resolve_is_platform_admin", resolve_is_admin
+        )
         self.client = MagicMock()
         self.client.chat_postMessage = AsyncMock(return_value={"ts": "1700.1"})
         self.client.chat_update = AsyncMock()

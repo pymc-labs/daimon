@@ -29,7 +29,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Sequence
 from datetime import datetime
-from typing import Final, Literal
+from typing import Final, Literal, get_args
 
 from anthropic import AsyncAnthropic
 from daimon.core.anthropic_guard import AnthropicDisabled, require_anthropic_allowed
@@ -62,6 +62,7 @@ __all__ = [
     "ContinuationAction",
     "ContinuationDecision",
     "ContinuationRequest",
+    "ContinuationReasonUnavailable",
     "ResponderChanged",
     "build_input_continuation",
     "check_wake_responder",
@@ -70,6 +71,7 @@ __all__ = [
     "load_asking_agent_id",
     "record_continuation",
     "record_input_continuation",
+    "require_writable_reason",
     "sanitize_requested_work",
     "settle_continuation",
 ]
@@ -131,6 +133,7 @@ class ContinuationRequest(BaseModel):
     target_name: str
     requested_work: str | None
     reason: ContinuationReason
+    attended: bool = False
     idempotency_key: uuid.UUID
 
 
@@ -148,6 +151,27 @@ class ContinuationDecision(BaseModel):
     action: ContinuationAction
     message: str | None = None
     seed_user_message: str | None = None
+
+
+#: A watch's wake: `watch_fired` reports in its bound thread; `watch_report` in the
+#: owner's DM or a new thread, and is never listed by the thread wake path.
+WATCH_REASONS: tuple[ContinuationReason, ...] = ("watch_fired", "watch_report")
+
+
+class ContinuationReasonUnavailable(DaimonError):
+    """A reason is readable but not yet safe to produce during a rolling release."""
+
+
+def require_writable_reason(reason: ContinuationReason) -> None:
+    """Refuse a reason this release must not write: unknown, or a watch wake while
+    watches are off. There is deliberately no caller override."""
+    if reason not in get_args(ContinuationReason):
+        raise ContinuationReasonUnavailable("Unknown continuation reason")
+    if reason in WATCH_REASONS:
+        from daimon.core.config import load_watches_settings
+
+        if not load_watches_settings().enabled:
+            raise ContinuationReasonUnavailable("Watch producers disabled")
 
 
 class ResponderChanged(DaimonError):
@@ -248,6 +272,7 @@ def build_input_continuation(
         target_name=row.target_name,
         requested_work=row.requested_work,
         reason="private_input_applied",
+        attended=True,
         idempotency_key=row.idempotency_key,
     )
 
@@ -273,6 +298,7 @@ async def record_continuation(
     request: ContinuationRequest,
 ) -> None:
     """Queue `request` as pending. Dispatches nothing; commits its own transaction."""
+    require_writable_reason(request.reason)
     async with sessionmaker.begin() as session:
         await _record_continuation_row(
             session,
@@ -285,6 +311,7 @@ async def record_continuation(
             target_ma_agent_id=request.target_ma_agent_id,
             target_name=request.target_name,
             reason=request.reason,
+            attended=request.attended,
             idempotency_key=request.idempotency_key,
             requested_work=request.requested_work,
         )
@@ -319,6 +346,7 @@ async def record_input_continuation(
         target_ma_agent_id=request.target_ma_agent_id,
         target_name=request.target_name,
         reason=request.reason,
+        attended=request.attended,
         idempotency_key=request.idempotency_key,
         requested_work=request.requested_work if carries_work else None,
     )
@@ -456,7 +484,7 @@ async def decide_continuation(
     # A timer is the agent's own appointment: the person talking in the
     # meantime is expected, not a newer request that replaces it.
     if (
-        request.reason != "timer"
+        request.reason not in ("timer", "watch_fired", "watch_report", "job_finished")
         and latest_user_message_at is not None
         and latest_user_message_at > row.created_at
     ):
@@ -470,9 +498,27 @@ async def decide_continuation(
             ),
         )
 
+    if request.reason in WATCH_REASONS:
+        from daimon.core.stores.watches import watch_seed
+
+        async with sessionmaker() as session:
+            seed = await watch_seed(session, row, now=now)
+        if seed is None:
+            return ContinuationDecision(action="skip_target_changed")
+        return ContinuationDecision(action="dispatch", seed_user_message=seed)
     if request.reason == "timer":
         return ContinuationDecision(
             action="dispatch",
             seed_user_message=render_timer_seed(request.requested_work, set_at=row.created_at),
         )
     return ContinuationDecision(action="dispatch", seed_user_message=request.requested_work)
+
+
+def continuation_attended(row: TaskContinuationRow) -> bool:
+    """Retain trusted initiation across handoffs; a wake never grants attendance."""
+    return row.attended and row.reason not in (
+        "timer",
+        "watch_fired",
+        "watch_report",
+        "job_finished",
+    )

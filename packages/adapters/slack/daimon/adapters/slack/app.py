@@ -25,7 +25,7 @@ import aiohttp
 import anthropic
 import structlog
 from cryptography.fernet import InvalidToken
-from daimon.adapters.slack.admin import resolve_requester
+from daimon.adapters.slack.admin import WorkspaceWebClient, resolve_requester
 from daimon.adapters.slack.agent_setup.actions import (
     handle_agent_setup_action,
     handle_agent_setup_command,
@@ -146,7 +146,12 @@ from daimon.adapters.slack.github_connect import (
     handle_github_update_click,
 )
 from daimon.adapters.slack.help import handle_help_command
-from daimon.adapters.slack.here import handle_here_command
+from daimon.adapters.slack.here import (
+    handle_here_approval_submission,
+    handle_here_approvals,
+    handle_here_command,
+    handle_make_confidential,
+)
 from daimon.adapters.slack.interactions import build_retry_handlers, resolve_web_client
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.adapters.slack.member_sync import SlackMemberSync
@@ -222,7 +227,11 @@ from daimon.core.agent_identity import (
 )
 from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.channel_listing import run_channel_listing
-from daimon.core.continuity.continuation import check_wake_responder, load_asking_agent_id
+from daimon.core.continuity.continuation import (
+    check_wake_responder,
+    continuation_attended,
+    load_asking_agent_id,
+)
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
     render_preparation_failed,
@@ -287,6 +296,8 @@ from daimon.core.turn.slots import (
 )
 from daimon.core.turn.state import ToolUseBlock
 from daimon.core.turn.thread_queue import (
+    QUEUE_NOTICE,
+    HeldThreads,
     ThreadQueue,
     claim_dispatch,
     dispatch_and_drain,
@@ -438,7 +449,7 @@ class SlackApp:
         # Keeps workspace member lists for web access; None leaves them alone.
         self.member_sync = member_sync
         # Slack timestamps are unique only within a workspace conversation.
-        self._processing: set[tuple[str, str, str]] = set()
+        self._processing: HeldThreads[tuple[str, str, str]] = HeldThreads()
         self._pending: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
         # Continuation dispatches skipped because the conversation was processing,
         # keyed by team, channel, and thread ts: re-run when it is released (see
@@ -698,6 +709,7 @@ class SlackApp:
         thread_id: str,
         team_id: str,
         selfhosted: bool,
+        requester_user_id: str,
     ) -> None:
         """Serialize the optional Anthropic file sweep after a tool turn."""
 
@@ -715,6 +727,7 @@ class SlackApp:
                 channel_id=channel,
                 thread_ts=thread_id,
                 team_id=team_id,
+                requester_user_id=requester_user_id,
             )
         )
         self._output_sweeps[outcome.ma_session_id] = task
@@ -729,6 +742,7 @@ class SlackApp:
         channel_id: str,
         thread_ts: str,
         team_id: str,
+        requester_user_id: str,
     ) -> None:
         """Detached post-turn output sweep, chained per MA session.
 
@@ -753,6 +767,7 @@ class SlackApp:
                 notice_keys=self._delivery_notice_keys,
                 team_id=team_id,
                 noticed_files=self._noticed_output_files,
+                requester_user_id=requester_user_id,
             )
         except Exception as exc:  # named boundary: a sweep failure must never escape
             log.warning(
@@ -1204,6 +1219,12 @@ class SlackApp:
                         )
 
                     self._spawn(_run_feedback_text())
+            elif cb_id == "here_approvals_thread":
+                await client.send_socket_mode_response(
+                    SocketModeResponse(envelope_id=req.envelope_id)
+                )
+                if not is_external_interactive(payload):
+                    self._spawn(handle_here_approval_submission(self.runtime, payload))
             elif cb_id == SUPPORT_CALLBACK_ID:
                 # Pure evaluate (no I/O) — must run before the single ack.
                 _sup = evaluate_support_submission(payload)
@@ -1497,10 +1518,14 @@ class SlackApp:
             or action_id == "routines_create"
         ):
             self._spawn(handle_routine_action(self.runtime, payload))
+        elif action_id == "here_approvals":
+            self._spawn(handle_here_approvals(self.runtime, payload))
         elif action_id == "billing_topup":
             self._spawn(handle_topup_select(self.runtime, payload))
         elif action_id == REDEEM_OPEN_ACTION_ID:
             self._spawn(handle_redeem_open(self.runtime, payload))
+        elif action_id == "here_make_confidential":
+            self._spawn(handle_make_confidential(self.runtime, payload))
         elif action_id in PANEL_ACTION_IDS:
             self._spawn(handle_panel_action(self.runtime, payload))
         elif action_id in (
@@ -1540,7 +1565,7 @@ class SlackApp:
         elif action_id.startswith(CONFIRMATION_CUSTOM_ID_PREFIX):
             self._spawn(self._confirmations.handle_click(payload))
         elif action_id == HAND_OVER_ACTION_ID:
-            self._spawn(handle_hand_over_click(self.runtime, payload))
+            self._spawn(handle_hand_over_click(self.runtime, payload, app=self))
 
     async def _lookup_host_member(self, team_id: str, user_id: str) -> bool:
         """Ask users.info whether `user_id` is a host member; cache a positive answer only."""
@@ -1785,11 +1810,11 @@ class SlackApp:
 
             # (3) PER-EVENT CLIENT — decrypt and construct; NEVER cache on self/runtime.
             token = decrypt_token(self.runtime.fernet, row.encrypted_token)
-            client = AsyncWebClient(  # per-event only
+            client = WorkspaceWebClient(  # per-event only
                 token=token,
                 retry_handlers=build_retry_handlers(),
                 session=self.runtime.slack_http,
-            )
+            ).bind_workspace(self.runtime, team_id)
 
             # (4) EXPLICIT MENTION GATE — Slack has been observed delivering
             # app_mention events for un-mentioned thread replies; require the
@@ -1812,7 +1837,9 @@ class SlackApp:
                 )
                 capture_exception_with_scope(exc)
                 return
-            mentioned = mentions_bot(event, bot_user_id=bot_user_id)
+            mentioned = bool(event.get("_handover_agent_id")) or mentions_bot(
+                event, bot_user_id=bot_user_id
+            )
             if by_name and mentioned:
                 return  # its app_mention event runs the turn
             if not by_name and not mentioned:
@@ -1976,12 +2003,19 @@ class SlackApp:
             # Append before awaiting reactions_add so a Slack API error on the
             # reaction call does not drop the enqueued event.
             self._pending.setdefault(thread_key, []).append(event)
+            generation = self._processing.generation(thread_key)
+            notify = self._processing.should_notify(thread_key)
             with contextlib.suppress(SlackApiError, aiohttp.ClientError, asyncio.TimeoutError):
                 await web_client.reactions_add(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
                     channel=channel,
-                    timestamp=event_ts,
+                    timestamp=event.get("_reaction_ts") or event_ts,
                     name=_PENDING_REACTION,
                 )
+            if notify and self._processing.is_current(thread_key, generation):
+                with contextlib.suppress(SlackApiError, aiohttp.ClientError, TimeoutError):
+                    await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
+                        channel=channel, thread_ts=thread_id, text=QUEUE_NOTICE
+                    )
             return
 
         # (2) Per-tenant turn slot. Admission is one synchronous span (no await
@@ -2060,7 +2094,7 @@ class SlackApp:
                 with contextlib.suppress(SlackApiError, aiohttp.ClientError, asyncio.TimeoutError):
                     await web_client.reactions_add(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
                         channel=channel,
-                        timestamp=event_ts,
+                        timestamp=event.get("_reaction_ts") or event_ts,
                         name="eyes",
                     )
                 await self._run_thread_turn(
@@ -2088,7 +2122,7 @@ class SlackApp:
 
     @property
     def _thread_queue(self) -> ThreadQueue[tuple[str, str, str], dict[str, Any]]:
-        return ThreadQueue(self._processing, self._pending)
+        return ThreadQueue(self._processing, self._pending, start_turn=self._processing.start_turn)
 
     async def _drain_pending_mentions(
         self,
@@ -2115,7 +2149,9 @@ class SlackApp:
 
         def compose(queued: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
             unsettled.update((id(event), event) for event in queued)
-            return group_by_author(queued, author)
+            return group_by_author(
+                queued, author, separate=lambda event: bool(event.get("_handover_agent_id"))
+            )
 
         async def run(user_events: list[dict[str, Any]]) -> None:
             try:
@@ -2182,7 +2218,7 @@ class SlackApp:
         """
         for event in events:
             q_channel: str = event.get("channel") or channel
-            q_ts: str = event.get("event_ts") or event.get("ts") or ""
+            q_ts: str = event.get("_reaction_ts") or event.get("event_ts") or event.get("ts") or ""
             try:
                 await web_client.reactions_remove(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
                     channel=q_channel,
@@ -2361,6 +2397,7 @@ class SlackApp:
         try:
             admission = await admit(
                 self.runtime.turn_deps,
+                origin="chat",
                 tenant_id=tenant_id,
                 requester_org=standing.org,
                 requester_home_id=standing.home_id,
@@ -2490,6 +2527,7 @@ class SlackApp:
                     ),
                 )
             return
+        is_admin = admission.is_admin
 
         agent = admission.agent
         _lc_agent_name: str = agent.name
@@ -2549,7 +2587,7 @@ class SlackApp:
             requester_foreign=standing.foreign,
             notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
             is True,
-            trigger_ts=str(event.get("ts") or "") or None,
+            trigger_ts=str(event.get("_reaction_ts") or event.get("ts") or "") or None,
             agent_name=_lc_agent_name,
             model_id=_lc_model_id,
             markup=self.runtime.turn_deps.markup,
@@ -2982,6 +3020,7 @@ class SlackApp:
                         responder_handle=responder_handle(self.runtime.settings),
                         responder_account=account,
                         session_state=session_state,
+                        effective_is_admin=admission.is_admin,
                     )
                     + "\n"
                     + full_message
@@ -3007,7 +3046,7 @@ class SlackApp:
                         tenant_id, False
                     )
                     is True,
-                    trigger_ts=str(event.get("ts") or "") or None,
+                    trigger_ts=str(event.get("_reaction_ts") or event.get("ts") or "") or None,
                     agent_name=_lc_agent_name,
                     model_id=_lc_model_id,
                     markup=self.runtime.turn_deps.markup,
@@ -3077,7 +3116,7 @@ class SlackApp:
                     responder_name=admission.config.agent_name or agent.name,
                     configuration_target_ma_agent_id=admission.config.configuration_target_ma_agent_id,
                     configuration_target_name=admission.config.configuration_target_name,
-                    role=Role.ADMIN if is_admin else Role.USER,
+                    role=Role.ADMIN if admission.is_platform_admin else Role.USER,
                     sender_foreign=admission.hold is not None and admission.hold.client,
                     shared_channel=admission.shared_channel,
                     platform_channel_id=channel,
@@ -3097,6 +3136,7 @@ class SlackApp:
                                 responder_handle=responder_handle(self.runtime.settings),
                                 responder_account=account,
                                 session_state=session_state,
+                                effective_is_admin=admission.is_admin,
                             )
                             + "\n"
                             + user_message
@@ -3214,6 +3254,7 @@ class SlackApp:
                 channel=channel,
                 thread_id=thread_id,
                 team_id=team_id,
+                requester_user_id=author_id,
                 selfhosted=(
                     admission.backend_revision is not None
                     and admission.backend_revision.backend == "selfhosted"
@@ -3300,6 +3341,11 @@ class SlackApp:
         The outgoing agent's identity is read off the thread's live session
         row BEFORE `bind_session` runs, since that bind is what supersedes it.
         """
+        if row.reason == "job_finished":
+            # Native current owner membership has no complete proof on this path.
+            # Cancel before preparation or output; never redirect to another destination.
+            raise AdmissionDenied(reason="invoker_not_allowed")
+
         # Read the predecessor BEFORE bind_session decides the replacement --
         # once it runs, the old row is superseded and this is the only chance
         # to read what it was running.
@@ -3366,6 +3412,8 @@ class SlackApp:
             else await self._channel_shared(web_client, team_id=team_id, channel=channel),
             platform="slack",
             external_user_id=row.requester_external_user_id,
+            origin=row.reason,
+            attended=continuation_attended(row),
             channel_id=channel,
             thread_id=thread_id,
             role=role,
@@ -3438,7 +3486,7 @@ class SlackApp:
             thread_ts=thread_id,
             cancel=follow_cancel,
             author_id=row.requester_external_user_id,
-            requester_is_admin=role is Role.ADMIN,
+            requester_is_admin=follow_admission.is_admin,
             requester_foreign=standing.foreign,
             notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
             is True,
@@ -3517,6 +3565,7 @@ class SlackApp:
                     responder_handle=responder_handle(self.runtime.settings),
                     responder_account=account,
                     handoff=handoff_notice,
+                    effective_is_admin=follow_admission.is_admin,
                 )
                 + "\n"
                 + seed_user_message
@@ -3535,7 +3584,7 @@ class SlackApp:
                 thread_ts=thread_id,
                 cancel=cancel,
                 author_id=row.requester_external_user_id,
-                requester_is_admin=role is Role.ADMIN,
+                requester_is_admin=follow_admission.is_admin,
                 requester_foreign=standing.foreign,
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
@@ -3575,6 +3624,7 @@ class SlackApp:
         try:
             async with turn_origin(
                 self.runtime.sessionmaker,
+                attended=continuation_attended(row),
                 tenant_id=tenant_id,
                 account_id=follow_admission.account_id,
                 platform="slack",
@@ -3586,7 +3636,7 @@ class SlackApp:
                     follow_admission.config.configuration_target_ma_agent_id
                 ),
                 configuration_target_name=(follow_admission.config.configuration_target_name),
-                role=role,
+                role=Role.ADMIN if follow_admission.is_platform_admin else Role.USER,
                 sender_foreign=follow_admission.hold is not None and follow_admission.hold.client,
                 shared_channel=follow_admission.shared_channel,
                 is_setup=follow_admission.config.thread_binding_kind == "setup",
@@ -3599,7 +3649,9 @@ class SlackApp:
                     platform="slack",
                     thread_id=thread_id,
                     external_user_id=row.requester_external_user_id,
+                    watch_row=row if row.reason == "watch_fired" else None,
                     origin="handoff" if handoff_notice is not None else "chat",
+                    attended=False if row.reason == "watch_fired" else continuation_attended(row),
                     user_message=(
                         render_turn_origin(
                             follow_origin,
@@ -3607,6 +3659,7 @@ class SlackApp:
                             responder_handle=responder_handle(self.runtime.settings),
                             responder_account=account,
                             handoff=handoff_notice,
+                            effective_is_admin=follow_admission.is_admin,
                         )
                         + "\n"
                         + seed_user_message

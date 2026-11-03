@@ -76,7 +76,15 @@ def _register_host_member_users_info(mock: Any) -> None:
     """Re-register users.info after a ``mock.clear()``: the requester is a host member."""
     mock.get(
         re.compile(r"https://slack\.com/api/users\.info.*"),
-        payload={"ok": True, "user": {"id": "U_REQUESTER", "team_id": "T_CONT_ENTRY"}},
+        payload={
+            "ok": True,
+            "user": {
+                "id": "U_REQUESTER",
+                "deleted": False,
+                "is_bot": False,
+                "team_id": "T_CONT_ENTRY",
+            },
+        },
         repeat=True,
     )
 
@@ -287,6 +295,7 @@ def _make_continuation_row(
         target_name="uat-agent",
         requested_work="finish the migration",
         reason=reason,
+        attended=True,
         status="claimed",
         skip_reason=None,
         idempotency_key=uuid.uuid4(),
@@ -321,6 +330,7 @@ async def _run_continuation_and_capture_controls(
     *,
     workspace_id: str,
     reason: ContinuationReason,
+    attended: bool = True,
     admin_status: bool | None = False,
     prior_role: Role | None = None,
     excluded_identity: bool = False,
@@ -355,6 +365,8 @@ async def _run_continuation_and_capture_controls(
         tenant_id=tenant.id, account_id=requester.account_id, reason=reason
     )
 
+    row = row.model_copy(update={"attended": attended})
+
     with (
         patch(
             "daimon.adapters.slack.app.resolve_requester",
@@ -381,6 +393,27 @@ async def _run_continuation_and_capture_controls(
             mapping_id=None,
             recovered=False,
         )
+
+        async def check_origin(*args, **kwargs):
+            from daimon.core.stores.turn_origins import get_active_origin
+            from daimon.core.turn_origin import current_origin_id
+
+            origin_id = current_origin_id.get()
+            assert origin_id is not None
+            async with db_session_factory() as session:
+                origin = await get_active_origin(
+                    session,
+                    origin_id=origin_id,
+                    tenant_id=tenant.id,
+                    account_id=row.requester_account_id,
+                    platform=row.platform,
+                    now=datetime.now(UTC),
+                )
+            assert origin is not None
+            assert origin.attended is kwargs["attended"]
+            return run_turn.return_value
+
+        run_turn.side_effect = check_origin
         await app._run_continuation_turn(  # pyright: ignore[reportPrivateUsage]
             row,
             "finish the migration",
@@ -394,6 +427,7 @@ async def _run_continuation_and_capture_controls(
     assert resolve_identity.await_args.kwargs["enabled"] == (not excluded_identity)
 
     assert run_turn.await_args is not None, "the follow-up turn should have run"
+    assert run_turn.await_args.kwargs["attended"] is (row.attended and row.reason != "timer")
     user_message = run_turn.await_args.kwargs["user_message"]
     assert isinstance(user_message, str), "user_message should be the rendered controls + seed"
     return user_message
@@ -503,7 +537,7 @@ async def test_continuation_turn_omits_handoff_notice_for_private_input(
     assert '"handoff"' not in private_controls, (
         f"a private-input continuation must carry no handoff block, got {private_controls}"
     )
-    assert "your first reply must show you have the task" not in private_controls, (
+    assert "If handoff is present" not in private_controls, (
         "the handoff instruction paragraph must be absent with no handoff block"
     )
     assert private_controls.endswith("finish the migration"), (
@@ -1350,3 +1384,35 @@ async def test_continuation_turn_backend_switch_card_captures_through_its_own_ad
         _CHANNEL,
         _THREAD_ID,
     )
+
+
+@pytest.mark.parametrize("attended", [False, True])
+async def test_handoff_retains_initiation_at_dispatch(
+    db_session, db_session_factory, fake_slack_web_client, attended
+):
+    await _run_continuation_and_capture_controls(
+        db_session,
+        db_session_factory,
+        fake_slack_web_client,
+        workspace_id="T_ATTENDANCE",
+        reason="task_handoff",
+        attended=attended,
+    )
+
+
+async def test_job_completion_fails_closed_before_preparation(
+    db_session, db_session_factory, fake_slack_web_client
+):
+    from daimon.core.turn.errors import AdmissionDenied
+
+    with patch("daimon.adapters.slack.app.bind_session", new_callable=AsyncMock) as bind:
+        with pytest.raises(AdmissionDenied):
+            await _run_continuation_and_capture_controls(
+                db_session,
+                db_session_factory,
+                fake_slack_web_client,
+                workspace_id="T_JOB_DENIED",
+                reason="job_finished",
+                attended=False,
+            )
+        bind.assert_not_awaited()

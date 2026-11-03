@@ -52,6 +52,7 @@ def _auth(
         role=role,
         platform=platform,
         platform_user_id="42",
+        chat_session_id="test-session",
     )
 
 
@@ -79,6 +80,7 @@ async def test_create_list_and_cancel_a_timer_from_a_turn(
         responder_ma_agent_id="agt_daimon",
         responder_name="daimon",
         role=Role.USER,
+        chat_session_id="test-session",
         sender_foreign=False,
         shared_channel=False,
     ) as origin:
@@ -141,6 +143,7 @@ async def test_create_timer_refuses_a_time_without_an_offset(
         responder_ma_agent_id="agt_daimon",
         responder_name="daimon",
         role=Role.USER,
+        chat_session_id="test-session",
         sender_foreign=False,
         shared_channel=False,
     ) as origin:

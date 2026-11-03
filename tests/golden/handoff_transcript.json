@@ -275,6 +275,75 @@
       "payload": {
         "body": null,
         "method": "GET",
+        "path": "/v1/sessions/<id:3>",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "agent": {
+            "description": null,
+            "id": "<id:1>",
+            "mcp_servers": [],
+            "model": {
+              "id": "claude-sonnet-5",
+              "speed": "standard"
+            },
+            "multiagent": null,
+            "name": "analysis-bot",
+            "skills": [],
+            "system": null,
+            "tools": [],
+            "type": "agent",
+            "version": 1
+          },
+          "archived_at": "<time:epoch+0s>",
+          "created_at": "<time:epoch+0s>",
+          "deployment_id": null,
+          "environment_id": "<id:2>",
+          "id": "<id:3>",
+          "metadata": {},
+          "outcome_evaluations": [],
+          "resources": [],
+          "stats": {
+            "active_seconds": null,
+            "duration_seconds": null
+          },
+          "status": "idle",
+          "title": null,
+          "type": "session",
+          "updated_at": "<time:epoch+0s>",
+          "usage": {
+            "cache_creation": null,
+            "cache_read_input_tokens": null,
+            "input_tokens": null,
+            "output_tokens": null
+          },
+          "vault_ids": []
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
         "path": "/v1/sessions/<id:3>/events/stream",
         "protocol_headers": [
           [
@@ -296,6 +365,75 @@
       "platform": "ma_http",
       "result": {
         "body": "event: session.status_idle\ndata: {\"id\": \"<id:6>\", \"processed_at\": \"2026-10-09T00:00:00Z\", \"stop_reason\": {\"type\": \"end_turn\"}, \"type\": \"session.status_idle\"}\n\n",
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/sessions/<id:3>",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "agent": {
+            "description": null,
+            "id": "<id:1>",
+            "mcp_servers": [],
+            "model": {
+              "id": "claude-sonnet-5",
+              "speed": "standard"
+            },
+            "multiagent": null,
+            "name": "analysis-bot",
+            "skills": [],
+            "system": null,
+            "tools": [],
+            "type": "agent",
+            "version": 1
+          },
+          "archived_at": "<time:epoch+0s>",
+          "created_at": "<time:epoch+0s>",
+          "deployment_id": null,
+          "environment_id": "<id:2>",
+          "id": "<id:3>",
+          "metadata": {},
+          "outcome_evaluations": [],
+          "resources": [],
+          "stats": {
+            "active_seconds": null,
+            "duration_seconds": null
+          },
+          "status": "idle",
+          "title": null,
+          "type": "session",
+          "updated_at": "<time:epoch+0s>",
+          "usage": {
+            "cache_creation": null,
+            "cache_read_input_tokens": null,
+            "input_tokens": null,
+            "output_tokens": null
+          },
+          "vault_ids": []
+        },
         "status": 200
       }
     },

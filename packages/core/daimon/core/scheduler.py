@@ -10,8 +10,9 @@ from datetime import UTC, datetime, timedelta
 import structlog
 from daimon.core.ids import generate_request_id
 from daimon.core.observability import capture_exception_with_scope
-from daimon.core.routine_delivery import record_failure
+from daimon.core.routine_delivery import record_routine_failure
 from daimon.core.stores.domain import RoutineRow
+from daimon.core.stores.lead_intake import configured_routines, routine_execution
 from daimon.core.stores.routines import (
     advance_stale,
     claim_due_fireable,
@@ -86,16 +87,16 @@ class RoutineDispatcher:
 
 async def _record_fire_error(
     sm: async_sessionmaker[AsyncSession],
-    routine_id: uuid.UUID,
+    row: RoutineRow,
     msg: str,
     reason: TerminationReason | None,
 ) -> None:
     """Record a failure on a FRESH session (never reuse fire's session)."""
     try:
-        async with sm() as s, s.begin():
-            await record_failure(s, routine_id, error=msg, reason=reason)
+        async with asyncio.timeout(1), sm() as s, s.begin():
+            await record_routine_failure(s, row, error=msg, reason=reason)
     except Exception:
-        log.exception("record_result(error) failed", routine_id=str(routine_id))
+        log.exception("record_result(error) failed", routine_id=str(row.id))
 
 
 async def run_one_tick(
@@ -143,6 +144,17 @@ async def run_one_tick(
             log.exception("claim_due_fireable failed")
             return dispatcher
 
+    try:
+        async with sm() as intake_session:
+            intake_bindings = await configured_routines(
+                intake_session, {row.tenant_id for row in rows}
+            )
+    except Exception:
+        log.exception("configured_routines failed")
+        for row in rows:
+            await _record_fire_error(sm, row, "routine_configuration_check_failed", None)
+        return dispatcher
+
     fireable: list[RoutineRow] = list(rows)
 
     # A persistent semaphore bounds fires across every tick.
@@ -163,30 +175,41 @@ async def run_one_tick(
             async with sem:
                 try:
                     with observation.activate():
-                        await asyncio.wait_for(fire(row), timeout=dispatch_timeout_s)
+                        async with routine_execution(
+                            sm,
+                            row.tenant_id,
+                            row.id,
+                            register=(row.tenant_id, row.id) in intake_bindings,
+                        ):
+                            await asyncio.wait_for(fire(row), timeout=dispatch_timeout_s)
                 except TimeoutError as err:
                     observation.finish(error=err, reason=TerminationReason.CEILING)
                     # Capture to Sentry, then keep the existing swallow —
                     # sibling tasks continue and record_result still runs.
                     capture_exception_with_scope(err)
                     timeout = f"timeout: exceeded {dispatch_timeout_s}s"
-                    await _record_fire_error(sm, row.id, timeout, TerminationReason.CEILING)
+                    await _record_fire_error(sm, row, timeout, TerminationReason.CEILING)
                 except Exception as err:
                     reason = termination_reason(err)
                     observation.finish(error=err, reason=reason)
                     capture_exception_with_scope(err)
                     await _record_fire_error(
-                        sm, row.id, f"{type(err).__name__}: {err}"[:500], reason
+                        sm,
+                        row,
+                        "execution_failed"
+                        if row.destination_kind == "dm"
+                        else f"{type(err).__name__}: {err}"[:500],
+                        reason,
                     )
         except asyncio.CancelledError as err:
             observation.finish(error=err)
             # Includes cancellation while waiting for a dispatch slot.
-            await _record_fire_error(sm, row.id, "scheduler_shutdown", None)
+            await _record_fire_error(sm, row, "scheduler_shutdown", None)
             raise
         finally:
             observation.finish(reason=TerminationReason.UNKNOWN, fallback=True)
             try:
-                async with sm() as session, session.begin():
+                async with asyncio.timeout(1), sm() as session, session.begin():
                     await skip_slots_during_fire(
                         session,
                         routine_id=row.id,

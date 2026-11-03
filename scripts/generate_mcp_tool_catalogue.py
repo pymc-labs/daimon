@@ -53,6 +53,7 @@ from daimon.core.config import (
     McpSettings,
     MicrosoftAccountsSettings,
     NotebookSettings,
+    RepoMemorySettings,
     Settings,
     SlackSettings,
 )
@@ -79,7 +80,7 @@ ISOLATED_ENV_NAMES = ("MCP_PUBLIC_URL",)
 # Registration groups `create_mcp_app` skips silently rather than failing
 # when their settings are absent. If one of these modules contributes nothing
 # the catalogue is quietly short, so it is an error instead.
-CONDITIONAL_MODULES = ("channels", "media", "microsoft.register")
+CONDITIONAL_MODULES = ("channels", "media", "microsoft.register", "repo_memory")
 
 # What each visibility tag means, from the `Visibility(False, tags=...)`
 # baselines in `server.py` and the re-enabling in
@@ -155,6 +156,7 @@ def _fully_configured_settings() -> Settings:
     is exactly the partial truth a generated catalogue must not ship."""
     return Settings(
         _env_file=None,  # pyright: ignore[reportCallIssue]
+        repo_memory=RepoMemorySettings(enabled=True),
         database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
         anthropic=AnthropicSettings(api_key=SecretStr("placeholder")),
         mcp=McpSettings(

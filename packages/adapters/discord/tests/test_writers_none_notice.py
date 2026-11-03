@@ -21,6 +21,7 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.protection import ProtectionState
 from daimon.testing.db import DatabasePreflight, require_owned_sessionmaker
@@ -488,6 +489,7 @@ async def test_actual_admission_after_policy_change_is_still_denied_before_nativ
         github_app_id=None,
         github_app_private_key=None,
         public_url=None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     bot.runtime = replace(bot.runtime, turn_deps=deps)
     await set_provision_status(bot.runtime.sessionmaker, tenant_id=TENANT, status="ready")

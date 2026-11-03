@@ -31,6 +31,7 @@ from daimon.adapters.slack.routines_panel.state import RoutinesPanelState
 from daimon.adapters.slack.routines_panel.views import build_content_view
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core import routine_service
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import build_subject
 from daimon.core.cron_words import schedule_words
 from daimon.core.errors import DaimonError
@@ -182,7 +183,9 @@ async def _refuse_non_admin(
     Every mutating run_* calls this first. Returns True = caller should return
     early (refused). Returns False = admin confirmed, proceed.
     """
-    is_admin = await resolve_is_admin(web_client, user_id=user_id, host_team_id=team_id)
+    is_admin = await resolve_is_admin(
+        web_client, user_id=user_id, host_team_id=team_id, action=DelegatedAction.ROUTINES
+    )
     if not is_admin:
         await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
             channel=channel_id,
@@ -344,7 +347,9 @@ async def run_routines_delete_submission(
 
         tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
 
-        is_admin = await resolve_is_admin(web_client, user_id=user_id, host_team_id=team_id)
+        is_admin = await resolve_is_admin(
+            web_client, user_id=user_id, host_team_id=team_id, action=DelegatedAction.ROUTINES
+        )
         try:
             await routine_service.delete_routine(
                 _env(runtime, tenant_id),

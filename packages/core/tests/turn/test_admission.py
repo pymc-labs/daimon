@@ -11,6 +11,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from anthropic.types.beta import BetaManagedAgentsAgent
@@ -21,6 +22,7 @@ from daimon.core.config import McpSettings
 from daimon.core.direct_messages import start_dm
 from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import MAResolverMissError, ResolverCache, new_resolver_cache
+from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, set_access_policy
 from daimon.core.stores.accounts import set_role
@@ -29,6 +31,7 @@ from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.tenants import set_funding_mode
 from daimon.core.stores.thread_agent_bindings import upsert_responder_binding
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.admission import (
     Admission,
     AdmissionDenied,
@@ -96,10 +99,18 @@ def _deps(
     router: MARouter,
     billing_config: BillingConfig | None = None,
     resolver_cache: ResolverCache | None = None,
+    native_member_admin: bool | None = None,
 ) -> TurnDeps:
     return TurnDeps(
         anthropic=build_fake_anthropic(router.dispatch),
         sessionmaker=sessionmaker,
+        membership_resolver=(
+            CachedMembershipResolver(
+                AsyncMock(return_value=Membership(is_member=True, is_admin=native_member_admin))
+            )
+            if native_member_admin is not None
+            else None
+        ),
         deployment_default=DeploymentDefault(),
         resolver_cache=resolver_cache if resolver_cache is not None else new_resolver_cache(),
         defaults_root=defaults_root,
@@ -111,6 +122,7 @@ def _deps(
         github_app_id=None,
         github_app_private_key=None,
         public_url=None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
 
@@ -141,6 +153,7 @@ async def test_admit_over_balance_tenant_raises_admission_denied_balance_deplete
     with pytest.raises(AdmissionDenied) as exc_info:
         await admit(
             deps,
+            origin="chat",
             tenant_id=tenant.id,
             requester_org=RequesterOrg.HOST,
             platform=platform,
@@ -202,6 +215,7 @@ async def test_admit_user_with_a_used_up_allowance_raises_admission_denied(
     with pytest.raises(AdmissionDenied) as exc_info:
         await admit(
             deps,
+            origin="chat",
             tenant_id=tenant.id,
             requester_org=RequesterOrg.HOST,
             platform=platform,
@@ -263,6 +277,7 @@ async def test_admit_refuses_a_turn_in_a_channel_over_its_budget(
     with pytest.raises(AdmissionDenied) as exc_info:
         await admit(
             deps,
+            origin="chat",
             tenant_id=tenant.id,
             requester_org=RequesterOrg.HOST,
             platform=platform,
@@ -315,14 +330,20 @@ async def test_a_budget_refusal_sends_the_notice_unless_the_tenant_opted_out(
     }
     opted_out = replace(base, budget_notifier=notifier, budget_notices_off=frozenset({tenant.id}))
     with pytest.raises(AdmissionDenied):
-        await admit(opted_out, **args, channel_id="chan-1", now=_NOW)
+        await admit(opted_out, origin="chat", **args, channel_id="chan-1", now=_NOW)
     release.set()
     await drain_budget_notices()
     assert sent == [], "an opted-out tenant gets no notice"
 
     release.clear()
     with pytest.raises(AdmissionDenied) as exc_info:
-        await admit(replace(base, budget_notifier=notifier), **args, channel_id="chan-1", now=_NOW)
+        await admit(
+            replace(base, budget_notifier=notifier),
+            origin="chat",
+            **args,
+            channel_id="chan-1",
+            now=_NOW,
+        )
     assert exc_info.value.reason == "channel_budget_exceeded", "the notice leaves the refusal as is"
     assert sent == [], "the refusal returns while the notice is still being sent"
     release.set()
@@ -338,7 +359,10 @@ async def test_admit_attributes_the_channel_and_a_dm_to_its_source(
     tenant = await _funded_tenant_with_spent_channel(db_session)
     await db_session.commit()
     deps = _deps(
-        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_router_for(tenant)
+        native_member_admin=False,
+        sessionmaker=db_session_factory,
+        defaults_root=tmp_path,
+        router=_router_for(tenant),
     )
     args = {
         "tenant_id": tenant.id,
@@ -347,21 +371,43 @@ async def test_admit_attributes_the_channel_and_a_dm_to_its_source(
         "requester_org": RequesterOrg.HOST,
     }
 
-    unbudgeted = await admit(deps, **args, channel_id="chan-1", now=_NOW)
+    unbudgeted = await admit(deps, origin="chat", **args, channel_id="chan-1", now=_NOW)
     assert unbudgeted.budget_channel_id == "chan-1", "no budget row admits, and still attributes"
 
     await make_channel_budget(db_session, tenant=tenant, limit_usd=Decimal("0"))
     await db_session.commit()
-    dm = await admit(deps, **args, channel_id="dm-chan", is_dm=True, now=_NOW)
+    dm = await admit(
+        deps,
+        origin="chat",
+        **args,
+        channel_id="dm-chan",
+        is_dm=True,
+        verified_membership=True,
+        now=_NOW,
+    )
     assert dm.budget_channel_id is None, "a DM with no source channel is unattributed"
     moved = await admit(
-        deps, **args, channel_id="dm-chan", is_dm=True, dm_source_channel_id="chan-2", now=_NOW
+        deps,
+        origin="chat",
+        **args,
+        channel_id="dm-chan",
+        is_dm=True,
+        verified_membership=True,
+        dm_source_channel_id="chan-2",
+        now=_NOW,
     )
     assert moved.budget_channel_id == "chan-2", "a moved DM counts toward the channel it came from"
     assert moved.origin_channel_id == "dm-chan", "the seal still sees the DM, not its source"
     with pytest.raises(AdmissionDenied) as exc_info:
         await admit(
-            deps, **args, channel_id="dm-chan", is_dm=True, dm_source_channel_id="chan-1", now=_NOW
+            deps,
+            origin="chat",
+            **args,
+            channel_id="dm-chan",
+            is_dm=True,
+            verified_membership=True,
+            dm_source_channel_id="chan-1",
+            now=_NOW,
         )
     assert exc_info.value.reason == "channel_budget_exceeded", "and is gated by its budget"
 
@@ -385,6 +431,7 @@ async def test_admit_gate_order_channel_budget_wins_over_allowance(
     with pytest.raises(AdmissionDenied) as exc_info:
         await admit(
             deps,
+            origin="chat",
             tenant_id=tenant.id,
             requester_org=RequesterOrg.HOST,
             platform="discord",
@@ -413,6 +460,7 @@ async def test_admit_missing_agent_only_raises_missing_turn_config_error(
     with pytest.raises(MissingTurnConfigError) as exc_info:
         await admit(
             deps,
+            origin="chat",
             tenant_id=tenant.id,
             requester_org=RequesterOrg.HOST,
             platform="discord",
@@ -443,6 +491,7 @@ async def test_admit_missing_agent_and_environment_raises_missing_turn_config_er
     with pytest.raises(MissingTurnConfigError) as exc_info:
         await admit(
             deps,
+            origin="chat",
             tenant_id=tenant.id,
             requester_org=RequesterOrg.HOST,
             platform="discord",
@@ -482,6 +531,7 @@ async def test_admit_unresolvable_tag_propagates_ma_resolver_miss_error(
     with pytest.raises(MAResolverMissError) as exc_info:
         await admit(
             deps,
+            origin="chat",
             tenant_id=tenant.id,
             requester_org=RequesterOrg.HOST,
             platform="discord",
@@ -519,6 +569,7 @@ async def test_admit_happy_path_returns_admission_with_retrieved_agent_and_accou
 
     admission = await admit(
         deps,
+        origin="chat",
         tenant_id=tenant.id,
         requester_org=RequesterOrg.HOST,
         platform="discord",
@@ -587,6 +638,7 @@ async def test_admit_reads_the_daimon_tools_the_agent_has_ask_or_deny_rules_on(
     ):
         admission = await admit(
             replace(deps, tool_safety=policy),
+            origin="chat",
             tenant_id=tenant.id,
             requester_org=RequesterOrg.HOST,
             platform="discord",
@@ -639,6 +691,7 @@ async def test_admission_reads_agent_rules_only_when_tool_safety_and_rules_are_o
             scoped = replace(deps, tool_safety=policy)
             return scoped, await admit(
                 scoped,
+                origin="chat",
                 tenant_id=tenant.id,
                 requester_org=RequesterOrg.HOST,
                 platform="discord",
@@ -710,6 +763,7 @@ async def test_a_tenant_whose_credit_ran_out_is_refused_without_the_no_credit_ye
     with pytest.raises(AdmissionDenied) as exc_info:
         await admit(
             deps,
+            origin="chat",
             tenant_id=tenant.id,
             requester_org=RequesterOrg.HOST,
             platform="discord",
@@ -741,6 +795,7 @@ async def test_admit_gate_order_config_bail_wins_over_over_balance(
     with pytest.raises(MissingTurnConfigError):
         await admit(
             deps,
+            origin="chat",
             tenant_id=tenant.id,
             requester_org=RequesterOrg.HOST,
             platform="discord",
@@ -789,6 +844,7 @@ async def test_admit_raises_resolver_miss_when_the_resolved_agent_is_archived(
     with pytest.raises(MAResolverMissError) as exc_info:
         await admit(
             deps,
+            origin="chat",
             tenant_id=tenant.id,
             requester_org=RequesterOrg.HOST,
             platform="discord",
@@ -843,6 +899,7 @@ async def test_admit_invalidates_archived_environment_cache(
     with pytest.raises(MAResolverMissError) as exc_info:
         await admit(
             deps,
+            origin="chat",
             tenant_id=tenant.id,
             requester_org=RequesterOrg.HOST,
             platform="discord",
@@ -909,6 +966,7 @@ async def test_admit_clears_the_scope_row_that_named_an_archived_agent(
     with pytest.raises(MAResolverMissError):
         await admit(
             deps,
+            origin="chat",
             tenant_id=tenant.id,
             requester_org=RequesterOrg.HOST,
             platform="discord",
@@ -955,6 +1013,7 @@ async def test_role_is_persisted_even_when_configuration_blocks_turn(
     with pytest.raises(MissingTurnConfigError):
         await admit(
             _deps(sessionmaker=db_session_factory, router=MARouter(), defaults_root=tmp_path),
+            origin="chat",
             tenant_id=tenant.id,
             requester_org=RequesterOrg.HOST,
             platform="slack",
@@ -1011,6 +1070,7 @@ async def test_setup_admission_uses_bound_identity_and_leaves_missing_target_unc
     router.add_environment(environment)
     admission = await admit(
         _deps(sessionmaker=db_session_factory, router=router, defaults_root=tmp_path),
+        origin="chat",
         tenant_id=tenant.id,
         requester_org=RequesterOrg.HOST,
         platform="discord",
@@ -1062,6 +1122,7 @@ async def test_handoff_thread_admits_the_agent_the_task_was_handed_to(
 
     admission = await admit(
         _deps(sessionmaker=db_session_factory, router=router, defaults_root=tmp_path),
+        origin="chat",
         tenant_id=tenant.id,
         requester_org=RequesterOrg.HOST,
         platform="discord",
@@ -1113,6 +1174,7 @@ async def test_handoff_thread_refuses_an_agent_from_another_workspace(
     with pytest.raises(DaimonError, match="no longer available here"):
         await admit(
             _deps(sessionmaker=db_session_factory, router=router, defaults_root=tmp_path),
+            origin="chat",
             tenant_id=tenant.id,
             requester_org=RequesterOrg.HOST,
             platform="discord",
@@ -1124,9 +1186,9 @@ async def test_handoff_thread_refuses_an_agent_from_another_workspace(
 
 
 async def _seed_admittable_tenant(
-    db_session: AsyncSession, *, policy: TenantAccessPolicy | None
+    db_session: AsyncSession, *, policy: TenantAccessPolicy | None, platform: str = "discord"
 ) -> TenantRow:
-    tenant = await make_tenant(db_session)
+    tenant = await make_tenant(db_session, platform=platform)  # type: ignore[arg-type]
     await make_tenant_config(
         db_session, tenant=tenant, agent_name="daimon", environment_name="default"
     )
@@ -1173,18 +1235,25 @@ async def test_admit_adds_the_default_agents_office_skills_on_teams_only(
         ma_environment(id="env_1", name="default", tenant_id=tenant.id),
     )
     deps = replace(
-        _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router),
+        _deps(
+            native_member_admin=False,
+            sessionmaker=db_session_factory,
+            defaults_root=tmp_path,
+            router=router,
+        ),
         platform_skills=load_platform_skills(Path(__file__).resolve().parents[4] / "defaults"),
     )
 
     admission = await admit(
         deps,
+        origin="chat",
         tenant_id=tenant.id,
         requester_org=RequesterOrg.HOST,
         platform=platform,
         external_user_id="user-1",
         channel_id="chan-1",
         is_dm=is_dm,
+        verified_membership=True,
         now=_NOW,
     )
 
@@ -1240,6 +1309,7 @@ async def test_admit_adds_the_default_agents_microsoft_365_skill_on_teams_only(
 
     admission = await admit(
         deps,
+        origin="chat",
         tenant_id=tenant.id,
         requester_org=RequesterOrg.HOST,
         platform=platform,
@@ -1295,6 +1365,7 @@ async def test_admit_refuses_an_invoker_outside_the_allowlist_before_any_ma_call
     with pytest.raises(AdmissionDenied) as exc_info:
         await admit(
             deps,
+            origin="chat",
             tenant_id=tenant.id,
             requester_org=RequesterOrg.HOST,
             platform="discord",
@@ -1331,6 +1402,7 @@ async def test_admit_admits_whoever_the_policy_allows(
 
     admission = await admit(
         deps,
+        origin="chat",
         tenant_id=tenant.id,
         requester_org=RequesterOrg.HOST,
         platform="discord",
@@ -1359,6 +1431,7 @@ async def test_admit_treats_a_missing_live_role_as_non_admin_even_for_a_stored_a
     # An earlier mention recorded the user as admin.
     await admit(
         deps,
+        origin="chat",
         tenant_id=tenant.id,
         requester_org=RequesterOrg.HOST,
         platform="discord",
@@ -1371,6 +1444,7 @@ async def test_admit_treats_a_missing_live_role_as_non_admin_even_for_a_stored_a
     with pytest.raises(AdmissionDenied) as exc_info:
         await admit(
             deps,
+            origin="chat",
             tenant_id=tenant.id,
             requester_org=RequesterOrg.HOST,
             platform="discord",
@@ -1398,6 +1472,7 @@ async def test_admit_gate_order_invoker_refusal_wins_over_missing_config_and_bal
     with pytest.raises(AdmissionDenied) as exc_info:
         await admit(
             deps,
+            origin="chat",
             tenant_id=tenant.id,
             requester_org=RequesterOrg.HOST,
             platform="slack",
@@ -1429,6 +1504,7 @@ async def test_admit_refuses_when_the_stored_policy_is_unreadable(
     with pytest.raises(AccessPolicyUnreadable):
         await admit(
             deps,
+            origin="chat",
             tenant_id=tenant.id,
             requester_org=RequesterOrg.HOST,
             platform="discord",
@@ -1488,11 +1564,15 @@ async def test_admit_marks_memory_read_only_for_sealed_channels_and_policy_dms(
 ) -> None:
     tenant = await _seed_admittable_tenant(db_session, policy=policy)
     deps = _deps(
-        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+        native_member_admin=False,
+        sessionmaker=db_session_factory,
+        defaults_root=tmp_path,
+        router=_admittable_router(tenant),
     )
 
     admission = await admit(
         deps,
+        origin="chat",
         tenant_id=tenant.id,
         requester_org=RequesterOrg.HOST,
         platform="discord",
@@ -1502,6 +1582,7 @@ async def test_admit_marks_memory_read_only_for_sealed_channels_and_policy_dms(
         now=_NOW,
         role=Role.USER,
         is_dm=is_dm,
+        verified_membership=True,
     )
 
     assert admission.memory_read_only is expected, "memory_read_only must follow the policy"
@@ -1546,6 +1627,7 @@ async def test_admit_records_every_seal_on_a_thread_sealed_twice(
 
     admission = await admit(
         deps,
+        origin="chat",
         tenant_id=tenant.id,
         requester_org=RequesterOrg.HOST,
         platform="discord",
@@ -1599,6 +1681,7 @@ async def test_admit_leaves_an_isolated_channels_own_agent_memory_writable(
 
     admission = await admit(
         deps,
+        origin="chat",
         tenant_id=tenant.id,
         requester_org=RequesterOrg.HOST,
         platform="discord",
@@ -1638,6 +1721,7 @@ async def test_admit_refuses_an_agent_that_is_not_the_isolated_channels_own(
     with pytest.raises(AdmissionDenied) as exc_info:
         await admit(
             deps,
+            origin="chat",
             tenant_id=tenant.id,
             requester_org=RequesterOrg.HOST,
             platform="discord",
@@ -1681,6 +1765,7 @@ async def test_admit_holds_an_isolated_teams_channel_to_its_own_agent(
 
     admission = await admit(
         deps,
+        origin="chat",
         **args,
         channel_id=_TEAMS_ROOM,
         thread_id=f"{_TEAMS_ROOM};messageid=1700000000000",
@@ -1691,12 +1776,14 @@ async def test_admit_holds_an_isolated_teams_channel_to_its_own_agent(
     with pytest.raises(AdmissionDenied) as exc_info:
         await admit(
             deps,
+            origin="chat",
             **args,
             channel_id="a:chat-1",
             thread_id="a:chat-1",
             now=_NOW,
             role=Role.USER,
             is_dm=True,
+            verified_membership=True,
         )
     assert exc_info.value.reason == "runs_elsewhere", "the isolated agent never answers a 1:1 chat"
 
@@ -1714,6 +1801,7 @@ async def test_admit_refuses_an_outside_agent_in_an_isolated_teams_thread(
     with pytest.raises(AdmissionDenied) as exc_info:
         await admit(
             deps,
+            origin="chat",
             tenant_id=tenant.id,
             requester_org=RequesterOrg.HOST,
             platform="teams",
@@ -1756,6 +1844,7 @@ async def test_admit_refuses_a_handoff_under_an_isolated_channel_to_an_outside_a
     with pytest.raises(AdmissionDenied) as exc_info:
         await admit(
             _deps(sessionmaker=db_session_factory, router=router, defaults_root=tmp_path),
+            origin="chat",
             tenant_id=tenant.id,
             requester_org=RequesterOrg.HOST,
             platform="discord",
@@ -1800,6 +1889,7 @@ async def test_admit_answers_a_setup_thread_under_an_isolated_channel_read_only(
 
     admission = await admit(
         _deps(sessionmaker=db_session_factory, router=router, defaults_root=tmp_path),
+        origin="chat",
         tenant_id=tenant.id,
         requester_org=RequesterOrg.HOST,
         platform="discord",
@@ -1841,6 +1931,7 @@ async def test_admit_refuses_a_turn_whose_reply_would_land_in_a_protected_channe
     with pytest.raises(AdmissionDenied) as exc_info:
         await admit(
             deps,
+            origin="chat",
             tenant_id=tenant.id,
             requester_org=RequesterOrg.HOST,
             platform="discord",
@@ -1872,6 +1963,7 @@ async def test_admit_still_admits_outside_the_protected_channels(
 
     admission = await admit(
         deps,
+        origin="chat",
         tenant_id=tenant.id,
         requester_org=RequesterOrg.HOST,
         platform="discord",
@@ -1902,6 +1994,7 @@ async def test_admit_protection_wins_over_the_invoker_refusal(
     with pytest.raises(AdmissionDenied) as exc_info:
         await admit(
             deps,
+            origin="chat",
             tenant_id=tenant.id,
             requester_org=RequesterOrg.HOST,
             platform="discord",
@@ -1935,6 +2028,7 @@ async def test_admit_with_an_unresolved_category(
     )
     call = admit(
         deps,
+        origin="chat",
         tenant_id=tenant.id,
         requester_org=RequesterOrg.HOST,
         platform="discord",
@@ -1979,12 +2073,16 @@ async def test_admit_refuses_a_pinned_agent_outside_its_channels(
     """The pin holds in every channel and thread, admins included, and for a member's DM."""
     tenant = await _seed_admittable_tenant(db_session, policy=_PIN_DAIMON)
     deps = _deps(
-        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+        native_member_admin=False,
+        sessionmaker=db_session_factory,
+        defaults_root=tmp_path,
+        router=_admittable_router(tenant),
     )
 
     with pytest.raises(AdmissionDenied) as exc_info:
         await admit(
             deps,
+            origin="chat",
             tenant_id=tenant.id,
             requester_org=RequesterOrg.HOST,
             platform="discord",
@@ -1994,6 +2092,7 @@ async def test_admit_refuses_a_pinned_agent_outside_its_channels(
             now=_NOW,
             role=role,
             is_dm=is_dm,
+            verified_membership=True,
         )
 
     assert exc_info.value.reason == "runs_elsewhere"
@@ -2023,6 +2122,7 @@ async def test_admit_admits_a_pinned_agent_in_its_channels_and_leaves_others_alo
 
     admission = await admit(
         deps,
+        origin="chat",
         tenant_id=tenant.id,
         requester_org=RequesterOrg.HOST,
         platform="discord",
@@ -2066,11 +2166,15 @@ async def test_admit_flags_a_sealed_source_apart_from_dm_memory_policy(
     """/dm-me needs to know the source itself is sealed, not only that memory is read-only."""
     tenant = await _seed_admittable_tenant(db_session, policy=policy)
     deps = _deps(
-        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+        native_member_admin=False,
+        sessionmaker=db_session_factory,
+        defaults_root=tmp_path,
+        router=_admittable_router(tenant),
     )
 
     admission = await admit(
         deps,
+        origin="chat",
         tenant_id=tenant.id,
         requester_org=RequesterOrg.HOST,
         platform="discord",
@@ -2080,6 +2184,7 @@ async def test_admit_flags_a_sealed_source_apart_from_dm_memory_policy(
         now=_NOW,
         role=Role.USER,
         is_dm=is_dm,
+        verified_membership=True,
     )
 
     assert admission.source_sealed is expected
@@ -2147,6 +2252,7 @@ async def test_admit_refuses_a_handed_off_thread_whose_binding_names_the_agent_d
     with pytest.raises(AdmissionDenied) as exc_info:
         await admit(
             deps,
+            origin="chat",
             tenant_id=tenant.id,
             requester_org=RequesterOrg.HOST,
             platform="discord",
@@ -2184,6 +2290,7 @@ async def test_admit_refuses_an_agent_pinned_by_its_display_name(
     with pytest.raises(AdmissionDenied) as exc_info:
         await admit(
             deps,
+            origin="chat",
             tenant_id=tenant.id,
             requester_org=RequesterOrg.HOST,
             platform="discord",
@@ -2207,13 +2314,17 @@ async def test_admit_exempts_an_admin_from_a_pin_in_a_dm_only(
     On Teams the adapter passes ADMIN for an owner of the admin team
     in a personal chat, so the same rule covers them.
     """
-    tenant = await _seed_admittable_tenant(db_session, policy=_PIN_DAIMON)
+    tenant = await _seed_admittable_tenant(db_session, policy=_PIN_DAIMON, platform=platform)
     deps = _deps(
-        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+        native_member_admin=True,
+        sessionmaker=db_session_factory,
+        defaults_root=tmp_path,
+        router=_admittable_router(tenant),
     )
 
     admission = await admit(
         deps,
+        origin="chat",
         tenant_id=tenant.id,
         requester_org=RequesterOrg.HOST,
         platform=platform,  # pyright: ignore[reportArgumentType]
@@ -2223,6 +2334,7 @@ async def test_admit_exempts_an_admin_from_a_pin_in_a_dm_only(
         now=_NOW,
         role=Role.ADMIN,
         is_dm=True,
+        verified_membership=True,
     )
 
     assert isinstance(admission, Admission)
@@ -2242,7 +2354,10 @@ async def test_an_admins_dm_with_an_isolated_channels_agent_is_held_to_its_budge
     )
     tenant = await _seed_admittable_tenant(db_session, policy=policy)
     deps = _deps(
-        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+        native_member_admin=True,
+        sessionmaker=db_session_factory,
+        defaults_root=tmp_path,
+        router=_admittable_router(tenant),
     )
     args = {
         "tenant_id": tenant.id,
@@ -2250,17 +2365,18 @@ async def test_an_admins_dm_with_an_isolated_channels_agent_is_held_to_its_budge
         "external_user_id": "boss",
         "channel_id": "dm-1",
         "is_dm": True,
+        "verified_membership": True,
         "role": Role.ADMIN,
         "requester_org": RequesterOrg.HOST,
     }
 
-    admission = await admit(deps, **args, now=_NOW)
+    admission = await admit(deps, origin="chat", **args, now=_NOW)
     assert admission.budget_channel_id == "chan-1", "charged to the agent's channel"
 
     await make_channel_budget(db_session, tenant=tenant, limit_usd=Decimal("0"))
     await db_session.commit()
     with pytest.raises(AdmissionDenied) as exc_info:
-        await admit(deps, **args, now=_NOW)
+        await admit(deps, origin="chat", **args, now=_NOW)
     assert exc_info.value.reason == "channel_budget_exceeded", "a $0 channel budget stops it"
 
 
@@ -2281,6 +2397,7 @@ async def _admit_as(
     deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router)
     return await admit(
         deps,
+        origin="chat",
         tenant_id=tenant.id,
         requester_org=RequesterOrg.HOST,
         platform="teams",
@@ -2290,6 +2407,7 @@ async def _admit_as(
         now=_NOW,
         role=role,
         is_dm=is_dm,
+        verified_membership=True,
     )
 
 
@@ -2312,3 +2430,302 @@ async def test_a_caller_in_an_isolated_channel_may_be_an_admin(
         "no one is held to a user's grant by where they are from"
     )
     assert await _stored_role(db_session, admission) == Role.ADMIN.value
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("is_dm", [False, True])
+async def test_approval_gate_is_tenant_scoped_and_refreshed_at_reauthorization(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    enabled: bool,
+    is_dm: bool,
+) -> None:
+    from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
+    from daimon.core.approval_gate import ApprovalGate
+    from daimon.core.stores.access_policy import set_access_policy
+    from daimon.core.tool_safety import ToolSafetyPolicy
+    from daimon.core.turn.admission import reauthorize, refresh_approval_gate
+
+    tenant = await make_tenant(db_session)
+    await make_tenant_config(
+        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
+    )
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    other = await make_tenant(db_session)
+    await set_access_policy(
+        db_session,
+        tenant_id=other.id,
+        policy=TenantAccessPolicy(approvals="off", approvals_set_by="foreign-admin"),
+    )
+    await db_session.commit()
+    router = resolved_agent_env_router(
+        ma_agent(id="ag_1", name="daimon", tenant_id=tenant.id),
+        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+    )
+    deps = replace(
+        _deps(
+            sessionmaker=db_session_factory,
+            defaults_root=tmp_path,
+            router=router,
+            native_member_admin=False,
+        ),
+        tool_safety=ToolSafetyPolicy(enabled=True, allow_gate_overrides=enabled),
+    )
+    admission = await admit(
+        deps,
+        origin="chat",
+        requester_org=RequesterOrg.HOST,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="user-1",
+        channel_id="chan-1",
+        is_dm=is_dm,
+        verified_membership=True,
+        now=_NOW,
+    )
+    assert admission.approval_gate == (
+        ApprovalGate("inherit", "server", None, tenant.id) if enabled and not is_dm else None
+    )
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(
+                approvals="off",
+                approvals_set_by="server-admin",
+                channel_rules={}
+                if is_dm
+                else {"chan-1": ChannelRule(approvals="on", approvals_set_by="channel-admin")},
+            ),
+        )
+    fresh = await reauthorize(deps, admission)
+    assert fresh.approval_gate == (
+        ApprovalGate("on", "channel:chan-1", "channel-admin", tenant.id)
+        if enabled and not is_dm
+        else None
+    )
+    assert admission.approval_gate == (
+        ApprovalGate("inherit", "server", None, tenant.id) if enabled and not is_dm else None
+    )
+
+    assert fresh.grant is not None
+    unbound = replace(fresh, grant=replace(fresh.grant, platform=None))
+    assert await refresh_approval_gate(deps, unbound) is None
+
+    if is_dm:
+        from daimon.core.tool_safety import ToolCall
+        from daimon.core.turn.approvals import chat_tool_confirmation
+        from daimon.core.turn.posture import PolicyApproval
+
+        assert await refresh_approval_gate(deps, fresh) is None
+        posture = chat_tool_confirmation(
+            deps.tool_safety,
+            requester_platform_user_id="user-1",
+            confirm=None,
+            approval_gate_for=lambda: refresh_approval_gate(deps, fresh),
+            server_urls={"third": "https://third.example/mcp"},
+        )
+        assert isinstance(posture, PolicyApproval)
+        assert not (
+            await posture.decide(
+                ToolCall(tool_use_id="dm-write", server_name="third", tool_name="create_issue")
+            )
+        ).allow
+
+
+@pytest.mark.parametrize("scope", ["server", "channel", "thread"])
+@pytest.mark.parametrize("revoked", ["on", "inherit"])
+@pytest.mark.parametrize("between_calls", [False, True])
+async def test_gate_revocation_reaches_prepared_and_running_turns(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    scope: str,
+    revoked: str,
+    between_calls: bool,
+) -> None:
+    from typing import cast
+    from unittest.mock import AsyncMock
+
+    from daimon.core.access_policy import Approvals
+    from daimon.core.approval_gate import set_approval_gate
+    from daimon.core.authz import Subject
+    from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
+    from daimon.core.turn.admission import decide_before_send, refresh_approval_gate
+    from daimon.core.turn.approvals import chat_tool_confirmation
+    from daimon.core.turn.errors import SessionBusyError
+    from daimon.core.turn.posture import PolicyApproval
+
+    tenant = await make_tenant(db_session)
+    await make_tenant_config(
+        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
+    )
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    await db_session.commit()
+    deps = replace(
+        _deps(
+            sessionmaker=db_session_factory,
+            defaults_root=tmp_path,
+            router=resolved_agent_env_router(
+                ma_agent(id="ag_1", name="daimon", tenant_id=tenant.id),
+                ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+            ),
+        ),
+        tool_safety=ToolSafetyPolicy(enabled=True, allow_gate_overrides=True),
+    )
+    target = {"server": None, "channel": "chan-1", "thread": "thread-1"}[scope]
+
+    async def change(value: Approvals) -> None:
+        await set_approval_gate(
+            db_session_factory,
+            tenant_id=tenant.id,
+            platform="discord",
+            target=target,
+            value=value,
+            subject=Subject(is_admin=True, platform_user_id="admin"),
+        )
+
+    await change("off")
+    admission = await admit(
+        deps,
+        origin="chat",
+        requester_org=RequesterOrg.HOST,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="user-1",
+        channel_id="chan-1",
+        thread_id="thread-1",
+        now=_NOW,
+    )
+    card = AsyncMock(return_value="denied")
+    posture = chat_tool_confirmation(
+        deps.tool_safety,
+        requester_platform_user_id="user-1",
+        confirm=card,
+        approval_gate_for=lambda: refresh_approval_gate(deps, admission),
+        server_urls={"third": "https://third.example/mcp"},
+    )
+    assert isinstance(posture, PolicyApproval)
+    call = ToolCall(tool_use_id="first", server_name="third", tool_name="create_issue")
+    if between_calls:
+        assert (await posture.decide(call)).allow
+        card.assert_not_awaited()
+    await change(cast(Approvals, revoked))
+    from daimon.core.session_fence_retry import retry_fences
+
+    attempts = 0
+
+    async def stale_send() -> None:
+        nonlocal attempts
+        attempts += 1
+        await decide_before_send(deps, admission)()
+
+    with pytest.raises(SessionBusyError):
+        await retry_fences(stale_send, backoff=False)
+    assert attempts == 1, "a changed gate must escape the fence retry loop"
+    # A retry is a newly admitted turn, never a spin over the stale prepared grant.
+    readmitted = await admit(
+        deps,
+        origin="chat",
+        requester_org=RequesterOrg.HOST,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="user-1",
+        channel_id="chan-1",
+        thread_id="thread-1",
+        now=_NOW,
+    )
+    assert readmitted.approval_gate is not None and readmitted.approval_gate.value == revoked
+    await retry_fences(decide_before_send(deps, readmitted), backoff=False)
+    # Unattended policy is unaffected by approval-gate changes.
+    await decide_before_send(deps, admission, attended=False)()
+    assert not (await posture.decide(call.model_copy(update={"tool_use_id": "next"}))).allow
+    card.assert_awaited_once()
+
+
+async def test_explicit_grant_does_not_promote_stored_role_when_platform_is_unavailable(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    from daimon.core.stores.accounts import get_account
+    from daimon.core.stores.daimon_admins import change_grant
+
+    tenant = await _seed_admittable_tenant(db_session, policy=None, platform="teams")
+    await change_grant(
+        db_session,
+        tenant_id=tenant.id,
+        platform="teams",
+        subject_kind="user",
+        subject_id="user-1",
+        actor_user_id="owner",
+        is_platform_admin=True,
+    )
+    await db_session.commit()
+    admission = await admit(
+        _deps(
+            sessionmaker=db_session_factory,
+            defaults_root=tmp_path,
+            router=_admittable_router(tenant),
+        ),
+        origin="chat",
+        tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
+        platform="teams",
+        external_user_id="user-1",
+        channel_id="chan-1",
+        now=_NOW,
+        role=None,
+    )
+    assert admission.is_admin
+    assert not admission.grant.subject.is_admin, "delegation does not exempt turn admission"
+    account = await get_account(db_session, admission.account_id)
+    assert account is not None and account.role is Role.USER
+
+
+@pytest.mark.parametrize(
+    ("platform", "kind"),
+    [("discord", "user"), ("discord", "role"), ("slack", "user"), ("teams", "user")],
+)
+async def test_delegated_admission_never_caches_admin_authority(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    platform: str,
+    kind: str,
+) -> None:
+    from daimon.core.stores.accounts import get_account
+    from daimon.core.stores.daimon_admins import change_grant
+
+    tenant = await _seed_admittable_tenant(db_session, policy=None, platform=platform)
+    await change_grant(
+        db_session,
+        tenant_id=tenant.id,
+        platform=platform,
+        subject_kind=kind,
+        subject_id="granted-role" if kind == "role" else "user-1",
+        actor_user_id="owner",
+        is_platform_admin=True,
+    )
+    await db_session.commit()
+    admission = await admit(
+        _deps(
+            sessionmaker=db_session_factory,
+            defaults_root=tmp_path,
+            router=_admittable_router(tenant),
+        ),
+        origin="chat",
+        tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
+        platform=platform,
+        external_user_id="user-1",
+        channel_id="chan-1",
+        now=_NOW,
+        role=Role.USER,
+        role_ids=("granted-role",) if kind == "role" else (),
+        verified_membership=True,
+    )
+    assert admission.is_admin and not admission.is_platform_admin
+    account = await get_account(db_session, admission.account_id)
+    assert account is not None and account.role is Role.USER

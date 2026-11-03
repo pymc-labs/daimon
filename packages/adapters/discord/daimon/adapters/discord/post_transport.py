@@ -19,6 +19,7 @@ from daimon.core.agent_post_identity import (
     is_our_discord_webhook,
     select_discord_webhook_id,
 )
+from daimon.core.turn.output import authorize_output
 
 import discord
 from discord.webhook.async_ import AsyncWebhookAdapter, async_context
@@ -428,6 +429,7 @@ class DiscordPostTransport:
             if thread is not None:
                 send_kwargs["thread"] = thread
             try:
+                await authorize_output()
                 sent = await hook.send(  # pyright: ignore[reportCallIssue]
                     *args, **send_kwargs, username=self.name, avatar_url=self.avatar_url, wait=True
                 )
@@ -435,9 +437,11 @@ class DiscordPostTransport:
                 return cast(discord.Message, sent)
             except discord.HTTPException as exc:
                 if exc.code == 50083 and thread is not None:
+                    await authorize_output()
                     await thread.edit(archived=False)
                     self._refuse_if_stopped()
                     try:
+                        await authorize_output()
                         sent = await hook.send(  # pyright: ignore[reportCallIssue]
                             *args,
                             **_retry_kwargs(send_kwargs, retry_files),
@@ -480,12 +484,15 @@ class DiscordPostTransport:
             args = (fallback_name_prefix(self.name, args[0]), *args[1:])
         self._refuse_if_stopped()
         try:
+            await authorize_output()
             return await self.channel.send(*args, **_retry_kwargs(kwargs, retry_files))
         except discord.HTTPException as exc:
             if exc.code != 50083 or not isinstance(self.channel, discord.Thread):
                 raise
+            await authorize_output()
             await self.channel.edit(archived=False)
             self._refuse_if_stopped()
+            await authorize_output()
             return await self.channel.send(*args, **_retry_kwargs(kwargs, retry_files))
 
     async def edit(self, message: discord.Message, **kwargs: Any) -> discord.Message | None:  # noqa: ANN401
@@ -524,6 +531,7 @@ class DiscordPostTransport:
                 if urgent:
                     # discord.py's default adapter serializes every edit for this webhook.
                     # A stuck progress call must not hold the terminal card behind it.
+                    await authorize_output()
                     context = async_context.set(AsyncWebhookAdapter())
                     try:
                         return cast(
@@ -531,6 +539,7 @@ class DiscordPostTransport:
                         )  # pyright: ignore[reportCallIssue]
                     finally:
                         async_context.reset(context)
+                await authorize_output()
                 return cast(discord.Message, await hook.edit_message(message.id, **edit_kwargs))  # pyright: ignore[reportCallIssue]
             except discord.NotFound as exc:
                 if exc.code != 10015:
@@ -541,6 +550,7 @@ class DiscordPostTransport:
                 return await self.send(_prefix_if_fallback=True, **_replacement_send_kwargs(kwargs))
         # Same id, so callers read it as no replacement; its edited_at is Discord's clock.
         self._refuse_if_stopped()
+        await authorize_output()
         return await message.edit(**kwargs)
 
     async def delete(self, message: discord.Message) -> None:

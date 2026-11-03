@@ -26,6 +26,7 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaCloudConfigParams, BetaEnvironment, BetaManagedAgentsAgent
 from daimon.core.config import McpSettings
 from daimon.core.headless_runner import run_turn
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from pydantic import HttpUrl, SecretStr
 
 from .conftest import LocalDaimonMCP
@@ -78,6 +79,7 @@ async def test_run_turn_attaches_daimon_mcp_vault(
         trigger_message="say hi",
         mcp_settings=mcp_settings,
         account_id=account_id,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     # `live_agent` is module-scoped with a fresh unique name, so the most

@@ -113,6 +113,43 @@ balancer, and a redeploy does not strand connected clients. The hourly limits
 on notebook publishes and bundle uploads are kept in memory, so each replica
 counts its own.
 
+## Turn on optional services
+
+Each of these is off until you set it up:
+
+| Service | Needs | Page |
+| --- | --- | --- |
+| Watches | the `sidecar` and `watch-executor` services and their own database login | [Watches](watches.md) |
+| Fly compute sessions | a Fly organisation and token on the MCP service and scheduler | [Fly compute](compute.md) |
+| Long jobs | a tenant policy set by an admin | [Long jobs](long-jobs.md) |
+| Repository memory | an import of existing memory, then a switch on every process | [Repository memory](repo-memory.md) |
+| Context providers | a binding per tenant and an HTTPS provider | [Context providers](context-providers.md) |
+| Lead intake | `daimon leads configure` and the encryption keys above | [Lead intake](lead-intake.md) |
+| Cold Discord DMs | a DM agent named per server | [Direct messages](direct-messages.md) |
+
+Discord role and membership checks run in the scheduler and MCP service as
+well as the Discord service. Set `DAIMON_DISCORD__BOT_TOKEN` on all three
+when you serve Discord. The bot must be able to read members, roles and server
+details.
+
+Keep the scheduler running even when no routine is due. It deletes expired
+lead evidence, Fly machines and watch evidence on its own schedule.
+
+### Upgrade with private routine data
+
+Two migrations need every old process stopped first:
+
+- `0140_clear_legacy_routine_output` erases saved output on routines with no
+  destination or channel. That output can draw on the owner's personal
+  memory, and older versions showed it to admins. Stop the old scheduler, adapters and MCP service before applying it,
+  or an old process can write it back. It cannot be undone.
+- `0135_routine_dm_destination` adds DM destinations. Upgrade the scheduler
+  and Discord service before anyone creates one. A downgrade is refused while
+  DM routines exist.
+
+Do not reset an uncertain routine DM delivery to pending by hand: delivery is
+at most once.
+
 ## Store charts and artifacts
 
 Hosted MCP clients receive bounded chart images directly from the Anthropic

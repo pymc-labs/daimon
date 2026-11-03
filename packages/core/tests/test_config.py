@@ -36,6 +36,17 @@ def test_privacy_delete_flag_defaults_on_and_reads_nested_env(
     assert load_settings(_env_file=None).privacy.delete_enabled is False
 
 
+def test_tool_safety_trusted_annotations_defaults_empty_and_reads_a_json_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.delenv("DAIMON_TOOL_SAFETY__TRUSTED_ANNOTATIONS", raising=False)
+    assert load_settings(_env_file=None).tool_safety.trusted_annotations == ()
+    monkeypatch.setenv("DAIMON_TOOL_SAFETY__TRUSTED_ANNOTATIONS", '["bridge", "linear"]')
+    assert load_settings(_env_file=None).tool_safety.trusted_annotations == ("bridge", "linear")
+
+
 def test_private_channel_messages_is_a_top_level_switch_that_needs_a_teams_public_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

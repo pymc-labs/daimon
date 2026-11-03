@@ -7,16 +7,28 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Literal, Protocol
 
+from daimon.core.errors import RoutineAlreadyRunning
 from daimon.core.stores.domain import RoutineRow
 from sqlalchemy.ext.asyncio import AsyncSession
 
 RoutineAction = Literal["pause", "resume", "toggle"]
-RoutineResult = Literal["changed", "gone", "wrong_tenant", "not_owner"]
+RoutineResult = Literal["changed", "gone", "wrong_tenant", "not_owner", "already_running"]
 
 
-class LoadOrPause(Protocol):
+class Load(Protocol):
     async def __call__(
         self, session: AsyncSession, routine_id: uuid.UUID, *, tenant_id: uuid.UUID
+    ) -> RoutineRow | None: ...
+
+
+class Pause(Protocol):
+    async def __call__(
+        self,
+        session: AsyncSession,
+        routine_id: uuid.UUID,
+        *,
+        tenant_id: uuid.UUID,
+        expected_updated_at: datetime | None = None,
     ) -> RoutineRow | None: ...
 
 
@@ -28,6 +40,7 @@ class Resume(Protocol):
         *,
         tenant_id: uuid.UUID,
         now: datetime,
+        expected_updated_at: datetime | None = None,
     ) -> RoutineRow | None: ...
 
 
@@ -38,8 +51,8 @@ async def apply_routine_action(
     tenant_id: uuid.UUID,
     op: RoutineAction,
     allowed: Callable[[RoutineRow], Awaitable[bool]],
-    load: LoadOrPause,
-    pause: LoadOrPause,
+    load: Load,
+    pause: Pause,
     resume: Resume,
     now: Callable[[], datetime],
     check_tenant: bool = False,
@@ -59,7 +72,18 @@ async def apply_routine_action(
     if op == "toggle":
         op = "pause" if row.enabled else "resume"
     if op == "pause":
-        await pause(session, routine_id, tenant_id=tenant_id)
+        await pause(session, routine_id, tenant_id=tenant_id, expected_updated_at=row.updated_at)
     else:
-        await resume(session, routine_id, tenant_id=tenant_id, now=now())
+        if row.enabled:
+            return "already_running"
+        try:
+            await resume(
+                session,
+                routine_id,
+                tenant_id=tenant_id,
+                now=now(),
+                expected_updated_at=row.updated_at,
+            )
+        except RoutineAlreadyRunning:
+            return "already_running"
     return "changed"

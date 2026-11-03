@@ -19,8 +19,10 @@ from daimon.adapters.discord.agent_setup.navigation import PanelViewBase
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.checks import refuse_if_not_admin
 from daimon.adapters.discord.layout import hairline, header
+from daimon.adapters.discord.outsiders import channel_outsiders
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.access_policy import ChannelReaders, ChannelWriters
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import build_subject
 from daimon.core.channel_rules import (
     READERS_LABELS,
@@ -34,8 +36,14 @@ from daimon.core.channel_rules import (
 )
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.outsiders import INTERNAL_ROLES_HINT, OutsiderVisibility
 from daimon.core.panel_audit import record_panel_write
-from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.access_policy import (
+    load_access_policy,
+    lock_access_policy,
+    policy_write_transaction,
+    set_access_policy,
+)
 
 import discord
 
@@ -111,11 +119,17 @@ class PermissionsView(PanelViewBase):
         allowed_user_id: int,
         status: ChannelRuleStatus,
         notice: str | None = None,
+        visibility: OutsiderVisibility | None = None,
+        internal_role_ids: tuple[str, ...] = (),
     ) -> None:
         super().__init__(state, runtime=runtime, allowed_user_id=allowed_user_id)
         container = build_permissions_container(
             channel_name=state.channel_name, status=status, notice=notice
         )
+        visibility = visibility or OutsiderVisibility()
+        lines = visibility.lines(readers=status.rule.readers)
+        if lines:
+            container.add_item(discord.ui.TextDisplay("\n".join(lines)))
         self.readers_select = _select("Who can read it", READERS_LABELS, status.rule.readers)
         self.readers_select.callback = self._on_readers  # type: ignore[method-assign]  # per-instance callback
         self.writers_select = _select("Who can post", WRITERS_LABELS, status.rule.writers)
@@ -126,7 +140,8 @@ class PermissionsView(PanelViewBase):
             container.add_item(select_row)
         row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
         buttons: list[tuple[str, discord.ButtonStyle, _Callback]] = [
-            (BACK_LABEL, discord.ButtonStyle.secondary, self._on_back)
+            (BACK_LABEL, discord.ButtonStyle.secondary, self._on_back),
+            ("Admins", discord.ButtonStyle.secondary, self._on_admins),
         ]
         if status.rule.readers != "own":
             buttons.append((COPY_LABEL, discord.ButtonStyle.secondary, self._on_copy))
@@ -138,6 +153,25 @@ class PermissionsView(PanelViewBase):
             )
             button.callback = callback  # type: ignore[method-assign]  # per-instance callback
             row.add_item(button)
+        if visibility.outsiders_can_view and status.rule.readers != "own":
+            button: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
+                label="Make confidential"
+            )
+            button.callback = self._on_confidential  # type: ignore[method-assign]
+            warning_row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow(button)
+            container.add_item(warning_row)
+        roles: discord.ui.RoleSelect[discord.ui.LayoutView] = discord.ui.RoleSelect(
+            placeholder="Name your internal roles",
+            min_values=0,
+            max_values=25,
+            default_values=[
+                discord.Object(id=int(role_id), type=discord.Role)
+                for role_id in internal_role_ids[:25]
+            ],
+        )
+        roles.callback = self._on_internal_roles  # type: ignore[method-assign]
+        self.internal_roles_select = roles
+        container.add_item(discord.ui.ActionRow(roles))
         row.add_item(self.done_button())  # pyright: ignore[reportArgumentType]  # Button[Self] is the same runtime item
         container.add_item(row)
         self.add_item(container)
@@ -160,7 +194,7 @@ class PermissionsView(PanelViewBase):
             platform_user_id=str(interaction.user.id),
             op="channel_rule",
         )
-        if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
+        if await refuse_if_not_admin(interaction, action=DelegatedAction.CHANNEL_PERMISSIONS):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
             await audit(outcome="denied", reason="needs_admin")
             return
         await interaction.response.defer()
@@ -201,12 +235,43 @@ class PermissionsView(PanelViewBase):
             notice = "\n\n".join(f"-# {note}" for note in change.notes)
         await self.swap_to(
             interaction,
-            PermissionsView(
-                state,
+            await build_permissions_view(
+                interaction,
+                state=state,
                 runtime=self.runtime,
                 allowed_user_id=self.allowed_user_id,
-                status=await load_rule_status(self.runtime, state=state),
                 notice=notice,
+            ),
+        )
+
+    async def _on_confidential(self, interaction: discord.Interaction) -> None:
+        await self._change(interaction, readers="own")
+
+    async def _on_internal_roles(self, interaction: discord.Interaction) -> None:
+        if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]
+            return
+        ids = tuple(str(role.id) for role in self.internal_roles_select.values)
+        if str(self.state.guild_id) in ids:
+            await interaction.response.send_message(
+                "Choose internal roles excluding @everyone.", ephemeral=True
+            )
+            return
+        await interaction.response.defer()
+        async with policy_write_transaction(
+            self.runtime.sessionmaker, tenant_id=_tenant_id(self.state)
+        ) as session:
+            await lock_access_policy(session, tenant_id=_tenant_id(self.state))
+            policy = await load_access_policy(session, tenant_id=_tenant_id(self.state))
+            updated = policy.model_copy(update={"internal_role_ids": ids})
+            await set_access_policy(session, tenant_id=_tenant_id(self.state), policy=updated)
+        await self.swap_to(
+            interaction,
+            await build_permissions_view(
+                interaction,
+                runtime=self.runtime,
+                state=self.state,
+                allowed_user_id=self.allowed_user_id,
+                notice="Internal roles saved.",
             ),
         )
 
@@ -234,3 +299,44 @@ class PermissionsView(PanelViewBase):
             allowed_user_id=self.allowed_user_id,
         )
         await self.swap_to(interaction, routing)
+
+    async def _on_admins(self, interaction: discord.Interaction) -> None:
+        from daimon.adapters.discord.agent_setup.admins_view import build_admins_view
+
+        if interaction.guild_id != self.state.guild_id:
+            return
+        await interaction.response.defer()
+        await self.swap_to(
+            interaction,
+            await build_admins_view(interaction, self.state, self.runtime, self.allowed_user_id),
+        )
+
+
+async def build_permissions_view(
+    interaction: discord.Interaction,
+    *,
+    runtime: DiscordRuntime,
+    state: PanelState,
+    allowed_user_id: int,
+    notice: str | None = None,
+) -> PermissionsView:
+    async with runtime.sessionmaker() as session:
+        policy = await load_access_policy(session, tenant_id=_tenant_id(state))
+    visibility = (
+        OutsiderVisibility(outsiders_can_view=True)
+        if policy.internal_role_ids
+        else OutsiderVisibility(note=INTERNAL_ROLES_HINT)
+    )
+    if interaction.guild is not None:
+        channel = interaction.guild.get_channel(state.channel_id)
+        if isinstance(channel, discord.abc.GuildChannel):
+            visibility = await channel_outsiders(channel, policy.internal_role_ids)
+    return PermissionsView(
+        state,
+        runtime=runtime,
+        allowed_user_id=allowed_user_id,
+        status=channel_rule_status(policy, str(state.channel_id)),
+        notice=notice,
+        visibility=visibility,
+        internal_role_ids=policy.internal_role_ids,
+    )

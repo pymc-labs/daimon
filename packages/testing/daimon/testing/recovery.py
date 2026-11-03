@@ -52,6 +52,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_text_block import (
 from daimon.core.config import McpSettings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.deps import TurnDeps
 from daimon.testing.ma import resolved_agent_env_router
 from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
@@ -358,6 +359,7 @@ class Process:
             deployment_default=DeploymentDefault(),
             resolver_cache=new_resolver_cache(),
             defaults_root=tmp_path,
+            tool_safety=OPEN_TOOL_SAFETY,
             mcp=McpSettings(),
             billing_config=None,
             markup=Decimal(1),

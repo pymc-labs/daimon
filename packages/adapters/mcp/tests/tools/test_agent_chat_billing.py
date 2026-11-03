@@ -194,6 +194,7 @@ class _World:
         self.sid = f"sesn_{uuid.uuid4().hex[:12]}"
         metadata = {
             MA_METADATA_KEY_TENANT: str(tenant_id),
+            "daimon_agent_chat": "true",
             MA_METADATA_KEY_ACCOUNT: str(account_id),
             MA_METADATA_KEY_BUDGET_CHANNEL: "chan-1",
         }

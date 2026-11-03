@@ -7,6 +7,7 @@ import pytest
 from daimon.core.scheduler import RoutineDispatcher, run_one_tick
 from daimon.core.stores.domain import CatchUpPolicy, RoutineRow, TenantRow
 from daimon.core.stores.routines import create_routine, get_routine, update_routine
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.testing.drivers.anthropic.ma import MARouter
@@ -108,6 +109,7 @@ async def test_slow_routine_does_not_block_next_tick_or_overlap_itself(
             await update_routine(
                 session,
                 slow.id,
+                edited_by=slow.created_by_user_id,
                 tenant_id=slow.tenant_id,
                 cron_expr="0 */5 * * *",
                 next_fire_at=edited_next,
@@ -447,6 +449,7 @@ async def test_dispatch_timeout_through_headless_records_ceiling(
                 tenant_id=row.tenant_id,
                 account_id=account.id,
                 session_factory=db_session_factory,
+                tool_safety=OPEN_TOOL_SAFETY,
                 turn_path=turn_path,
             )
 

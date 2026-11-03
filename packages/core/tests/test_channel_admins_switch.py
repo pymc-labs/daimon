@@ -10,9 +10,6 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, AgentRef, Place, Surface, authorize, build_subject
 from daimon.core.channel_budget_notice import BudgetNotice, notice_recipients
 from daimon.core.config import load_settings
-from daimon.core.github_panel import requester_manages_agent
-from daimon.core.native_admins import StoredAdmin
-from daimon.core.scope import DeploymentDefault
 from daimon.core.support_routing import support_recipient_tiers
 
 
@@ -38,26 +35,6 @@ def test_former_holder_has_no_policy_rights() -> None:
     assert authorize(
         policy, subject=admin, action=Action.RUN_AGENT, surface=Surface.HUB, agent=agent
     )
-
-
-async def test_github_save_rejects_former_holder(monkeypatch: pytest.MonkeyPatch) -> None:
-    from daimon.core import github_panel
-
-    read = AsyncMock(return_value=StoredAdmin(is_admin=False, platform_user_id="user"))
-    monkeypatch.setattr(github_panel, "read_stored_admin", read)
-    allowed = await requester_manages_agent(
-        AsyncMock(),
-        tenant_id=uuid.uuid4(),
-        account_id=uuid.uuid4(),
-        platform="discord",
-        platform_user_id="user",
-        agent_name="helper",
-        ma_agent_id="agent-id",
-        default=DeploymentDefault(),
-        is_daimon_managed=False,
-    )
-    assert not allowed
-    read.assert_awaited_once()
 
 
 async def test_budget_notice_and_support_use_native_admin_path(

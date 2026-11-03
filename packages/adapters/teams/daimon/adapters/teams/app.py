@@ -101,7 +101,11 @@ from daimon.adapters.teams.turn_hooks import turn_hooks
 from daimon.core.agent_identity import identity_enabled_for, is_builtin_agent
 from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.authz import Action, authorize, build_subject, build_turn_place
-from daimon.core.continuity.continuation import check_wake_responder, load_asking_agent_id
+from daimon.core.continuity.continuation import (
+    check_wake_responder,
+    continuation_attended,
+    load_asking_agent_id,
+)
 from daimon.core.continuity.dispatch import dispatch_pending_continuations
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
@@ -169,6 +173,8 @@ from daimon.core.turn.slots import (
 )
 from daimon.core.turn.state import ToolUseBlock
 from daimon.core.turn.thread_queue import (
+    QUEUE_NOTICE,
+    HeldThreads,
     ThreadQueue,
     claim_dispatch,
     dispatch_and_drain,
@@ -314,7 +320,9 @@ def _as_mention(inbound: TeamsInbound) -> TeamsInbound:
 
 
 def _by_author(queued: list[TeamsInbound]) -> list[list[TeamsInbound]]:
-    return group_by_author(queued, lambda item: item.user_id)
+    return group_by_author(
+        queued, lambda item: item.user_id, separate=lambda item: item.handover_agent_id is not None
+    )
 
 
 def _compose(items: list[TeamsInbound]) -> TeamsInbound:
@@ -445,7 +453,7 @@ class TeamsApp:
         # Tool-write confirmation cards awaiting a click.
         self.confirmations = TeamsConfirmationCards(self._sender, feed=feed)
         self.provider_actions = TeamsProviderActions(self._sender, feed=feed)
-        self._processing: set[str] = set()
+        self._processing: HeldThreads[str] = HeldThreads()
         self._pending: dict[str, list[TeamsInbound]] = {}
         # Controls held for a turn's output sweep, by conversation: the next turn
         # there posts them before its own card.
@@ -1213,7 +1221,9 @@ class TeamsApp:
             )
             capture_exception_with_scope(exc)
             if await self._finish([inbound]):  # unfinished, it replays: say nothing
-                command = self._private.command(inbound) is not None  # its sender's alone
+                command = (
+                    inbound.handover_agent_id is None and self._private.command(inbound) is not None
+                )
                 with contextlib.suppress(*TEAMS_SEND_ERRORS):
                     await self._say(inbound, _FAILED, sender_only=command)
 
@@ -1225,7 +1235,7 @@ class TeamsApp:
             if await self._finish([inbound]):
                 await self._say(inbound, DENIED, sender_only=True)
             return
-        command = self._private.command(inbound)
+        command = None if inbound.handover_agent_id is not None else self._private.command(inbound)
         if command is None and not inbound.is_targeted:
             await self._orchestrate(inbound, tenant_id)
         elif await self._finish([inbound]):
@@ -1258,7 +1268,14 @@ class TeamsApp:
             self._thread_queue.enqueue(key, inbound)
             allowed = functools.partial(self._may_start_turn, inbound, tenant_id)
             self._reactions.mark_queued(inbound, allowed=allowed)
+            generation = self._processing.generation(key)
+            notify = self._processing.should_notify(key)
             self._supersede_batch(inbound)
+            if notify and await allowed() and self._processing.is_current(key, generation):
+                try:
+                    await self._say(inbound, QUEUE_NOTICE)
+                except Exception:
+                    log.warning("mention_queue.notice_failed", conversation_id=key, exc_info=True)
             return
         # Over the cap the turn queues: it posts the ordinary card and waits
         # after it (`wait_for_slot` in _run_turn). Only a full queue refuses.
@@ -1333,7 +1350,7 @@ class TeamsApp:
 
     @property
     def _thread_queue(self) -> ThreadQueue[str, TeamsInbound]:
-        return ThreadQueue(self._processing, self._pending)
+        return ThreadQueue(self._processing, self._pending, start_turn=self._processing.start_turn)
 
     async def _run_turns(self, key: str, tenant_id: uuid.UUID, queued: list[TeamsInbound]) -> None:
         """One turn per author, composed of the messages its fence still held."""
@@ -1446,6 +1463,8 @@ class TeamsApp:
                 tenant_id=tenant_id,
                 platform="teams",
                 external_user_id=inbound.user_id,
+                origin="chat" if continuation is None else continuation.reason,
+                attended=None if continuation is None else continuation_attended(continuation),
                 channel_id=inbound.channel_id,
                 thread_id=inbound.thread_id,
                 role=role,
@@ -1594,9 +1613,13 @@ class TeamsApp:
                     holder,
                     markers,
                     new_lifecycle,
+                    watch_row=continuation
+                    if continuation and continuation.reason == "watch_fired"
+                    else None,
                     role=role or Role.USER,  # admission's: one read per turn
                     handoff=handoff,
                     reraise=reraise,
+                    attended=continuation is None or continuation_attended(continuation),
                 )
             except asyncio.CancelledError:
                 raise
@@ -1668,8 +1691,10 @@ class TeamsApp:
         new_lifecycle: LifecycleFactory,
         *,
         role: Role,
+        watch_row: TaskContinuationRow | None = None,
         handoff: HandoffFactory | None,
         reraise: bool,
+        attended: bool,
     ) -> None:
         deps = self.runtime.turn_deps
         lifecycle = holder[-1]
@@ -1752,6 +1777,7 @@ class TeamsApp:
         config = admission.config
         async with turn_origin(
             self.runtime.sessionmaker,
+            attended=attended,
             tenant_id=tenant_id,
             account_id=admission.account_id,
             platform="teams",
@@ -1759,7 +1785,7 @@ class TeamsApp:
             thread_id=inbound.thread_id,
             responder_ma_agent_id=str(admission.agent.id),
             responder_name=config.agent_name or admission.agent.name,
-            role=role,
+            role=Role.ADMIN if admission.is_platform_admin else Role.USER,
             configuration_target_ma_agent_id=config.configuration_target_ma_agent_id,
             configuration_target_name=config.configuration_target_name,
             is_setup=config.thread_binding_kind == "setup",
@@ -1776,12 +1802,13 @@ class TeamsApp:
                 responder_handle=f"@{inbound.bot_name}" if inbound.bot_name else None,
                 session_state=None if quiet else prepared.continuity.session_state(),
                 handoff=notice,
+                effective_is_admin=admission.is_admin,
             )
             render = functools.partial(
                 render_user_message,
                 controls,
                 inbound,
-                is_admin=role is Role.ADMIN,
+                is_admin=admission.is_admin,
                 keys=render_keys_element(await self._key_names(tenant_id, inbound, admission)),
                 prefix=attachments.prefix,
                 channel_files=await self._files_reachable(inbound),
@@ -1803,6 +1830,8 @@ class TeamsApp:
                 platform="teams",
                 thread_id=inbound.thread_id,
                 external_user_id=inbound.user_id,
+                attended=attended,
+                watch_row=watch_row,
                 origin="handoff" if notice is not None else "chat",
                 user_message=message,
                 request_text=None if inbound.unprompted else inbound.text,
@@ -1825,15 +1854,16 @@ class TeamsApp:
         if outcome.mapping_id is not None:
             markers.add(outcome.mapping_id)
         final = holder[-1]
-        await self._finish_outputs(
-            inbound,
-            outcome,
-            final,
-            selfhosted=(
-                admission.backend_revision is not None
-                and admission.backend_revision.backend == "selfhosted"
-            ),
-        )
+        if final.output_authorization is None:
+            await self._finish_outputs(
+                inbound,
+                outcome,
+                final,
+                selfhosted=(
+                    admission.backend_revision is not None
+                    and admission.backend_revision.backend == "selfhosted"
+                ),
+            )
         if outcome.mapping_id is not None and final.final_message_id is not None:
             mark = final.final_message_id
             if inbound.kind != "dm":
@@ -2053,6 +2083,11 @@ class TeamsApp:
         service_url: str | None,
     ) -> None:
         """The receiving agent's first turn, run as the requester on the ordinary path."""
+        if row.reason == "job_finished":
+            # Native current owner membership has no complete proof on this path.
+            # Cancel before preparation or output; never redirect to another destination.
+            raise AdmissionDenied(reason="invoker_not_allowed")
+
         handoff: HandoffFactory | None = None
         if row.reason == "task_handoff":
             # Read before the bind, which supersedes the outgoing agent's session.

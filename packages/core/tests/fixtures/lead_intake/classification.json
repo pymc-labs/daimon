@@ -1,0 +1,16 @@
+[
+ {"kind":"cold sales pitches","text":"Hello, we sell AI consulting services. Can I book 15 minutes to pitch our developer team?","classification":"other"},
+ {"kind":"SEO/link-building offers","text":"Buy high DA backlinks for your consulting site. Guaranteed first-page SEO at $99.","classification":"other"},
+ {"kind":"newsletters","text":"This week's Bayesian news: three project case studies. Unsubscribe below.","classification":"other"},
+ {"kind":"recruiters/job applicants","text":"Please find my CV. I am seeking a consulting role, not hiring your team.","classification":"other"},
+ {"kind":"vendor invoices","text":"Invoice INV-123 for your hosting subscription is due tomorrow. Please remit payment.","classification":"other"},
+ {"kind":"auto-replies/out-of-office","text":"Automatic reply: I am out of office until Monday. Contact reception for urgent enquiries.","classification":"other"},
+ {"kind":"bounces","text":"Delivery Status Notification (Failure): your consulting proposal could not be delivered.","classification":"other"},
+ {"kind":"phishing","text":"Urgent: your mailbox will be deleted. Enter your password at the attached login form.","classification":"other"},
+ {"kind":"calendar invites","text":"BEGIN:VCALENDAR Invitation: weekly project sync. RSVP yes or no. END:VCALENDAR","classification":"other"},
+ {"kind":"partnership spam","text":"We would love a strategic partnership: promote our crypto platform to all your clients.","classification":"other"},
+ {"kind":"workshop/course enquiries","text":"When is your next public introductory course? I want to buy one seat.","classification":"other"},
+ {"kind":"consulting","text":"From: Ada <ada@synthetic.example>\nTo: intake@example.test\nWe need paid consulting to validate our hierarchical demand model. Can your team advise on scope and a proposal?\nAda, Synthetic synthetic.example","classification":"consulting"},
+ {"kind":"project","text":"From: Ada <ada@synthetic.example>\nTo: intake@example.test\nWe would like to commission a forecasting project for our stores, starting next quarter. Please arrange a scoping call.\nAda, Synthetic synthetic.example","classification":"project"},
+ {"kind":"forwarded project","text":"From: Relay <relay@example.test>\nTo: intake@example.test\nForwarded message\nFrom: Ada <ada@synthetic.example>\nCan we hire you to build a Bayesian churn model? We have a budget and need a project proposal.\nAda, Synthetic synthetic.example","classification":"project"}
+]

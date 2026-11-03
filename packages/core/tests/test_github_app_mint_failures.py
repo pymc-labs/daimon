@@ -675,6 +675,7 @@ async def test_failed_working_installation_never_aliases_surviving_token(
         token_scopes=access.token_scopes,
         github_repo_map_sha256=github_repo_map_sha256(access.repo_credential_map),
         github_repo_script_sha256=github_repo_script_sha256(),
+        tool_safety=OPEN_TOOL_SAFETY,
     ).model_copy(
         update={"unavailable_repos": tuple((url, now) for url in access.excluded_repo_urls)}
     )
@@ -1925,6 +1926,7 @@ async def test_two_refused_installations_leave_no_helper_or_replacement_loop(
         repo_branch=None,
         memory_store_id=None,
         vault_id="vault",
+        tool_safety=OPEN_TOOL_SAFETY,
     ).model_copy(
         update={"unavailable_repos": tuple((url, now) for url in first.excluded_repo_urls)}
     )

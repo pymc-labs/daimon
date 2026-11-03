@@ -179,7 +179,9 @@ async def test_requester_gets_ephemeral_link_and_click_sets_followup(
         sessionmaker=_Sessions(),
     )
     interaction = AsyncMock()
+    interaction.user = MagicMock(spec=discord.Member)
     interaction.user.id = 456
+    interaction.user.guild_permissions = discord.Permissions(administrator=True)
     interaction.guild_id = 123
     interaction.channel_id = 789
     interaction.application_id = 1234

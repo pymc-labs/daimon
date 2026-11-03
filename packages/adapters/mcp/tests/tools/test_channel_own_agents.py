@@ -136,6 +136,7 @@ class _World:
             chat_agent_id=None
             if executing is None
             else derive_agent_uuid(tenant_id=self.tenant_id, ma_agent_id=executing),
+            chat_session_id="test-session",
         )
 
 
@@ -545,6 +546,7 @@ async def _setup_thread_origin(
             expires_at=now + dt.timedelta(minutes=10),
             now=now,
             is_setup=responder == "shared",
+            chat_session_id="test-session",
         )
     return str(origin.id)
 
@@ -594,6 +596,7 @@ async def test_the_setup_thread_configures_its_channels_own_agent(
         platform="discord",
         platform_user_id="444444444444444444",
         agent_id=derive_agent_uuid(tenant_id=world.tenant_id, ma_agent_id="agent_shared"),
+        chat_session_id="test-session",
     )
     with pytest.raises(ToolError, match="not found"):
         await _get_agent_impl(runtime, agent_key, "local", origin_context_id=origin)
@@ -697,6 +700,7 @@ def _key(world: _World, *, bound: str | None) -> AuthIdentity:
         platform_user_id="444444444444444444",
         agent_id=derive_agent_uuid(tenant_id=world.tenant_id, ma_agent_id="agent_local"),
         bound_channel_id=bound,
+        chat_session_id="test-session",
     )
 
 
@@ -832,6 +836,7 @@ async def _chat_turn_in_room(
             shared_channel=False,
             expires_at=now + dt.timedelta(minutes=10),
             now=now,
+            chat_session_id="test-session",
         )
         if not live:
             return str(origin.id)
@@ -987,12 +992,24 @@ async def test_an_own_agents_channel_environment_name_shows_only_inside_it(
         )
 
     async def summary_row(auth: AuthIdentity) -> tuple[str | None, str | None]:
-        summary = await _get_tenant_summary_impl(runtime, auth)
+        summary = await _get_tenant_summary_impl(
+            runtime,
+            replace(
+                auth,
+                is_platform_admin=True,
+                token_kind="cli",
+                agent_id=None,
+                chat_session_id=None,
+                chat_agent_id=None,
+            ),
+        )
         row = next(row for row in summary.channels if row.channel_id == ROOM)
         return row.agent_name, row.environment_name
 
     assert await summary_row(world.auth()) == (None, None), "the summary hides C's names outside"
-    assert await summary_row(operator) == ("local", "acme-env"), "an operator token sees them"
+    assert await summary_row(operator) == (None, None), (
+        "a personal credential retains location redaction"
+    )
     cleared = await _clear_channel_environment_impl(
         runtime, world.auth(), channel_id=ROOM, confirm_open_network=True
     )
@@ -1078,11 +1095,12 @@ async def test_a_running_held_turn_holds_calls_that_name_no_origin(
 
     monkeypatch.setattr(channel_target, "resolve_visible_channel", visible)
     monkeypatch.setattr(participation_mod, "verify_participation_scope", verified)
-    with pytest.raises(ToolError, match="nothing outside it is read"):
+    with pytest.raises(ToolError, match="personal user credential"):
         await _get_channel_budget_impl(runtime, builtin, OTHER)
     with pytest.raises(ToolError, match="nothing outside it is read"):
         await _get_thread_participation_impl(runtime, builtin, None, OTHER)
-    await _get_channel_budget_impl(runtime, builtin, ROOM, origin_id)
+    with pytest.raises(ToolError, match="personal user credential"):
+        await _get_channel_budget_impl(runtime, builtin, ROOM, origin_id)
     other_account = replace(builtin, account_id=uuid.uuid4())
     (await load_read_policy(runtime, other_account, origin_context_id=None)).require(OTHER)
 
@@ -1117,6 +1135,7 @@ async def test_turns_running_in_two_own_agents_channels_refuse_an_unnamed_call(
             shared_channel=False,
             expires_at=now + dt.timedelta(minutes=10),
             now=now,
+            chat_session_id="test-session",
         )
     origin_id = await _setup_thread_origin(committing_sessionmaker, world)
     builtin = world.auth(admin=False, executing="agent_shared")

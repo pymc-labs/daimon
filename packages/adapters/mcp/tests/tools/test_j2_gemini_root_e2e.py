@@ -208,6 +208,7 @@ async def fresh_chat(request, db_preflight, db_nullpool_engine, monkeypatch):
             shared_channel=False,
             now=datetime.now(UTC),
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            chat_session_id="fixture-session-grant",
         )
     ma = FakeMA(tenant.id)
     daimon = ma_agent(
@@ -251,9 +252,11 @@ async def fresh_chat(request, db_preflight, db_nullpool_engine, monkeypatch):
             account_id=account.id,
             role=Role.ADMIN if admin else Role.USER,
             is_admin=admin,
+            is_platform_admin=admin,
             platform="discord",
             platform_user_id="123",
             chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_daimon"),
+            chat_session_id="fixture-session-grant",
         )
         yield Chat(runtime, auth, origin, ma, trace)
 
@@ -386,6 +389,7 @@ async def test_a_copy_made_on_argon_answers_its_first_message_as_its_own_gemini_
     )
     admission = await admit(
         deps,
+        origin="chat",
         tenant_id=chat.auth.tenant_id,
         requester_org=RequesterOrg.HOST,
         platform="discord",
@@ -509,6 +513,7 @@ async def _argon_card(chat: Chat, name: str, preview, **extra):
         tenant_id=chat.auth.tenant_id,
         account_id=chat.auth.account_id,
         current_admin=AsyncMock(return_value=chat.auth.is_admin),
+        current_platform_admin=AsyncMock(return_value=False),
     )
     return await prepare(
         prompt_for_tool_call(

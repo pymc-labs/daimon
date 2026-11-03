@@ -39,7 +39,16 @@ def test_each_payload_kind_names_its_person() -> None:
     )
     slash = {"team_id": "T1", "user_id": "U0MAYA", "user_name": "maya"}
     assert payload_name("slash_commands", slash) == ("T1", "U0MAYA", None, "maya")
-    click = {"team": {"id": "T1"}, "user": {"id": "U0MAYA", "username": "maya", "name": "maya"}}
+    click = {
+        "team": {"id": "T1"},
+        "user": {
+            "deleted": False,
+            "is_bot": False,
+            "id": "U0MAYA",
+            "username": "maya",
+            "name": "maya",
+        },
+    }
     assert payload_name("interactive", click) == ("T1", "U0MAYA", None, "maya")
     bare = {"team_id": "T1", "event": {"type": "app_mention", "user": "U0MAYA"}}
     assert payload_name("events_api", bare) == ("T1", "U0MAYA", None, None), "no profile, no name"

@@ -17,6 +17,7 @@ from anthropic.types.beta.session_create_params import Resource
 from daimon.core.session_ports_compat import create_session_record, session_scope
 from daimon.core.session_seal import inherited_seal_ids
 from daimon.core.sessions import create_isolated_session, create_session
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.contracts.actions import UserMessage
 from mux.contracts.ids import Scope
@@ -171,6 +172,7 @@ async def test_session_create_matches_legacy_wire_request(
                 tenant_id=tenant,
                 account_id=account,
                 resources=resources,
+                tool_safety=OPEN_TOOL_SAFETY,
             )
         else:
             old = await old_client.beta.sessions.create(
@@ -187,6 +189,7 @@ async def test_session_create_matches_legacy_wire_request(
                 tenant_id=tenant,
                 account_id=account,
                 extra_resources=resources,
+                tool_safety=OPEN_TOOL_SAFETY,
             )
     legacy.assert_consumed()
     migrated.assert_consumed()
@@ -217,6 +220,7 @@ async def test_last_access_check_runs_before_create_request() -> None:
             agent=ma_agent(id="ag_parity"),
             environment=ma_environment(id="env_parity"),
             before_create=before_create,
+            tool_safety=OPEN_TOOL_SAFETY,
         )
     transport.assert_consumed()
     assert checked

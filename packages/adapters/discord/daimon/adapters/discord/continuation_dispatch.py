@@ -10,12 +10,15 @@ import structlog
 from anthropic import AsyncAnthropic
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.post_transport import DiscordPostTransport
+from daimon.adapters.discord.watch_access import require_watch_thread_access
 from daimon.core.agent_identity import AgentIdentity, resolve_agent_identity
 from daimon.core.continuity.continuation import ContinuationDecision
 from daimon.core.continuity.dispatch import ContinuationContextUnavailable
 from daimon.core.continuity.dispatch import dispatch_pending_continuations as dispatch_core
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.thread_sessions import get_live_thread_session
+from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn.output import OutputAuthorization, output_authorization
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
@@ -75,7 +78,7 @@ async def dispatch_pending_continuations(
         # A timer is never superseded by newer messages, so it needs no history.
         latest = (
             None
-            if row.reason == "timer"
+            if row.reason in ("timer", "watch_fired", "job_finished")
             else await _latest_human_message_at(thread, after=row.created_at)
         )
         async with sessionmaker() as session:
@@ -89,7 +92,26 @@ async def dispatch_pending_continuations(
         return latest, live is not None and live.active_turn_message_id is not None
 
     async def post(row: TaskContinuationRow, text: str, reason: str) -> None:
-        if await may_post():
+        authorization: OutputAuthorization | None = None
+        if row.reason == "watch_fired":
+            if client is None:
+                log.info("continuation.notice_withheld", thread_id=row.thread_id, reason=reason)
+                return
+
+            async def check_watch_notice() -> None:
+                assert client is not None
+                await require_watch_thread_access(sessionmaker, row, client)
+
+            authorization = OutputAuthorization(check_watch_notice)
+            try:
+                await authorization.check()
+            except AdmissionDenied:
+                log.info("continuation.notice_withheld", thread_id=row.thread_id, reason=reason)
+                return
+            allowed = True
+        else:
+            allowed = await may_post()
+        if allowed:
             if client is None:
                 await thread.send(embed=build_notice_embed(text))
             else:
@@ -118,7 +140,16 @@ async def dispatch_pending_continuations(
                     builtin=identity.builtin,
                     identity_enabled=identity_enabled,
                 )
-                await transport.send(embed=build_notice_embed(text))
+                if authorization is None:
+                    await transport.send(embed=build_notice_embed(text))
+                else:
+                    try:
+                        with output_authorization(authorization):
+                            await transport.send(embed=build_notice_embed(text))
+                    except AdmissionDenied:
+                        log.info(
+                            "continuation.notice_withheld", thread_id=row.thread_id, reason=reason
+                        )
         else:
             log.info("continuation.notice_withheld", thread_id=row.thread_id, reason=reason)
 

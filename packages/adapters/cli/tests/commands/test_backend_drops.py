@@ -802,6 +802,7 @@ async def test_default_denial_observation_keeps_the_real_external_user_id(operat
     with pytest.raises(AdmissionDenied):
         await admit(
             deps,
+            origin="chat",
             tenant_id=tenant.id,
             requester_org=RequesterOrg.HOST,
             platform="discord",

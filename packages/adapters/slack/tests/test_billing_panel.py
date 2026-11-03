@@ -527,7 +527,7 @@ def _panel_patches(fake: Any, *, admin: bool, **more: Any) -> Iterator[None]:
             patch(f"{module}.resolve_web_client", new_callable=AsyncMock, return_value=fake.client)
         )
         stack.enter_context(
-            patch(f"{module}.resolve_is_admin", new_callable=AsyncMock, return_value=admin)
+            patch(f"{module}.resolve_is_platform_admin", new_callable=AsyncMock, return_value=admin)
         )
         for name, value in more.items():
             stack.enter_context(patch(f"{module}.{name}", new=value))

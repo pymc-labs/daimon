@@ -72,6 +72,7 @@ from daimon.core.billing import BillingConfig
 from daimon.core.defaults.ma_index import list_agents_by_tenants
 from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.membership_subject import resolve_subject
 from daimon.core.native_admins import read_stored_admin
 from daimon.core.permissions import agent_permissions
 from daimon.core.scope import ScopeContext
@@ -157,7 +158,17 @@ async def _agents_by_tenant(
         except AccessPolicyUnreadable:
             log.warning("hub.tenant_skipped.policy_unreadable", tenant_id=str(tenant.tenant_id))
             continue
-        subject = stored.subject()
+        subject = (
+            await resolve_subject(
+                runtime.session_factory,
+                runtime.membership_resolver,
+                tenant_id=tenant.tenant_id,
+                user_id=hub.platform_user_id,
+                require_fresh=True,
+            )
+            if hub.platform == "discord"
+            else stored.subject()
+        )
         agents = by_id[tenant.tenant_id]
         out.append(
             (tenant, [a for a in agents if _hub_sees(policy, subject, a, config.agent_name)])
@@ -287,11 +298,11 @@ def register_hub_tools(
     async def _admitted(
         ctx: Context, daimon_id: str, tool_name: str
     ) -> tuple[AuthIdentity, Subject, Callable[[], Awaitable[None]]]:
-        """Admit a hub turn; returns the identity, the caller's stored rights,
+        """Admit a hub turn; returns the identity, the caller's native rights,
         and the re-check the turn runs right before its create and send.
 
-        One read per call serves both the pin exemption (server admins only)
-        and sealed-session access; the re-check reads the stored role again.
+        Discord rights use fresh membership evidence; other platforms use
+        stored roles. The re-check runs the current admission policy again.
         """
         _, agent, auth = await _identity(runtime, ctx, daimon_id)
         subject = await load_hub_subject(runtime, auth)
@@ -304,6 +315,7 @@ def register_hub_tools(
         admitted = await _admit(
             auth,
             sessionmaker=runtime.session_factory,
+            membership_resolver=runtime.membership_resolver,
             billing_config=billing_config,
             markup=runtime.settings.billing.markup,
             tool_name=tool_name,
@@ -314,6 +326,7 @@ def register_hub_tools(
         recheck = _admission_recheck(
             admitted,
             sessionmaker=runtime.session_factory,
+            membership_resolver=runtime.membership_resolver,
             tool_name=tool_name,
             agent_names=names,
             pin_exempt=hub_exempt,
@@ -349,8 +362,11 @@ def register_hub_tools(
 
         Runs as you, in that Daimon's workspace: it reads only what you can see
         and spends that workspace's credit. Pass ``handle`` from a previous
-        result to continue the same conversation. On timeout the error carries
+        result to continue the same conversation. Replies require current membership
+        and invoker-policy access at delivery. On timeout the error carries
         the handle; resume with it rather than asking again.
+        Only handles opened through agent chat can be continued here; platform
+        conversations and legacy sessions without this provenance are refused.
         """
         auth, subject, recheck = await _admitted(ctx, daimon_id, "ask")
         with hub_session_access(subject, "continue"):
@@ -382,9 +398,20 @@ def register_hub_tools(
 
     @mcp.tool
     async def continue_turn(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, daimon_id: str, handle: str, message: str
+        ctx: Context, daimon_id: str, handle: str, message: str | None = None
     ) -> dict[str, str]:
-        """Send a follow-up on an existing session without waiting."""
+        """Send a follow-up on an existing session without waiting.
+
+        On a session ``get_session`` reports ``paused`` with the hint to call
+        ``continue_turn`` (a turn started here, waiting on tool confirmations
+        after a restart), this resumes it first: the waiting calls are decided
+        by the current tool policy, and ``message`` is then optional; a
+        ``message`` is sent once the resumed turn ends, waiting up to about 90
+        seconds. Only the session's own account can continue or resume it,
+        and never a turn waiting on an approval card in chat.
+        Only handles opened through agent chat can be continued here; platform
+        conversations and legacy sessions without this provenance are refused.
+        """
         auth, subject, recheck = await _admitted(ctx, daimon_id, "continue_turn")
         with hub_session_access(subject, "continue"):
             await _verify_account_owns_session(runtime, auth, handle)
@@ -394,7 +421,12 @@ def register_hub_tools(
     async def get_session(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, daimon_id: str, handle: str
     ) -> SessionInfo:
-        """Status of one session. Poll until ``idle`` before reading ``list_events``."""
+        """Status of one session. Poll until ``idle`` before reading ``list_events``.
+
+        ``paused`` means the turn waits on tool confirmations; ``hint`` says
+        whether its owner resumes it with ``continue_turn`` or it waits for an
+        approval in chat. Reading never answers them.
+        """
         _, _, auth = await _identity(runtime, ctx, daimon_id)
         with hub_session_access(await load_hub_subject(runtime, auth), "read"):
             await _verify_account_owns_session(runtime, auth, handle)
@@ -409,7 +441,10 @@ def register_hub_tools(
         limit: int | None = None,
         order: Literal["asc", "desc"] | None = None,
     ) -> Page[SessionEventOut]:
-        """A session's transcript. The Daimon's reply is in ``agent.message`` events."""
+        """A session's transcript. The Daimon's reply is in ``agent.message`` events.
+
+        Callers must still pass current membership and invoker-policy checks.
+        """
         _, _, auth = await _identity(runtime, ctx, daimon_id)
         with hub_session_access(await load_hub_subject(runtime, auth), "read"):
             await _verify_account_owns_session(runtime, auth, handle)

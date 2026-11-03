@@ -691,3 +691,85 @@ async def test_create_thread_forum_channel_denied_without_send_messages(
 
     with pytest.raises(ToolError, match="missing send_messages permission"):
         _check_create_thread_permission(channel, member)
+
+
+@pytest.mark.parametrize("case", ["thread_writers", "thread_send", "thread_create", "allowed"])
+async def test_lead_destination_uses_thread_and_native_permissions(
+    monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    from datetime import UTC, datetime
+
+    from daimon.adapters.mcp.tools.lead_intake import authorize_effect_destination
+    from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
+    from daimon.core.lead_intake import IntakeConfig
+    from daimon.core.lead_intake_service import IntakeAccess
+
+    permissions = (
+        _VIEW_CHANNEL
+        | _SEND_MESSAGES
+        | (1 << 16)
+        | _CREATE_PUBLIC_THREADS
+        | _SEND_MESSAGES_IN_THREADS
+    )
+    if case == "thread_send":
+        permissions &= ~_SEND_MESSAGES_IN_THREADS
+    if case == "thread_create":
+        permissions &= ~_CREATE_PUBLIC_THREADS
+
+    async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
+        if route.path == "/guilds/{guild_id}":
+            return {
+                **_guild_payload(),
+                "roles": [
+                    _everyone_role("111", 0),
+                    {**_everyone_role("111", permissions), "id": "555"},
+                ],
+            }
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return {**_member_payload(), "roles": ["555"]}
+        if route.path == "/channels/{channel_id}":
+            return _thread_payload() if str(route.channel_id) == "999" else _text_channel_payload()
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    patch_discord_http(monkeypatch, handler)
+    config = IntakeConfig(
+        agent_id=uuid.uuid4(),
+        guild_id="111",
+        channel_id="222",
+        source_connection_id="gmail",
+        crm_connection_id="crm",
+        portal_id="3",
+        reconciliation_start=datetime.now(UTC),
+    )
+    policy = TenantAccessPolicy(
+        channel_rules={"999": ChannelRule(writers="none")} if case == "thread_writers" else {}
+    )
+    access = IntakeAccess(
+        thread_id=None if case == "thread_create" else "999",
+        create_thread=case == "thread_create",
+    )
+    async with rest_client("synthetic") as client:
+        _, member = await _resolve_member(client, "111", "42")
+        if case == "allowed":
+            await authorize_effect_destination(
+                _runtime_with_discord_token(),
+                _auth(),
+                client,
+                member,
+                config,
+                policy,
+                access,
+                frozenset(),
+            )
+        else:
+            with pytest.raises(ToolError):
+                await authorize_effect_destination(
+                    _runtime_with_discord_token(),
+                    _auth(),
+                    client,
+                    member,
+                    config,
+                    policy,
+                    access,
+                    frozenset(),
+                )

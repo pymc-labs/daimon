@@ -41,6 +41,7 @@ async def test_policy_change_during_transfer_is_applied_before_successor(
             channel_id="vault",
             thread_id="thread-1",
             is_dm=False,
+            human_invocation=True,
         )
         return replace(
             _admission(account=account, agent=agent),

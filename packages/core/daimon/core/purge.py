@@ -51,6 +51,16 @@ because routines reference platform users by their external id, not the
 principal UUID. The orchestrator dispatches manually rather than via a unified
 Protocol.
 
+Long-job records are erased through the accounts.id ON DELETE CASCADE; their
+cancellation audit rows cascade from the job. Worker sessions carry the same
+account/tenant stamps as other owned sessions and use the existing upstream
+session-deletion work item. No separate retained job-content exception applies.
+
+Fly registrations, their conversation metadata and background command rows
+(including stored output tails) cascade on account deletion.
+The compute reconciler deletes the remaining tagged apps as unregistered orphans;
+upstream machine/file deletion requires the scheduler and Fly to be available.
+
 Deliberate carve-outs:
 - Provider-neutral (mux) state: a person's private slots, with their binding generations,
   journal, leases, operations and release requests, are erased with the account, and the
@@ -141,6 +151,7 @@ from daimon.core.stores import github_connect as github_connect_store
 from daimon.core.stores import github_issued_tokens as github_issued_tokens_store
 from daimon.core.stores import github_links as github_links_store
 from daimon.core.stores import identity as identity_store
+from daimon.core.stores import lead_intake as lead_intake_store
 from daimon.core.stores import mcp_tokens as mcp_tokens_store
 from daimon.core.stores import message_feedback as message_feedback_store
 from daimon.core.stores import microsoft_user_tokens as microsoft_tokens_store
@@ -156,6 +167,7 @@ from daimon.core.stores import support_escalation as support_escalation_store
 from daimon.core.stores import teams_message_admissions as teams_admissions_store
 from daimon.core.stores import tenants as tenants_store
 from daimon.core.stores import user_skills as user_skills_store
+from daimon.core.stores import watches as watches_store
 from daimon.core.stores import web_people as web_people_store
 from daimon.core.stores import web_roles as web_roles_store
 from daimon.core.stores import wizard_session as wizard_session_store
@@ -175,6 +187,7 @@ class PurgeReport(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
+    watches: int = 0
     routines: int = 0
     principal_links: int = 0
     cli_principals: int = 0
@@ -195,11 +208,13 @@ class PurgeReport(BaseModel):
     wizard_sessions: int = 0
     message_feedback: int = 0
     support_escalations: int = 0
+    daimon_admins: int = 0
     channel_admins: int = 0
     agent_post_requesters: int = 0
     platform_user_names: int = 0
     teams_messages: int = 0
     microsoft_user_tokens: int = 0
+    lead_intakes: int = 0
     web_people: int = 0
     web_admin_grants: int = 0
     # The account's private provider slots and what hangs off them (stores.mux_erasure).
@@ -213,6 +228,8 @@ class PurgeReport(BaseModel):
 
     def merge(self, other: PurgeReport) -> PurgeReport:
         return PurgeReport(
+            watches=self.watches + other.watches,
+            lead_intakes=self.lead_intakes + other.lead_intakes,
             routines=self.routines + other.routines,
             principal_links=self.principal_links + other.principal_links,
             cli_principals=self.cli_principals + other.cli_principals,
@@ -237,6 +254,7 @@ class PurgeReport(BaseModel):
             wizard_sessions=self.wizard_sessions + other.wizard_sessions,
             message_feedback=self.message_feedback + other.message_feedback,
             support_escalations=self.support_escalations + other.support_escalations,
+            daimon_admins=self.daimon_admins + other.daimon_admins,
             channel_admins=self.channel_admins + other.channel_admins,
             agent_post_requesters=self.agent_post_requesters + other.agent_post_requesters,
             platform_user_names=self.platform_user_names + other.platform_user_names,
@@ -283,7 +301,11 @@ async def _purge_principal_in_session(
     platform_user_names_count = 0
     teams_messages_count = 0
     microsoft_user_tokens_count = 0
+    lead_intakes_count = 0
     if isinstance(principal, PlatformPrincipalRow):
+        lead_intakes_count = await lead_intake_store.erase_actor(
+            session, principal.tenant_id, principal.external_id
+        )
         routines_count = await routines_store.delete_for_principal(
             session,
             tenant_id=principal.tenant_id,
@@ -336,6 +358,21 @@ async def _purge_principal_in_session(
         )
         # A channel admin grant names the person by platform user id; the row
         # itself is the tenant's, so only their id leaves it.
+        from daimon.core.stores.daimon_admins import erase_user
+        from daimon.core.stores.security_audit import erase_admin_subject
+
+        daimon_admins_count = await erase_user(
+            session,
+            tenant_id=principal.tenant_id,
+            platform=principal.platform,
+            platform_user_id=principal.external_id,
+        )
+        await erase_admin_subject(
+            session,
+            tenant_id=principal.tenant_id,
+            platform=principal.platform,
+            platform_user_id=principal.external_id,
+        )
         channel_admins_count = await channel_admins_store.remove_user_from_channel_admins(
             session,
             tenant_id=principal.tenant_id,
@@ -381,6 +418,7 @@ async def _purge_principal_in_session(
         # principal owns no support_escalations rows — same reasoning, and the
         # same refusal to match on os_user, as message_feedback above.
         support_escalations_count = 0
+        daimon_admins_count = 0
         channel_admins_count = 0
 
     user_skills_count = await user_skills_store.delete_user_skills_for_principal(
@@ -432,6 +470,7 @@ async def _purge_principal_in_session(
             )
 
     return PurgeReport(
+        lead_intakes=lead_intakes_count,
         routines=routines_count,
         principal_links=links_count,
         cli_principals=principal_count if kind == "cli" else 0,
@@ -442,6 +481,7 @@ async def _purge_principal_in_session(
         wizard_sessions=wizard_sessions_count,
         message_feedback=message_feedback_count,
         support_escalations=support_escalations_count,
+        daimon_admins=daimon_admins_count,
         channel_admins=channel_admins_count,
         agent_post_requesters=agent_post_requesters_count,
         platform_user_names=platform_user_names_count,
@@ -529,6 +569,7 @@ async def _purge_account_transaction(
     order).
     """
     await privacy_deletes_store.lock_account(session, account_id=account_id)
+    watches_count = await watches_store.delete_for_account(session, account_id=account_id)
     await security_audit_store.erase_account_for_privacy(session, account_id=account_id)
     cli_list = await identity_store.list_cli_principals_for_account(session, account_id=account_id)
     pp_list = await identity_store.list_platform_principals_for_account(
@@ -551,6 +592,12 @@ async def _purge_account_transaction(
 
     report = PurgeReport()
     github_account_link = await github_links_store.get_account_link(session, account_id=account_id)
+    # Who set a routine's sandbox opt-in: keep the change, drop the person.
+    await routines_store.erase_sandbox_setter(
+        session,
+        ids=[str(account_id), *(str(principal.id) for principal in cli_list)],
+        platform_users=[(pp.tenant_id, pp.external_id) for pp in pp_list],
+    )
     for principal in (*cli_list, *pp_list):
         sub = await _purge_principal_in_session(session, principal=principal)
         report = report.merge(sub)
@@ -644,6 +691,7 @@ async def _purge_account_transaction(
         )
     db_report = report.merge(
         PurgeReport(
+            watches=watches_count,
             mux_slots=mux_erased.slots,
             mux_binding_generations=mux_erased.binding_generations,
             mux_journal_sessions=mux_erased.journal_sessions,

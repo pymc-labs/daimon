@@ -40,7 +40,7 @@ def _origin(platform: str = "teams") -> TurnOriginRow:
 
 
 def test_the_turns_own_controls_carry_the_id_and_the_redaction_removes_only_it() -> None:
-    rendered = render_turn_origin(_origin())
+    rendered = render_turn_origin(_origin(), effective_is_admin=False)
 
     redacted = redact_turn_origin_text(rendered)
 
@@ -56,7 +56,7 @@ def test_the_turns_own_controls_carry_the_id_and_the_redaction_removes_only_it()
 
 def test_every_platform_round_trips_through_the_renderer() -> None:
     for platform in ("teams", "discord", "slack"):
-        rendered = render_turn_origin(_origin(platform))
+        rendered = render_turn_origin(_origin(platform), effective_is_admin=False)
         assert str(ORIGIN_ID) in rendered and str(ORIGIN_ID) not in redact_turn_origin_text(
             rendered
         ), platform

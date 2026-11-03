@@ -14,6 +14,7 @@ import pytest
 from daimon.core.headless_runner import run_turn
 from daimon.core.routine_delivery import agent_posted_to
 from daimon.core.stores.domain import RoutineRow
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.state import TurnState
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, sse_response
@@ -72,6 +73,16 @@ async def _final_state(
             ).model_dump(mode="json"),
         ),
     )
+    router.add(
+        "GET",
+        r"/v1/sessions/[^/]+$",
+        lambda r, m: httpx.Response(
+            200,
+            json=ma_session(
+                id="ses_1", agent_id="agent_x", model="claude-sonnet-4-5", environment_id="env_x"
+            ).model_dump(mode="json"),
+        ),
+    )
     router.add("GET", r"/v1/sessions/[^/]+/events/stream", lambda r, m: sse_response(events))
     router.add(
         "POST", r"/v1/sessions/[^/]+/events", lambda r, m: httpx.Response(200, json={"data": None})
@@ -98,6 +109,7 @@ async def _final_state(
         environment_id="env_x",
         trigger_message="go",
         on_state=states.append,
+        tool_safety=OPEN_TOOL_SAFETY,
         tenant_id=identity.tenant_id,
         account_id=identity.account_id,
         turn_path=turn_path,

@@ -48,7 +48,9 @@ def _make_runtime(
     discord_settings.thread_open_notice_after_s = 3.0
     settings.discord = discord_settings
     settings.thread_naming = ThreadNamingSettings(enabled=False)
-    anthropic = AsyncMock()
+    anthropic = AsyncMock(max_retries=8)
+    anthropic.with_options = MagicMock(return_value=anthropic)
+    anthropic.with_middleware = MagicMock(return_value=anthropic)
     # Dead-session recovery's transcript rescue (`_replay_previous_session`)
     # walks this as an async iterator, not an awaitable -- an unconfigured
     # AsyncMock attribute returns a coroutine instead and blows up with
@@ -1285,7 +1287,8 @@ class TestOnReadySweepWidenedReconcile:
 
     async def test_a_repeated_on_ready_redoes_only_what_has_not_succeeded(
         self,
-        db_session_factory: async_sessionmaker[AsyncSession],
+        db_engine: AsyncEngine,
+        db_clean: None,
     ) -> None:
         """on_ready re-fires after a failed RESUME. A tenant whose reconcile succeeded
         and every synced scope are done once per process; a tenant whose reconcile
@@ -1294,6 +1297,11 @@ class TestOnReadySweepWidenedReconcile:
         from daimon.core.defaults.report import Action, ApplyReport, ResourceOutcome
         from daimon.core.ma_identity import derive_tenant_uuid
 
+        # The two guilds' seeds run at once. On `db_session_factory`'s single
+        # connection their transactions interleave, and the one left open holds
+        # locks that hang a later test in this worker; give each its own pooled
+        # connection, as the bot's engine does.
+        db_session_factory = async_sessionmaker(bind=db_engine, expire_on_commit=False)
         ok_id, flaky_id = 900000020, 900000021
         for guild_id in (ok_id, flaky_id):
             await provision_tenant(
@@ -2456,6 +2464,7 @@ class TestCredentialButtonRegistration:
 
         for name in (
             "run_wake_poller",
+            "run_watch_report_poller",
             "run_request_expiry_poller",
             "run_connect_notice_poller",
             "run_delivery_poller",
@@ -2917,3 +2926,28 @@ async def test_replay_does_not_repeat_a_provisioning_notice(
     await bot.on_message(message, startup_replay=True)
     message.channel.send.assert_awaited_once()
     assert "setting up" in message.channel.send.await_args.kwargs["embed"].description
+
+
+async def test_queue_keeps_original_messages_with_identical_text() -> None:
+    bot = make_bot(_make_runtime(MagicMock()))
+    first = _make_channel_message(content="remember this", channel_id=800)
+    first.id = 31
+    second = _make_channel_message(content="remember this", channel_id=900)
+    second.id = 32
+    bot._pending[900] = [first, second]  # pyright: ignore[reportPrivateUsage]
+
+    with (
+        patch.object(bot, "_handle_mention", new_callable=AsyncMock) as handle,
+        patch.object(bot, "_clear_queued_reactions", new_callable=AsyncMock),
+    ):
+        await bot._drain_pending_mentions(900, "123456", uuid.uuid4())  # pyright: ignore[reportPrivateUsage]
+
+    handle.assert_awaited_once()
+    assert handle.await_args.args[0] is first
+    sources = handle.await_args.kwargs["query_messages"]
+    assert len(sources) == 2
+    assert sources[0] is first
+    assert sources[1] is second
+    assert [(m.id, m.channel.id) for m in sources] == [(31, 800), (32, 900)]
+    assert handle.await_args.kwargs["admitted_message_ids"] == ("31", "32")
+    assert handle.await_args.kwargs["content_override"] == "remember this\n\nremember this"

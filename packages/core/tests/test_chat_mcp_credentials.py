@@ -20,8 +20,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 
 @pytest.mark.parametrize("private", [False, True])
+@pytest.mark.parametrize("session_bound", [False, True])
 async def test_registered_vault_rotates_before_expiry_and_after_revoke(
-    db_engine, db_clean, private
+    db_engine, db_clean, private, session_bound
 ):
     # Separate connections expose registry publication races hidden by shared-connection fixtures.
     db_session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
@@ -31,7 +32,10 @@ async def test_registered_vault_rotates_before_expiry_and_after_revoke(
         account = await make_account(db, tenant=tenant)
     agent = uuid.uuid4()
     context_id = uuid.uuid4() if private else None
+    session_grant = str(uuid.uuid4()) if session_bound else None
     name = f"daimon-mcp:{account.id}:{agent}"
+    if session_grant is not None:
+        name += f":session:{session_grant}"
     if context_id is not None:
         name += f":slack-turn:{context_id}"
     secret = b"s" * 32
@@ -122,9 +126,11 @@ async def test_registered_vault_rotates_before_expiry_and_after_revoke(
             public_url="https://mcp.example.com/mcp",
             session_factory=db_session_factory,
             slack_turn_context_id=context_id,
+            chat_session_id=session_grant,
         )
         assert await ensure_agent_mcp_vault(client, now=now, **kwargs) == "vlt_chat"
         claims = minted[0]
+        assert claims.get("chat_session_id") == session_grant
         assert claims["exp"] - claims["iat"] == int(CHAT_TOKEN_TTL.total_seconds())
         assert (
             claims["chat_agent_id"] == str(agent)
@@ -186,6 +192,7 @@ async def test_registered_vault_rotates_before_expiry_and_after_revoke(
         assert minted[-1].get("slack_turn_context_id") == (
             None if context_id is None else str(context_id)
         )
+        assert minted[-1].get("chat_session_id") == session_grant
         assert len(minted) == 2 and minted[1]["jti"] != claims["jti"]
         async with db_session_factory() as db, db.begin():
             await revoke_mcp_token(

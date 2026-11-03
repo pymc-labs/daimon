@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 from daimon.core import workspace_transfer
 from daimon.core.session_snapshot import snapshot_from_retrieved_session
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.workspace_transfer import (
     FullHandoff,
     HistoryOnly,
@@ -83,6 +84,9 @@ async def test_runner_declares_and_accepts_losses_without_changing_prepared_inpu
             external_user_id="user",
             markup=Decimal("1.2"),
             channel_id="channel",
+            tool_safety=OPEN_TOOL_SAFETY,
+            public_url=None,
+            platform="discord",
         )
         result = await runner(
             old_session_id="sess_old",

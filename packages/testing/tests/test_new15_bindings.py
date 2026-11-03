@@ -32,6 +32,7 @@ from daimon.core.stores.access_policy import (
     set_access_policy,
 )
 from daimon.core.stores.mux_state import PostgresStateStore
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.admission import AdmissionObserver, admit
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.gemini import (
@@ -423,6 +424,7 @@ async def setup_join(
         turn_path="mux",
         channel_backends=True,
         state_store=store,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     sdk: Any = None
     wire: Any = None

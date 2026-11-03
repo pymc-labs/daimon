@@ -26,6 +26,11 @@ from daimon.core import _models
 # Table name -> reason it legitimately has no tenant_id column.
 # Adding a table here is a deliberate act: state what carries isolation instead.
 _TENANT_ID_EXEMPT: dict[str, str] = {
+    # Registration owns the tenant; ingress and dispatch verify its exact binding.
+    "watch_capabilities": "globally unique watch_id FK to tenant-scoped registration",
+    "watch_inbox": "globally unique watch_id FK to tenant-scoped registration",
+    "watch_firings": "globally unique watch_id FK; dispatch verifies tenant and conversation binding",
+    "watch_controls": "operator-only global/tenant/owner stop scopes; no tenant-facing enumeration",
     # The tenant identity table itself; its `id` IS the tenant_id.
     "tenants": "identity table — `id` is the tenant_id",
     # One row per running Discord worker process, not per tenant.

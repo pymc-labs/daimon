@@ -103,6 +103,8 @@ class _World:
             external_id=external_id,
             platform_user_id=USER if platform else None,
             is_admin=admin,
+            is_platform_admin=admin,
+            chat_session_id="test-session",
         )
 
 
@@ -248,6 +250,7 @@ async def _chat_turn(
             shared_channel=False,
             expires_at=now + timedelta(minutes=10),
             now=now,
+            chat_session_id="test-session",
             platform_channel_id=channel,
             platform_message_id="666666666666666666" if channel else None,
         )
@@ -351,6 +354,11 @@ async def test_a_confirm_adds_only_from_a_chat_session_that_asks_the_person_firs
             **extra,
         )
 
+    if where == "agent_key":
+        with pytest.raises(ToolError, match="needs its owner or a server admin"):
+            await add()
+        assert world.created == []
+        return
     preview = await add()
     summary = preview.summary
     assert "content_hash=" not in summary and "open helper and use Add skill" in summary
@@ -715,6 +723,7 @@ async def _setup_thread_origin(world: _World, factory: async_sessionmaker[AsyncS
             expires_at=now + timedelta(minutes=10),
             now=now,
             is_setup=True,
+            chat_session_id="test-session",
         )
     await _live_session(world, thread_id=SETUP_THREAD, responder="agent_shared")
     return str(origin.id)
@@ -880,6 +889,7 @@ async def _reply(
         sender_foreign=False,
         shared_channel=False,
         message_text=text,
+        chat_session_id="test-session",
     ) as origin:
         yield str(origin.id)
 

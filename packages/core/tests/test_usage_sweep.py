@@ -43,6 +43,7 @@ from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import session_settle_state, turn_outcomes
 from daimon.core.tenant_balance import debit_amount
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.posture import UsageRecorder
 from daimon.core.turn.prepare import bind_recorder
@@ -206,6 +207,7 @@ def _chat_recorder(
         github_app_id=None,
         github_app_private_key=None,
         public_url=None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     return bind_recorder(
         deps,
@@ -544,11 +546,14 @@ async def test_a_settle_cut_short_keeps_the_request(
     ]
     await _request(db_session_factory)
 
+    # Exercise the page bound independently of host/database throughput.
     cut = await settle_finished_turn(
-        ma.client, db_session_factory, session, markup=MARKUP, max_pages=1
+        ma.client, db_session_factory, session, markup=MARKUP, max_pages=1, budget_s=None
     )
     kept = await _pending(db_session_factory)
-    rest = await settle_finished_turn(ma.client, db_session_factory, session, markup=MARKUP)
+    rest = await settle_finished_turn(
+        ma.client, db_session_factory, session, markup=MARKUP, budget_s=None
+    )
 
     assert cut is not None and not cut.complete and kept == BOUNDARY
     assert rest is not None and rest.complete and await _pending(db_session_factory) is None

@@ -66,7 +66,7 @@ async def _run(
                 return SimpleNamespace(id=row.id, name=row.name, metadata={})
         return None
 
-    monkeypatch.setattr(github_command, "is_guild_admin", lambda _interaction: admin)  # pyright: ignore[reportUnknownArgumentType,reportUnknownLambdaType]
+    monkeypatch.setattr(github_command, "is_platform_admin", lambda _interaction: admin)  # pyright: ignore[reportUnknownArgumentType,reportUnknownLambdaType]
     monkeypatch.setattr(
         github_command, "resolve_tenant_for_interaction", AsyncMock(return_value=tenant_id)
     )

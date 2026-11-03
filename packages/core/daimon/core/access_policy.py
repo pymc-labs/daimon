@@ -23,6 +23,8 @@ ChannelWriters = Literal["any", "own", "none"]
 """Who may start turns and post in a channel: anyone, its own agents only, or
 nobody, admins and daimon's notices included."""
 
+Approvals = Literal["inherit", "off", "on"]
+
 
 class ChannelRule(BaseModel):
     """Who may read and write one channel, Discord thread, Slack thread
@@ -32,6 +34,8 @@ class ChannelRule(BaseModel):
 
     readers: ChannelReaders = "any"
     writers: ChannelWriters = "any"
+    approvals: Approvals = Field(default="inherit", exclude_if=lambda value: value == "inherit")
+    approvals_set_by: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def _own_on_both(self) -> ChannelRule:
@@ -46,9 +50,18 @@ OPEN_RULE = ChannelRule()
 
 
 class AgentRule(BaseModel):
-    """Where one agent may run."""
+    """Where one agent may run and which humans may invoke it."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
+
+    invoker_role_ids: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
+
+    @field_validator("invoker_role_ids")
+    @classmethod
+    def _role_snowflakes(cls, ids: tuple[str, ...]) -> tuple[str, ...]:
+        if not all(is_discord_snowflake(value) for value in ids):
+            raise ValueError("role ids must contain numeric role IDs")
+        return tuple(dict.fromkeys(ids))
 
     runs_in: tuple[str, ...] | None = None
     """The only channels (and threads under them) it runs in. None runs it
@@ -104,13 +117,29 @@ def _from_lists(data: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+def is_discord_snowflake(value: str) -> bool:
+    """A canonical decimal Discord id between 1 and 2**64 - 1."""
+    return (
+        value.isascii()
+        and value.isdecimal()
+        and 0 < int(value) < 2**64
+        and str(int(value)) == value
+    )
+
+
 class TenantAccessPolicy(BaseModel):
     """One tenant's access policy. Renaming a field means reading the old name too."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    # Platform user ids allowed to start a turn. Empty means everyone may.
+    # Platform user and Discord role ids form a union; both empty means open.
     invoker_user_ids: tuple[str, ...] = ()
+    invoker_role_ids: tuple[str, ...] = ()
+    # Discord organisation membership for visibility warnings, independent of invoker access.
+    internal_role_ids: tuple[str, ...] = ()
+    invoker_admin_bypass: bool = True
+    approvals: Approvals = Field(default="inherit", exclude_if=lambda value: value == "inherit")
+    approvals_set_by: str | None = Field(default=None, exclude_if=lambda value: value is None)
     # Channel, Discord thread or Slack ``channel:ts`` id -> its rule; a thread
     # also follows its channel's. Open rules are not kept.
     channel_rules: dict[str, ChannelRule] = Field(default_factory=dict)
@@ -134,6 +163,13 @@ class TenantAccessPolicy(BaseModel):
         if "enabled_backends" in fields and "backends_explicit" not in fields:
             return {**fields, "backends_explicit": True}
         return fields
+
+    @field_validator("invoker_role_ids", "internal_role_ids")
+    @classmethod
+    def _role_snowflakes(cls, ids: tuple[str, ...]) -> tuple[str, ...]:
+        if not all(is_discord_snowflake(value) for value in ids):
+            raise ValueError("role ids must contain numeric role IDs")
+        return tuple(dict.fromkeys(ids))
 
     @field_validator("enabled_backends")
     @classmethod
@@ -159,19 +195,55 @@ class TenantAccessPolicy(BaseModel):
     @field_validator("agent_rules")
     @classmethod
     def _drop_unset(cls, rules: dict[str, AgentRule]) -> dict[str, AgentRule]:
-        return {name: rule for name, rule in rules.items() if rule.runs_in is not None}
+        return {
+            name: rule
+            for name, rule in rules.items()
+            if rule.runs_in is not None or rule.invoker_role_ids
+        }
+
+
+def agent_invoker_roles(
+    policy: TenantAccessPolicy, names: tuple[str | None, ...]
+) -> tuple[tuple[str, ...], ...]:
+    """Every role restriction on a target's aliases; each must be satisfied."""
+    return tuple(
+        rule.invoker_role_ids
+        for name in names
+        if name is not None
+        and (rule := policy.agent_rules.get(name)) is not None
+        and rule.invoker_role_ids
+    )
 
 
 OPEN_ACCESS_POLICY = TenantAccessPolicy()
 
 
 def is_invoker_allowed(
-    policy: TenantAccessPolicy, *, external_user_id: str, is_admin: bool
+    policy: TenantAccessPolicy,
+    *,
+    external_user_id: str,
+    is_admin: bool,
+    role_ids: tuple[str, ...] = (),
+    verified_membership: bool | None = None,
 ) -> bool:
-    """Whether this user may start a turn. Admins always may, so they can't lock themselves out."""
-    if is_admin or not policy.invoker_user_ids:
+    """Apply the user/role union and the current server-admin exemption.
+
+    Unknown membership cannot match a role policy. An explicit nonmember
+    cannot invoke, even through a user exception or admin flag. `is_admin` must
+    be live native server permission: persisted roles and token claims are not
+    admin evidence.
+    """
+    if policy.invoker_role_ids and verified_membership is not True:
+        return False
+    if verified_membership is False:
+        return False
+    if is_admin and policy.invoker_admin_bypass:
         return True
-    return external_user_id in policy.invoker_user_ids
+    if not (policy.invoker_user_ids or policy.invoker_role_ids):
+        return True
+    return external_user_id in policy.invoker_user_ids or bool(
+        set(role_ids) & set(policy.invoker_role_ids)
+    )
 
 
 DM_SCOPE_PREFIX = "dm:"

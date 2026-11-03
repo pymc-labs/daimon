@@ -219,7 +219,9 @@ def tool_rules_clear_command(
                 if existing is not None:
                     url = existing.server_url
                 else:
-                    server, _, _ = tool_key.partition("/")
+                    server, sep, tool = tool_key.partition("/")
+                    if not sep or not server or not tool or "/" in tool:
+                        raise StoreError("tool_key must be exactly server/tool")
                     url = next((s.url for s in agent.mcp_servers if s.name == server), None)
                 if url is None:
                     raise StoreError("no stored rule or attached MCP server for that tool")

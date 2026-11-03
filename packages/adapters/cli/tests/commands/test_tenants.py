@@ -709,6 +709,8 @@ def test_access_policy_set_is_registered_with_its_flags() -> None:
         for flag in (*param.opts, *param.secondary_opts)
     }
     assert flags >= {
+        "--invoker-admin-bypass",
+        "--no-invoker-admin-bypass",
         "--invoker",
         "--dm-memory-read-only",
         "--drop-agent-rules",
@@ -901,3 +903,167 @@ def test_policy_json_keeps_legacy_shape_until_backends_are_configured(enabled):
         assert "enabled_backends" not in payload
     else:
         assert payload["enabled_backends"] == ["anthropic", "openai"]
+
+
+@pytest.mark.asyncio
+async def test_invoker_roles_set_show_and_clear(db_session_factory, stub_anthropic):  # type: ignore[no-untyped-def]
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    await provision_tenant(db_session_factory, platform="discord", workspace_id="111")
+    await tenants_access_policy_set(
+        rt=rt,
+        console=_make_console(),
+        platform="discord",
+        external_id="111",
+        invoker_role=["222", "333", "222"],
+    )
+    assert (await _policy(db_session_factory, workspace_id="111")).invoker_role_ids == (
+        "222",
+        "333",
+    )
+    console = _make_console()
+    await tenants_access_policy_get(
+        rt=rt, console=console, platform="discord", external_id="111", as_json=True
+    )
+    assert json.loads(_output(console))["invoker_role_ids"] == ["222", "333"]
+    await tenants_access_policy_set(
+        rt=rt,
+        console=_make_console(),
+        platform="discord",
+        external_id="111",
+        clear_invoker_roles=True,
+    )
+    assert not (await _policy(db_session_factory, workspace_id="111")).invoker_role_ids
+    with pytest.raises(typer.BadParameter, match="@everyone"):
+        await tenants_access_policy_set(
+            rt=rt, console=console, platform="discord", external_id="111", invoker_role=["111"]
+        )
+
+
+@pytest.mark.parametrize("platform", ["slack", "teams"])
+@pytest.mark.asyncio
+async def test_invoker_roles_refuse_unsupported_platform(
+    db_session_factory, stub_anthropic, platform: str
+):  # type: ignore[no-untyped-def]
+    with pytest.raises(typer.BadParameter, match="only for Discord"):
+        await tenants_access_policy_set(
+            rt=build_cli_runtime(
+                db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings()
+            ),
+            console=_make_console(),
+            platform=platform,
+            external_id="workspace",
+            invoker_role=["222"],
+        )
+
+
+async def test_dm_policy_inspect_set_clear_preserves_enablement(db_session_factory):
+    rt = build_cli_runtime(db_session_factory)
+    result = await provision_tenant(
+        db_session_factory, platform="discord", workspace_id="700000101"
+    )
+    initial = await tenants_mod.tenants_dm_policy(
+        rt=rt, platform="discord", external_id="700000101"
+    )
+    assert initial == {"enabled": False, "dm_agent_name": None}
+    configured = await tenants_mod.tenants_dm_policy(
+        rt=rt, platform="discord", external_id="700000101", agent="private", enabled=True
+    )
+    assert configured == {"enabled": True, "dm_agent_name": "private"}
+    cleared = await tenants_mod.tenants_dm_policy(
+        rt=rt, platform="discord", external_id="700000101", clear_agent=True
+    )
+    assert cleared == {"enabled": True, "dm_agent_name": None}
+    with pytest.raises(typer.BadParameter, match="mutually exclusive"):
+        await tenants_mod.tenants_dm_policy(
+            rt=rt, platform="discord", external_id="700000101", agent="private", clear_agent=True
+        )
+    assert result.tenant_id is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
+async def test_invoker_admin_bypass_set_get(db_session_factory, stub_anthropic, platform):  # type: ignore[no-untyped-def]
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    await provision_tenant(db_session_factory, platform=platform, workspace_id="111")
+    for bypass in (False, True):
+        await tenants_access_policy_set(
+            rt=rt,
+            console=_make_console(),
+            platform=platform,
+            external_id="111",
+            invoker_admin_bypass=bypass,
+        )
+        for as_json in (False, True):
+            console = _make_console()
+            await tenants_access_policy_get(
+                rt=rt,
+                console=console,
+                platform=platform,
+                external_id="111",
+                as_json=as_json,
+            )
+            output = _output(console)
+            if as_json:
+                assert json.loads(output)["invoker_admin_bypass"] is bypass
+            else:
+                assert f"invoker_admin_bypass: {str(bypass).lower()}" in output
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("clear_flag", ["clear_internal_roles", "clear"])
+async def test_internal_roles_set_show_and_clear(db_session_factory, stub_anthropic, clear_flag):  # type: ignore[no-untyped-def]
+    # Deployment DB/config access is the operator boundary, without Discord attestation.
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    await provision_tenant(db_session_factory, platform="discord", workspace_id="111")
+    await tenants_access_policy_set(
+        rt=rt,
+        console=_make_console(),
+        platform="discord",
+        external_id="111",
+        internal_role=["222", "333", "222"],
+    )
+    assert (await _policy(db_session_factory, workspace_id="111")).internal_role_ids == (
+        "222",
+        "333",
+    )
+    console = _make_console()
+    await tenants_access_policy_get(
+        rt=rt, console=console, platform="discord", external_id="111", as_json=True
+    )
+    assert json.loads(_output(console))["internal_role_ids"] == ["222", "333"]
+    await tenants_access_policy_set(
+        rt=rt,
+        console=_make_console(),
+        platform="discord",
+        external_id="111",
+        **{clear_flag: True},
+    )
+    assert not (await _policy(db_session_factory, workspace_id="111")).internal_role_ids
+    with pytest.raises(typer.BadParameter, match="@everyone"):
+        await tenants_access_policy_set(
+            rt=rt, console=console, platform="discord", external_id="111", internal_role=["111"]
+        )
+
+
+@pytest.mark.parametrize("flag", ["--internal-role", "--clear-internal-roles", "--clear"])
+def test_access_policy_help_states_operator_boundary_for_all_role_mutations(flag: str) -> None:
+    command = get_command(main_mod.app)
+    for name in ("tenants", "access-policy", "set"):
+        assert isinstance(command, Group)
+        command = command.commands[name]
+    assert "Deployment-operator command" in (command.help or "")
+    assert "Permissions panel" in (command.help or "")
+    option = next(
+        param for param in command.params if isinstance(param, Option) and flag in param.opts
+    )
+    assert isinstance(option, Option)
+    assert "Operator-only" in (option.help or "")
+
+
+def test_policy_rule_display_includes_agent_invoker_roles() -> None:
+    from daimon.adapters.cli.commands.tenants import permission_rule_rows
+
+    policy = TenantAccessPolicy(agent_rules={"restricted": AgentRule(invoker_role_ids=("123",))})
+    [row] = permission_rule_rows(policy)
+    assert row.model_dump()["invoker_role_ids"] == ["123"]
+    assert row.runs_in is None

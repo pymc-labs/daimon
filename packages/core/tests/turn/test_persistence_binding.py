@@ -21,6 +21,7 @@ from daimon.core.shared_threads import (
 )
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.stores.thread_sessions import create_thread_session
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.binding import prepared_persistence
 from daimon.core.turn.deps import TurnDeps
@@ -56,6 +57,7 @@ def deps(factory: async_sessionmaker[AsyncSession]) -> TurnDeps:
         github_app_private_key=None,
         public_url=None,
         turn_path="mux",
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
 

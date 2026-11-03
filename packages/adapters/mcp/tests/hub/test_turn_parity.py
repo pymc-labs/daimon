@@ -175,7 +175,7 @@ async def test_hub_turn_outcomes_and_account_attribution(
             session_id=m.group(1),
             status="idle",
             agent_id=AGENT_ID,
-            metadata={"daimon_account": str(principal.account_id)},
+            metadata={"daimon_agent_chat": "true", "daimon_account": str(principal.account_id)},
         ),
     )
     router.add(

@@ -41,6 +41,7 @@ from daimon.core.microsoft_write_paths import write_kind
 from daimon.core.tool_safety import (
     DAIMON_SERVER_NAME,
     PUBLISH_TOOLS,
+    WATCH_CONFIRMED_TOOLS,
     ToolCall,
     microsoft_send_tools,
 )
@@ -205,11 +206,19 @@ class ToolRuleCardReference(BaseModel):
     channel_revision: int = Field(default=0, ge=0)
 
 
+#: What a card shows outside Details, in every state.
+MAX_VISIBLE_LINES = 8
+MAX_VISIBLE_LINE_LENGTH = 120
+
+
 class ConfirmationPrompt(BaseModel):
     """What a confirmation card shows, platform-neutral.
 
     `detail_lines` shows short, readable inputs behind Details. Only
-    `requester_platform_user_id` may answer.
+    `requester_platform_user_id` may answer. `visible_lines` stay on the card
+    in every state, so what was approved can be inspected after the answer;
+    `lead_intake_id` makes Details a lead read, refused to whoever may not
+    read that lead. Lead intake runs on Discord, which renders both.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -234,6 +243,8 @@ class ConfirmationPrompt(BaseModel):
         default=None, exclude_if=lambda value: value is None
     )
     tool_rules_enabled: bool = Field(default=False, exclude_if=lambda value: not value)
+    visible_lines: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
+    lead_intake_id: str | None = Field(default=None, exclude_if=lambda value: value is None)
     # A publish that may leave a lasting public link (a report, any notebook
     # upload, a file in a notebook): never answered for a test bot.
     lasting_public_link: bool = Field(default=False, exclude_if=lambda value: not value)
@@ -242,6 +253,15 @@ class ConfirmationPrompt(BaseModel):
     def _aware_expiry(self) -> ConfirmationPrompt:
         if self.expires_at.tzinfo is None:
             raise ValueError("expires_at must be timezone-aware")
+        return self
+
+    @model_validator(mode="after")
+    def _bounded_visible_lines(self) -> ConfirmationPrompt:
+        # A card that cannot show every selection is refused, never truncated.
+        if len(self.visible_lines) > MAX_VISIBLE_LINES or any(
+            len(line) > MAX_VISIBLE_LINE_LENGTH or "\n" in line for line in self.visible_lines
+        ):
+            raise ValueError("visible_lines exceed the card's bounds")
         return self
 
 
@@ -410,16 +430,100 @@ def _microsoft_write_card(data: dict[str, object]) -> tuple[str, str, tuple[str,
     return _microsoft_write_action(method, decoded), consequence, details
 
 
+_LEAD_SELECTIONS = (
+    ("company_id", "Company"),
+    ("contact_id", "Contact"),
+    ("deal_id", "Deal"),
+    ("discord_message_id", "Starter message"),
+)
+_LEAD_CONFIRMATIONS = (
+    ("separate_opportunity_confirmed", "Separate opportunity"),
+    ("discord_post_absence_confirmed", "Starter post absent"),
+)
+
+
+#: Where a watch's reports go, as its approval card says it.
+_WATCH_DELIVERY: Final[dict[str, str]] = {
+    "thread": "this thread",
+    "dm": "your DM",
+    "new_thread": "a new public thread each time",
+}
+
+#: The same places on an edit card, which may be shown outside the watch's thread.
+_WATCH_EDIT_DELIVERY: Final[dict[str, str]] = {
+    **_WATCH_DELIVERY,
+    "thread": "its own thread",
+}
+
+#: What an edit card names each changed field, in the order it shows them.
+_WATCH_EDIT_FIELDS: Final[tuple[tuple[str, str], ...]] = (
+    ("instructions", "Instructions"),
+    ("arguments", "Checks"),
+    ("projection", "Looks at"),
+    ("rule", "Reports when"),
+    ("key", "Compares by"),
+    ("evidence", "Shows"),
+    ("interval", "Checks every (seconds)"),
+    ("lasts", "Lasts"),
+    ("max_turns_per_day", "Reports a day at most"),
+)
+
+
+def _watch_lasts(data: dict[str, object]) -> str | None:
+    """How long a watch on this card runs; None when the call leaves it as it is."""
+    if data.get("permanent") is True:
+        return "permanent"
+    days = data.get("lifetime_days")
+    if days is None:
+        return None
+    return f"{_one_line(days, limit=12)} days"
+
+
+def _watch_value(value: object) -> str:
+    if value is None or value in ("", [], {}):
+        return "none"
+    if isinstance(value, dict | list):
+        value = json.dumps(value, separators=(",", ":"), sort_keys=True)
+    return _one_line(value, limit=60)
+
+
+def _watch_edit_lines(data: dict[str, object]) -> tuple[str, ...]:
+    """Where the watch reports, then each change as old → new.
+
+    The old values come from the call, and `update_watch` refuses unless they
+    are exactly what is stored, so the card never shows a made-up "before".
+    """
+    raw = data.get("before")
+    before = cast("dict[str, object]", raw) if isinstance(raw, dict) else {}
+    old = str(before.get("delivery") or "thread")
+    new = str(data.get("delivery") or old)
+
+    def place(value: str) -> str:
+        return _WATCH_EDIT_DELIVERY.get(value, _one_line(value, limit=40))
+
+    reports_to = place(new) if new == old else f"{place(old)} → {place(new)}"
+    after = {**data, "lasts": _watch_lasts(data)}
+    return (
+        f"Reports to: {reports_to}",
+        *(
+            f"{label}: {_watch_value(before.get(field))} → {_watch_value(after[field])}"
+            for field, label in _WATCH_EDIT_FIELDS
+            if after.get(field) is not None
+        ),
+    )
+
+
 def prompt_for_tool_call(
     call: ToolCall,
     *,
     requester_platform_user_id: str,
     now: datetime,
     timeout: timedelta = CONFIRMATION_TIMEOUT,
+    trusted_servers: frozenset[str] = frozenset({DAIMON_SERVER_NAME}),
 ) -> ConfirmationPrompt:
     """The card for one gated write, with short product-facing details."""
-    server = call.server_name or "a tool"
-    publishing = call.tool_name in PUBLISH_TOOLS and server == DAIMON_SERVER_NAME
+    own_server = call.server_name in trusted_servers
+    publishing = call.tool_name in PUBLISH_TOOLS and own_server
     data = call.input
     name = str(data.get("name") or "")
     slug = str(data.get("slug") or "")
@@ -430,7 +534,7 @@ def prompt_for_tool_call(
     denied_action: str
     consequence: str | None = None
     detail_lines: tuple[str, ...]
-    if call.tool_name in {"request_provider_allowlist"} and server == DAIMON_SERVER_NAME:
+    if call.tool_name in {"request_provider_allowlist"} and own_server:
         reference = ConfigurationReference.model_validate(
             {
                 "operation": "provider_allowlist",
@@ -446,7 +550,7 @@ def prompt_for_tool_call(
             admin=True,
             configuration=reference,
         )
-    if call.tool_name == "request_channel_pin_clear" and server == DAIMON_SERVER_NAME:
+    if call.tool_name == "request_channel_pin_clear" and own_server:
         reference = ConfigurationReference.model_validate(
             {
                 "operation": "channel_pin_clear",
@@ -461,7 +565,7 @@ def prompt_for_tool_call(
             admin=True,
             configuration=reference,
         )
-    if call.tool_name == "request_agent_backend_switch" and server == DAIMON_SERVER_NAME:
+    if call.tool_name == "request_agent_backend_switch" and own_server:
         reference = BackendSwitchReference.model_validate(
             {
                 "agent": data.get("agent_name"),
@@ -521,7 +625,7 @@ def prompt_for_tool_call(
             f"Shared with: {_short(recipients)}",
             f"Spending cap: ${cap}" if cap is not None else "Spending cap: Not set",
         )
-    elif call.tool_name == "microsoft_send" and server == DAIMON_SERVER_NAME:
+    elif call.tool_name == "microsoft_send" and own_server:
         invite = data.get("action") == "create_event"
         # Each field is one line: a newline in one must not fake a line of the card.
         subject = _one_line(data.get("subject") or "")
@@ -559,11 +663,57 @@ def prompt_for_tool_call(
                 f"Message: {preview or '(empty)'}",
             )
         )
-    elif call.tool_name == "microsoft_write" and server == DAIMON_SERVER_NAME:
+    elif call.tool_name == "lead_intake_resolve" and own_server:
+        resolution = data.get("resolution")
+        fields = cast("dict[str, object]", resolution) if isinstance(resolution, dict) else {}
+        action = "Resolve lead"
+        title = "Confirm lead resolution?"
+        denied_action = "Lead resolution not applied"
+        consequence = "Use these selections and resume intake. No email is sent."
+        # The exact selections stay on the card; evidence stays behind Details.
+        visible = (
+            f"Intake: {data.get('intake_id')}",
+            *(
+                f"{label}: {fields[key]}"
+                for key, label in _LEAD_SELECTIONS
+                if fields.get(key) is not None
+            ),
+            *(
+                f"{label}: {'yes' if fields.get(key) else 'no'}"
+                for key, label in _LEAD_CONFIRMATIONS
+            ),
+        )
+        return ConfirmationPrompt(
+            title=title,
+            consequence=consequence,
+            action=action,
+            denied_action=denied_action,
+            detail_lines=(),
+            visible_lines=tuple(str(line) for line in visible),
+            lead_intake_id=str(data.get("intake_id") or ""),
+            requester_platform_user_id=requester_platform_user_id,
+            expires_at=now + timeout,
+        )
+    elif call.tool_name == "microsoft_write" and own_server:
         action, consequence, detail_lines = _microsoft_write_card(data)
         title = f"{action}?"
         denied_action = "Microsoft 365 not changed"
-    elif call.tool_name == "add_skill" and server == DAIMON_SERVER_NAME:
+
+    elif call.tool_name == "start_long_job" and own_server:
+        action = "Start long job"
+        title = "Run this command in an isolated worker?"
+        denied_action = "Long job not started"
+        consequence = (
+            "The worker runs unattended and bills your account "
+            "until it finishes or reaches its limits."
+        )
+        detail_lines = (
+            f"Title: {data.get('title', '')}",
+            f"Deadline (minutes): {data.get('deadline_minutes') or 'configured default'}",
+            f"Dollar cap: {data.get('max_usd') or 'configured default'}",
+            f"Exact command:\n{data.get('command', '')}",
+        )
+    elif call.tool_name == "add_skill" and own_server:
         agent = str(data.get("agent_name") or data.get("agent") or "agent")
         if not name:
             source = str(data.get("path") or data.get("attachment_url") or "")
@@ -589,6 +739,28 @@ def prompt_for_tool_call(
             f"Agent: {_short(agent)}",
             f"Source: {source_label}",
         )
+    elif call.tool_name == "create_watch" and own_server:
+        action = "Create watch"
+        title = "Create this watch?"
+        denied_action = "Watch not created"
+        delivery = data.get("delivery") or "thread"
+        # Always the first line, whatever order the fields came in.
+        reports_to = _WATCH_DELIVERY.get(str(delivery), _one_line(delivery, limit=40))
+        shown = {"delivery", "permanent", "lifetime_days", "max_turns_per_day"}
+        rest = {key: value for key, value in data.items() if key not in shown}
+        daily = data.get("max_turns_per_day")
+        detail_lines = (
+            f"Reports to: {reports_to}",
+            f"Lasts: {_watch_lasts(data) or '7 days'}",
+            *(() if daily is None else (f"Reports a day at most: {_one_line(daily, limit=12)}",)),
+            *_generic_details(rest),
+        )
+    elif call.tool_name == "update_watch" and own_server:
+        action = "Change watch"
+        title = "Change this watch?"
+        denied_action = "Watch not changed"
+        consequence = "Reports queued before the change are dropped."
+        detail_lines = _watch_edit_lines(data)
     else:
         verb = call.tool_name.replace("_", " ").capitalize()
         subject = title_value or name
@@ -613,9 +785,20 @@ def prompt_for_tool_call(
 
 def confirmed_tools_for_turn(deps: TurnDeps) -> frozenset[str]:
     """Daimon's tools this turn's session asks before, from already-injected selectors."""
-    return backend_switch_tools(enabled=deps.backend_selection_enabled) | microsoft_send_tools(
-        enabled=deps.microsoft_send, tool_safety_on=deps.tool_safety.enabled
+    return (
+        WATCH_CONFIRMED_TOOLS
+        | backend_switch_tools(enabled=deps.backend_selection_enabled)
+        | microsoft_send_tools(enabled=deps.microsoft_send, tool_safety_on=deps.tool_safety.enabled)
     )
+
+
+async def confirmed_tools_for_tenant(deps: TurnDeps, tenant_id: uuid.UUID) -> frozenset[str]:
+    from daimon.core.stores.lead_intake import confirmation_tools
+
+    base = confirmed_tools_for_turn(deps)
+    if not deps.public_url:
+        return base
+    return base | await confirmation_tools(deps.sessionmaker, tenant_id)
 
 
 def stated_settings(
@@ -728,6 +911,7 @@ def backend_switch_callbacks(
     tenant_id: uuid.UUID,
     account_id: uuid.UUID,
     current_admin: Callable[[str], Awaitable[bool]],
+    current_platform_admin: Callable[[str], Awaitable[bool]],
     resource_host: NeutralResourceHost | None = None,
     default_agent_name: str | None = None,
     place_word: str = "server",
@@ -867,11 +1051,11 @@ def backend_switch_callbacks(
             or identity.platform_user_id != clicker
         ):
             raise ValueError("This confirmation is unavailable. Preview again.")
-        subject = build_subject(is_admin=await current_admin(clicker), platform_user_id=clicker)
-        if (
-            reference.operation in ("provider_allowlist", "channel_pin_clear")
-            and not subject.is_admin
-        ):
+        subject = build_subject(
+            is_admin=await current_platform_admin(clicker),
+            platform_user_id=clicker,
+        )
+        if not subject.is_admin:
             raise ValueError("This change needs a current workspace admin.")
         actor = BackendActor(tenant_id=tenant_id, account_id=account_id, subject=subject)
         try:

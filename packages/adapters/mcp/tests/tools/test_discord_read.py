@@ -1224,3 +1224,29 @@ async def test_list_threads_archived_without_last_message_uses_archive_timestamp
     assert rows[0].last_activity == "2026-06-01T12:00:00+00:00", (
         "archived thread without last_message_id should use archive_timestamp"
     )
+
+
+@pytest.mark.parametrize("tool", ["channel", "thread"])
+async def test_poll_reads_recheck_owners_history_permission_at_actual_read(monkeypatch, tool):
+    """A prior scheduling ACL check cannot substitute for source-time authorization."""
+
+    async def handler(route, kwargs):
+        if route.path == "/guilds/{guild_id}":
+            return {**_guild_payload(), "roles": [_everyone_role("111", _VIEW_CHANNEL)]}
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return _member_payload()
+        if route.path == "/channels/{channel_id}":
+            channel_id = kwargs.get("channel_id") or route.channel_id
+            return _thread_payload() if str(channel_id) == "444" else _text_channel_payload()
+        raise AssertionError("No history read is authorized")
+
+    patch_discord_http(monkeypatch, handler)
+    with pytest.raises(ToolError, match="read_message_history"):
+        if tool == "channel":
+            await _read_channel_impl(
+                _runtime_with_discord_token(), _auth(), channel_id="222", require_owner_history=True
+            )
+        else:
+            await _read_thread_impl(
+                _runtime_with_discord_token(), _auth(), thread_id="444", require_owner_history=True
+            )
