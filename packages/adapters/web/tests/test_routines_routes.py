@@ -347,8 +347,8 @@ async def test_a_member_may_deliver_only_to_a_channel_their_platform_shows_them(
             f"/api/routines/{made.json()['id']}", json={"clear_destination": True}
         )
     assert choices["destinations"] == [
-        {"id": _CHANNEL, "name": "general"},
-        {"id": "222", "name": "secret"},
+        {"id": _CHANNEL, "name": "general", "kind": "channel"},
+        {"id": "222", "name": "secret", "kind": "channel"},
     ], "what the platform shows them, minus a channel kept to its own agents"
     assert {user for user, _ in asked} == {"m-1"}
     assert (refused.status_code, locked.status_code) == (422, 422)
