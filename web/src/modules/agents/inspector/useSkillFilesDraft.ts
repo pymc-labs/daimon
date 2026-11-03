@@ -27,6 +27,8 @@ export function useSkillFilesDraft(stored: StoredFile[], onSave: (body: Record<s
     binary: !!file && file.content === null,
     text: edits[shown] ?? file?.content ?? "",
     open: setPath,
+    read: (n: string) => edits[n] ?? stored.find((f) => f.path === n)?.content ?? "",
+    setFile: (n: string, v: string) => setEdits((d) => ({ ...d, [n]: v })),
     setText: (v: string) => setEdits((d) => ({ ...d, [shown]: v })),
     add: (n: string) => {
       if (!PATH.test(n) || names.includes(n)) return false

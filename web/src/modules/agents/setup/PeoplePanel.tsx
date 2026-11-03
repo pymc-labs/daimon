@@ -1,6 +1,7 @@
 import { X } from "lucide-react"
 import { useState } from "react"
 
+import { PersonLink } from "@/components/links"
 import { Avatar } from "@/components/common"
 import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -22,7 +23,7 @@ export function PeoplePanel({ agent }: Props) {
         <div className="space-y-1">
           {[{ ...agent.owner, role: "Owner" }, ...agent.co_owners.map((p) => ({ ...p, role: "Co-owner" }))].map((p) => (
             <div key={p.id} className="flex h-8 items-center gap-2 text-sm">
-              <Avatar name={p.name} />{p.name}<span className="ml-auto text-xs text-muted-foreground">{p.role}</span>
+              <Avatar name={p.name} /><PersonLink id={p.id} name={p.name} /><span className="ml-auto text-xs text-muted-foreground">{p.role}</span>
             </div>
           ))}
         </div>

@@ -9,6 +9,7 @@ import { createContext, useContext, useEffect, useMemo, useRef, useState } from 
 
 import { AgentAvatar, Ago, Avatar, Money } from "@/components/common"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
+import { modelLabel } from "@/lib/format"
 import { useTheme } from "@/lib/theme-context"
 import { cn } from "@/lib/utils"
 import { pressProps } from "@/lib/filters"
@@ -146,7 +147,7 @@ function ModelNode() {
     <Card id="model" icon={<Cpu />} title="Model">
       <div className="space-y-1 p-3">
         <div className="flex items-center gap-2">
-          <span className="text-sm font-medium">{c?.label ?? config.model.id}{config.model.speed === "fast" && " Fast"}</span>
+          <span className="text-sm font-medium">{modelLabel(config.model.id, c?.label)}{config.model.speed === "fast" && " Fast"}</span>
           {config.model.backend === "anthropic" && <Pill>{EFFORT_LABEL[config.model.effort]}</Pill>}
         </div>
         <div className="text-xs text-muted-foreground">

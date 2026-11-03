@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
 
 import { ApiError, api } from "@/lib/api"
-import type { EnvironmentDoc, EnvironmentInput, LibrarySkill, SkillVersion, SyncedSkill } from "../types"
+import type { EnvironmentDoc, EnvironmentInput, LibrarySkill, SkillDetail, SkillFiles, SkillVersion, SyncedSkill } from "../types"
 
 const fail = (e: Error) => toast.error(e.message)
 
@@ -11,6 +11,19 @@ export const useLibrarySkills = (enabled = true) =>
 
 export const useSkillVersions = (id: string) =>
   useQuery({ queryKey: ["agents", "library", "skills", id, "versions"], queryFn: () => api.get<SkillVersion[]>(`/api/agents/skills/${id}/versions`), retry: false })
+
+export const useSkill = (id: string) =>
+  useQuery({ queryKey: ["agents", "library", "skills", id], queryFn: () => api.get<SkillDetail>(`/api/agents/skills/${id}`), retry: false })
+
+/** The files of one version of a library skill, the latest when `version` is null. */
+export const useLibraryFiles = (id: string, version: string | null) =>
+  useQuery({
+    queryKey: ["agents", "library", "skills", id, "files", version],
+    queryFn: () => api.get<SkillFiles>(`/api/agents/skills/${id}/files${version ? `?version=${encodeURIComponent(version)}` : ""}`),
+    retry: false,
+  })
+
+type Ref = { id: string; name: string; version: string }
 
 export function useSkillWrites() {
   const qc = useQueryClient()
@@ -22,6 +35,17 @@ export function useSkillWrites() {
       onError: fail,
     }),
     remove: useMutation({ mutationFn: (id: string) => api.del(`/api/agents/skills/${id}`), onSuccess: done, onError: fail }),
+    create: useMutation({ mutationFn: (b: { name: string; description: string }) => api.post<Ref>("/api/agents/skills", b), onSuccess: done, onError: fail }),
+    save: useMutation({
+      mutationFn: (b: { id: string; files: Record<string, string | null>; expected_version: string }) =>
+        api.put<Ref>(`/api/agents/skills/${b.id}/files`, { files: b.files, expected_version: b.expected_version }),
+      onSuccess: done,
+      onError: (e) => {
+        if (e instanceof ApiError && e.status === 409) void done()
+        fail(e)
+      },
+    }),
+    restore: useMutation({ mutationFn: (b: { id: string; version: string }) => api.post<Ref>(`/api/agents/skills/${b.id}/restore`, { version: b.version }), onSuccess: done, onError: fail }),
   }
 }
 

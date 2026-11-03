@@ -66,10 +66,20 @@ describe("EnvironmentForm", () => {
   it("sends the loaded version and says so when it changed meanwhile", async () => {
     vi.mocked(api.put).mockRejectedValue(new ApiError(409, "This environment changed since you opened it. Reload and try again."))
     show(env)
+    await userEvent.type(screen.getByLabelText("Description"), "Analysis")
     await userEvent.click(screen.getByRole("button", { name: "Save" }))
     await waitFor(() => expect(api.put).toHaveBeenCalledTimes(1))
     expect(vi.mocked(api.put).mock.calls[0]![1]).toMatchObject({ expected_updated_at: "2030-01-01T00:00:00Z" })
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith("Changed meanwhile. Reloaded."))
+  })
+
+  it("shows Save and Discard only once something changed", async () => {
+    show(env)
+    expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument()
+    await userEvent.type(screen.getByLabelText("Description"), "x")
+    expect(screen.getByRole("button", { name: "Save" })).toBeInTheDocument()
+    await userEvent.click(screen.getByRole("button", { name: "Discard" }))
+    expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument()
   })
 
   it("leaves a managed environment read-only", () => {

@@ -1,105 +1,115 @@
-import { RefreshCw, Trash2 } from "lucide-react"
+import { Plus, RefreshCw } from "lucide-react"
 import { useState } from "react"
+import { useNavigate } from "react-router"
 
-import { Drawer } from "@/components/Drawer"
 import { QueryState } from "@/components/QueryState"
-import { Ago } from "@/components/common"
+import { AgentAvatar, Ago } from "@/components/common"
+import { FilterBar, SearchInput } from "@/components/filters"
 import { Page } from "@/components/shell/Page"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { rowProps, useParam } from "@/lib/filters"
-import { useConfirm } from "@/lib/confirm"
 import { plural } from "@/lib/format"
-import { PanelSection, Tag } from "@/modules/admin/shared"
 import type { LibrarySkill, SyncedSkill } from "../types"
-import { useLibrarySkills, useSkillVersions, useSkillWrites } from "./api"
+import { useLibrarySkills, useSkillWrites } from "./api"
+import { sourceLabel } from "./skill-meta"
 import { LIBRARY_TABS } from "./tabs"
 
-const usedBy = (s: LibrarySkill) => {
-  const agents = s.used_by.filter((u) => u.kind === "agent").length
-  const channels = s.used_by.length - agents
-  return [agents && plural(agents, "agent"), channels && plural(channels, "channel")].filter(Boolean).join(", ") || "Unused"
+function UsedBy({ skill }: { skill: LibrarySkill }) {
+  const agents = skill.used_by.filter((u) => u.kind === "agent")
+  const channels = skill.used_by.length - agents.length
+  if (!skill.used_by.length) return <span className="text-faint">Unused</span>
+  return (
+    <span className="flex items-center gap-2">
+      <span className="flex -space-x-1.5">
+        {agents.slice(0, 3).map((u) => <AgentAvatar key={u.id} name={u.name} className="size-5 text-[9px] ring-2 ring-background" />)}
+      </span>
+      <span className="text-muted-foreground">{[agents.length && plural(agents.length, "agent"), channels && plural(channels, "channel")].filter(Boolean).join(", ")}</span>
+    </span>
+  )
 }
 
 export function Skills() {
   const query = useLibrarySkills()
-  const [, setSkill] = useParam("skill")
+  const navigate = useNavigate()
+  const [q, setQ] = useParam("q")
   const [syncing, setSyncing] = useState(false)
-  const rows = query.data ?? []
+  const [creating, setCreating] = useState(false)
+  const all = query.data ?? []
+  const rows = all.filter((s) => !q || `${s.title} ${s.name} ${s.description}`.toLowerCase().includes(q.toLowerCase()))
   return (
     <Page
       crumbs={[{ label: "Agents", to: "/agents" }, { label: "Skills" }]}
       tabs={LIBRARY_TABS}
       flush
-      actions={<Button size="sm" onClick={() => setSyncing(true)}><RefreshCw />Sync from GitHub</Button>}
+      actions={
+        <>
+          <Button size="sm" variant="outline" onClick={() => setSyncing(true)}><RefreshCw />Sync from GitHub</Button>
+          <Button size="sm" onClick={() => setCreating(true)}><Plus />New skill</Button>
+        </>
+      }
     >
-      <QueryState query={query} className="px-6" isEmpty={() => !rows.length} empty="No skills">{() => (
+      <FilterBar>
+        <SearchInput value={q} onChange={(v) => setQ(v || null)} className="w-56" />
+        <span className="ml-auto text-xs text-muted-foreground tabular">{plural(rows.length, "skill")}</span>
+      </FilterBar>
+      <QueryState query={query} className="px-6" isEmpty={() => !rows.length} empty={all.length ? "No skills match" : "No skills"}>{() => (
         <Table>
           <TableHeader>
             <TableRow className="hover:bg-transparent">
               <TableHead className="pl-4 lg:pl-6">Name</TableHead>
-              <TableHead>Version</TableHead>
+              <TableHead className="max-md:hidden">Source</TableHead>
               <TableHead>Used by</TableHead>
-              <TableHead className="pr-4 text-right lg:pr-6">Added</TableHead>
+              <TableHead className="pr-4 text-right lg:pr-6">Updated</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {rows.map((s) => (
-              <TableRow key={s.id} {...rowProps(() => setSkill(s.id))} className="cursor-pointer">
+              <TableRow key={s.id} {...rowProps(() => navigate(`/agents/skills/${encodeURIComponent(s.id)}`))} className="cursor-pointer">
                 <TableCell className="pl-4 lg:pl-6">
-                  <span className="flex items-center gap-2"><span className="font-medium">{s.name}</span>{s.source === "anthropic" && <Tag>Built in</Tag>}{s.default && <Tag>Default</Tag>}</span>
+                  <span className="block min-w-0">
+                    <span className="block truncate font-medium">{s.title}</span>
+                    <span className="block max-w-[44ch] truncate text-xs text-muted-foreground">{s.description}</span>
+                  </span>
                 </TableCell>
-                <TableCell className="text-muted-foreground">{s.version || "–"}</TableCell>
-                <TableCell className="text-muted-foreground">{usedBy(s)}</TableCell>
-                <TableCell className="pr-4 text-right text-muted-foreground lg:pr-6"><Ago iso={s.created_at} /></TableCell>
+                <TableCell className="text-muted-foreground max-md:hidden">{sourceLabel(s)}</TableCell>
+                <TableCell><UsedBy skill={s} /></TableCell>
+                <TableCell className="pr-4 text-right text-muted-foreground lg:pr-6"><Ago iso={s.updated_at} /></TableCell>
               </TableRow>
             ))}
           </TableBody>
         </Table>
       )}</QueryState>
-      <Drawer param="skill" title="Skill" ids={rows.map((s) => s.id)}>{(id) => <SkillView skill={rows.find((s) => s.id === id)} />}</Drawer>
       <Sync open={syncing} onOpenChange={setSyncing} />
+      <NewSkill open={creating} onOpenChange={setCreating} />
     </Page>
   )
 }
 
-function SkillView({ skill }: { skill?: LibrarySkill }) {
-  const confirm = useConfirm()
-  const { remove } = useSkillWrites()
-  const [, setSkill] = useParam("skill")
-  const versions = useSkillVersions(skill?.id ?? "")
-  if (!skill) return <div className="p-5 text-sm text-muted-foreground">Not found</div>
-  const locked = skill.source !== "custom" || skill.default
-  const drop = async () => {
-    if (!(await confirm({ title: `Delete ${skill.name}?`, action: "Delete", destructive: true }))) return
-    remove.mutate(skill.id, { onSuccess: () => setSkill(null) })
-  }
+function NewSkill({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
+  const { create } = useSkillWrites()
+  const navigate = useNavigate()
+  const [name, setName] = useState("")
+  const [description, setDescription] = useState("")
+  const go = () => name.trim() && create.mutate({ name: name.trim(), description: description.trim() }, {
+    onSuccess: (made) => { onOpenChange(false); setName(""); setDescription(""); navigate(`/agents/skills/${encodeURIComponent(made.id)}`) },
+  })
   return (
-    <>
-      <div className="flex items-center gap-2 px-5 py-4">
-        <h2 className="text-lg font-semibold">{skill.name}</h2>
-        {skill.source === "anthropic" && <Tag>Built in</Tag>}{skill.default && <Tag>Default</Tag>}
-        {!locked && <Button variant="outline" size="sm" className="ml-auto" disabled={remove.isPending} onClick={() => void drop()}><Trash2 />Delete</Button>}
-      </div>
-      <PanelSection title="Used by">
-        {!skill.used_by.length ? <div className="text-sm text-muted-foreground">Nothing</div> : (
-          <ul className="space-y-1 text-sm">
-            {skill.used_by.map((u) => <li key={`${u.kind}:${u.name}`} className="flex items-center gap-2">{u.name}<span className="text-xs text-muted-foreground">{u.kind === "agent" ? "Agent" : "Channel"}</span></li>)}
-          </ul>
-        )}
-      </PanelSection>
-      {skill.source === "custom" && (
-        <PanelSection title="Versions">
-          <QueryState query={versions} isEmpty={(v) => !v.length} empty="None">{(v) => (
-            <ul className="space-y-1 text-sm">
-              {v.map((x, i) => <li key={x.version} className="flex items-center gap-2"><span className="font-mono text-xs">{x.version}</span>{i === 0 && <Tag>Latest</Tag>}<span className="ml-auto text-xs text-muted-foreground"><Ago iso={x.created_at} /></span></li>)}
-            </ul>
-          )}</QueryState>
-        </PanelSection>
-      )}
-    </>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader><DialogTitle>New skill</DialogTitle></DialogHeader>
+        <form id="new-skill" className="space-y-2" onSubmit={(e) => { e.preventDefault(); go() }}>
+          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Name" aria-label="Name" className="h-8" autoFocus />
+          <Input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Description" aria-label="Description" className="h-8" />
+        </form>
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button type="submit" form="new-skill" disabled={!name.trim() || create.isPending}>Create</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 
