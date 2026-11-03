@@ -639,4 +639,18 @@ export const agentsHandlers = [
 ;(globalThis as { __resetAgents?: () => void }).__resetAgents = () => { DB = seed(); save() }
 
 /** The roster and who is asking, for the setup handlers in `agent-setup.ts`. */
-export const roster = { all: () => DB, find, viewer, details, save }
+export const roster = {
+  all: () => DB, find, viewer, details, save,
+  remove: (id: string) => { DB = DB.filter((r) => r.id !== id); save() },
+  copy: (r: Rec, name: string, by: string) => {
+    const last = r.versions.at(-1)!
+    const made: Rec = {
+      id: `ag_${name.toLowerCase().replace(/[^a-z0-9]+/g, "_")}_${Date.now().toString(36).slice(-4)}`,
+      owner: by, co_owners: [], last_used_at: null, spend_usd: 0, drafts: {},
+      versions: [{ version: 1, at: new Date().toISOString(), by, note: `Copied from ${last.config.name}`, config: { ...clone(last.config), name } }],
+    }
+    DB.push(made)
+    save()
+    return made
+  },
+}

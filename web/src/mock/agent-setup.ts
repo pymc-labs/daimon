@@ -109,4 +109,25 @@ export const agentSetupHandlers = [
     CODING.set(id, rows.filter((k) => k !== row))
     return new HttpResponse(null, { status: 204 })
   }),
+  http.post("/api/agents/:id/archive", async ({ params }) => {
+    await wait(400)
+    if (!roster.viewer()) return unauthorized()
+    if (!isAdmin()) return forbidden("Archiving an agent needs an admin.")
+    if (!roster.find(String(params.id))) return notFound()
+    roster.remove(String(params.id))
+    return new HttpResponse(null, { status: 204 })
+  }),
+  http.post("/api/agents/:id/copy", async ({ params, request }) => {
+    await wait(500)
+    const v = roster.viewer()
+    if (!v) return unauthorized()
+    if (!isAdmin()) return forbidden("Copying an agent needs an admin.")
+    const r = roster.find(String(params.id))
+    if (!r) return notFound()
+    const name = ((await request.json()) as { name: string }).name.trim()
+    if (!name) return HttpResponse.json({ detail: "That name can't be used." }, { status: 422 })
+    if (roster.all().some((x) => x.versions.at(-1)!.config.name.toLowerCase() === name.toLowerCase())) return HttpResponse.json({ detail: `agent '${name}' already exists` }, { status: 409 })
+    const made = roster.copy(r, name, v.id)
+    return HttpResponse.json({ id: made.id, name })
+  }),
 ]

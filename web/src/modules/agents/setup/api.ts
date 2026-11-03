@@ -57,3 +57,13 @@ export function useSetOwners(id: string) {
     onError: fail,
   })
 }
+
+/** Retire an agent, or copy it under a new name; both are an admin's. */
+export function useAgentLifecycle(id: string) {
+  const qc = useQueryClient()
+  const done = () => qc.invalidateQueries({ queryKey: ["agents"] })
+  return {
+    archive: useMutation({ mutationFn: () => api.post(`/api/agents/${id}/archive`), onSuccess: done, onError: fail }),
+    copy: useMutation({ mutationFn: (name: string) => api.post<{ id: string; name: string }>(`/api/agents/${id}/copy`, { name }), onSuccess: done, onError: fail }),
+  }
+}

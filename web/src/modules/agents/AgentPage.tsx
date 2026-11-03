@@ -15,6 +15,7 @@ import { useAgent, useCatalog, useDraft, useDraftEditor } from "./api"
 import { Canvas } from "./Canvas"
 import { DraftBar } from "./Draft"
 import { Inspector } from "./inspector/Inspector"
+import { LifecycleMenu } from "./setup/LifecycleMenu"
 
 export function AgentPage() {
   const { id = "" } = useParams()
@@ -59,6 +60,7 @@ export function AgentPage() {
             <HistoryIcon />History
           </Button>
           <Button variant="outline" size="sm" asChild><Link to={`/chat?agent=${agent.id}`}><MessagesSquare />Chat</Link></Button>
+          <LifecycleMenu agent={agent} />
         </>
       )}
     >
