@@ -113,7 +113,7 @@ export function Defaults() {
   if (!d) return null
   const edit = !!me?.capabilities.includes("channels.manage")
   const run = (key: DefaultsKey, body: unknown) => void save.run(key, body, (message) =>
-    confirm({ title: "Open network access?", body: message, action: "Continue", destructive: true })).then(setOut)
+    confirm({ title: "Allow internet access?", body: message, action: "Continue", destructive: true })).then(setOut)
   const p = { edit, run, busy: save.pending }
 
   return (

@@ -21,7 +21,7 @@ export function Sandbox({ c }: { c: ChannelDetail }) {
 
   const run = async (environment: string | null) => {
     const r = await save.run("put", "environment", { environment, expected: own }, (body) =>
-      confirm({ title: "Open network access?", body, action: "Continue", destructive: true }))
+      confirm({ title: "Allow internet access?", body, action: "Continue", destructive: true }))
     if (!r.error) setDraft(environment ?? "")
     setOut(r)
   }
