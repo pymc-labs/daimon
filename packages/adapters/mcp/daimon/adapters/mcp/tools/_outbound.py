@@ -226,7 +226,9 @@ async def prepare_posts(
     if not scope.interactive:
         return rendered
     settings = runtime.settings.outbound
-    for post in posts:
+    # Length and captions guard other people's attention; the requester's own thread
+    # and their own DM are theirs to fill.
+    for post in (p for p in posts if _outside(p, scope)):
         if settings.max_length and len(post.text) > settings.max_length:
             record_denial("outbound_too_long")
             raise ToolError(TOO_LONG)

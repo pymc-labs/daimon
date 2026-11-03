@@ -129,6 +129,22 @@ async def test_prepare_posts_when_too_long_or_bare_media_then_refused_if_attende
     )
 
 
+@pytest.mark.parametrize("platform", PLATFORMS)
+@pytest.mark.parametrize("place", ["home", "42"], ids=["own_thread", "dm_to_requester"])
+async def test_prepare_posts_when_long_or_bare_media_in_own_conversation_then_posts(
+    sessionmaker, platform, place
+):
+    runtime, auth = await _setup(sessionmaker, platform)
+    plan = ReachPlan(threads=0, places=0, people=0)
+    for post in (
+        OutgoingPost(text="x" * 5000, place=place),
+        OutgoingPost(text="clip", place=place, media=True),
+    ):
+        assert await prepare_posts(runtime, auth, [post], plan=plan, scope=_scope()), (
+            f"{platform}: the requester's own conversation takes long docs and bare videos"
+        )
+
+
 @pytest.mark.parametrize("platform", ("discord", "slack"))
 async def test_prepare_posts_when_person_opted_out_then_untagged_and_uncounted(
     sessionmaker, platform, monkeypatch
