@@ -6,12 +6,15 @@ Pure rules; the MCP server keeps the per-turn tally and asks for approval.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime, timedelta
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 ReachVerdict = Literal["ok", "plan_too_small", "needs_approval"]
 
+# An outside client's budget renews each window, so it limits bursts, not a lifetime.
+CLIENT_WINDOW = timedelta(hours=2)
 CHEAPER_SHAPE = "Offer one thread with a checklist instead, each owner tagged once."
 DECLINED = f"Not posted: the person did not approve. {CHEAPER_SHAPE}"
 NO_CARD = (
@@ -129,3 +132,9 @@ def card_title(plan: ReachPlan, where: str) -> str:
 
 def _count(n: int, one: str, many: str | None = None) -> str:
     return f"{n} {one if n == 1 else (many or one + 's')}"
+
+
+def client_tally_key(client: str, now: datetime) -> str:
+    """The tally an outside client spends in the fixed window holding ``now``."""
+    bucket = int(now.timestamp() // CLIENT_WINDOW.total_seconds())
+    return f"client:{client}:{bucket}"

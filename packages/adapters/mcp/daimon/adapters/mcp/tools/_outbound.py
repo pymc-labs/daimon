@@ -9,6 +9,7 @@ from __future__ import annotations
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
 import aiohttp
@@ -35,6 +36,7 @@ from daimon.core.outbound.reach import (
     ReachPlan,
     ReachTally,
     check_reach,
+    client_tally_key,
     needs_approval,
     plan_too_small,
 )
@@ -137,7 +139,7 @@ async def turn_scope(runtime: McpRuntime, auth: AuthIdentity) -> TurnScope:
                 origin=origin,
             )
     return TurnScope(
-        key=f"client:{auth.token_jti or auth.account_id}",
+        key=client_tally_key(auth.token_jti or str(auth.account_id), datetime.now(UTC)),
         kind="outside",
         own_places=frozenset(),
         requester_id=auth.platform_user_id,

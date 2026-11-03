@@ -303,7 +303,7 @@ async def test_turn_scope_when_no_running_origin_then_outside_client(
     assert scope.kind == "outside", "nothing proves the server started it, so it is a client"
     assert scope.interactive, "outside clients get the length and caption rules"
     assert scope.origin is None, "and no card, so over budget fails closed"
-    assert scope.key.startswith("client:jti-1"), "tallied per credential"
+    assert scope.key.startswith("client:jti-1:"), "tallied per credential"
 
 
 async def test_turn_scope_when_two_turns_share_a_session_then_neither_borrows_the_other(

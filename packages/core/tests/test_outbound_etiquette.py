@@ -1,6 +1,6 @@
 """Outbound etiquette: mention rendering, attribution and the reach budget."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import cast
 
@@ -13,7 +13,14 @@ from daimon.core.outbound.mentions import (
     neutralise_broadcasts,
     render_post,
 )
-from daimon.core.outbound.reach import ReachPlan, ReachTally, card_title, check_reach
+from daimon.core.outbound.reach import (
+    CLIENT_WINDOW,
+    ReachPlan,
+    ReachTally,
+    card_title,
+    check_reach,
+    client_tally_key,
+)
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall, ToolSafetyPolicy, decide_tool_call
 from daimon.core.turn.deps import TurnDeps
 
@@ -198,3 +205,13 @@ def test_approve_reach_prompt_when_counts_invalid_then_no_card(raw):
     call = _reach_call().model_copy(update={"input": {**raw, "where": "#x"}})
     with pytest.raises(ValueError, match="validation error"):
         prompt_for_tool_call(call, requester_platform_user_id="owner", now=datetime.now(UTC))
+
+
+def test_client_tally_key_when_window_turns_then_budget_renews() -> None:
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+
+    same = client_tally_key("jti", start + CLIENT_WINDOW - timedelta(seconds=1))
+    later = client_tally_key("jti", start + CLIENT_WINDOW)
+
+    assert client_tally_key("jti", start) == same, "one window shares a tally"
+    assert later != same, "the next window starts a fresh tally"
