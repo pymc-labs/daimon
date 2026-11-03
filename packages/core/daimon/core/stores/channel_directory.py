@@ -85,8 +85,11 @@ async def list_configured_channel_ids(
         select(SharedChannel.channel_id).where(
             SharedChannel.tenant_id == tenant_id, SharedChannel.platform == platform
         ),
+        # A deleted channel or a direct message is listed only for what else names it.
         select(PlatformChannelName.channel_id).where(
-            PlatformChannelName.tenant_id == tenant_id, PlatformChannelName.platform == platform
+            PlatformChannelName.tenant_id == tenant_id,
+            PlatformChannelName.platform == platform,
+            PlatformChannelName.status == "named",
         ),
     ]
     if platform == "teams":

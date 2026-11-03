@@ -2,8 +2,9 @@
 
 There is no channels table: a channel is listed when a setting, a budget, the
 access policy, a known name or spend in the last 30 days names it. The private
-channels DM conversations run in are left out. Web chat is one row,
-`WEB_ROW_ID`, gathering every person's web spend. Spend is read once for all
+channels DM conversations run in are left out, and so are deleted channels and direct
+messages the platform answered for (`status`; `load_channel_row` still reads them). Web
+chat is one row, `WEB_ROW_ID`, gathering every person's web spend. Spend is read once for all
 rows: usage rows priced like the Credits page (`channel_cost_totals`) for what a channel
 spent, and the ledger (`list_window_spend`) for a budget, which is what the budget gate counts.
 
@@ -53,6 +54,11 @@ WEB_ROW_ID = WEB_PLACE_ID
 ValueSource = Literal["channel", "workspace", "deployment"]
 """Where a cascaded value comes from: the channel's own, the workspace default, or the
 deployment's."""
+ChannelStatusName = Literal["active", "gone", "direct"]
+"""`active`: listed or not yet checked. `gone`: the platform says it no longer exists.
+`direct`: a direct message conversation."""
+ChannelKind = Literal["category", "channel", "thread", "forum_post", "team"]
+"""What a row or a path node is. `forum_post` is a thread in a Discord forum channel."""
 AccessTag = Literal["kept_inside", "locked", "shared"]
 """`kept_inside`: only this channel reads it. `locked`: only its own agents read it
 (a confidential channel). `shared`: shared with another organisation."""
@@ -89,6 +95,15 @@ class ChannelSpend:
 
 
 @dataclass(frozen=True)
+class PathNode:
+    """One ancestor of a channel: its category or team, or the channel of a thread."""
+
+    id: str
+    name: str | None
+    kind: ChannelKind
+
+
+@dataclass(frozen=True)
 class ChannelRow:
     channel_id: str
     platform: str
@@ -102,6 +117,14 @@ class ChannelRow:
     tags: tuple[AccessTag, ...]
     budget: ChannelBudgetStatus | None
     spend: ChannelSpend
+    kind: ChannelKind = "channel"
+    path: tuple[PathNode, ...] = ()
+    """Ancestors, root first: Discord category and channel, a Teams team."""
+
+    @property
+    def status(self) -> ChannelStatusName:
+        stored = self.name.status if self.name is not None else "named"
+        return "active" if stored == "named" else stored
 
     @property
     def confidential(self) -> bool:
@@ -163,6 +186,58 @@ def _tags(policy: TenantAccessPolicy, channel_id: str, shared: bool) -> tuple[Ac
     return tuple(tags)
 
 
+_TEAMS_REPLY = ";messageid="
+
+
+def _named(row: ChannelNameRow | None) -> ChannelNameRow | None:
+    return row if row is not None and row.name else None
+
+
+def channel_kind(
+    platform: str, channel_id: str, name: ChannelNameRow | None, names: Mapping[str, ChannelNameRow]
+) -> ChannelKind:
+    """The row's kind: a thread, a forum post, or a channel; web chat and unknowns are channels."""
+    if platform == "teams":
+        return "thread" if _TEAMS_REPLY in channel_id else "channel"
+    if name is None or name.kind != "thread":
+        return "channel"
+    parent = _named(names.get(name.parent_id)) if name.parent_id is not None else None
+    return "forum_post" if parent is not None and parent.kind == "forum" else "thread"
+
+
+def channel_path(
+    platform: str, channel_id: str, name: ChannelNameRow | None, names: Mapping[str, ChannelNameRow]
+) -> tuple[PathNode, ...]:
+    """The ancestors of a channel, root first. Pure.
+
+    A Discord thread sits under its channel under its category; a Teams channel under its
+    team, a Teams reply thread under its channel. An ancestor with no stored row is named
+    by what its child recorded.
+    """
+    if name is None or name.parent_id is None:
+        return ()
+    if platform == "teams":
+        team = PathNode(name.parent_id, name.parent_name, "team")
+        base = channel_id.split(_TEAMS_REPLY)[0] if _TEAMS_REPLY in channel_id else None
+        parent = _named(names.get(base)) if base is not None else None
+        if base is None or base == channel_id:
+            return (team,)
+        return (team, PathNode(base, parent.name if parent else None, "channel"))
+    chain: list[PathNode] = []
+    current = name
+    seen = {channel_id}
+    while current.parent_id is not None and current.parent_id not in seen:
+        seen.add(current.parent_id)
+        parent = _named(names.get(current.parent_id))
+        if parent is None:
+            kind: ChannelKind = "channel" if current.kind == "thread" else "category"
+            chain.append(PathNode(current.parent_id, current.parent_name, kind))
+            break
+        chain.append(PathNode(parent.channel_id, parent.name, "channel"))
+        current = parent
+    return tuple(reversed(chain))
+
+
 def build_channel_rows(
     channel_ids: Collection[str],
     *,
@@ -192,6 +267,8 @@ def build_channel_rows(
                 tags=() if web else _tags(policy, channel_id, channel_id in shared),
                 budget=budgets.get(channel_id),
                 spend=spend.get(channel_id, ChannelSpend()),
+                kind=channel_kind(platform, channel_id, names.get(channel_id), names),
+                path=channel_path(platform, channel_id, names.get(channel_id), names),
             )
         )
 
@@ -264,13 +341,20 @@ async def _read(
         ),
         names={
             row.channel_id: row
-            for row in await list_channel_names(session, tenant_id=tenant_id, platform=platform)
+            for row in await list_channel_names(
+                session, tenant_id=tenant_id, platform=platform, unnamed=True
+            )
         },
         shared=await list_shared_channel_ids(session, tenant_id=tenant_id, platform=platform),
         budgets=await _budget_statuses(session, budgets, tenant_id=tenant_id, now=now),
         spend=fold_web_spend(totals, markup),
         dms=await list_dm_channel_ids(session, tenant_id=tenant_id),
     )
+
+
+def _active(name: ChannelNameRow | None) -> bool:
+    """Whether the platform still has the channel: deleted channels and DMs are left out."""
+    return name is None or name.status == "named"
 
 
 def _rows(reads: _Reads, channel_ids: Collection[str]) -> tuple[ChannelRow, ...]:
@@ -307,6 +391,7 @@ async def load_channel_directory(
         | used
     )
     listed = {cid for cid in listed if not is_web_channel(cid)} - reads.dms
+    listed = {cid for cid in listed if _active(reads.names.get(cid))}
     return ChannelDirectory(
         platform=reads.platform,
         default_agent=Sourced.of(reads.answering.agent_in(None)),

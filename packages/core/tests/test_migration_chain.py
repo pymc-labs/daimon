@@ -136,6 +136,7 @@ TAIL = (
     "0172_fold_caps_into_allowances",
     "0173_channel_settings",
     "0174_drop_channel_admins",
+    "0175_channel_name_status",
 )
 HEAD = TAIL[-1]
 

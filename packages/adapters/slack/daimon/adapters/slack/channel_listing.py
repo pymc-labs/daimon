@@ -10,14 +10,18 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
-from daimon.core.channel_listing import store_listing
+from daimon.core.channel_listing import check_unlisted_channels, store_listing
+from daimon.core.platform_names import ChannelLookup, ChannelStatus
 from daimon.core.stores.platform_names import ChannelSighting
 from daimon.core.stores.tenants import list_tenants_by_platform
+from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 #: Seconds between pages: well under tier 2's limit.
 PAGE_GAP_S = 3.5
+#: Seconds between `conversations.info` calls (tier 3, about 50 a minute).
+INFO_GAP_S = 1.5
 
 
 async def list_workspace(
@@ -49,22 +53,56 @@ async def list_workspace(
         await asyncio.sleep(page_gap_s)
 
 
+def info_lookup(client: AsyncWebClient) -> ChannelLookup:
+    """Ask Slack what one channel id is: its name, `GONE` (`channel_not_found`) or `DIRECT`.
+
+    A private channel the bot left answers `channel_not_found` too, so it reads as gone.
+    Any other error is no answer.
+    """
+
+    async def lookup(_workspace_id: str, channel_id: str) -> str | ChannelStatus | None:
+        try:
+            resp = await client.conversations_info(channel=channel_id)  # pyright: ignore[reportUnknownMemberType]
+        except SlackApiError as exc:
+            error = cast("dict[str, Any]", exc.response.data).get("error")  # pyright: ignore[reportUnknownMemberType]
+            return ChannelStatus.GONE if error == "channel_not_found" else None
+        data = cast("dict[str, Any]", resp.data)  # pyright: ignore[reportUnknownMemberType]
+        channel = cast("dict[str, Any]", data.get("channel") or {})
+        if channel.get("is_im") or channel.get("is_mpim"):
+            return ChannelStatus.DIRECT
+        name = channel.get("name")
+        return name if isinstance(name, str) else None
+
+    return lookup
+
+
 async def list_all_once(
     sessionmaker: async_sessionmaker[AsyncSession],
     client_for: Callable[[str], Awaitable[AsyncWebClient | None]],
     *,
     page_gap_s: float = PAGE_GAP_S,
+    info_gap_s: float = INFO_GAP_S,
 ) -> int:
-    """One round: every Slack workspace with a bot token, one after another."""
+    """One round: every Slack workspace with a bot token, one after another.
+
+    Channels with settings that the list did not show are asked about too (`info_lookup`).
+    """
     stored = 0
     for tenant in await list_tenants_by_platform(sessionmaker, platform="slack"):
         client = await client_for(tenant.external_id)
         if client is None:
             continue
+        listed = await list_workspace(client, page_gap_s=page_gap_s)
         stored += await store_listing(
+            sessionmaker, tenant_id=tenant.id, platform="slack", channels=listed
+        )
+        await check_unlisted_channels(
             sessionmaker,
             tenant_id=tenant.id,
             platform="slack",
-            channels=await list_workspace(client, page_gap_s=page_gap_s),
+            external_id=tenant.external_id,
+            listed=listed.keys(),
+            lookup=info_lookup(client),
+            gap_s=info_gap_s,
         )
     return stored

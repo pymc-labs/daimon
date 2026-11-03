@@ -55,6 +55,7 @@ from daimon.adapters.discord.lifecycle import (
 from daimon.adapters.discord.member_sync import MemberSync
 from daimon.adapters.discord.membership import GatewayMembershipResolver, member_facts
 from daimon.adapters.discord.names import (
+    bot_channel_lookup,
     list_guilds_once,
     remember_guild_channels,
     remember_guild_user,
@@ -1160,6 +1161,7 @@ class DaimonBot(commands.Bot):
                     lambda: list_guilds_once(
                         self.runtime.sessionmaker,
                         [g for g in self.guilds if self._allows_guild(g.id)],
+                        lookup=bot_channel_lookup(self),
                     ),
                     platform="discord",
                     should_stop=lambda: self.draining or self.is_closed(),

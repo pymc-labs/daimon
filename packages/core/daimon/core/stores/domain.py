@@ -653,6 +653,8 @@ class ChannelNameRow(BaseModel):
     parent_name: str | None = None
     last_seen_at: datetime | None = None
     archived: bool | None = None
+    status: Literal["named", "gone", "direct"] = "named"
+    """Whether the platform still has it; a gone or direct row may hold an empty name."""
 
 
 AllowanceSubjectKind = Literal["person", "group", "invite"]
