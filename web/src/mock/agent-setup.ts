@@ -115,6 +115,12 @@ export const agentSetupHandlers = [
     RULES.set(id, [...rows.filter((r) => r !== prior), next])
     return HttpResponse.json(next)
   }),
+  http.get("/api/agents/:id/google", async ({ params }) => {
+    await wait()
+    const s = setupOf(String(params.id))
+    if (s.res) return s.res
+    return HttpResponse.json({ email: "assistant@example.com", scopes: ["https://www.googleapis.com/auth/drive.readonly", "https://www.googleapis.com/auth/calendar.readonly"] })
+  }),
   http.get("/api/agents/:id/coding-keys", async ({ params }) => {
     await wait()
     const s = setupOf(String(params.id))

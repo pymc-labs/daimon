@@ -3,9 +3,10 @@ import { useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Mono } from "@/components/common"
+import { Pill } from "../bits"
 import { Section, type Props } from "../inspector/parts"
 import type { AgentToolRule } from "../types"
-import { useAgentToolRules, useSetAgentToolRule } from "./api"
+import { useAgentToolRules, useGoogleBinding, useSetAgentToolRule } from "./api"
 
 type Rule = NonNullable<AgentToolRule["rule"]>
 const RULES: Record<Rule, string> = { allow: "Allow", ask: "Ask", deny: "Deny" }
@@ -63,6 +64,22 @@ export function ToolRulesPanel({ agent, config }: Props) {
             </div>
           </div>
         )}
+      </div>
+    </Section>
+  )
+}
+
+/** The Google Workspace identity the agent acts as, when its operator bound one. */
+export function GoogleBadge({ agent }: Pick<Props, "agent">) {
+  const g = useGoogleBinding(agent.id, agent.can_view_details)
+  if (!g.data) return null
+  return (
+    <Section title="Google Workspace">
+      <div className="space-y-1.5 text-sm">
+        <Mono className="block truncate">{g.data.email}</Mono>
+        <div className="flex flex-wrap gap-1">
+          {g.data.scopes.map((s) => <Pill key={s}>{s.split("/").pop()}</Pill>)}
+        </div>
       </div>
     </Section>
   )

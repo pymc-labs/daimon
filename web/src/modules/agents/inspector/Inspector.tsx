@@ -15,7 +15,7 @@ import { NewServer, ServerEditor } from "./ServerEditors"
 import { PlacesEditor } from "./PlacesEditor"
 import { CodingPanel } from "../setup/CodingPanel"
 import { KnowledgePanel } from "../setup/KnowledgePanel"
-import { ToolRulesPanel } from "../setup/ToolRulesPanel"
+import { GoogleBadge, ToolRulesPanel } from "../setup/ToolRulesPanel"
 import { KeysPanel } from "../setup/KeysPanel"
 import { PeoplePanel } from "../setup/PeoplePanel"
 import { nodeUi } from "../nodes/registry"
@@ -41,7 +41,7 @@ export function Inspector(p: Props) {
   else if (node === "model") body = <ModelEditor {...p} />
   else if (node === "skills") body = <SkillsEditor {...p} />
   else if (skill) body = <SkillEditor {...p} skill={skill} />
-  else if (node === "tools") body = <><ToolsEditor {...p} />{can("workspace.manage") && <ToolRulesPanel {...p} />}</>
+  else if (node === "tools") body = <><ToolsEditor {...p} /><GoogleBadge agent={agent} />{can("workspace.manage") && <ToolRulesPanel {...p} />}</>
   else if (node === "people") body = <PeoplePanel {...p} />
   else if (node === "keys") body = <KeysPanel {...p} />
   else if (node === "coding") body = <CodingPanel {...p} />

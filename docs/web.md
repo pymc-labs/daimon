@@ -109,6 +109,27 @@ The subject token is a JWT signed with the identity key: `iss` is the entry's
 workspace, such as `discord:123`. Only workspaces the entry serves get a token.
 A refused exchange is tried again after five minutes.
 
+## Agent setup beyond the config
+
+On an agent's canvas, its owners and admins also see:
+
+- **Keys** and **Coding tools**: stored key names (values never come back) and
+  coding keys, shown once when made. A coding key can only be made for people
+  who may run the agent.
+- **Knowledge**: the agent's shared memory to read. Admins also read each
+  channel's memory.
+- **People**: owners and co-owners. Admins change them.
+- **Tools**: admins set the agent's own tool rules, including for Daimon's own
+  tools and for routines. They need tool safety and `agent_rules` on. A
+  channel's rules are in that channel's settings.
+- **Google Workspace**: the identity an operator bound to the agent, read-only.
+
+Admins can archive or copy an agent from its menu, and manage the workspace's
+skills and sandbox environments under **Agents** > **Skills** and
+**Environments**. Syncing skills from GitHub reads public repositories only; a
+private one needs an agent's grant, made in chat. Copying an agent that runs on
+another provider than the default is refused.
+
 ## Admin settings and audit
 
 Admins change the workspace's rules under **Admin** > **Settings**. The same

@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
 
 import { api } from "@/lib/api"
-import type { AgentKey, AgentToolRule, AgentToolRules, CodingKey, KnowledgeStores, MintedCodingKey, PersonRef } from "../types"
+import type { AgentKey, AgentToolRule, AgentToolRules, CodingKey, GoogleBinding, KnowledgeStores, MintedCodingKey, PersonRef } from "../types"
 
 const fail = (e: Error) => toast.error(e.message)
 
@@ -96,3 +96,6 @@ export function useSetAgentToolRule(id: string) {
     onError: fail,
   })
 }
+
+export const useGoogleBinding = (id: string, enabled: boolean) =>
+  useQuery({ queryKey: ["agents", id, "google"], queryFn: () => api.get<GoogleBinding | null>(`/api/agents/${id}/google`), enabled, retry: false })

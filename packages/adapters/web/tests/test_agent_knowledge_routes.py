@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.stores.agent_google_binding import upsert_agent_google_binding
 from daimon.core.stores.agent_memory_stores import insert_channel_memory_store, insert_memory_store
 from mux.testing.drivers.anthropic.ma import (
     FakeMemoryStoreState,
@@ -91,3 +92,27 @@ async def test_a_stranger_reads_nothing_and_a_missing_memory_is_not_found(
         )
         unknown = await client.get("/api/agents/ag_w/knowledge/paths", params={"store": "x"})
     assert missing.status_code == 404 and unknown.status_code == 404
+
+
+async def test_the_bound_google_identity_is_shown_to_the_owner_and_not_to_others(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    agents, owner, other = await agent_people(db_session)
+    async with db_session_factory.begin() as db:
+        await upsert_agent_google_binding(
+            db,
+            agent_id=derive_agent_uuid(tenant_id=owner.tenant_id, ma_agent_id="ag_w"),
+            email="bot@example.com",
+            scopes=["https://www.googleapis.com/auth/drive.readonly"],
+        )
+    token = await sign_in_token(db_session_factory, owner)
+    async with agent_client(agents, owner.tenant_id, db_session_factory, token) as client:
+        bound = await client.get("/api/agents/ag_w/google")
+    token = await sign_in_token(db_session_factory, other)
+    async with agent_client(agents, other.tenant_id, db_session_factory, token) as client:
+        refused = await client.get("/api/agents/ag_w/google")
+    assert bound.json() == {
+        "email": "bot@example.com",
+        "scopes": ["https://www.googleapis.com/auth/drive.readonly"],
+    }
+    assert refused.status_code == 403, "only the owner or an admin"

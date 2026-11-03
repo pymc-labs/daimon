@@ -224,3 +224,6 @@ export type KnowledgeStores = { shared: boolean; channels: MemoryPlace[] }
 /** An agent's own rule on one tool (`connection/tool`), for every channel; `revision` 0 is no rule yet. */
 export type AgentToolRule = { tool: string; rule: "allow" | "ask" | "deny" | null; scope: "chat" | "chat_and_routines"; revision: number }
 export type AgentToolRules = { active: boolean; rules: AgentToolRule[] }
+
+/** The Google Workspace identity bound to an agent by its operator; shown, never changed here. */
+export type GoogleBinding = { email: string; scopes: string[] }
