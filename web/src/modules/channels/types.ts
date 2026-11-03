@@ -62,7 +62,11 @@ export type ChannelChangeResult = { channel: ChannelDetail; notes: string[] }
 export type DefaultAgentChange = { agent: string | null; expected: string | null }
 /** POST /:id/kept-agents. `expected` is `kept_agents` as read. */
 export type KeptAgentChange = { action: "add" | "remove"; agent: string; expected: string[] }
-/** PUT /:id/access. `copy_agent` copies the default agent so it can be kept here; `release_agents` lets kept agents go. */
+/**
+ * PUT /:id/access. `copy_agent` copies the default agent so it can be kept here.
+ * Moving readers off "own" while agents are kept here needs one of `release_agents` (drop their rule)
+ * or `keep_rules` (keep it); neither, or both, is a 422.
+ */
 export type AccessChange = {
   readers?: Readers
   writers?: Writers
@@ -70,6 +74,7 @@ export type AccessChange = {
   copy_agent?: boolean
   copy_from?: string | null
   release_agents?: boolean
+  keep_rules?: boolean
 }
 /** PUT /:id/budget. `expected` is the budget as read (limit, window, dates), or null. */
 export type BudgetChange = {
@@ -85,9 +90,71 @@ export type BudgetChange = {
 /** GET /:id/history (admins), newest first. `tool_rule` rows have `{agent, tool, rule}` values and no surface. */
 export type ChannelHistoryEntry = {
   at: string
-  setting: "default_agent" | "kept_agents" | "access" | "budget" | "tool_rule"
+  setting: ChannelSetting
   before: unknown
   after: unknown
   actor: { id: string; name: string | null } | null
   surface: "web" | "chat" | "panel" | "cli" | null
 }
+
+export type ChannelSetting =
+  | "default_agent" | "kept_agents" | "access" | "budget" | "participation" | "progress_plans" | "environment"
+  | "skills" | "provider_pin" | "channel_copy" | "thread_participation" | "thread_progress_plans" | "thread_rule"
+  | "thread_handoff" | "tool_rule"
+
+export type SwitchMode = "on" | "off" | "disabled"
+/** Following threads or progress plans. `own` is this tier's own mode (null: inherits); `value` and `source` are what applies. */
+export type ChannelSwitch = {
+  available: boolean
+  own: SwitchMode | null
+  value: SwitchMode
+  source: "deployment" | "workspace" | "channel" | "thread"
+}
+export type ThreadOverrideKind = "participation" | "progress_plans" | "thread_rule" | "handoff"
+export type ToolRule = { agent: string; tool: string; rule: "allow" | "ask" | "deny" | null; scope: "chat" | "chat_and_routines"; revision: number }
+/** `key` is a day (YYYY-MM-DD), an agent id or a person id; null when unknown. */
+export type SpendAmount = { key: string | null; name: string | null; usd: number }
+
+/** GET /:id/settings (members and admins). */
+export type ChannelSettings = {
+  participation: ChannelSwitch
+  progress_plans: ChannelSwitch
+  skills: { skill_id: string; name: string }[]
+  /** `editable` is false while tool safety is off, or for members. */
+  tool_rules: { editable: boolean; rules: ToolRule[] }
+  provider_pin: { backend: string; model: string | null; local: number } | null
+  channel_copy: { name: string; agent_id: string } | null
+  /** Threads with their own setting; `value` is the mode, "readers/writers", or the agent handed to. */
+  threads: { thread_id: string; kind: ThreadOverrideKind; value: string }[]
+  link: string | null
+  /** Teams private and shared channels only. */
+  teams_subscription: { status: "active" | "expired" | "missing"; expires_at: string | null } | null
+  routines: { id: string; agent: string; cron: string; enabled: boolean; relation: "posts_here" | "made_here" | "both" }[]
+  spend: { days: number; by_day: SpendAmount[]; by_agent: SpendAmount[]; by_person: SpendAmount[] }
+}
+
+/** PUT /:id/participation, /:id/progress-plans, /api/channel-defaults/{participation,progress-plans}. null mode inherits. */
+export type SwitchChange = { mode: SwitchMode | null; expected: SwitchMode | null }
+/** PUT /:id/environment, /api/channel-defaults/environment. A 428 asks to resend with `confirm_open_network`. */
+export type EnvironmentChange = { environment: string | null; expected: string | null; confirm_open_network?: boolean }
+/** POST /:id/skills. `skill` is a name or id to add, the skill id to remove; `expected` the skill ids as read. */
+export type SkillChange = { action: "add" | "remove"; skill: string; expected: string[] }
+/** PUT /:id/tool-rules. null rule clears; `expected_revision` is the rule's revision as read (0 when none). */
+export type ToolRuleChange = { agent: string; tool: string; rule: ToolRule["rule"]; scope?: ToolRule["scope"]; expected_revision: number }
+/** POST /:id/provider-pin/clear. */
+export type PinClear = { expected_local: number }
+/** POST /:id/channel-copy/retire. */
+export type CopyRetire = { name: string; agent_id: string }
+/** POST /:id/threads/clear. */
+export type ThreadClear = { thread_id: string; kind: ThreadOverrideKind }
+
+/** GET /api/channel-defaults; every PUT under it answers with this too. */
+export type ChannelDefaults = {
+  platform: string
+  agent: Sourced
+  environment: Sourced
+  participation: ChannelSwitch
+  progress_plans: ChannelSwitch
+}
+/** PUT /api/channel-defaults/agent. */
+export type WorkspaceAgentChange = { agent: string | null; expected: string | null }

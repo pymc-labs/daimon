@@ -2,7 +2,9 @@
 import { http, HttpResponse, type HttpHandler } from "msw"
 
 import type {
-  AccessChange, BudgetChange, Channel, ChannelDetail, ChannelHistoryEntry, ChannelList, DefaultAgentChange, KeptAgentChange, Readers, Writers,
+  AccessChange, BudgetChange, Channel, ChannelDefaults, ChannelDetail, ChannelHistoryEntry, ChannelList, ChannelSettings, ChannelSwitch,
+  CopyRetire, DefaultAgentChange, EnvironmentChange, KeptAgentChange, PinClear, Readers, SkillChange, SwitchChange, ThreadClear,
+  ToolRuleChange, WorkspaceAgentChange, Writers,
 } from "@/modules/channels/types"
 import { forbidden, notFound, wait } from "./util"
 import { me } from "./world"
@@ -37,6 +39,34 @@ const history: Record<string, ChannelHistoryEntry[]> = {
   ],
 }
 
+const sw = (value: ChannelSwitch["value"], source: ChannelSwitch["source"], own: ChannelSwitch["own"] = null): ChannelSwitch =>
+  ({ available: true, own, value, source })
+const settingsOf = (c: Channel): ChannelSettings => ({
+  participation: sw("off", "deployment"),
+  progress_plans: sw("on", "workspace"),
+  skills: c.id === "c_clv" ? [{ skill_id: "skill_pymc", name: "pymc-modeling" }] : [],
+  tool_rules: { editable: false, rules: [] },
+  provider_pin: c.id === "c_clv" ? { backend: "openai", model: "gpt-5", local: 3 } : null,
+  channel_copy: c.id === "c_board" ? { name: "board-desk", agent_id: "agent_board" } : null,
+  threads: c.id === "c_general" ? [{ thread_id: "t_launch", kind: "progress_plans", value: "off" }, { thread_id: "t_help", kind: "handoff", value: "clv" }] : [],
+  link: c.id === "web" ? null : `https://discord.com/channels/1/${c.id}`,
+  teams_subscription: null,
+  routines: c.id === "c_clv" ? [{ id: "r_weekly", agent: "clv", cron: "0 9 * * 1", enabled: true, relation: "both" }] : [],
+  spend: {
+    days: 30,
+    by_day: c.spend.last_30_days_usd ? [{ key: ago(48).slice(0, 10), name: null, usd: c.spend.last_30_days_usd }] : [],
+    by_agent: c.spend.last_30_days_usd ? [{ key: "agent_1", name: c.agent.value, usd: c.spend.last_30_days_usd }] : [],
+    by_person: c.spend.last_30_days_usd ? [{ key: "u_1", name: "Priya Raman", usd: c.spend.last_30_days_usd }] : [],
+  },
+})
+const settings: Record<string, ChannelSettings> = {}
+const settingsFor = (c: Channel) => (settings[c.id] ??= settingsOf(c))
+const defaults: ChannelDefaults = {
+  platform: "discord", agent: WORKSPACE, environment: { value: "default", source: "deployment" },
+  participation: sw("off", "deployment"), progress_plans: sw("on", "workspace", "on"),
+}
+const confirmNeeded = () => HttpResponse.json({ detail: "This channel is sealed and that sandbox has open network access. Confirm to go ahead." }, { status: 428 })
+
 const manage = () => me()?.capabilities.includes("channels.manage") ?? false
 const view = () => me()?.capabilities.includes("channels.view") ?? false
 /** Members see web chat and channels their chat platform shows them, never a locked one. */
@@ -68,6 +98,83 @@ export const channelsHandlers: HttpHandler[] = [
     platform: "discord", default_agent: WORKSPACE, default_environment: { value: "default", source: "deployment" }, channels: channels.filter(visible),
   })),
   http.get("/api/channels/:id/history", ({ params }) => manage() ? HttpResponse.json(history[params.id as string] ?? []) : forbidden()),
+  http.get("/api/channels/:id/settings", ({ params }) => {
+    const c = find(params.id as string)
+    return c ? HttpResponse.json(settingsFor(c)) : notFound()
+  }),
+  ...(["participation", "progress-plans"] as const).map((path) => http.put(`/api/channels/:id/${path}`, async ({ params, request }) => {
+    const c = find(params.id as string)
+    if (!c) return notFound()
+    if (c.id === "web") return invalid("Web chat has no such setting.")
+    const body = (await request.json()) as SwitchChange
+    const key = path === "participation" ? "participation" : "progress_plans"
+    const s = settingsFor(c)
+    if (body.expected !== s[key].own) return stale()
+    s[key] = body.mode ? sw(body.mode, "channel", body.mode) : sw(defaults[key].value, defaults[key].source)
+    return changed(c, {}, key, body.expected, body.mode)
+  })),
+  http.put("/api/channels/:id/environment", async ({ params, request }) => {
+    const c = find(params.id as string)
+    if (!c) return notFound()
+    if (c.id === "web") return invalid("Web chat has no such setting.")
+    const body = (await request.json()) as EnvironmentChange
+    const own = c.environment.source === "channel" ? c.environment.value : null
+    if (body.expected !== own) return stale()
+    if (c.readers === "inside" && body.environment === "open" && !body.confirm_open_network) return confirmNeeded()
+    return changed(c, { environment: body.environment ? { value: body.environment, source: "channel" } : defaults.environment }, "environment", own, body.environment)
+  }),
+  http.post("/api/channels/:id/skills", async ({ params, request }) => {
+    const c = find(params.id as string)
+    if (!c) return notFound()
+    const body = (await request.json()) as SkillChange
+    const s = settingsFor(c)
+    if (!same([...body.expected].sort(), s.skills.map((k) => k.skill_id).sort())) return stale()
+    const before = s.skills.map((k) => k.name)
+    s.skills = body.action === "add" ? [...s.skills, { skill_id: `skill_${body.skill}`, name: body.skill }] : s.skills.filter((k) => k.skill_id !== body.skill)
+    return changed(c, {}, "skills", before, s.skills.map((k) => k.name))
+  }),
+  http.put("/api/channels/:id/tool-rules", async ({ params, request }) => {
+    const c = find(params.id as string)
+    if (!c) return notFound()
+    const body = (await request.json()) as ToolRuleChange
+    const s = settingsFor(c)
+    if (!s.tool_rules.editable) return invalid("Tool rules are read only while tool safety is off.")
+    const prior = s.tool_rules.rules.find((r) => r.agent === body.agent && r.tool === body.tool)
+    if ((prior?.revision ?? 0) !== body.expected_revision) return stale()
+    const rule = { agent: body.agent, tool: body.tool, rule: body.rule, scope: body.scope ?? "chat", revision: body.expected_revision + 1 }
+    s.tool_rules.rules = [...s.tool_rules.rules.filter((r) => r !== prior), rule]
+    return changed(c, {}, "tool_rule", prior ?? null, rule)
+  }),
+  http.post("/api/channels/:id/provider-pin/clear", async ({ params, request }) => {
+    const c = find(params.id as string)
+    if (!c) return notFound()
+    const body = (await request.json()) as PinClear
+    const s = settingsFor(c)
+    if (s.provider_pin?.local !== body.expected_local) return stale()
+    const before = s.provider_pin
+    s.provider_pin = null
+    return changed(c, {}, "provider_pin", before, null)
+  }),
+  http.post("/api/channels/:id/channel-copy/retire", async ({ params, request }) => {
+    const c = find(params.id as string)
+    if (!c) return notFound()
+    const body = (await request.json()) as CopyRetire
+    const s = settingsFor(c)
+    if (s.channel_copy?.agent_id !== body.agent_id) return stale()
+    s.channel_copy = null
+    return changed(c, {}, "channel_copy", body.name, null)
+  }),
+  http.post("/api/channels/:id/threads/clear", async ({ params, request }) => {
+    const c = find(params.id as string)
+    if (!c) return notFound()
+    const body = (await request.json()) as ThreadClear
+    const s = settingsFor(c)
+    const match = s.threads.find((t) => t.thread_id === body.thread_id && t.kind === body.kind)
+    if (!match) return stale()
+    s.threads = s.threads.filter((t) => t !== match)
+    const setting = body.kind === "handoff" ? "thread_handoff" : body.kind === "thread_rule" ? "thread_rule" : `thread_${body.kind}` as const
+    return changed(c, {}, setting, { thread: match.thread_id, value: match.value }, null)
+  }),
   http.get("/api/channels/:id", ({ params }) => {
     const c = find(params.id as string)
     return c ? HttpResponse.json(detail(c)) : notFound()
@@ -115,5 +222,29 @@ export const channelsHandlers: HttpHandler[] = [
       spent_usd: spent, remaining_usd: Math.max(0, +(limit - spent).toFixed(2)), percent_used: Math.min(100, Math.round((spent / limit) * 100)), active: true, exceeded: spent >= limit,
     }
     return changed(c, { budget }, "budget", now, { limit_usd: budget.limit_usd, window: budget.window, starts_at: budget.starts_at, ends_at: budget.ends_at })
+  }),
+  http.get("/api/channel-defaults", async () => {
+    await wait()
+    return view() ? HttpResponse.json(defaults) : forbidden()
+  }),
+  http.put("/api/channel-defaults/:what", async ({ params, request }) => {
+    await wait()
+    if (!manage()) return forbidden()
+    const what = params.what as string
+    if (what === "agent") {
+      const body = (await request.json()) as WorkspaceAgentChange
+      if (body.expected !== (defaults.agent.source === "workspace" ? defaults.agent.value : null)) return stale()
+      defaults.agent = body.agent ? { value: body.agent, source: "workspace" } : { value: "daimon", source: "deployment" }
+    } else if (what === "environment") {
+      const body = (await request.json()) as EnvironmentChange
+      if (body.expected !== (defaults.environment.source === "workspace" ? defaults.environment.value : null)) return stale()
+      defaults.environment = body.environment ? { value: body.environment, source: "workspace" } : { value: "default", source: "deployment" }
+    } else if (what === "participation" || what === "progress-plans") {
+      const key = what === "participation" ? "participation" : "progress_plans"
+      const body = (await request.json()) as SwitchChange
+      if (body.expected !== defaults[key].own) return stale()
+      defaults[key] = body.mode ? sw(body.mode, "workspace", body.mode) : sw("off", "deployment")
+    } else return notFound()
+    return HttpResponse.json(defaults)
   }),
 ]

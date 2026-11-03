@@ -125,7 +125,20 @@ export function describeChange(e: ChannelHistoryEntry, labels: { readers: Choice
       const t = a ?? b
       return { what: `Tool rule ${word(quote(t?.tool))}`, from: quote(b?.rule), to: quote(a?.rule) }
     }
+    case "skills": return { what: "Skills", from: list(e.before), to: list(e.after) }
+    case "provider_pin": return { what: "Provider", from: quote(obj(e.before)?.backend), to: quote(obj(e.after)?.backend) }
+    default: {
+      const thread = (v: unknown) => (obj(v) ? quote(obj(v)!.mode ?? obj(v)!.value) : quote(v))
+      return { what: OTHER[e.setting], from: thread(e.before), to: thread(e.after) }
+    }
   }
+}
+
+const list = (v: unknown) => (Array.isArray(v) && v.length ? v.join(", ") : "none")
+const OTHER: Record<string, string> = {
+  participation: "Following threads", progress_plans: "Progress plans", environment: "Sandbox", channel_copy: "Channel copy",
+  thread_participation: "Following in a thread", thread_progress_plans: "Progress plans in a thread",
+  thread_rule: "Thread rule", thread_handoff: "Thread hand-over",
 }
 
 /** A channel as people write it; web chat keeps its own name. */
