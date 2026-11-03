@@ -19,8 +19,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0159_fold_caps_into_allowances"
-down_revision: str | None = "0158_usage_agent_backfill"
+revision: str = "0160_fold_caps_into_allowances"
+down_revision: str | None = "0159_channel_changes"
 branch_labels: str | None = None
 depends_on: str | None = None
 

@@ -371,7 +371,7 @@ async def test_access_settings_start_open_and_name_what_the_workspace_has(
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    async with _admin(web_client, db_session_factory, tmp_path) as admin:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
         got = (await admin.client.get("/api/admin/settings")).json()
 
     assert got["access"] == {
@@ -390,7 +390,7 @@ async def test_access_settings_change_one_by_one_and_leave_an_audit_row_each(
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    async with _admin(web_client, db_session_factory, tmp_path) as admin:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
         url = "/api/admin/settings"
         await admin.client.patch(url, json={"dm_enabled": True})
         await admin.client.patch(url, json={"dm_memory_read_only": True})
@@ -422,7 +422,7 @@ async def test_a_bad_access_change_is_refused_whole(
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    async with _admin(web_client, db_session_factory, tmp_path) as admin:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
         url = "/api/admin/settings"
         nobody = await admin.client.patch(
             url, json={"dm_enabled": True, "invokers": {"people": []}}
@@ -441,7 +441,7 @@ async def test_settings_a_chat_platform_lacks_are_hidden_and_refused(
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    async with _admin(web_client, db_session_factory, tmp_path) as admin:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
         async with db_session_factory.begin() as db:
             await db.execute(
                 text("UPDATE tenants SET platform = 'teams' WHERE id = :id"),
@@ -460,7 +460,7 @@ async def test_providers_are_set_through_the_allowlist_service_and_audited_twice
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    async with _admin(web_client, db_session_factory, tmp_path) as admin:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
         url = "/api/admin/settings"
         offered = [p["id"] for p in (await admin.client.get(url)).json()["providers"]["offered"]]
         set_ = await admin.client.patch(url, json={"providers": ["anthropic", "gemini"]})
@@ -665,7 +665,7 @@ async def test_the_audit_log_adds_chat_tool_calls_and_panel_writes_with_stored_f
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    async with _admin(web_client, db_session_factory, tmp_path) as admin:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
         await admin.client.patch(
             f"/api/admin/people/{admin.member.id}", json={"status": "suspended"}
         )
@@ -705,7 +705,7 @@ async def test_the_audit_log_filters_by_source_actor_kind_and_date(
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    async with _admin(web_client, db_session_factory, tmp_path) as admin:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
         await admin.client.patch(
             f"/api/admin/people/{admin.member.id}", json={"status": "suspended"}
         )
@@ -758,7 +758,7 @@ async def test_the_audit_log_and_its_kinds_stay_admin_only(
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    async with _admin(web_client, db_session_factory, tmp_path) as admin:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
         admin.as_member()
         refused = [
             (await admin.client.get(path)).status_code
