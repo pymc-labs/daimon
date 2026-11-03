@@ -86,8 +86,8 @@ def test_the_teams_prompt_defers_to_the_files_hint_for_a_person_with_no_one_to_o
 #: What Discord's and Slack's prompts hash to. A new hash replaces their sessions, so
 #: it moves only with a deliberate change to the shipped prompt.
 _PINNED_ON_MAIN = {
-    "discord": "ecb7ded4ed3eed0ad910ef3997f43a263b45ea221015968a2e7438174a2597cd",
-    "slack": "0aead3ff15cd5864a30f05b8fbb607231c057a6281d21c3523c93220fdd9db33",
+    "discord": "ce3c36f2f41a0affe9cd6edc33acbd42ecdc64a3f031632cd2736ec36676dc60",
+    "slack": "c579a7ee69668c825ca43a7ee5217abe0d4d9d4fc37bcdbdc6df6738f264b642",
 }
 
 
@@ -184,3 +184,21 @@ def test_tenant_context_fragments_survive_whatever_they_name(platform: str) -> N
     assert DEFAULT_FRAGMENTS["routine"] in routine, "an extend fragment keeps the default"
     assert "Resume from the notes." in context_prompt("handoff", system=variant)
     assert context_prompt("routine", system=variant) == context_prompt("routine", system=system)
+
+
+@pytest.mark.parametrize("platform", _PLATFORMS)
+def test_every_platform_prompt_carries_the_etiquette_block(platform: str) -> None:
+    variant = system_for_platform(_shipped_system(), platform)
+
+    assert variant is not None
+    assert "Messages for other people." in variant
+    assert "team-etiquette skill" in variant.replace("\n", " "), f"{platform}: names the skill"
+
+
+def test_the_daimon_agent_always_attaches_the_etiquette_skill() -> None:
+    spec = yaml.safe_load((_DEFAULTS / "agents" / "daimon.yaml").read_text())
+
+    [entry] = [s for s in spec["skills"] if s["skill_id"] == "team-etiquette"]
+
+    assert entry == {"type": "custom", "skill_id": "team-etiquette"}, "no platform limit"
+    assert (_DEFAULTS / "skills" / "team-etiquette" / "SKILL.md").is_file()
