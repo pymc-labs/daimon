@@ -19,10 +19,12 @@ export function Composer({ onSend, onStop, busy, placeholder, disabled, picker, 
     t.style.height = "auto"
     t.style.height = `${Math.min(t.scrollHeight, 240)}px`
   }, [text])
-  const canSend = (!!text.trim() || files.length > 0) && !busy && !disabled
+  // Files staged before attaching was turned off are never shown or sent.
+  const staged = canAttach ? files : []
+  const canSend = (!!text.trim() || staged.length > 0) && !busy && !disabled
   const submit = () => {
     if (!canSend) return
-    onSend(text.trim(), files)
+    onSend(text.trim(), staged)
     setText("")
     setFiles([])
     setTooBig([])
@@ -39,9 +41,9 @@ export function Composer({ onSend, onStop, busy, placeholder, disabled, picker, 
       onDrop={(e) => { if (e.dataTransfer.files.length) { e.preventDefault(); add(Array.from(e.dataTransfer.files)) } }}
       className={cn("rounded-xl border bg-background shadow-[0_1px_2px_rgb(0_0_0/0.04)] focus-within:border-border-strong", disabled && "bg-muted/60 shadow-none")}
     >
-      {files.length > 0 && (
+      {staged.length > 0 && (
         <div className="flex flex-wrap gap-1.5 px-3 pt-3">
-          {files.map((f, i) => (
+          {staged.map((f, i) => (
             <span key={`${i}-${f.name}`} className="inline-flex h-7 items-center gap-1.5 rounded-md border bg-muted px-2 text-xs">
               <Paperclip className="size-3.5 text-muted-foreground" />
               <span className="max-w-40 truncate">{f.name}</span>
@@ -53,7 +55,7 @@ export function Composer({ onSend, onStop, busy, placeholder, disabled, picker, 
           ))}
         </div>
       )}
-      {tooBig.length > 0 && <div role="alert" className="px-4 pt-3 text-sm text-destructive">{tooBig.join(", ")} {tooBig.length === 1 ? "is" : "are"} over 24 MB</div>}
+      {canAttach && tooBig.length > 0 && <div role="alert" className="px-4 pt-3 text-sm text-destructive">{tooBig.join(", ")} {tooBig.length === 1 ? "is" : "are"} over 24 MB</div>}
       <textarea
         ref={ref}
         rows={1}
