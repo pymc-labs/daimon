@@ -7,7 +7,7 @@ dive → model inventory**.
 
 1. **Executive summary landing tab** — a top-level narrative first: "media drove
    $X.XM incremental revenue this quarter; top performer: <channel>; biggest
-   opportunity: <channel> at NN% saturation." Key numbers as cards WITH 90%
+   opportunity: <channel> at NN% saturation." Key numbers as a plain row (`.keynums`) WITH 90%
    credible intervals. Where lift was / was not measured belongs here too, with
    drill-down (client-requested, 2026-09).
 2. **Contribution waterfall with credible intervals** — CIs so small

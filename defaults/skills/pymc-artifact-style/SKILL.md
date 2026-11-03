@@ -5,23 +5,23 @@ description: Apply PyMC Labs' house style and the readability and clarity princi
 
 # PyMC Labs artifact style
 
-Everything you hand a user is a PyMC Labs deliverable and should look like one.
-A client skims a report; polish is what makes the content land. This is PyMC's
-own style — never substitute a client's brand colors unless the user explicitly
-asks for a client-branded artifact.
+Everything you hand a user is a PyMC Labs deliverable and should look like one:
+a well-edited document, not an app. The reader is busy, often on a phone, and
+wants the answer first. This is PyMC's own style; never substitute a client's
+brand colors unless the user explicitly asks for a client-branded artifact.
 
-Use the current [PyMC Labs website](https://www.pymc-labs.com/) identity:
-Inter, navy text, pale fills, three readable text accents, and the dark/light
-PyMC Labs wordmarks.
-The bundled report class adapts the existing Tufte layout to that identity.
-Read [references/website-brand.md](references/website-brand.md) for source
-provenance, exact website tokens, and the distinction between website styling
-and document conventions.
+The look in one line: Inter and JetBrains Mono, navy text on white, one accent
+(indigo) for links and the prompt Copy button, one full-width column, large body
+text, headings that state the point, rules-only tables, a small wordmark. The
+bundled templates produce exactly this; start from them rather than from a blank
+page, and run the pre-publish lint before any HTML goes out.
+Read [references/website-brand.md](references/website-brand.md) for where the
+palette and type come from.
 
-Keep titles and labels short, positioning broad, and copy sparse. Reports still
-need enough evidence, units, and uncertainty to support their conclusions.
-Build layout, text, and functional controls in code. Reuse the bundled official
-logos; if new logos or decorative artwork are requested, use image generation.
+Keep titles and labels short and copy sparse. Reports still need enough
+evidence, units, and uncertainty to support their conclusions. Reuse the bundled
+official logos; if new logos or artwork are explicitly requested, use image
+generation.
 
 
 ## Readability and clarity — anything a client or prospect will see
@@ -135,27 +135,94 @@ ask. The requester usually knows the client better than you do, and this is the
 fastest way to let them catch what you can't. It is advice and never blocks the
 send. Skip it when the person you are talking to is the client.
 
-## Reports and PDFs — everything you need is bundled here
+## The look — what every artifact uses
 
-The Typst report class, the brand fonts, and the website logos all ship
-**inside this skill**. You do not need to clone anything and you do not need
-network access to the brand repos.
+| Element | Rule |
+|---|---|
+| Type | **Inter** for everything, **JetBrains Mono** for code. Body 18–19px on screen (16pt in a PDF), line height 1.6. Headings 600 at 40 / 28 / 22px (32 / 25 / 21 on a phone). |
+| Color | Navy `#0C1F40` text on white. One accent, indigo `#5462C4`, for links and the prompt Copy button only. Secondary text is navy at 72% opacity. |
+| Layout | One column, full width of the screen, up to about 820px for reading. No second column at any width in a document; a dashboard may set two charts side by side. |
+| Headings | State the point: "Channel A returns more than Channel B", not "Results". A reader who skims only the headings gets the story. |
+| Tables | Rules only: heavy top and bottom, a light header rule, no verticals, no fills, numbers right-aligned. |
+| Charts | Only when they show real data from this work, with a heading or title that states what they show, units on the axes, intervals where a decision depends on them. |
+| Prompts | A plain code block with one Copy button. Nothing else gets a copy button. |
+| Wordmark | The dark PyMC Labs wordmark, about 20px tall, top left, on white. |
+| Caveats | A plain sentence where they apply. Simulated or example data is said once, near the top, in words. |
+| Footer | One line: PyMC Labs, the month, and the data note if there is one. |
 
+Bold only as a leading label ("**You get:** …"), never scattered through
+sentences.
+
+## Never
+
+- Hero bands, dark header blocks, decorative art, fake UI or fake chart mockups.
+- Pills, badges, chips, emoji, icon-card grids, key-number cards, rounded-card layouts.
+- Callout boxes, stacked callouts, "Good to know", "Key takeaways", "At a glance", "TL;DR".
+- Accordions, expand / collapse buttons, tabs on a document (dashboards may use tabs).
+- Sidebars, sticky or floating nav, link icons on headings.
+- Buttons that do nothing for the reader (Start, Share, Download) and copy buttons on anything but a prompt.
+- Gradients, shadows, a second accent color, an italic serif flourish in a title.
+- "Prepared by … for …", "Confidential" unless legally required, eyebrow labels such as "GUIDE · CLIENT × PYMC LABS".
+- Stock phrasing: "not just X but Y", "Here's the thing", "Let's dive in", "In today's …", lists of three for rhythm, intros that restate the title, summaries that repeat the page, "I hope this helps".
+
+## Pre-publish lint — mandatory for every HTML artifact
+
+Before you publish, send or share any HTML (page, guide, report, one-pager,
+FAQ, dashboard), run:
+
+```bash
+python3 <this skill>/lint/publish_lint.py page.html                    # documents
+python3 <this skill>/lint/publish_lint.py --kind dashboard dash.html   # dashboards
+python3 <this skill>/lint/publish_lint.py --render page.html           # + text size and phone overflow (Playwright)
 ```
-typst/pymc-report.typ      the report class — import this
-typst/starter.typ          minimal working report; copy it and replace content
-typst/report-example.typ   the full worked example — read it for the helpers
-fonts/                     Inter (300–700), JetBrains Mono, Fira Math
-assets/pymc-labs-logo-dark.png   dark wordmark for light backgrounds
-assets/pymc-labs-logo-light.png  light wordmark for dark backgrounds
-assets/pymc-marketing-logo.png, causalpy-logo.png  library logos, for decks about them
-mpl/                       matplotlibrc + plotstyle.py + axes.py
+
+Exit code 1 means at least one **BLOCK** finding (accordions, sidebars, sticky
+nav, hero bands, decorative SVG, gradients, shadows, pills, cards, icon-card
+grids, callout boxes, emoji, serif accents, small body text, stray buttons,
+copy buttons on non-prompts, boilerplate labels, stock phrasing, bold scattered
+through a paragraph, styled words in the title). Each finding names the first
+element or phrase it matched.
+Fix every one and run it again; do not publish with a BLOCK. **WARN** findings
+(softer phrasing such as "robust" or "leverage", generic headings, rounded
+corners, eyebrows) are fixed too; keep one only when it is a false positive, and
+say so in the send-readiness note. `lint/test_publish_lint.py` is the lint's own
+test.
+
+Exit code 2 means the lint could not run (for example, a wrong path).
+
+The lint reads HTML pages and dashboards you author. It does not cover marimo
+exports (their interface is drawn by JavaScript), PDFs or slides: those get
+their look from the templates below and their writing from the rewrite pass, so
+check them against the Never list yourself.
+
+## Building each kind of artifact
+
+### HTML pages — guides, reports, one-pagers, FAQs
+
+Write the content as Markdown and build it; the page style is frozen in
+`page/page.css`, so the output looks right by default.
+
+```bash
+S=<this skill>
+python3 $S/page/build_page.py content.md -o page.html --footer "PyMC Labs, November 2026."
+python3 $S/lint/publish_lint.py page.html
 ```
 
-### Build
+The Markdown subset is the whole vocabulary: one `# Title that states the
+point`, the first paragraph after it becomes the lede, `##`/`###` headings,
+paragraphs, lists, pipe tables (numeric columns right-align), ```` ```prompt ````
+fences (a prompt with one Copy button), other fences (plain code, no button),
+`![Caption](figure.png)` (inlined with the caption under it), `**bold**`,
+`*italic*`, `` `code` `` and links. Fonts and the wordmark are embedded, so the
+file renders offline (`--fonts google` links them instead, for a smaller page).
+Worked examples, built in CI: `page/examples/guide.md` (a prompt walkthrough),
+`report.md` (a short analysis with two charts from `make_figures.py`) and
+`onepager.md` (a decision page for a VP).
 
-The `typst` CLI is not installed. Use the Python package — it ships the
-compiler as a wheel and installs in seconds:
+### Reports and PDFs — `typst/pymc-plain.typ`
+
+The Typst compiler, fonts and logo are bundled. The `typst` CLI is not
+installed; use the Python package:
 
 ```bash
 pip install typst
@@ -166,170 +233,42 @@ import typst
 typst.compile(
     "starter.typ",
     output="report.pdf",
-    root="..",              # the skill dir, so ../assets and ../fonts resolve
-    font_paths=["../fonts"],  # REQUIRED — without it headings silently go serif
+    root="..",                # the skill dir, so ../assets and ../fonts resolve
+    font_paths=["../fonts"],  # REQUIRED: without it headings silently go serif
 )
 ```
 
-`font_paths` is not optional. Typst has no access to the bundled faces without
-it, and the failure is silent: the document still compiles, but every heading
-falls back to a serif and the result stops looking like a PyMC report.
-
-### Fonts
-
-Use `Inter` for body and headings, with normal stretch (`100%`): body 400,
-headings 600 (large) and 500 (smaller), with slightly tight tracking, as on the
-website. Use `JetBrains Mono` for code. Fira Math is the document math face; the
-website does not specify one. All are bundled. Archivo and Fira Mono are no
-longer part of the style and are not bundled.
-
-### Writing the document
+`typst/starter.typ` is a working document: copy it and replace the content.
 
 ```typ
-#import "pymc-report.typ": *
-
-#show: pymc-report.with(
-  title:    [Report title],
-  subtitle: [One-line description],
-  client:   [Client name],
-  author:   [PyMC Labs],
-  date:     [August 2026],
-  status:   "Confidential",   // cover + footer; none to hide
-  paper:    "a4",             // or "us-letter"
-  cover-background: none,     // plain; pass a path for supplied artwork
-  draft: false,
-  abstract: [ Executive summary … ],
-  outline-depth: 2,
-  number-headings: false,     // unnumbered headings are the house default
+#import "pymc-plain.typ": *
+#show: pymc-plain.with(
+  title: [A title that states the finding],
+  lede: [The answer in two sentences.],
+  date: [November 2026],
+  footer-note: [Example data, not a real business.],   // or none
+  paper: "a4",                                         // or "us-letter"
 )
-
-= Section heading
+= A heading that states the point
 Body text …
 ```
 
-**Heading numbering is a parameter, not a decision to improvise.** Short and
-presentational documents use unnumbered headings (the default) — hierarchy is
-typographic and the register is editorial. Long technical reports that need
-cross-references set `number-headings: true` and get `1`, `1.1`. Either is
-correct; hand-typed "01"/"02" prefixes are not.
+It gives one full-width column at 16pt, the small wordmark, no cover page, no
+table of contents, no margin notes. `#dtable(...)` is the rules-only table;
+`#figure(image("fig.pdf"), caption: [...])` puts the caption under the figure.
+A PDF that needs depth gets more sections, not more devices.
 
-### Layout helpers — the Tufte margin is the whole point
+`typst/pymc-report.typ` (the older margin-note layout with cover, sidenotes and
+key-figure callouts) and `report-example.typ` stay only for an explicit request
+for that layout or for revising a document already built on it.
 
-The page is a ⅔ text column plus a ⅓ margin. Figures, captions, sidenotes and
-key numbers live in that margin, beside the prose that discusses them. Setting
-the content as a plain single column throws away the design.
+### Slide decks (.pptx) — render the slides, do not typeset them
 
-| Helper | Use |
-|---|---|
-| `#sidenote[…]` | numbered margin note — citations, sourcing, asides |
-| `#marginnote[…]` | un-numbered margin commentary |
-| `#dtable(…)` | table with Butterick rules (heavy top/bottom, light header rule, **no verticals**) |
-| `#flowfigure(x, caption: […], label: <id>)` | figure/table in the text column, caption in the margin |
-| `#marginfigure(…)` | small figure entirely in the margin |
-| `#widefigure(…)` | spans text + margin |
-| `#fullpagefigure(…)` | its own page |
-| `#widetable(dtable(…), caption: […])` | full-width, page-breakable — tables taller than a page |
-| `#keyfigure[value][label]` | large key-number callout in the margin |
-| `#executive-summary[…]` | the summary panel |
-| `#callout[…]` | in-flow emphasis box |
-| `#quotebox(by: [Name])[…]` | pull quote, colored spine |
-| `#appendix("A", [Title])` | appendix divider |
-
-Cross-reference with `@label`, and attach labels via the helper's `label:`
-argument — never a trailing `<label>`, which errors with `cannot reference
-context`.
-
-## Brand palette — these exact hexes
-
-| Token | Hex | Use |
-|---|---|---|
-| navy | `#0C1F40` | body text, headings, chart furniture, first series |
-| navy-deep | `#07142A` | dark surfaces, footers |
-| navy-header | `#071530` | dark header bands |
-| aqua | `#B4E7DD` | rules, spines, fills, series |
-| periwinkle | `#9FAAE2` | secondary fills, series |
-| peach | `#F6AE72` | warm fill — use sparingly |
-| violet | `#C8B4E7` | optional fill |
-| soft-white | `#F7F7F7` | code slabs, panels; text on dark surfaces |
-| white | `#FFFFFF` | page |
-
-The pale colors (aqua, periwinkle, peach, violet) are fills. They are unreadable
-as small text on white. For colored **text** use the website's text accents:
-
-| Text accent | Hex | Use |
-|---|---|---|
-| teal | `#0C9E82` | accent text, icons, "positive" labels; pairs with an aqua tint behind it |
-| indigo | `#5462C4` | links and interactive text (hover state on the site) |
-| dark-orange | `#C4720A` | warm status text (e.g. *Confidential*, *Draft*); pairs with a peach tint |
-
-A tag or badge is text accent on a translucent fill of its pale partner: teal on
-aqua at ~35%, dark-orange on peach at ~35%. Navy text on white otherwise. Color
-earns its place (Butterick) — the accent punctuates, it does not decorate.
-
-## Typography
-
-| Role | Face |
-|---|---|
-| Body | **Inter** 400 — ask for family `Inter` |
-| Headings | **Inter** 600 (h1) / 500 (h2, h3), tracking −0.02em / −0.015em |
-| Math | **Fira Math**, weight 300 |
-| Code | **JetBrains Mono** on soft-white |
-| Serif accent (HTML only) | `Georgia, serif`, italic 500 — a word or phrase in a display line, never body text; not bundled, so not in PDFs |
-
-Headings are unnumbered by default — hierarchy is typographic, the register is
-editorial.
-
-## Charts — use the bundled matplotlib style
-
-```python
-import matplotlib as mpl
-mpl.rc_file("mpl/matplotlibrc")     # website palette, Inter, navy semibold titles
-```
-
-`mpl/plotstyle.py` carries `PALETTE` (fills), `PALETTE_TEXT` (text accents),
-`CYCLE` (series order: strong colors first, pale last) and a `fill_between` patch that gives clean edges; `mpl/axes.py` adds
-`add_axis_end_tick_caps`. Import them alongside the rc if you want the helpers.
-
-ArviZ draws through matplotlib, so `az.plot_posterior`, `az.plot_trace` and
-friends inherit the style once the rc is loaded.
-
-Save figures as **vector PDF** and embed with `image("fig.pdf")`. The rc sets
-`figure.figsize: 4.8, 3.0` — 122 mm, exactly the Typst text column — so figures
-land at native scale instead of being resampled. Needs matplotlib ≥ 3.10.1; do
-not switch to SVG path output (the Inter statics share a PostScript name and
-SVG path-mode collides bold/regular glyphs).
-
-The palette the rc cycles, if you need it by hand:
-
-```
-0C1F40  navy        0C9E82  teal         F6AE72  peach        5462C4  indigo
-9FAAE2  periwinkle  C4720A  dark-orange  C8B4E7  violet       B4E7DD  aqua
-```
-
-Aqua, violet and periwinkle are low-contrast lines on white; with more than
-five series, prefer small multiples to the tail of the cycle.
-
-## Chart rules that matter more than color
-
-- **Assign series colors in the cycle's fixed order.** Never reorder by rank — a
-  filter that drops a series must not repaint the survivors.
-- **Never a dual y-axis.** Two measures of different scale become two charts,
-  small multiples, or an index to a common base.
-- **Sequential: one hue, light→dark. Diverging: two hues, neutral midpoint.**
-  Never a rainbow, never a hue at a diverging midpoint.
-- **A legend whenever there are 2+ series.** With ≤ 4, label directly too.
-  Identity must never rest on color alone.
-- **Beyond the cycle, do not invent another color.** Fold the tail into "Other",
-  or use small multiples.
-- **Label the axes and name the units.** The title states the finding, not the
-  variable names.
-
-## Slide decks (.pptx) — render the slides, do not typeset them
-
-There is no PowerPoint template. Build a deck by typesetting each slide in
-Typst at slide dimensions, rendering it to PNG, and placing one full-bleed
-image per slide. The house style then survives the trip, because the fonts are
-baked into the pixels.
+There is no PowerPoint template. Typeset each slide in Typst at slide size
+(white page, the small dark wordmark top left, one heading that states the
+point, large text, at most one chart or table), render it to PNG, and place one
+full-bleed image per slide. The fonts are baked into the pixels, so the style
+survives the trip.
 
 ```python
 import typst
@@ -351,37 +290,22 @@ prs.save("deck.pptx")
 ```
 
 **Do not build slides out of pptx text boxes.** A text run stores the font by
-*name*, and the bundled fonts may not be installed on the machines that
-open the file — PowerPoint and Google Slides silently substitute a generic
-sans and the deck stops looking like PyMC. This is the same failure as the
-`font_paths` trap above, one layer further out: the PDF survives because Typst
-embeds the faces, and a pptx has nothing to embed.
+name, the bundled fonts may not be installed where the file opens, and
+PowerPoint and Google Slides silently substitute a generic sans. The cost of
+rendering is real: the text is no longer editable. If the recipient needs to
+edit the words, say so and hand over the Typst sources.
 
-The cost is real: rendered slides are images, so the text is no longer
-editable and does not reflow. Slide order, deletion, and speaker notes still
-work. If the recipient needs to edit the words, say so and hand over the
-Typst sources — do not quietly ship a deck that cannot be edited.
-
-### Use the matching website logo
-
-Use `assets/pymc-labs-logo-dark.png` on white or soft-white, and
-`assets/pymc-labs-logo-light.png` on navy or navy-deep. Preserve aspect ratio
-and clear space. Both are official website assets with real transparency;
+Use `assets/pymc-labs-logo-dark.png` on white, and
+`assets/pymc-labs-logo-light.png` only on a dark slide. Preserve aspect ratio;
 do not recolor or regenerate them.
 
-The report defaults to the dark logo and a plain cover. The older logo files
-and cover artwork are no longer part of the style and are not bundled.
+### Marimo notebooks — build with the bundled style cell
 
-## Marimo notebooks — build with the bundled style cell
-
-A notebook gets the same identity as a report, implemented for marimo:
-Inter and JetBrains Mono embedded as `@font-face`, navy text, aqua rules,
-the dark wordmark header, key-number cards, callouts, rules-only tables and
-charts in this palette. Marimo's theme variables (`--heading-font`,
-`--text-font`, `--monospace-font`, `--primary`) are overridden, so headings
-do not fall back to marimo's serif and sliders are teal. Follow
-`marimo_notebooks` for everything else: alignment, real data, cell dataflow,
-publishing and attachments.
+The style cell gives a notebook the same look: Inter and JetBrains Mono
+embedded, navy text, the small wordmark, plain headings, rules-only tables.
+Marimo's theme variables are overridden, so headings do not fall back to
+marimo's serif. Follow `marimo_notebooks` for everything else: alignment, real
+data, cell dataflow, publishing and attachments.
 
 The style cell is ~200 KiB with fonts and logo embedded. **Never paste it or
 read it into the conversation.** Write only your content cells and let the
@@ -391,88 +315,65 @@ build script assemble the notebook:
 S=<this skill's directory>/notebook
 cp $S/example_content.py content.py                 # a working example to start from
 mkdir -p data && cp $S/mmm_example.csv data/        # only to run the example itself
-# edit content.py: keep the @app.cell structure, replace the content
-python $S/build_notebook.py content.py -o nb.py --title "Tab title"   # --width compact|medium|full, default medium
+python $S/build_notebook.py content.py -o nb.py --title "Tab title"   # --width compact|medium|full
 marimo export html nb.py -o /tmp/check.html         # every cell must execute
 ```
 
-Then publish `nb.py` with `marimo_notebooks`. The build needs only the
-standard library; the notebook needs marimo, matplotlib, numpy and pandas,
-which the notebook host ships, so the style needs no PEP 723 header. If the
-notebook needs a library outside that set, add the header to the top of the
-built `nb.py`, before `import marimo`, and list `marimo`, `matplotlib`,
-`numpy` and `pandas` with your extras: the isolated environment replaces the
-baked one.
-
 `content.py` holds `@app.cell` functions only (no `import marimo`, no
-`app = ...`, no `__main__` block; the build adds them). The style cell
-defines `mo np pd plt C CYCLE SEQ DIV badge callout figure header kpis table`:
-declare the ones a cell uses in its signature, e.g.
-`def _(mo, C, figure, plt, df):`, and never redefine them.
+`app = ...`, no `__main__` block). The style cell defines
+`mo np pd plt C CYCLE SEQ DIV badge callout figure header kpis table`: declare
+the ones a cell uses in its signature and never redefine them. The notebook
+host ships marimo, matplotlib, numpy and pandas; for anything else add a PEP 723
+header to the built `nb.py` listing those four plus your extras.
 
-Layout, top to bottom:
-
-1. `header(title, subtitle, badges=[...], accent="Word")` as the first cell.
-   It also injects the page CSS, so it must render first. `accent` sets one
-   word in the italic accent. Badges: teal for status, orange for caveats
-   such as "Example data", indigo for neutral tags.
-2. `callout(...)` for data provenance or the main caveat; `kind="warn"`
-   (peach) for anything the reader must not miss, such as example data.
-3. `kpis([(value, label), ...])`: 3 to 4 key numbers.
-4. Sections as `mo.md("## Heading\n\ntext")`, unnumbered: prose, then the
+1. `header(title, subtitle)` first: it also injects the page CSS. The title
+   states the point; the subtitle is one plain line, and is where example data
+   is said.
+2. Sections as `mo.md("## Heading that states the point\n\ntext")`, then the
    controls in an `mo.hstack`, then the chart they drive.
-5. Charts through `figure(fig, caption)`: an inline 200 dpi PNG with the
-   fonts baked in. The chart rules above apply unchanged; `CYCLE` is the
-   series order, `SEQ` and `DIV` the sequential and diverging colormaps.
-6. Tables through `table(df, fmt="{:,.2f}")`: heavy top and bottom rules, a
-   light header rule, no verticals, as wide as their columns.
+3. Charts through `figure(fig, caption)`, tables through `table(df, fmt=...)`.
 
-Keep it light: no dark theme and no `theme="dark"`. Example data is labelled
-in a warn callout and a badge, and never stated as a finding. If the build
-script is unavailable, apply the palette and type by hand and say the
-notebook is an unbranded fallback.
+`badge()`, `callout()` and `kpis()` still exist so older notebooks build; they
+now render plain text, a plain paragraph and a rules-only table. Do not use
+them in new notebooks.
 
-Marimo widgets live in shadow DOM, so only CSS variables reach them; that is
-why the style sets variables rather than selectors. A headless browser
+Keep it light: no dark theme. Example data is said once and never stated as a
+finding. A headless browser
 rendering a check needs `locale="en-US"`.
 
-## Interactive dashboards — build with the bundled template
+### Interactive dashboards — build with the bundled template
 
-A dashboard is a report the client keeps using, so it carries the full identity:
-wordmark header on the dark band, frozen palette tokens, Inter/JetBrains Mono
-actually loaded, tabs in the drill-down order **executive summary → channel deep
-dive → model inventory**. Build single-file HTML from the bundled skeleton:
+A dashboard is a report the client keeps using: white page, small wordmark,
+title that states the point, tabs in the drill-down order **executive summary →
+channel deep dive → model inventory**. Build single-file HTML from the skeleton:
 
 ```bash
 python3 dashboard/build_dashboard.py content.html -o dashboard.html \
     --title "..." --subtitle "..." --scripts charts.js
+python3 lint/publish_lint.py --kind dashboard dashboard.html
 # content.html: only <section class="tab" id="…" data-title="…"> blocks
 # charts.js:    Plotly calls — ALWAYS pass {...PYMC_LAYOUT} and PYMC_CONFIG
 ```
 
 The template wires the tabs, inlines the wordmark, loads Plotly from the CDN,
-and defines `C` (palette constants), `PYMC_SERIES`, `PYMC_LAYOUT`, `PYMC_CONFIG`
-for every chart. The builder refuses any hex that is not a palette value
-(non-negotiable 2) — color via `var(--token)`, `C.*` or `rgba()` only.
-Interactivity is vanilla JS + Plotly: tabs, `<select>`/`<input type=range>`
-controls (they inherit the teal accent), hover. No frameworks, no build step.
-Proven patterns (all in the live example): a budget-simulator tab with per-channel
-sliders that recompute expected incremental revenue through the fitted saturation
-curves (plus one-click "apply optimizer plan" / reset), a period selector restyling
-the headline cards and waterfall in place, a weekly-trends tab (stacked
-contributions, Plotly rangeslider, channel chips to toggle series), metric sort
-toggles, and click-a-bar-to-highlight across charts and tables. Dashboards should
-default to this level of interactivity — a static page of charts is a report, not
-a dashboard.
+and defines `C` (palette constants), `PYMC_SERIES`, `PYMC_LAYOUT`, `PYMC_CONFIG`.
+Key numbers go in `<div class="keynums"><div class="keynum">` with `.knum`,
+`.klabel` and `.kci` (a plain row with rules, not cards); a status word is
+`<span class="status">`, plain semibold text. The builder refuses any hex that is not a palette
+value. Interactivity is vanilla JS + Plotly: tabs, `<select>` and
+`<input type=range>` controls, hover, legend clicks to toggle series. Proven
+patterns: a budget simulator with per-channel sliders through the fitted
+saturation curves (with "apply optimizer plan" and reset), a period selector
+that updates the key numbers and the waterfall in place, a weekly-trends tab
+with a rangeslider, and click-a-bar-to-highlight across charts and tables.
 
 **What goes on an MMM dashboard is not a style question** — read
-[dashboard/CONTENT.md](dashboard/CONTENT.md): the client-validated view list
-(executive narrative first; CIs on the waterfall; spend share vs effect share
-PLUS the reallocation read; ROI and CPIK with 90% CIs; marginal next to average
-ROI; saturation position; min/max-rebalanced baseline; budget optimizer view).
-Original units everywhere; uncertainty on anything a decision hangs on.
-For a dashboard that must recompute live (sliders re-running a model), use a
-marimo notebook instead — this template is for serving results.
+[dashboard/CONTENT.md](dashboard/CONTENT.md): executive narrative first; CIs on
+the waterfall; spend share vs effect share PLUS the reallocation read; ROI and
+CPIK with 90% CIs; marginal next to average ROI; saturation position;
+min/max-rebalanced baseline; budget optimizer view. Original units everywhere;
+uncertainty on anything a decision hangs on. For a dashboard that must
+recompute live (sliders re-running a model), use a marimo notebook instead.
 
 **Scheduled data refresh** — a dashboard served as a daimon artifact can update
 itself without republishing: publish with `store: read`, have the page read its
@@ -482,29 +383,85 @@ the embedded numbers as the fallback when the store is absent. A scheduled daimo
 routine (daily or weekly) pulls the latest MMM run outputs and writes one
 `channels/<name>` document per channel plus `meta/latest` (refresh timestamp,
 period) — viewers get fresh numbers on next load, and the page shows the refresh
-stamp. The example wiring is in the dashboard template docs; keep the store schema
-flat (one doc per channel, plain numeric fields in original units).
+stamp. Keep the store schema flat (one doc per channel, plain numeric fields in
+original units).
 
-## When the bundled template cannot be used
+### Without a template, or with a requested one
 
-Match the palette and typography by hand: navy body and headings, aqua rules,
-dark-orange for a single status word, teal or indigo for accent text,
-soft-white code slabs, Inter (or the closest
-humanist sans available). Tables get horizontal rules only. Say plainly in the
-delivery that this is an unbranded fallback and the binding is missing — do not
-quietly ship something that looks nothing like a PyMC report.
+Match the look by hand: Inter (or the closest humanist sans), navy text on
+white, indigo links, one column, 18–19px body, rules-only tables, soft-white
+code blocks, the small dark wordmark. Run the lint on the result. Say plainly in
+the delivery that this is an unbranded fallback.
 
 There is no Word or Google Docs template. For a Docs deliverable, apply the
-palette manually, or export a PDF from the Typst template and attach that — the
-PDF path is the one with a real template behind it.
+same rules by hand, or export a PDF from `pymc-plain.typ` and attach that.
 
-## Explicit template requests
+Honor an explicitly requested client or legacy template, including the older
+margin-note report class. Otherwise use this style for every new artifact,
+including sales collateral.
 
-Honor an explicitly requested client or legacy sales template. Otherwise use
-this website-aligned identity for new artifacts, including sales collateral.
-Do not silently revert to the older Calibri/navy proposal style.
+## Palette and charts
 
-## Non-negotiables (added 2026-10-12 after the conformance gate measured 4/8 drift)
+### Palette
+
+| Token | Hex | Use |
+|---|---|---|
+| navy | `#0C1F40` | all text, headings, rules, the first chart series |
+| indigo | `#5462C4` | the one accent: links and the prompt Copy button |
+| soft-white | `#F7F7F7` | code and prompt blocks |
+| white | `#FFFFFF` | page |
+| teal, dark-orange | `#0C9E82`, `#C4720A` | chart series only |
+| aqua, periwinkle, peach, violet | `#B4E7DD`, `#9FAAE2`, `#F6AE72`, `#C8B4E7` | chart fills and series only, never page decoration |
+| navy-deep, navy-header | `#07142A`, `#071530` | slides on a dark background only |
+
+Lighten or darken with `rgba()` alpha on a palette color, never a new hex.
+
+### Matplotlib style
+
+```python
+import matplotlib as mpl
+mpl.rc_file("mpl/matplotlibrc")     # website palette, Inter, navy titles
+```
+
+`mpl/plotstyle.py` carries `PALETTE` (fills), `PALETTE_TEXT` (text accents),
+`CYCLE` (series order: strong colors first, pale last) and a `fill_between`
+patch that gives clean edges; `mpl/axes.py` adds `add_axis_end_tick_caps`.
+ArviZ draws through matplotlib, so `az.plot_posterior` and friends inherit the
+style once the rc is loaded.
+
+For a PDF, save **vector PDF** and embed with `image("fig.pdf")` (needs
+matplotlib ≥ 3.10.1; do not switch to SVG path output, the Inter statics share
+a PostScript name and SVG path-mode collides bold and regular glyphs). For an
+HTML page, save PNG at 200 dpi and reference it from the Markdown.
+
+The cycle, if you need it by hand:
+
+```
+0C1F40  navy        0C9E82  teal         F6AE72  peach        5462C4  indigo
+9FAAE2  periwinkle  C4720A  dark-orange  C8B4E7  violet       B4E7DD  aqua
+```
+
+Aqua, violet and periwinkle are low-contrast lines on white; with more than
+five series, prefer small multiples to the tail of the cycle.
+
+### Chart rules that matter more than color
+
+- **Assign series colors in the cycle's fixed order.** Never reorder by rank — a
+  filter that drops a series must not repaint the survivors.
+- **Never a dual y-axis.** Two measures of different scale become two charts,
+  small multiples, or an index to a common base.
+- **Sequential: one hue, light→dark. Diverging: two hues, neutral midpoint.**
+  Never a rainbow, never a hue at a diverging midpoint.
+- **A legend whenever there are 2+ series.** With ≤ 4, label directly too.
+  Identity must never rest on color alone.
+- **Beyond the cycle, do not invent another color.** Fold the tail into "Other",
+  or use small multiples.
+- **Label the axes and name the units.** The title states the finding, not the
+  variable names.
+- **Real data only.** No illustrative or decorative charts; a chart of
+  simulated data says so in its caption.
+
+## Non-negotiables
 
 1. **Register the bundled fonts BEFORE any matplotlib figure** — the rc names Inter,
    but without registration charts silently fall back to DejaVuSans:
@@ -514,15 +471,25 @@ Do not silently revert to the older Calibri/navy proposal style.
    for f in Path("<this skill>/fonts").glob("*.ttf"):
        fm.fontManager.addfont(str(f))
    ```
-2. **Palette hex values only — including every CSS colour literal.** Any hex in a
-   style block, inline style, gradient or hover state must be a palette value, white,
-   or one of the skill's greys. Never hand-mix a tint, shade or "darker navy";
-   lighten/darken with `rgba()` alpha on a palette colour, never with a new hex.
-3. **Every HTML or PDF report carries the wordmark header** (the bundled logo asset at
-   the top, as in the Typst template). A chart image alone does not need the logo; a
-   report does, always.
-4. **Naming a font is not loading it.** Every HTML page must actually LOAD Inter (and
-   JetBrains Mono when code appears): a Google Fonts `<link>` for pages that may go
-   online, or embedded `@font-face` (the bundled font files, base64) for anything that
-   must render offline. `font-family: "Inter", ...` without a load renders in a system
-   font and fails the conformance gate.
+2. **Palette hex values only — including every CSS color literal.** Any hex in a
+   style block, inline style or hover state is a palette value, white, or
+   navy at an `rgba()` alpha. Never hand-mix a tint or shade.
+3. **Every HTML or PDF document carries the small dark wordmark** at the top
+   left (the templates do this). A chart image alone does not need it.
+4. **Naming a font is not loading it.** Every HTML page actually loads Inter (and
+   JetBrains Mono when code appears): embedded `@font-face` (the default in
+   `build_page.py`) or a Google Fonts `<link>`. The lint blocks a page that names
+   Inter without loading it.
+5. **Run `lint/publish_lint.py` before publishing any HTML**, and publish only
+   with zero BLOCK findings.
+
+## Common failure modes
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| PDF headings come out in a serif | `font_paths` missing from `typst.compile` | pass `font_paths=["../fonts"]` and `root=".."` |
+| Chart text in DejaVu Sans | fonts not registered before the first figure | non-negotiable 1 |
+| Lint BLOCK `cards` / `pills` on a dashboard | old `.cards` / `.badge` markup | use `.keynums` / `.keynum` and `.status` |
+| Lint BLOCK `buttons` on a page | a decorative or fake action button | delete it; only prompts get a Copy button |
+| Page has a sidebar or second column at desktop width | hand-built layout | rebuild through `page/build_page.py` |
+| Notebook title shows an italic word | old `accent=` argument | it is ignored now; restate the title as the point |

@@ -6,8 +6,8 @@ Usage: build_dashboard.py content.html -o dashboard.html
 
 content.html = the <section class="tab" id="..." data-title="..."> blocks only.
 scripts.js   = the Plotly calls (wrap in <script>…</script> or pass raw JS).
-The template carries the frozen style block, the wordmark header (inlined here
-from the bundled logo), tab wiring, and PYMC_LAYOUT/PYMC_CONFIG Plotly defaults.
+The template carries the frozen style block, a plain white header with the small
+dark wordmark (inlined here from the bundled logo), tab wiring, and PYMC_LAYOUT/PYMC_CONFIG Plotly defaults.
 
 Guard: any hex literal in the content that is not a palette value fails the
 build (non-negotiable 2) — use var(--token), the C.* JS constants, or rgba().
@@ -43,7 +43,7 @@ def main():
         sys.exit("non-palette hexes in content: %s — use var(--token)/C.*/rgba()" % sorted(bad))
 
     logo = base64.b64encode(
-        open(os.path.join(HERE, "..", "assets", "pymc-labs-logo-light.png"), "rb").read()
+        open(os.path.join(HERE, "..", "assets", "pymc-labs-logo-dark.png"), "rb").read()
     ).decode()
     html = open(os.path.join(HERE, "dashboard_template.html"), encoding="utf-8").read()
     for k, v in (("{{TITLE}}", a.title), ("{{SUBTITLE}}", a.subtitle), ("{{FOOTER}}", a.footer),
