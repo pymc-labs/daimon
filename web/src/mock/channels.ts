@@ -2,10 +2,11 @@
 import { http, HttpResponse, type HttpHandler } from "msw"
 
 import type {
-  AccessChange, BudgetChange, Channel, ChannelDefaults, ChannelDetail, ChannelHistoryEntry, ChannelList, ChannelSettings, ChannelSwitch,
-  CopyRetire, DefaultAgentChange, EnvironmentChange, KeptAgentChange, PinClear, Readers, SkillChange, SwitchChange, ThreadClear,
+  AccessChange, AgentRefs, BudgetChange, Channel, ChannelDefaults, ChannelDetail, ChannelHistoryEntry, ChannelList, ChannelSettings, ChannelSwitch,
+  CopyRetire, DefaultAgentChange, EnvironmentChange, KeptAgentChange, PathNode, PinClear, Readers, SkillChange, SwitchChange, ThreadClear,
   ToolRuleChange, WorkspaceAgentChange, Writers,
 } from "@/modules/channels/types"
+import { roster } from "./agents"
 import { forbidden, notFound, wait } from "./util"
 import { me } from "./world"
 
@@ -17,31 +18,74 @@ const WORKSPACE = { value: "daimon", source: "workspace" } as const
 /** A channel as stored: members are sent it without its budget and spend. */
 type Stored = Channel & { spend: NonNullable<Channel["spend"]> }
 
-const C = (id: string, name: string | null, parent: string | null, more: Partial<Stored> = {}): Stored => ({
-  id, platform: "discord", name, kind: "text", parent: parent ? { id: `k_${parent}`, name: parent } : null, last_seen_at: ago(2),
-  agent: WORKSPACE, environment: { value: "default", source: "deployment" }, readers: "any", writers: "any", kept_agents: [], tags: [],
+const DISCORD_CATEGORY = (id: string, name: string): PathNode => ({ id, name, kind: "category" })
+const PROJECTS = DISCORD_CATEGORY("k_projects", "Projects")
+const LEADERSHIP = DISCORD_CATEGORY("k_leadership", "Leadership")
+const node = (id: string, name: string, kind: PathNode["kind"] = "channel"): PathNode => ({ id, name, kind })
+
+const C = (id: string, name: string | null, path: PathNode[], more: Partial<Stored> = {}): Stored => ({
+  id, platform: "discord", name, kind: "channel", status: "active", path, parent: path.at(-1) ? { id: path.at(-1)!.id, name: path.at(-1)!.name } : null,
+  last_seen_at: ago(2), agent: WORKSPACE, environment: { value: "default", source: "deployment" }, readers: "any", writers: "any", kept_agents: [], tags: [],
   budget: null, spend: { month_usd: 0, last_30_days_usd: 0 }, last_active_at: null, ...more,
 })
+const monthly = (spent: number, limit = 25): Channel["budget"] => ({
+  limit_usd: limit.toFixed(2), window: "monthly", starts_at: null, ends_at: null, spent_usd: spent, remaining_usd: Math.max(0, +(limit - spent).toFixed(2)),
+  percent_used: Math.min(100, Math.round((spent / limit) * 100)), active: true, exceeded: spent >= limit,
+})
+const thread = (id: string, name: string, path: PathNode[], more: Partial<Stored> = {}) => C(id, name, path, { kind: "thread", ...more })
+
+const OPS = node("k_ops", "Ops team", "team")
+const DS = node("k_ds", "Data science", "team")
+const GENERAL = node("c_general", "general")
+const CLV = node("c_clv", "clv-models")
+const QUESTIONS = node("c_questions", "questions")
 
 const channels: Stored[] = [
-  C("web", "Web chat", null, { platform: "web", kind: null, last_seen_at: null, spend: { month_usd: 41.2, last_30_days_usd: 58.9 }, last_active_at: ago(0.3) }),
-  C("c_board", "board", "Leadership", { readers: "own", writers: "own", tags: ["locked"], agent: { value: "board-desk", source: "channel" }, kept_agents: ["board-desk"] }),
-  C("c_clv", "clv-models", "Projects", {
-    agent: { value: "clv", source: "channel" }, spend: { month_usd: 12.4, last_30_days_usd: 19.75 }, last_active_at: ago(5),
-    budget: { limit_usd: "25.00", window: "monthly", starts_at: null, ends_at: null, spent_usd: 12.4, remaining_usd: 12.6, percent_used: 49, active: true, exceeded: false },
+  C("web", "Web chat", [], { platform: "web", last_seen_at: null, spend: { month_usd: 41.2, last_30_days_usd: 58.9 }, last_active_at: ago(0.3) }),
+  C("c_board", "board", [LEADERSHIP], { readers: "own", writers: "own", tags: ["locked"], agent: { value: "board-desk", source: "channel" }, kept_agents: ["board-desk"], last_active_at: ago(70) }),
+  C("c_clv", "clv-models", [PROJECTS], {
+    agent: { value: "clv", source: "channel" }, spend: { month_usd: 12.4, last_30_days_usd: 19.75 }, last_active_at: ago(5), budget: monthly(12.4),
   }),
-  C("c_general", "general", null, { spend: { month_usd: 3.1, last_30_days_usd: 6.2 }, last_active_at: ago(1) }),
-  C("c_mmm", "mmm", "Projects", { readers: "inside", tags: ["kept_inside"], spend: { month_usd: 28, last_30_days_usd: 30.5 }, last_active_at: ago(26),
-    budget: { limit_usd: "25.00", window: "monthly", starts_at: null, ends_at: null, spent_usd: 28, remaining_usd: 0, percent_used: 100, active: true, exceeded: true } }),
-  C("c_partners", "partners", null, { tags: ["shared"] }),
-  C("t_ops", "ops-room", "Ops team", { platform: "teams", kind: "private", last_active_at: ago(9), spend: { month_usd: 2.4, last_30_days_usd: 4.8 } }),
+  thread("t_q3", "Q3 holdout check", [PROJECTS, CLV], { agent: { value: "pricing-analyst", source: "channel" }, spend: { month_usd: 1.8, last_30_days_usd: 1.8 }, last_active_at: ago(7) }),
+  thread("t_priors", "Priors review", [PROJECTS, CLV], { last_active_at: ago(400) }),
+  C("c_mmm", "mmm", [PROJECTS], { readers: "inside", tags: ["kept_inside"], spend: { month_usd: 28, last_30_days_usd: 30.5 }, last_active_at: ago(26), budget: monthly(28) }),
+  C("c_questions", "questions", [PROJECTS], { last_active_at: ago(12) }),
+  C("p_roas", "How to read ROAS?", [PROJECTS, QUESTIONS], { kind: "forum_post", last_active_at: ago(12) }),
+  C("c_general", "general", [], { spend: { month_usd: 3.1, last_30_days_usd: 6.2 }, last_active_at: ago(1) }),
+  thread("t_launch", "Launch", [GENERAL], { last_active_at: ago(3) }),
+  thread("t_help", "Help", [GENERAL], { last_active_at: ago(30) }),
+  thread("t_weekly", "Weekly sync", [node("c_opsnotes", "ops-notes")], { last_active_at: ago(50) }),
+  C("c_partners", "partners", [], { tags: ["shared"] }),
+  C("t_ops", "ops-room", [OPS], { platform: "teams", last_active_at: ago(9), spend: { month_usd: 2.4, last_30_days_usd: 4.8 } }),
+  thread("t_incident", "Incident 14", [OPS, node("t_ops", "ops-room")], { platform: "teams", last_active_at: ago(10) }),
+  C("t_general", "General", [OPS], { platform: "teams", last_active_at: ago(40) }),
+  C("t_models", "models", [DS], { platform: "teams", last_active_at: ago(60) }),
+  C("s_pricing", "pricing", [], { platform: "slack", agent: { value: "pricing-analyst", source: "channel" }, last_active_at: ago(4), spend: { month_usd: 6.2, last_30_days_usd: 9.4 } }),
+  thread("s_promo", "Promo test", [node("s_pricing", "pricing")], { platform: "slack", last_active_at: ago(6) }),
+  // Channels the platform no longer has, and direct messages: kept for their settings, never listed.
+  C("g_old1", "old-launch", [], { status: "gone" }),
+  C("g_old2", "q1-planning", [], { status: "gone", budget: monthly(4, 10) }),
+  C("d_dm1", null, [], { status: "direct", kind: "channel" }),
+  C("s_gone", "retired-team", [], { platform: "slack", status: "gone" }),
 ]
+/** Agent keys as channels store them, and the roster agent each names. A key not found here is an agent that no longer exists. */
+const KEYS: Record<string, string> = { daimon: "ag_daimon", clv: "ag_mmm", "pricing-analyst": "ag_pricing", "board-desk": "ag_sales" }
+function refOf(key: string): AgentRefs[string] {
+  const recs = roster.all()
+  const rec = recs.find((r) => r.id === KEYS[key]) ?? recs.find((r) => r.versions.at(-1)!.config.name === key)
+  const cfg = rec?.versions.at(-1)!.config
+  return rec && cfg ? { id: rec.id, name: cfg.name, avatar: cfg.avatar } : { id: null, name: null, avatar: null }
+}
+const refs = (keys: Iterable<string | null | undefined>): AgentRefs =>
+  Object.fromEntries([...new Set([...keys].filter((k): k is string => !!k))].map((k) => [k, refOf(k)]))
+const keysOf = (c: Stored) => [c.agent.value, ...c.kept_agents]
 const history: Record<string, ChannelHistoryEntry[]> = {
   c_clv: [
     { at: ago(30), setting: "budget", before: null, after: { limit_usd: "25.00", window: "monthly", starts_at: null, ends_at: null }, actor: { id: "acc_jonas", name: "Jonas Weber" }, surface: "web" },
     { at: ago(80), setting: "default_agent", before: null, after: "clv", actor: { id: "acc_priya", name: "Priya Raman" }, surface: "chat" },
   ],
 }
+const historyKeys = (id: string) => (history[id] ?? []).flatMap((e) => [e.before, e.after].flatMap((v) => (typeof v === "string" ? [v] : Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [])))
 
 const sw = (value: ChannelSwitch["value"], source: ChannelSwitch["source"], own: ChannelSwitch["own"] = null): ChannelSwitch =>
   ({ available: true, own, value, source })
@@ -54,26 +98,29 @@ const curve = (total: number, days: number): { key: string; name: null; usd: num
 const settingsOf = (c: Stored): ChannelSettings => ({
   participation: sw("off", "deployment"),
   progress_plans: sw("on", "workspace"),
-  skills: c.id === "c_clv" ? [{ skill_id: "skill_pymc", name: "pymc-modeling" }, { skill_id: "skill_brief", name: "client-brief" }] : [],
+  skills: c.id === "c_clv" ? [{ skill_id: "data-validation", name: "Data validation" }, { skill_id: "exploratory-data-analysis", name: "Exploratory analysis" }] : [],
   tool_rules: { editable: true, rules: c.id === "c_clv" ? [
-    { agent: "clv", tool: "search/web_search", rule: "ask", scope: "chat", revision: 2 },
-    { agent: "clv", tool: "mail/send_email", rule: "deny", scope: "chat_and_routines", revision: 1 },
+    { agent: "clv", tool: "search/web_search", tool_label: "Web search", server_name: "Search", rule: "ask", scope: "chat", revision: 2 },
+    { agent: "clv", tool: "mail/send_email", tool_label: "Send email", server_name: "Mail", rule: "deny", scope: "chat_and_routines", revision: 1 },
+    { agent: "retired-analyst", tool: "bigquery/run_query", tool_label: "Run query", server_name: "Bigquery", rule: "allow", scope: "chat", revision: 1 },
   ] : [] },
-  provider_pin: c.id === "c_clv" ? { backend: "openai", model: "gpt-5", local: 3 } : null,
+  provider_pin: c.id === "c_clv" ? { backend: "openai", model: "gpt-5.5", model_label: null, local: 3 } : null,
   channel_copy: c.id === "c_board" ? { name: "board-desk", agent_id: "agent_board" } : null,
-  threads: c.id === "c_general" ? [{ thread_id: "t_launch", kind: "progress_plans", value: "off" }, { thread_id: "t_help", kind: "handoff", value: "clv" }] : [],
-  link: c.id === "web" ? null : `https://discord.com/channels/1/${c.id}`,
+  threads: c.id === "c_general" ? [
+    { thread_id: "t_launch", name: "Launch", kind: "progress_plans", value: "off" }, { thread_id: "t_help", name: "Help", kind: "handoff", value: "clv" },
+  ] : c.id === "c_clv" ? [{ thread_id: "t_q3", name: "Q3 holdout check", kind: "handoff", value: "retired-analyst" }, { thread_id: "t_gone", name: null, kind: "participation", value: "on" }] : [],
+  link: c.id === "web" ? null : `https://${c.platform}.com/channels/1/${c.id}`,
   teams_subscription: c.id === "t_ops" ? { status: "expired", expires_at: ago(30) } : null,
   routines: c.id === "c_clv" ? [
-    { id: "r1", agent: "clv", cron: "0 9 * * 1", enabled: true, relation: "both" },
-    { id: "r2", agent: "pricing-analyst", cron: "30 8 * * 1-5", enabled: false, relation: "posts_here" },
+    { id: "r1", title: "Monday readout", agent: "clv", cron: "0 9 * * 1", enabled: true, relation: "both" },
+    { id: "r2", title: "Weekday pricing check", agent: "pricing-analyst", cron: "30 8 * * 1-5", enabled: false, relation: "posts_here" },
   ] : [],
   spend: {
     days: 30,
     by_day: c.spend.last_30_days_usd ? curve(c.spend.last_30_days_usd, 30) : [],
     by_agent: c.spend.last_30_days_usd ? [
-      { key: "agent_1", name: c.agent.value, usd: +(c.spend.last_30_days_usd * 0.7).toFixed(2) },
-      { key: "agent_2", name: "pricing-analyst", usd: +(c.spend.last_30_days_usd * 0.3).toFixed(2) },
+      { key: "ag_mmm", name: "MMM Analyst", usd: +(c.spend.last_30_days_usd * 0.7).toFixed(2) },
+      { key: "ag_pricing", name: "Pricing Analyst", usd: +(c.spend.last_30_days_usd * 0.3).toFixed(2) },
     ] : [],
     by_person: c.spend.last_30_days_usd ? [
       { key: "u_1", name: "Priya Raman", usd: +(c.spend.last_30_days_usd * 0.55).toFixed(2) },
@@ -81,9 +128,14 @@ const settingsOf = (c: Stored): ChannelSettings => ({
       { key: null, name: null, usd: +(c.spend.last_30_days_usd * 0.1).toFixed(2) },
     ] : [],
   },
+  agents: {},
 })
 const settings: Record<string, ChannelSettings> = {}
 const settingsFor = (c: Stored) => (settings[c.id] ??= settingsOf(c))
+const withAgents = (s: ChannelSettings): ChannelSettings => ({
+  ...s,
+  agents: refs([...s.tool_rules.rules.map((r) => r.agent), ...s.routines.map((r) => r.agent), ...s.threads.filter((t) => t.kind === "handoff").map((t) => t.value)]),
+})
 const defaults: ChannelDefaults = {
   platform: "discord", agent: WORKSPACE, environment: { value: "default", source: "deployment" },
   participation: sw("off", "deployment"), progress_plans: sw("on", "workspace", "on"),
@@ -94,13 +146,15 @@ const manage = () => me()?.capabilities.includes("channels.manage") ?? false
 const view = () => me()?.capabilities.includes("channels.view") ?? false
 /** Members see web chat and channels their chat platform shows them, never a locked one. */
 const visible = (c: Stored) => manage() || (!c.tags.includes("locked") && c.id !== "c_partners")
+/** The directory leaves out channels the platform no longer has and direct messages; a direct id still reads. */
+const listed = (c: Stored) => c.status === "active" && visible(c)
 const find = (id: string) => channels.find((c) => c.id === id && visible(c))
 const figures = (c: Stored): Channel => (manage() ? c : { ...c, budget: null, spend: null })
 const detail = (c: Stored): ChannelDetail => ({
   ...figures(c), readers_label: READERS[c.readers], writers_label: WRITERS[c.writers],
   readers_options: Object.entries(READERS).map(([value, label]) => ({ value: value as Readers, label })),
   writers_options: Object.entries(WRITERS).map(([value, label]) => ({ value: value as Writers, label })),
-  can_manage: manage(), budget_editable: manage() && c.id !== "web",
+  can_manage: manage(), budget_editable: manage() && c.id !== "web", agents: refs(keysOf(c)),
 })
 const stale = () => HttpResponse.json({ detail: "This changed since you opened it. Reload and try again." }, { status: 409 })
 const invalid = (detail: string) => HttpResponse.json({ detail }, { status: 422 })
@@ -119,14 +173,17 @@ export const channelsHandlers: HttpHandler[] = [
     if (!view() || (request.method !== "GET" && !manage())) return forbidden()
   })),
   http.get("/api/channels", () => HttpResponse.json<ChannelList>({
-    platform: "discord", default_agent: WORKSPACE, default_environment: { value: "default", source: "deployment" }, channels: channels.filter(visible).map(figures),
+    platform: "discord", default_agent: WORKSPACE, default_environment: { value: "default", source: "deployment" },
+    channels: channels.filter(listed).map(figures), agents: refs(["daimon", ...channels.filter(listed).flatMap(keysOf)]),
   })),
-  http.get("/api/channels/:id/history", ({ params }) => manage() ? HttpResponse.json(history[params.id as string] ?? []) : forbidden()),
+  http.get("/api/channels/:id/history", ({ params }) => manage()
+    ? HttpResponse.json({ entries: history[params.id as string] ?? [], agents: refs(historyKeys(params.id as string)) })
+    : forbidden()),
   http.get("/api/channels/:id/settings", ({ params }) => {
     const c = find(params.id as string)
     if (!c) return notFound()
     const s = settingsFor(c)
-    return HttpResponse.json({ ...s, spend: manage() ? s.spend : null, tool_rules: { ...s.tool_rules, editable: s.tool_rules.editable && manage() } })
+    return HttpResponse.json({ ...withAgents(s), spend: manage() ? s.spend : null, tool_rules: { ...s.tool_rules, editable: s.tool_rules.editable && manage() } })
   }),
   ...(["participation", "progress-plans"] as const).map((path) => http.put(`/api/channels/:id/${path}`, async ({ params, request }) => {
     const c = find(params.id as string)
@@ -156,7 +213,7 @@ export const channelsHandlers: HttpHandler[] = [
     const s = settingsFor(c)
     if (!same([...body.expected].sort(), s.skills.map((k) => k.skill_id).sort())) return stale()
     const before = s.skills.map((k) => k.name)
-    s.skills = body.action === "add" ? [...s.skills, { skill_id: `skill_${body.skill}`, name: body.skill }] : s.skills.filter((k) => k.skill_id !== body.skill)
+    s.skills = body.action === "add" ? [...s.skills, { skill_id: body.skill, name: body.skill.replaceAll("-", " ").replace(/^./, (x: string) => x.toUpperCase()) }] : s.skills.filter((k) => k.skill_id !== body.skill)
     return changed(c, {}, "skills", before, s.skills.map((k) => k.name))
   }),
   http.put("/api/channels/:id/tool-rules", async ({ params, request }) => {
@@ -167,7 +224,9 @@ export const channelsHandlers: HttpHandler[] = [
     if (!s.tool_rules.editable) return invalid("Tool rules are read only while tool safety is off.")
     const prior = s.tool_rules.rules.find((r) => r.agent === body.agent && r.tool === body.tool)
     if ((prior?.revision ?? 0) !== body.expected_revision) return stale()
-    const rule = { agent: body.agent, tool: body.tool, rule: body.rule, scope: body.scope ?? "chat", revision: body.expected_revision + 1 }
+    const words = (k: string) => { const w = k.replaceAll(/[_-]+/g, " "); return w.charAt(0).toUpperCase() + w.slice(1) }
+    const [server = "", tool = ""] = body.tool.includes("/") ? body.tool.split("/") : ["", body.tool]
+    const rule = { agent: body.agent, tool: body.tool, tool_label: words(tool), server_name: server ? words(server) : "", rule: body.rule, scope: body.scope ?? "chat", revision: body.expected_revision + 1 }
     s.tool_rules.rules = [...s.tool_rules.rules.filter((r) => r !== prior), rule]
     return changed(c, {}, "tool_rule", prior ?? null, rule)
   }),

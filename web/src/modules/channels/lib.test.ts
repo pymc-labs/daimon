@@ -1,48 +1,95 @@
 import { describe, expect, it } from "vitest"
 
+import { flatten } from "@/components/tree-state"
+
 import {
-  accessAsk, accessFlags, budgetStops, choiceOf, cronWords, defaultSource, describeChange, fillDays, type Filters, filterChannels,
-  groupChannels, nameOf, sourcedLabel, spendLines, spentFor, switchChange, threadValue, toolRuleChange, unavailableText,
+  accessAsk, accessFlags, agentChoices, agentsOf, budgetStops, channelTree, choiceOf, cronWords, defaultSource, describeChange, fillDays,
+  type Filters, filterChannels, nameOf, overrideCount, spendLines, spentFor, switchChange, threadValue, toolRuleChange, treeFilter, unavailableText,
 } from "./lib"
 import type { Channel } from "./types"
 
 const channel = (id: string, name: string, more: Partial<Channel> = {}): Channel => ({
-  id, platform: "discord", name, kind: "text", parent: null, last_seen_at: null, agent: { value: "daimon", source: "workspace" },
+  id, platform: "discord", name, kind: "channel", status: "active", parent: null, path: [], last_seen_at: null, agent: { value: "daimon", source: "workspace" },
   environment: { value: null, source: null }, readers: "any", writers: "any", kept_agents: [], tags: [], budget: null,
   spend: { month_usd: 0, last_30_days_usd: 0 }, last_active_at: null, ...more,
 })
-const cat = (name: string) => ({ id: `k_${name}`, name })
-const none: Filters = { q: "", platforms: [], access: [], budget: [], agents: [] }
+const category = (name: string, platform = "discord") => ({ id: `k_${name}`, name, kind: platform === "teams" ? "team" as const : "category" as const })
+const inCategory = (name: string, platform = "discord") => ({ parent: { id: `k_${name}`, name }, path: [category(name, platform)] })
+const none: Filters = { q: "", platforms: [], access: [], budget: [], agents: [], override: null }
 
-describe("groupChannels", () => {
-  it("puts web chat and loose channels first, then groups by name with rows sorted", () => {
+describe("channelTree", () => {
+  const ids = (rows: Channel[]) => channelTree(rows).map((n) => [n.id, n.parentId])
+
+  it("nests a channel under its category and a thread under its channel", () => {
     const rows = [
-      channel("b", "beta", { parent: cat("Projects") }), channel("w", "Web chat", { platform: "web" }),
-      channel("a", "alpha", { parent: cat("Projects") }), channel("g", "general"), channel("l", "board", { parent: cat("Leadership") }),
+      channel("g", "general", inCategory("Projects")),
+      channel("t", "ideas", { kind: "thread", path: [category("Projects"), { id: "g", name: "general", kind: "channel" }] }),
     ]
-    const g = groupChannels(rows)
-    expect(g.map((x) => x.name)).toEqual([null, "Leadership", "Projects"])
-    expect(g[0]!.rows.map((c) => c.id)).toEqual(["w", "g"])
-    expect(g[2]!.rows.map((c) => c.id)).toEqual(["a", "b"])
+    expect(ids(rows)).toEqual([["g", "g:discord:k_Projects"], ["t", "g"], ["g:discord:k_Projects", null]])
   })
 
-  it("keeps a category and a team of the same id apart", () => {
-    const g = groupChannels([channel("a", "a", { parent: cat("X") }), channel("b", "b", { platform: "teams", parent: cat("X") })])
-    expect(g).toHaveLength(2)
+  it("puts web chat first, then channels before categories, each by name", () => {
+    const rows = [
+      channel("b", "beta", inCategory("Projects")), channel("w", "Web chat", { platform: "web" }),
+      channel("z", "zed"), channel("a", "alpha"), channel("l", "board", inCategory("Leadership")),
+    ]
+    const top = channelTree(rows).filter((n) => n.parentId === null).map((n) => n.id)
+    expect(top).toEqual(["w", "a", "z", "g:discord:k_Leadership", "g:discord:k_Projects"])
+  })
+
+  it("keeps a category and a team of the same id apart and orders roots by platform", () => {
+    const rows = [channel("a", "a", { platform: "teams", ...inCategory("X", "teams") }), channel("b", "b", inCategory("X"))]
+    const groups = channelTree(rows).filter((n) => n.kind === "group")
+    expect(groups.map((g) => g.id)).toEqual(["g:discord:k_X", "g:teams:k_X"])
+  })
+
+  it("lets Slack channels stand at the root with threads below", () => {
+    const rows = [channel("s", "ops", { platform: "slack" }), channel("t", "thread", { platform: "slack", kind: "thread", path: [{ id: "s", name: "ops", kind: "channel" }] })]
+    expect(ids(rows)).toEqual([["s", null], ["t", "s"]])
+  })
+
+  it("holds a thread whose channel is not listed under a group for that channel", () => {
+    const rows = [channel("t", "ideas", { kind: "thread", path: [category("Projects"), { id: "gone", name: "lost", kind: "channel" }] })]
+    const tree = channelTree(rows)
+    const group = tree.find((n) => n.id === "g:discord:gone")
+    expect(group).toMatchObject({ kind: "group", parentId: "g:discord:k_Projects", row: { type: "group", name: "lost" } })
+    expect(tree.find((n) => n.id === "t")?.parentId).toBe("g:discord:gone")
+  })
+
+  it("opens ancestors of a match and a group that matches a plain search keeps its rows", () => {
+    const rows = [channel("g", "general", inCategory("Projects")), channel("o", "other", inCategory("Leadership"))]
+    const tree = channelTree(rows)
+    const seen = (f: Partial<Filters>) => flatten(tree, {}, treeFilter({ ...none, ...f })).map((x) => x.node.id)
+    expect(seen({ q: "gener" })).toEqual(["g:discord:k_Projects", "g"])
+    expect(seen({ q: "leader" })).toEqual(["g:discord:k_Leadership", "o"])
+    expect(treeFilter(none)).toBeNull()
+  })
+})
+
+describe("agents", () => {
+  const refs = { daimon: { id: "a1", name: "Daimon" }, clv: { id: "a2", name: "Customer value" }, old: { id: null, name: null } }
+  it("lists the keys in use by name, sorted", () => {
+    const rows = [channel("1", "a", { agent: { value: "daimon", source: "workspace" } }), channel("2", "b", { agent: { value: "clv", source: "channel" } }), channel("3", "c", { agent: { value: "clv", source: "channel" } })]
+    expect(agentsOf(rows, refs)).toEqual([{ key: "clv", name: "Customer value" }, { key: "daimon", name: "Daimon" }])
+  })
+  it("keeps a key already in use for the agent it names and shows a deleted one", () => {
+    const roster = [{ name: "Customer value", avatar: null }, { name: "Daimon", avatar: null }]
+    const choices = agentChoices(roster, ["clv", "old"], refs)
+    expect(choices.map((c) => [c.key, c.name])).toEqual([["old", "Deleted agent"], ["clv", "Customer value"], ["Daimon", "Daimon"]])
   })
 })
 
 describe("filterChannels", () => {
   const rows = [
-    channel("1", "clv-models", { parent: cat("Projects"), budget: { limit_usd: "25.00", window: "monthly", starts_at: null, ends_at: null, spent_usd: 1, remaining_usd: 24, percent_used: 4, active: true, exceeded: false }, agent: { value: "clv", source: "channel" } }),
+    channel("1", "clv-models", { ...inCategory("Projects"), budget: { limit_usd: "25.00", window: "monthly", starts_at: null, ends_at: null, spent_usd: 1, remaining_usd: 24, percent_used: 4, active: true, exceeded: false }, agent: { value: "clv", source: "channel" } }),
     channel("2", "board", { tags: ["locked"], platform: "slack" }),
     channel("3", "general"),
   ]
   const ids = (f: Partial<Filters>) => filterChannels(rows, { ...none, ...f }).map((c) => c.id)
 
-  it("searches name and parent", () => {
+  it("searches the name only", () => {
     expect(ids({ q: "CLV" })).toEqual(["1"])
-    expect(ids({ q: "projects" })).toEqual(["1"])
+    expect(ids({ q: "projects" })).toEqual([])
   })
   it("ORs within a facet and ANDs across", () => {
     expect(ids({ platforms: ["slack", "discord"] })).toEqual(["1", "2", "3"])
@@ -98,11 +145,6 @@ describe("budget stops", () => {
 })
 
 describe("labels", () => {
-  it("shows where a default comes from", () => {
-    expect(sourcedLabel({ value: "daimon", source: "workspace" })).toBe("Workspace default: daimon")
-    expect(sourcedLabel({ value: "clv", source: "channel" })).toBe("clv")
-    expect(sourcedLabel({ value: null, source: null })).toBe("None")
-  })
   it("names web chat plainly and channels with a hash", () => {
     expect(nameOf({ platform: "web", name: "Web chat" })).toBe("Web chat")
     expect(nameOf({ platform: "discord", name: "general" })).toBe("#general")
@@ -110,17 +152,28 @@ describe("labels", () => {
   })
 })
 
+describe("overrides", () => {
+  it("counts the channels that set a value themselves", () => {
+    const rows = [channel("1", "a", { agent: { value: "x", source: "channel" } }), channel("2", "b"), channel("3", "c", { environment: { value: "e", source: "channel" } })]
+    expect(overrideCount(rows, "agent")).toBe(1)
+    expect(overrideCount(rows, "sandbox")).toBe(1)
+    expect(filterChannels(rows, { ...none, override: "agent" }).map((c) => c.id)).toEqual(["1"])
+  })
+})
+
 describe("describeChange", () => {
   const labels = { readers: [{ value: "any" as const, label: "Anyone" }, { value: "own" as const, label: "Only its own agents" }], writers: [{ value: "none" as const, label: "Nobody" }, { value: "any" as const, label: "Anyone" }] }
   const entry = (setting: Parameters<typeof describeChange>[0]["setting"], before: unknown, after: unknown) => ({ at: "", setting, before, after, actor: null, surface: null })
   it("uses the server's labels for access", () => {
-    expect(describeChange(entry("access", { readers: "any", writers: "any" }, { readers: "own", writers: "any" }), labels)).toEqual({ what: "Who can read", from: "Anyone", to: "Only its own agents" })
-    expect(describeChange(entry("access", { readers: "any", writers: "any" }, { readers: "any", writers: "none" }), labels)).toEqual({ what: "Who can post", from: "Anyone", to: "Nobody" })
+    expect(describeChange(entry("access", { readers: "any", writers: "any" }, { readers: "own", writers: "any" }), labels)).toEqual({ what: "Who can read", from: ["Anyone"], to: ["Only its own agents"] })
+    expect(describeChange(entry("access", { readers: "any", writers: "any" }, { readers: "any", writers: "none" }), labels)).toEqual({ what: "Who can post", from: ["Anyone"], to: ["Nobody"] })
   })
-  it("reads kept agents, budgets and agents", () => {
-    expect(describeChange(entry("kept_agents", ["a"], ["a", "b"]), labels)).toEqual({ what: "Kept agents", from: "", to: "added b" })
-    expect(describeChange(entry("budget", null, { limit_usd: "25.00", window: "monthly" }), labels)).toEqual({ what: "Budget", from: "none", to: "$25.00 monthly" })
-    expect(describeChange(entry("default_agent", null, "clv"), labels)).toEqual({ what: "Default agent", from: "none", to: "clv" })
+  it("keeps agent keys as keys so they can be linked", () => {
+    expect(describeChange(entry("kept_agents", ["a"], ["a", "b"]), labels)).toEqual({ what: "Kept here", from: [], to: ["added ", { agent: "b" }] })
+    expect(describeChange(entry("default_agent", null, "clv"), labels)).toEqual({ what: "Default agent", from: ["none"], to: [{ agent: "clv" }] })
+  })
+  it("reads budgets", () => {
+    expect(describeChange(entry("budget", null, { limit_usd: "25.00", window: "monthly" }), labels)).toEqual({ what: "Budget", from: ["none"], to: ["$25.00 monthly"] })
   })
 })
 
@@ -200,7 +253,7 @@ describe("channel rows", () => {
   })
 
   it("compares a tool rule with the revision of the same agent and tool", () => {
-    const rules = [{ agent: "a", tool: "x", rule: "ask" as const, scope: "chat_and_routines" as const, revision: 4 }]
+    const rules = [{ agent: "a", tool: "x", tool_label: "X", server_name: "S", rule: "ask" as const, scope: "chat_and_routines" as const, revision: 4 }]
     expect(toolRuleChange({ agent: "a", tool: "x", rule: "deny" }, rules)).toMatchObject({ scope: "chat_and_routines", expected_revision: 4 })
     expect(toolRuleChange({ agent: "a", tool: "y", rule: "allow" }, rules).expected_revision).toBe(0)
   })
