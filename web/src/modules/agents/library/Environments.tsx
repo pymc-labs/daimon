@@ -55,7 +55,7 @@ export function Environments() {
         </Table>
       )}</QueryState>
       <Drawer param="env" title="Environment" ids={rows.map((e) => e.id)}>
-        {(id) => <EnvironmentForm key={id} env={id === "new" ? null : rows.find((e) => e.id === id) ?? null} missing={id !== "new" && !rows.some((e) => e.id === id)} />}
+        {(id) => <EnvironmentForm key={`${id}|${rows.find((e) => e.id === id)?.updated_at ?? ""}`} env={id === "new" ? null : rows.find((e) => e.id === id) ?? null} missing={id !== "new" && !rows.some((e) => e.id === id)} />}
       </Drawer>
     </Page>
   )
@@ -83,7 +83,7 @@ export function EnvironmentForm({ env, missing }: { env: EnvironmentDoc | null; 
   }
   const busy = create.isPending || save.isPending || archive.isPending
   const go = () => env
-    ? save.mutate({ id: env.id, spec })
+    ? save.mutate({ id: env.id, spec, expected_updated_at: env.updated_at })
     : create.mutate(spec, { onSuccess: (made) => setEnv(made.id) })
   const retire = async () => {
     if (!env || !(await confirm({ title: `Archive ${env.name}?`, action: "Archive", destructive: true }))) return

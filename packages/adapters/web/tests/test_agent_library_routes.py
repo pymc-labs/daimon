@@ -206,6 +206,38 @@ async def test_an_admin_lists_and_changes_an_environment(
     assert [(r.action, r.target) for r in rows] == [("Changed environment", "Data")]
 
 
+async def test_a_stale_environment_form_is_refused(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    agents, owner, other = await agent_people(db_session)
+    await make_admin(db_session_factory, other)
+    mine = ma_environment(
+        id="env_mine",
+        name="Data",
+        tenant_id=owner.tenant_id,
+        updated_at="2030-01-02T00:00:00Z",
+    )
+    patched = _environments(agents, owner.tenant_id, mine)
+    token = await sign_in_token(db_session_factory, other)
+    spec = {"name": "Data", "network": "limited"}
+    async with agent_client(agents, owner.tenant_id, db_session_factory, token) as client:
+        listed = (await client.get("/api/agents/environments")).json()
+        stale = await client.put(
+            "/api/agents/environments/env_mine",
+            json={"spec": spec, "expected_updated_at": "2030-01-01T00:00:00Z"},
+            headers=OWN,
+        )
+        current = await client.put(
+            "/api/agents/environments/env_mine",
+            json={"spec": spec, "expected_updated_at": listed[0]["updated_at"]},
+            headers=OWN,
+        )
+    assert stale.status_code == 409 and len(patched) == 1, (
+        "a changed environment is not overwritten"
+    )
+    assert current.status_code == 200, current.text
+
+
 async def test_an_environment_name_already_taken_is_refused(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:

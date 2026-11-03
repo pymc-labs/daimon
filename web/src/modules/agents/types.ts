@@ -204,6 +204,8 @@ export const ECOSYSTEMS = ["pip", "npm", "apt", "cargo", "gem", "go"] as const
 export type Ecosystem = (typeof ECOSYSTEMS)[number]
 export type EnvironmentDoc = {
   id: string; name: string; description: string; created_at: string
+  /** The version loaded; a save sends it back and is refused when it moved on. */
+  updated_at: string
   /** Read-only: a built-in agent runs in it. */
   managed: boolean
   cloud: boolean

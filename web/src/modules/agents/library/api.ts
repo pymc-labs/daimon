@@ -45,10 +45,15 @@ export function useEnvironmentWrites(ask: Ask) {
   return {
     create: useMutation({ mutationFn: (spec: EnvironmentInput) => api.post<EnvironmentDoc>("/api/agents/environments", spec), onSuccess: done, onError: fail }),
     save: useMutation({
-      mutationFn: (b: { id: string; spec: EnvironmentInput }) =>
-        guarded((confirm) => api.put<EnvironmentDoc>(`/api/agents/environments/${b.id}`, { spec: b.spec, confirm_open_network: confirm })),
+      mutationFn: (b: { id: string; spec: EnvironmentInput; expected_updated_at: string }) =>
+        guarded((confirm) => api.put<EnvironmentDoc>(`/api/agents/environments/${b.id}`, { spec: b.spec, confirm_open_network: confirm, expected_updated_at: b.expected_updated_at })),
       onSuccess: done,
-      onError: (e) => { if (!(e instanceof ApiError && e.status === 428)) fail(e) },
+      onError: (e) => {
+        if (e instanceof ApiError && e.status === 409) {
+          toast.error("Changed meanwhile. Reloaded.")
+          void done()
+        } else if (!(e instanceof ApiError && e.status === 428)) fail(e)
+      },
     }),
     archive: useMutation({
       mutationFn: (id: string) =>

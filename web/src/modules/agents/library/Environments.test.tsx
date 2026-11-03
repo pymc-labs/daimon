@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { MemoryRouter } from "react-router"
+import { toast } from "sonner"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import { ConfirmProvider } from "@/components/confirm"
@@ -9,10 +10,11 @@ import { ApiError, api } from "@/lib/api"
 import type { EnvironmentDoc } from "../types"
 import { EnvironmentForm } from "./Environments"
 
+vi.mock("sonner", () => ({ toast: { error: vi.fn() } }))
 vi.mock("@/lib/api", async (orig) => ({ ...(await orig<typeof import("@/lib/api")>()), api: { get: vi.fn(), put: vi.fn(), post: vi.fn(), del: vi.fn() } }))
 
 const env: EnvironmentDoc = {
-  id: "env_1", name: "daimon", description: "", created_at: "2030-01-01T00:00:00Z", managed: false, cloud: true,
+  id: "env_1", name: "daimon", description: "", created_at: "2030-01-01T00:00:00Z", updated_at: "2030-01-01T00:00:00Z", managed: false, cloud: true,
   network: "limited", open_network: false, allowed_hosts: [], allow_package_managers: true, allow_mcp_servers: true, packages: { pip: ["numpy"] },
 }
 
@@ -49,6 +51,15 @@ describe("EnvironmentForm", () => {
     await userEvent.click(screen.getByRole("button", { name: "Save" }))
     await waitFor(() => expect(api.put).toHaveBeenCalledTimes(1))
     expect(vi.mocked(api.put).mock.calls[0]![1]).toMatchObject({ spec: { packages: { pip: ["numpy>=1.26,<2", "pandas"] } } })
+  })
+
+  it("sends the loaded version and says so when it changed meanwhile", async () => {
+    vi.mocked(api.put).mockRejectedValue(new ApiError(409, "This environment changed since you opened it. Reload and try again."))
+    show(env)
+    await userEvent.click(screen.getByRole("button", { name: "Save" }))
+    await waitFor(() => expect(api.put).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(api.put).mock.calls[0]![1]).toMatchObject({ expected_updated_at: "2030-01-01T00:00:00Z" })
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith("Changed meanwhile. Reloaded."))
   })
 
   it("leaves a managed environment read-only", () => {

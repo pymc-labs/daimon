@@ -22,6 +22,7 @@ class SyncBody(BaseModel):
 class EnvironmentBody(BaseModel):
     spec: EnvironmentInput
     confirm_open_network: bool = False
+    expected_updated_at: str | None = None
 
 
 class ArchivedDoc(BaseModel):
@@ -114,6 +115,7 @@ def agent_library_router(runtime: WebRuntime) -> APIRouter:
                 environment_id=environment_id,
                 spec=body.spec,
                 confirmed=body.confirm_open_network,
+                expected_updated_at=body.expected_updated_at,
                 audited=recorded(runtime, caller, "Changed environment"),
             )
         except EnvironmentNeedsConfirm as exc:

@@ -88,6 +88,7 @@ class EnvironmentDoc(BaseModel):
     name: str
     description: str
     created_at: str
+    updated_at: str
     managed: bool
     """A built-in agent runs in it, so it is read-only here."""
     cloud: bool
@@ -106,6 +107,7 @@ def environment_doc(env: BetaEnvironment) -> EnvironmentDoc:
         name=env.metadata.get(MA_METADATA_KEY_NAME) or env.name,
         description=env.description or "",
         created_at=env.created_at,
+        updated_at=env.updated_at,
         managed=env.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
         cloud=False,
         network="limited",
@@ -194,9 +196,12 @@ async def update(
     environment_id: str,
     spec: EnvironmentInput,
     confirmed: bool = False,
+    expected_updated_at: str | None = None,
     audited: ChangeRecorder | None = None,
 ) -> EnvironmentDoc:
     """Set an environment's packages and network; its name stays.
+
+    A stale `expected_updated_at` (the version the caller loaded) is refused.
 
     Raises `EnvironmentNeedsConfirm` when this opens the network of one a sealed
     channel runs in, until `confirmed`.
@@ -204,6 +209,10 @@ async def update(
     require_admin(actor, "Environments")
     env = await _find(deps, actor, environment_id)
     _editable(env)
+    if expected_updated_at is not None and env.updated_at != expected_updated_at:
+        raise AgentEditError(
+            "This environment changed since you opened it. Reload and try again.", kind="stale"
+        )
     name = env.metadata.get(MA_METADATA_KEY_NAME) or env.name
     config = spec.config(replace=True)
     if not confirmed:

@@ -22,13 +22,13 @@ function library(): LibrarySkill[] {
 }
 
 const ENVS: EnvironmentDoc[] = [
-  { id: "env_default", name: "default", description: "", created_at: ago(2000), managed: true, cloud: true, network: "limited", open_network: false, allowed_hosts: [], allow_package_managers: true, allow_mcp_servers: true, packages: { pip: ["numpy", "pandas"] } },
-  { id: "env_daimon", name: "daimon", description: "Analysis tools", created_at: ago(700), managed: false, cloud: true, network: "limited", open_network: true, allowed_hosts: ["api.example.com"], allow_package_managers: true, allow_mcp_servers: true, packages: { pip: ["pymc", "arviz"], apt: ["graphviz"] } },
-  { id: "env_clv", name: "clv", description: "", created_at: ago(300), managed: false, cloud: true, network: "unrestricted", open_network: true, allowed_hosts: [], allow_package_managers: true, allow_mcp_servers: true, packages: {} },
+  { id: "env_default", name: "default", description: "", created_at: ago(2000), updated_at: ago(2000), managed: true, cloud: true, network: "limited", open_network: false, allowed_hosts: [], allow_package_managers: true, allow_mcp_servers: true, packages: { pip: ["numpy", "pandas"] } },
+  { id: "env_daimon", name: "daimon", description: "Analysis tools", created_at: ago(700), updated_at: ago(700), managed: false, cloud: true, network: "limited", open_network: true, allowed_hosts: ["api.example.com"], allow_package_managers: true, allow_mcp_servers: true, packages: { pip: ["pymc", "arviz"], apt: ["graphviz"] } },
+  { id: "env_clv", name: "clv", description: "", created_at: ago(300), updated_at: ago(300), managed: false, cloud: true, network: "unrestricted", open_network: true, allowed_hosts: [], allow_package_managers: true, allow_mcp_servers: true, packages: {} },
 ]
 
 const toDoc = (id: string, spec: EnvironmentInput, was?: EnvironmentDoc): EnvironmentDoc => ({
-  id, name: was?.name ?? spec.name, description: spec.description, created_at: was?.created_at ?? new Date().toISOString(), managed: false, cloud: true,
+  id, name: was?.name ?? spec.name, description: spec.description, created_at: was?.created_at ?? new Date().toISOString(), updated_at: new Date().toISOString(), managed: false, cloud: true,
   network: spec.network, open_network: spec.network === "unrestricted" || spec.allowed_hosts.length > 0,
   allowed_hosts: spec.network === "limited" ? spec.allowed_hosts : [], allow_package_managers: spec.allow_package_managers, allow_mcp_servers: spec.allow_mcp_servers,
   packages: Object.fromEntries(ECOSYSTEMS.map((k) => [k, spec.packages[k] ?? []]).filter(([, v]) => (v as string[]).length)),
@@ -98,7 +98,8 @@ export const agentLibraryHandlers = [
     if (i < 0) return notFound()
     const was = ENVS[i]!
     if (was.managed) return forbidden(`${was.name} is managed by the server and can't be changed here.`)
-    const { spec, confirm_open_network } = (await request.json()) as { spec: EnvironmentInput; confirm_open_network: boolean }
+    const { spec, confirm_open_network, expected_updated_at } = (await request.json()) as { spec: EnvironmentInput; confirm_open_network: boolean; expected_updated_at?: string }
+    if (expected_updated_at && expected_updated_at !== was.updated_at) return HttpResponse.json({ detail: "This environment changed since you opened it. Reload and try again." }, { status: 409 })
     if (!confirm_open_network && sealedOpening(spec, was)) return HttpResponse.json({ detail: "A sealed channel runs in this environment. Opening its network lets that channel's content go anywhere. Confirm to go ahead." }, { status: 428 })
     ENVS[i] = toDoc(was.id, spec, was)
     return HttpResponse.json(ENVS[i])
