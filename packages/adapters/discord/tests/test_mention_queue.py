@@ -1390,6 +1390,24 @@ async def test_early_eyes_precede_admission_and_clear_on_failure(queued_bot):
     message.remove_reaction.assert_awaited_once_with("👀", queued_bot.user)
 
 
+async def test_a_backend_refusal_is_logged_as_one_not_as_over_cap(queued_bot):
+    """A turn refused for its backend logs why, never as a spend cap."""
+    from daimon.core.turn.errors import AdmissionDenied
+    from structlog.testing import capture_logs
+
+    message = _make_thread_message()
+    refused = AdmissionDenied(reason="backend_unsupported", cause="re_confirm", provider="gemini")
+    with capture_logs() as logs, patch("daimon.adapters.discord.bot.admit", side_effect=refused):
+        await queued_bot._handle_mention(message, "123456", uuid.uuid4())
+    events = [row for row in logs if row["event"].startswith("turn.skipped.")]
+    assert [row["event"] for row in events] == ["turn.skipped.backend_unsupported"], (
+        "one event that names the refusal"
+    )
+    assert (events[0]["cause"], events[0]["provider"]) == ("re_confirm", "gemini"), (
+        "the cause says what to fix"
+    )
+
+
 @pytest.mark.parametrize("cancelled", [False, True])
 async def test_early_eyes_clear_after_orchestration_and_add_failure_is_cosmetic(
     queued_bot, cancelled

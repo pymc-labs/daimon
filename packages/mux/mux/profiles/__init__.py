@@ -162,6 +162,7 @@ def meters_cache_writes_for(provider: Provider) -> bool:
 
 
 __all__ = [
+    "CONSENTED_DEFAULT_MODELS",
     "CONVERSATION_ONLY",
     "PROVIDER_ALIASES",
     "INLINE_REUSE",
@@ -208,6 +209,13 @@ _BACKEND_SELECTIONS: Mapping[Provider, BackendSelection] = {
         allowed_models=(ARGON_MODEL,),
         tariff_gated_models=(ARGON_MODEL,),
     ),
+}
+#: The provider defaults that backend-switch consents on a default-model setting
+#: were recorded under. Frozen: they must not follow a later default change, which
+#: is what tells an old consent it was confirmed for another model.
+CONSENTED_DEFAULT_MODELS: Mapping[Provider, str] = {
+    "gemini": "gemini-3.8-flash",
+    "openai": "gpt-6-luna",
 }
 RUNNABLE_PROFILES: frozenset[str] = frozenset(
     profile
