@@ -238,3 +238,4 @@ async def test_settings_name_the_agents_they_mention_and_a_missing_one_is_null(
         settings = (await admin.client.get("/api/channels/c1/settings")).json()
 
     assert settings["agents"]["ghost"] == {"id": None, "name": None, "avatar": None}
+    assert settings["routines"][0]["title"] == "hi"
