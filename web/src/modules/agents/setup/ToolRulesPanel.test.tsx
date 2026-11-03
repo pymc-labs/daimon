@@ -18,6 +18,8 @@ const props = { node: "tools", agent, config: agent, ro: false, changed: new Set
 beforeEach(() => {
   vi.clearAllMocks()
   vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} })
+  Element.prototype.scrollIntoView = () => {}
+  Element.prototype.hasPointerCapture = () => false
 })
 
 describe("ToolRulesPanel", () => {
