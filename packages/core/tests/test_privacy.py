@@ -940,6 +940,7 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "github_connect_click_intents": "github_connect_click_intents",
         "github_user_links": "github_user_links",
         "mcp_tokens": "mcp_tokens",
+        "tag_opt_outs": "tag_opt_outs",
         "gemini_records": "gemini_records",
         "selfhosted_operations": "selfhosted_operations",
         "slack_user_tokens": "slack_user_tokens",
@@ -998,6 +999,7 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
     """
     # Tables the orchestrator deletes, keyed by why they are in scope.
     purged: dict[str, str] = {
+        "tag_opt_outs": "account_id PK/FK -> accounts.id; tag_opt_outs.delete_for_account",
         "watches": "owner_account_id FK; explicit erasure also deletes evidence and pending wakes",
         "watch_notice_receipts": "owner_account_id FK cascade; watches.delete_for_account deletes receipts",
         "watch_credentials": "owner_account_id FK cascade; watches.delete_for_account deletes keys",

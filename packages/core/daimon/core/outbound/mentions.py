@@ -61,7 +61,8 @@ def mentioned_user_ids(text: str, platform: Platform) -> tuple[str, ...]:
     return tuple(dict.fromkeys(m.group(1) for m in pattern.finditer(text)))
 
 
-def _untag(text: str, platform: Platform, skip: frozenset[str], names: Mapping[str, str]) -> str:
+def untag(text: str, platform: Platform, skip: frozenset[str], names: Mapping[str, str]) -> str:
+    """Mentions of ``skip`` as plain ``@Name``, with no mention markup."""
     if not skip or platform == "teams":
         return text
     pattern = _SLACK_USER if platform == "slack" else _DISCORD_USER
@@ -104,7 +105,7 @@ def render_post(
     attribution: str | None = None,
 ) -> RenderedPost:
     """Apply every mention rule; ``attribution`` is appended once, never pinging."""
-    body = _untag(neutralise_broadcasts(text, platform), platform, do_not_tag, names or {})
+    body = untag(neutralise_broadcasts(text, platform), platform, do_not_tag, names or {})
     if attribution and body.rstrip().endswith(attribution):
         body = body.rstrip().removesuffix(attribution).rstrip()
     user_ids = mentioned_user_ids(body, platform)

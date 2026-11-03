@@ -3715,6 +3715,26 @@ class ReachTally(Base):
     )
 
 
+class TagOptOut(Base):
+    """A person who asked never to be tagged, by their account.
+
+    Keyed by account so the choice follows the person across every linked
+    platform identity; deleted with the account.
+    """
+
+    __tablename__ = "tag_opt_outs"
+
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class DirectMessagePolicy(Base):
     """Explicit tenant opt-in; absence leaves existing DM behavior unchanged."""
 
