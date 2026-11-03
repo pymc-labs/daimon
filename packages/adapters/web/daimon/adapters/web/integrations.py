@@ -15,7 +15,11 @@ from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
 from anthropic.types.beta import BetaManagedAgentsAgent
-from daimon.adapters.web.admin_common import listed_agents, names_by_account
+from daimon.adapters.web.admin_common import (
+    listed_agents,
+    names_by_account,
+    person_ids_by_account,
+)
 from daimon.adapters.web.audit import audit
 from daimon.adapters.web.caller import WebCaller, requires
 from daimon.adapters.web.runtime import WebRuntime
@@ -100,9 +104,11 @@ class GithubInstall(BaseModel):
 class GithubRequest(BaseModel):
     id: str
     agent: str
+    agent_id: str | None
     repos: list[str]
     access: Literal["read", "write"]
     requester: str
+    requester_id: str | None
     created_at: str
     expires_at: str
     waiting_github: bool
@@ -273,6 +279,7 @@ def integrations_router(runtime: WebRuntime) -> APIRouter:
             except IntegrationsRefused as exc:
                 raise _refused(exc) from exc
             people = await names_by_account(db, tenant_id)
+            person_ids = await person_ids_by_account(db, tenant_id)
         return Github(
             configured=runtime.settings.github_app.app_id is not None,
             installations=[
@@ -312,9 +319,11 @@ def integrations_router(runtime: WebRuntime) -> APIRouter:
                 GithubRequest(
                     id=str(r.id),
                     agent=named.get(r.agent_id, r.agent_name),
+                    agent_id=ma_ids.get(r.agent_id),
                     repos=list(r.repo_names),
                     access=r.required_ability,
                     requester=people.get(r.requester_account_id, "Someone"),
+                    requester_id=person_ids.get(r.requester_account_id),
                     created_at=r.created_at.isoformat(),
                     expires_at=r.expires_at.isoformat(),
                     waiting_github=r.status == "waiting_github",

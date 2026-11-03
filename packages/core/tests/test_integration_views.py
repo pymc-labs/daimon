@@ -180,7 +180,7 @@ async def test_github_overview_lists_repos_per_agent_requests_and_failed_syncs(
     assert [r.agent_id for r in overview.requests] == [other]
     assert sorted((t.kind, t.subject) for t in overview.trouble) == [
         ("installation", "team-a"),
-        ("push", "team-a/app refs/heads/main"),
+        ("push", "team-a/app main"),
     ], "another workspace's repo sync is not listed"
 
 

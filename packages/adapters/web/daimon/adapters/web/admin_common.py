@@ -89,6 +89,11 @@ async def listed_agents(runtime: WebRuntime, tenant_id: uuid.UUID) -> list[BetaM
     return await runtime.agents.agents(runtime.turns.deps.anthropic, tenant_id)
 
 
+async def person_ids_by_account(db: AsyncSession, tenant_id: uuid.UUID) -> dict[uuid.UUID, str]:
+    people = await people_store.list_people(db, tenant_id=tenant_id)
+    return {p.account_id: str(p.id) for p in people}
+
+
 async def names_by_account(db: AsyncSession, tenant_id: uuid.UUID) -> dict[uuid.UUID, str]:
     people = await people_store.list_people(db, tenant_id=tenant_id)
     return {p.account_id: p.display_name for p in people}
