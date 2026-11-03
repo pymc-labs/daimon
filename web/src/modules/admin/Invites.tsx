@@ -1,4 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query"
+import { Mail } from "lucide-react"
 import { useState } from "react"
 import { toast } from "sonner"
 import { AgentAvatar, CopyButton } from "@/components/common"
@@ -19,7 +20,9 @@ import { cn } from "@/lib/utils"
 import { LoadMore, QueryState } from "@/components/QueryState"
 import type { Invite } from "./types"
 import { ROLE } from "./roles"
-import { Facts, Field, PanelSection } from "./shared"
+import { AgentLink } from "@/components/links"
+import { Facts, PanelHead, PanelSection } from "@/components/panel"
+import { Field } from "./shared"
 
 // Invites
 
@@ -74,25 +77,23 @@ function InviteTable({ data }: { data: Invite[] }) {
         const i = data.find((x) => x.id === id)
         return i && (
           <div>
-            <div className="px-5 py-5">
-              <div className="truncate text-base font-semibold">{i.email}</div>
-              <div className="text-sm text-muted-foreground">{STATUS[i.status]}</div>
-            </div>
-            <PanelSection title="Details">
-              <Facts rows={[["Role", ROLE[i.role]], ["Credit", usd(i.credit_usd)], ["Expires", shortDate(i.expires_at)], ["Invited by", i.by]]} />
+            <PanelHead
+              icon={<Mail className="size-4 text-muted-foreground" />}
+              title={i.email}
+              subtitle={STATUS[i.status]}
+              menu={i.status === "pending" ? [{ label: "Revoke", destructive: true, disabled: revoke.isPending, onSelect: () => revoke.mutate(i) }] : undefined}
+            />
+            <PanelSection>
+              <Facts rows={[
+                ["Role", ROLE[i.role]],
+                ["Credit", usd(i.credit_usd)],
+                ["Expires", shortDate(i.expires_at)],
+                ["Invited by", i.by],
+                ["Agents", i.agents.length
+                  ? <span key="agents" className="flex flex-col items-end gap-1">{i.agents.map((a) => <AgentLink key={a.id} id={a.id} name={a.name} avatar={a.avatar} />)}</span>
+                  : "Any agent"],
+              ]} />
             </PanelSection>
-            <PanelSection title="Agents">
-              {i.agents.length ? (
-                <div className="space-y-1">
-                  {i.agents.map((a) => <div key={a.id} className="flex h-8 items-center gap-2 text-sm"><AgentAvatar src={a.avatar} name={a.name} />{a.name}</div>)}
-                </div>
-              ) : <span className="text-sm text-muted-foreground">Any agent</span>}
-            </PanelSection>
-            {i.status === "pending" && (
-              <div className="border-t px-5 py-4">
-                <Button variant="outline" size="sm" className="text-destructive" disabled={revoke.isPending} onClick={() => revoke.mutate(i)}>Revoke</Button>
-              </div>
-            )}
           </div>
         )
       }}

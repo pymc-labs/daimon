@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query"
 import { ThumbsDown, ThumbsUp } from "lucide-react"
 
 import { Facet, FilterBar } from "@/components/filters"
+import { AgentLink } from "@/components/links"
 import { QueryState } from "@/components/QueryState"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { api } from "@/lib/api"
@@ -35,7 +36,7 @@ export function Feedback() {
             <TableBody>
               {d.agents.map((a) => (
                 <TableRow key={a.id ?? "unknown"}>
-                  <TableCell className="font-medium">{a.name}</TableCell>
+                  <TableCell className="font-medium"><AgentLink id={a.id} name={a.name} /></TableCell>
                   <TableCell>{a.up ?? FEW}</TableCell>
                   <TableCell>{a.down ?? FEW}</TableCell>
                   <TableCell className="max-sm:hidden">
