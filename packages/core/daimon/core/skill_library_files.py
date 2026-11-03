@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 import anthropic
 from daimon.core.agent_admin import require_admin
@@ -29,6 +32,7 @@ from daimon.core.skill_library import library_skill, own_skills
 from daimon.core.skills.ingest import SkillIngestError, bundle_from_files
 from mux.contracts.errors import ProviderError, ScopeViolation
 from pydantic import BaseModel
+from sqlalchemy import text
 
 __all__ = [
     "SkillRef",
@@ -50,6 +54,23 @@ class SkillRef(BaseModel):
 def slug_of(text: str) -> str:
     """`Data validation` as `data-validation`."""
     return _NAME.sub("-", text.strip().lower()).strip("-")
+
+
+@asynccontextmanager
+async def _skill_lock(
+    deps: AgentEditDeps, *, tenant_id: uuid.UUID, skill_id: str
+) -> AsyncIterator[None]:
+    """Serialize publishing versions of one skill, until the block ends.
+
+    The version check and the publish are separate provider calls; held across both, a
+    second save sees the first's version and is refused as stale rather than overwriting it.
+    """
+    async with deps.session_factory() as session, session.begin():
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": f"library_skill:{tenant_id}:{skill_id}"},
+        )
+        yield
 
 
 def _target(name: str, version: str) -> str:
@@ -100,7 +121,9 @@ async def _publish(
             deps.client, skill_id, data=bundle.zip_bytes, scope=actor.scope()
         )
     except (anthropic.APIStatusError, ProviderError, ScopeViolation) as exc:
-        raise AgentEditError("The skill could not be saved. Try again.", kind="conflict") from exc
+        raise AgentEditError(
+            "The skill could not be saved. Try again.", kind="unavailable"
+        ) from exc
     if audited is not None:
         async with deps.session_factory() as session, session.begin():
             await audited(session, _target(name, published.version))
@@ -121,37 +144,39 @@ async def save_library_files(
     A file with None content keeps its bytes from ``expected_version``. A later version than
     that is a conflict: the editor reloads rather than overwrite it.
     """
-    name, latest = await _custom(deps, actor, skill_id, verb="edited")
-    if latest != expected_version:
-        raise AgentEditError(
-            "This skill changed since you opened it. Reload to see the new version.",
-            kind="stale",
+    require_admin(actor, "The skill library")
+    async with _skill_lock(deps, tenant_id=actor.tenant_id, skill_id=skill_id):
+        name, latest = await _custom(deps, actor, skill_id, verb="edited")
+        if latest != expected_version:
+            raise AgentEditError(
+                "This skill changed since you opened it. Reload to see the new version.",
+                kind="stale",
+            )
+        bodies: dict[str, bytes] = {
+            path: body.encode("utf-8") for path, body in files.items() if body is not None
+        }
+        too_big = sorted(path for path, body in bodies.items() if len(body) > MAX_EDIT_BYTES)
+        if too_big:
+            raise AgentEditError(
+                f"{too_big[0]} is over {MAX_EDIT_BYTES} bytes, the most the editor saves.",
+                kind="invalid",
+            )
+        kept = {path for path, body in files.items() if body is None}
+        if kept:
+            original = await download_files(
+                deps, actor=actor, skill_id=skill_id, version=expected_version
+            )
+            if not kept <= original.keys():
+                raise AgentEditError("A kept file is not in the skill.", kind="invalid")
+            bodies |= {path: original[path] for path in kept}
+        return await _publish(
+            deps,
+            actor=actor,
+            skill_id=skill_id,
+            name=name,
+            bodies=bodies,
+            audited=audited,
         )
-    bodies: dict[str, bytes] = {
-        path: body.encode("utf-8") for path, body in files.items() if body is not None
-    }
-    too_big = sorted(path for path, body in bodies.items() if len(body) > MAX_EDIT_BYTES)
-    if too_big:
-        raise AgentEditError(
-            f"{too_big[0]} is over {MAX_EDIT_BYTES} bytes, the most the editor saves.",
-            kind="invalid",
-        )
-    kept = {path for path, body in files.items() if body is None}
-    if kept:
-        original = await download_files(
-            deps, actor=actor, skill_id=skill_id, version=expected_version
-        )
-        if not kept <= original.keys():
-            raise AgentEditError("A kept file is not in the skill.", kind="invalid")
-        bodies |= {path: original[path] for path in kept}
-    return await _publish(
-        deps,
-        actor=actor,
-        skill_id=skill_id,
-        name=name,
-        bodies=bodies,
-        audited=audited,
-    )
 
 
 async def restore_library_version(
@@ -163,16 +188,18 @@ async def restore_library_version(
     audited: ChangeRecorder | None = None,
 ) -> SkillRef:
     """Publish an older version's files again as the next version."""
-    name, _latest = await _custom(deps, actor, skill_id, verb="edited")
-    old = await download_files(deps, actor=actor, skill_id=skill_id, version=version)
-    return await _publish(
-        deps,
-        actor=actor,
-        skill_id=skill_id,
-        name=name,
-        bodies=old,
-        audited=audited,
-    )
+    require_admin(actor, "The skill library")
+    async with _skill_lock(deps, tenant_id=actor.tenant_id, skill_id=skill_id):
+        name, _latest = await _custom(deps, actor, skill_id, verb="edited")
+        old = await download_files(deps, actor=actor, skill_id=skill_id, version=version)
+        return await _publish(
+            deps,
+            actor=actor,
+            skill_id=skill_id,
+            name=name,
+            bodies=old,
+            audited=audited,
+        )
 
 
 async def create_library_skill(
@@ -201,7 +228,9 @@ async def create_library_skill(
             deps.client, display_title=title, data=bundle.zip_bytes, scope=actor.scope()
         )
     except (anthropic.APIStatusError, ProviderError, ScopeViolation) as exc:
-        raise AgentEditError("The skill could not be created. Try again.", kind="conflict") from exc
+        raise AgentEditError(
+            "The skill could not be created. Try again.", kind="unavailable"
+        ) from exc
     version = created.latest_version or ""
     if audited is not None:
         async with deps.session_factory() as session, session.begin():

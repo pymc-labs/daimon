@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import re
 import zipfile
@@ -51,6 +52,7 @@ class _Library:
     title: str
     versions: dict[str, dict[str, bytes]] = field(default_factory=dict[str, dict[str, bytes]])
     created: list[str] = field(default_factory=list[str])
+    refuse_publish: bool = False
 
     def router(self) -> MARouter:
         router = MARouter()
@@ -91,6 +93,11 @@ class _Library:
         return httpx.Response(200, json={"data": rows, "has_more": False, "next_page": None})
 
     def _publish(self, request: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        if self.refuse_publish:
+            return httpx.Response(
+                400,
+                json={"type": "error", "error": {"type": "invalid_request_error", "message": "no"}},
+            )
         version = str(len(self.versions) + 1)
         self.versions[version] = _uploaded_files(request)
         created = VersionCreateResponse.model_validate(self._version(version))
@@ -161,6 +168,48 @@ async def test_a_save_against_an_older_version_is_refused_as_stale(
 
     assert refused.value.kind == "stale", "a later version is not overwritten"
     assert sorted(library.versions) == ["1", "2"], "nothing was published"
+
+
+async def test_a_provider_failure_is_unavailable_not_a_conflict(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    library, deps, actor = await _setup(db_session, db_session_factory)
+    library.refuse_publish = True
+
+    with pytest.raises(AgentEditError) as refused:
+        await skill_library_files.save_library_files(
+            deps,
+            actor=actor,
+            skill_id="sk_1",
+            files={"SKILL.md": _SKILL_MD + "More.\n", "ref.md": None},
+            expected_version="2",
+        )
+
+    assert refused.value.kind == "unavailable", "the editor keeps the draft and may retry"
+
+
+async def test_two_saves_of_one_version_publish_once(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    library, deps, actor = await _setup(db_session, db_session_factory)
+
+    results = await asyncio.gather(
+        *(
+            skill_library_files.save_library_files(
+                deps,
+                actor=actor,
+                skill_id="sk_1",
+                files={"SKILL.md": _SKILL_MD + text, "ref.md": None},
+                expected_version="2",
+            )
+            for text in ("One.\n", "Two.\n")
+        ),
+        return_exceptions=True,
+    )
+
+    refused = [r for r in results if isinstance(r, AgentEditError)]
+    assert [r.kind for r in refused] == ["stale"], "the second save is refused, not merged"
+    assert sorted(library.versions) == ["1", "2", "3"], "one version was published"
 
 
 async def test_a_save_keeps_unchanged_files_from_the_loaded_version(

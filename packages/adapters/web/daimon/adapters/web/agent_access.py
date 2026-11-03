@@ -27,6 +27,7 @@ _STATUS = {
     "conflict": 409,
     "taken": 409,
     "invalid": 422,
+    "unavailable": 503,
 }
 
 
