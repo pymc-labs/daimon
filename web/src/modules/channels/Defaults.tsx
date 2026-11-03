@@ -12,9 +12,9 @@ import { agentChoices, agentName, overrideCount, switchChange, unavailableText }
 import { Notice } from "./shared"
 import type { ChannelDefaults, ChannelSwitch } from "./types"
 
-const Overrides = ({ what, n }: { what: string; n: number }) => (
+const Overrides = ({ what, n }: { what: string; n: number }) => n > 0 && (
   <Link to={`/channels?override=${what}`} className="w-28 shrink-0 text-right text-xs whitespace-nowrap text-muted-foreground hover:text-foreground hover:underline">
-    {n ? `Set in ${plural(n, "channel")}` : "Not overridden"}
+    Set in {plural(n, "channel")}
   </Link>
 )
 
