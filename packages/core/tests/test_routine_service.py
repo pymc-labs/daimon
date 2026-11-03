@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -25,11 +26,13 @@ from daimon.core.routine_service import (
     destination_channel_of,
     get_routine,
     list_routines,
+    run_now,
     set_enabled,
     update_routine,
 )
 from daimon.core.rule_views import RuleViewer
 from daimon.core.stores.domain import RoutineDestinationKind
+from daimon.core.stores.routines import claim_due_fireable
 from daimon.core.turn_hold import TurnHold
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent
@@ -306,6 +309,68 @@ async def test_pause_resume_and_delete(
     await delete_routine(env, owner, row.id)
     with pytest.raises(RoutineRefused, match=NOT_FOUND):
         await get_routine(env, owner, row.id)
+
+
+async def test_run_now_makes_the_routine_due_and_the_schedule_carries_on(
+    db_session: AsyncSession, committing_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant_id = await _tenant(db_session)
+    await db_session.commit()
+    now = datetime(2030, 5, 6, 10, 30, tzinfo=UTC)
+    seen: list[str] = []
+
+    async def on_change(_session: AsyncSession, happened: str, _row: object) -> None:
+        seen.append(happened)
+
+    env = _env(committing_sessionmaker, tenant_id, now=lambda: now, on_change=on_change)
+    owner = _caller(tenant_id)
+    row = await create_routine(env, owner, _new())
+    assert row.next_fire_at is not None and row.next_fire_at > now
+
+    due = await run_now(env, owner, row.id)
+
+    assert due.next_fire_at == now, "the scheduler picks routines by their next-run time"
+    assert seen == ["created", "run_now"]
+    async with committing_sessionmaker() as session, session.begin():
+        [claimed] = await claim_due_fireable(session, now=now + timedelta(seconds=30))
+        assert claimed.id == row.id
+    async with committing_sessionmaker() as session:
+        after = await get_routine(env, owner, row.id)
+    assert after.next_fire_at == datetime(2030, 5, 7, 9, 0, tzinfo=UTC), (
+        "after the run the routine's own schedule is next"
+    )
+
+
+async def test_only_the_owner_or_an_admin_runs_a_routine_now(
+    db_session: AsyncSession, committing_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant_id = await _tenant(db_session)
+    await db_session.commit()
+    env = _env(committing_sessionmaker, tenant_id)
+    row = await create_routine(env, _caller(tenant_id), _new())
+
+    with pytest.raises(RoutineRefused) as refused:
+        await run_now(env, _caller(tenant_id, "u_other"), row.id)
+    assert str(refused.value) == NOT_FOUND
+    with pytest.raises(RoutineRefused) as ownerless:
+        await run_now(env, _caller(tenant_id, None), row.id)
+    assert str(ownerless.value) == NOT_FOUND
+
+    assert (await run_now(env, _caller(tenant_id, "u_admin", admin=True), row.id)).id == row.id
+
+
+async def test_a_paused_routine_is_not_run_now(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant_id = await _tenant(db_session)
+    env = _env(db_session_factory, tenant_id)
+    owner = _caller(tenant_id)
+    row = await create_routine(env, owner, _new())
+    await set_enabled(env, owner, row.id, enabled=False)
+
+    with pytest.raises(RoutineRefused, match="paused"):
+        await run_now(env, owner, row.id)
+    assert (await get_routine(env, owner, row.id)).next_fire_at is None
 
 
 async def test_update_recomputes_next_fire_and_clears_destination(

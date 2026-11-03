@@ -430,6 +430,33 @@ async def resume_routine(
     return RoutineRow.model_validate(orm)
 
 
+async def mark_due(
+    session: AsyncSession,
+    routine_id: _uuid.UUID,
+    *,
+    tenant_id: _uuid.UUID,
+    now: datetime,
+) -> RoutineRow | None:
+    """Make an enabled routine due at ``now``, so the next scheduler tick fires it.
+
+    The tick claims it like any slot and stamps the next cron slot, so the schedule
+    carries on. ``updated_at`` stays, so a run in flight is not treated as edited and
+    still skips this mark. Returns ``None`` for a missing, other-tenant or paused routine.
+    """
+    stmt = (
+        update(Routine)
+        .where(Routine.id == routine_id, Routine.tenant_id == tenant_id, Routine.enabled.is_(True))
+        .values(next_fire_at=now)
+        .returning(Routine)
+        .execution_options(synchronize_session=False)
+    )
+    orm = (await session.execute(stmt)).scalar_one_or_none()
+    if orm is None:
+        return None
+    await session.flush()
+    return RoutineRow.model_validate(orm)
+
+
 async def record_result(
     session: AsyncSession,
     routine_id: _uuid.UUID,

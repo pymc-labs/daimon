@@ -92,7 +92,7 @@ class DestinationResolver(Protocol):
     async def __call__(self, kind: RoutineDestinationKind, destination_id: str) -> Placement: ...
 
 
-Happened = Literal["created", "changed", "paused", "resumed", "deleted"]
+Happened = Literal["created", "changed", "paused", "resumed", "run_now", "deleted"]
 
 OnChange = Callable[[AsyncSession, Happened, RoutineRow], Awaitable[None]]
 """Runs inside the transaction that made the change, so a record of it commits with it."""
@@ -667,6 +667,30 @@ async def set_enabled(
             raise RoutineNotFound()
         await _record(env, session, "resumed" if enabled else "paused", changed)
         return changed
+
+
+async def run_now(env: RoutineEnv, caller: RoutineCaller, routine_id: uuid.UUID) -> RoutineRow:
+    """Make a routine due now. The scheduler picks it up by its next-run time on its next tick.
+
+    The owner or an admin, like any change. A paused routine is refused: resuming is
+    the person's call. The routine's own schedule continues after the run.
+    """
+    _require_allowed(caller)
+    viewer = (await _view(env)).viewer
+    async with env.sessionmaker() as session, session.begin():
+        row = await routines_store.get_routine(session, routine_id, tenant_id=caller.tenant_id)
+        if row is None or not sees_routine(viewer, row):
+            raise RoutineNotFound()
+        _require_owner(caller, row)
+        if not row.enabled:
+            raise RoutineRefused("This routine is paused. Resume it to run it.")
+        due = await routines_store.mark_due(
+            session, routine_id, tenant_id=caller.tenant_id, now=env.now()
+        )
+        if due is None:
+            raise RoutineNotFound()
+        await _record(env, session, "run_now", due)
+        return due
 
 
 async def delete_routine(env: RoutineEnv, caller: RoutineCaller, routine_id: uuid.UUID) -> None:
