@@ -1,7 +1,7 @@
 """F2 offline: Daimon's default capabilities on the OpenAI backend, MCP served for real.
 
 The F1 default-capability scenario (`mux.testing.conformance.default_capability`) runs
-against the OpenAI driver with the default agent's 11 skills and builtin tools,
+against the OpenAI driver with the default agent's 12 skills and builtin tools,
 exactly as the F1 OpenAI test scripts them. What F2 adds: the `daimon-mcp`
 attachment is authenticated (`credential_ref` resolved per session by the
 driver's `mcp_secrets`), and its two read tools are served by the disposable

@@ -289,12 +289,12 @@ live calls are discovered or scheduled by this harness.
 ## F1: default capability scenario
 
 This supplementary scenario is separate from the eighteen standard cases. It
-uses the actual `defaults/agents/daimon.yaml` name/system, all eleven skill trees
+uses the actual `defaults/agents/daimon.yaml` name/system, all twelve skill trees
 and six logical builtin capabilities. Only the probe model is overridden;
 production defaults are unchanged. The reserved `daimon-mcp` server and matching
 MCP toolset are attached explicitly to the disposable agent.
 
-`DefaultManifest` contains eleven `NamedSkill(name, upload)` bundles, the logical
+`DefaultManifest` contains twelve `NamedSkill(name, upload)` bundles, the logical
 builtin names, one `MCPConnection` and `skill_to_invoke="file-handling"`.
 `DefaultCapabilityAdapter` takes the driver, scope, probe model, optional
 environment, upstream transport evidence, optional typed pending reason,
@@ -311,7 +311,7 @@ facts obtained independently from actual upstream requests/readbacks, never a
 verdict inferred from the requested spec. Native settings must retain enabled
 and permission semantics in their mapped ToolSpecs.
 
-The runner creates and retrieves eleven distinct skills, requires immutable
+The runner creates and retrieves twelve distinct skills, requires immutable
 version pins, checks exact upstream bytes, creates/retrieves the default agent
 and creates one session. With atomic pinning enabled it passes and checks the
 agent revision. Without it, it passes `Revision(local=0)` with no native revision

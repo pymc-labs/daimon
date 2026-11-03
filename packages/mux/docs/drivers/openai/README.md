@@ -390,7 +390,7 @@ and `uv run --all-packages --all-extras python -O -m pytest packages/mux/tests/d
 ## F1 default-capability adapter
 
 `OpenAIDefaultCapabilityFactory` is an explicit offline adapter for the shared F1
-scenario. It uploads the actual eleven authored default skill bundles through
+scenario. It uploads the actual twelve authored default skill bundles through
 #584's multipart path, installs their immutable versions in one hosted session,
 and independently decodes upstream uploads and deployed agent configuration.
 The adapter declares `atomic_revision_pin=False`: its successful result reports

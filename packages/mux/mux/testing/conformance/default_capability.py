@@ -57,6 +57,7 @@ DEFAULT_SKILLS = (
     "data-cleaning",
     "exploratory-data-analysis",
     "eda-storytelling",
+    "team-etiquette",
 )
 BuiltinCapability = Literal["bash", "read", "edit", "grep", "glob", "write"]
 DEFAULT_TOOLS: tuple[BuiltinCapability, ...] = ("bash", "read", "edit", "grep", "glob", "write")
@@ -133,7 +134,7 @@ def skill_text(manifest: DefaultManifest) -> str:
     require(manifest.name == "daimon", "F1: expected authored default agent")
     require(
         tuple(s.name for s in manifest.skills) == DEFAULT_SKILLS,
-        "F1: default must bind all eleven authored skills",
+        "F1: default must bind all twelve authored skills",
     )
     require(manifest.builtin_tools == DEFAULT_TOOLS, "F1: default builtin toolset changed")
     require(manifest.mcp.name == "daimon-mcp", "F1: reserved MCP server missing")
@@ -424,7 +425,7 @@ async def scenario(
             "F1: retrieved skill pin changed",
         )
         pins.append(pin)
-    require(len({pin.id for pin in pins}) == 11, "F1: eleven distinct uploaded skills required")
+    require(len({pin.id for pin in pins}) == 12, "F1: twelve distinct uploaded skills required")
     require(
         transport.skill_uploads == tuple(s.upload for s in manifest.skills),
         "F1: upstream skill bytes changed",
@@ -491,7 +492,7 @@ async def scenario(
         "F1",
         "pass",
         (
-            "eleven exact skill uploads and immutable pins",
+            "twelve exact skill uploads and immutable pins",
             "default toolset and daimon-mcp deployment/readback",
             "one root: skill read, two read-only MCP tools, "
             "six mapped builtin capabilities and completion",
