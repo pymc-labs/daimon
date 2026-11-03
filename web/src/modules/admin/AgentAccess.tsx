@@ -22,7 +22,7 @@ const KEY = ["admin", "agent-access"]
 
 /** Where an agent may be reached from the web, in a few words. */
 function whoText(a: AgentAccess): string {
-  if (a.fixed_to) return `Only in ${channelLabel(a.fixed_name)}`
+  if (a.fixed_to) return `Kept to ${channelLabel(a.fixed_name)}`
   if (!a.web) return "Nobody"
   return a.who === "groups" ? (a.groups.join(", ") || "No groups") : WHO[a.who]
 }
@@ -103,7 +103,7 @@ function AccessBody({ a, save }: { a: AgentAccess; save: (b: Partial<AgentAccess
       </div>
       {a.fixed_to ? (
         <PanelSection title="Runs in">
-          <div className="flex items-center gap-2 text-sm"><Lock className="size-4 text-faint" aria-label="Locked" />Only in {channelLabel(a.fixed_name)}</div>
+          <div className="flex items-center gap-2 text-sm"><Lock className="size-4 text-faint" aria-label="Locked" />Kept to {channelLabel(a.fixed_name)}</div>
         </PanelSection>
       ) : (
         <>

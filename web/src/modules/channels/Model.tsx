@@ -16,13 +16,13 @@ export function Model({ c, s }: { c: ChannelDetail; s: ChannelSettings }) {
   const text = [pin.backend, pin.model].filter(Boolean).join(", ")
 
   const clear = async () => {
-    if (!(await confirm({ title: "Clear the fixed model?", body: text, action: "Clear", destructive: true }))) return
+    if (!(await confirm({ title: "Clear the model fixed by the operator?", body: text, action: "Clear", destructive: true }))) return
     setOut(await save.run("post", "provider-pin/clear", { expected_local: pin.local }))
   }
   return (
     <PanelSection title="Model">
       <div className="text-sm">
-        <Line label="Fixed model">
+        <Line label="Model fixed by the operator">
           <span className="flex min-w-0 items-center gap-2">
             <span className="truncate">{text}</span>
             {c.can_manage && <Button size="xs" variant="outline" disabled={save.pending} onClick={() => void clear()}>Clear</Button>}
