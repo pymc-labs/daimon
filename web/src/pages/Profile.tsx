@@ -102,7 +102,7 @@ function Body({ d }: { d: Profile }) {
         ))}
         {d.connections.map((c) => (
           <Row key={`${c.kind}:${c.agent?.id}:${c.key}`}>
-            <span className="min-w-0 flex-1 truncate">{c.label}{c.agent && <span className="text-muted-foreground"> for <AgentLink id={c.agent.id} name={c.agent.name} /></span>}</span>
+            <span className="flex min-w-0 flex-1 items-center gap-1.5 truncate">{c.label}{c.agent && <><span className="text-muted-foreground">for</span><AgentLink id={c.agent.id} name={c.agent.name} /></>}</span>
             <Button variant="ghost" size="sm" disabled={disconnect.isPending} aria-label={`Disconnect ${c.label}`} onClick={async () => {
               if (await confirm({ title: `Disconnect ${c.label}?`, action: "Disconnect", destructive: true })) disconnect.mutate(c)
             }}>Disconnect</Button>

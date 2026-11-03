@@ -95,7 +95,7 @@ function AuditTable({ data }: { data: AuditEntry[] }) {
               <Facts rows={[
                 ["Source", SOURCES[e.source]],
                 ["Who", e.actor_id ? <PersonLink key="who" id={e.actor_id} name={e.who} /> : e.who],
-                ["Target", <Target key="target" t={e.target} />],
+                ["Target", e.target.name ? <Target key="target" t={e.target} /> : null],
                 ["When", absolute(e.at, true)],
                 ...(e.facts ?? [["Detail", e.detail] as [string, string | undefined]]),
               ]} />

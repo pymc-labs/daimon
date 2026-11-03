@@ -13,7 +13,7 @@ import { api } from "@/lib/api"
 import { channelLabel } from "@/lib/format"
 import { useGroups } from "@/lib/hooks"
 import type { AgentAccess } from "./types"
-import { AgentLink, ChannelLink } from "@/components/links"
+import { ChannelLink } from "@/components/links"
 import { Facts, PanelHead, PanelSection, Tag } from "@/components/panel"
 
 // Agent access
@@ -97,7 +97,7 @@ function AccessBody({ a, save }: { a: AgentAccess; save: (b: Partial<AgentAccess
     <div>
       <PanelHead
         avatar={<AgentAvatar src={a.agent.avatar} name={a.agent.name} className="size-10 rounded-lg text-sm" />}
-        title={<AgentLink id={a.agent.id} name={a.agent.name} />}
+        title={a.agent.name}
         subtitle={a.agent.model}
       />
       <PanelSection>
