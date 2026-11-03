@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Settings, redeeming and audit in the web app.** Admin > Settings gains an Access group
+  (who may start turns, shown by person, plus direct messages, read-only DM memory and typed
+  mentions) and a Providers group (which providers the workspace may use). The old "Default
+  agent" setting is now "Web chat agent". Credits can redeem a promo code and shows how the
+  workspace is funded. Admin > Audit adds chat tool calls and panel writes next to the web
+  changes, with filters for source, person, action and date. A routine's panel has **Run
+  now** for its owner or an admin.
+- **Monthly limits per member are allowances.** The per-member cap and the web Credits
+  allowances were two limits on the same spend. Migration 0159 converts each cap into a
+  monthly allowance (the default for everyone, or one for a person), keeping the stricter
+  limit where an allowance already existed, and the turn gate no longer has a separate cap
+  step. `daimon tenants cap` now writes the allowance. Allowances count billed dollars, so a
+  markup above 1 makes a converted limit stricter than the cap was.
 - **Routines in the web app.** A Routines page lists scheduled prompts with their schedule in
   words, destination, next run and last result. Members work with their own routines, admins
   with all, and a person needs a linked chat account on the workspace's platform to add one.

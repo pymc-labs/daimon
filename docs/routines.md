@@ -36,7 +36,9 @@ numbers"). Each platform also has a panel:
   admins create and delete. The form's schedule field takes cron, such as
   `0 9 * * 1-5`, and the panel shows schedules in words.
 - **Web app** Routines page: members create and manage their own, admins all.
-  Creating needs a linked chat account, which the routine runs as.
+  Creating needs a linked chat account, which the routine runs as. **Run now**
+  in a routine's panel makes it due at once, and the scheduler fires it on its
+  next tick. A paused routine cannot run, and the routine's own schedule carries on.
 - **Discord** `/routines` is read-mostly: pick a routine, pause or resume it,
   or view its last output. Create one by asking the agent.
 
@@ -209,6 +211,7 @@ are in [configuration.md](configuration.md#scheduler).
 | list and read last output | admin or the creator | `Manage Server`, the command's invoker only | admin or the creator |
 | pause and resume | admin or the creator | admin or the creator | admin or the creator |
 | delete | admin or the creator | not offered | admin or the creator |
+| run now | admin or the creator, web app only | not offered | not offered |
 
 Ownerless routines and callers with no platform user id are admin-only. A
 refusal reads as "not found", so a forbidden routine looks the same as a missing

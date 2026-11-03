@@ -97,6 +97,20 @@ The subject token is a JWT signed with the identity key: `iss` is the entry's
 workspace, such as `discord:123`. Only workspaces the entry serves get a token.
 A refused exchange is tried again after five minutes.
 
+## Admin settings and audit
+
+Admins change the workspace's rules under **Admin** > **Settings**. The same
+checks apply as in chat, and each change is recorded.
+
+- **Access**: who may start turns, direct messages, read-only memory in DMs
+  and typed mentions. Direct messages show only on Discord and Slack.
+- **Providers**: which model providers the workspace may use.
+- **Web chat agent**: the agent a new web chat opens with. It is not the
+  workspace's default agent in chat.
+
+**Admin** > **Audit** lists changes made in the web app together with chat
+tool calls and panel writes. Filter by source, person, action and date.
+
 ## Troubleshooting
 
 | Symptom | Fix |
