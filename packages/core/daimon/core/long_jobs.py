@@ -14,7 +14,7 @@ import structlog
 from daimon.core.config import LongJobsSettings
 from daimon.core.errors import StoreError
 from daimon.core.long_job_models import LongJob, LongJobManifest, LongJobState
-from daimon.core.spend_gate import SpendBlock, SpendRequest, spend_gate
+from daimon.core.spend_gate import SpendBlock, SpendCheck, SpendRequest, spend_gate
 from daimon.core.stores import long_jobs as store
 from daimon.core.stores.tenants import list_tenants_by_platform
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -61,7 +61,7 @@ async def require_admission(
         channel_id=None,
         agent_id=job.agent_id,
     )
-    checks: frozenset[SpendBlock] = frozenset({"balance_depleted", "allowance_exhausted"})
+    checks: frozenset[SpendCheck] = frozenset({"balance_depleted", "allowance_exhausted"})
 
     async def gate(db: AsyncSession) -> SpendBlock | None:
         return await spend_gate(
@@ -75,6 +75,8 @@ async def require_admission(
             blocked = await gate(db)
     if blocked == "balance_depleted":
         raise StoreError("Long job refused: tenant balance depleted")
+    if blocked == "cap_exceeded":
+        raise StoreError("Long job refused: owner monthly cap exceeded")
     if blocked == "allowance_exhausted":
         raise StoreError("Long job refused: owner spend allowance used up")
 

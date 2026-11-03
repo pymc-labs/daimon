@@ -641,7 +641,7 @@ async def test_rls_rejects_cross_tenant_reads_and_writes(db_engine, db_clean):
             await conn.execute(text(f'DROP ROLE IF EXISTS "{role}"'))
 
 
-async def test_spend_allowance_gate_refuses_owner(db_engine, db_clean):
+async def test_a_spent_person_limit_refuses_owner_as_the_monthly_cap(db_engine, db_clean):
     from daimon.core.allowance_limits import set_person_limit
 
     sm = async_sessionmaker(db_engine, expire_on_commit=False)
@@ -653,6 +653,26 @@ async def test_spend_allowance_gate_refuses_owner(db_engine, db_clean):
             platform_user_id=job.owner_external_user_id,
             amount=Decimal("0"),
             now=datetime.now(UTC),
+        )
+    with pytest.raises(StoreError, match="monthly cap exceeded"):
+        await require_admission(sm, job)
+
+
+async def test_spend_allowance_gate_refuses_owner(db_engine, db_clean):
+    from daimon.core.stores import spend_allowances
+
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    job = await seed(sm)
+    async with sm.begin() as db:
+        await spend_allowances.create_allowance(
+            db,
+            tenant_id=job.tenant_id,
+            subject_kind="person",
+            subject_id=job.owner_external_user_id,
+            agent_id=None,
+            amount_usd=Decimal("0"),
+            window="total",
+            starts_at=datetime.now(UTC) - timedelta(days=1),
         )
     with pytest.raises(StoreError, match="spend allowance used up"):
         await require_admission(sm, job)

@@ -2684,6 +2684,9 @@ class SlackApp:
                         "balance_depleted": admission_refusal_message(
                             "balance_depleted", self.runtime.settings, foreign=standing.foreign
                         ),
+                        "cap_exceeded": admission_refusal_message(
+                            "cap_exceeded", self.runtime.settings, foreign=standing.foreign
+                        ),
                         "allowance_exhausted": admission_refusal_message(
                             "allowance_exhausted", self.runtime.settings, foreign=standing.foreign
                         ),

@@ -128,7 +128,12 @@ from daimon.core.session_ports_compat import retrieve_session_record, session_sc
 from daimon.core.skill_sync.resync_queue import drain_github_push_resync_queue
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from daimon.core.slack_event_dedup_sweep import sweep_expired_slack_event_dedup
-from daimon.core.spend_gate import SpendBlock, SpendRequest, spend_gate_in_new_session
+from daimon.core.spend_gate import (
+    SpendBlock,
+    SpendCheck,
+    SpendRequest,
+    spend_gate_in_new_session,
+)
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.direct_messages import dm_enabled
@@ -254,31 +259,44 @@ def _routine_sandbox(
     return RoutineSandbox(pin=pin, on_drift=on_drift)
 
 
+async def _spend_block(
+    sm: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    row: RoutineRow,
+    *,
+    platform: str,
+    check: SpendCheck,
+    agent_id: str | None = None,
+) -> SpendBlock | None:
+    """What one check of the spend gate stops this routine's fire with, if anything.
+
+    The allowance check answers `cap_exceeded` when the creator's monthly limit is what
+    has no room.
+    """
+    return await spend_gate_in_new_session(
+        sm,
+        request=SpendRequest(
+            tenant_id=row.tenant_id,
+            platform_user_id=row.created_by_user_id,
+            platform=platform,
+            channel_id=row.channel_id,
+            agent_id=agent_id,
+        ),
+        markup=settings.billing.markup,
+        checks=frozenset({check}),
+    )
+
+
 async def _blocked(
     sm: async_sessionmaker[AsyncSession],
     settings: Settings,
     row: RoutineRow,
     *,
     platform: str,
-    check: SpendBlock,
-    agent_id: str | None = None,
+    check: SpendCheck,
 ) -> bool:
     """Whether one check of the spend gate stops this routine's fire."""
-    return (
-        await spend_gate_in_new_session(
-            sm,
-            request=SpendRequest(
-                tenant_id=row.tenant_id,
-                platform_user_id=row.created_by_user_id,
-                platform=platform,
-                channel_id=row.channel_id,
-                agent_id=agent_id,
-            ),
-            markup=settings.billing.markup,
-            checks=frozenset({check}),
-        )
-        == check
-    )
+    return await _spend_block(sm, settings, row, platform=platform, check=check) is not None
 
 
 async def _build_fire(
@@ -754,29 +772,33 @@ async def _build_fire(
         # billed to (the destination's parent, else where the routine was made).
         if await _refused_over_channel_budget(row, platform=platform):
             return
-        # The creator's spend allowance, last, on the agent the fire resolved.
-        if await _blocked(
+        # The creator's spend allowance and monthly limit, last, on the agent the fire
+        # resolved. A spent monthly limit is `cap_exceeded`, as it was before the limit
+        # joined the allowances.
+        spend_block = await _spend_block(
             sm,
             settings,
             row,
             platform=platform,
             check="allowance_exhausted",
             agent_id=resolved_agent_id,
-        ):
+        )
+        if spend_block is not None:
+            capped = spend_block == "cap_exceeded"
+            reason = (
+                TerminationReason.ADMISSION_CAP_EXCEEDED
+                if capped
+                else TerminationReason.ADMISSION_DENIED
+            )
             if (observation := current_outcome.get()) is not None:
-                observation.finish(reason=TerminationReason.ADMISSION_DENIED)
+                observation.finish(reason=reason)
             log.info(
-                "routine.skipped.allowance_exhausted",
+                "routine.skipped.cap_exceeded" if capped else "routine.skipped.allowance_exhausted",
                 routine_id=str(row.id),
                 tenant_id=str(row.tenant_id),
             )
             async with sm() as s, s.begin():
-                await record_routine_failure(
-                    s,
-                    row,
-                    error="allowance_exhausted",
-                    reason=TerminationReason.ADMISSION_DENIED,
-                )
+                await record_routine_failure(s, row, error=spend_block, reason=reason)
             return
         if resolved_agent_id != row.agent_id:
             async with sm() as heal_s, heal_s.begin():

@@ -57,6 +57,7 @@ BATCH_MAX_QUIET_PERIODS: Final[int] = 6
 
 _SKIPS: dict[SpendBlock, str] = {
     "balance_depleted": "over_balance",
+    "cap_exceeded": "over_cap",
     "budget_exceeded": "over_channel_budget",
     "allowance_exhausted": "allowance_exhausted",
 }

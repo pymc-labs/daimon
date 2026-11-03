@@ -293,11 +293,13 @@ def _admission_recheck(  # pyright: ignore[reportUnusedFunction]
 
 _GATE_LOG: dict[SpendBlock, str] = {
     "balance_depleted": "balance",
+    "cap_exceeded": "cap",
     "budget_exceeded": "channel_budget",
     "allowance_exhausted": "allowance",
 }
 _BLOCK_REASON: dict[SpendBlock, TerminationReason] = {
     "balance_depleted": TerminationReason.ADMISSION_BALANCE_DEPLETED,
+    "cap_exceeded": TerminationReason.ADMISSION_CAP_EXCEEDED,
     "budget_exceeded": TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED,
     "allowance_exhausted": TerminationReason.ADMISSION_DENIED,
 }
@@ -346,8 +348,8 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
     - Then runs the one spend gate (``daimon.core.spend_gate``): balance,
       the channel budget of the isolated channel whose own agent this is (an
       exempt caller's hub or DM run included, else a key's bound channel),
-      then the person's spend allowances, on ``agent_id`` when the caller
-      knows the agent (a derived id on a key does not name it);
+      then the person's spend allowances and monthly limit, on ``agent_id`` when
+      the caller knows the agent (a derived id on a key does not name it);
       each denial raises a ``TERMINAL ERROR:`` ``ToolError`` and logs a deny
       event carrying only ids (tenant/user/tool/gate) — never prompt content
       or raw Gemini text (Pitfall 9).
@@ -399,6 +401,8 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
             f"TERMINAL ERROR: This {nouns.scope}'s daimon credit is depleted. "
             f"An admin can top up with {nouns.billing}."
         )
+    if block == "cap_exceeded":
+        raise ToolError(f"TERMINAL ERROR: {admission_refusal_text('cap_exceeded', nouns)}")
     if block == "allowance_exhausted":
         raise ToolError(f"TERMINAL ERROR: {admission_refusal_text('allowance_exhausted', nouns)}")
     raise ToolError(
@@ -448,10 +452,8 @@ async def _gate_origin_spend(  # pyright: ignore[reportUnusedFunction]
         gate=_GATE_LOG[block],
     )
     _refused(sessionmaker, auth, tool_name, _BLOCK_REASON[block])
-    if block == "allowance_exhausted":
-        raise ToolError(
-            f"TERMINAL ERROR: {admission_refusal_text('allowance_exhausted', _refusal_nouns(auth))}"
-        )
+    if block in ("cap_exceeded", "allowance_exhausted"):
+        raise ToolError(f"TERMINAL ERROR: {admission_refusal_text(block, _refusal_nouns(auth))}")
     raise ToolError(budget_message)
 
 

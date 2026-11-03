@@ -2,9 +2,10 @@
 
 Chat turns, thread participation, routines, MCP tool calls and the web all stop on
 the same three checks, in this order: the workspace's prepaid balance, the channel's
-budget, and the person's spend allowances (which carry the per-member monthly limits). Each surface
-words its own refusal; this module only decides. Exceptions propagate: the gate
-fails closed.
+budget, and the person's spend allowances (which carry the per-member monthly limits).
+A refusal that comes from the monthly limit is reported as `cap_exceeded`, not as an
+allowance. Each surface words its own refusal; this module only decides. Exceptions
+propagate: the gate fails closed.
 
 A caller that must not re-run every check (a queued turn that was admitted moments
 ago) passes `checks` to run only some, so a surface's behaviour changes only where it
@@ -31,10 +32,13 @@ from daimon.core.stores import identity, spend_allowances, web_identities, web_p
 from daimon.core.tenant_balance import is_over_balance
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-SpendBlock = Literal["balance_depleted", "budget_exceeded", "allowance_exhausted"]
+SpendCheck = Literal["balance_depleted", "budget_exceeded", "allowance_exhausted"]
+SpendBlock = SpendCheck | Literal["cap_exceeded"]
+"""What stopped a request. `cap_exceeded` comes out of the allowance check, so it is a
+result but never one of the `checks` a caller asks for."""
 
-ALL_CHECKS: frozenset[SpendBlock] = frozenset(get_args(SpendBlock))
-AFTER_QUEUE_CHECKS: frozenset[SpendBlock] = frozenset({"balance_depleted", "allowance_exhausted"})
+ALL_CHECKS: frozenset[SpendCheck] = frozenset(get_args(SpendCheck))
+AFTER_QUEUE_CHECKS: frozenset[SpendCheck] = frozenset({"balance_depleted", "allowance_exhausted"})
 """What a queued turn is checked against again once it holds its slot: the money that
 can run out while it waited. The channel budget was decided at admission."""
 
@@ -180,9 +184,13 @@ async def spend_gate(
     request: SpendRequest,
     markup: Decimal,
     now: datetime,
-    checks: frozenset[SpendBlock] = ALL_CHECKS,
+    checks: frozenset[SpendCheck] = ALL_CHECKS,
 ) -> SpendBlock | None:
-    """The first check that stops this request, or None when it may spend."""
+    """The first check that stops this request, or None when it may spend.
+
+    The allowance check also holds the member's monthly limit; when that limit, not an
+    allowance, has no room left the block is `cap_exceeded`.
+    """
     if "balance_depleted" in checks and await is_over_balance(
         tenant_id=request.tenant_id, session=session
     ):
@@ -195,12 +203,10 @@ async def spend_gate(
         session=session,
     ):
         return "budget_exceeded"
-    if (
-        "allowance_exhausted" in checks
-        and request.platform_user_id is not None
-        and (await person_verdict(session, request=request, markup=markup, now=now)).blocked
-    ):
-        return "allowance_exhausted"
+    if "allowance_exhausted" in checks and request.platform_user_id is not None:
+        verdict = await person_verdict(session, request=request, markup=markup, now=now)
+        if verdict.blocked:
+            return "cap_exceeded" if verdict.capped else "allowance_exhausted"
     return None
 
 
@@ -210,7 +216,7 @@ async def spend_gate_in_new_session(
     request: SpendRequest,
     markup: Decimal,
     now: datetime | None = None,
-    checks: frozenset[SpendBlock] = ALL_CHECKS,
+    checks: frozenset[SpendCheck] = ALL_CHECKS,
 ) -> SpendBlock | None:
     """`spend_gate` for a caller that holds no session; `now` defaults to the present."""
     async with sessionmaker() as session:

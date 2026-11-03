@@ -401,6 +401,7 @@ async def test_wait_for_slot_uses_the_held_ticket() -> None:
         (None, "started"),
         ("balance_depleted", "balance_depleted"),
         ("allowance_exhausted", "allowance_exhausted"),
+        ("cap_exceeded", "cap_exceeded"),
     ],
 )
 async def test_a_queued_turn_is_checked_by_admissions_recheck(

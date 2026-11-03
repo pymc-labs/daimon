@@ -1526,14 +1526,24 @@ async def test_fire_rejects_routine_when_tenant_balance_depleted(
     await fake_client.close()
 
 
-@pytest.mark.parametrize("amount", [Decimal("0"), Decimal("5")], ids=["exhausted", "room"])
+@pytest.mark.parametrize(
+    ("amount", "is_cap", "error"),
+    [
+        (Decimal("0"), False, "allowance_exhausted"),
+        (Decimal("0"), True, "cap_exceeded"),
+        (Decimal("5"), False, None),
+    ],
+    ids=["exhausted", "capped", "room"],
+)
 async def test_fire_is_stopped_by_the_creators_exhausted_allowance(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     amount: Decimal,
+    is_cap: bool,
+    error: str | None,
 ) -> None:
-    """The creator's spend allowance gates a fire after balance and channel budget."""
+    """The creator's allowance or monthly cap gates a fire after balance and channel budget."""
     now = datetime(2026, 5, 30, 12, 0, 0, tzinfo=UTC)
     tenant = await make_tenant(db_session)
     await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
@@ -1544,8 +1554,9 @@ async def test_fire_is_stopped_by_the_creators_exhausted_allowance(
         subject_id="u4",
         agent_id=None,
         amount_usd=amount,
-        window="total",
+        window="month" if is_cap else "total",
         starts_at=now - timedelta(days=1),
+        is_cap=is_cap,
     )
     row = await create_routine(
         db_session,
@@ -1590,9 +1601,9 @@ async def test_fire_is_stopped_by_the_creators_exhausted_allowance(
     async with db_session_factory() as s:
         fetched = await get_routine(s, row.id, tenant_id=tenant.id)
     assert fetched is not None
-    if amount == 0:
-        assert calls == [], "an exhausted allowance must refuse the fire"
-        assert fetched.last_error == "allowance_exhausted"
+    if error is not None:
+        assert calls == [], "an exhausted allowance or cap must refuse the fire"
+        assert fetched.last_error == error, "the failure names the cap apart from an allowance"
         return
     assert fetched.last_error is None, "an allowance with room lets the fire run"
     assert len(calls) == 1

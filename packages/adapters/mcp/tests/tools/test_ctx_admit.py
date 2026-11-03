@@ -581,6 +581,35 @@ async def test_ungated_hub_admin_keeps_lookup_exemption(
     names.assert_not_awaited()
 
 
+async def test_admit_with_a_spent_monthly_cap_refuses_in_the_limit_words(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    auth = await _member(db_session, policy=None)
+    await spend_allowances.create_allowance(
+        db_session,
+        tenant_id=auth.tenant_id,
+        subject_kind="person",
+        subject_id="u1",
+        agent_id=None,
+        amount_usd=Decimal(0),
+        window="month",
+        starts_at=datetime.now(UTC) - timedelta(days=1),
+        is_cap=True,
+    )
+    await db_session.commit()
+    with _BALANCE_OK, pytest.raises(ToolError) as refused:
+        await _admit(
+            auth,
+            sessionmaker=db_session_factory,
+            billing_config=None,
+            markup=Decimal(1),
+            tool_name="ask",
+        )
+    assert str(refused.value) == (
+        "TERMINAL ERROR: You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
+    ), "a spent cap keeps its own wording, not the allowance's"
+
+
 async def test_admit_with_an_exhausted_allowance_refuses_in_the_shared_words(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
