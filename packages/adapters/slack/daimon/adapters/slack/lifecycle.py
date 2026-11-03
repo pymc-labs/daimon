@@ -81,6 +81,7 @@ from daimon.core.cost_footer import cost_footer_shown
 from daimon.core.native_footer_cost import native_footer_text
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_alerts import alert_ops
+from daimon.core.outbound.opt_out import tag_opt_outs
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.card_state import CardState as State
@@ -552,6 +553,18 @@ class SlackTurnLifecycle(OutputGate):
             except Exception:
                 log.warning("turn.balance_footer_failed", exc_info=True)
 
+    async def _author_opted_out(self) -> bool:
+        """A person who asked never to be tagged gets the answer without the ping."""
+        if self._tenant_id is None:
+            return False
+        skip = await tag_opt_outs(
+            self._sessionmaker,
+            tenant_id=self._tenant_id,
+            platform="slack",
+            user_ids=[self._author_id],
+        )
+        return bool(skip)
+
     async def _flush_terminal(
         self,
         fallback_text: str | None = None,
@@ -680,7 +693,9 @@ class SlackTurnLifecycle(OutputGate):
             if final_response:
                 answer_parts.append(final_response)
             final_text = "\n\n".join(answer_parts)
-            notify_on_completion = self._notify_on_completion and not cancelled
+            notify_on_completion = (
+                self._notify_on_completion and not cancelled and not await self._author_opted_out()
+            )
             if cancelled and not final_text:
                 await self._flush_cancelled()
                 self.final_ts = self._status_ts

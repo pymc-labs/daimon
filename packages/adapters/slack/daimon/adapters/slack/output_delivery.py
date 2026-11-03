@@ -184,8 +184,10 @@ class _SweepMention:
     them; a Slack mention always pings, so the posts after it do not repeat it.
     """
 
-    def __init__(self, requester_user_id: str | None) -> None:
-        self._mention = f"<@{requester_user_id}>" if requester_user_id else None
+    def __init__(self, requester_user_id: str | None, label: str | None = None) -> None:
+        # ``label`` is the mention as it should read: a plain name for someone
+        # who asked never to be tagged.
+        self._mention = (label or f"<@{requester_user_id}>") if requester_user_id else None
 
     @property
     def pending(self) -> str | None:
@@ -267,6 +269,7 @@ async def deliver_session_outputs(
     team_id: str,
     noticed_files: NoticedFiles | None = None,
     requester_user_id: str | None = None,
+    requester_label: str | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> None:
     """Sweep the session's outputs into the thread, degrading on abort codes.
@@ -281,7 +284,7 @@ async def deliver_session_outputs(
     ``noticed_files`` records the kept oversize outputs already announced, so
     a file over the limit gets one notice rather than one per sweep.
     """
-    mention = _SweepMention(requester_user_id)
+    mention = _SweepMention(requester_user_id, requester_label)
     post = build_output_poster(
         web_client, channel_id=channel_id, thread_ts=thread_ts, mention=mention
     )
