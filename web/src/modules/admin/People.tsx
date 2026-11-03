@@ -9,15 +9,21 @@ import { Facet, FilterBar, SearchInput } from "@/components/filters"
 import { rowProps, useListParam, useParam } from "@/lib/filters"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Link } from "react-router"
+import { AgentLink } from "@/components/links"
+import { PanelHead } from "@/components/panel"
+import { useAgents } from "@/modules/agents/api"
+import type { Allowance, SpendRow } from "@/modules/credits/types"
+import { plural, usd } from "@/lib/format"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { api } from "@/lib/api"
-import { usePaged } from "@/lib/hooks"
+import { useCan, usePaged } from "@/lib/hooks"
 import type { Role } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import type { AdminPerson } from "./types"
 import { ROLE } from "./roles"
-import { PanelSection as Section, Tag } from "./shared"
+import { Facts, PanelSection as Section, Tag } from "./shared"
 
 const usePeople = () => usePaged<AdminPerson>(["admin", "people"], "/api/admin/people")
 // People
@@ -27,13 +33,16 @@ export function People() {
   const { data } = query
   const [q, setQ] = useParam("q")
   const [role, setRole] = useListParam("role")
+  const [group, setGroup] = useListParam("group")
   const [, setPerson] = useParam("person")
-  const rows = (data ?? []).filter((p) => (!q || `${p.name} ${p.email}`.toLowerCase().includes(q.toLowerCase())) && (!role.length || role.includes(p.role)))
+  const rows = (data ?? []).filter((p) => (!q || `${p.name} ${p.email}`.toLowerCase().includes(q.toLowerCase())) && (!role.length || role.includes(p.role)) && (!group.length || p.groups.some((g) => group.includes(g))))
+  const groups = [...new Set((data ?? []).flatMap((p) => p.groups))].sort()
   return (
     <>
       <FilterBar className="px-0 pt-0">
         <SearchInput value={q} onChange={(v) => setQ(v || null)} className="w-56" />
         <Facet label="Role" value={role} onChange={setRole} options={Object.entries(ROLE).map(([value, label]) => ({ value, label }))} />
+        {groups.length > 0 && <Facet label="Group" value={group} onChange={setGroup} options={groups.map((g) => ({ value: g, label: g }))} />}
         <span className="ml-auto text-xs text-muted-foreground tabular">{rows.length} people</span>
       </FilterBar>
       <QueryState query={query} isEmpty={() => !rows.length} empty="No people">{() => (
@@ -91,52 +100,75 @@ function PersonView({ id }: { id: string }) {
 
 function PersonBody({ p, save }: { p: AdminPerson; save: { mutate: (b: Partial<AdminPerson>) => void } }) {
   const confirm = useConfirm()
+  const can = useCan()
+  const agents = useAgents()
+  const allowances = useQuery({ queryKey: ["credits", "allowances"], queryFn: () => api.get<Allowance[]>("/api/credits/allowances"), enabled: can("credits.manage") })
+  const spend = useQuery({
+    queryKey: ["credits", "spend", "person", "this"], queryFn: () => api.get<SpendRow[]>("/api/credits/spend?by=person&period=this"),
+    enabled: can("credits.manage"),
+  })
+  const owned = (agents.data ?? []).filter((a) => a.owner.id === p.id)
+  const theirs = (allowances.data ?? []).filter((a) => a.subject.kind === "person" && a.subject.id === p.id)
+  const spent = spend.data?.find((r) => r.id === p.id)
   return (
     <div>
-      <div className="flex items-center gap-3 px-5 py-5">
-        <Avatar name={p.name} className="size-10 text-sm" />
-        <div className="min-w-0">
-          <div className="truncate text-base font-semibold">{p.name}</div>
-          <div className="truncate text-sm text-muted-foreground">{p.email}</div>
-        </div>
-        {p.status === "suspended" && <span className="ml-auto"><Tag>Suspended</Tag></span>}
-      </div>
-      <Section title="Role">
-        <Select value={p.role} onValueChange={(v) => save.mutate({ role: v as Role })} disabled={p.role === "owner"}>
-          <SelectTrigger className="w-48"><SelectValue /></SelectTrigger>
-          <SelectContent>{Object.entries(ROLE).map(([v, l]) => <SelectItem key={v} value={v}>{l}</SelectItem>)}</SelectContent>
-        </Select>
+      <PanelHead
+        avatar={<Avatar name={p.name} className="size-10 text-sm" />}
+        title={p.name}
+        subtitle={p.email}
+        tags={p.status === "suspended" ? <Tag>Suspended</Tag> : undefined}
+        actions={p.status === "suspended" && <Button variant="outline" size="sm" onClick={() => save.mutate({ status: "active" })}>Restore</Button>}
+        menu={p.role !== "owner" && p.status === "active" ? [{
+          label: "Suspend", destructive: true,
+          onSelect: async () => { if (await confirm({ title: `Suspend ${p.name}?`, body: "Their threads stop on every platform.", action: "Suspend", destructive: true })) save.mutate({ status: "suspended" }) },
+        }] : undefined}
+      />
+      <Section>
+        <Facts rows={[
+          ["Role", (
+            <Select key="role" value={p.role} onValueChange={(v) => save.mutate({ role: v as Role })} disabled={p.role === "owner"}>
+              <SelectTrigger size="sm" className="w-40"><SelectValue /></SelectTrigger>
+              <SelectContent>{Object.entries(ROLE).map(([v, l]) => <SelectItem key={v} value={v}>{l}</SelectItem>)}</SelectContent>
+            </Select>
+          )],
+          ["Groups", p.groups.length ? <span key="groups" className="flex flex-wrap gap-1.5">{p.groups.map((g) => <Tag key={g}>{g}</Tag>)}</span> : "None"],
+          ["Sign-in", (
+            <span key="signin" className="flex flex-col gap-1">
+              {p.identities.map((i) => (
+                <span key={i.provider} className="flex items-center gap-2">
+                  <IdentityIcon identity={i} />{i.provider_label}<span className="truncate text-muted-foreground">{i.label}</span>
+                </span>
+              ))}
+            </span>
+          )],
+          ["Credit", p.credit ? <CreditMeter key="credit" meter={{ ...p.credit, window: p.role === "visitor" ? "total" : "month", resets_at: null }} /> : null],
+          ["Last seen", <Ago key="seen" iso={p.last_seen} />],
+        ]} />
       </Section>
-      <Section title="Groups">
-        <div className="flex flex-wrap gap-1.5">{p.groups.length ? p.groups.map((g) => <Tag key={g}>{g}</Tag>) : <span className="text-sm text-muted-foreground">None</span>}</div>
-      </Section>
-      <Section title="Sign-in">
-        <div className="space-y-1">
-          {p.identities.map((i) => (
-            <div key={i.provider} className="flex h-8 items-center gap-2.5 text-sm">
-              <IdentityIcon identity={i} />
-              <span>{i.provider_label}</span>
-              <span className="truncate text-muted-foreground">{i.label}</span>
-            </div>
-          ))}
-        </div>
-      </Section>
-      {p.credit && (
-        <Section title="Credit">
-          <CreditMeter meter={{ ...p.credit, window: p.role === "visitor" ? "total" : "month", resets_at: null }} />
+      {owned.length > 0 && (
+        <Section title="Agents">
+          <ul className="space-y-1.5 text-sm">{owned.map((a) => <li key={a.id}><AgentLink id={a.id} name={a.name} avatar={a.avatar} /></li>)}</ul>
         </Section>
       )}
-      <Section title="Last seen"><span className="text-sm"><Ago iso={p.last_seen} /></span></Section>
-      {p.role === "visitor" && p.status === "active" && <SignInLink person={p} />}
-      {p.role !== "owner" && (
-        <div className="border-t px-5 py-4">
-          {p.status === "active" ? (
-            <Button variant="outline" size="sm" className="text-destructive" onClick={async () => {
-              if (await confirm({ title: `Suspend ${p.name}?`, body: "Their threads stop on every platform.", action: "Suspend", destructive: true })) save.mutate({ status: "suspended" })
-            }}>Suspend</Button>
-          ) : <Button variant="outline" size="sm" onClick={() => save.mutate({ status: "active" })}>Restore</Button>}
-        </div>
+      {theirs.length > 0 && (
+        <Section title="Allowances">
+          <ul className="space-y-1.5 text-sm">
+            {theirs.map((a) => (
+              <li key={a.id}>
+                <Link to={`/credits/allowances?allowance=${a.id}`} className="hover:underline">
+                  {usd(a.amount_usd)}{a.window === "month" ? " / month" : " total"}, {a.agent?.name ?? "any agent"}
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </Section>
       )}
+      {spent && (
+        <Section title="Spend this month">
+          <Link to={`/credits/spend?period=this&q=${encodeURIComponent(p.name)}`} className="text-sm hover:underline">{usd(spent.usd)}, {plural(spent.turns, "reply", "replies")}</Link>
+        </Section>
+      )}
+      {p.role === "visitor" && p.status === "active" && <SignInLink person={p} />}
     </div>
   )
 }
