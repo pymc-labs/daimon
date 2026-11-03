@@ -173,6 +173,8 @@ async def _set_channel_environment_impl(
             channel_id=target.channel_id,
             environment_name=name,
             actor_account_id=auth.account_id,
+            platform=auth.platform or "",
+            surface="chat",
         )
     return ChannelEnvironmentResult(
         scope=_scope_label(target.channel_id),
@@ -208,6 +210,8 @@ async def _clear_channel_environment_impl(
             channel_id=channel_id,
             environment_name=None,
             actor_account_id=auth.account_id,
+            platform=auth.platform or "",
+            surface="chat",
         )
     return ChannelEnvironmentResult(
         scope=_scope_label(channel_id),

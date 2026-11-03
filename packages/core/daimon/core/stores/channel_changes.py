@@ -5,15 +5,19 @@ from __future__ import annotations
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import datetime
+from typing import Final
 
 from daimon.core._models import ChannelChange
-from daimon.core.scope import ChannelScopeRef
+from daimon.core.scope import ChannelScopeRef, TenantScopeRef
 from daimon.core.stores.domain import ChangeSurface, ChannelChangeRow, ChannelSetting
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields, unset_fields
 from pydantic import JsonValue
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+WORKSPACE_ID: Final = "*"
+"""The channel id a workspace-wide change (a workspace default) is recorded under."""
 
 WriteHook = Callable[[AsyncSession], Awaitable[None]]
 """Run inside a change's transaction once it is written: a surface's own audit row."""
@@ -107,6 +111,49 @@ async def write_channel_default(
         tenant_id=tenant_id,
         platform=platform,
         channel_id=channel_id,
+        setting="default_agent",
+        before=prior,
+        after=agent_name,
+        actor_account_id=actor_account_id,
+        surface=surface,
+    )
+    return prior
+
+
+async def write_workspace_default(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    agent_name: str | None,
+    actor_account_id: uuid.UUID | None,
+    surface: ChangeSurface,
+    set_by_admin: bool = False,
+) -> str | None:
+    """Set (None: clear) the workspace's default agent and record it; return the prior one."""
+    scope = TenantScopeRef(tenant_id=tenant_id)
+    prior_row = await get_scope(session, scope=scope)
+    prior = prior_row.agent_name if prior_row is not None else None
+    if agent_name is None:
+        if prior is not None:
+            await unset_fields(
+                session, scope=scope, fields=["agent_name"], actor_account_id=actor_account_id
+            )
+    else:
+        await set_fields(
+            session,
+            scope=scope,
+            tenant_id=tenant_id,
+            agent_name=agent_name,
+            mode="agent",
+            actor_account_id=actor_account_id,
+            set_by_admin=set_by_admin,
+        )
+    await record_change(
+        session,
+        tenant_id=tenant_id,
+        platform=platform,
+        channel_id=WORKSPACE_ID,
         setting="default_agent",
         before=prior,
         after=agent_name,

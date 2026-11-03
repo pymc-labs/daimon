@@ -111,6 +111,8 @@ async def test_load_reads_one_channel_and_skips_what_the_viewer_cannot_see(
         channel_id=ROOM,
         environment_name="gpu",
         actor_account_id=None,
+        platform="discord",
+        surface="panel",
     )
     await set_channel_budget(
         db_session,

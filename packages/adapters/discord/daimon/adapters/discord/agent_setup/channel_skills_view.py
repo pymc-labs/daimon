@@ -167,6 +167,8 @@ class ChannelSkillsView(PanelViewBase):
                 platform="discord",
                 channel_id=str(self.state.channel_id),
                 skill_id=self.remove_select.values[0],
+                actor_account_id=self.state.account_id,
+                surface="panel",
             )
         await audit(outcome="allowed", reason="completed")
         await self.swap_to(interaction, await self.rebuilt())
@@ -210,6 +212,7 @@ class AddChannelSkillModal(discord.ui.Modal):
                     default=view.runtime.deployment_default,
                     actor_account_id=state.account_id,
                     platform_skills=view.runtime.turn_deps.platform_skills,
+                    surface="panel",
                 )
         except (SkillsListTruncatedError, anthropic.APIError):
             await interaction.response.send_message(

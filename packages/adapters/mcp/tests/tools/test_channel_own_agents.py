@@ -943,6 +943,8 @@ async def test_an_own_agents_channel_environment_name_shows_only_inside_it(
                 channel_id=channel,
                 environment_name=name,
                 actor_account_id=world.account_id,
+                platform="discord",
+                surface="panel",
             )
     environments = [
         ma_environment(id=f"env_{name}", name=name, tenant_id=world.tenant_id).model_dump(

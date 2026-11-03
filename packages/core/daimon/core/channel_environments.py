@@ -49,6 +49,8 @@ from daimon.core.scope import (
     TenantScopeRef,
 )
 from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.channel_changes import WORKSPACE_ID, record_change
+from daimon.core.stores.domain import ChangeSurface
 from daimon.core.stores.scoped_config_read import (
     get_scope,
     list_propagations_for_tenant,
@@ -692,11 +694,13 @@ async def save_scope_environment(
     channel_id: str | None,
     environment_name: str | None,
     actor_account_id: uuid.UUID | None,
+    platform: str,
+    surface: ChangeSurface,
 ) -> str | None:
     """Set a channel's environment (the tenant default with no channel), or clear it with None.
 
-    Returns the environment the scope named before. The caller has already
-    checked that the environment exists and that the actor may change the scope.
+    Returns the environment the scope named before, and records the change. The caller
+    has already checked that the environment exists and that the actor may change the scope.
     """
     scope: ChannelScopeRef | TenantScopeRef = (
         ChannelScopeRef(tenant_id=tenant_id, channel_id=channel_id)
@@ -717,6 +721,17 @@ async def save_scope_environment(
         await unset_fields(
             session, scope=scope, fields=["environment_name"], actor_account_id=actor_account_id
         )
+    await record_change(
+        session,
+        tenant_id=tenant_id,
+        platform=platform,
+        channel_id=channel_id if channel_id is not None else WORKSPACE_ID,
+        setting="environment",
+        before=previous,
+        after=environment_name,
+        actor_account_id=actor_account_id,
+        surface=surface,
+    )
     return previous
 
 

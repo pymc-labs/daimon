@@ -215,6 +215,8 @@ async def save_environment_choice(
             channel_id=channel_id,
             environment_name=name,
             actor_account_id=state.account_id,
+            platform="discord",
+            surface="panel",
         )
     await audit_environment_pick(
         runtime=runtime, state=state, user_id=user_id, outcome="allowed", reason="completed"

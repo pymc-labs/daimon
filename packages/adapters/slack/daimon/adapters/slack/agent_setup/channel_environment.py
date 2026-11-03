@@ -192,6 +192,8 @@ async def save_environment_choice(
             channel_id=channel_id,
             environment_name=name,
             actor_account_id=actor.account_id,
+            platform="slack",
+            surface="panel",
         )
     await audit(outcome="allowed", reason="completed")
     log.info(

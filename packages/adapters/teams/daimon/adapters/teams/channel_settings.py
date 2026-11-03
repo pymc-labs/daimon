@@ -322,6 +322,8 @@ class ChannelSettingsDialog:
                 channel_id=channel_id,
                 environment_name=name,
                 actor_account_id=account_id,
+                platform="teams",
+                surface="panel",
             )
         await self._audit(actor, "environment", outcome="allowed", reason="completed")
         log.info(
@@ -398,6 +400,7 @@ class ChannelSettingsDialog:
         if remove:
             # Counted from the rows deleted: a forged id or a second Save removes nothing.
             removed = 0
+            remover = await get_or_create_account(self._runtime, actor)
             async with self._runtime.sessionmaker.begin() as session:
                 for skill_id in remove:
                     removed += await remove_channel_skill(
@@ -406,6 +409,8 @@ class ChannelSettingsDialog:
                         platform="teams",
                         channel_id=channel_id,
                         skill_id=skill_id,
+                        actor_account_id=remover,
+                        surface="panel",
                     )
             await self._audit(actor, "channel_skills", outcome="allowed", reason="completed")
             notes.append(f"Removed {removed}." if removed else "Those were already removed.")
@@ -427,6 +432,7 @@ class ChannelSettingsDialog:
                     default=self._runtime.deployment_default,
                     actor_account_id=account_id,
                     platform_skills=self._runtime.turn_deps.platform_skills,
+                    surface="panel",
                 )
         except (SkillsListTruncatedError, anthropic.APIError):
             await self._audit(actor, "channel_skills", outcome="error", reason="skills_unreadable")

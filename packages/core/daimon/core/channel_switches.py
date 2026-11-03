@@ -30,14 +30,11 @@ from daimon.core.scope_cascade import (
     scope_label,
     tier_word,
 )
-from daimon.core.stores.channel_changes import record_change
+from daimon.core.stores.channel_changes import WORKSPACE_ID, record_change
 from daimon.core.stores.domain import ChannelSetting
 from daimon.core.stores.switch_modes import Switch, get_switch_modes, set_switch_mode
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-WORKSPACE_ID: Final = "*"
-"""The channel id a workspace-wide change is recorded under."""
 
 SWITCH_PLATFORMS: Final[dict[Switch, frozenset[str]]] = {
     "participation": frozenset({"discord", "teams"}),

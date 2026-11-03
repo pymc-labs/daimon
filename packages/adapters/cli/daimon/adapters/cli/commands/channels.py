@@ -635,6 +635,7 @@ async def channels_skills_add(
             platform_skills=load_platform_skills(
                 rt.settings.defaults_root, features=rt.settings.configured_features
             ),
+            surface="cli",
         )
         if isinstance(added, str):
             raise DaimonError(CHANNEL_SKILL_REFUSALS[added])
@@ -691,6 +692,8 @@ async def channels_skills_remove(
                 platform=platform,
                 channel_id=channel,
                 skill_id=match.skill_id,
+                actor_account_id=None,
+                surface="cli",
             )
             await _audit_skill_change(
                 session,
