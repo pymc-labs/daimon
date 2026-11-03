@@ -442,7 +442,7 @@ async def test_failed_channel_write_cleanup_keeps_gemini_catalog_and_native_iden
         async def fail_write(*args: object, **kwargs: object) -> None:
             raise OSError("offline channel write failed")
 
-        monkeypatch.setattr(channel_rules, "set_fields", fail_write)
+        monkeypatch.setattr(channel_rules, "write_channel_default", fail_write)
         with pytest.raises(OSError, match="offline channel write failed"):
             await set_channel_rule(
                 legacy,
