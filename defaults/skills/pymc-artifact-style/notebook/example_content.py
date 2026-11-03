@@ -1,11 +1,9 @@
 @app.cell(hide_code=True)
 def _(header):
     header(
-        "Marketing mix EDA, in PyMC style",
-        "A style showcase on the pymc-marketing example dataset: header, key numbers, "
-        "callouts, interactive controls, charts and rules-only tables.",
-        badges=[("Style template", "teal"), ("Example data", "orange")],
-        accent="PyMC",
+        "The example KPI trends upward, and channel x2 is off most weeks",
+        "An exploratory look at the pymc-marketing example dataset before any model is fitted.",
+        badges=[("Example data", "orange")],
     )
     return
 
@@ -13,7 +11,7 @@ def _(header):
 @app.cell(hide_code=True)
 def _(callout):
     callout(
-        "**Data.** `mmm_example.csv` ships with pymc-marketing: 179 weeks of a simulated "
+        "Example data: `mmm_example.csv` ships with pymc-marketing: 179 weeks of a simulated "
         "KPI `y`, two channel-spend series `x1`/`x2`, two events and a time index. It is a "
         "library example, not client data, so nothing here is a finding about a real business.",
         kind="warn",
@@ -42,7 +40,7 @@ def _(df, kpis):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ## KPI over time
+    ## The KPI trends upward with a yearly cycle
 
     Drag the window to zoom. The shaded bands mark the two event indicators in the data.
     """)
@@ -83,7 +81,7 @@ def _(C, df, figure, plt, smooth, window):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ## Do the channels move with the KPI?
+    ## Both channels move with the KPI, x2 more strongly
 
     A correlation matrix is read in blocks, not skimmed for its largest cell. Diverging
     palette: **indigo** negative, **dark orange** positive, white at zero.
@@ -117,7 +115,7 @@ def _(DIV, df, figure, np, plt):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ## One channel at a time, with a lag
+    ## Shift a channel by a few weeks to see the carry-over
 
     Pick a channel and shift its spend by 0–8 weeks to see how the relationship with the
     KPI changes. Series colors follow the fixed cycle: a filter never repaints survivors.
@@ -154,9 +152,7 @@ def _(C, channels, df, figure, lag, pick, plt):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ## Summary table
-
-    Rules only: heavy top and bottom, a light header rule, no vertical lines.
+    ## The numbers behind the charts
     """)
     return
 
@@ -165,14 +161,4 @@ def _(mo):
 def _(df, table):
     s = df[["y", "x1", "x2"]].describe().T[["count", "mean", "std", "min", "50%", "max"]]
     table(s.rename(columns={"50%": "median"}), fmt="{:,.2f}")
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md("""
-    ---
-    *Built with the PyMC Labs artifact style for notebooks: Inter and JetBrains Mono, navy text, aqua rules,
-    teal/indigo/dark-orange text accents, and the website's dark wordmark.*
-    """)
     return
