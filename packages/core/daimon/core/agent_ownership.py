@@ -11,7 +11,7 @@ number of co-owners (`agent_co_owners`); both own it in every check.
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 
 import structlog
@@ -164,6 +164,63 @@ async def remove_agent_co_owner(
                 session, tenant_id, agent_id, by_account_id, "remove_co_owner", subject=account_id
             )
     return removed
+
+
+async def replace_agent_owners(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    owner_account_id: uuid.UUID | None,
+    co_owner_account_ids: Sequence[uuid.UUID],
+    by_account_id: uuid.UUID | None,
+) -> bool:
+    """Make the owner and co-owners exactly these, in the caller's transaction.
+
+    An admin's change: a new owner is assigned, none clears it, co-owners are added
+    and removed to match. Whether anything changed. Raises LookupError for an
+    account outside the tenant and `ForeignOwnerError` for a person from another
+    organisation.
+    """
+    changed = False
+    current = await agent_owners.owner_of(session, tenant_id, agent_id)
+    if owner_account_id != current:
+        if owner_account_id is None:
+            await agent_owners.clear_owner(session, tenant_id=tenant_id, agent_id=agent_id)
+            await _audit(session, tenant_id, agent_id, by_account_id, "clear")
+        else:
+            await agent_owners.set_owner(
+                session,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                owner_account_id=owner_account_id,
+                source="admin_assigned",
+            )
+            await _audit(session, tenant_id, agent_id, by_account_id, "assign")
+        changed = True
+    wanted = [a for a in dict.fromkeys(co_owner_account_ids) if a != owner_account_id]
+    held = await agent_owners.co_owners_of(session, tenant_id, agent_id)
+    for account_id in held:
+        if account_id not in wanted and await agent_owners.remove_co_owner(
+            session, tenant_id=tenant_id, agent_id=agent_id, account_id=account_id
+        ):
+            await _audit(
+                session, tenant_id, agent_id, by_account_id, "remove_co_owner", subject=account_id
+            )
+            changed = True
+    for account_id in wanted:
+        if account_id not in held and await agent_owners.add_co_owner(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            account_id=account_id,
+            added_by_account_id=by_account_id,
+        ):
+            await _audit(
+                session, tenant_id, agent_id, by_account_id, "add_co_owner", subject=account_id
+            )
+            changed = True
+    return changed
 
 
 async def agent_co_owners(
