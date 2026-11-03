@@ -872,7 +872,7 @@ async def _request_watch_credential_impl(
             "This Daimon cannot store keys yet, so no form was posted. "
             "Ask whoever runs this Daimon."
         )
-    origin = await require_turn_origin(runtime, auth, origin_context_id)
+    origin = refuse_helper(await require_turn_origin(runtime, auth, origin_context_id))
     if not origin.attended:
         raise ToolError("Ask for this in your own conversation with me.")
     named_url, ma_agent = await _watch_server_url(runtime, auth, origin, server)
@@ -920,7 +920,7 @@ async def _forget_watch_credential_impl(
     server: str,
     origin_context_id: str | None,
 ) -> ForgetWatchCredentialResult:
-    origin = await require_turn_origin(runtime, auth, origin_context_id)
+    origin = refuse_helper(await require_turn_origin(runtime, auth, origin_context_id))
     if not origin.attended:
         raise ToolError("Ask for this in your own conversation with me.")
     server_url, _ = await _watch_server_url(runtime, auth, origin, server)

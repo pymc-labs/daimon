@@ -156,6 +156,7 @@ async def _origin(
     parent: str,
     *,
     foreign: bool = False,
+    helper_of: uuid.UUID | None = None,
 ) -> str:
     now = datetime.now(UTC)
     async with sm.begin() as session:
@@ -176,6 +177,7 @@ async def _origin(
             now=now,
             chat_session_id="test-session",
             sender_foreign=foreign,
+            helper_of=helper_of,
         )
     return str(origin.id)
 
@@ -732,6 +734,34 @@ async def test_connect_sends_a_private_single_use_card(
     async with committing_sessionmaker() as session:
         row = await sign_ins.get_live_sign_in(session, state=state, now=datetime.now(UTC))
     assert row is not None and row.user_id == OID, "the link must be bound to the requester"
+
+
+async def test_a_helpers_turn_cannot_send_a_sign_in_card(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    fake: FakeMicrosoft,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A helper may not message the person a sign-in card; other Microsoft tools still run."""
+    _, auth = await _person(committing_sessionmaker)
+    origin = await _origin(committing_sessionmaker, auth, CHANNEL, helper_of=uuid.uuid4())
+    sent: list[dict[str, Any]] = []
+
+    async def fake_send(
+        runtime: McpRuntime, auth: AuthIdentity, *, conversation_id: str, card: dict[str, Any]
+    ) -> None:
+        sent.append(card)
+
+    monkeypatch.setattr(connect_module, "send_card_to_caller", fake_send)
+    with pytest.raises(ToolError, match="You are helping another agent"):
+        await connect_microsoft_impl(
+            _runtime(committing_sessionmaker, fake), auth, origin_context_id=origin
+        )
+    assert sent == [], "no card may be sent for a helper"
+    async with committing_sessionmaker() as session:
+        live = await sign_ins.get_live_sign_in_for_user(
+            session, tenant_id=auth.tenant_id, user_id=OID, now=datetime.now(UTC)
+        )
+    assert live is None, "no sign-in link may be minted for a helper"
 
 
 async def test_failed_card_delivery_withdraws_the_link(
