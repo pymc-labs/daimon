@@ -1,7 +1,7 @@
 """Exercise the canonical migration chain through real Alembic and PostgreSQL.
 
 Main's branch (0132..0158) and the preview branch (0134..0167) both descend from
-0131_usage_obs_tenant_idx; 0168 joins them and the last of the linear tail 0169..0174 is the single head. The ORM
+0131_usage_obs_tenant_idx; 0168 joins them and the last of the linear tail 0169..0176 is the single head. The ORM
 describes the head, so below the merge the preview branch is compared without
 the objects main's branch changes.
 """
@@ -137,6 +137,7 @@ TAIL = (
     "0173_channel_settings",
     "0174_drop_channel_admins",
     "0175_channel_name_status",
+    "0176_routine_names",
 )
 HEAD = TAIL[-1]
 
