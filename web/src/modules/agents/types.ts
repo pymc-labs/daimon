@@ -220,3 +220,7 @@ export type EnvironmentInput = {
 /** What an agent remembers: whether it has shared memory, and (admins) a store per channel. */
 export type MemoryPlace = { store: string; platform: string; name: string }
 export type KnowledgeStores = { shared: boolean; channels: MemoryPlace[] }
+
+/** An agent's own rule on one tool (`connection/tool`), for every channel; `revision` 0 is no rule yet. */
+export type AgentToolRule = { tool: string; rule: "allow" | "ask" | "deny" | null; scope: "chat" | "chat_and_routines"; revision: number }
+export type AgentToolRules = { active: boolean; rules: AgentToolRule[] }

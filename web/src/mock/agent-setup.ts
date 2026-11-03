@@ -1,11 +1,12 @@
 // Mock API for what an agent holds beyond its config: keys, coding keys, owners, knowledge, lifecycle.
 import { http, HttpResponse } from "msw"
 
-import type { AgentKey, CodingKey, MintedCodingKey } from "@/modules/agents/types"
+import type { AgentKey, AgentToolRule, CodingKey, MintedCodingKey } from "@/modules/agents/types"
 import { roster } from "./agents"
 import { forbidden, notFound, unauthorized, wait } from "./util"
 import { PEOPLE } from "./world"
 
+const RULES = new Map<string, AgentToolRule[]>()
 const ago = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString()
 const nameOf = (id: string) => PEOPLE.find((p) => p.id === id)?.name ?? "Daimon"
 
@@ -94,6 +95,25 @@ export const agentSetupHandlers = [
     if (s.res) return s.res
     const path = new URL(request.url).searchParams.get("path") ?? ""
     return HttpResponse.json({ path, content: `Notes kept in ${path}.\nUse short sentences.` })
+  }),
+  http.get("/api/agents/:id/tool-rules", async ({ params }) => {
+    await wait()
+    if (!isAdmin()) return forbidden("Tool rules are for admins.")
+    if (!roster.find(String(params.id))) return notFound()
+    return HttpResponse.json({ active: true, rules: RULES.get(String(params.id)) ?? [] })
+  }),
+  http.put("/api/agents/:id/tool-rules", async ({ params, request }) => {
+    await wait()
+    const id = String(params.id)
+    if (!isAdmin()) return forbidden("Tool rules are for admins.")
+    if (!roster.find(id)) return notFound()
+    const { expected_revision, ...b } = (await request.json()) as Omit<AgentToolRule, "revision"> & { expected_revision: number }
+    const rows = RULES.get(id) ?? []
+    const prior = rows.find((r) => r.tool === b.tool)
+    if ((prior?.revision ?? 0) !== expected_revision) return HttpResponse.json({ detail: "This rule changed since you opened it. Reload and try again." }, { status: 409 })
+    const next = { ...b, revision: expected_revision + 1 }
+    RULES.set(id, [...rows.filter((r) => r !== prior), next])
+    return HttpResponse.json(next)
   }),
   http.get("/api/agents/:id/coding-keys", async ({ params }) => {
     await wait()

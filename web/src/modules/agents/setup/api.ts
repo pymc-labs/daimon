@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
 
 import { api } from "@/lib/api"
-import type { AgentKey, CodingKey, KnowledgeStores, MintedCodingKey, PersonRef } from "../types"
+import type { AgentKey, AgentToolRule, AgentToolRules, CodingKey, KnowledgeStores, MintedCodingKey, PersonRef } from "../types"
 
 const fail = (e: Error) => toast.error(e.message)
 
@@ -82,3 +82,17 @@ export const useMemoryText = (id: string, store: string, path: string) =>
     enabled: !!store && !!path,
     retry: false,
   })
+
+/** The agent's rules for every channel; admins only. */
+export const useAgentToolRules = (id: string, enabled: boolean) =>
+  useQuery({ queryKey: ["agents", id, "tool-rules"], queryFn: () => api.get<AgentToolRules>(`/api/agents/${id}/tool-rules`), enabled, retry: false })
+
+/** Set a rule, or clear it with a null rule. `expected_revision` is the rule as read. */
+export function useSetAgentToolRule(id: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (b: Pick<AgentToolRule, "tool" | "rule" | "scope"> & { expected_revision: number }) => api.put<AgentToolRule>(`/api/agents/${id}/tool-rules`, b),
+    onSettled: () => { void qc.invalidateQueries({ queryKey: ["agents", id, "tool-rules"] }) },
+    onError: fail,
+  })
+}

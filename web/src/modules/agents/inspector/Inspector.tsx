@@ -1,6 +1,6 @@
 import { X } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { useKey } from "@/lib/hooks"
+import { useCan, useKey } from "@/lib/hooks"
 import { nodeEffect } from "../api"
 import { EffectTag, Pill } from "../bits"
 import { PANEL_W } from "../Canvas"
@@ -15,6 +15,7 @@ import { NewServer, ServerEditor } from "./ServerEditors"
 import { PlacesEditor } from "./PlacesEditor"
 import { CodingPanel } from "../setup/CodingPanel"
 import { KnowledgePanel } from "../setup/KnowledgePanel"
+import { ToolRulesPanel } from "../setup/ToolRulesPanel"
 import { KeysPanel } from "../setup/KeysPanel"
 import { PeoplePanel } from "../setup/PeoplePanel"
 import { nodeUi } from "../nodes/registry"
@@ -26,6 +27,7 @@ const TITLES: Record<string, string> = {
 
 export function Inspector(p: Props) {
   const { node, agent, config, select } = p
+  const can = useCan()
   useKey((e) => { if (e.key === "Escape") select("") }, [select])
   const kind = node.split(/[:/]/)[0]!
   const server = kind === "mcp" ? config.mcp_servers.find((s) => node.startsWith(`mcp:${s.key}`)) : undefined
@@ -39,7 +41,7 @@ export function Inspector(p: Props) {
   else if (node === "model") body = <ModelEditor {...p} />
   else if (node === "skills") body = <SkillsEditor {...p} />
   else if (skill) body = <SkillEditor {...p} skill={skill} />
-  else if (node === "tools") body = <ToolsEditor {...p} />
+  else if (node === "tools") body = <><ToolsEditor {...p} />{can("workspace.manage") && <ToolRulesPanel {...p} />}</>
   else if (node === "people") body = <PeoplePanel {...p} />
   else if (node === "keys") body = <KeysPanel {...p} />
   else if (node === "coding") body = <CodingPanel {...p} />
