@@ -1,4 +1,7 @@
-"""`/api/admin/feedback`: thumbs and reasons per agent over a period, counts only."""
+"""`/api/admin/feedback`: thumbs and reasons per agent over a period, counts only.
+
+A count of one or two is withheld (null): it could point to who voted.
+"""
 
 from __future__ import annotations
 
@@ -15,19 +18,25 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 UNKNOWN_AGENT = "Unknown agent"
+MIN_SHOWN = 3
+
+
+def shown(count: int) -> int | None:
+    """The count, or None when one or two votes would point to the voters. Pure."""
+    return None if 0 < count < MIN_SHOWN else count
 
 
 class ReasonCount(BaseModel):
     code: str
     label: str
-    count: int
+    count: int | None
 
 
 class AgentFeedbackOut(BaseModel):
     id: str | None
     name: str
-    up: int
-    down: int
+    up: int | None
+    down: int | None
     reasons: list[ReasonCount]
 
 
@@ -69,10 +78,10 @@ def feedback_router(runtime: WebRuntime) -> APIRouter:
                     name=names.get(f.ma_agent_id, UNKNOWN_AGENT)
                     if f.ma_agent_id
                     else UNKNOWN_AGENT,
-                    up=f.up,
-                    down=f.down,
+                    up=shown(f.up),
+                    down=shown(f.down),
                     reasons=[
-                        ReasonCount(code=code, label=label, count=f.reasons[code])
+                        ReasonCount(code=code, label=label, count=shown(f.reasons[code]))
                         for code, label in FEEDBACK_REASONS.items()
                         if code in f.reasons
                     ],

@@ -848,8 +848,36 @@ async def test_feedback_counts_by_agent_and_shows_no_text_or_voter(
     assert res.status_code == 200, res.text
     body = res.json()
     assert body["days"] == 7, f"the period comes back: {body}"
-    assert body["agents"][0]["down"] == 1, f"the vote counts: {body}"
-    assert body["agents"][0]["reasons"] == [{"code": "too_slow", "label": "Too slow", "count": 1}]
+    assert body["agents"][0]["down"] is None, f"one vote is withheld: {body}"
+    assert body["agents"][0]["reasons"] == [
+        {"code": "too_slow", "label": "Too slow", "count": None}
+    ]
     assert "private words" not in res.text and "voter-secret" not in res.text, (
         "neither the text nor the voter is shown"
     )
+
+
+async def test_feedback_shows_a_count_once_three_votes_stand_behind_it(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
+        async with db_session_factory.begin() as db:
+            for n, vote in enumerate(("down", "down", "up", "up", "up")):
+                await message_feedback.record_vote(
+                    db,
+                    tenant_id=admin.ws.tenant_id,
+                    platform="discord",
+                    message_id=f"m{n}",
+                    channel_id="c",
+                    platform_user_id=f"voter-{n}",
+                    account_id=None,
+                    ma_session_id="s-unknown",
+                    vote=vote,  # pyright: ignore[reportArgumentType]
+                )
+        res = await admin.client.get("/api/admin/feedback?days=7")
+
+    assert res.status_code == 200, res.text
+    agent = res.json()["agents"][0]
+    assert (agent["up"], agent["down"]) == (3, None), f"three show, two are withheld: {agent}"

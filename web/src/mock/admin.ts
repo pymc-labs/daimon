@@ -156,7 +156,8 @@ export const adminHandlers: HttpHandler[] = [
     const days = Number(new URL(request.url).searchParams.get("days")) || 30
     const k = days / 30
     const n = (x: number) => Math.round(x * k)
-    const body: Feedback = {
+    const few = (x: number) => (x > 0 && x < 3 ? null : x)
+    const raw: Feedback = {
       days,
       agents: [
         { id: "ag_daimon", name: "Daimon", up: n(86), down: n(9), reasons: [{ code: "inaccurate", label: "Wrong or inaccurate", count: n(4) }, { code: "incomplete", label: "Incomplete or cut off", count: n(3) }, { code: "too_slow", label: "Too slow", count: n(2) }] },
@@ -164,6 +165,10 @@ export const adminHandlers: HttpHandler[] = [
         { id: "ag_review", name: "Code Reviewer", up: n(23), down: n(1), reasons: [{ code: "other", label: "Something else", count: n(1) }] },
         { id: null, name: "Unknown agent", up: n(2), down: 0, reasons: [] },
       ],
+    }
+    const body: Feedback = {
+      ...raw,
+      agents: raw.agents.map((x) => ({ ...x, up: few(x.up!), down: few(x.down!), reasons: x.reasons.map((r) => ({ ...r, count: few(r.count!) })) })),
     }
     return me()?.capabilities.includes("audit.view") ? HttpResponse.json(body) : forbidden()
   }),

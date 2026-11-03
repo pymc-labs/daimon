@@ -77,6 +77,6 @@ export type SettingsPatch = {
   providers?: string[] | "default"
 }
 
-export type FeedbackReason = { code: string; label: string; count: number }
-export type AgentFeedback = { id: string | null; name: string; up: number; down: number; reasons: FeedbackReason[] }
+export type FeedbackReason = { code: string; label: string; count: number | null }
+export type AgentFeedback = { id: string | null; name: string; up: number | null; down: number | null; reasons: FeedbackReason[] }
 export type Feedback = { days: number; agents: AgentFeedback[] }

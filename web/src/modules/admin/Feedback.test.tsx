@@ -25,6 +25,15 @@ describe("Feedback", () => {
     expect(api.get).toHaveBeenCalledWith("/api/admin/feedback?days=30")
   })
 
+  it("withholds counts of one or two votes", async () => {
+    const few: Data = { days: 30, agents: [{ id: "ag_a", name: "Daimon", up: 8, down: null, reasons: [{ code: "too_slow", label: "Too slow", count: null }] }] }
+    vi.mocked(api.get).mockResolvedValue(few as never)
+    render(<QueryClientProvider client={new QueryClient()}><MemoryRouter><Feedback /></MemoryRouter></QueryClientProvider>)
+    expect(await screen.findByText("8")).toBeInTheDocument()
+    expect(screen.getByText("Fewer than 3")).toBeInTheDocument()
+    expect(screen.getByText("Too slow Fewer than 3")).toBeInTheDocument()
+  })
+
   it("says so when nobody voted", async () => {
     vi.mocked(api.get).mockResolvedValue({ days: 30, agents: [] } as never)
     render(<QueryClientProvider client={new QueryClient()}><MemoryRouter><Feedback /></MemoryRouter></QueryClientProvider>)

@@ -9,6 +9,7 @@ import { useParam } from "@/lib/filters"
 import { Pill } from "../agents/bits"
 import type { Feedback as Data } from "./types"
 
+const FEW = "Fewer than 3"
 const PERIODS = [{ value: "7", label: "Last 7 days" }, { value: "30", label: "Last 30 days" }, { value: "90", label: "Last 90 days" }]
 
 export function Feedback() {
@@ -26,8 +27,8 @@ export function Feedback() {
             <TableHeader>
               <TableRow className="hover:bg-transparent">
                 <TableHead>Agent</TableHead>
-                <TableHead className="w-20"><ThumbsUp className="size-3.5" aria-label="Thumbs up" /></TableHead>
-                <TableHead className="w-20"><ThumbsDown className="size-3.5" aria-label="Thumbs down" /></TableHead>
+                <TableHead className="w-28"><ThumbsUp className="size-3.5" aria-label="Thumbs up" /></TableHead>
+                <TableHead className="w-28"><ThumbsDown className="size-3.5" aria-label="Thumbs down" /></TableHead>
                 <TableHead className="max-sm:hidden">Reasons</TableHead>
               </TableRow>
             </TableHeader>
@@ -35,10 +36,10 @@ export function Feedback() {
               {d.agents.map((a) => (
                 <TableRow key={a.id ?? "unknown"}>
                   <TableCell className="font-medium">{a.name}</TableCell>
-                  <TableCell>{a.up}</TableCell>
-                  <TableCell>{a.down}</TableCell>
+                  <TableCell>{a.up ?? FEW}</TableCell>
+                  <TableCell>{a.down ?? FEW}</TableCell>
                   <TableCell className="max-sm:hidden">
-                    <span className="flex flex-wrap gap-1">{a.reasons.map((r) => <Pill key={r.code}>{r.label} {r.count}</Pill>)}</span>
+                    <span className="flex flex-wrap gap-1">{a.reasons.map((r) => <Pill key={r.code}>{r.label} {r.count ?? FEW}</Pill>)}</span>
                   </TableCell>
                 </TableRow>
               ))}
