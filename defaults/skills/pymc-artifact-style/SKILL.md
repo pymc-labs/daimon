@@ -139,9 +139,9 @@ send. Skip it when the person you are talking to is the client.
 
 | Element | Rule |
 |---|---|
-| Type | **Inter** for everything, **JetBrains Mono** for code. Body 18–19px on screen (14pt in a PDF), line height 1.6. Headings 600 at 40 / 28 / 22px (32 / 25 / 21 on a phone). |
+| Type | **Inter** for everything, **JetBrains Mono** for code. Body 18–19px on screen (16pt in a PDF), line height 1.6. Headings 600 at 40 / 28 / 22px (32 / 25 / 21 on a phone). |
 | Color | Navy `#0C1F40` text on white. One accent, indigo `#5462C4`, for links and the prompt Copy button only. Secondary text is navy at 72% opacity. |
-| Layout | One column, full width of the screen, up to about 820px for reading. No second column at any width. |
+| Layout | One column, full width of the screen, up to about 820px for reading. No second column at any width in a document; a dashboard may set two charts side by side. |
 | Headings | State the point: "Channel A returns more than Channel B", not "Results". A reader who skims only the headings gets the story. |
 | Tables | Rules only: heavy top and bottom, a light header rule, no verticals, no fills, numbers right-aligned. |
 | Charts | Only when they show real data from this work, with a heading or title that states what they show, units on the axes, intervals where a decision depends on them. |
@@ -179,20 +179,32 @@ python3 <this skill>/lint/publish_lint.py --render page.html           # + text 
 Exit code 1 means at least one **BLOCK** finding (accordions, sidebars, sticky
 nav, hero bands, decorative SVG, gradients, shadows, pills, cards, icon-card
 grids, callout boxes, emoji, serif accents, small body text, stray buttons,
-copy buttons on non-prompts, boilerplate labels, styled words in the title).
+copy buttons on non-prompts, boilerplate labels, stock phrasing, bold scattered
+through a paragraph, styled words in the title). Each finding names the first
+element or phrase it matched.
 Fix every one and run it again; do not publish with a BLOCK. **WARN** findings
-(stock phrases, bold density, generic headings, rounded corners, eyebrows) go in
-the send-readiness note if you keep them. `lint/test_publish_lint.py` is the
-lint's own test.
+(softer phrasing such as "robust" or "leverage", generic headings, rounded
+corners, eyebrows) are fixed too; keep one only when it is a false positive, and
+say so in the send-readiness note. `lint/test_publish_lint.py` is the lint's own
+test.
 
-## HTML pages — guides, reports, one-pagers, FAQs
+Exit code 2 means the lint could not run (for example, a wrong path).
+
+The lint reads HTML pages and dashboards you author. It does not cover marimo
+exports (their interface is drawn by JavaScript), PDFs or slides: those get
+their look from the templates below and their writing from the rewrite pass, so
+check them against the Never list yourself.
+
+## Building each kind of artifact
+
+### HTML pages — guides, reports, one-pagers, FAQs
 
 Write the content as Markdown and build it; the page style is frozen in
 `page/page.css`, so the output looks right by default.
 
 ```bash
 S=<this skill>
-python3 $S/page/build_page.py content.md -o page.html --footer "PyMC Labs, November 2026. Example data."
+python3 $S/page/build_page.py content.md -o page.html --footer "PyMC Labs, November 2026."
 python3 $S/lint/publish_lint.py page.html
 ```
 
@@ -207,7 +219,7 @@ Worked examples, built in CI: `page/examples/guide.md` (a prompt walkthrough),
 `report.md` (a short analysis with two charts from `make_figures.py`) and
 `onepager.md` (a decision page for a VP).
 
-## Reports and PDFs — `typst/pymc-plain.typ`
+### Reports and PDFs — `typst/pymc-plain.typ`
 
 The Typst compiler, fonts and logo are bundled. The `typst` CLI is not
 installed; use the Python package:
@@ -241,7 +253,7 @@ typst.compile(
 Body text …
 ```
 
-It gives one full-width column at 14pt, the small wordmark, no cover page, no
+It gives one full-width column at 16pt, the small wordmark, no cover page, no
 table of contents, no margin notes. `#dtable(...)` is the rules-only table;
 `#figure(image("fig.pdf"), caption: [...])` puts the caption under the figure.
 A PDF that needs depth gets more sections, not more devices.
@@ -250,66 +262,7 @@ A PDF that needs depth gets more sections, not more devices.
 key-figure callouts) and `report-example.typ` stay only for an explicit request
 for that layout or for revising a document already built on it.
 
-## Brand palette
-
-| Token | Hex | Use |
-|---|---|---|
-| navy | `#0C1F40` | all text, headings, rules, the first chart series |
-| indigo | `#5462C4` | the one accent: links and the prompt Copy button |
-| soft-white | `#F7F7F7` | code and prompt blocks |
-| white | `#FFFFFF` | page |
-| teal, dark-orange | `#0C9E82`, `#C4720A` | chart series; dark-orange also for a single status word in a dashboard |
-| aqua, periwinkle, peach, violet | `#B4E7DD`, `#9FAAE2`, `#F6AE72`, `#C8B4E7` | chart fills and series only, never page decoration |
-| navy-deep, navy-header | `#07142A`, `#071530` | slides on a dark background only |
-
-Lighten or darken with `rgba()` alpha on a palette color, never a new hex.
-
-## Charts — use the bundled matplotlib style
-
-```python
-import matplotlib as mpl
-mpl.rc_file("mpl/matplotlibrc")     # website palette, Inter, navy titles
-```
-
-`mpl/plotstyle.py` carries `PALETTE` (fills), `PALETTE_TEXT` (text accents),
-`CYCLE` (series order: strong colors first, pale last) and a `fill_between`
-patch that gives clean edges; `mpl/axes.py` adds `add_axis_end_tick_caps`.
-ArviZ draws through matplotlib, so `az.plot_posterior` and friends inherit the
-style once the rc is loaded.
-
-For a PDF, save **vector PDF** and embed with `image("fig.pdf")` (needs
-matplotlib ≥ 3.10.1; do not switch to SVG path output, the Inter statics share
-a PostScript name and SVG path-mode collides bold and regular glyphs). For an
-HTML page, save PNG at 200 dpi and reference it from the Markdown.
-
-The cycle, if you need it by hand:
-
-```
-0C1F40  navy        0C9E82  teal         F6AE72  peach        5462C4  indigo
-9FAAE2  periwinkle  C4720A  dark-orange  C8B4E7  violet       B4E7DD  aqua
-```
-
-Aqua, violet and periwinkle are low-contrast lines on white; with more than
-five series, prefer small multiples to the tail of the cycle.
-
-## Chart rules that matter more than color
-
-- **Assign series colors in the cycle's fixed order.** Never reorder by rank — a
-  filter that drops a series must not repaint the survivors.
-- **Never a dual y-axis.** Two measures of different scale become two charts,
-  small multiples, or an index to a common base.
-- **Sequential: one hue, light→dark. Diverging: two hues, neutral midpoint.**
-  Never a rainbow, never a hue at a diverging midpoint.
-- **A legend whenever there are 2+ series.** With ≤ 4, label directly too.
-  Identity must never rest on color alone.
-- **Beyond the cycle, do not invent another color.** Fold the tail into "Other",
-  or use small multiples.
-- **Label the axes and name the units.** The title states the finding, not the
-  variable names.
-- **Real data only.** No illustrative or decorative charts; a chart of
-  simulated data says so in its caption.
-
-## Slide decks (.pptx) — render the slides, do not typeset them
+### Slide decks (.pptx) — render the slides, do not typeset them
 
 There is no PowerPoint template. Typeset each slide in Typst at slide size
 (white page, the small dark wordmark top left, one heading that states the
@@ -346,7 +299,7 @@ Use `assets/pymc-labs-logo-dark.png` on white, and
 `assets/pymc-labs-logo-light.png` only on a dark slide. Preserve aspect ratio;
 do not recolor or regenerate them.
 
-## Marimo notebooks — build with the bundled style cell
+### Marimo notebooks — build with the bundled style cell
 
 The style cell gives a notebook the same look: Inter and JetBrains Mono
 embedded, navy text, the small wordmark, plain headings, rules-only tables.
@@ -373,20 +326,22 @@ the ones a cell uses in its signature and never redefine them. The notebook
 host ships marimo, matplotlib, numpy and pandas; for anything else add a PEP 723
 header to the built `nb.py` listing those four plus your extras.
 
-1. `header(title, subtitle, badges=[("Example data", "orange")])` first: it also
-   injects the page CSS. The title states the point; badges render as one line
-   of plain status text, not pills.
-2. `callout(text)` is a plain paragraph for data provenance or the main caveat.
-3. `kpis([(value, label), ...])` is a small rules-only table of key numbers.
-4. Sections as `mo.md("## Heading that states the point\n\ntext")`, then the
+1. `header(title, subtitle)` first: it also injects the page CSS. The title
+   states the point; the subtitle is one plain line, and is where example data
+   is said.
+2. Sections as `mo.md("## Heading that states the point\n\ntext")`, then the
    controls in an `mo.hstack`, then the chart they drive.
-5. Charts through `figure(fig, caption)`, tables through `table(df, fmt=...)`.
+3. Charts through `figure(fig, caption)`, tables through `table(df, fmt=...)`.
 
-Keep it light: no dark theme. Example data is said once in the header line and
-the first paragraph, and never stated as a finding. A headless browser
+`badge()`, `callout()` and `kpis()` still exist so older notebooks build; they
+now render plain text, a plain paragraph and a rules-only table. Do not use
+them in new notebooks.
+
+Keep it light: no dark theme. Example data is said once and never stated as a
+finding. A headless browser
 rendering a check needs `locale="en-US"`.
 
-## Interactive dashboards — build with the bundled template
+### Interactive dashboards — build with the bundled template
 
 A dashboard is a report the client keeps using: white page, small wordmark,
 title that states the point, tabs in the drill-down order **executive summary →
@@ -404,7 +359,7 @@ The template wires the tabs, inlines the wordmark, loads Plotly from the CDN,
 and defines `C` (palette constants), `PYMC_SERIES`, `PYMC_LAYOUT`, `PYMC_CONFIG`.
 Key numbers go in `<div class="keynums"><div class="keynum">` with `.knum`,
 `.klabel` and `.kci` (a plain row with rules, not cards); a status word is
-`<span class="status warm">`. The builder refuses any hex that is not a palette
+`<span class="status">`, plain semibold text. The builder refuses any hex that is not a palette
 value. Interactivity is vanilla JS + Plotly: tabs, `<select>` and
 `<input type=range>` controls, hover, legend clicks to toggle series. Proven
 patterns: a budget simulator with per-channel sliders through the fitted
@@ -431,7 +386,7 @@ period) — viewers get fresh numbers on next load, and the page shows the refre
 stamp. Keep the store schema flat (one doc per channel, plain numeric fields in
 original units).
 
-## When the bundled template cannot be used
+### Without a template, or with a requested one
 
 Match the look by hand: Inter (or the closest humanist sans), navy text on
 white, indigo links, one column, 18–19px body, rules-only tables, soft-white
@@ -441,11 +396,70 @@ the delivery that this is an unbranded fallback.
 There is no Word or Google Docs template. For a Docs deliverable, apply the
 same rules by hand, or export a PDF from `pymc-plain.typ` and attach that.
 
-## Explicit template requests
-
 Honor an explicitly requested client or legacy template, including the older
 margin-note report class. Otherwise use this style for every new artifact,
 including sales collateral.
+
+## Palette and charts
+
+### Palette
+
+| Token | Hex | Use |
+|---|---|---|
+| navy | `#0C1F40` | all text, headings, rules, the first chart series |
+| indigo | `#5462C4` | the one accent: links and the prompt Copy button |
+| soft-white | `#F7F7F7` | code and prompt blocks |
+| white | `#FFFFFF` | page |
+| teal, dark-orange | `#0C9E82`, `#C4720A` | chart series only |
+| aqua, periwinkle, peach, violet | `#B4E7DD`, `#9FAAE2`, `#F6AE72`, `#C8B4E7` | chart fills and series only, never page decoration |
+| navy-deep, navy-header | `#07142A`, `#071530` | slides on a dark background only |
+
+Lighten or darken with `rgba()` alpha on a palette color, never a new hex.
+
+### Matplotlib style
+
+```python
+import matplotlib as mpl
+mpl.rc_file("mpl/matplotlibrc")     # website palette, Inter, navy titles
+```
+
+`mpl/plotstyle.py` carries `PALETTE` (fills), `PALETTE_TEXT` (text accents),
+`CYCLE` (series order: strong colors first, pale last) and a `fill_between`
+patch that gives clean edges; `mpl/axes.py` adds `add_axis_end_tick_caps`.
+ArviZ draws through matplotlib, so `az.plot_posterior` and friends inherit the
+style once the rc is loaded.
+
+For a PDF, save **vector PDF** and embed with `image("fig.pdf")` (needs
+matplotlib ≥ 3.10.1; do not switch to SVG path output, the Inter statics share
+a PostScript name and SVG path-mode collides bold and regular glyphs). For an
+HTML page, save PNG at 200 dpi and reference it from the Markdown.
+
+The cycle, if you need it by hand:
+
+```
+0C1F40  navy        0C9E82  teal         F6AE72  peach        5462C4  indigo
+9FAAE2  periwinkle  C4720A  dark-orange  C8B4E7  violet       B4E7DD  aqua
+```
+
+Aqua, violet and periwinkle are low-contrast lines on white; with more than
+five series, prefer small multiples to the tail of the cycle.
+
+### Chart rules that matter more than color
+
+- **Assign series colors in the cycle's fixed order.** Never reorder by rank — a
+  filter that drops a series must not repaint the survivors.
+- **Never a dual y-axis.** Two measures of different scale become two charts,
+  small multiples, or an index to a common base.
+- **Sequential: one hue, light→dark. Diverging: two hues, neutral midpoint.**
+  Never a rainbow, never a hue at a diverging midpoint.
+- **A legend whenever there are 2+ series.** With ≤ 4, label directly too.
+  Identity must never rest on color alone.
+- **Beyond the cycle, do not invent another color.** Fold the tail into "Other",
+  or use small multiples.
+- **Label the axes and name the units.** The title states the finding, not the
+  variable names.
+- **Real data only.** No illustrative or decorative charts; a chart of
+  simulated data says so in its caption.
 
 ## Non-negotiables
 

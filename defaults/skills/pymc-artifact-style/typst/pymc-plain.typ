@@ -29,7 +29,7 @@
   date: none,                    // e.g. [November 2026]; goes in the footer line
   footer-note: none,             // e.g. [Example data, not a real business.]
   paper: "a4",                   // or "us-letter"
-  font-size: 14pt,               // large on purpose; do not go below 12pt
+  font-size: 16pt,               // large on purpose; do not go below 13pt
   logo: "../assets/pymc-labs-logo-dark.png",
   body,
 ) = {

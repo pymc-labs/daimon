@@ -2,7 +2,7 @@
 
 By the end of one thread you have priors checked before fitting, a fit that passes its convergence checks, and contributions and ROI read with their uncertainty.
 
-The data is simulated and shaped like our project, so no Example Brokerage data is used. To run this on your own data, replace step 1 with your files; steps 2 to 7 stay the same.
+The data is simulated and shaped like our project, so no Example Retailer data is used. To run this on your own data, replace step 1 with your files; steps 2 to 7 stay the same.
 
 Run the prompts in one thread, in order. Steps 4, 5 and 7 fit models, so start them before a meeting rather than during one. If Daimon has a different name in your channel, use that instead of `@daimon`.
 
@@ -11,7 +11,7 @@ Run the prompts in one thread, in order. Steps 4, 5 and 7 fit models, so start t
 ```prompt
 @daimon We're starting a short MMM walkthrough in this thread. Keep every file and model you make here so later steps can reuse them.
 
-Build a simulated dataset shaped like ours, so no Example Brokerage data is used: 6 regions, 156 weekly rows each from January 2023, random seed 2027. Outcome: existing-asset net flows by region, with a few genuine outlier weeks. Media: national TV impressions with their cost, national upper-funnel spend, and paid search and paid social spend by region. Controls: seasonal event weeks and three one-off shock flags. Keep the true parameters out of the thread; we'll work as we would on real data.
+Build a simulated dataset shaped like ours, so no Example Retailer data is used: 6 regions, 156 weekly rows each from January 2023, random seed 2027. Outcome: weekly sales by region, with a few genuine outlier weeks. Media: national TV spend, and paid search and paid social spend by region. Controls: seasonal event weeks and three one-off shock flags. Keep the true parameters out of the thread; we'll work as we would on real data.
 
 Then check it like a real delivery (grain, gaps, week anchor, units, plausible ranges), flag the outlier weeks without removing them, and attach the cleaned files with a short data summary.
 ```
@@ -35,9 +35,9 @@ This is the step to argue about. Priors are where your team's knowledge goes in:
 ## 3. Check the priors against reality (prior predictive check)
 
 ```prompt
-@daimon Run a prior predictive check on that model: draw from the priors alone, with no data fitted. Plot the simulated net flows against the observed range for two regions, and show the channel contributions and ROI the priors imply.
+@daimon Run a prior predictive check on that model: draw from the priors alone, with no data fitted. Plot the simulated sales against the observed range for two regions, and show the channel contributions and ROI the priors imply.
 
-Tell me whether the priors allow outcomes we would call impossible (media driving more than total flows, an ROI nobody would believe) or rule out plausible ones. Adjust what needs it, show before and after, and update the specification.
+Tell me whether the priors allow outcomes we would call impossible (media driving more than total sales, an ROI nobody would believe) or rule out plausible ones. Adjust what needs it, show before and after, and update the specification.
 ```
 
 **You get:** Charts of what the model believes before it sees any data, and a revised prior table.
@@ -59,7 +59,7 @@ Four independent chains show whether separate runs agree, which is what R-hat me
 ## 5. Check the fit, in sample and on held-out weeks (posterior predictive check)
 
 ```prompt
-@daimon Run a posterior predictive check: for each region, plot observed against predicted net flows with 50% and 94% intervals, report how often the observations fall inside the 94% band, and show residuals over time so we can see anything the model missed (event weeks, outlier weeks, the end of the sample).
+@daimon Run a posterior predictive check: for each region, plot observed against predicted sales with 50% and 94% intervals, report how often the observations fall inside the 94% band, and show residuals over time so we can see anything the model missed (event weeks, outlier weeks, the end of the sample).
 
 Then refit with the same settings and checks on all but the last 13 weeks, forecast those 13 weeks, and report coverage and error on them. Say plainly where the model fits badly.
 ```
@@ -71,14 +71,14 @@ In-sample fit flatters every model; the held-out weeks are the fairer test. A go
 ## 6. Read contributions and ROI with their uncertainty
 
 ```prompt
-@daimon From the full fit, show each channel's contribution to net flows and its ROI over the whole period, each with a 94% interval, and each channel's response curve with its band and where current spend sits on it.
+@daimon From the full fit, show each channel's contribution to sales and its ROI over the whole period, each with a 94% interval, and each channel's response curve with its band and where current spend sits on it.
 
 For each channel, compare prior and posterior ROI so we can see how much the data actually informed it, and flag channels the data cannot tell apart (strongly correlated posteriors). Lead with what we can and cannot say, in plain words.
 ```
 
 **You get:** Contribution and ROI charts with intervals, response curves, and a short read of what the data supports.
 
-Read the interval, not the point. A channel whose posterior looks like its prior is telling you about the prior, not the data. That channel is the first candidate for a real lift test.
+Read the interval, not the point. A channel whose posterior looks like its prior is telling you about the prior. That channel is the first candidate for a real lift test.
 
 ## 7. Test the priors' influence and write the model card
 
@@ -90,13 +90,11 @@ Then write a one-page model card for our team: the model, the priors and why, ev
 
 **You get:** A prior-sensitivity comparison and a one-page model card.
 
-Large moves under wider priors mean the data is weak for that channel. That is a finding, not a failure, and it belongs in the model card. The model card is the first thing a model-risk reviewer will ask for.
+Large moves under wider priors mean the data is weak for that channel. That is a finding, and it belongs in the model card. The model card is the first thing a model-risk reviewer will ask for.
 
 ## After the walkthrough, ask for any of these in the same thread
 
 **Calibrate with a real lift test.** When a geo or lift test has actually run, add its result to the model as a calibration measurement and repeat steps 4 to 7. A test's result has to come from running the test; it cannot be simulated in advance. Daimon can help design the test: markets, length, spend change and the smallest effect it could detect.
-
-**Brand equity model.** The stage-2 Bayesian VAR on the stage-1 base, awareness and consideration. The same checks apply: a prior predictive check for explosive dynamics, the same convergence checks, and enough stage-1 draws carried over that the brand equity interval stops moving when more are added. A few dozen draws is a smoke test, not a result.
 
 **MTA reconciliation.** Where MTA credit and the MMM disagree, and clear rules for which source to trust for which decision.
 
@@ -108,7 +106,7 @@ Large moves under wider priors mean the data is weak for that channel. That is a
 
 ## Questions
 
-### Is any Example Brokerage data used?
+### Is any Example Retailer data used?
 
 No. Daimon creates every number in step 1. The shape follows our project; the values are made up, so results describe the simulated data, not your business.
 

@@ -2,8 +2,7 @@
 def _(header):
     header(
         "The example KPI trends upward, and channel x2 is off most weeks",
-        "An exploratory look at the pymc-marketing example dataset before any model is fitted.",
-        badges=[("Example data", "orange")],
+        "Example data: an exploratory look at the pymc-marketing example dataset before any model is fitted.",
     )
     return
 
@@ -11,7 +10,7 @@ def _(header):
 @app.cell(hide_code=True)
 def _(callout):
     callout(
-        "Example data: `mmm_example.csv` ships with pymc-marketing: 179 weeks of a simulated "
+        "`mmm_example.csv` ships with pymc-marketing: 179 weeks of a simulated "
         "KPI `y`, two channel-spend series `x1`/`x2`, two events and a time index. It is a "
         "library example, not client data, so nothing here is a finding about a real business.",
         kind="warn",

@@ -7,10 +7,10 @@ Each unit of spend on Channel A returned about 3,600 KPI (90% interval 3,300 to 
 | Channel A | 3,621 | 179 |
 | Channel B | 3,036 | 32 |
 
-## How sure we are
+## Channel B's number rests on 32 weeks of data
 
 Channel B was off in 82% of weeks, so its number rests on 32 weeks. The model is a quick regression with fixed carry-over and no saturation, so returns could fall at higher spend and it would not show.
 
-## What we need from you
+## Approve a geo test on Channel B and the full model
 
-Approve a 6-week geo test on Channel B, with no spend change elsewhere, and two weeks for the full Bayesian MMM.
+A 6-week geo test on Channel B, with no spend change elsewhere, and two weeks for the full Bayesian MMM.

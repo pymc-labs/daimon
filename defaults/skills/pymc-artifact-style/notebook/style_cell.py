@@ -72,7 +72,7 @@ def _():
       /* marimo's own theme variables */
       --heading-font:'Inter',system-ui,sans-serif;--text-font:'Inter',system-ui,sans-serif;
       --monospace-font:'JetBrains Mono',ui-monospace,monospace;
-      --primary:#0C9E82;--color-blue-500:#0C9E82;--color-blue-600:#0C9E82;--blue-9:#0C9E82;
+      --primary:#5462C4;--color-blue-500:#5462C4;--color-blue-600:#5462C4;--blue-9:#5462C4;
       --color-slate-200:#0c1f4018;}
     html,body,#root{background:#fff!important;}
     body,.markdown,.prose,marimo-ui-element,label,button,input,select,table{
@@ -93,7 +93,7 @@ def _():
     .pm-head h1{margin:0 0 .6rem;font-size:2.4rem;font-weight:600;letter-spacing:-.02em;line-height:1.15;}
     .pm-head p{margin:0 0 .4rem;font-size:1.25rem;line-height:1.5;max-width:44rem;}
     .pm-meta{font-size:1rem;color:#0c1f40b8;}
-    .pm-kpis{margin:.4rem 0 1.2rem;}
+    .pm-keytable{margin:.4rem 0 1.2rem;}
     .pm-note{margin:.6rem 0;font-size:1.05rem;}
     .pm-fig{margin:.6rem 0 1.2rem;}
     .pm-fig img{width:100%;height:auto;display:block;}
@@ -106,14 +106,14 @@ def _():
     table.pm-table tbody th{font-weight:500;}
     table.pm-table td{text-align:right;padding:.38rem .7rem;border:none;font-variant-numeric:tabular-nums;}
     table.pm-table th:first-child,table.pm-table td:first-child{text-align:left;}
-    input[type=range],input[type=checkbox],input[type=radio]{accent-color:var(--pm-teal);}
+    input[type=range],input[type=checkbox],input[type=radio]{accent-color:var(--pm-indigo);}
     """
 
     # The helpers keep their names so existing notebooks still run, but the
     # output is plain: no pills, no cards, no coloured callout boxes.
     def badge(text, color="teal"):
         """Plain status text (no pill). `color` is accepted and ignored."""
-        return f'<span class="pm-tag">{text}</span>'
+        return f'<span class="pm-status">{text}</span>'
     def header(title, subtitle="", badges=(), accent=""):
         """Page header: small wordmark, a title that states the point, one lede line.
         badges=[(text, _)] become one plain line of status text ("Example data · Draft").
@@ -127,7 +127,7 @@ def _():
     def kpis(items):
         """items = [(value, label), ...] -> a rules-only two-column table, not cards."""
         rows = "".join(f"<tr><td>{l}</td><td>{v}</td></tr>" for v, l in items)
-        return mo.Html(f"<table class='pm-table pm-kpis'><tbody>{rows}</tbody></table>")
+        return mo.Html(f"<table class='pm-table pm-keytable'><tbody>{rows}</tbody></table>")
     def callout(md_text, kind="info"):
         """A plain paragraph where the caveat applies (no box). Start with **Label.** if needed."""
         return mo.Html(f"<div class='pm-note'>{mo.md(md_text).text}</div>")
