@@ -214,6 +214,10 @@ async def test_a_routine_is_titled_by_its_name_else_by_the_start_of_its_prompt(r
         cleared = (await client.patch(f"/api/routines/{made['id']}", json={"name": ""})).json()
         assert (cleared["name"], cleared["title"]) == (None, "post the numbers")
 
+        spaced = (await client.post("/api/routines", json=_NEW | {"name": " Weekly "})).json()
+        blank = (await client.post("/api/routines", json=_NEW | {"name": "   "})).json()
+        assert (spaced["name"], blank["name"]) == ("Weekly", None), "create trims like update"
+
 
 def test_the_title_falls_back_to_the_first_line_cut_at_sixty_characters() -> None:
     title = routines_module.routine_title

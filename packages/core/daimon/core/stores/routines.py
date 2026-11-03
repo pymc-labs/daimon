@@ -197,7 +197,7 @@ async def create_routine(
         created_by_user_id=created_by_user_id,
         agent_id=agent_id,
         agent_name=agent_name,
-        name=name,
+        name=(name or "").strip() or None,
         cron_expr=cron_expr,
         timezone=timezone_,
         trigger_message=trigger_message,
