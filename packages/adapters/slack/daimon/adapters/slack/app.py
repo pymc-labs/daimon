@@ -766,6 +766,10 @@ class SlackApp:
                 platform="slack",
                 text=f"<@{requester_user_id}>",
             )
+        except Exception:  # named boundary: the files still go out, pinging nobody
+            log.warning("slack.output_delivery.opt_out_lookup_failed", exc_info=True)
+            requester_label = "@someone"
+        try:
             await deliver_session_outputs(
                 self.runtime.turn_deps.anthropic,
                 web_client,

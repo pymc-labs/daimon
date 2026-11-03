@@ -1121,3 +1121,27 @@ def test_selfhosted_tool_turn_skips_output_sweep(
             requester_user_id="U_TEST",
             selfhosted=True,
         )
+
+
+async def test_output_sweep_when_opt_out_lookup_fails_then_files_still_go_out_unpinged(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A failed never-tag lookup must not drop the files; the sweep names nobody instead."""
+    app = _make_app(db_session_factory, tenant_id_str=str(uuid.uuid4()))
+    deliver = AsyncMock()
+    with (
+        patch("daimon.adapters.slack.app.untag_opted_out", AsyncMock(side_effect=OSError)),
+        patch("daimon.adapters.slack.app.deliver_session_outputs", deliver),
+    ):
+        await app._sweep_session_outputs(  # pyright: ignore[reportPrivateUsage]
+            None,
+            MagicMock(),
+            session_id="sesn_1",
+            channel_id="C_TEST",
+            thread_ts="1.2",
+            team_id="T_TEST",
+            requester_user_id="U_TEST",
+        )
+
+    deliver.assert_awaited_once()
+    assert deliver.await_args.kwargs["requester_label"] == "@someone", "nobody is pinged"
