@@ -38,6 +38,7 @@ from daimon.adapters.mcp.tools.discord._visibility import (
     _require_discord_channel_writable,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.github_app_auth import build_app_install_url
+from daimon.core.outbound.opt_out import untag_opted_out
 from fastmcp.exceptions import ToolError
 
 
@@ -73,6 +74,11 @@ async def _post_app_install_button_impl(  # pyright: ignore[reportUnusedFunction
     view.add_item(button)
 
     content = _build_message_body(requester_platform_user_id=requester_id, purpose=purpose)
+    # Someone who asked never to be tagged is named, not pinged.
+    content = await untag_opted_out(
+        runtime.session_factory, tenant_id=auth.tenant_id, platform="discord", text=content
+    )
+    ping = f"<@{requester_id}>" in content
 
     async with rest_client(bot_token) as c:
         _, member = await _resolve_member(c, guild_id, requester_id)
@@ -91,7 +97,7 @@ async def _post_app_install_button_impl(  # pyright: ignore[reportUnusedFunction
             content=content,
             view=view,
             allowed_mentions=discord.AllowedMentions(
-                users=True, everyone=False, roles=False, replied_user=False
+                users=ping, everyone=False, roles=False, replied_user=False
             ),
         )
         return str(sent.id)
