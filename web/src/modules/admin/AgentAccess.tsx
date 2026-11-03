@@ -13,7 +13,8 @@ import { api } from "@/lib/api"
 import { channelLabel } from "@/lib/format"
 import { useGroups } from "@/lib/hooks"
 import type { AgentAccess } from "./types"
-import { PanelSection, Tag } from "./shared"
+import { AgentLink, ChannelLink } from "@/components/links"
+import { Facts, PanelHead, PanelSection, Tag } from "@/components/panel"
 
 // Agent access
 
@@ -94,46 +95,42 @@ function AccessBody({ a, save }: { a: AgentAccess; save: (b: Partial<AgentAccess
   const options = Object.entries(WHO).filter(([v]) => v !== "groups" || names.length > 0 || a.who === "groups")
   return (
     <div>
-      <div className="flex items-center gap-3 px-5 py-5">
-        <AgentAvatar src={a.agent.avatar} name={a.agent.name} className="size-10 rounded-lg text-sm" />
-        <div className="min-w-0">
-          <div className="truncate text-base font-semibold">{a.agent.name}</div>
-          <div className="truncate text-sm text-muted-foreground">{a.agent.model}</div>
-        </div>
-      </div>
-      {a.fixed_to ? (
-        <PanelSection title="Runs in">
-          <div className="flex items-center gap-2 text-sm"><Lock className="size-4 text-faint" aria-label="Locked" />Kept to {channelLabel(a.fixed_name)}</div>
+      <PanelHead
+        avatar={<AgentAvatar src={a.agent.avatar} name={a.agent.name} className="size-10 rounded-lg text-sm" />}
+        title={<AgentLink id={a.agent.id} name={a.agent.name} />}
+        subtitle={a.agent.model}
+      />
+      <PanelSection>
+        {a.fixed_to ? (
+          <Facts rows={[["Runs in", <span key="in" className="flex items-center gap-1.5"><Lock className="size-4 text-faint" aria-label="Locked" /><ChannelLink id={a.fixed_to} name={a.fixed_name} /></span>]]} />
+        ) : (
+          <Facts rows={[
+            ["Web chat", <Switch key="web" checked={a.web} onCheckedChange={(web) => save({ web })} aria-label={`Web chat for ${a.agent.name}`} />],
+            ["Who", (
+              <Select key="who" value={a.who} onValueChange={(who) => save({ who: who as AgentAccess["who"] })} disabled={!a.web}>
+                <SelectTrigger size="sm" className="w-40"><SelectValue /></SelectTrigger>
+                <SelectContent>{options.map(([v, l]) => <SelectItem key={v} value={v}>{l}</SelectItem>)}</SelectContent>
+              </Select>
+            )],
+          ]} />
+        )}
+      </PanelSection>
+      {!a.fixed_to && a.web && a.who === "groups" && (
+        <PanelSection title="Groups">
+          {names.length ? (
+            <div className="space-y-1">
+              {names.map((g) => (
+                <Label key={g} className="h-8 gap-2.5 font-normal">
+                  <Checkbox
+                    checked={a.groups.includes(g)}
+                    onCheckedChange={(on) => save({ groups: on ? [...a.groups, g] : a.groups.filter((x) => x !== g) })}
+                  />
+                  {g}
+                </Label>
+              ))}
+            </div>
+          ) : <Tag>No groups</Tag>}
         </PanelSection>
-      ) : (
-        <>
-          <PanelSection title="Web chat">
-            <Switch checked={a.web} onCheckedChange={(web) => save({ web })} aria-label={`Web chat for ${a.agent.name}`} />
-          </PanelSection>
-          <PanelSection title="Who">
-            <Select value={a.who} onValueChange={(who) => save({ who: who as AgentAccess["who"] })} disabled={!a.web}>
-              <SelectTrigger className="w-48"><SelectValue /></SelectTrigger>
-              <SelectContent>{options.map(([v, l]) => <SelectItem key={v} value={v}>{l}</SelectItem>)}</SelectContent>
-            </Select>
-          </PanelSection>
-          {a.web && a.who === "groups" && (
-            <PanelSection title="Groups">
-              {names.length ? (
-                <div className="space-y-1">
-                  {names.map((g) => (
-                    <Label key={g} className="h-8 gap-2.5 font-normal">
-                      <Checkbox
-                        checked={a.groups.includes(g)}
-                        onCheckedChange={(on) => save({ groups: on ? [...a.groups, g] : a.groups.filter((x) => x !== g) })}
-                      />
-                      {g}
-                    </Label>
-                  ))}
-                </div>
-              ) : <Tag>No groups</Tag>}
-            </PanelSection>
-          )}
-        </>
       )}
     </div>
   )
