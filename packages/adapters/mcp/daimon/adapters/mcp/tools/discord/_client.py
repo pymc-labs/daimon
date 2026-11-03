@@ -21,14 +21,15 @@ _application_ids: dict[int, int] = {}
 @asynccontextmanager
 async def rest_client(token: str) -> AsyncIterator[discord.Client]:
     """Per-call REST-only ``discord.Client``. Closes its HTTP session on exit."""
-    # Never everyone, here or a role; only the people the rendered post tags.
+    # Never everyone, here or a role; only the people the rendered post tags. A send
+    # that skipped the outbound gate pings nobody unless it says whom itself.
     users = ping_users.get()
     client = discord.Client(
         intents=discord.Intents.default(),
         allowed_mentions=discord.AllowedMentions(
             everyone=False,
             roles=False,
-            users=True if users is None else [discord.Object(int(u)) for u in users],
+            users=False if users is None else [discord.Object(int(u)) for u in users],
             replied_user=False,
         ),
     )
