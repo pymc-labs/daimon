@@ -9,7 +9,7 @@ import io
 import uuid
 from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable, Coroutine
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from time import monotonic
@@ -24,6 +24,7 @@ from daimon.adapters.discord import theme
 from daimon.adapters.discord.agent_setup.stale_picture import StalePictureChangeButton
 from daimon.adapters.discord.attachments import build_attachment_url_prefix
 from daimon.adapters.discord.budget_notice import with_budget_notifier
+from daimon.adapters.discord.button_message import ButtonMessage
 from daimon.adapters.discord.checks import admin_caller, is_member_guild_admin, member_role_ids
 from daimon.adapters.discord.context import (
     build_channel_context_xml,
@@ -52,9 +53,10 @@ from daimon.adapters.discord.lifecycle import (
     edit_recovered_card,
 )
 from daimon.adapters.discord.member_sync import MemberSync
+from daimon.adapters.discord.membership import GatewayMembershipResolver, member_facts
 from daimon.adapters.discord.names import remember_guild_channels, remember_guild_user
 from daimon.adapters.discord.notice_card import build_notice_embed
-from daimon.adapters.discord.output_delivery import deliver_session_outputs
+from daimon.adapters.discord.output_delivery import Conversation, deliver_session_outputs
 from daimon.adapters.discord.permissions import check_missing_permissions
 from daimon.adapters.discord.post_transport import (
     DiscordPostTransport,
@@ -98,7 +100,9 @@ from daimon.adapters.discord.vision import (
     download_as_image_blocks,
     is_vision_image_attachment,
 )
+from daimon.adapters.discord.watch_access import require_watch_thread_access
 from daimon.core.agent_identity import AgentIdentity, identity_enabled_for, resolve_agent_identity
+from daimon.core.agent_pins import agent_pin_names
 from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.billing_panel import fmt_usd
@@ -107,6 +111,7 @@ from daimon.core.config import DirectMessagePolicy, Settings
 from daimon.core.continuity.continuation import (
     ContinuationDecision,
     check_wake_responder,
+    continuation_attended,
     load_asking_agent_id,
 )
 from daimon.core.continuity.messages import (
@@ -115,6 +120,8 @@ from daimon.core.continuity.messages import (
     render_preparation_failed,
 )
 from daimon.core.continuity.wakes import WakeThread, run_wake_poller, skip_thread_wakes
+from daimon.core.continuity.watch_notices import poll_watch_notices
+from daimon.core.continuity.watch_reports import run_watch_report_poller
 from daimon.core.credential_form_expiry import run_credential_form_expiry_poller
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
@@ -147,10 +154,12 @@ from daimon.core.stores.discord_message_admissions import (
 from daimon.core.stores.domain import (
     CredentialRequestRow,
     Role,
+    RoutineRow,
     TaskContinuationRow,
     TenantRow,
     ThreadSessionRow,
     TurnCardIntentRow,
+    WatchRow,
 )
 from daimon.core.stores.github_access_requests import AccessRequest
 from daimon.core.stores.github_connect_notices import ConnectNotice
@@ -182,6 +191,7 @@ from daimon.core.stores.turn_card_intents import (
     record_turn_card_recovery_failure,
 )
 from daimon.core.stores.turn_origins import get_active_origin, thread_archive_requested
+from daimon.core.stores.watches import NoticeAttempt, Refused, SentNotice, Unclear
 from daimon.core.thread_naming import (
     THREAD_NAME_MAX_CHARS,
     fallback_thread_name,
@@ -202,6 +212,7 @@ from daimon.core.turn.errors import (
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
 from daimon.core.turn.outcomes import observe_turn, record_refusal
+from daimon.core.turn.output import OutputAuthorization
 from daimon.core.turn.prepare import PreparedTurn, admitted_session_scope, bind_session
 from daimon.core.turn.protection import (
     ConfirmedProtection,
@@ -213,6 +224,8 @@ from daimon.core.turn.run import RunOutcome, run_prepared_turn
 from daimon.core.turn.slots import QUEUE_TIMED_OUT_TEXT, holding, release_turn_slot, wait_for_slot
 from daimon.core.turn.state import ToolUseBlock
 from daimon.core.turn.thread_queue import (
+    QUEUE_NOTICE,
+    HeldThreads,
     ThreadQueue,
     claim_dispatch,
     dispatch_and_drain,
@@ -231,6 +244,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 from discord.http import HTTPClient
 
@@ -707,6 +721,11 @@ class DaimonBot(commands.Bot):
         self.runtime = with_budget_notifier(
             runtime, self.open_member_dm, self.is_closed, client=self
         )
+        self.membership_resolver = GatewayMembershipResolver(self)
+        self.runtime = replace(
+            self.runtime,
+            turn_deps=replace(self.runtime.turn_deps, membership_resolver=self.membership_resolver),
+        )
         # The SDK routes slash commands, buttons, and modals before dispatching
         # on_interaction, so filter their gateway payload before those callbacks.
         parse_interaction = self._connection.parsers["INTERACTION_CREATE"]
@@ -717,11 +736,23 @@ class DaimonBot(commands.Bot):
                 parse_interaction(data)
 
         self._connection.parsers["INTERACTION_CREATE"] = parse_allowed_interaction
+
+        # discord.py's on_member_update only fires for SDK-cached members.
+        # Invalidate raw updates too: REST-fetched DM members need not be cached.
+        parse_member_update = self._connection.parsers["GUILD_MEMBER_UPDATE"]
+
+        def invalidate_member_update(data: dict[str, Any]) -> None:
+            guild_id = str(data["guild_id"])
+            tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
+            self.membership_resolver.invalidate(tenant_id, guild_id, str(data["user"]["id"]))
+            parse_member_update(data)
+
+        self._connection.parsers["GUILD_MEMBER_UPDATE"] = invalidate_member_update
         # Per-thread concurrency state. _processing: thread IDs with an active turn.
         # _pending: mentions queued behind an in-flight turn for that thread.
         # Drained after the current turn finishes into a single composite follow-up
         # turn so the user doesn't lose messages they fired while the bot was busy.
-        self._processing: set[int] = set()
+        self._processing: HeldThreads[int] = HeldThreads()
         self._processing_tasks: dict[int, asyncio.Task[object]] = {}
         # The running turn of each thread, for a typed "stop" (`_typed_stop`).
         self._typed_stops = TypedStops()
@@ -860,28 +891,40 @@ class DaimonBot(commands.Bot):
         if self._output_sweeps.get(session_id) is task:
             del self._output_sweeps[session_id]
 
+    async def _routine_agent_names(self, row: RoutineRow) -> tuple[str | None, ...]:
+        agent = await find_agent_by_daimon_tag(
+            self.runtime.anthropic, tenant_id=row.tenant_id, name=row.agent_name
+        )
+        if agent is None or agent.id != row.agent_id:
+            return ()
+        return (row.agent_name, *agent_pin_names(agent.name, agent.metadata))
+
     async def _sweep_session_outputs(
         self,
         previous: asyncio.Task[None] | None,
-        thread: discord.Thread,
-        tenant_id: uuid.UUID,
+        thread: Conversation,
         session_id: str,
+        may_post: Callable[[], Awaitable[bool]],
         lifecycle: DiscordTurnLifecycle | None = None,
     ) -> None:
         # A previous sweep owns post-then-delete for this MA session until it finishes.
         if previous is not None:
             with contextlib.suppress(Exception):
                 await previous
+        # A DM has one reader, so a file posted apart from the answer needs no attribution.
+        attributed = lifecycle if isinstance(thread, discord.Thread) else None
         try:
             await deliver_session_outputs(
                 self.runtime.turn_deps.anthropic,
                 thread,
                 session_id=session_id,
-                may_post=lambda: self._may_post_in(tenant_id=tenant_id, channel=thread),
+                may_post=may_post,
                 notice_thread_ids=self._delivery_notice_thread_ids,
                 noticed_files=self._noticed_output_files,
                 turn_window=lifecycle.turn_window if lifecycle is not None else None,
                 answer=lifecycle.answer_message if lifecycle is not None else None,
+                requester_id=attributed.requester_id if attributed is not None else None,
+                reply_to=attributed.files_reply_to(thread.id) if attributed is not None else None,
             )
         except Exception as exc:  # detached sweep must not fail the completed turn
             log.warning(
@@ -966,14 +1009,46 @@ class DaimonBot(commands.Bot):
         once and never stranded, which a per-turn cutoff could not promise.
         Sweeps stay serialized per session.
         """
+        if lifecycle is not None and lifecycle.output_authorization is not None:
+            # A watch's execution grant ends with the turn, before detached sweeps.
+            return
         if selfhosted or not any(
             isinstance(block, ToolUseBlock) for block in outcome.state.content
         ):
             return
-        session_id = outcome.ma_session_id
+        self._queue_output_sweep(
+            thread,
+            outcome.ma_session_id,
+            may_post=lambda: self._may_post_in(tenant_id=tenant_id, channel=thread),
+            lifecycle=lifecycle,
+        )
+
+    def schedule_dm_output_sweep(
+        self,
+        channel: discord.DMChannel,
+        session_id: str,
+        *,
+        may_post: Callable[[], Awaitable[bool]],
+        lifecycle: DiscordTurnLifecycle | None,
+    ) -> None:
+        """Sweep a DM turn's files onto its answer, detached like a thread's sweep.
+
+        ``may_post`` is the DM's own delivery check, asked again before each
+        file: the thread gate's channel permissions mean nothing in a DM.
+        """
+        self._queue_output_sweep(channel, session_id, may_post=may_post, lifecycle=lifecycle)
+
+    def _queue_output_sweep(
+        self,
+        thread: Conversation,
+        session_id: str,
+        *,
+        may_post: Callable[[], Awaitable[bool]],
+        lifecycle: DiscordTurnLifecycle | None,
+    ) -> None:
         previous = self._output_sweeps.get(session_id)
         task = self._spawn(
-            self._sweep_session_outputs(previous, thread, tenant_id, session_id, lifecycle)
+            self._sweep_session_outputs(previous, thread, session_id, may_post, lifecycle)
         )
         self._output_sweeps[session_id] = task
         task.add_done_callback(functools.partial(self._forget_output_sweep, session_id))
@@ -1084,6 +1159,14 @@ class DaimonBot(commands.Bot):
                 )
             )
             self._spawn(
+                run_watch_report_poller(
+                    self.runtime.sessionmaker,
+                    platform="discord",
+                    open_report=self._open_watch_report,
+                    should_stop=lambda: self.draining or self.is_closed(),
+                )
+            )
+            self._spawn(
                 run_request_expiry_poller(
                     self.runtime.sessionmaker,
                     platform="discord",
@@ -1097,6 +1180,7 @@ class DaimonBot(commands.Bot):
                     self.runtime.sessionmaker,
                     platform="discord",
                     deliver=self._send_connect_notice,
+                    after_poll=self._poll_watch_import_notices,
                     should_stop=lambda: self.draining or self.is_closed(),
                 )
             )
@@ -1114,6 +1198,9 @@ class DaimonBot(commands.Bot):
                             row.tenant_id, DirectMessagePolicy()
                         ),
                         client=self,
+                        output_client=self.runtime.anthropic,
+                        membership_resolver=self.membership_resolver,
+                        resolve_agent_names=self._routine_agent_names,
                         resolve_identity=lambda row, guild_id: resolve_routine_identity(
                             self.runtime.sessionmaker,
                             self.runtime.anthropic,
@@ -1140,11 +1227,14 @@ class DaimonBot(commands.Bot):
                 )
         from daimon.adapters.discord.commands.agent_setup import AgentSetupCog
         from daimon.adapters.discord.commands.billing import BillingCog
+        from daimon.adapters.discord.commands.cost_footer import CostFooterCog
         from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
         from daimon.adapters.discord.commands.github import GitHubCog
         from daimon.adapters.discord.commands.help import HelpCog
         from daimon.adapters.discord.commands.here import HereCog
+        from daimon.adapters.discord.commands.leads import LeadsCog
         from daimon.adapters.discord.commands.memory import MemoryCog
+        from daimon.adapters.discord.commands.model import ModelCog
         from daimon.adapters.discord.commands.privacy import PrivacyCog
         from daimon.adapters.discord.commands.routines import RoutinesCog
         from daimon.adapters.discord.feedback_reactions import FeedbackReactionCog
@@ -1155,9 +1245,12 @@ class DaimonBot(commands.Bot):
         await self.add_cog(AgentSetupCog(self))
         await self.add_cog(GitHubCog(self))
         await self.add_cog(RoutinesCog(self))
+        await self.add_cog(LeadsCog(self))
         await self.add_cog(BillingCog(self))
+        await self.add_cog(CostFooterCog(self))
         await self.add_cog(PrivacyCog(self))
         await self.add_cog(MemoryCog(self))
+        await self.add_cog(ModelCog(self))
         await self.add_cog(FeedbackReactionCog(self))
 
         # One-time CLASS registration (not per-button) for the chat-initiated
@@ -2007,13 +2100,20 @@ class DaimonBot(commands.Bot):
         return isinstance(name, str) and bool(name)  # pyright: ignore[reportUnnecessaryIsInstance]
 
     def _allows_guild(self, guild_id: int | None) -> bool:
-        """Non-production accepts only configured guilds; DMs have no guild to allow."""
-        if not self._non_production:
+        """Non-production accepts only configured guilds.
+
+        DMs and their buttons carry no guild and pass as in production; the
+        direct-message cog then answers only through a tenant `allows_tenant`
+        accepts, so a lane bot still serves no one outside its guilds.
+        """
+        if not self._non_production or guild_id is None:
             return True
         settings = self.runtime.settings.discord
-        return (
-            guild_id is not None and settings is not None and guild_id in settings.command_guild_ids
-        )
+        return settings is not None and guild_id in settings.command_guild_ids
+
+    def allows_tenant(self, tenant: TenantRow | None) -> bool:
+        """Whether a DM may be answered through `tenant`, whose external id is its guild."""
+        return tenant is not None and self._allows_guild(int(tenant.external_id))
 
     def dispatch(self, event: str, /, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401
         """Stop guild events before any registered cog listener sees them."""
@@ -2187,16 +2287,27 @@ class DaimonBot(commands.Bot):
                 )
             )
         if non_production:
-            # Remove commands left by a production deployment without registering
-            # any global commands in this environment. Guild copies stay local.
+            # Replace commands left by a production deployment with the DM-only ones:
+            # only the global scope reaches DMs, and a DM-only command never shows in
+            # a guild, so registering it globally widens nothing.
+            dm_only = [
+                command
+                for command in self.tree.get_commands()
+                if isinstance(command, app_commands.Command)
+                and command.allowed_contexts is not None
+                and not command.allowed_contexts.guild
+            ]
             if not self._global_tree_synced:
                 if self.application_id is None:
                     log.warning("tree_sync_global_clear_failed", reason="missing_application_id")
                     return
                 try:
-                    await self.http.bulk_upsert_global_commands(self.application_id, payload=[])
+                    await self.http.bulk_upsert_global_commands(
+                        self.application_id,
+                        payload=[command.to_dict(self.tree) for command in dm_only],
+                    )
                     self._global_tree_synced = True
-                    log.info("tree_cleared_global")
+                    log.info("tree_cleared_global", dm_only=[c.name for c in dm_only])
                 except discord.HTTPException as exc:
                     log.warning("tree_sync_global_clear_failed", error=str(exc))
                     return
@@ -2208,6 +2319,8 @@ class DaimonBot(commands.Bot):
                     self.tree.clear_commands(guild=guild_obj)
                     if guild.id in command_guild_ids:
                         self.tree.copy_global_to(guild=guild_obj)
+                        for command in dm_only:
+                            self.tree.remove_command(command.name, guild=guild_obj)
                     await self.tree.sync(guild=guild_obj)
                     self._ready_synced_guild_ids.add(guild.id)
                     log.info("tree_synced", guild_id=str(guild.id))
@@ -2398,6 +2511,7 @@ class DaimonBot(commands.Bot):
 
     async def on_guild_remove(self, guild: discord.Guild) -> None:
         """Soft-archive: stamp archived_at=now(). NO row delete."""
+        self.membership_resolver.invalidate_guild(str(guild.id))
         if not self._allows_guild(guild.id):
             return
         guild_id = str(guild.id)
@@ -2914,11 +3028,30 @@ class DaimonBot(commands.Bot):
         # (it short-circuits on message.mention_everyone), which would make the bot
         # reply to every mass ping. message.mentions excludes @everyone/@here and
         # role mentions, so this triggers only on a direct user mention of the bot.
-        bot_mentioned = self.user is not None and any(
-            user.id == self.user.id for user in message.mentions
+        bot_mentioned = isinstance(message, ButtonMessage) or (
+            self.user is not None and any(user.id == self.user.id for user in message.mentions)
         )
         if self.draining:
             return
+        if (
+            not startup_replay
+            and not resume_admitted
+            and not isinstance(message, ButtonMessage)
+            and message.guild is not None
+            and isinstance(message.author, discord.Member)
+            and not message.author.bot
+        ):
+            # Timestamp actual ingress, before routing/queue waits. A queued
+            # message's old Member snapshot must never restore a revoked role.
+            # A button's snapshot predates its seed/switch reads; admission uses
+            # current membership evidence instead of re-observing that snapshot.
+            guild_id = str(message.guild.id)
+            self.membership_resolver.observe(
+                derive_tenant_uuid(platform="discord", workspace_id=guild_id),
+                guild_id,
+                str(message.author.id),
+                member_facts(message.author),
+            )
         is_webhook_post = isinstance(message.webhook_id, int)
         if not bot_mentioned and is_plain_text_mention_candidate(
             author_is_bot=message.author.bot,
@@ -3346,6 +3479,8 @@ class DaimonBot(commands.Bot):
         """
         self._queued_reactions.add(id(message))
         self._thread_queue.enqueue(thread_id, message)
+        generation = self._processing.generation(thread_id)
+        notify = self._processing.should_notify(thread_id)
         try:
             if self._thread_lost(message):
                 return  # no reaction in a gone or closed thread; the release finishes the row
@@ -3361,6 +3496,19 @@ class DaimonBot(commands.Bot):
             # The drain can finish while add_reaction is still in flight.
             if id(message) not in self._queued_reactions and not self._thread_lost(message):
                 await self._remove_mention_reaction(message, "⌛")
+        if (
+            notify
+            and not self._thread_lost(message)
+            and self._processing.is_current(thread_id, generation)
+        ):
+            try:
+                await message.channel.send(QUEUE_NOTICE)
+            except Exception as exc:
+                log.warning(
+                    "mention_queue.notice_failed",
+                    thread_id=str(thread_id),
+                    err_type=type(exc).__name__,
+                )
 
     def _thread_lost(self, message: discord.Message) -> bool:
         """Whether `message` sits in a thread that is gone or closed.
@@ -3459,7 +3607,7 @@ class DaimonBot(commands.Bot):
 
     @property
     def _thread_queue(self) -> ThreadQueue[int, discord.Message]:
-        return ThreadQueue(self._processing, self._pending)
+        return ThreadQueue(self._processing, self._pending, start_turn=self._processing.start_turn)
 
     async def _drain_pending_mentions(
         self, thread_id: int, guild_id: str, tenant_id: uuid.UUID
@@ -3469,7 +3617,9 @@ class DaimonBot(commands.Bot):
         def compose(queued: list[discord.Message]) -> list[list[discord.Message]]:
             draining.update((id(message), message) for message in queued)
             groups: list[list[discord.Message]] = []
-            for author_messages in group_by_author(queued, lambda m: m.author.id):
+            for author_messages in group_by_author(
+                queued, lambda m: m.author.id, separate=lambda m: isinstance(m, ButtonMessage)
+            ):
                 pending: list[discord.Message] = []
                 for queued_message in author_messages:
                     if is_affirmative(queued_message.content):
@@ -3809,6 +3959,27 @@ class DaimonBot(commands.Bot):
         except discord.HTTPException:
             return False
 
+    async def _poll_watch_import_notices(self) -> None:
+        from daimon.adapters.discord.budget_notice import send_watch_notice
+
+        async def deliver(
+            watch: WatchRow, workspace_id: str, text: str, /, *, attempt: NoticeAttempt
+        ) -> SentNotice | Unclear | Refused | bool:
+            sent = await send_watch_notice(
+                self.runtime,
+                self.open_member_dm,
+                self.is_closed,
+                bot_user_id=self.user.id if self.user else None,
+                tenant_id=watch.tenant_id,
+                workspace_id=workspace_id,
+                recipient_id=watch.owner_external_id,
+                text=text,
+                attempt=attempt,
+            )
+            return sent if sent is not None else False
+
+        await poll_watch_notices(self.runtime.sessionmaker, deliver=deliver)
+
     async def open_member_dm(self, guild_id: int, user_id: int) -> discord.abc.Messageable:
         """A DM with a human member of `guild_id` (routine delivery fallback).
 
@@ -3855,6 +4026,105 @@ class DaimonBot(commands.Bot):
             )
         )
         return True
+
+    async def _open_watch_report(self, row: TaskContinuationRow) -> None:
+        """The report poller's hook: dispatch one watch report in its own task."""
+        if self.draining:
+            return
+        from daimon.core.continuity.watch_reports import dispatch_watch_report
+
+        self._spawn(
+            dispatch_watch_report(
+                self.runtime.sessionmaker,
+                row,
+                run_report=self._run_watch_report,
+                dispatch_errors=(discord.HTTPException,),
+            )
+        )
+
+    async def _run_watch_report(self, row: TaskContinuationRow, seed: str) -> None:
+        """Run one started watch report into the owner's DM or a new thread."""
+        from daimon.adapters.discord.watch_delivery import (
+            deliver_dm_report,
+            open_report_thread,
+        )
+        from daimon.core.direct_messages import DirectMessageAccessRevoked, run_dm_watch
+        from daimon.core.stores.watches import get_firing, get_watch, pause_watch
+        from daimon.core.turn.admission import DmSource
+
+        async with self.runtime.sessionmaker() as db:
+            firing = await get_firing(db, row.idempotency_key)
+            watch = None if firing is None else await get_watch(db, firing.watch_id)
+        if watch is None:
+            raise AdmissionDenied(reason="runs_elsewhere")
+        if watch.delivery == "dm":
+
+            async def run_turn(current: WatchRow) -> str:
+                try:
+                    reply = await run_dm_watch(
+                        self.runtime.turn_deps,
+                        row,
+                        owner_user_id=current.owner_external_id,
+                        prompt=seed,
+                        source=DmSource(
+                            channel_id=current.parent_channel_id, thread_id=current.thread_id
+                        ),
+                        budget_channel_id=current.parent_channel_id,
+                    )
+                except DirectMessageAccessRevoked as error:
+                    log.info("watch_report.dm_refused", reason=error.reason)
+                    if error.reason in ("dm_disabled", "source_sealed"):
+                        async with self.runtime.sessionmaker.begin() as db:
+                            await pause_watch(
+                                db,
+                                current.id,
+                                reason="Watch paused: it can no longer report in your DMs.",
+                            )
+                    raise AdmissionDenied(reason="invoker_not_allowed") from None
+                return reply.text
+
+            async def member_present(guild_id: int, user_id: int) -> bool:
+                try:
+                    guild = self.get_guild(guild_id) or await self.fetch_guild(guild_id)
+                    member = await guild.fetch_member(user_id)
+                except (discord.NotFound, discord.Forbidden):
+                    return False
+                return not member.bot
+
+            await deliver_dm_report(
+                self.runtime.sessionmaker,
+                row,
+                run_turn=run_turn,
+                open_dm=self.open_member_dm,
+                member_present=member_present,
+                dm_policy=lambda tenant_id: self.runtime.settings.direct_message_policies.get(
+                    tenant_id, DirectMessagePolicy()
+                ),
+            )
+            return
+        if watch.delivery != "new_thread":
+            raise AdmissionDenied(reason="runs_elsewhere")
+        thread = await open_report_thread(self.runtime.sessionmaker, row, client=self)
+        if thread.id in self._processing:
+            # Someone is already talking in it; the report waits for that turn.
+            raise SessionBusyError(
+                pending_reasons=("watch_report",),
+                retry_after=datetime.now(UTC) + timedelta(seconds=30),
+            )
+        self._processing.add(thread.id)
+        self._thread_stops.claim(thread.id)
+        self._track_processing_task(thread.id)
+        try:
+            # The normal continuation path, in the thread this firing made.
+            await self._run_continuation_turn(
+                row.model_copy(update={"thread_id": str(thread.id)}),
+                ContinuationDecision(action="dispatch", seed_user_message=seed),
+                thread=thread,
+                tenant_id=row.tenant_id,
+                guild_id=str(thread.guild.id),
+            )
+        finally:
+            await self._release_and_clear(thread.id, row.tenant_id, clear_reactions=False)
 
     def _release_thread(self, thread_id: int) -> None:
         self._processing_tasks.pop(thread_id, None)
@@ -3981,19 +4251,26 @@ class DaimonBot(commands.Bot):
             else None
         )
 
-        # The follow-up runs as the requester, so it carries their role as it
-        # stands NOW -- re-read from the guild, never from anything the form
-        # or the row recorded. A lookup that fails runs the turn as USER.
-        role, _role_ids = await _requester_role(thread.guild, row.requester_external_user_id)
-        # A continuation posts into the thread too: a protected one is skipped
-        # (the dispatcher logs it) before admission, which then reads the
-        # parent the check cached.
-        post_state = await _channel_protection_state(
-            self.runtime.sessionmaker, tenant_id=tenant_id, channel=thread
-        )
-        if not post_state.may_post:
-            raise AdmissionDenied(reason="writers_none")
-        category_id, category_unresolved = await _resolve_category(thread, fetch=False)
+        # Watches and long-job completions require fresh REST-only owner access.
+        # Other continuations retain their existing requester-role resolution.
+        if row.reason in ("watch_fired", "watch_report", "job_finished"):
+            access = await require_watch_thread_access(self.runtime.sessionmaker, row, self)
+            member = access.member
+            role = (
+                Role.ADMIN
+                if is_member_guild_admin(member, guild_owner_id=member.guild.owner_id)
+                else Role.USER
+            )
+            _role_ids = member_role_ids(member)
+            category_id, category_unresolved = access.category_id, False
+        else:
+            role, _role_ids = await _requester_role(thread.guild, row.requester_external_user_id)
+            post_state = await _channel_protection_state(
+                self.runtime.sessionmaker, tenant_id=tenant_id, channel=thread
+            )
+            if not post_state.may_post:
+                raise AdmissionDenied(reason="writers_none")
+            category_id, category_unresolved = await _resolve_category(thread, fetch=False)
         admission = await admit(
             self.runtime.turn_deps,
             tenant_id=tenant_id,
@@ -4003,10 +4280,21 @@ class DaimonBot(commands.Bot):
             channel_id=row.parent_channel_id,
             thread_id=row.thread_id,
             role=role,
+            role_ids=tuple(_role_ids),
+            verified_membership=True
+            if row.reason in ("watch_fired", "watch_report", "job_finished")
+            else None,
+            origin=row.reason,
+            attended=continuation_attended(row),
             now=datetime.now(UTC),
             category_id=category_id,
             category_unresolved=category_unresolved,
         )
+        if (
+            row.reason in ("watch_fired", "watch_report", "job_finished")
+            and admission.account_id != row.requester_account_id
+        ):
+            raise AdmissionDenied(reason="invoker_not_allowed")
         # A wake runs only as the agent it was queued for; a thread rerouted in
         # the meantime refuses it here, before any card, bind or billed turn.
         check_wake_responder(
@@ -4075,16 +4363,34 @@ class DaimonBot(commands.Bot):
             thread.id, requester_id=int(row.requester_external_user_id), cancel=cancel
         )
 
+        async def watch_binding() -> None:
+            from daimon.core.stores.watches import watch_seed
+
+            if row.reason in ("watch_fired", "watch_report"):
+                async with self.runtime.sessionmaker() as db:
+                    seed = await watch_seed(db, row, now=datetime.now(UTC))
+                if seed is None:
+                    raise AdmissionDenied(reason="runs_elsewhere")
+            access = await require_watch_thread_access(self.runtime.sessionmaker, row, self)
+            member = access.member
+            live_role = (
+                Role.ADMIN
+                if is_member_guild_admin(member, guild_owner_id=member.guild.owner_id)
+                else Role.USER
+            )
+            if live_role is not role or set(member_role_ids(member)) != set(_role_ids):
+                raise AdmissionDenied(reason="invoker_not_allowed")
+
         def _make_lifecycle(
             turn_id: uuid.UUID, on_first_post: Callable[[discord.Message], Awaitable[None]]
         ) -> DiscordTurnLifecycle:
-            return DiscordTurnLifecycle(
+            lifecycle = DiscordTurnLifecycle(
                 sessionmaker=self.runtime.sessionmaker,
                 alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                 tenant_id=tenant_id,
                 budget_channel_id=admission.budget_channel_id,
                 requester_id=int(row.requester_external_user_id),
-                requester_is_admin=role is Role.ADMIN,
+                requester_is_admin=admission.is_admin,
                 in_dm=isinstance(thread, discord.DMChannel),
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
@@ -4110,6 +4416,10 @@ class DaimonBot(commands.Bot):
                     thread, msg, turn_card_intent_id=turn_id
                 ),
             )
+
+            if row.reason in ("watch_fired", "watch_report", "job_finished"):
+                lifecycle.set_output_authorization(OutputAuthorization(watch_binding))
+            return lifecycle
 
         turn_card_intent, lifecycle = await post_initial_turn_card(
             self.runtime.sessionmaker,
@@ -4147,6 +4457,7 @@ class DaimonBot(commands.Bot):
             tenant_id=tenant_id,
             account_id=admission.account_id,
             platform="discord",
+            attended=continuation_attended(row),
             parent_channel_id=row.parent_channel_id,
             thread_id=row.thread_id,
             platform_channel_id=row.thread_id,
@@ -4154,7 +4465,7 @@ class DaimonBot(commands.Bot):
             responder_name=admission.config.agent_name or agent.name,
             configuration_target_ma_agent_id=admission.config.configuration_target_ma_agent_id,
             configuration_target_name=admission.config.configuration_target_name,
-            role=role,
+            role=Role.ADMIN if admission.is_platform_admin else Role.USER,
             sender_foreign=admission.hold is not None and admission.hold.client,
             shared_channel=admission.shared_channel,
             is_setup=admission.config.thread_binding_kind == "setup",
@@ -4240,6 +4551,7 @@ class DaimonBot(commands.Bot):
                     responder_handle=_responder_handle(self.runtime.settings),
                     session_state=session_state,
                     handoff=handoff_notice,
+                    effective_is_admin=admission.is_admin,
                 )
                 + "\n"
                 + seed_message
@@ -4255,7 +4567,7 @@ class DaimonBot(commands.Bot):
                 tenant_id=tenant_id,
                 budget_channel_id=admission.budget_channel_id,
                 requester_id=int(row.requester_external_user_id),
-                requester_is_admin=role is Role.ADMIN,
+                requester_is_admin=admission.is_admin,
                 in_dm=isinstance(thread, discord.DMChannel),
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
@@ -4284,6 +4596,8 @@ class DaimonBot(commands.Bot):
                     thread, msg, turn_card_intent_id=turn_card_intent.id
                 ),
             )
+            if row.reason in ("watch_fired", "watch_report", "job_finished"):
+                new_lifecycle.set_output_authorization(OutputAuthorization(watch_binding))
             lifecycle_holder[0] = new_lifecycle
             return new_lifecycle
 
@@ -4304,7 +4618,12 @@ class DaimonBot(commands.Bot):
                     platform="discord",
                     thread_id=row.thread_id,
                     external_user_id=row.requester_external_user_id,
+                    watch_row=row if row.reason in ("watch_fired", "watch_report") else None,
+                    job_row=row if row.reason == "job_finished" else None,
                     origin="handoff" if handoff_notice is not None else "chat",
+                    attended=False
+                    if row.reason in ("watch_fired", "watch_report", "job_finished")
+                    else continuation_attended(row),
                     user_message=(
                         render_turn_origin(
                             origin,
@@ -4312,6 +4631,7 @@ class DaimonBot(commands.Bot):
                             responder_handle=_responder_handle(self.runtime.settings),
                             session_state=session_state,
                             handoff=handoff_notice,
+                            effective_is_admin=admission.is_admin,
                         )
                         + "\n"
                         + seed_message
@@ -4332,6 +4652,11 @@ class DaimonBot(commands.Bot):
                         client=self,
                     ),
                     active_turn_message_id=marked_message_id,
+                    before_send=(
+                        watch_binding
+                        if row.reason in ("watch_fired", "watch_report", "job_finished")
+                        else None
+                    ),
                     **provider_action_options(
                         prepared,
                         lambda: discord_provider_action_hook(
@@ -4405,6 +4730,7 @@ class DaimonBot(commands.Bot):
             await self._archive_after_outputs(outcome, thread)
 
     async def on_guild_role_update(self, before: discord.Role, after: discord.Role) -> None:
+        self.membership_resolver.invalidate_guild(str(after.guild.id))
         if not self._allows_guild(after.guild.id):
             return
         if before.permissions != after.permissions:
@@ -4427,11 +4753,25 @@ class DaimonBot(commands.Bot):
             await self._member_sync.joined(member)
 
     async def on_raw_member_remove(self, payload: discord.RawMemberRemoveEvent) -> None:
+        guild_id = str(payload.guild_id)
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
+        self.membership_resolver.invalidate(tenant_id, guild_id, str(payload.user.id))
         # Raw, so a member missing from the cache still leaves the list.
         if self._allows_guild(payload.guild_id):
             await self._member_sync.left(payload.guild_id, payload.user.id)
 
+    async def on_member_remove(self, member: discord.Member) -> None:
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(member.guild.id))
+        self.membership_resolver.invalidate(tenant_id, str(member.guild.id), str(member.id))
+
+    async def on_guild_unavailable(self, guild: discord.Guild) -> None:
+        self.membership_resolver.invalidate_guild(str(guild.id))
+
     async def on_member_update(self, before: discord.Member, after: discord.Member) -> None:
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(after.guild.id))
+        self.membership_resolver.observe(
+            tenant_id, str(after.guild.id), str(after.id), member_facts(after)
+        )
         if not self._allows_guild(after.guild.id):
             return
         if self.user is not None and after.id == self.user.id and before.roles != after.roles:
@@ -4784,6 +5124,7 @@ class DaimonBot(commands.Bot):
         try:
             admission = await admit(
                 self.runtime.turn_deps,
+                origin="chat",
                 tenant_id=tenant_id,
                 requester_org=RequesterOrg.HOST,
                 platform="discord",
@@ -4909,6 +5250,7 @@ class DaimonBot(commands.Bot):
                     )
                 )
             return
+        is_admin = admission.is_admin
 
         agent = admission.agent
 
@@ -5243,7 +5585,7 @@ class DaimonBot(commands.Bot):
             responder_name=admission.config.agent_name or agent.name,
             configuration_target_ma_agent_id=admission.config.configuration_target_ma_agent_id,
             configuration_target_name=admission.config.configuration_target_name,
-            role=role,
+            role=Role.ADMIN if admission.is_platform_admin else Role.USER,
             sender_foreign=admission.hold is not None and admission.hold.client,
             shared_channel=admission.shared_channel,
             is_setup=admission.config.thread_binding_kind == "setup",
@@ -5500,9 +5842,7 @@ class DaimonBot(commands.Bot):
                     excluded_message_ids=own_card_ids,
                 )
         else:
-            if content_override is not None:
-                user_message = content_override
-            elif isinstance(message.channel, discord.TextChannel):
+            if isinstance(message.channel, discord.TextChannel):
                 user_message, _ = await build_channel_context_xml(
                     message.channel,
                     trigger=message,
@@ -5511,10 +5851,13 @@ class DaimonBot(commands.Bot):
                     bot_display_name=discord_settings.bot_display_name,
                     is_admin=is_admin,
                     key_names=key_names,
+                    query_text=content_override,
+                    query_message_ids=tuple(int(i) for i in admitted_message_ids),
+                    query_messages=query_messages,
                 )
             else:
                 # Forum/voice channels: fall back to raw message content
-                user_message = message.content
+                user_message = content_override if content_override is not None else message.content
 
         # Inline only the trigger message's images as base64 vision blocks.
         # Images we can't inline (too large, too many, unsupported, fetch error)
@@ -5595,6 +5938,7 @@ class DaimonBot(commands.Bot):
                     **backend_facts(admission),
                     responder_handle=_responder_handle(self.runtime.settings),
                     session_state=session_state,
+                    effective_is_admin=admission.is_admin,
                 )
                 + "\n"
                 + full_message
@@ -5667,12 +6011,17 @@ class DaimonBot(commands.Bot):
                     platform="discord",
                     thread_id=str(thread.id),
                     external_user_id=str(message.author.id),
+                    context_mention_ids=tuple(
+                        str(u.id) for u in message.mentions if not getattr(u, "bot", True)
+                    ),
+                    context_message_text=message.content,
                     user_message=(
                         render_turn_origin(
                             origin,
                             **backend_facts(admission),
                             responder_handle=_responder_handle(self.runtime.settings),
                             session_state=session_state,
+                            effective_is_admin=admission.is_admin,
                         )
                         + "\n"
                         + user_message

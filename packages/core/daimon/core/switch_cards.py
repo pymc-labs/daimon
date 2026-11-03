@@ -386,6 +386,7 @@ async def _apply(
         tenant_id=tenant_id,
         account_id=claimed.account_id,
         current_admin=admin_now,
+        current_platform_admin=admin_now,
         default_agent_name=deployment_default.agent_name,
         place_word=place_word,
         answering_agent_name=claimed.answering_agent_name,

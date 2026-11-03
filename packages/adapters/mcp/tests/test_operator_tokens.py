@@ -96,6 +96,7 @@ async def test_tenant_read_token_lists_exactly_its_tools(
     names = await _tool_names(_make_app(sessionmaker), token)
     assert names == {
         "get_tenant_summary",
+        "list_admins",
         "list_channel_budgets",
         "get_channel_budget",
         "list_channel_skills",
@@ -224,17 +225,17 @@ async def test_operator_calls_are_rate_limited_and_audited(
     tenant_id, jti, token = await _operator_token(committing_sessionmaker, "tenant:read")
     app = _make_app(committing_sessionmaker, calls_per_minute=1)
 
-    first = await call_mcp_tool(app, token=token, name="get_tenant_summary")
-    second = await call_mcp_tool(app, token=token, name="get_tenant_summary")
+    first = await call_mcp_tool(app, token=token, name="list_admins")
+    second = await call_mcp_tool(app, token=token, name="list_admins")
     for middleware in app.state.mcp.middleware:
         if isinstance(middleware, IdentityMiddleware):
             await middleware.drain_audit()
     async with committing_sessionmaker() as session:
         events = await list_events(session, tenant_id=tenant_id)
 
-    assert "balance_usd" in _text(first), f"the first call succeeds: {first}"
+    assert not first["result"].get("isError"), f"the first call succeeds: {first}"
     assert "too many calls" in _text(second), f"the second is over the limit: {second}"
-    calls = [e for e in events if e.tool_name == "get_tenant_summary"]
+    calls = [e for e in events if e.tool_name == "list_admins"]
     assert [(e.outcome, e.token_kind, e.token_jti, e.scope) for e in calls] == [
         ("allowed", "operator", jti, "tenant:read"),
         ("denied", "operator", jti, None),
@@ -242,7 +243,7 @@ async def test_operator_calls_are_rate_limited_and_audited(
     assert all(e.platform_user_id == "u-admin" for e in calls), "it acts as the admin"
 
 
-async def test_the_tenant_summary_sent_to_an_operator_has_no_seal_or_protection_key(
+async def test_operator_cannot_read_financial_summary_or_sealed_policy(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant_id, _jti, token = await _operator_token(committing_sessionmaker, "tenant:read")
@@ -262,5 +263,5 @@ async def test_the_tenant_summary_sent_to_an_operator_has_no_seal_or_protection_
     )
 
     text = _text(result)
-    assert "'channel_id': 'c3'" in text and "timed_credit" in text, f"the summary: {result}"
+    assert "personal user credential" in text, f"money reads require a person: {result}"
     assert "sealed" not in text and "protected" not in text, "neither key is on the wire"

@@ -1168,3 +1168,19 @@ def test_place_from_origin_maps_a_dm_scope_to_no_channel() -> None:
     assert Place.from_origin(parent_channel_id="C1", thread_id=None) == Place(
         channel_id="C1", parent_channel_id="C1"
     )
+
+
+@pytest.mark.parametrize("action", [Action.START_TURN, Action.ACT_FOR_CREATOR])
+def test_role_gate_requires_current_membership_and_matching_role(action: Action) -> None:
+    policy = TenantAccessPolicy(invoker_role_ids=("123",))
+    subject = Subject(platform_user_id="U1", verified_membership=True, role_ids=("123",))
+    assert authorize(policy, subject=subject, action=action)
+    assert not authorize(
+        policy, subject=Subject(platform_user_id="U1", role_ids=("123",)), action=action
+    )
+    assert not authorize(
+        policy, subject=Subject(platform_user_id="U1", verified_membership=True), action=action
+    )
+    assert not authorize(
+        policy, subject=Subject(platform_user_id="U1", is_admin=True), action=action
+    )

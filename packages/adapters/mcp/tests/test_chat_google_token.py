@@ -18,6 +18,7 @@ from daimon.core.config import (
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.sessions import create_session
 from daimon.core.stores.agent_google_binding import upsert_agent_google_binding
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.testing.asgi import mcp_session
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
@@ -96,6 +97,7 @@ async def test_chat_google_token_is_scoped_to_executing_agent(
         account_id=account.id,
         agent_uuid=agent_id,
         session_factory=sessionmaker,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     google_creds = Mock(token="mock-google-access-token")
     google_factory = Mock(return_value=google_creds)

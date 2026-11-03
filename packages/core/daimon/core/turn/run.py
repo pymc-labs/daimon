@@ -22,32 +22,46 @@ from typing import Literal, TypedDict, cast
 import anthropic as _anthropic
 import structlog
 from anthropic.types import RawMessageStreamEvent
+from anthropic.types.beta import BetaManagedAgentsSession
 from anthropic.types.beta.beta_managed_agents_system_content_block_param import (
     BetaManagedAgentsSystemContentBlockParam,
 )
 from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
-from daimon.core.config import load_turn_settings
+from daimon.core.config import get_repo_memory_settings, load_turn_settings
 from daimon.core.confirmation import (
     ConfirmationHook,
     ToolRuleCardReference,
-    confirmed_tools_for_turn,
+    confirmed_tools_for_tenant,
 )
 from daimon.core.context_prompt import TurnContext, context_prompt
+from daimon.core.context_provider import ContextHook, ContextRequest, LoadedProvider
 from daimon.core.errors import TurnError
 from daimon.core.handoff_context import (
     render_lost_workspace_framing,
     render_previous_session,
     select_recent_turns,
+    supports_system_message,
 )
 from daimon.core.ma import replay_events
+from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mcp_tool_annotations import agent_mcp_token_for, mcp_annotation_lookup
 from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import TurnBackendRequest, TurnRuntime
+from daimon.core.mux_compat import legacy_call
+from daimon.core.repo_memory import (
+    MemoryState,
+    record_memory_prefix,
+    turn_memory_state,
+    with_memory_prefix,
+)
 from daimon.core.session_fence_retry import retry_fences
 from daimon.core.session_mutation import SessionRetired, session_mutation_fence
 from daimon.core.session_preparation_gate import pool_headroom
 from daimon.core.session_preparation_stages import lock_preparation
+from daimon.core.session_snapshot import session_mcp_servers
 from daimon.core.stores.agent_notices import record_agent_notices, take_agent_notices
-from daimon.core.stores.domain import TransferKind
+from daimon.core.stores.domain import TaskContinuationRow, TransferKind
+from daimon.core.stores.gemini_runtime_state import complete
 from daimon.core.stores.thread_session_lineage import link_replacement
 from daimon.core.stores.thread_sessions import (
     get_live_thread_session,
@@ -56,8 +70,16 @@ from daimon.core.stores.thread_sessions import (
     mark_dead,
     transfer_active_turn,
 )
+from daimon.core.stores.turn_origins import bind_origin_session
+from daimon.core.thread_models import MODEL_FALLBACK_NOTICE
 from daimon.core.tool_safety import daimon_endpoint, trusted_servers_for
-from daimon.core.turn.admission import Admission, decide_before_send, reauthorize
+from daimon.core.turn.admission import (
+    Admission,
+    decide_before_send,
+    reauthorize,
+    refresh_approval_gate,
+    require_current_spend,
+)
 from daimon.core.turn.agent_notices import (
     GITHUB_KEY_RESTART_NOTICE,
     LOST_WORKSPACE_NOTICE,
@@ -68,12 +90,18 @@ from daimon.core.turn.approvals import (
     agent_rule_lookup,
     channel_for_tool_rules,
     chat_tool_confirmation,
+    unattended_decider,
 )
 from daimon.core.turn.binding import prepared_persistence
-from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
+from daimon.core.turn.ceiling import (
+    ceiling_error,
+    current_turn_deadline,
+    remaining_s,
+    turn_deadline,
+)
 from daimon.core.turn.deps import TurnDeps
-from daimon.core.turn.driver import SEND_ATTEMPTED, run_turn
-from daimon.core.turn.errors import SessionBusyError
+from daimon.core.turn.driver import SEND_ATTEMPTED, run_turn, unattended_sends
+from daimon.core.turn.errors import AdmissionDenied, SessionBusyError
 from daimon.core.turn.io import LegacyTurnIO, TurnIO, turn_io
 from daimon.core.turn.lifecycle import (
     Acknowledgment,
@@ -85,8 +113,15 @@ from daimon.core.turn.lifecycle import (
 from daimon.core.turn.mcp_context import mcp_context_prefix, tool_permission
 from daimon.core.turn.outbound import scrubbed_for
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
+from daimon.core.turn.output import OutputAuthorization, output_authorization
 from daimon.core.turn.persistence import BindingSuperseded, LeaseWait, TurnPersistence
-from daimon.core.turn.posture import Billed, BillingPosture, UsageRecorder
+from daimon.core.turn.posture import (
+    Billed,
+    BillingPosture,
+    PolicyApproval,
+    ToolConfirmation,
+    UsageRecorder,
+)
 from daimon.core.turn.prepare import (
     ContinuityOutcome,
     CreatedSession,
@@ -105,16 +140,38 @@ from daimon.core.turn.provider_actions import (
 )
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason, termination_reason
+from daimon.core.turn.unattended import (
+    dm_session_authority,
+    refuse_ungated_confirmation,
+    require_native_unattended_capabilities,
+    session_gate,
+)
+from daimon.core.turn.unattended_capabilities import (
+    ServerTool,
+    capability_policy,
+    capability_posture,
+    constrain_capabilities,
+    invalidate_cached_tools,
+    protected_tools,
+    restore_capabilities,
+    send_capabilities,
+    unattended_entry_point,
+)
+from daimon.core.turn_origin import current_origin_id, execution_origin
 from daimon.core.usage_billing import ObservationBilled, ObservationRecorder
 from daimon.core.usage_sweep import SETTLE_BUDGET_S, settle_session
 from mux.contracts.events import Event
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.profile import SUPPORTED
+from mux.drivers.anthropic import SESSION_READS_NAMESPACE, SessionReads
 from mux.errors import ScopeViolation, UnsupportedCapability
 from mux.profiles import MANAGED_AGENTS, get_profile
 from mux.profiles.selfhosted import LOOP as SELFHOSTED_LOOP
+from mux.state.lease import Lease
 from sqlalchemy.exc import SQLAlchemyError
+
+_JOB_ALLOWLIST = frozenset({ServerTool("daimon-mcp", "get_long_job")})
 
 
 class _TurnPortKwargs(TypedDict, total=False):
@@ -326,15 +383,48 @@ class _DeferredFailureLifecycle:
 
     inner: TurnLifecycle
     _held: tuple[TurnState, Exception] | None = None
+    authorize_final: Callable[[], Awaitable[None]] | None = None
 
     async def on_acknowledgment(self, phase: Acknowledgment) -> None:
         await acknowledge(self.inner, phase)
 
     async def on_render(self, state: TurnState) -> None:
+        if self.authorize_final is not None:
+            # Watches keep their initial card until the final post. Streaming
+            # renders would either poll Discord on every tick or deliver stale
+            # authorization after access was revoked.
+            return
         await self.inner.on_render(state)
 
+    async def _may_finish(self) -> bool:
+        if self.authorize_final is None:
+            return True
+        for delay in (1, 2, None):
+            try:
+                await self.authorize_final()
+                return True
+            except Exception as err:
+                if not isinstance(err, AdmissionDenied) and delay is not None:
+                    await asyncio.sleep(delay)
+                    continue
+                await self._output_refused(err)
+                break
+        return False
+
+    async def _output_refused(self, err: Exception) -> None:
+        log.warning("turn.final_output_refused", error_type=type(err).__name__)
+        cleanup = getattr(self.inner, "on_output_refused", None)
+        if cleanup is not None:
+            await cast(Callable[[], Awaitable[None]], cleanup)()
+
     async def on_terminal_success(self, state: TurnState) -> None:
-        await self.inner.on_terminal_success(state)
+        if await self._may_finish():
+            try:
+                await self.inner.on_terminal_success(state)
+            except Exception as err:
+                if self.authorize_final is None or isinstance(err, AdmissionDenied):
+                    raise
+                await self._output_refused(err)
 
     async def on_terminal_failure(self, state: TurnState, err: Exception) -> None:
         self._held = (state, err)
@@ -368,7 +458,13 @@ class _DeferredFailureLifecycle:
         self._held = None
         if termination is not None:
             state = replace(state, termination=termination)
-        await self.inner.on_terminal_failure(state, err)
+        if await self._may_finish():
+            try:
+                await self.inner.on_terminal_failure(state, err)
+            except Exception as delivery_error:
+                if self.authorize_final is None or isinstance(delivery_error, AdmissionDenied):
+                    raise
+                await self._output_refused(delivery_error)
 
 
 async def _mirror_cancel(cancel: asyncio.Event, fresh_cancel: asyncio.Event) -> None:
@@ -988,6 +1084,8 @@ async def run_prepared_turn(
     reseed_user_message: Callable[[], Awaitable[str]],
     recovery_lifecycle: Callable[[asyncio.Event], TurnLifecycle],
     origin: TurnContext = "chat",
+    context_mention_ids: tuple[str, ...] = (),
+    context_message_text: str | None = None,
     image_blocks: Sequence[BetaManagedAgentsImageBlockParam] | None = None,
     render_interval_s: float = 2.0,
     deadline: datetime | None = None,
@@ -999,8 +1097,16 @@ async def run_prepared_turn(
     active_turn_message_id: str | None = None,
     before_send: Callable[[], Awaitable[None]] | None = None,
     turn_card_intent_id: uuid.UUID | None = None,
+    watch_row: TaskContinuationRow | None = None,
+    job_row: TaskContinuationRow | None = None,
     request_text: str | None = None,
 ) -> RunOutcome:
+    """Drive an admitted turn, including unattended wakes.
+
+    Unattended Managed Agents sends re-gate the current session before each
+    message and confirmation batch. Runtimes without a session read refuse
+    unattended confirmations with a plain reason, including with safety off.
+    """
     # Imported here: `daimon.core.helpers` runs helper turns through this module.
     from daimon.core.helpers import serve_helpers
 
@@ -1081,6 +1187,8 @@ async def run_prepared_turn(
                     reseed_user_message=reseed_user_message,
                     recovery_lifecycle=recovery_lifecycle,
                     origin=origin,
+                    context_mention_ids=context_mention_ids if platform == "discord" else (),
+                    context_message_text=context_message_text,
                     image_blocks=image_blocks,
                     render_interval_s=render_interval_s,
                     deadline=deadline,
@@ -1092,6 +1200,8 @@ async def run_prepared_turn(
                     active_turn_message_id=active_turn_message_id,
                     before_send=before_send,
                     turn_card_intent_id=turn_card_intent_id,
+                    watch_row=watch_row,
+                    job_row=job_row,
                     request_text=request_text,
                 )
     except BaseException as exc:
@@ -1159,6 +1269,64 @@ async def run_prepared_turn(
 _CHAT_RENDERED_ORIGINS: frozenset[TurnContext] = frozenset({"chat", "handoff"})
 
 
+async def _repo_memory_state(
+    deps: TurnDeps,
+    prepared: PreparedTurn,
+    *,
+    tenant_id: uuid.UUID,
+    origin: TurnContext,
+    unattended: bool,
+) -> MemoryState:
+    if not get_repo_memory_settings(deps).enabled:
+        return MemoryState()
+    return await turn_memory_state(
+        deps.sessionmaker,
+        tenant_id=tenant_id,
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=prepared.admission.agent.id),
+        session_provider=prepared.session_ref.provider
+        if prepared.session_ref
+        else MANAGED_AGENTS.provider,
+        session_id=prepared.ma_session_id,
+        # Shared conversations never acquire one speaker's private directives.
+        account_id=(
+            None
+            if unattended or prepared.admission.shared_owner is not None
+            else prepared.admission.account_id
+        ),
+        allowed=(
+            (current_origin_id.get() is not None or origin == "routine")
+            and prepared.admission.hold is None
+            and not prepared.admission.shared_channel
+            and not prepared.admission.source_shared
+        ),
+    )
+
+
+async def _record_memory_state(
+    deps: TurnDeps,
+    *,
+    tenant_id: uuid.UUID,
+    session_id: str,
+    session_provider: str,
+    prefix: str,
+) -> None:
+    """Record the state a completed turn sent; a miss only sends it again next turn."""
+    try:
+        await record_memory_prefix(
+            deps.sessionmaker,
+            tenant_id=tenant_id,
+            session_id=session_id,
+            session_provider=session_provider,
+            prefix=prefix,
+        )
+    except Exception as error:  # the turn already delivered; never fail it here
+        log.warning(
+            "turn.memory_state_record_failed",
+            session_id=session_id,
+            error=type(error).__name__,
+        )
+
+
 async def run_prepared_turn_impl(
     deps: TurnDeps,
     prepared: PreparedTurn,
@@ -1173,6 +1341,8 @@ async def run_prepared_turn_impl(
     reseed_user_message: Callable[[], Awaitable[str]],
     recovery_lifecycle: Callable[[asyncio.Event], TurnLifecycle],
     origin: TurnContext = "chat",
+    context_mention_ids: tuple[str, ...] = (),
+    context_message_text: str | None = None,
     image_blocks: Sequence[BetaManagedAgentsImageBlockParam] | None = None,
     render_interval_s: float = 2.0,
     deadline: datetime | None = None,
@@ -1184,6 +1354,8 @@ async def run_prepared_turn_impl(
     active_turn_message_id: str | None = None,
     before_send: Callable[[], Awaitable[None]] | None = None,
     turn_card_intent_id: uuid.UUID | None = None,
+    watch_row: TaskContinuationRow | None = None,
+    job_row: TaskContinuationRow | None = None,
     request_text: str | None = None,
 ) -> RunOutcome:
     """Run one turn against `prepared`'s session; on a dead-session (404)
@@ -1212,13 +1384,12 @@ async def run_prepared_turn_impl(
     original recorder.
 
     `confirm_write` is the adapter's confirmation-card hook and `attended`
-    says whether a person is waiting on this turn (default: every origin but
-    `routine`). Both only matter while
-    `deps.tool_safety` is enabled: a third-party write then waits for the
-    requester to approve it on a card (`attended=True`) or is refused under
-    the unattended rules (`attended=False`). An adapter that passes no hook
-    gets `no_confirmation_surface`, so its writes are refused, never run
-    unseen. With the policy off the posture stays `RequireApproval`.
+    says whether a person is waiting (default: every origin but `routine`).
+    Unattended turns follow `daimon.core.turn.unattended`, recovery included:
+    a gate failure prevents the batch from being sent, and a Managed Agents
+    backend without a session read is refused with `AdmissionDenied`.
+    Attended writes use the adapter's card hook when the policy requires it;
+    a missing hook refuses them with `no_confirmation_surface`.
 
     `active_turn_message_id` is the in-flight marker the adapter wrote on
     `prepared.mapping_id` for this turn, if any. A recovery moves it onto the
@@ -1249,81 +1420,23 @@ async def run_prepared_turn_impl(
         # `confirm_write` is deliberately not wrapped: an approval card shows exactly what
         # will be sent or run, so a scrubbed card over the original call would misstate it.
         lifecycle, recovery_lifecycle = scrubbed_for(platform, lifecycle, recovery_lifecycle)
-    effective_deadline = deadline if deadline is not None else turn_deadline(now=now())
-    confirmed_tools: frozenset[str] = confirmed_tools_for_turn(deps)
-    if confirmed_tools:
-        revision = prepared.admission.backend_revision
-        if (
-            revision is not None
-            and get_profile(revision.profile).support_for("tool_confirmation") not in SUPPORTED
-        ):
-            confirmed_tools = frozenset()
-    rules_for = (
-        agent_rule_lookup(
-            deps.sessionmaker,
-            tenant_id=tenant_id,
-            agent_id=str(prepared.admission.agent.id),
-            server_urls={s.name: s.url for s in prepared.admission.agent.mcp_servers},
-            also_urls=daimon_endpoint(deps.public_url),
-            channel_id=channel_for_tool_rules(
-                platform=platform,
-                channel_id=prepared.admission.origin_channel_id,
-                private_dm_id=prepared.admission.private_dm_id,
-            ),
-        )
-        if getattr(deps.tool_safety, "enabled", False)
-        and getattr(deps.tool_safety, "agent_rules", False)
-        else None
-    )
-    tool_confirmation = chat_tool_confirmation(
-        deps.tool_safety,
-        provider_permissions=(
-            prepared.admission.backend_revision is not None
-            and prepared.admission.backend_revision.profile == SELFHOSTED_LOOP.profile_id
-        ),
-        requester_platform_user_id=external_user_id,
-        confirm=confirm_write,
-        attended=attended if attended is not None else origin != "routine",
-        trusted_servers=trusted_servers_for(deps.public_url),
-        asks_before_publishing=prepared.admission.asks_before_publishing,
-        confirmed_tools=confirmed_tools,
-        daimon_rules=bool(prepared.admission.daimon_rule_tools),
-        rules_for=rules_for,
-        rule_card_for=(
-            lambda call: (
-                (
-                    ToolRuleCardReference(
-                        tenant_id=tenant_id,
-                        agent_id=str(prepared.admission.agent.id),
-                        agent_name=prepared.admission.agent.name,
-                        tool_key=call.key,
-                        server_url=url,
-                        channel_id=channel_for_tool_rules(
-                            platform=platform,
-                            channel_id=prepared.admission.origin_channel_id,
-                            private_dm_id=prepared.admission.private_dm_id,
-                        ),
-                    )
-                    if (
-                        url := next(
-                            (
-                                server.url
-                                for server in prepared.admission.agent.mcp_servers
-                                if server.name == call.server_name
-                            ),
-                            None,
-                        )
-                    )
-                    is not None
-                    else None
-                )
-                if getattr(deps.tool_safety, "enabled", False)
-                and getattr(deps.tool_safety, "agent_rules", False)
-                else None
-            )
-        ),
-    )
 
+    if job_row is not None and (job_row.reason != "job_finished" or attended is not False):
+        raise ValueError("Job completion turns must be explicitly unattended")
+    if job_row is not None and (
+        job_row.tenant_id != tenant_id
+        or job_row.platform != platform
+        or job_row.thread_id != thread_id
+        or job_row.requester_account_id != prepared.admission.account_id
+        or job_row.target_ma_agent_id != prepared.admission.agent.id
+    ):
+        raise AdmissionDenied(reason="invoker_not_allowed")
+    if watch_row is not None and (
+        watch_row.reason not in ("watch_fired", "watch_report") or attended is not False
+    ):
+        raise ValueError("Watch turns must be explicitly unattended")
+    effective_deadline = deadline if deadline is not None else turn_deadline(now=now())
+    unattended = not (attended if attended is not None else origin != "routine")
     # Tracks the session/mapping id (and whether recovery has taken over) the
     # FINAL attempt is running against, updated by `_run` the instant recovery
     # recreates -- so a ceiling breach mid-recovery marks the NEW mapping dead,
@@ -1355,7 +1468,112 @@ async def run_prepared_turn_impl(
         thread_id=thread_id,
         chat_rendered=origin in _CHAT_RENDERED_ORIGINS,
     )
+    memory_state = await _repo_memory_state(
+        deps,
+        prepared,
+        tenant_id=tenant_id,
+        origin=origin,
+        unattended=unattended,
+    )
+    repo_memory = memory_state.prefix
     prefix = context + plans + prepared.continuity.user_prefix
+    if prepared.admission.model_fell_back:
+        prefix += MODEL_FALLBACK_NOTICE
+
+    async def load_context_config(request: ContextRequest) -> LoadedProvider | None:
+        from daimon.core.stores import context_providers
+        from daimon.core.stores.tenants import get_tenant
+
+        async with deps.sessionmaker.begin() as session:
+            config = await context_providers.load(
+                session,
+                tenant_id=request.tenant_id,
+                channel_id=request.parent_channel_id or request.channel_id,
+                agent_id=request.agent_id,
+            )
+            if config is None or not config.enabled:
+                return None
+            tenant = await get_tenant(session, request.tenant_id)
+            if tenant is None or tenant.archived_at is not None:
+                return None
+            return LoadedProvider(config, tenant.external_id)
+
+    def context_hook_for(admission: Admission, model_id: str | None) -> ContextHook | None:
+        revision = admission.backend_revision
+        if revision is not None and revision.profile != MANAGED_AGENTS.profile_id:
+            return None
+        grant = admission.grant
+        # No fabricated placement from message text or budget attribution.
+        if grant is None or grant.tenant_id != tenant_id:
+            return None
+        place = grant.run_place
+        if place.parent_unresolved or (place.channel_id is None and not grant.is_dm):
+            return None
+        is_thread = bool(place.parent_channel_id and place.parent_channel_id != place.channel_id)
+        return ContextHook(
+            deps.context_providers,
+            ContextRequest(
+                tenant_id=tenant_id,
+                server_id="",
+                platform=platform,
+                channel_id=(admission.private_dm_id or grant.channel_id)
+                if grant.is_dm
+                else place.channel_id,
+                parent_channel_id=place.parent_channel_id if is_thread else None,
+                thread_id=admission.origin_thread_id,
+                place_type="dm" if grant.is_dm else "thread" if is_thread else "channel",
+                requester_platform_user_id=external_user_id,
+                agent_id=admission.agent.id,
+                mention_ids=context_mention_ids if platform == "discord" else (),
+                message_text=(context_message_text or "") if platform == "discord" else "",
+            ),
+            load_context_config,
+            system_message_supported=supports_system_message(model_id or admission.agent.model.id),
+        )
+
+    async def authorize_watch(admission: Admission, session_id: str) -> None:
+        assert watch_row is not None
+        from daimon.core.continuity.watch_turn import require_watch_send
+
+        await require_watch_send(
+            deps.sessionmaker,
+            watch_row,
+            admission,
+            session_id=session_id,
+            tenant_id=tenant_id,
+            platform=platform,
+            thread_id=thread_id,
+        )
+        await decide_before_send(deps, admission, attended=not unattended)()
+        await require_current_spend(
+            deps,
+            tenant_id=watch_row.tenant_id,
+            platform=watch_row.platform,
+            external_user_id=watch_row.requester_external_user_id,
+            budget_channel_id=admission.budget_channel_id or watch_row.parent_channel_id,
+            agent_id=admission.agent.id,
+            now=now(),
+        )
+        if before_send is not None:
+            await before_send()
+
+    rules_for = (
+        agent_rule_lookup(
+            deps.sessionmaker,
+            tenant_id=tenant_id,
+            agent_id=str(prepared.admission.agent.id),
+            server_urls={s.name: s.url for s in prepared.admission.agent.mcp_servers},
+            also_urls=daimon_endpoint(deps.public_url),
+            channel_id=channel_for_tool_rules(
+                platform=platform,
+                channel_id=prepared.admission.origin_channel_id,
+                private_dm_id=prepared.admission.private_dm_id,
+            ),
+        )
+        if getattr(deps.tool_safety, "enabled", False)
+        and getattr(deps.tool_safety, "agent_rules", False)
+        else None
+    )
     briefing_cell: list[tuple[Admission, str]] = []
 
     async def briefing(admission: Admission, attempt_cancel: asyncio.Event) -> str:
@@ -1376,7 +1594,7 @@ async def run_prepared_turn_impl(
                 policy=deps.tool_safety,
                 trusted_servers=trusted_servers_for(deps.public_url),
                 rules=rules_for,
-                recheck=lambda: decide_before_send(deps, admission)(),
+                recheck=lambda: decide_before_send(deps, admission, attended=not unattended)(),
             ),
             cancel=attempt_cancel,
         )
@@ -1389,42 +1607,405 @@ async def run_prepared_turn_impl(
         session_id: str,
         mapping_id: uuid.UUID | None,
         session_ref: ResourceRef | None = None,
+        *,
         attempt_cancel: asyncio.Event = cancel,
-    ) -> AsyncIterator[None]:
-        if (deps.turn_path or load_turn_settings().path) == "legacy":
-            yield
-            return
-        persistence = await prepared_persistence(
-            deps,
-            admission,
-            tenant_id=tenant_id,
-            platform=platform,
-            thread_id=thread_id,
-            session_id=session_id,
-            mapping_id=mapping_id,
-            operation_key=operation_key,
-            session_ref=session_ref,
-            scope=prepared._scope,  # pyright: ignore[reportPrivateUsage]
-            lease_wait=LeaseWait(
-                timeout_s=remaining_s(effective_deadline, now=now()), cancel=attempt_cancel
-            ),
-        )
-        active_persistence_cell[0] = persistence
-        with persistence.activate():
-            yield
+        confirmation: ToolConfirmation,
+        backend: ManagedAgents | None = None,
+        scope: Scope | None = None,
+    ) -> AsyncIterator[ToolConfirmation]:
+        origin_id = current_origin_id.get()
+
+        @contextlib.asynccontextmanager
+        async def origin_grant(lease: Lease | None = None) -> AsyncIterator[None]:
+            with execution_origin(origin_id):
+                if origin_id is None:
+                    yield
+                    return
+                try:
+                    async with deps.sessionmaker.begin() as db:
+                        mapping = (
+                            await get_thread_session_by_id(db, id=mapping_id)
+                            if mapping_id is not None
+                            else None
+                        )
+                        grant = (
+                            mapping.effective_config.chat_session_id
+                            if mapping is not None
+                            and mapping.ma_session_id == session_id
+                            and mapping.tenant_id == tenant_id
+                            and mapping.account_id == admission.account_id
+                            and mapping.effective_config is not None
+                            else None
+                        )
+                        if (
+                            mapping_id is None
+                            and session_id == prepared.ma_session_id
+                            and admission == prepared.admission
+                            and prepared.session_ref is not None
+                            and prepared.session_ref.tenant_id == str(tenant_id)
+                            and prepared.session_ref.account_id == str(admission.account_id)
+                        ):
+                            grant = prepared.native_chat_session_id
+                        await bind_origin_session(
+                            db,
+                            origin_id=origin_id,
+                            chat_session_id=grant,
+                            memory_read_only=(
+                                admission.memory_read_only or admission.source_sealed
+                            ),
+                            attended=not unattended,
+                            human_invocation=admission.grant is not None
+                            and admission.grant.human_invocation,
+                            lease=lease,
+                        )
+                    yield
+                finally:
+                    # Clear only this origin. If its lease was lost and a successor
+                    # already bound the grant, never revoke the successor's authority.
+                    async def unbind() -> None:
+                        assert origin_id is not None
+                        async with deps.sessionmaker.begin() as db:
+                            await bind_origin_session(db, origin_id=origin_id, chat_session_id=None)
+
+                    await complete(unbind())
+
+        # Preparation/queueing cannot borrow an ambient parent execution.
+        with execution_origin(None):
+            selected_path = deps.turn_path or load_turn_settings().path
+            posture = confirmation
+            async with contextlib.AsyncExitStack() as stack:
+                if unattended:
+                    revision = admission.backend_revision
+                    managed = revision is None or revision.profile == MANAGED_AGENTS.profile_id
+                    gateable = managed
+                    read_session: Callable[[], Awaitable[BetaManagedAgentsSession]] | None = None
+                    injected = (backend or deps.backend) if selected_path == "mux" else None
+                    gate_scope = admitted_session_scope(
+                        admission, tenant_id=tenant_id, session_id=session_id, prepared=scope
+                    )
+                    if gateable and injected is not None:
+                        # An injected mux runtime must offer the actual snapshot
+                        # read; its profile alone does not prove it can re-gate.
+                        ref = session_ref
+                        if ref is None and deps.backend_session_ref is not None:
+                            ref = deps.backend_session_ref(session_id, gate_scope)
+                        try:
+                            reads = injected.extension(
+                                SessionReads, namespace=SESSION_READS_NAMESPACE, version=1
+                            )
+                        except UnsupportedCapability:
+                            gateable = False
+                        else:
+                            if ref is None:
+                                gateable = False
+                            else:
+
+                                async def read_injected_session() -> BetaManagedAgentsSession:
+                                    return BetaManagedAgentsSession.model_validate(
+                                        await legacy_call(reads.read_native(gate_scope, ref))
+                                    )
+
+                                read_session = read_injected_session
+
+                    if (managed or watch_row is not None or job_row is not None) and not gateable:
+                        # An unreadable unattended session cannot be constrained.
+                        raise AdmissionDenied(reason="backend_unsupported")
+                    if (
+                        job_row is None
+                        and watch_row is None
+                        and admission.grant is not None
+                        and admission.grant.is_dm
+                    ):
+                        if not gateable:
+                            raise AdmissionDenied(reason="backend_unsupported")
+                        posture, dm_gate = await dm_session_authority(
+                            deps,
+                            admission,
+                            session_id,
+                            tenant_id=tenant_id,
+                            read_session=read_session,
+                            entry_point=unattended_entry_point(origin),
+                        )
+                        stack.enter_context(unattended_sends(dm_gate))
+                    elif gateable:
+                        if watch_row is None and job_row is None:
+                            gate = session_gate(
+                                deps.anthropic,
+                                session_id,
+                                deps.tool_safety,
+                                scope=gate_scope,
+                                public_url=deps.public_url,
+                                session_factory=deps.sessionmaker,
+                                tenant_id=tenant_id,
+                                read_session=read_session,
+                                entry_point=unattended_entry_point(origin),
+                            )
+                        else:
+                            from daimon.core.continuity.watch_turn import watch_capabilities
+                            from daimon.core.session_ports_compat import retrieve_session_record
+
+                            original_snapshot: BetaManagedAgentsSession | None = None
+
+                            async def _fenced_wake_gate() -> None:
+                                nonlocal original_snapshot
+                                if job_row is None:
+                                    await authorize_watch(admission, session_id)
+                                snapshot = (
+                                    await read_session()
+                                    if read_session is not None
+                                    else await retrieve_session_record(
+                                        deps.anthropic.with_options(max_retries=0),
+                                        session_id,
+                                        scope=gate_scope,
+                                    )
+                                )
+                                row = job_row if job_row is not None else watch_row
+                                assert row is not None
+                                if (
+                                    snapshot.id != session_id
+                                    or snapshot.agent.id != row.target_ma_agent_id
+                                ):
+                                    raise AdmissionDenied(reason="invoker_not_allowed")
+                                if job_row is not None:
+                                    constrained = await constrain_capabilities(
+                                        snapshot,
+                                        deps.tool_safety,
+                                        public_url=deps.public_url,
+                                        session_factory=deps.sessionmaker,
+                                        tenant_id=tenant_id,
+                                        allow_builtins=capability_policy("wake").allow_builtins,
+                                        allow_skills=capability_policy("wake").allow_skills,
+                                        tool_allowlist=_JOB_ALLOWLIST,
+                                    )
+                                else:
+                                    constrained = await watch_capabilities(
+                                        snapshot,
+                                        deps.tool_safety,
+                                        public_url=deps.public_url,
+                                        sessions=deps.sessionmaker,
+                                        tenant_id=tenant_id,
+                                    )
+                                if original_snapshot is None and constrained.changed:
+                                    await invalidate_cached_tools(
+                                        snapshot, constrained, session_factory=deps.sessionmaker
+                                    )
+                                    original_snapshot = snapshot
+                                    stack.push_async_callback(
+                                        restore_capabilities,
+                                        deps.anthropic.with_options(max_retries=0, timeout=30),
+                                        original_snapshot,
+                                        constrained.original,
+                                        scope=gate_scope,
+                                    )
+                                await send_capabilities(
+                                    deps.anthropic.with_options(max_retries=0),
+                                    snapshot,
+                                    constrained,
+                                    scope=gate_scope,
+                                )
+
+                            gate = _fenced_wake_gate
+                        stack.enter_context(unattended_sends(gate))
+                    else:
+                        # Selfhosted pauses every declared tool at the host boundary,
+                        # including automatic tools when unattended. Keep the composed
+                        # read/write and sandbox decider for those inspected actions.
+                        if revision is None or revision.profile != SELFHOSTED_LOOP.profile_id:
+                            posture = PolicyApproval(decide=refuse_ungated_confirmation)
+                            require_native_unattended_capabilities(
+                                prepared._native_spec,  # pyright: ignore[reportPrivateUsage]
+                                profile_id=revision.profile if revision is not None else "unknown",
+                            )
+
+                            async def native_gate() -> None:
+                                require_native_unattended_capabilities(
+                                    prepared._native_spec,  # pyright: ignore[reportPrivateUsage]
+                                    profile_id=revision.profile
+                                    if revision is not None
+                                    else "unknown",
+                                )
+
+                            stack.enter_context(unattended_sends(native_gate))
+                        else:
+                            stack.enter_context(unattended_sends(None))
+                if selected_path == "legacy":
+                    async with origin_grant():
+                        yield posture
+                    return
+                persistence = await prepared_persistence(
+                    deps,
+                    admission,
+                    tenant_id=tenant_id,
+                    platform=platform,
+                    thread_id=thread_id,
+                    session_id=session_id,
+                    mapping_id=mapping_id,
+                    operation_key=operation_key,
+                    session_ref=session_ref,
+                    scope=prepared._scope,  # pyright: ignore[reportPrivateUsage]
+                    execution_context=origin_grant,
+                    lease_wait=LeaseWait(
+                        timeout_s=remaining_s(effective_deadline, now=now()),
+                        cancel=attempt_cancel,
+                    ),
+                )
+                active_persistence_cell[0] = persistence
+                with persistence.activate():
+                    yield posture
 
     async def checked_send() -> None:
-        await decide_before_send(deps, prepared.admission)()
+        await decide_before_send(deps, prepared.admission, attended=not unattended)()
         if before_send is not None:
             await before_send()
 
     async def _run() -> RunOutcome:
+        confirmed_tools: frozenset[str] = await confirmed_tools_for_tenant(deps, tenant_id)
+        if confirmed_tools:
+            revision = prepared.admission.backend_revision
+            if (
+                revision is not None
+                and get_profile(revision.profile).support_for("tool_confirmation") not in SUPPORTED
+            ):
+                confirmed_tools = frozenset()
+        server_urls = {
+            s.name: s.url
+            for s in session_mcp_servers(
+                prepared.admission.agent,
+                frozenset(),
+                tool_safety=deps.tool_safety,
+                public_url=deps.public_url,
+                confirmed_tools=confirmed_tools,
+            )
+        }
+        trusted_servers = trusted_servers_for(deps.public_url, server_urls)
+        annotations_for = (
+            mcp_annotation_lookup(
+                server_urls={
+                    s.name: s.url
+                    for s in prepared.admission.agent.mcp_servers
+                    if s.name in deps.tool_safety.trusted_annotations
+                },
+                token_for=agent_mcp_token_for(
+                    deps.sessionmaker,
+                    fernet=deps.fernet,
+                    tenant_id=tenant_id,
+                    agent_id=derive_agent_uuid(
+                        tenant_id=tenant_id, ma_agent_id=str(prepared.admission.agent.id)
+                    ),
+                ),
+            )
+            # Only servers the operator trusts for annotations are read; with
+            # none trusted no catalogue is ever listed.
+            if deps.tool_safety.enabled and deps.tool_safety.trusted_annotations
+            else None
+        )
+        rules_channel = channel_for_tool_rules(
+            platform=platform,
+            channel_id=prepared.admission.origin_channel_id,
+            private_dm_id=prepared.admission.private_dm_id,
+        )
+        rule_lookup = agent_rule_lookup(
+            deps.sessionmaker,
+            tenant_id=tenant_id,
+            agent_id=str(prepared.admission.agent.id),
+            server_urls={s.name: s.url for s in prepared.admission.agent.mcp_servers},
+            also_urls=daimon_endpoint(deps.public_url),
+            channel_id=rules_channel,
+        )
+        if unattended:
+            # A wake nobody asked for just now: the one
+            # unattended decider, policy on or off, with Daimon's card-only actions
+            # refused, never the chat posture's safety-off shortcuts.
+            tool_confirmation = PolicyApproval(
+                decide=unattended_decider(
+                    deps.tool_safety,
+                    trusted_servers=trusted_servers,
+                    confirmed_tools=confirmed_tools | protected_tools(deps.tool_safety),
+                    daimon_rules=True,
+                    annotations_for=annotations_for,
+                    rules_for=rule_lookup,
+                )
+            )
+
+            tool_confirmation = capability_posture(
+                tool_confirmation, tool_allowlist=_JOB_ALLOWLIST if job_row is not None else None
+            )
+        else:
+            tool_confirmation = chat_tool_confirmation(
+                deps.tool_safety,
+                provider_permissions=(
+                    prepared.admission.backend_revision is not None
+                    and prepared.admission.backend_revision.profile == SELFHOSTED_LOOP.profile_id
+                ),
+                requester_platform_user_id=external_user_id,
+                confirm=confirm_write,
+                trusted_servers=trusted_servers,
+                asks_before_publishing=prepared.admission.asks_before_publishing,
+                approval_gate_for=lambda: refresh_approval_gate(deps, prepared.admission),
+                server_urls=server_urls,
+                confirmed_tools=confirmed_tools,
+                daimon_rules=bool(prepared.admission.daimon_rule_tools),
+                rules_for=(
+                    rule_lookup
+                    if deps.tool_safety.enabled and deps.tool_safety.agent_rules
+                    else None
+                ),
+                rule_card_for=(
+                    lambda call: (
+                        (
+                            ToolRuleCardReference(
+                                tenant_id=tenant_id,
+                                agent_id=str(prepared.admission.agent.id),
+                                agent_name=prepared.admission.agent.name,
+                                tool_key=call.key,
+                                server_url=url,
+                                channel_id=rules_channel,
+                            )
+                            if (
+                                url := next(
+                                    (
+                                        server.url
+                                        for server in prepared.admission.agent.mcp_servers
+                                        if server.name == call.server_name
+                                    ),
+                                    None,
+                                )
+                            )
+                            is not None
+                            else None
+                        )
+                        if deps.tool_safety.enabled and deps.tool_safety.agent_rules
+                        else None
+                    )
+                ),
+                annotations_for=annotations_for,
+            )
+
+        if watch_row is not None:
+            from daimon.core.continuity.watch_turn import watch_posture
+
+            tool_confirmation = watch_posture(
+                deps.tool_safety,
+                rules_for=agent_rule_lookup(
+                    deps.sessionmaker,
+                    tenant_id=tenant_id,
+                    agent_id=str(prepared.admission.agent.id),
+                    server_urls={s.name: s.url for s in prepared.admission.agent.mcp_servers},
+                    channel_id=channel_for_tool_rules(
+                        platform=platform,
+                        channel_id=prepared.admission.origin_channel_id,
+                        private_dm_id=prepared.admission.private_dm_id,
+                    ),
+                ),
+            )
+
         ma_session_id = prepared.ma_session_id
         mapping_id = prepared.mapping_id
 
         action_kwargs: _ProviderActionKwargs = {}
         if (
-            provider_action is not None
+            not unattended
+            and provider_action is not None
             and prepared.admission.backend_revision is not None
             and prepared.admission.backend_revision.profile != "anthropic.managed_agents"
         ):
@@ -1437,42 +2018,89 @@ async def run_prepared_turn_impl(
                 now=now,
             )
 
-        first_attempt = _DeferredFailureLifecycle(inner=lifecycle)
+        async def check_watch_delivery() -> None:
+            assert watch_row is not None
+            try:
+                await authorize_watch(prepared.admission, ma_session_id)
+            except asyncio.CancelledError:
+                raise
+            except AdmissionDenied:
+                cancel.set()
+                raise
+
+        delivery = OutputAuthorization(check_watch_delivery) if watch_row is not None else None
+        if delivery is not None:
+            install = getattr(lifecycle, "set_output_authorization", None)
+            if install is not None:
+                cast(Callable[[OutputAuthorization], None], install)(delivery)
+        first_attempt = _DeferredFailureLifecycle(
+            inner=lifecycle, authorize_final=delivery.check if delivery is not None else None
+        )
         superseded: BindingSuperseded | None = None
         try:
             async with persisted(
-                prepared.admission, ma_session_id, mapping_id, prepared.session_ref
-            ):
-                message = _with_prefix(
-                    prefix + await briefing(prepared.admission, cancel), user_message
-                )
-                state = await run_turn(
-                    **_turn_port_kwargs(
-                        deps,
-                        prepared.admission,
-                        ma_session_id,
-                        tenant_id=tenant_id,
-                        provider_backend=prepared.backend,
-                        provider_session=prepared.session_ref,
-                        provider_runtime=prepared.runtime,
-                        provider_scope=prepared._scope,  # pyright: ignore[reportPrivateUsage]
-                    ),
-                    anthropic=deps.anthropic,
-                    session_id=ma_session_id,
-                    user_message=message,
-                    lifecycle=first_attempt,
-                    cancel=cancel,
-                    render_interval_s=render_interval_s,
-                    billing=prepared_billing(prepared, tenant_id=tenant_id),
-                    tool_confirmation=tool_confirmation,
-                    **action_kwargs,
-                    image_blocks=image_blocks,
-                    system_blocks=prepared.continuity.system_blocks,
-                    before_send=checked_send
-                    if before_send is not None
-                    else decide_before_send(deps, prepared.admission),
-                    send_guard=lambda: session_mutation_fence(deps.sessionmaker, ma_session_id),
-                )
+                prepared.admission,
+                ma_session_id,
+                mapping_id,
+                prepared.session_ref,
+                confirmation=tool_confirmation,
+                backend=prepared.backend,
+                scope=prepared._scope,  # pyright: ignore[reportPrivateUsage]
+            ) as attempt_confirmation:
+                with output_authorization(delivery):
+                    try:
+                        state = await run_turn(
+                            **_turn_port_kwargs(
+                                deps,
+                                prepared.admission,
+                                ma_session_id,
+                                tenant_id=tenant_id,
+                                provider_backend=prepared.backend,
+                                provider_session=prepared.session_ref,
+                                provider_runtime=prepared.runtime,
+                                provider_scope=prepared._scope,  # pyright: ignore[reportPrivateUsage]
+                            ),
+                            anthropic=deps.anthropic,
+                            session_id=ma_session_id,
+                            user_message=_with_prefix(
+                                prefix + await briefing(prepared.admission, cancel),
+                                with_memory_prefix(user_message, repo_memory),
+                            ),
+                            lifecycle=first_attempt,
+                            cancel=cancel,
+                            render_interval_s=render_interval_s,
+                            billing=prepared_billing(prepared, tenant_id=tenant_id),
+                            tool_confirmation=attempt_confirmation,
+                            **action_kwargs,
+                            image_blocks=image_blocks,
+                            system_blocks=prepared.continuity.system_blocks,
+                            context_hook=context_hook_for(
+                                prepared.admission, prepared.session_model_id
+                            ),
+                            before_send=checked_send
+                            if before_send is not None
+                            else decide_before_send(
+                                deps, prepared.admission, attended=not unattended
+                            ),
+                            send_guard=lambda: session_mutation_fence(
+                                deps.sessionmaker, ma_session_id
+                            ),
+                        )
+                        if state.error is None and state.termination == TerminationReason.COMPLETED:
+                            await _record_memory_state(
+                                deps,
+                                tenant_id=tenant_id,
+                                session_id=ma_session_id,
+                                session_provider=prepared.session_ref.provider
+                                if prepared.session_ref
+                                else MANAGED_AGENTS.provider,
+                                prefix=repo_memory,
+                            )
+                        if delivery is not None:
+                            await first_attempt.flush_held_failure()
+                    finally:
+                        if delivery is not None:
+                            delivery.close()
         except BindingSuperseded as error:
             # The holder replaced this turn's session while it queued: the recovery
             # below adopts that replacement instead of running on the stale one.
@@ -1482,6 +2110,7 @@ async def run_prepared_turn_impl(
         if not (
             (superseded is not None or _is_dead_session(state))
             and before_send is None
+            and watch_row is None
             and mapping_id is not None
             and (
                 prepared.admission.backend_revision is None
@@ -1605,6 +2234,22 @@ async def run_prepared_turn_impl(
             # words on the privileged channel where the replacement's model
             # takes one, the quoted conversation always in the user message.
             reseed = await reseed_user_message()
+            # A replacement needs the full state even if the old session already
+            # had it. Reuse this turn's single read, only for the same principal
+            # and repo-binding agent under an equally eligible admission.
+            recovery_admission = recovery.admission or prepared.admission
+            recovery_memory = (
+                memory_state.rendered
+                if (
+                    recovery_admission.agent.id == prepared.admission.agent.id
+                    and recovery_admission.account_id == prepared.admission.account_id
+                    and recovery_admission.shared_owner == prepared.admission.shared_owner
+                    and recovery_admission.hold is None
+                    and not recovery_admission.shared_channel
+                    and not recovery_admission.source_shared
+                )
+                else ""
+            )
             fresh_cancel = asyncio.Event()
             new_lifecycle = recovery_lifecycle(fresh_cancel)
             # Mirror a LATE cancel on the ORIGINAL event into
@@ -1619,12 +2264,11 @@ async def run_prepared_turn_impl(
                     new_session_id,
                     new_mapping_id,
                     attempt_cancel=fresh_cancel,
-                ):
+                    confirmation=tool_confirmation,
+                ) as recovery_confirmation:
                     reseeded_message = _with_prefix(
-                        plans
-                        + loss_user_prefix
-                        + await briefing(recovery.admission or prepared.admission, fresh_cancel),
-                        reseed,
+                        plans + loss_user_prefix + await briefing(recovery_admission, fresh_cancel),
+                        with_memory_prefix(reseed, recovery_memory),
                     )
                     mark = SEND_ATTEMPTED.get()
                     sends_before = len(mark) if mark is not None else 0
@@ -1642,18 +2286,32 @@ async def run_prepared_turn_impl(
                         cancel=fresh_cancel,
                         render_interval_s=render_interval_s,
                         billing=Billed(record=new_record),
-                        tool_confirmation=tool_confirmation,
+                        tool_confirmation=recovery_confirmation,
                         image_blocks=image_blocks,
                         system_blocks=loss_system_blocks,
+                        context_hook=context_hook_for(
+                            recovery.admission or prepared.admission, recovery.model_id
+                        ),
                         # Reseeding and opening the stream await platform and MA
                         # calls after recovery's last decision.
                         before_send=decide_before_send(
-                            deps, recovery.admission or prepared.admission
+                            deps, recovery.admission or prepared.admission, attended=not unattended
                         ),
                         send_guard=lambda: session_mutation_fence(
                             deps.sessionmaker, recovery.ma_session_id
                         ),
                     )
+                    if (
+                        recovered_state.error is None
+                        and recovered_state.termination == TerminationReason.COMPLETED
+                    ):
+                        await _record_memory_state(
+                            deps,
+                            tenant_id=tenant_id,
+                            session_id=new_session_id,
+                            session_provider=MANAGED_AGENTS.provider,
+                            prefix=recovery_memory,
+                        )
             finally:
                 if not mirror_task.done():
                     mirror_task.cancel()
@@ -1719,8 +2377,6 @@ async def run_prepared_turn_impl(
                 recovered=recovered,
                 continuity=continuity_cell[0],
             )
-
-    from daimon.core.turn.ceiling import current_turn_deadline
 
     # Set for the whole turn, so anything inside it (a card posted mid-turn, in this
     # task or one it starts) reads the deadline and never promises a time past it.

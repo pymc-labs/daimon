@@ -10,8 +10,12 @@ request.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Final
+from typing import TYPE_CHECKING, Final
+
+if TYPE_CHECKING:
+    from daimon.adapters.teams.thread_reader import ThreadReader
 
 import structlog
 from daimon.adapters.teams.admin_caller import admin_caller
@@ -25,9 +29,15 @@ from daimon.adapters.teams.card_actions import (
     submitted_fields,
     toast,
 )
-from daimon.adapters.teams.identity import DENIED, channel_thread_id
+from daimon.adapters.teams.identity import (
+    DENIED,
+    TeamsInbound,
+    channel_thread_id,
+    display_bot_name,
+    foreign_tenant,
+)
 from daimon.adapters.teams.runtime import TeamsRuntime
-from daimon.core.thread_handoff import switch_thread_on_request
+from daimon.core.thread_handoff import handover_seed, switch_thread_on_request
 from microsoft_teams.api import AdaptiveCardInvokeActivity, AdaptiveCardInvokeResponse
 from microsoft_teams.apps import ActivityContext
 from microsoft_teams.cards import ExecuteAction
@@ -55,8 +65,16 @@ def hand_over_button(*, agent_id: str, agent_name: str, offer: str) -> ExecuteAc
 class TeamsThreadHandoff:
     """Hand over clicks."""
 
-    def __init__(self, runtime: TeamsRuntime) -> None:
+    def __init__(
+        self,
+        runtime: TeamsRuntime,
+        *,
+        dispatch: Callable[[TeamsInbound], None],
+        reader: ThreadReader,
+    ) -> None:
         self._runtime = runtime
+        self._dispatch = dispatch
+        self._reader = reader
 
     async def on_action(
         self, ctx: ActivityContext[AdaptiveCardInvokeActivity]
@@ -68,6 +86,7 @@ class TeamsThreadHandoff:
     ) -> AdaptiveCardInvokeResponse:
         """Switch the clicked conversation to the button's agent, or say privately why not."""
         runtime, activity = self._runtime, ctx.activity
+        clicked_at = datetime.now(UTC)
         actor = await card_actor(runtime, activity)
         if actor is None:
             return toast(DENIED)
@@ -83,6 +102,17 @@ class TeamsThreadHandoff:
             return toast(FAILED)
         if not agent_id:
             return toast(FAILED)
+        data = activity.channel_data
+        team = data.team if data is not None else None
+        seed = await self._reader.latest_user_message(
+            conversation_id=thread_id,
+            channel_id=conversation.split(";", 1)[0],
+            user_id=actor.user_id,
+            team_id=team.id if team is not None else None,
+            team_group_id=team.aad_group_id if team is not None else None,
+            before=notice,
+            kind=activity.conversation.conversation_type or "",
+        )
         outcome = await switch_thread_on_request(
             runtime.anthropic,
             runtime.sessionmaker,
@@ -92,7 +122,8 @@ class TeamsThreadHandoff:
             thread_id=thread_id,
             ma_agent_id=agent_id,
             caller=await admin_caller(
-                runtime, tenant_id=actor.tenant_id, user_id=actor.user_id, is_admin=actor.is_admin
+                runtime,
+                user_id=actor.user_id,
             ),
             default=runtime.deployment_default,
             channel="this chat" if personal else "this channel",
@@ -103,6 +134,33 @@ class TeamsThreadHandoff:
         )
         if not outcome.switched:
             return toast(outcome.text)
+        settings = runtime.settings.teams
+        assert settings is not None
+        home = foreign_tenant(activity.from_, activity.channel_data, ours=settings.tenant_id)
+        self._dispatch(
+            TeamsInbound(
+                kind="dm"
+                if activity.conversation.conversation_type == "personal"
+                else ("group" if personal else "channel"),
+                entra_tenant_id=settings.tenant_id,
+                user_id=actor.user_id,
+                conversation_id=thread_id,
+                channel_id=conversation if personal else conversation.split(";", 1)[0],
+                activity_id=activity.id,
+                text=handover_seed(seed, agent_name=outcome.destination_name or ""),
+                service_url=activity.service_url,
+                bot_name=display_bot_name(activity.recipient.name),
+                team_id=team.id if team is not None else None,
+                team_group_id=team.aad_group_id if team is not None else None,
+                user_name=activity.from_.name,
+                timestamp=clicked_at.isoformat(),
+                sender_id=activity.from_.id,
+                is_foreign=home is not None,
+                home_tenant_id=home,
+                handover_agent_id=agent_id,
+                handover_notice_id=notice,
+            )
+        )
         # The agent now answering is told (`switch_thread_on_request`); the offer
         # keeps its words and drops its button. A card from before `offer` gets a pop-up.
         offer = str(submitted_fields(activity.value.action.data).get("offer") or "")

@@ -21,6 +21,7 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_PRIVATE_DM,
     is_private_routine_stamp,
 )
+from daimon.core.membership_subject import resolve_subject
 from daimon.core.native_admins import read_stored_admin
 from daimon.core.session_seal import session_facts
 from daimon.core.stores.thread_sessions import thread_ids_for_sessions
@@ -54,15 +55,11 @@ _ADMIN_CONTINUE_REFUSED = (
 
 
 async def load_hub_subject(runtime: McpRuntime, auth: AuthIdentity) -> Subject:
-    """Load the caller's stored native admin role.
+    """Load native admin evidence for a person's own hub login.
 
-    The hub has no live platform role (it pins ``is_admin=False``); the stored
-    role is the one each platform turn records from the
-    adapter's live check, so a demotion or promotion takes effect on the
-    person's next Discord, Slack or Teams turn in that workspace. Only a
-    person's own hub login qualifies: an agent-scoped key, a chat-turn
-    credential or a token with no platform user is never an admin here,
-    whatever role its account holds.
+    Discord checks fresh membership and admin permissions on every call.
+    Other platforms use the role recorded by the person's last platform turn.
+    Agent-scoped keys and chat-turn credentials never qualify here.
     """
     if (
         auth.platform_user_id is None
@@ -70,6 +67,14 @@ async def load_hub_subject(runtime: McpRuntime, auth: AuthIdentity) -> Subject:
         or auth.slack_turn_context_id is not None
     ):
         return build_subject(is_admin=False, platform_user_id=auth.platform_user_id)
+    if auth.platform == "discord":
+        return await resolve_subject(
+            runtime.session_factory,
+            runtime.membership_resolver,
+            tenant_id=auth.tenant_id,
+            user_id=auth.platform_user_id,
+            require_fresh=True,
+        )
     async with runtime.session_factory() as db:
         stored = await read_stored_admin(
             db,
@@ -133,6 +138,12 @@ def hub_session_access(subject: Subject, mode: Literal["read", "continue"]) -> I
         yield
     finally:
         _HUB_ACCESS.reset(token)
+
+
+def hub_access_mode() -> Literal["read", "continue"] | None:
+    """The hub call in progress (`hub_session_access`), or None off the hub."""
+    access = _HUB_ACCESS.get()
+    return access.mode if access is not None else None
 
 
 async def admin_readable_legacy_sessions(
@@ -304,3 +315,50 @@ async def require_session_outside_seals(
         ):
             raise ToolError(_ADMIN_CONTINUE_REFUSED)
         raise ToolError(_SEALED_SESSION_MSG)
+
+
+async def source_metadata_readable(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    metadata: dict[str, str],
+    *,
+    origin_context_id: str | None = None,
+) -> bool:
+    """Source privacy only: callers establish owner/admin authority separately.
+
+    Admin status and the hub's admin transcript exception never bypass source
+    privacy here. Private contexts still require their owner's execution grant.
+    """
+    facts = session_facts(metadata, owned=True)
+    if facts.private and metadata.get(MA_METADATA_KEY_ACCOUNT) != str(auth.account_id):
+        return False
+    private = metadata.get(MA_METADATA_KEY_PRIVATE_DM)
+    if (
+        private is not None
+        and not is_private_routine_stamp(private)
+        and not (
+            auth.slack_turn_context_id is not None
+            and auth.agent_id is None
+            and private == str(auth.slack_turn_context_id)
+        )
+    ):
+        return False
+    if auth.agent_id is not None or auth.chat_agent_id is None:
+        origin_context_id = None
+    read = await load_read_policy(
+        runtime, auth, origin_context_id=origin_context_id, resolve_without_seals=True
+    )
+    return bool(
+        authorize(
+            read.policy,
+            subject=mcp_subject(auth),
+            surface=Surface.AGENT_CHAT,
+            action=Action.READ_SESSION,
+            agent=read.agent,
+            origin_channel_ids=read.origin_channel_ids,
+            origin=read.origin_place,
+            # 'owned' discharges only READ_SESSION's ownership precondition: act
+            # was already decided by long_job_access; source/private checks remain.
+            session=facts,
+        )
+    )

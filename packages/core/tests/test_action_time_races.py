@@ -41,6 +41,7 @@ async def setup(db_session, db_committing_engine):
             channel_id="vault",
             thread_id="thread-1",
             is_dm=is_dm,
+            human_invocation=True,
         )
         return replace(
             _admission(account=account, agent=agent),

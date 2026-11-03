@@ -93,7 +93,7 @@ RULES: tuple[tuple[str, str], ...] = (
 DAIMON = (
     "core", "mcp", "slack", "teams", "web", "parity", "discord",
     "turn-mux", "parity-mux", "slack-mux", "discord-mux", "teams-mux",
-    "scheduler-mux", "cli-run-mux", "nonchat-mux",
+    "sidecar-mux", "scheduler-mux", "cli-run-mux", "nonchat-mux",
     "staging-config", "journeys", "lint", "shard-check",
 )  # fmt: skip
 _HOSTS = (*DAIMON, "image-daimon")
@@ -143,8 +143,9 @@ def _shards(suite: str, count: int, paths: str, **extra: str | int) -> list[Leg]
 
 
 _CORE = (
-    "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing"
-    " tests/integration tests/platform_contract tests/test_*.py tests/performance"
+    "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler"
+    " packages/adapters/sidecar packages/testing tests/integration tests/platform_contract"
+    " tests/test_*.py tests/performance tests/write_workflows"
 )
 _NONCHAT = " ".join(
     [
@@ -180,6 +181,7 @@ MATRICES: dict[str, list[Leg]] = {
         *_shards("slack-mux", 1, "packages/adapters/slack"),
         *_shards("discord-mux", 2, "packages/adapters/discord"),
         *_shards("teams-mux", 1, "packages/adapters/teams"),
+        *_shards("sidecar-mux", 1, "packages/adapters/sidecar"),
         *_shards("scheduler-mux", 1, "packages/adapters/scheduler"),
         *_shards("cli-run-mux", 1, "packages/adapters/cli/tests/run"),
         *_shards("nonchat-mux", 1, _NONCHAT),

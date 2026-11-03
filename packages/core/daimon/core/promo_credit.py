@@ -1,8 +1,8 @@
 """Redeem promo codes and report live timed credit.
 
 A server-wide grant is an idempotent ledger row keyed ``promo:{code_id}:{tenant_id}``,
-so a retry never double-writes; only an admin redeems one. A channel code
-(``channel_cap_usd`` set) is for any member: each redemption writes a ledger
+so a retry never double-writes; only a platform admin redeems one. A channel code
+(``channel_cap_usd`` set) also requires a platform admin: each redemption writes a ledger
 credit attributed to the member's channel, keyed by code, tenant, channel and
 person, and raises that channel's budget limit by the same amount when it has
 one. The balance stays ``SUM(delta_usd)`` and the balance and cap gates never
@@ -115,9 +115,9 @@ async def redeem_promo_code(
     """Redeem ``code`` for the tenant in one transaction; a refusal is counted for throttling.
 
     ``is_admin``: whether the caller found the redeemer to be a server or
-    workspace admin, live, at submit; only an admin may redeem a server-wide
+    workspace admin, live, at submit; only a platform admin may redeem any
     code. ``channel``: where the redeemer is, a thread's parent channel; a
-    channel code lands there for anyone, admin or not, and is refused without
+    channel code lands there for a platform admin and is refused without
     one. Both are required so no caller can grant admin rights by omission.
 
     The redeemer's attempts are serialized first, so concurrent guesses cannot
@@ -175,6 +175,8 @@ async def _redeem_in_session(
     channel: PromoChannel | None,
     is_admin: bool,
 ) -> PromoRedeemResult:
+    if is_admin is not True:
+        return PromoRedeemRefused(reason="admin_only")
     normalized = normalize_promo_code(code)
     if not is_well_formed_promo_code(normalized):
         return PromoRedeemRefused(reason="invalid")
@@ -185,8 +187,6 @@ async def _redeem_in_session(
         return await _redeem_into_channel(
             session, row=row, tenant_id=tenant_id, account_id=account_id, now=now, channel=channel
         )
-    if not is_admin:
-        return PromoRedeemRefused(reason="admin_only")
     if await promo_store.has_redemption(session, promo_code_id=row.id, tenant_id=tenant_id):
         return PromoRedeemRefused(reason="already_redeemed")
     refusal = redeem_refusal(row, now=now)

@@ -66,6 +66,8 @@ def _override_users_info_admin(mock: Any, *, team_id: str = _TEAM_ID) -> None:
         payload={
             "ok": True,
             "user": {
+                "deleted": False,
+                "is_bot": False,
                 "id": _ADMIN_USER_ID,
                 "name": "admin",
                 "team_id": team_id,
@@ -496,17 +498,14 @@ async def test_handle_routine_action_output_by_creator_returns_last_output(
     )
 
 
-async def test_handle_routine_action_output_by_admin_non_creator_returns_last_output(
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_handle_routine_action_output_by_admin_non_creator_checks_privacy(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: object,
+    legacy: bool,
 ) -> None:
-    """A workspace admin who did not create the routine still reads its output.
-
-    The gate is admin OR creator. Without this case a regression narrowing it to
-    creator-only would pass: the refusal test uses a non-admin non-creator and
-    the allow test uses the creator, so neither notices the admin arm going away.
-    """
+    """Admins can read routed shared output, but cannot read legacy private output."""
     client_fake: Any = fake_slack_web_client
     _override_users_info_admin(client_fake.mock, team_id="T_OUT_ADMIN")
 
@@ -521,6 +520,7 @@ async def test_handle_routine_action_output_by_admin_non_creator_returns_last_ou
         timezone_="UTC",
         trigger_message="someone else's routine",
         enabled=True,
+        channel_id=None if legacy else "C_SHARED",
     )
     await db_session.flush()
     await record_result(db_session, routine.id, tail="Q3 revenue was 4.2M", error=None)
@@ -532,9 +532,42 @@ async def test_handle_routine_action_output_by_admin_non_creator_returns_last_ou
     await handle_routine_action(runtime, payload)  # type: ignore[arg-type]
 
     bodies = _ephemeral_bodies(client_fake.mock)
-    assert any("Q3 revenue was 4.2M" in b for b in bodies), (
-        "a workspace admin is authorised even when they did not create the routine"
-    )
+    assert any("Q3 revenue was 4.2M" in b for b in bodies) is not legacy
+    assert any("Only the owner" in b for b in bodies) is legacy
     assert not any("can read this routine's output" in b for b in bodies), (
         "an admin must not be shown the creator-or-admin refusal"
     )
+
+
+async def test_resume_of_running_routine_replies_without_rescheduling_or_reporting_error(
+    db_session, db_session_factory, fake_slack_web_client, monkeypatch
+):
+    tenant_id, fernet_key, _ = await _seed_team(db_session)
+    routine = await create_routine(
+        db_session,
+        tenant_id=tenant_id,
+        created_by_user_id=_USER_ID,
+        agent_id="ag",
+        agent_name="daimon",
+        cron_expr="0 * * * *",
+        timezone_="UTC",
+        trigger_message="run",
+        enabled=True,
+    )
+    runtime = build_slack_runtime(fernet_key, db_session_factory)
+    payload = _pause_payload(routine.id)
+    payload["actions"] = [
+        {"action_id": f"routine_action:{routine.id}", "selected_option": {"value": "resume"}}
+    ]
+    reported = MagicMock()
+    monkeypatch.setattr(
+        "daimon.adapters.slack.routines_panel.actions.capture_exception_with_scope", reported
+    )
+    await handle_routine_action(runtime, payload)
+    assert any(
+        "This routine is already on." in body
+        for body in _ephemeral_bodies(fake_slack_web_client.mock)
+    )
+    reported.assert_not_called()
+    async with db_session_factory() as session:
+        assert await get_routine(session, routine.id, tenant_id=tenant_id) == routine

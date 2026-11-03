@@ -85,6 +85,8 @@ async def test_the_tick_loop_reports_progress_but_the_other_loops_do_not() -> No
                 tick=tick,
                 usage_sweep=unittest.mock.AsyncMock(),
                 privacy_sweep=unittest.mock.AsyncMock(),
+                compute_sweep=unittest.mock.AsyncMock(),
+                compute_task_poll=unittest.mock.AsyncMock(),
                 interval_s=0.01,
                 stop_event=stop,
             )

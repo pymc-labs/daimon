@@ -17,6 +17,7 @@ from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._authz_facts import mcp_subject
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_pins import (
     PIN_WRITE_REFUSAL,
     POLICY_UNREADABLE_REFUSAL,
@@ -35,25 +36,12 @@ from fastmcp.exceptions import ToolError
 
 
 def _trusted_credential(auth: AuthIdentity) -> bool:
-    """A credential whose stored roles this guard trusts to configure an agent with a rule.
+    """The request's verified platform/grant verdict applies to configuration only.
 
-    - A chat turn's credential (``chat_agent_id``): minted for one turn whose
-      admission recorded the adapter's live platform role as the account's
-      stored one, which ``is_admin`` reads as of that turn. The same vault token is reused
-      by that person's later hub and routine sessions, so there it is as
-      current as their last platform turn.
-    - The deployment operator's own token (no agent, no chat turn, no
-      platform user; ``is_admin`` comes from the internal claim or the stored
-      role), which already controls the deployment.
-
-    An agent-scoped key (``agent_id``) is never trusted, whoever minted it:
-    it is long-lived and its account's roles may be stale.
+    External keys cannot inherit an owner's authority. Personal user and
+    verified chat credentials use the same live configuration check.
     """
-    if auth.agent_id is not None:
-        return False
-    if auth.chat_agent_id is not None:
-        return auth.platform_user_id is not None
-    return auth.platform_user_id is None
+    return not auth.is_external_agent and not auth.is_operator
 
 
 async def require_pin_write_access(
@@ -62,6 +50,7 @@ async def require_pin_write_access(
     *,
     ma_agent: BetaManagedAgentsAgent | Callable[[], Awaitable[BetaManagedAgentsAgent]],
     origin: TurnOriginRow | None,
+    action: DelegatedAction | None = DelegatedAction.AGENT_SETTINGS,
 ) -> None:
     """Raise unless this caller may change ``ma_agent`` from ``origin``.
 
@@ -71,7 +60,7 @@ async def require_pin_write_access(
     A trusted admin credential may write from anywhere; agent keys never are trusted.
     """
     trusted = _trusted_credential(auth)
-    if trusted and auth.is_admin:
+    if trusted and auth.admin_for(action):
         return
     async with runtime.session_factory() as session:
         try:

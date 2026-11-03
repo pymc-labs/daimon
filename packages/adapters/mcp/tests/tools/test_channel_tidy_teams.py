@@ -108,6 +108,7 @@ class _World:
                 shared_channel=False,
                 expires_at=now + timedelta(hours=1),
                 now=now,
+                chat_session_id="test-session",
             )
         auth = AuthIdentity(
             account_id=self.account_id,
@@ -117,6 +118,7 @@ class _World:
             external_id=_ENTRA,
             platform_user_id=_CALLER,
             chat_agent_id=derive_agent_uuid(tenant_id=self.tenant_id, ma_agent_id=agent),
+            chat_session_id="test-session",
         )
         return auth, str(origin.id)
 

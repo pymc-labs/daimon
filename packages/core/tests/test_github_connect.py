@@ -860,7 +860,7 @@ async def test_connect_link_requester_resolves_platform_admin_not_cli_operator(
         == cli_id
     )
     requester_id = await github_connect.admin_account_for_platform_user(
-        db_session, tenant_id=tenant_id, external_id="123"
+        db_session, tenant_id=tenant_id, external_id="123", is_platform_admin=True
     )
     assert requester_id == admin_id
     token = await github_connect.mint_invitation(
@@ -875,7 +875,10 @@ async def test_connect_link_requester_resolves_platform_admin_not_cli_operator(
     for platform_user_id in ("456", "wrong-platform", "missing"):
         with pytest.raises(ValueError, match="workspace admin"):
             await github_connect.admin_account_for_platform_user(
-                db_session, tenant_id=tenant_id, external_id=platform_user_id
+                db_session,
+                tenant_id=tenant_id,
+                external_id=platform_user_id,
+                is_platform_admin=platform_user_id != "456",
             )
 
 
@@ -1195,11 +1198,10 @@ async def test_confirm_reassignment_checks_existing_agent_grants_before_writing(
             github_user_id=7,
             repos=confirmed,
         )
-        assert (
-            await github_access.repo_for_agent(
-                db_session, tenant_id=tenant_id, repo_id=101, agent_id=agent_id
-            )
-        ).installation_id == 13
+        repo = await github_access.repo_for_agent(
+            db_session, tenant_id=tenant_id, repo_id=101, agent_id=agent_id
+        )
+        assert repo is not None and repo.installation_id == 13
     else:
         with pytest.raises(github_connect.GrantReassignmentError, match=expected) as error:
             await github_connect.confirm(

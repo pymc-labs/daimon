@@ -95,6 +95,14 @@ def _cred_wire(
 # ---------------------------------------------------------------------------
 
 
+def test_partition_skips_shared_thread_vaults() -> None:
+    """The sweep re-mints daimon-mcp JWTs; a shared thread's vault never holds one."""
+    from daimon.core.mcp_vault import shared_vault_name
+
+    vaults = [_vault("vlt_shared", shared_vault_name(uuid.uuid4(), uuid.uuid4()))]
+    assert partition_daimon_mcp_vault_ids(vaults) == []
+
+
 def test_partition_returns_only_daimon_mcp_vaults() -> None:
     """Only vaults prefixed with 'daimon-mcp:' are returned; others are ignored."""
     account_a = uuid.uuid4()

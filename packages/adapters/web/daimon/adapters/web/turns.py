@@ -303,6 +303,7 @@ class WebTurns:
                 surface=Surface.WEB,
                 principal_platform=principal.platform,
                 spend_person=principal.spend_person,
+                origin="chat",
             )
         except (
             MissingTurnConfigError,
@@ -424,6 +425,7 @@ class WebTurns:
             controls = render_turn_origin(
                 origin,
                 **backend_facts(admission),
+                effective_is_admin=admission.is_admin,
                 session_state=None if continued else prepared.continuity.session_state(),
             )
 

@@ -205,7 +205,11 @@ def identity_change_reasons(
             and recorded.personal_memory_store_id != desired.personal_memory_store_id,
             "personal_memory_store",
         ),
-        (recorded.vault_id != desired.vault_id, "vault"),
+        (
+            recorded.vault_id != desired.vault_id
+            or (desired.chat_session_id is not None and recorded.chat_session_id is None),
+            "vault",
+        ),
         # The vault id above is carried over, never re-derived, so only this
         # sees a held turn arrive at an unheld session or the reverse.
         (recorded.mcp_hold != desired.mcp_hold, "credential_hold"),

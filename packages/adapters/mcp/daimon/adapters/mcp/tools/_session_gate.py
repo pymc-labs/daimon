@@ -17,6 +17,7 @@ from daimon.adapters.mcp.resource_ports import mcp_scope, retrieve_session
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
 from daimon.core.channel_backend import backend_selection_enabled
+from daimon.core.config import get_repo_memory_settings
 from daimon.core.confirmation import backend_switch_tools
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_personal_servers import visible_tools
@@ -25,8 +26,14 @@ from daimon.core.mux_compat import retrieve_agent
 from daimon.core.session_seal import session_facts
 from daimon.core.session_snapshot import hash_tools, session_tools
 from daimon.core.stores.domain import ThreadSessionRow, TurnOriginRow
+from daimon.core.stores.lead_intake import confirmation_tools
 from daimon.core.stores.thread_sessions import get_live_thread_session
-from daimon.core.tool_safety import has_confirmation_gate, microsoft_send_tools
+from daimon.core.tool_safety import (
+    DAIMON_SERVER_NAME,
+    WATCH_CONFIRMED_TOOLS,
+    has_confirmation_gate,
+    microsoft_send_tools,
+)
 from daimon.core.turn.approvals import daimon_rule_tools_for
 from mux.errors import ScopeViolation
 
@@ -63,6 +70,12 @@ async def session_card_gap(
     """
     if origin is None:
         return "no_origin"
+    if tool_name == "lead_intake_resolve" and (
+        not origin.attended
+        or not auth.chat_session_id
+        or origin.chat_session_id != auth.chat_session_id
+    ):
+        return "no_origin"
     async with runtime.session_factory() as session:
         live = await get_live_thread_session(
             session,
@@ -72,6 +85,11 @@ async def session_card_gap(
             account_id=auth.account_id,
         )
     if live is None:
+        return "no_live_session"
+    if tool_name == "lead_intake_resolve" and (
+        live.effective_config is None
+        or live.effective_config.chat_session_id != auth.chat_session_id
+    ):
         return "no_live_session"
     try:
         ma_session = await retrieve_session(
@@ -143,6 +161,12 @@ async def _recorded_as_gated(
     session; equal to the gated tools a session for this caller gets now
     (`session_tools`, asking before publishing or not), it is the server's own
     record of the card. An agent changed since that bind reads as not gated.
+
+    Non-watch actions also recognize the pre-watch hash format, omitting only
+    the newly added watch gates. The requested action must still ask in that
+    exact recorded template. Watch enrollment never uses this compatibility path.
+    A session bound before `update_watch` was gated proves every other card it
+    gated, never an edit.
     """
     recorded = live.effective_config
     if recorded is None:
@@ -190,8 +214,17 @@ async def _recorded_as_gated(
         {"request_channel_backend_switch"} if selection else set[str]()
     )
     before_pin_clear = confirmed - {"request_channel_pin_clear"}
-    for confirmed_tools in dict.fromkeys(
-        (confirmed, legacy, before_config, before_config_legacy, before_pin_clear)
+    lead_tools = await confirmation_tools(runtime.session_factory, auth.tenant_id)
+    for confirmed_tools, pre_watch in dict.fromkeys(
+        (candidate | lead_tools | watch_tools, not watch_tools)
+        for candidate in (confirmed, legacy, before_config, before_config_legacy, before_pin_clear)
+        for watch_tools in (
+            WATCH_CONFIRMED_TOOLS,
+            WATCH_CONFIRMED_TOOLS - {"update_watch"},
+            frozenset[str](),
+        )
+        if (watch_tools or tool_name not in WATCH_CONFIRMED_TOOLS)
+        and (tool_name in watch_tools or tool_name != "update_watch")
     ):
         for asks_before_publishing in (False, True):
             for daimon_rule_tools in dict.fromkeys((frozenset[str](), rule_tools)):
@@ -203,7 +236,30 @@ async def _recorded_as_gated(
                     asks_before_publishing=asks_before_publishing,
                     confirmed_tools=confirmed_tools,
                     daimon_rule_tools=daimon_rule_tools,
+                    legacy_memory_servers=(
+                        get_repo_memory_settings(runtime.settings).legacy_mcp_server_names
+                        if get_repo_memory_settings(runtime.settings).enabled
+                        else ()
+                    ),
                 )
+                if pre_watch:
+                    # Policy-on sessions add watch gates implicitly too. Rebuild
+                    # the exact pre-watch template for non-watch actions only;
+                    # no old hash can authorize watch enrollment or rotation.
+                    tools = [
+                        tool.model_copy(
+                            update={
+                                "configs": [
+                                    config
+                                    for config in tool.configs or []
+                                    if config.name not in WATCH_CONFIRMED_TOOLS
+                                ]
+                            }
+                        )
+                        if tool.type == "mcp_toolset" and tool.mcp_server_name == DAIMON_SERVER_NAME
+                        else tool
+                        for tool in tools
+                    ]
                 if hash_tools(tools) == recorded.tools_sha256 and has_confirmation_gate(
                     [tool.model_dump(mode="json") for tool in tools], tool_name=tool_name
                 ):

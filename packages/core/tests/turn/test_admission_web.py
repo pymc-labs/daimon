@@ -44,6 +44,7 @@ async def _admit(
         requester_home_id=home_id,
         surface=Surface.WEB,
         principal_platform=principal_platform,
+        origin="chat",
     )
 
 
@@ -62,6 +63,7 @@ async def test_member_runs_as_their_linked_platform_principal(
 
     assert admission.account_id == linked.account_id, "spend and memory stay the person's own"
     assert admission.grant is not None and admission.grant.surface is Surface.WEB
+    assert admission.grant.human_invocation, "a web message is a person's own turn"
     assert admission.hold is None, "a member is not held"
     assert (
         await find_platform_principal(

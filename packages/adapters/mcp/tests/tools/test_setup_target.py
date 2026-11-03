@@ -78,7 +78,11 @@ async def test_switch_target_updates_shared_binding_and_only_requesting_snapshot
     router.add("GET", r"/v1/agents", lambda _r, _m: list_response([target.model_dump(mode="json")]))
     runtime = _runtime(committing_sessionmaker, build_fake_anthropic(router.dispatch))
     auth = AuthIdentity(
-        account_id=caller.id, tenant_id=tenant.id, role=Role.USER, platform="discord"
+        account_id=caller.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        platform="discord",
+        chat_session_id="test-session",
     )
     async with (
         turn_origin(
@@ -96,6 +100,7 @@ async def test_switch_target_updates_shared_binding_and_only_requesting_snapshot
             sender_foreign=False,
             shared_channel=False,
             is_setup=True,
+            chat_session_id="test-session",
         ) as origin,
         turn_origin(
             committing_sessionmaker,
@@ -112,6 +117,7 @@ async def test_switch_target_updates_shared_binding_and_only_requesting_snapshot
             sender_foreign=False,
             shared_channel=False,
             is_setup=True,
+            chat_session_id="test-session",
         ) as concurrent,
     ):
         result = await _set_setup_target_impl(
@@ -171,10 +177,15 @@ async def test_tool_rejects_wrong_or_expired_origin_before_ma_access(
         now=now,
         expires_at=now + timedelta(minutes=-1 if mismatch == "expired" else 10),
         is_setup=True,
+        chat_session_id="test-session",
     )
     await db_session.commit()
     auth = AuthIdentity(
-        account_id=account.id, tenant_id=tenant.id, role=Role.USER, platform="slack"
+        account_id=account.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        platform="slack",
+        chat_session_id="test-session",
     )
     if mismatch == "caller":
         auth = replace(auth, account_id=uuid.uuid4())
@@ -213,6 +224,7 @@ async def test_identity_pin_refuses_deleted_recreated_namesake(
         role=Role.ADMIN,
         is_admin=True,
         platform="discord",
+        chat_session_id="test-session",
     )
     with pytest.raises(ToolError, match="missing or changed"):
         await resolve_setup_agent(
@@ -249,6 +261,7 @@ async def test_origin_refuses_agent_scoped_token_for_another_responder(
         responder_ma_agent_id="agent_daimon",
         responder_name="Daimon",
         role=Role.USER,
+        chat_session_id="test-session",
         sender_foreign=False,
         shared_channel=False,
     ) as origin:
@@ -258,6 +271,7 @@ async def test_origin_refuses_agent_scoped_token_for_another_responder(
             role=Role.USER,
             platform="discord",
             **{credential: uuid.uuid4()},
+            chat_session_id="test-session",
         )
         with pytest.raises(ToolError, match="another agent"):
             await require_turn_origin(runtime, auth, str(origin.id))
@@ -336,6 +350,7 @@ async def test_model_change_uses_specialist_identity_and_retains_admin_gate(
         platform="discord",
         agent_id=None if is_admin else uuid.uuid4(),
         bound_channel_id=None if is_admin else "parent",
+        chat_session_id="test-session",
     )
     if is_admin:
         result = await _update_agent_impl(
@@ -405,7 +420,11 @@ async def test_setup_target_refuses_in_a_handoff_thread_and_names_who_answers(
     router.add("GET", r"/v1/agents", lambda _r, _m: list_response([target.model_dump(mode="json")]))
     runtime = _runtime(committing_sessionmaker, build_fake_anthropic(router.dispatch))
     auth = AuthIdentity(
-        account_id=caller.id, tenant_id=tenant.id, role=Role.USER, platform="discord"
+        account_id=caller.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        platform="discord",
+        chat_session_id="test-session",
     )
 
     async with turn_origin(
@@ -418,6 +437,7 @@ async def test_setup_target_refuses_in_a_handoff_thread_and_names_who_answers(
         responder_ma_agent_id="agent_research",
         responder_name="research-bot",
         role=Role.USER,
+        chat_session_id="test-session",
         sender_foreign=False,
         shared_channel=False,
     ) as origin:
@@ -464,7 +484,11 @@ async def test_setup_target_refusal_in_ordinary_chat_keeps_configuration_open(
     router.add("GET", r"/v1/agents", lambda _r, _m: list_response([target.model_dump(mode="json")]))
     runtime = _runtime(committing_sessionmaker, build_fake_anthropic(router.dispatch))
     auth = AuthIdentity(
-        account_id=caller.id, tenant_id=tenant.id, role=Role.USER, platform="discord"
+        account_id=caller.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        platform="discord",
+        chat_session_id="test-session",
     )
 
     async with turn_origin(
@@ -477,6 +501,7 @@ async def test_setup_target_refusal_in_ordinary_chat_keeps_configuration_open(
         responder_ma_agent_id="agent_daimon",
         responder_name="daimon",
         role=Role.USER,
+        chat_session_id="test-session",
         sender_foreign=False,
         shared_channel=False,
     ) as origin:
@@ -498,11 +523,11 @@ async def test_setup_target_refusal_in_ordinary_chat_keeps_configuration_open(
     assert "/agent-setup" not in message, "the refusal must name a reachable control, not a path"
 
 
-async def test_missing_origin_uses_the_callers_only_running_turn(
+async def test_missing_origin_never_discovers_a_running_human_turn(
     db_session: AsyncSession,
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """A model that drops origin_context_id still reaches its own single turn."""
+    """An empty origin never discovers another execution, even when only one is live."""
     from daimon.core.ma_identity import derive_agent_uuid
 
     tenant = await make_tenant(db_session)
@@ -515,6 +540,7 @@ async def test_missing_origin_uses_the_callers_only_running_turn(
         role=Role.USER,
         platform="discord",
         chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_daimon"),
+        chat_session_id="test-session",
     )
     async with turn_origin(
         committing_sessionmaker,
@@ -526,10 +552,13 @@ async def test_missing_origin_uses_the_callers_only_running_turn(
         responder_ma_agent_id="agent_daimon",
         responder_name="Daimon",
         role=Role.USER,
+        chat_session_id="test-session",
         sender_foreign=False,
         shared_channel=False,
     ) as first:
-        assert (await require_turn_origin(runtime, auth, "")).id == first.id
+        assert (await require_turn_origin(runtime, auth, str(first.id))).id == first.id
+        with pytest.raises(ToolError, match="origin_context_id"):
+            await require_turn_origin(runtime, auth, "")
         # A second running turn with the same agent makes it ambiguous: refuse.
         async with turn_origin(
             committing_sessionmaker,
@@ -541,6 +570,7 @@ async def test_missing_origin_uses_the_callers_only_running_turn(
             responder_ma_agent_id="agent_daimon",
             responder_name="Daimon",
             role=Role.USER,
+            chat_session_id="test-session",
             sender_foreign=False,
             shared_channel=False,
         ):

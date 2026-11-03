@@ -14,7 +14,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
-    _require_admin,  # pyright: ignore[reportPrivateUsage]
+    _require_platform_admin,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.core import promo_credit
@@ -50,7 +50,7 @@ async def _redeem_promo_code_impl(
     runtime: McpRuntime, auth: AuthIdentity, code: str
 ) -> RedeemPromoCodeResult:
     require_scope(auth, "promo:redeem")
-    _require_admin(auth)
+    _require_platform_admin(auth)
     result = await promo_credit.redeem_promo_code(
         runtime.session_factory,
         tenant_id=auth.tenant_id,
@@ -58,7 +58,7 @@ async def _redeem_promo_code_impl(
         code=code,
         now=datetime.now(UTC),
         channel=None,  # no channel here: a channel code is refused as needs_channel
-        is_admin=True,  # checked by _require_admin above
+        is_admin=True,  # checked by _require_platform_admin above
     )
     if isinstance(result, promo_credit.PromoRedeemRefused):
         return RedeemPromoCodeResult(
@@ -99,13 +99,13 @@ def register_promo_code_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context,
         code: str,
     ) -> RedeemPromoCodeResult:
-        """Redeem a promo code for credit on this workspace.
+        """Redeem credit with a direct personal platform-admin CLI credential.
         For example, apply the code someone was given to add credit to the balance.
 
         Case, spaces and dashes in ``code`` do not matter. Each code works once
         per workspace. Timed credit only exists between its start and
         end and is spent before other credit; whatever is left expires at the
         end. Repeated wrong codes pause redemption for a few minutes. Requires
-        an admin.
+        a live platform admin acting directly; chat and routines are refused.
         """
         return await _redeem_promo_code_impl(runtime, await _auth(ctx), code)

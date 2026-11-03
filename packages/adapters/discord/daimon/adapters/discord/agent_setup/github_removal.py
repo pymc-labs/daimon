@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 from daimon.adapters.discord.agent_setup.github_connect_card import connect_embed
 from daimon.adapters.discord.agent_setup.github_home import connect_button_view
-from daimon.adapters.discord.checks import is_guild_admin
+from daimon.adapters.discord.checks import is_platform_admin
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.github_connect_cards import resolve_connect_card
 from daimon.core.github_panel import connect_link, sync_connect_admin
@@ -20,7 +20,7 @@ async def send_pending_notice(
     runtime: DiscordRuntime, interaction: discord.Interaction, *, tenant_id: uuid.UUID
 ) -> None:
     """Deliver one queued removal notice when an admin opens setup."""
-    if not is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]
+    if not is_platform_admin(interaction):  # pyright: ignore[reportArgumentType]
         return
     async with runtime.sessionmaker.begin() as session:
         notice = await claim_notice(session, tenant_id=tenant_id, now=datetime.now(UTC))
@@ -33,7 +33,7 @@ async def send_pending_notice(
                 tenant_id=tenant_id,
                 platform="discord",
                 platform_user_id=str(interaction.user.id),
-                verified_tenant_admin=True,
+                is_platform_admin=True,
             )
             url = await connect_link(
                 session,

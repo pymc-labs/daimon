@@ -615,3 +615,86 @@ async def test_tools_update_leaves_off_a_server_only_another_member_signed_in_to
     assert result.snapshot.mcp_servers_sha256 == hash_mcp_servers([daimon]), (
         "and the snapshot hashes what the session now runs, or the next turn re-applies"
     )
+
+
+async def test_suppressed_update_matches_desired_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from daimon.core import session_update_ops
+    from daimon.core.session_snapshot import desired_snapshot, session_tools
+    from daimon.testing.ma_models import ma_agent
+
+    monkeypatch.setattr(
+        session_update_ops,
+        "resolve_hidden_mcp_server_names",
+        AsyncMock(return_value=frozenset()),
+    )
+    state = FakeSessionsState(ma=FakeMAState())
+    _register_agent(state.ma)
+    bodies: list[dict[str, Any]] = []
+
+    def capture(request: httpx.Request) -> httpx.Response:
+        import json
+
+        if request.method == "POST" and request.url.path.count("/") == 3:
+            bodies.append(json.loads(request.content))
+        raise NotHandled
+
+    client = _build_client(state, before=[capture])
+    session_id, recorded = await _session_with_env(client, content=b"A=1\n")
+    agent = ma_agent(
+        id=_AGENT_ID,
+        tools=[
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": "legacy",
+                "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+                "configs": [],
+            }
+        ],
+        mcp_servers=[{"name": "legacy", "type": "url", "url": "https://mcp.example/legacy"}],
+    )
+    result = await apply_update_ops(
+        client,
+        MagicMock(),
+        ops=(ReplaceToolsAndMcpServers(),),
+        session_id=session_id,
+        recorded=recorded,
+        agent=agent,
+        tenant_id=uuid.uuid4(),
+        agent_uuid=uuid.uuid4(),
+        account_id=uuid.uuid4(),
+        mcp=McpSettings(),
+        tool_safety=OPEN_TOOL_SAFETY,
+        fernet=None,
+        github_fallback_pat=None,
+        github_app_id=None,
+        github_app_private_key=None,
+        legacy_memory_servers=("legacy",),
+        now=_NOW,
+    )
+    desired = desired_snapshot(
+        agent,
+        hidden_mcp_server_names=frozenset(),
+        environment_id=_ENV_ID,
+        env_sha256=recorded.env_sha256,
+        repo_url=None,
+        repo_branch=None,
+        memory_store_id=None,
+        vault_id=None,
+        tool_safety=OPEN_TOOL_SAFETY,
+        legacy_memory_servers=("legacy",),
+    )
+    expected_tools = session_tools(
+        agent,
+        frozenset(),
+        tool_safety=OPEN_TOOL_SAFETY,
+        public_url=None,
+        legacy_memory_servers=("legacy",),
+    )
+    sent = [b["agent"] for b in bodies if "agent" in b]
+    assert len(sent) == 1
+    assert sent[0]["tools"] == [tool.model_dump(mode="json") for tool in expected_tools]
+    assert isinstance(result, AppliedOps)
+    assert result.snapshot.tools_sha256 == hash_tools(expected_tools) == desired.tools_sha256
+    assert result.snapshot.mcp_servers_sha256 == desired.mcp_servers_sha256

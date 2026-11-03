@@ -6,12 +6,216 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- After **Hand over**, the new agent's first reply goes straight to the person's request. Before, it opened by naming the work in progress and the files that came across. It still says when a file it needs is missing or when something could not be carried over.
+
+- On a self-hosted harness, when an MCP server's tool returns an error, the agent now sees the server's error message and can act on it, for example by calling the step it says is missing. Before, the agent saw only "Tool failed: ValueError". The result is still marked as an error, and credentials in it are still redacted.
+
+- Upgrading through `0142_watches` works when the migrator is not a superuser, as on Cloud SQL and other managed Postgres 16 and later. It failed with "must be able to SET ROLE daimon_watch_ingress_owner", because such a migrator only administers the roles it creates. The migration now grants the migrator that role first.
+
+- A routine with no destination and no channel reads its owner's personal memory again, read-only, as it did before DM routines. Only the owner can read its saved output and errors; admins can still manage it.
+
+- A turn that finished and delivered its answer is no longer reported as failed when Daimon cannot save which repository memory it sent. The failed save is logged, and the next turn sends that memory again.
+
+- A long-lived thread whose stream drops mid-turn reconnects instead of failing. Reconnecting reads the session's whole history, and that read had 60 seconds however long the thread; a thread with a long history ran out and the turn ended as an upstream error. The read may now use what is left of the 45-minute turn ceiling, less 30 seconds, and never less than 60 seconds.
+
+- A watch that reports in its owner's DM waits while the owner has a DM reply running, such as one waiting on an approval card, and reports once it ends. Before, the report was skipped.
+
+- A Discord DM answer survives one failed server membership lookup while it is written. Before, a single timed-out or rate-limited lookup closed the progress card for the rest of the turn, so the answer never showed. A person verified as no longer a member still sees no more of it.
+
+- **New conversation**, **Switch server** and `/new` in a Discord DM answer straight away while Daimon is still replying there, saying to try again once it's done. Before, they waited for the reply and Discord showed the interaction as failed.
+
+- Stopping a Discord DM turn no longer posts its partial answer again under the card, or "The reply finished without text." when it stopped before any text. A DM turn that ends with no text and no tools shows only its card too.
+
+- Files an agent saves during a Discord DM turn are sent in the DM, attached to the answer as in a server thread. Before, a DM turn never collected them, so the agent said a file was ready when none arrived, and it stayed only in the session. A DM is held to Discord's default 10 MB upload limit; a larger file stays in the session with a notice, as in a thread. Each file first checks that the person may still receive the answer.
+
+- Discord DMs have a **New conversation** button next to **Switch server**, and `/new` and `/dm-settings` commands in DMs. The buttons appear only on a conversation's opening message, which says to run `/dm-settings` for them, and on `/dm-settings` itself; replies no longer carry them. Both start an empty private conversation with the same server and its DM agent, so a person picks up an agent's changed credentials or tools without choosing a server again. Access is checked as for a first DM, and a button from an older conversation refuses. Non-production deployments, which register commands per server, also register their DM-only commands globally so they appear in DMs, and leave them out of the server copies.
+
+- A Discord member who may not use Daimon and DMs it is told they don't have permission to DM Daimon, instead of being sent to `/dm-me`, which would refuse them too. This applies when the server's invoker policy or the DM agent's role requirement refuses them. Someone who isn't a member of any of Daimon's servers still gets the `/dm-me` guidance, so the reply never confirms a server they aren't in.
+
+- Discord DMs show the same progress card as a server thread while Daimon works: what it is doing, a Stop button, and the answer in the card when it finishes. Before, a DM only showed the typing indicator until the whole answer arrived. Each card update first checks that the person may still receive the answer, and stops for good once they may not. A restart mid-turn leaves the DM card at its last update.
+
+- A Discord DM can approve a write. A tool call that needs approval used to be refused in a DM straight away, because a DM had nowhere to show the confirmation card, so a DM agent could never publish an artifact or run any other gated write. The card is now posted in the DM, only the person who sent the message can answer it, and it times out as in a thread. Slack and Teams DMs still refuse such writes.
+
+- Non-production deployments answer DMs again. `DAIMON_DISCORD__COMMAND_GUILD_IDS` dropped every event with no guild, so a dev lane's bot never saw a DM or a click on the buttons under a DM reply. The allow-list now applies only to guild events; DMs reach the bot as in production, where it answers only a verified member of one of its tenants.
+
+- Detaching an MCP server with `detach_mcp_server` also removes the copies of its key from the vaults of everyone who used the agent, a shared thread's vault included, not only the key the agent stores. Before, those copies stayed until someone deleted them by hand, and a later attach at the same URL could quietly use them. Only that agent's copies of that server's key go: another agent's own key for the same server and a person's own sign-in stay. If some copies cannot be removed, the reply says so and asks for an operator.
+
+- A watch that reports in a new thread or the owner's DM reports its events again. Those reports start a fresh session that mounts the agent's memory but has no file tools, and the model wrote file and memory tool calls as plain text instead of the report. Every watch turn now says it has no file, shell or memory tools.
+
+- Admins can hide the line under each finished answer that names the agent, the time taken, the cost and the money left. On Discord, `/cost-footer hide` (or `show`) changes it for the whole server, and `/cost-footer` alone says which is set; on Slack and Teams, ask the agent, which calls the admin-only `set_cost_footer` (`get_cost_footer` reads it). It is shown by default, so nothing changes until an admin hides it. Hidden, answers end with no summary, Slack's card reads "Done." and Teams keeps only the vote buttons; billing and `/billing` are unchanged (migration `0167_cost_footer`).
+
+- A watch owner notice that cannot be delivered no longer retries every five minutes until the watch is deleted. When Discord will never deliver it (the owner closed their DMs, blocked the bot, left the server or is a bot account) the attempt is recorded as `refused` and the notice stops; any other failure retries after 5, 10, 20 and 40 minutes, then hourly, and is dropped a day after its first attempt. Every notice kind follows the same rule (migration `0166_watch_notice_refused`).
+
+- An agent that enables Daimon tools by name now sees all of them. Before, it saw only the tools that wait for a person's Approve: the rest were listed only behind `search_tools` and `call_tool`, which its list did not enable. Daimon records each agent's list when a session for it is created or updated and lists those tools directly for that agent (migration `0165_agent_daimon_tools`).
+
+- QA confirm clicks and QA auto-approve also run on the `lane-preview` dev lane, not only on staging: the host's project must end in `-dev` and its deployment name must be `lane-preview`. The QA bot allow-list, the read-only control files and the audit log apply as on staging, and publish cards stay manual.
+
+- A permanent watch paused for 30 days cannot be resumed or edited, even while watches are switched off. Editing a paused watch to permanent starts its 30 paused days from the edit. An edit and a create approved at the same moment cannot pass the 5 permanent watches an owner may have.
+
+- Watch owners can change a watch in place: `preview_watch_edit` shows each change as old and new, and `update_watch` saves it after the owner approves a card that shows the same. Instructions, arguments, projection, rule, key, evidence, interval, lifetime, daily limit and where it reports can change; the tool, server, owner and agent cannot. Reports queued before the edit are dropped, the next check saves a new starting point without reporting, and an edit refuses if the watch changed in the meantime. Admins can pause, delete and list another owner's watch but not edit it.
+
+- An owner who is an admin can make a watch permanent (`permanent=true`, at most 5 each; one paused for 30 days expires) or let it report more than 24 times a day (`max_turns_per_day`). Operators set the daily ceilings for every watch or one tenant with `daimon watches limits set --scope global|tenant:TENANT_UUID --per-watch N --per-owner N` and read them with `daimon watches limits show`; a lowered ceiling holds from the next firing, and the owner gets the usual daily limit message (migration `0164_watch_lifetime_caps`).
+
+- Watches can report in their owner's DM or in a new public thread for each report: pass `delivery="dm"` or `delivery="new_thread"` to `create_watch` (Discord only; the default stays the watch's own thread). A DM always goes to the owner who made the watch, runs read-and-report only like any watch turn, and stops, pausing the watch, when DMs are turned off or the owner may no longer get them. A watch made in a DM reports there, and one made in a private thread cannot start new threads. A new-thread report pauses the watch when the owner can no longer start threads there, and a retried report reuses its thread (migration `0163_watch_delivery`).
+
+- Watches can read an MCP server tool with the owner's own key: an operator lists it in `DAIMON_WATCHES__POLLABLE_TOOLS` with credential `owner`, and `request_watch_credential` posts a private form only the requester can fill in. The key is stored encrypted, used only by that owner's watches and sent only to that exact URL, for example a read-scoped API key the person creates on that server. A new key takes effect at the next check, `forget_watch_credential` deletes it, a watch without its key pauses as `credential_missing` and its owner is told, and account erasure removes the keys (migration `0162_watch_credentials`).
+
+- Watch owner notices (expired, paused, stopped, cap reached) go out once even if the bot restarts mid-send: each attempt leaves a receipt, and a resumed send first looks for the earlier DM. Operators count them with `daimon watches notices --watch WATCH_UUID [--json]`; receipts hold ids, times and outcome, never the message text, and are kept 30 days, also after the watch is deleted.
+
+- Operators name the MCP server tools that return chat or archive text in `DAIMON_WATCHES__CHAT_TOOLS` (a JSON list, default none); listing them for polling on an MCP server is refused. Daimon's own `read_thread`, `read_channel` and `search_messages` are always refused there. Watch import notices and signing-key messages use plain words.
+
+- Watches can poll a read tool on an MCP server the agent attaches: pass the server's URL (or its name on the agent) as `create_watch`'s `server`. Only tools an operator lists for that exact URL in `DAIMON_WATCHES__POLLABLE_TOOLS` with credential `agent` or `none` can be watched, and the server must say the tool only reads; that can refuse a watch but never allow one. A watch pauses and tells its owner when the server is detached or moved to another URL, the tool is disabled or denied, or its listing changes (`source_changed`). Compressed replies are refused, a busy server cannot hold up watches on other servers, Daimon's own chat readers and the tools listed in `DAIMON_WATCHES__CHAT_TOOLS` are refused on MCP servers, internationalised host names count as one entry, a queued report no longer runs after its tool is delisted, and poll results with very large or very small numbers are measured as the database stores them (migration `0158_watch_mcp_claim`).
+
+- Operators choose which tools a watch may poll with `DAIMON_WATCHES__POLLABLE_TOOLS`; the default keeps `read_thread` and `read_channel`. An unlisted tool is refused at create and resume, a watch whose tool is taken off the list pauses and its owner gets one private message, and a raised per-tool floor slows existing watches without pausing them; an empty value keeps the default. Polled watches also handle bigger results: a `[]` step in projections, `added` by a `key` that keeps only fingerprints, chosen `evidence` fields per new item, a 256 KiB raw read, a 64 KiB baseline and 16 KiB reports of at most 20 items with the rest counted (migration `0156_watch_mcp_sources`). A watch turn whose gathered reports exceed 512 KiB now keeps the newest and counts the rest as omitted instead of being dropped.
+
+- Add `daimon routines link-source` to link a paused, never-fired routine to its source routine before `seed-first-run`, with a dry run by default and refusal of existing or conflicting links. Linking and seeding share never-fired validation, allowing paused DM routines with edit-only skipped delivery markers.
+
+- Add `daimon routines create --paused` to create disabled routines with no next
+  fire time. For import, create with `--paused`, then use
+  `daimon routines link-source --apply` to set the source ID before
+  `daimon routines seed-first-run --apply`. Dry-run reports whether creation
+  would be paused or enabled.
+
+- Watch cap messages now say whether the watch hit its own daily limit or its owner's limit across all their watches, and the owner-wide one goes out at most once a day instead of once per watch. A watch held back by a cap no longer counts earlier source errors toward stopping it, so a day of capped polls followed by one error cannot stop a healthy watch.
+
+- Stop a polled watch that keeps failing: after at least five errors in a row over at least a day it pauses, cancels its queued wakes and sends its owner one private message; resuming it with the usual approval resets the count. Owners also get one private message per watch per rolling day when a daily cap holds back a firing; the watch keeps running and fires again when the day rolls.
+
+- Admins can list every watch in their workspace with `list_watches(scope="all")`, and operators with `daimon watches list --tenant TENANT_UUID`: owner, status and pause reason, source and destination, expiry, firings today, last firing and errors. Non-admins are refused; instructions, keys and source evidence are never shown.
+
+- Fly sessions can run long commands in the background: `fly_run_bash` with `run_in_background` returns a task id, `fly_task_status` and `fly_task_result` read it, and the original conversation gets one short message when it ends. Running commands keep their session alive up to the maximum lifetime; a machine restart reports them lost and never reruns them.
+
+- Add optional owner-isolated Fly sessions with approved launch/extension, inline bash, file tools and automatic lease cleanup. Launches are disabled by default. Cleanup runs on its own scheduler loop and isolates failures per machine; foreign callers are refused.
+
+- Preserve trusted turn controls and disabled repository-memory defaults when
+  runtime settings are partial.
+
+- Support operator-configured Google authorized-user credentials for matching agent bindings alongside service-account delegation.
+
+- Name Google's error code (`invalid_scope`, `invalid_grant`) when a Google user-credential refresh fails, and refuse user-credential bindings with no scopes.
+
+- Keep legacy repository-memory readers suppressed during in-place session updates
+  and confirmation checks. Preserve origin restrictions on native-runtime rebinds,
+  inject repository state only on the first successful turn or a state change, and
+  reject invalid or reserved slugs in offline memory imports.
+
+- Replace whitespace-only Slides text by deleting it before insertion, including
+  newline-only shapes; genuinely empty shapes still skip deletion.
+
+- Limit Toggl corrections to stopped entries attributed by workspace Reports in
+  an explicit 365-day UTC date window. Remove timer-stop support; refuse missing
+  targets, including running entries and very recent edits affected by Reports lag.
+
+- Support Shared Drives and partial Calendar patches in sandbox writes; fill empty
+  Slides placeholders without deleting absent text. Check packaged runtime copies
+  for drift and missing folders, and document audience controls and token transcript exposure.
+
+- Fix Toggl shared-account edits by resolving ownership and timing through
+  workspace Reports v3 filtered by entry ID and explicitly named member, rather
+  than a key-owner-only lookup. Refuse incomplete or ambiguous report evidence.
+
+- Add sandbox OpenAI image generation and local-reference editing with validated
+  reply attachments. Ship opt-in credential-holder agent specs for Workspace,
+  Toggl and images; the retired Gemini Imagen route is explicitly refused.
+
+- Add narrow Toggl Track scripts for explicit-member stopped-entry update and
+  bulk edits, checking all target owners before writing and reporting partial results.
+
+- Add a sandbox Slides template workflow with validated batches, revision checks
+  and PNG rendering for mandatory visual review.
+
+- Add a sandbox Workspace write skill using short-lived Google tokens on a dedicated
+  bound agent, with explicit operations and redacted errors. Correct CLI auth
+  guidance for ordinary chat identity.
+
+- Add opt-in repository memory shared across agents, creator-only personal directives,
+  four native `repo_memory_*` tools, bounded turn injection, legacy reader suppression
+  and an offline importer. Bound working repositories use their live App grant without
+  requiring each person to link GitHub. Restricted conversations cannot save or delete.
+
+- Add slot-safe routine handover with claimed-slot and completion evidence,
+  stable source ids, atomic `seed-first-run` and `pause-for-handback` operator
+  commands, and read-only `export-rollback` using rollback format version 2.
+  Seed files remain bare JSON arrays with source identity and next-run keys;
+  wrapped objects and legacy keys are rejected without aliases.
+  Migration `0161_routine_source_id` preserves existing links under source names.
+  Handback preserves the enabled state
+  and next unrun slot across coalescing and checks schedule, completion and
+  delivery consistency before declaring a final export. Repeated resume replies
+  plainly without replacing a seeded first run.
+
+- Pre-connect pre-turn context provider pools at runtime startup and keep idle HTTPS origins warm with unauthenticated health requests.
+
+- Optional tenant-scoped pre-turn MCP context providers, configured with `daimon context-provider set`, with bounded fail-open calls and session acknowledgements.
+  Allow up to 400 ms until a session acknowledges its system fragment, configurable
+  with `first_call_timeout_ms`; subsequent calls retain the 200 ms ceiling.
+  Keep idle provider connections alive for 240 seconds so turns can reuse them.
+  Let bounded late provider calls and config reads finish in the background to warm
+  connections for later turns, discarding late results without advancing acknowledgements.
+
+- Preserve Discord request message and channel IDs in turn context, including every
+  source of a merged queued request, so agents can cite the original messages.
+
+- Add optional per-agent Discord invoker roles, requiring current human role
+  membership even for server admins across chat, handoffs and MCP.
+  Automated wakes and unknown origins cannot acquire one from a recorded owner. Operators can
+  set or clear roles with `daimon agents rule invoker-roles`. Workspace transfers
+  away from role-gated agents carry transcripts without running a checkpoint.
+  Human provenance is stored separately from attended tool controls.
+
+- Let newly recognized platform admins connect GitHub repos without first sending
+  a chat message to refresh their stored role. Delegated admins remain excluded.
+
+- Keep long-job policy and worker spending-limit administration platform-only.
+  Worker spending tools require a personal CLI credential; chat and routine
+  execution cannot change caps. Foreign and held callers receive no admin authority.
+
+- Discord `/routines` now supports admin creation and confirmed creator-or-admin
+  deletion, with schedule validation and agent policy checks. Pause and resume
+  also recognize server owners and Administrator permissions. Thread-created
+  routines retain verified parent/thread provenance and use the parent channel's
+  budget; unresolved sources are refused.
+
+- Clarify that granted admins can change what agents do, including agents platform
+  admins use. Refuse operator-token minting until the platform role is recorded,
+  with instructions to refresh it, and require platform admins to mint coding-tool keys.
+
+- Transfer routine execution authority to the editor of its behavior, confine
+  role snapshots to platform admission/connect commands, and keep credential,
+  MCP-connection and DM-toggle administration platform-only. Human authority
+  requires a registered personal CLI token; billing-panel tokens are checkout-only.
+
+- Require direct human platform-admin authority for admin delegation and money
+  controls; refuse agent-run credentials, keep GitHub platform-only, and apply
+  delegated configuration through an explicit action allow-list.
+
+- Platform admins can delegate tenant-wide Daimon admin to users, or Discord roles,
+  from the Discord and Slack Admins screens, authenticated MCP tools, or
+  `daimon admins list|grant|revoke`. Delegated admins can configure Daimon but
+  cannot delegate, change billing or spending caps. Revocation applies to open
+  panels and existing MCP credentials immediately; changes are audited.
+  Promo redemption, including channel codes, and operator-token minting require
+  a live platform admin. Delegated admins do not acquire the hub exception for
+  reading other people’s sessions or sealed transcripts.
+
+- Add opt-in server-admin overrides for third-party MCP write approvals at
+  server, channel and thread scope, through audited native `/here` controls on
+  Discord, Slack and Teams. Every click/submission rechecks native admin authority.
+  Changes apply to the next write in prepared and running turns; failed setting
+  reads require confirmation. Fixed confirmation and permission-setter names
+  retain their gates on every host, including unrelated name collisions. Direct
+  messages, deny rules and unattended writes retain their existing behavior.
+  Rollback caveat: older builds reject the stored approval fields as unknown and
+  refuse that tenant's policy. Before rollback, while this build still runs, a
+  native server/workspace admin must use `/here` (Teams: `here`) to choose
+  **Inherit** for Server and for every channel/thread with a saved override.
+  Alternatively, restore a policy backup from before overrides were saved.
+  Disabling the deployment flag does not remove the stored fields.
 
 - **Helpers.** An agent can ask other agents, on any model provider, for help inside its
   turn (`list_helpers`, `ask_helper`, `wait_for_helpers`). Pick each agent's helpers on its
   canvas in the web app. A helper runs for the same person in the same thread, with that
   person's rules, budget and confirmations; its reply goes back to the asking agent, and it
-  stops when that turn ends. Replies are text. Migration 0159 adds the helper tables.
+  stops when that turn ends. Replies are text. Migration 0170 adds the helper tables.
 - **Web app.** People chat with agents in a browser, signing in with Discord. Shared files
   reach the agent, and files it makes come back as downloads. Key requests show as a form in
   the chat. Admins manage people, invites, credit and settings, and a one-time owner link
@@ -198,6 +402,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Route selfhosted direct requests to Azure Container Apps session pools with a stable per-session identifier and the fixed Entra pool audience.
 ### Fixed
+- Fall back to the transcript when a handoff's previous agent has been deleted.
+
+- Skip archived workspaces when draining watch notices so other owners still receive
+  theirs, and limit expired-watch notices to watches that expired within the last 24 hours.
+
+- Explain queued mentions once a previous turn has run for three minutes on Discord,
+  Slack and Teams; bound upstream liveness reads while retaining turn ownership
+  when status is unknown. Turn mutations retain their original timeout and disable
+  automatic SDK retries.
+
+- The hand-over button on Discord, Slack and Teams now re-sends the clicker's
+  latest readable message to the new agent, or a fixed prompt when none can be
+  read. It uses normal mention intake, including the usual hourglass and queue
+  behind a running turn. Later mentions run after the click; repeated or refused
+  clicks start no extra turn.
+
+- Keep completed routine replies deliverable when generated-file collection fails, with a note that files could not be attached.
+
+- Record routine failures and queue channel/thread failure notices after the scheduler heals a stale agent ID.
+
+- Correct the routines documentation: owner-DM execution failures and busy-owner skips record an error without sending a notice.
+
+- Finish origin grant revocation and turn lease release even when a turn is cancelled repeatedly.
+
+- Stop the watch sidecar on polling configuration or programming errors; retry transient database and transport failures without logging sensitive exception details.
+
+- Bound lock waits to five seconds when upgrading cold-DM agent selection and routine DM destinations, so busy tables cannot stall Daimon startup indefinitely.
+
+- Watch turns show their status card until the answer is posted; a brief Discord outage no longer pauses the watch.
+
+- Daimon watches retry capped polls at their normal interval and privately notify owners of firing limits, revoked access, and expiry.
+
+- Concurrent routines for the same owner reuse their platform identity when enrollment is still committing, instead of failing with a duplicate-principal error.
+
+- Bind signed session-origin authority only while a turn owns its conversation lease, so queued or stopped attended turns cannot replace an unattended holder’s grant or attendance.
 
 - **Web agent editor fixes.** Deleted channels no longer show as "Unnamed channel" (they
   leave the pickers, or read "Deleted channel"; DMs read "Direct message"). The model picker
@@ -251,12 +490,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Require separate service/tool identities in the self-hosted harness, refuse unsigned gateway authentication, isolate file operations and redact SDK failure logs.
 - Verify the self-hosted driver and harness together over HTTP, including approval execution, cancellation, replay and narrowed tool permissions.
+- Watch channel/category protection uses the category from the fresh Discord REST parent and current DB rules before admission, execution and output. A stale gateway category cannot authorize a watch in a protected category; unverifiable rules or channel metadata refuse output and pause the watch.
+
+- Discord watches compute access entirely from fresh REST guild ownership, roles, member, parent, thread and membership proofs, checking parent visibility, read history and private-thread membership (or Manage Threads) before running and before every output, including the initial thinking card. Locked threads require Manage Threads. Revoked or unverifiable access pauses the watch with a plain reason and never falls back to the parent channel. Slack and Teams watch enrollment remains unsupported.
+
+- Unattended turns (agent chat `start_turn`/`ask`, routines, watches and wakes)
+  run again on Managed Agents sessions that carry the provider's `budget` and
+  `execution_identity` fields; every one was refused before the model call. A
+  refusal now names the field it could not review (for example
+  `unreviewed provider field session.budget`) instead of claiming the agent
+  delegates to other agents.
+
+- Preserve recorded approval cards for existing backend switches and other
+  non-watch actions when the provider omits session overrides after watch gates
+  are introduced. Watch enrollment still requires its own verified approval.
+
+- Protect legacy destination-free routine previews and diagnostics from non-owner
+  readers, including administrators, across MCP and chat panels. Clear retained
+  legacy private output once during upgrade; operator backfill output stays redacted.
+
+- Lead approval Details loads authorized live evidence on each click and shows
+  removed records as no longer available. Cards retain no cached evidence.
+  Batch mailbox readback requires the common lead read check, and hidden leads
+  no longer consume list pages. Automatic resume batches skip old configuration
+  revisions, old destinations and unreadable records before filling their window.
+
+- Access policies that keep the default admin bypass remain readable by older deployments during rolling upgrades.
+
+- Discord private conversations retain operational and billing notices while access denials stay silent. Discovery failures after membership and invoker checks show a generic notice without server or agent names.
+
+- Continuing a routine session through the CLI, MCP or a checkpoint retains its conversation channel rules; its private transcript stamp no longer makes it execute as a DM.
+
+- Stopping or cancelling an unattended decision, or reaching its turn ceiling, leaves pending calls paused and interrupts the session without sending confirmations, including on runtimes without a confirmation gate. Cancellation during decision-task or card cleanup also completes bounded interrupt cleanup before propagating. Normal decisions on those runtimes still refuse unattended confirmations.
+
+- Handoffs created by unattended wakes retain unattended tool safety on Discord, Slack and Teams; queueing a handoff no longer grants human approval surfaces.
 
 ### Added
+- Discord and Slack warn when outsiders can view a channel that is not
+  confidential, with an admin-only Make confidential action. Discord admins can
+  name internal roles in Permissions or deployment operators can use the CLI.
+  Slack checks external, Enterprise workspace and pending sharing from one fresh
+  channel-info response, with no cache or guest lookups. Both Slack screens state
+  that guest accounts aren't checked and recommend making guest channels
+  confidential; failed sharing reads say Outsider check skipped. Known warnings
+  survive later Slack metadata failures, and private channels the bot cannot see
+  retain the invite-the-bot card. CLI access-policy help identifies its
+  deployment-operator trust boundary explicitly, including both clear paths.
+
+- Human-approved long jobs in isolated Managed Agents workers, with admin tenant/agent policy, owner billing, durable restart recovery, retained source privacy and read-only completion wakes on Discord after current owner access checks. Slack and Teams completion delivery fails closed pending equivalent access proof.
 
 - A standalone Azure OpenAI harness runs local agent tools, MCP connections and skills, with durable event replay, approval decisions and cancellation. It supports direct HTTP and Foundry invocation envelopes; deployment details are in `apps/harness/README.md`.
 
 ### Changed
+- Validate source-supported lead attribution before recording a HubSpot deal creation intent, keeping reviews resolvable; ignore attribution when its property is unconfigured; attribution without a verbatim supporting quote is dropped; document deal type and channel mappings, use “Lead” for manually selected companies without a name, and include candidate names and IDs in CRM review reasons.
+
+- Daimon hub session reads and agent listings now verify Discord admin permissions freshly; agent-chat confirmations stop when caller membership or invoker access is revoked.
+
+- Daimon unattended turns treat provider telemetry, budget, outcome, metadata and model settings as opaque and ignore new top-level session fields with a log once per field name. Tools, MCP servers, skills, execution identity and session resources remain strict; memory-store access is limited to read-only/read-write modes or the provider's omitted/null default.
+
+- Preserve unattended sandbox restrictions across native providers: refuse workers and wakes that require automatic sandbox/custom tools or other ungated capabilities before a provider message; retain conversation-only workers, attended native execution and guarded selfhosted tools.
+
+- Imported Discord read watches map to owner-authorized `read_thread`/`read_channel` poll watches (message reads require thread IDs, default/cap integer limits at 20, and warn before CLI confirmation); unsupported imports stay paused with a reason printed by the CLI, without an owner notice for Discord mapping failures. Mapped channel watches use live result differences instead of `since` and see live channel messages only, excluding archived history and messages inside child threads. Refuse page-event watch creation until a page-event producer exists.
+
+- **Third-party MCP tools that say they only read can stop asking for
+  approval, on servers you trust.** List a server in
+  `DAIMON_TOOL_SAFETY__TRUSTED_ANNOTATIONS` (e.g. `["bridge"]`) and, with tool
+  safety on, Daimon reads that server's own tool annotations (once per turn,
+  on the first paused call to it) and runs a tool marked `readOnlyHint: true`
+  as a read, so a noun-first read such as `memory_flag_list` no longer needs a
+  `DAIMON_TOOL_SAFETY__EFFECTS` pin; each such allow is logged. A tool also
+  marked `destructiveHint: true`, one marked `readOnlyHint: false`, and one
+  without the hint are never let through by annotations; an `effects` pin or a
+  `denied` entry still wins, and when the server cannot be read the tool name
+  decides as before. The list is empty by default: an unlisted server's
+  annotations are never fetched and its tools are classified by name only.
 
 - The web agent API's `month_usd` and `month_start` are now `spend_usd` and `spend_since`:
   an agent's spend over the last 30 days, not the calendar month.
@@ -369,6 +676,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rule names outside `[A-Za-z0-9_.-]{1,128}` are no longer accepted.
 
 - Switching providers preserves supported MCP tools when a sibling needs confirmation; unavailable tools require explicit consent and remain blocked.
+- **MCP servers connected agent-wide now work in shared threads.** A shared
+  thread's session mounted no vault holding the agent's shared MCP tokens,
+  so such a server failed authentication there and every reply carried an
+  "unavailable this turn" notice. The thread now has a vault of its own
+  holding those tokens and nothing else; a token added, rotated or removed
+  reaches it on the thread's next turn. The shared workspace still holds
+  the agent's own credentials only, never anyone's personally connected MCP
+  servers. A shared thread whose session was created before this change
+  picks the tokens up once that session is replaced.
+
+- **Delivered files say whose they are.** Files an agent saves arrive a few seconds after its reply, and in a Slack or Discord thread several people use, the next person's turn has often started by then, so one person's files looked like part of someone else's turn. Every delivery is now labelled with the person whose turn made the files, in every thread, not only shared ones. On Slack the first file (or oversize notice) of each delivery says "For @name", so that person is notified once. On Discord, a file that cannot go on the answer, and every oversize notice, replies to the person's own message and says "For @name" without pinging. Files are labelled, not reordered: they can still appear after a later turn's answer (#788).
 
 
 ### Changed
@@ -496,6 +814,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   memory, no Daimon model knobs).
 
 ### Removed
+- Staffing threads are removed from Daimon.
 
 - **Teams treats people from another organisation as members.** A shared
   channel's external participants and Entra guests are answered wherever a
@@ -674,7 +993,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A Discord private form (the **Enter it privately** button for a key, token or repo) that nobody clicks now turns into "⌛ This form expired." with a line saying how to ask again, and loses its button, within about a minute of expiring. Before, it kept looking live until someone clicked it and only then said it had expired.
 - A Discord private form (the **Enter it privately** button for a key, token or repo) that nobody clicks now turns into "⌛ This form expired." with a line saying how to ask again, and loses its button, usually within a minute of expiring. Before, it kept looking live until someone clicked it and only then said it had expired.
 - Turns started with the MCP agent-chat tools (`start_turn`, `continue_turn`, `ask`) are now billed, at the same price, markup and budget channel as a chat turn and once only. They are settled the first time `get_my_session`, `list_events` or `ask` sees the turn finished. Before, they were billed only by the usage sweep, which is off by default, so they were not charged at all.
-- The usage sweep (`DAIMON_SCHEDULER__USAGE_SWEEP_ENABLED`) now settles only the agent-chat sessions whose finished turns nobody read, instead of listing every session in the Managed Agents workspace, and is on by default. Calls made before this release are not charged automatically: `daimon usage settle-backlog` debits them for the internal tenants given and waives them for everyone else.
+- The usage sweep (`DAIMON_SCHEDULER__USAGE_SWEEP_ENABLED`) now settles only the agent-chat sessions whose finished turns nobody read, instead of listing every session in the Managed Agents workspace, and is on by default. Calls made before this release are not charged automatically: `daimon usage settle-backlog` debits them for the selected tenants and waives them for everyone else.
 - Archiving an agent (`daimon agents archive`, the `archive_agent` tool, the Slack panel's Delete) now drops its agent rule along with the channel defaults naming it. Before, the rule stayed, and a later channel copy given the same name (copy names are cut to 40 characters, so two channels can share one) was refused with "<name>'s rule names other channels, so it can't be used for Own agents only". A channel copy also skips any name that still has a rule, and `daimon agents rule set … <name> --anywhere` (or `set_agent_rule` with no channels) now drops a rule whose agent no longer exists, so rules left by agents archived earlier can be cleared (#22).
 - Archiving an agent (`daimon agents archive`, the `archive_agent` tool, the Slack panel's Delete) now drops its agent rule along with the channel defaults naming it. Before, the rule stayed, and a later channel copy given the same name (copy names are cut to 40 characters, so two channels can share one) was refused with "<name>'s rule names other channels, so it can't be used for Own agents only". A channel copy also skips any name that still has a rule, and `daimon agents rule set … <name> --anywhere` (or `set_agent_rule` with no channels) now drops a rule whose agent no longer exists, so rules left by agents archived earlier can be cleared. It never drops a rule a live agent still answers to, under its MA name, its config name or, for a report reader, its source agent's name.
 - `daimon skills delete` and the `delete_skill` chat tool refuse to delete a skill an agent or channel still uses, saying where it is attached and how to detach it. Before, the delete succeeded and every later turn for that agent or channel failed. `daimon skills delete --force` detaches it from every agent and channel in every tenant first (its confirmation says how many, and how many are outside the selected tenant), then deletes it. A skill being attached while it is deleted is no longer left attached to a deleted skill: one waits for the other, and an attach that loses says the skill was just deleted. Syncing a skill repo no longer deletes a skill removed from the repo while another agent or a channel still uses it, and the startup cleanup of duplicate default skills keeps a duplicate that is still in use.
@@ -683,7 +1002,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A Discord turn with completion pings on no longer shows its summary line (time, cost, money left) twice. The status card used to carry the summary while the pinged answer was posted below it with the same summary, until the card was deleted; when that delete failed, both stayed. The card now reads "Done." without the summary, and only the answer carries it. If the answer cannot be posted before its summary is up, the card gets the summary back.
 - Opening an expired, revoked or unknown notebook or report link in a browser now shows a plain "Link unavailable" page asking the sender to share a new link, instead of a raw JSON error. The status codes (404 for notebooks, 403 for reports) and the link checks are unchanged, and API clients still get JSON.
 - Mentioning Daimon in a Discord channel whose **Who can post** rule is **Nobody** is no longer met with silence that looks like an outage. Your message gets a 🔒 reaction and you get a direct message saying Daimon can't reply in that channel and who can change the rule: a server admin in `/agent-setup` → **Who answers where** → **Permissions** for a channel rule, or whoever runs Daimon for a category rule. It is only sent when a rule really matches, not when Daimon refused because it couldn't look up the channel's category. Daimon still posts nothing in the channel and runs no turn. You're told at most once per channel every 10 minutes (`DAIMON_DISCORD__PROTECTED_CHANNEL_NOTICE_COOLDOWN_MIN`).
-- A new Discord thread is no longer titled after the agent's internal name (for example "Chat with qa-haiku-canary-20261010") when the automatic title is unavailable. It is titled with your opening message instead, cut to 50 characters, and a generated title that names nothing, such as "Greeting" or "Help request", is replaced the same way. A bare mention with no text is titled "Chat with" the bot's name.
+- A new Discord thread is no longer titled after the agent's internal name (for example "Chat with example-agent") when the automatic title is unavailable. It is titled with your opening message instead, cut to 50 characters, and a generated title that names nothing, such as "Greeting" or "Help request", is replaced the same way. A bare mention with no text is titled "Chat with" the bot's name.
 - Model calls an agent made while its chat worker was down (a deploy or crash mid-turn) are now billed when the next turn in that thread ends, at the same price and once only. Previously they went unbilled unless the usage sweep was switched on.
 - When your team's Daimon credit runs out, the reply now says how to fix it: "An admin can top up with `/billing`." on Discord and Slack, and `billing` in a 1:1 chat on Teams. Before, it only said "Ask an admin to top up." without naming where.
 - A routine that posts to a channel or thread now says so there when it fails, instead of posting nothing. The notice names the routine, says what went wrong in plain words (for example "The request to the AI model failed." or "Your team's Daimon credit has run out.") and that it will try again at its next scheduled time. It is posted once when a routine starts failing, not on every failed run, and again only after a run has succeeded.
@@ -747,11 +1066,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Members can redeem a promo code into their own channel's budget (#791).** `daimon promo create --amount 10 --channel-cap 30` makes a channel code. Any member can redeem it from `/billing` on Discord or Slack, or `billing` typed in a Teams channel. It adds $10 to the budget of the channel they are in (a thread counts as its parent), once per person per channel, until that channel has taken $30 from the code. `--max-redemptions` still limits the total. The credit is a `promo_credit` ledger entry tagged with the channel, and it raises the channel's budget limit by the same amount. In a channel with no budget, the credit goes to the server's balance. Admins still redeem ordinary codes for the whole server. A member who tries one is told only an admin can, and a channel code entered in a DM, a Slack group DM or a Teams 1:1 chat is refused. **Redeem code** now appears for members while a channel code can be redeemed, and for admins while any code can. Each attempt writes a security audit row naming the channel, including an empty code or a failed redemption on Teams. A Discord reply that fails after a redemption is no longer recorded as a failed redemption. `daimon promo list` shows `channel_cap_usd` and `daimon promo redemptions` shows `channel_id`. The Discord ready message now reads "Have a promo code? Redeem it in `/billing`."
 - **The promo refusal throttle now counts per person.** Five refused attempts in 15 minutes pause only that person's redemptions. Before, they paused everyone's on the server, admins included.
 - Migration `0088_channel_promo_codes` only adds: the `promo_channel_redemptions` table and two nullable columns. Workers of the previous release keep redeeming server-wide codes during the rollout and after an application-only rollback. Create channel codes only once every worker runs this release, because older workers would credit one server-wide.
-- **Each person gets their own memory with an agent.** An agent now keeps your preferences, and anything it learns about you, in a personal memory that only your own conversations with it can read, in channels and DMs alike. Its shared memory, which everyone who talks to the agent reads, is kept for team knowledge such as conventions and project facts, and the agent is told never to copy anything from your personal memory into it. Another person's conversation never has your personal memory mounted, so it cannot be read there whatever the agent is asked. Your personal memory starts with your next new conversation; conversations already open carry on as they are, and nothing already in the shared memory is moved. Routines use the shared memory only. Deleting your account deletes your personal memory at Anthropic.
-- **Each person gets their own memory with an agent.** An agent now keeps your preferences, and anything it learns about you, in a personal memory that only your own conversations with it can read, in channels and DMs alike. Its shared memory, which everyone who talks to the agent reads, is kept for team knowledge such as conventions and project facts, and the agent is told never to copy anything from your personal memory into it. Another person's conversation never has your personal memory mounted, so it cannot be read there whatever the agent is asked. Your personal memory starts with your next new conversation; conversations already open carry on as they are, and nothing already in the shared memory is moved. A routine that posts nowhere but to you (one made in a DM, with no channel to post to) can also read your personal memory, without changing it; any routine that posts in a channel uses the shared memory only. Asking an agent through the hub uses your personal memory too; agent keys and operator tools don't. `/memory mine` (`memory mine` on Teams) shows your own personal memory and `/memory forget-mine` clears it after you confirm with the code it shows you; nobody can see or clear anyone else's. Deleting your account deletes your personal memory at Anthropic.
+- **Each person gets their own memory with an agent.** An agent now keeps your preferences, and anything it learns about you, in a personal memory that only your own conversations with it can read, in channels and DMs alike. Its shared memory, which everyone who talks to the agent reads, is kept for team knowledge such as conventions and project facts, and the agent is told never to copy anything from your personal memory into it. Another person's conversation never has your personal memory mounted, so it cannot be read there whatever the agent is asked. Your personal memory starts with your next new conversation; conversations already open carry on as they are, and nothing already in the shared memory is moved. Explicit DM routines can read and write their owner's personal memory under the normal live-DM memory policy; a headless routine with no destination or channel reads its owner's personal memory read-only, and channel and thread routines use shared memory only. Asking an agent through the hub uses your personal memory too; agent keys and operator tools don't. `/memory mine` (`memory mine` on Teams) shows your own personal memory and `/memory forget-mine` clears it after you confirm with the code it shows you; nobody can see or clear anyone else's. Deleting your account deletes your personal memory at Anthropic.
 
 - **`daimon memory personal-report`** shows operators, per agent, how many entries in its shared memory look personal, with a few redacted examples. It only reads: nothing is moved or deleted.
-- `daimon usage settle-backlog --internal UUID` settles the model calls agent-chat sessions made before this release with no ledger row: debited for the internal tenants given, waived (marked settled, nothing charged) for every other tenant. It is a dry run unless `--apply` is given, and prints a receipt (one JSON object with `--json`): the cutoff, the mode and, per tenant, the sessions, calls and the amount debited or waived.
+- `daimon usage settle-backlog --internal UUID` settles the model calls agent-chat sessions made before this release with no ledger row: debited for the selected tenants, waived (marked settled, nothing charged) for every other tenant. It is a dry run unless `--apply` is given, and prints a receipt (one JSON object with `--json`): the cutoff, the mode and, per tenant, the sessions, calls and the amount debited or waived.
 
 - Agents can remove a repo from their own GitHub access in a setup conversation after the same requester confirms in a later turn. Removing a working repo clears that selection without changing other agents.
 
@@ -1344,6 +1662,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Routines now run in their channel's environment, then the workspace default, instead of always the deployment default. A channel or workspace `environment_name` already set with `daimon config set` moves those routines onto it from their next fire; `daimon config unset` it first to keep them where they were.
 
 ### Added
+- Built-in sandbox tools (bash, file reads and edits and the rest) can be turned back on for one channel, thread or destination-free routine at a time, for that routine's own scheduled runs. The supported way today is the operator's `daimon routines sandbox-tools --tenant TENANT ROUTINE_ID... [--off] [--dry-run]`, which also opts in a confirmed list of routines at once and leaves any already set alone. An opt-in covers exactly the routine's current agent version and environment: a run gets built-ins only when its agent version and environment are the ones recorded, so after anyone edits the agent or its environment the next run goes without them and the opt-in is cleared until the operator approves the routine again. The `set_routine_sandbox_tools` MCP tool accepts only a live Discord server admin's own token, which no Daimon surface issues yet; it is kept for a future admin surface and refuses agents, operator tokens, legacy tokens and Slack or Teams callers. DM routines cannot be opted in, and editing a routine's agent, trigger message, destination or budget channel turns the opt-in off. Every change records who made it, when, the routine id and the agent version and environment it covers. `get_routine`, `list_routines` and the Discord `/routines` panel show whether a routine has sandbox tools. Watches, timers and wakes, agent chat, `daimon run` and workspace checkpoints keep them off with no opt-in.
+
+- Native tenant-scoped lead intake with encrypted capture, Gmail qualification,
+  restricted Discord dossiers and draft replies, conservative HubSpot reuse,
+  durable write recovery, authorized human resolution and retention tombstones.
+  CRM recovery refuses conflicts with approved selections and requires another review.
+  Dossier effects/readback honor thread permissions; classification can read new
+  discoveries without service credentials. Nested attachments are excluded,
+  discoveries expire, source tombstones survive connection renames, and actor
+  erasure prevents racing resolution audits from recreating personal data.
+  Intake authority is bound to one attended session grant; routine provenance
+  remains isolated through refresh and resolution is protected unattended.
+  A lead's readers are fixed to the sales channel it was captured for: every
+  reader, including `/leads` and approval-card Details, needs that channel's and
+  its dossier thread's history, and an agent kept to its own channel reads no
+  lead elsewhere. Resolve cards keep the approved IDs visible; adoption refuses
+  a channel change; discoveries survive a mailbox connection rename.
+
+- Turns nobody watches (routines, timers and worker wakes, agent chat, `daimon run` and workspace checkpoints) refuse a session whose agent coordinates other agents, before anything is sent: its roster's agents could run tools and MCP writes the unattended gate cannot reach, and Managed Agents cannot remove the roster from a live session. Such a routine fails with `AdmissionDenied: backend_unsupported`, agent chat answers with a tool error, and a checkpoint carries only the conversation. A session carrying a field this release has not reviewed, at any level from the session and its resources down to a tool's permission policy, is refused the same way (including a field hidden inside a setting that should be a plain value), as is an unattended turn on a Managed Agents runtime that cannot read its session. Every MCP call in these sessions now pauses for the unattended decider, Daimon's own tools and calls with tool safety off included; the decider allows what it allowed before. Built-in sandbox tools (bash, file edits and the rest) and custom tools are disabled for every unattended entry point, including watches, with no opt-in. Routines and other unattended runs cannot generate files with sandbox tools, and workspace checkpoints cannot create sandbox archives.
+
+- A conversation can run on a model of its own: `/model` in a Discord thread shows it or switches it to Haiku, Sonnet or Opus (or back to the agent's default), and asking in words ("use opus", "think harder") switches it on any platform. The thread keeps the choice for every later reply, across restarts; other conversations and the stored agent are unchanged. Anyone who may start a turn there may change it; routines and other unattended runs can't. A choice that can no longer run falls back to the agent's own model, and the reply says so.
+
+- Prevent watch feedback loops with bounded human-only poll windows and canonical
+  source IDs. Verify owner enrollment cards inside create/resume/key rotation;
+  unsupported backends refuse.
+
+- Require attended owner approval to enroll, resume or rotate watches; prevent
+  polling the reporting thread, honor the agent's live read toolset, and isolate
+  polling on an authenticated private executor. Scheduling races no longer appear
+  as owner access revocation.
+
+- Native OpenAI sessions install isolated MCP session grants before creation, bind them to each executing origin on reuse, and revoke origin authority when the turn ends. Child preparation cannot inherit a parent origin grant.
+
+- Agent chat and hub mutations require a session opened on that headless surface. Same-account platform sessions and legacy sessions without proven headless provenance cannot be continued, cancelled or archived through it. Unauthorized callers are refused before waiting on a session mutation fence.
+
+- Preserve the deployed Microsoft accounts migration ID and explain deployment serialization.
+
+- Add default-off watch infrastructure with atomic evidence and durable wakes,
+  restricted database identities, replay/retention limits and an optional
+  sidecar. Only polled Discord `read_thread`/`read_channel` watches work end to end.
+  Imported Discord read polls map to these tools and remain
+  paused until owner/destination confirmation.
+  Polls on other tools use unreviewed tools: creation is refused
+  and imports remain paused as `source_unmapped`. Webhook/callback watches map to
+  `page_event`, which is not yet delivered. Account erasure removes owned watches,
+  evidence and queued wakes. Woken turns require an execution-bound unattended session grant, explicitly allowlisted
+  snapshot fields and named read tools; skills, multiagent coordinators and unknown
+  capabilities refuse before provider mutation. Original tools restore after each
+  turn, including cancellation. Fresh access and spend checks gate every send and
+  output write; a failed check latches delivery off through cleanup. Startup audits
+  resolve the real ingress schema and refuse unsafe effective database privileges.
+  Expired batches never absorb fresh events.
+
+- Add deterministic polling of reviewed read tools, bounded projections, saved
+  baselines, separate poll leases and error backoff. Owner MCP tools manage watches
+  and deliver page signing keys privately once. Offline imports remain paused until
+  their exact owner and destination are confirmed; unmapped polls stay
+  paused and queue a private owner notice.
+
+- Scheduled routine results attach generated files on Discord (including owner DMs) and Slack. Upload limits and unsupported Teams file delivery are explained in the result; the outbox does not replay interrupted deliveries across polls. A platform SDK may retry a single send after a server error or connection reset. Fallback-DM files recheck DM controls, recipient eligibility and isolation before upload; delivery failure logs omit sensitive exception text.
+
+- Discord routines can deliver privately to their owner through MCP, the admin-only routines panel (for the admin’s own routines), or `daimon routines create --destination dm`. Delivery rechecks live access, respects tenant DM controls, and exposes failures without public fallback or outbox replay across polls. Platform SDKs may retry a single send after a server error or connection reset. DM routines run as scheduled owner messages through the normal live-DM admission, binding and runner, with the owner’s normal memory and credentials in a fresh private scope, including read and write access to personal memory under the normal live-DM memory policy. Headless routines mount their owner's personal memory read-only only when they have no destination or channel. They are unattended and Managed Agents only; calls needing a person are refused. Nobody watches intermediate actions: permitted tools retain ordinary DM side-effect risk. Crash and stop guarantees are exactly those of live DMs. A slot is skipped if the owner has a live DM turn running. Agent or destination edits invalidate private output and pending delivery atomically; concurrent edits, pauses and resumes reject stale revisions and require a reload. Pause/resume revisions strictly advance and cannot overwrite a newer cron/timezone schedule. Creation-time source channels, threads and provenance status are immutable across retargeting, clearing and DM conversion. Legacy unknown-source routines retain ordinary edits and firing, but must be recreated from their source to get DM delivery. Routines created from a private conversation verify its saved guild source; cold conversations remain source-free, and unknown provenance refuses DM delivery. CLI source IDs are verified against the selected tenant's guild, including in dry-run.
+
+- Private Discord replies recheck the answering agent's current pin and isolation rules before delivery. Unavailable bound agents and unreadable private policies are silent, and superseded server-switch controls are retired.
+
+- Discord can answer a first DM using an explicitly configured tenant agent, with a private server chooser when several servers qualify. Cold starts copy no channel history. Ineligible cold senders receive a one-time `/dm-me` guidance reply per person per process, without a model turn; revoked access to an existing conversation suppresses its reply; server switches reset the private scope.
+
+- Add per-tenant `invoker_admin_bypass` and CLI flags to require server admins to match invoker user/role lists.
+
+- Gate Discord turns and routine owners by configured role IDs, with current membership checks for MCP, scheduled fires, and private delivery. Configure roles with `daimon tenants access-policy set --invoker-role`.
+
+- `daimon channels answerable discord GUILD_ID` lists the Discord channels where Daimon may answer at all: every channel the turn gate admits, that is one not under a `writers: none` channel or category rule, with each bound thread checked the same way. With `--expect FILE`, a list of the channels another bot sharing the server does not answer, it checks that Daimon's set equals that list, prints the ids missing on each side and any answering bound thread under an unlisted channel, and exits 1 on any difference. Read-only, and it fails closed: a channel it cannot place is answerable or an error, never silent.
 
 - **The Teams app can be added to private and shared channels.** The
   manifest template moves to version 1.25 with `supportsChannelFeatures:
@@ -2003,6 +2393,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (or going unmetered where no scheduler runs).
 
 ### Security
+- An unattended session with an MCP server whose name contains `/` is refused before anything is sent. A watch's tool allowlist is kept as server and tool pairs, so a server named `linear/bridge` can no longer enable an absent `bridge/get_issue` tool on the `linear` server.
+
+- MCP server names can no longer contain `/`: attaching one (`attach_mcp_server`, `create_agent`, `update_agent`, a credential request, or an agent spec for `daimon agents create`/`update`) is refused, because tool keys use `/` between the server and the tool. A call on a server that already has such a name is never allowed by an operator key or a tool rule: it asks in chat and is refused in unattended runs, unless the operator's deny list refuses it outright.
+
+- An unattended session's telemetry (timing, token usage and cache creation, outcome evaluations) must match its reviewed schema; a new or reshaped field there is refused like one anywhere else in the session.
+
+- An unattended session carrying a private attribute at any level is refused; only the SDK's own request ID is allowed.
+
+- Origin-based MCP actions require the signed grant of the calling session.
+  Routines and timers cannot borrow a concurrent human origin, and empty origin
+  IDs refuse. Human handoffs retain their approval surfaces.
+
+- Unattended wakes re-gate Managed Agents sessions before every
+  confirmation batch. Runtimes without session reads refuse unattended
+  confirmations with a plain reason, including when tool safety is off.
+
+- Agent-chat turns (`start_turn`, `continue_turn` and `ask`, with an agent key or on the hub) now follow tool safety. Before every message the session's tool settings are set again from the current policy, and each tool call is decided by the unattended rules when it is made: reads run, and a third-party write is refused unless the operator allowed it in unattended runs. These turns used to run every tool without asking. With tool safety off, calls the session still asks about are allowed.
+
+- Agent-chat turns apply agent tool rules for their channel (a channel-bound key's channel, or the conversation's), and refuse Daimon's card-only actions: a backend switch and Microsoft mail and invites with tool safety on or off, and Microsoft file changes with it on, as in chat.
+
+- Reading a session never answers its tool calls. An agent-chat turn left waiting on a tool call by a restart reads as `paused` from `get_session` and `get_my_session`, with a hint; only the session's owner resumes it with `continue_turn`, whose `message` is now optional for that case, and the current policy decides the waiting calls. `continue_turn` never answers a confirmation card from a chat turn.
+
+- An MCP tool hint that marks a tool both read-only and destructive now counts as a write.
+
+- `daimon run` treats its turn as unattended: before the message it sets the session's tool settings from the current policy, even for a session created while tool safety was off, and decides each paused call by the unattended rules (`DAIMON_TOOL_SAFETY__UNATTENDED_WRITES`, not chat-only grants).
+
+- Every unattended turn (agent chat, `daimon run`, routines and other headless runs, workspace checkpoints) sets the session's tool settings from the current policy right before its message and before each batch of tool confirmations, and sends each once, without automatic retries; a failed update stops that send. Unattended wakes decide their paused calls by the same unattended rules, with tool safety on or off.
+
+- `daimon run` on an existing session applies that session's own tenant and channel tool rules (a Slack thread's parent channel, never a DM's source channel); only a session stamped for no tenant uses the local CLI tenant. A checkpoint turn applies its conversation's channel rules, not those of the channel it is billed to.
+
+- A workspace transfer's checkpoint turn no longer auto-approves tool calls: its old session is gated right before the checkpoint message, and paused calls are decided by the unattended rules.
+
+- Routines and other headless runs answer tool confirmations with the same unattended decider as agent-chat turns, never auto-approving: with tool safety off, ordinary third-party calls are still allowed, but Daimon's card-only actions (backend switch, Microsoft mail and invites; file changes with tool safety on) now ask in the routine's session and are refused.
 
 - Sentry's event scrubber checks nested values, so a token inside a dict local,
   such as request headers, no longer ships with an error event.

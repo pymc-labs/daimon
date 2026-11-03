@@ -1,0 +1,278 @@
+"""Operator-only offline import and explicit binding confirmation."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import uuid
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Annotated
+
+import typer
+from daimon.adapters.cli.flags import JSON_OPTION
+from daimon.adapters.cli.runtime import build_runtime
+from daimon.core.config import load_settings
+from daimon.core.continuity.watch_imports import WatchExport
+from daimon.core.stores.platform_names import get_user_names
+from daimon.core.stores.tenants import get_tenant
+from daimon.core.stores.watches import (
+    NoticeReceipt,
+    WatchActivity,
+    confirm_import,
+    get_watch,
+    import_watch,
+    list_notice_receipts,
+    list_tenant_watches,
+    set_watch_limits,
+    watch_ceilings,
+)
+
+watches_app = typer.Typer(
+    help="List a tenant's watches and their owner-notice receipts, import paused watches, "
+    "confirm reviewed bindings and set daily firing limits."
+)
+limits_app = typer.Typer(help="Daily firing limits for every watch, or one tenant's.")
+watches_app.add_typer(limits_app, name="limits")
+
+
+def _listed(item: WatchActivity, names: dict[tuple[str, str], str | None]) -> dict[str, object]:
+    """The operator view of one watch. Never its instructions, keys, baseline or evidence."""
+    row = item.watch
+    reason, tool = row.source_state.get("reason"), row.source_state.get("tool")
+    return {
+        "watch_id": str(row.id),
+        "owner_id": row.owner_external_id,
+        "owner": names.get((row.platform, row.owner_external_id)),
+        "status": row.status,
+        "reason": str(reason) if reason else None,
+        "source": row.source,
+        "source_tool": str(tool) if tool else None,
+        "destination": f"{row.platform} thread",
+        "parent_channel_id": row.parent_channel_id,
+        "thread_id": row.thread_id,
+        "agent_id": row.agent_id,
+        "expires_at": row.expires_at.isoformat() if row.expires_at else "permanent",
+        "fires_today": item.fires_today,
+        "last_fired_at": item.last_fired_at.isoformat() if item.last_fired_at else None,
+        "errors": row.consecutive_errors,
+        "retry_after": row.backoff_until.isoformat() if row.backoff_until else None,
+    }
+
+
+@watches_app.command("list")
+def list_command(
+    tenant: Annotated[uuid.UUID, typer.Option("--tenant")],
+    as_json: Annotated[bool, JSON_OPTION] = False,
+) -> None:
+    """List every watch in --tenant, read-only: owner, status, source, expiry and firings."""
+
+    async def run() -> list[dict[str, object]]:
+        async with build_runtime(load_settings()) as runtime, runtime.sessionmaker() as db:
+            if await get_tenant(db, tenant) is None:
+                raise typer.BadParameter("No such tenant", param_hint="--tenant")
+            listed = await list_tenant_watches(db, tenant_id=tenant, now=datetime.now(UTC))
+            names: dict[tuple[str, str], str | None] = {}
+            for platform in {item.watch.platform for item in listed}:
+                found = await get_user_names(
+                    db,
+                    tenant_id=tenant,
+                    platform=platform,
+                    user_ids={
+                        item.watch.owner_external_id
+                        for item in listed
+                        if item.watch.platform == platform
+                    },
+                )
+                names.update({(platform, user): name.label for user, name in found.items()})
+        return [_listed(item, names) for item in listed]
+
+    rows = asyncio.run(run())
+    if as_json:
+        typer.echo(json.dumps(rows, indent=2))
+        return
+    if not rows:
+        typer.echo("No watches.")
+        return
+    for row in rows:
+        owner = f"{row['owner']} ({row['owner_id']})" if row["owner"] else row["owner_id"]
+        status = f"{row['status']}: {row['reason']}" if row["reason"] else row["status"]
+        source = f"{row['source']}/{row['source_tool']}" if row["source_tool"] else row["source"]
+        last = row["last_fired_at"] or "never"
+        typer.echo(
+            f"{row['watch_id']}  owner={owner}  status={status}  source={source}  "
+            f"to={row['destination']} {row['thread_id']}  expires={row['expires_at']}  "
+            f"fires_today={row['fires_today']}  last_fired={last}  errors={row['errors']}"
+        )
+
+
+def _receipt(row: NoticeReceipt) -> dict[str, object]:
+    """One notice attempt: ids, times and outcome. Receipts never hold the notice text."""
+    return {
+        "kind": row.kind,
+        "generation": row.generation,
+        "attempt": row.attempt,
+        "outcome": row.outcome,
+        "attempted_at": row.attempted_at.isoformat(),
+        "settled_at": row.settled_at.isoformat() if row.settled_at else None,
+        "owner_account_id": str(row.owner_account_id),
+        "platform": row.platform,
+        "channel_id": row.channel_id,
+        "message_id": row.message_id,
+    }
+
+
+def _messages_sent(rows: list[NoticeReceipt]) -> dict[str, int]:
+    """Distinct messages sent per notice kind; a sent receipt without a message id counts once."""
+    seen: dict[str, set[str]] = {}
+    for index, row in enumerate(rows):
+        if row.outcome == "sent":
+            seen.setdefault(row.kind, set()).add(row.message_id or f"unknown-{index}")
+    return {kind: len(ids) for kind, ids in sorted(seen.items())}
+
+
+@watches_app.command("notices")
+def notices_command(
+    watch: Annotated[uuid.UUID, typer.Option("--watch")],
+    as_json: Annotated[bool, JSON_OPTION] = False,
+) -> None:
+    """Show --watch's owner-notice receipts, read-only, kept 30 days and after deletion.
+
+    `sent` counts distinct messages per notice kind: an expiry notice delivered
+    exactly once shows `"expired": 1`.
+    """
+
+    async def run() -> list[NoticeReceipt]:
+        async with build_runtime(load_settings()) as runtime, runtime.sessionmaker() as db:
+            return await list_notice_receipts(db, watch_id=watch)
+
+    rows = asyncio.run(run())
+    sent = _messages_sent(rows)
+    if as_json:
+        report = {"watch_id": str(watch), "sent": sent, "receipts": [_receipt(r) for r in rows]}
+        typer.echo(json.dumps(report, indent=2))
+        return
+    if not rows:
+        typer.echo("No notice receipts.")
+        return
+    for row in map(_receipt, rows):
+        typer.echo(
+            f"{row['attempted_at']}  {row['kind']}  generation={row['generation']}  "
+            f"attempt={row['attempt']}  outcome={row['outcome']}  "
+            f"message={row['message_id'] or 'none'}"
+        )
+    typer.echo("sent: " + (", ".join(f"{kind}={n}" for kind, n in sent.items()) or "none"))
+
+
+@watches_app.command("import")
+def import_command(export_file: Path) -> None:
+    """Import a v1 JSON manifest, offline. Every watch starts paused; no key is copied."""
+    if export_file.stat().st_size > 1048576:
+        raise typer.BadParameter("Watch export exceeds 1 MiB")
+    manifest = WatchExport.model_validate_json(export_file.read_bytes())
+
+    async def run() -> None:
+        async with build_runtime(load_settings()) as runtime:
+            # Whole-file transaction: no half-import or lost owner notice on crash.
+            async with runtime.sessionmaker.begin() as db:
+                rows = [
+                    await import_watch(db, entry, now=datetime.now(UTC))
+                    for entry in manifest.watches
+                ]
+            for row in rows:
+                detail = row.source_state.get("mapping_error")
+                suffix = f": {detail}" if detail else ""
+                typer.echo(f"{row.id} paused {row.source_state.get('reason')}{suffix}")
+
+    asyncio.run(run())
+
+
+@watches_app.command("confirm")
+def confirm_command(
+    watch_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    owner_account_id: uuid.UUID,
+    agent_id: str,
+    parent_channel_id: str,
+    thread_id: str,
+) -> None:
+    """Confirm a mapped import's exact binding. Page watches first need owner key rotation."""
+
+    async def run() -> None:
+        async with build_runtime(load_settings()) as runtime:
+            async with runtime.sessionmaker.begin() as db:
+                current = await get_watch(db, watch_id)
+                if current is not None and current.source_state.get("tool") == "read_thread":
+                    typer.echo(
+                        "Warning: imported message reads require a thread ID. "
+                        "Channel and DM IDs are unsupported; use read_channel for channel sources.",
+                        err=True,
+                    )
+                row = await confirm_import(
+                    db,
+                    watch_id,
+                    tenant_id=tenant_id,
+                    owner_account_id=owner_account_id,
+                    agent_id=agent_id,
+                    parent_channel_id=parent_channel_id,
+                    thread_id=thread_id,
+                    now=datetime.now(UTC),
+                )
+            typer.echo(f"{row.id} {row.status}")
+
+    asyncio.run(run())
+
+
+ScopeOption = Annotated[
+    str, typer.Option("--scope", help="global, or tenant:TENANT_UUID to override it for one tenant")
+]
+
+
+@limits_app.command("set")
+def limits_set_command(
+    scope: ScopeOption,
+    per_watch: Annotated[
+        int | None,
+        typer.Option("--per-watch", min=1, max=240, help="Most reports one watch makes a day"),
+    ] = None,
+    per_owner: Annotated[
+        int | None,
+        typer.Option(
+            "--per-owner", min=1, max=1000, help="Most reports one owner's watches make a day"
+        ),
+    ] = None,
+) -> None:
+    """Set the daily limits for --scope; a limit left out returns to its default (24 and 100).
+
+    Every firing reads them, so a lowered limit holds from the next firing. A watch
+    can ask for more than 24 a day only up to this limit, and only with an admin.
+    """
+
+    async def run() -> None:
+        async with build_runtime(load_settings()) as runtime, runtime.sessionmaker.begin() as db:
+            await set_watch_limits(db, scope=scope, per_watch=per_watch, per_owner=per_owner)
+
+    try:
+        asyncio.run(run())
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--scope") from None
+    typer.echo(f"{scope}: per watch {per_watch or 'default'}, per owner {per_owner or 'default'}")
+
+
+@limits_app.command("show")
+def limits_show_command(
+    tenant: Annotated[uuid.UUID, typer.Option("--tenant")],
+    as_json: Annotated[bool, JSON_OPTION] = False,
+) -> None:
+    """Show the daily limits in force for --tenant: its own, else the global ones, else defaults."""
+
+    async def run() -> dict[str, int]:
+        async with build_runtime(load_settings()) as runtime, runtime.sessionmaker() as db:
+            ceilings = await watch_ceilings(db, tenant)
+        return {"per_watch": ceilings.per_watch, "per_owner": ceilings.per_owner}
+
+    limits = asyncio.run(run())
+    if as_json:
+        typer.echo(json.dumps(limits))
+        return
+    typer.echo(f"per watch {limits['per_watch']}, per owner {limits['per_owner']}")

@@ -17,7 +17,7 @@ import structlog
 from daimon.adapters.discord.agent_setup.budget import LAYOUT_TEXT_BUDGET
 from daimon.adapters.discord.agent_setup.navigation import PanelViewBase
 from daimon.adapters.discord.agent_setup.state import PanelState
-from daimon.adapters.discord.checks import is_guild_admin
+from daimon.adapters.discord.checks import is_platform_admin
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_ownership import owns_agent
@@ -185,7 +185,7 @@ async def live_coding_key_access(
     agent: RosterAgent,
 ) -> CodingKeyAccess | None:
     """What the clicker may do with this agent's coding keys, read now."""
-    admin = is_guild_admin(interaction)  # pyright: ignore[reportArgumentType]
+    admin = is_platform_admin(interaction)  # pyright: ignore[reportArgumentType]
     owned = False
     if not admin:
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(state.guild_id))

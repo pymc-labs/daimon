@@ -39,6 +39,7 @@ from daimon.core.agent_mcp_credentials import (
     mirror_credentials_into_vault,
     resolve_agent_mcp_credentials,
     resolve_hidden_mcp_server_names,
+    sync_shared_mcp_credentials,
 )
 from daimon.core.caller_resources import (
     APP_SESSION_VAULT_PREFIX,
@@ -56,6 +57,7 @@ from daimon.core.credential_env import (
 )
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
+    MA_METADATA_KEY_AGENT_CHAT,
     MA_METADATA_KEY_BILLING_EXEMPT,
     MA_METADATA_KEY_BUDGET_CHANNEL,
     MA_METADATA_KEY_PRIVATE_DM,
@@ -81,6 +83,7 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_hold import hold_key
 from daimon.core.mcp_identity import RelayBinding, identity_relay_urls
 from daimon.core.mcp_personal_servers import visible_mcp_servers, visible_tools
+from daimon.core.mcp_server_url import session_mcp_url
 from daimon.core.mcp_vault import (
     GITHUB_COPILOT_MCP_URL,
     create_relay_vault,
@@ -115,10 +118,11 @@ from daimon.core.skills.unresolved import (
 )
 from daimon.core.stores import agent_files, agent_memory_stores
 from daimon.core.stores import agent_mcp_credentials as credential_store
+from daimon.core.stores.agent_daimon_tools import record_enabled_daimon_tools
 from daimon.core.stores.channel_skills import list_skill_channel_rules
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.github_issued_tokens import register_app_session_vault
-from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
+from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolSafetyPolicy
 from daimon.core.turn_hold import TurnHold
 from mux.contracts.ids import Scope
 from mux.contracts.resources import ResourceBinding, WorkspaceSource
@@ -180,6 +184,17 @@ def _agent_mcp_mirror_required(
         and session_factory is not None
         and fernet is not None
     )
+
+
+def _shared_mcp_vault_required(
+    *,
+    account_id: uuid.UUID | None,
+    hide_personal_for: uuid.UUID | None,
+    fernet: MultiFernet | None,
+) -> bool:
+    """A shared thread's session (no account, a synthetic owner) mounts a vault
+    of the thread's own for the agent's shared tokens."""
+    return account_id is None and hide_personal_for is not None and fernet is not None
 
 
 def _session_mcp_credential(url: str, *, app_mode: bool) -> bool:
@@ -244,8 +259,9 @@ async def project_session_resources(
     memory_read_only: bool,
     fernet: MultiFernet | None = None,
     channel_skills: Sequence[MaSkill] = (),
-    tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
+    tool_safety: ToolSafetyPolicy,
     asks_before_publishing: bool = False,
+    legacy_memory_servers: tuple[str, ...] = (),
     mcp_settings: McpSettings | None = None,
     agent_github_app: GithubAppSettings | None = None,
     hide_personal_for: uuid.UUID | None = None,
@@ -286,13 +302,23 @@ async def project_session_resources(
             await credential_store.list_credential_revisions(
                 session, tenant_id=tenant_id, agent_id=agent_uuid
             )
-            if _agent_mcp_mirror_required(
-                vault_available=caller_vault,
-                account_id=account_id,
-                tenant_id=tenant_id,
-                agent_uuid=agent_uuid,
-                session_factory=session_factory,
-                fernet=fernet,
+            if (
+                _agent_mcp_mirror_required(
+                    vault_available=caller_vault,
+                    account_id=account_id,
+                    tenant_id=tenant_id,
+                    agent_uuid=agent_uuid,
+                    session_factory=session_factory,
+                    fernet=fernet,
+                )
+            )
+            or (
+                app_mode
+                and _shared_mcp_vault_required(
+                    account_id=account_id,
+                    hide_personal_for=hide_personal_for,
+                    fernet=fernet,
+                )
             )
             else ()
         )
@@ -320,6 +346,13 @@ async def project_session_resources(
         tool_safety=tool_safety,
         public_url=public_url,
         asks_before_publishing=asks_before_publishing,
+        legacy_memory_servers=legacy_memory_servers,
+    )
+    await record_enabled_daimon_tools(
+        session_factory,
+        tenant_id=tenant_id,
+        agent_id=agent_uuid,
+        tools=[tool.model_dump(mode="json") for tool in tools],
     )
     servers = session_mcp_servers(agent, hidden, tool_safety=tool_safety, public_url=public_url)
     payload = agent.model_dump(
@@ -433,6 +466,7 @@ def _session_metadata(
     tenant_id: uuid.UUID | None,
     billing_exempt: ExemptReason | None,
     budget_channel_id: str | None = None,
+    agent_chat: bool = False,
 ) -> dict[str, str]:
     """The metadata stamp every Daimon-created session carries.
 
@@ -443,6 +477,8 @@ def _session_metadata(
     `daimon_budget_channel` is the channel whose budget the sweep charges.
     """
     metadata: dict[str, str] = {}
+    if agent_chat:
+        metadata[MA_METADATA_KEY_AGENT_CHAT] = "true"
     if account_id is not None:
         metadata[MA_METADATA_KEY_ACCOUNT] = str(account_id)
     if tenant_id is not None:
@@ -492,10 +528,12 @@ async def create_session(
     http_client: httpx.AsyncClient | None = None,
     extra_resources: Sequence[Resource] = (),
     billing_exempt: ExemptReason | None = None,
+    agent_chat: bool = False,
     memory_read_only: bool = False,
     personal_memory: bool = False,
-    tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
+    tool_safety: ToolSafetyPolicy,
     asks_before_publishing: bool = False,
+    legacy_memory_servers: tuple[str, ...] = (),
     confirmed_tools: frozenset[str] = frozenset(),
     daimon_rule_tools: frozenset[str] = frozenset(),
     slack_turn_context_id: uuid.UUID | None = None,
@@ -517,7 +555,9 @@ async def create_session(
 
     When ``mcp_settings`` has both ``public_url`` and ``jwt_secret``,
     ``ensure_agent_mcp_vault()`` runs first (refreshing its registered credential
-    when needed) and the per-agent vault id is attached to the session.
+    when needed). A separate identity vault, registered token and URL slot
+    bind origin use to this provider session; the per-agent vault remains
+    mounted for personal OAuth and external MCP connections.
     Both ``account_id``, ``agent_uuid``, and ``session_factory`` are required in
     that case — no fallback to an account-scoped vault. The vault get-or-create
     is serialized per (account_id, agent_id) via a blocking Postgres advisory
@@ -550,6 +590,8 @@ async def create_session(
     ``model_override`` replaces the model for this session through
     ``agent_with_overrides``. It never changes the stored agent.
 
+    ``agent_chat`` records headless surface provenance at creation. Only those
+    sessions may later be continued, cancelled or archived through agent chat.
     ``system_override`` replaces the system prompt the same way, for a platform
     whose variant differs from the agent's own (`daimon.core.platform_system`).
 
@@ -607,11 +649,12 @@ async def create_session(
     with the same access as the shared one and the same degrade-not-block
     handling. Only a caller whose session belongs to one verified person
     passes it: an interactive chat turn (keyed on the caller's account), a hub
-    `ask`/`start_turn` (platform sign-in, owner-only handles) and a routine
-    whose result reaches only its owner (`rule_views.routine_answers_only_owner`,
-    read-only). Every other caller (agent keys, operator and CLI tokens, routines
-    with a destination) leaves it off and mounts the shared store alone, with
-    instructions that forbid recording personal facts.
+    `ask`/`start_turn` (platform sign-in, owner-only handles), and explicit DM
+    routines through the normal live-DM pipeline. A headless routine passes it
+    only when its result reaches nobody but its owner (no destination or
+    channel), read-only like its shared mount; every other headless routine
+    mounts the shared store alone, with instructions that forbid recording
+    personal facts. Agent keys and operator/CLI tokens also leave it off.
 
     GitHub repository resources and credentials come from the agent's usable
     GitHub App grants. ``prepare_app_access`` mints installation tokens and
@@ -663,8 +706,19 @@ async def create_session(
         agent_uuid=agent_uuid,
         session_factory=session_factory,
     )
+    shared_vault = app_mode and _shared_mcp_vault_required(
+        account_id=account_id,
+        hide_personal_for=hide_personal_for,
+        fernet=fernet,
+    )
     vault_id: str | None = None
     caller_vault_id: str | None = None
+    chat_session_id = (
+        str(uuid.uuid4())
+        if caller_vault and any(server.name == DAIMON_SERVER_NAME for server in agent.mcp_servers)
+        else None
+    )
+    execution_vault_id: str | None = None
     relay_vault_id: str | None = None
     try:
         if app_mode:
@@ -687,6 +741,18 @@ async def create_session(
                         else None
                     ),
                     hold=hold,
+                )
+            if shared_vault:
+                assert hide_personal_for is not None and fernet is not None
+                # A shared thread's own vault: the agent's shared tokens only.
+                caller_vault_id = await sync_shared_mcp_credentials(
+                    anthropic,
+                    sessionmaker=session_factory,
+                    fernet=fernet,
+                    tenant_id=tenant_id,
+                    agent_id=agent_uuid,
+                    owner=hide_personal_for,
+                    exclude_github_copilot=True,
                 )
             if caller_vault:
                 assert account_id is not None and session_factory is not None
@@ -735,6 +801,23 @@ async def create_session(
                 session_factory=session_factory,
                 slack_turn_context_id=slack_turn_context_id,
                 hold=hold,
+                scope=scope,
+            )
+
+        if chat_session_id is not None:
+            assert mcp_settings is not None and mcp_settings.public_url is not None
+            assert mcp_settings.jwt_secret is not None and account_id is not None
+            assert agent_uuid is not None and session_factory is not None
+            execution_vault_id = await ensure_agent_mcp_vault(
+                anthropic,
+                account_id=account_id,
+                agent_id=agent_uuid,
+                jwt_secret=mcp_settings.jwt_secret.get_secret_value().encode(),
+                public_url=session_mcp_url(str(mcp_settings.public_url), chat_session_id),
+                now=dt.datetime.now(dt.UTC),
+                session_factory=session_factory,
+                slack_turn_context_id=slack_turn_context_id,
+                chat_session_id=chat_session_id,
                 scope=scope,
             )
 
@@ -932,15 +1015,24 @@ async def create_session(
             tool_safety=tool_safety,
             public_url=public_url,
             asks_before_publishing=asks_before_publishing,
+            legacy_memory_servers=legacy_memory_servers,
             confirmed_tools=confirmed_tools,
             daimon_rule_tools=daimon_rule_tools,
         )
+        if session_factory is not None and tenant_id is not None and agent_uuid is not None:
+            await record_enabled_daimon_tools(
+                session_factory,
+                tenant_id=tenant_id,
+                agent_id=agent_uuid,
+                tools=[tool.model_dump(mode="json") for tool in tools],
+            )
         servers = session_mcp_servers(
             agent,
             hidden,
             tool_safety=tool_safety,
             public_url=public_url,
             confirmed_tools=confirmed_tools,
+            chat_session_id=chat_session_id,
         )
         gated = list(tools) != list(visible_tools(agent, hidden))
         healed = list(servers) != list(visible_mcp_servers(agent, hidden))
@@ -992,7 +1084,10 @@ async def create_session(
             tenant_id=tenant_id,
             billing_exempt=billing_exempt,
             budget_channel_id=budget_channel_id,
+            agent_chat=agent_chat,
         )
+        if chat_session_id is not None:
+            metadata["daimon_chat_session_id"] = chat_session_id
         if slack_turn_context_id is not None:
             metadata[MA_METADATA_KEY_PRIVATE_DM] = str(slack_turn_context_id)
         elif private_dm_id is not None:
@@ -1077,7 +1172,7 @@ async def create_session(
                 # mounted vault as the session's Daimon one.
                 vault_ids=[
                     mounted
-                    for mounted in (relay_vault_id, caller_vault_id, vault_id)
+                    for mounted in (relay_vault_id, execution_vault_id, caller_vault_id, vault_id)
                     if mounted is not None
                 ]
                 or None,
@@ -1175,7 +1270,9 @@ async def create_isolated_session(
     account_id: uuid.UUID | None,
     tenant_id: uuid.UUID | None,
     resources: list[Resource],
+    tool_safety: ToolSafetyPolicy,
     billing_exempt: ExemptReason | None = None,
+    agent_chat: bool = False,
     memory_read_only: bool = False,
     budget_channel_id: str | None = None,
     origin_channel_id: str | None = None,
@@ -1205,6 +1302,8 @@ async def create_isolated_session(
 
     `billing_exempt`, `budget_channel_id` and the origin stamp the session the
     same way `create_session` does: metadata only, never a mount.
+    `tool_safety` gates its toolsets the same way too, as an override of the
+    tools alone.
 
     On MA failure: `anthropic.APIError` propagates, except a skill the agent
     pins that no longer exists, which raises `SkillUnavailable` telling the
@@ -1215,11 +1314,20 @@ async def create_isolated_session(
         tenant_id=tenant_id,
         billing_exempt=billing_exempt,
         budget_channel_id=budget_channel_id,
+        agent_chat=agent_chat,
     )
     if origin_channel_id is not None:
         metadata.update(
             origin_stamp(channel_id=origin_channel_id, thread_id=None, seal=origin_seal_ids)
         )
+    tools = session_tools(agent, frozenset(), tool_safety=tool_safety, public_url=None)
+    agent_argument: Agent = agent.id
+    if list(tools) != list(agent.tools):
+        agent_argument = {
+            "type": "agent_with_overrides",
+            "id": agent.id,
+            "tools": [cast(Tool, t.model_dump(mode="json", exclude_none=True)) for t in tools],
+        }
 
     try:
         return await create_session_record(
@@ -1229,7 +1337,7 @@ async def create_isolated_session(
                 account_id=account_id,
                 call_site="sessions:create_isolated_session",
             ),
-            agent=agent.id,
+            agent=agent_argument,
             environment_id=environment.id,
             metadata=metadata if metadata else None,
             resources=resources,

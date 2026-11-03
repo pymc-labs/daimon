@@ -46,6 +46,7 @@ from daimon.core.shared_threads import shared_owner, shared_slot
 from daimon.core.stores import mux_state
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.stores.thread_sessions import get_live_thread_session
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn import openai_host
 from daimon.core.turn import prepare as preparation
 from daimon.core.turn.admission import Admission
@@ -188,6 +189,7 @@ def _deps(sessionmaker: async_sessionmaker[AsyncSession]) -> TurnDeps:
         public_url=None,
         turn_path="mux",
         channel_backends=True,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
 

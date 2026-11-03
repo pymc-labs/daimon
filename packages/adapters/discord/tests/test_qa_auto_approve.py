@@ -34,8 +34,11 @@ def _prompt(requester: str = QA, *, admin: bool = False, expires_in=timedelta(mi
     return prompt.model_copy(update={"expires_at": datetime.now(UTC) + expires_in, "admin": admin})
 
 
-def _settings(*qa_ids: str) -> Any:
-    return SimpleNamespace(discord=SimpleNamespace(qa_bot_user_ids=qa_ids))
+def _settings(*qa_ids: str, environment: str = "") -> Any:
+    return SimpleNamespace(
+        discord=SimpleNamespace(qa_bot_user_ids=qa_ids),
+        environment=SimpleNamespace(name=environment),
+    )
 
 
 def _write(directory: Path, body: object, *, read_only: bool = True) -> Path:
@@ -74,6 +77,29 @@ async def test_a_host_that_is_not_staging_is_off(
 ) -> None:
     monkeypatch.setattr(qa, "gcp_project_id", AsyncMock(return_value=project))
     assert await qa.enabled_for(_settings(QA), QA) is False
+
+
+async def test_the_qa_lane_of_a_dev_project_is_enabled(
+    mount: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(qa, "gcp_project_id", AsyncMock(return_value="example-daimon-dev"))
+    assert await qa.enabled_for(_settings(QA, environment="lane-preview"), QA) is True
+
+
+@pytest.mark.parametrize(
+    ("project", "environment"),
+    [
+        ("example-daimon-dev", ""),
+        ("example-daimon-dev", "lane-other"),
+        ("example-daimon-prod", "lane-preview"),
+        (None, "lane-preview"),
+    ],
+)
+async def test_a_lane_name_without_a_dev_project_or_another_lane_is_off(
+    mount: Path, monkeypatch: pytest.MonkeyPatch, project: str | None, environment: str
+) -> None:
+    monkeypatch.setattr(qa, "gcp_project_id", AsyncMock(return_value=project))
+    assert await qa.enabled_for(_settings(QA, environment=environment), QA) is False
 
 
 async def test_a_requester_who_is_not_a_qa_bot_is_off_without_a_metadata_lookup(

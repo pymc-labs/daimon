@@ -86,7 +86,7 @@ def _click(monkeypatch: pytest.MonkeyPatch, user: int, *, admin: bool = False) -
         "find_agent_by_derived_uuid",
         AsyncMock(return_value=SimpleNamespace(id="ag_helper", name="helper", metadata={})),
     )
-    monkeypatch.setattr(repos_module, "is_guild_admin", lambda _interaction: admin)
+    monkeypatch.setattr(repos_module, "is_platform_admin", lambda _interaction: admin)
     monkeypatch.setattr(
         repos_module,
         "admin_caller",

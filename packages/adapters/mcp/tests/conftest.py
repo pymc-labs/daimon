@@ -11,7 +11,8 @@ must observe real COMMIT visibility.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import asyncio
+from collections.abc import AsyncIterator, Iterator
 
 import pytest
 import pytest_asyncio
@@ -28,6 +29,20 @@ from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
 )
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def isolate_confirmation_workers() -> AsyncIterator[None]:
+    """An agent-chat send starts its turn's confirmation worker; one test's
+    worker must not outlive it into the next test's fakes."""
+    from daimon.adapters.mcp.tools import _agent_chat_safety
+
+    yield
+    workers = [w.task for w in _agent_chat_safety._workers.values()]  # pyright: ignore[reportPrivateUsage]
+    _agent_chat_safety._workers.clear()  # pyright: ignore[reportPrivateUsage]
+    for worker in workers:
+        worker.cancel()
+    await asyncio.gather(*workers, return_exceptions=True)
 
 
 @pytest.fixture(autouse=True)
@@ -73,3 +88,49 @@ async def committing_sessionmaker(
     schema mapping is needed here.
     """
     return async_sessionmaker(bind=db_engine, expire_on_commit=False)
+
+
+@pytest.fixture(autouse=True)
+def current_discord_membership(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Existing MCP fixtures simulate a current non-admin server member.
+
+    Explicit resolver fakes override this default in role/admin/error tests.
+    No runtime constructed by this suite can accidentally call Discord REST.
+    """
+    from daimon.adapters.mcp.runtime import McpRuntime
+    from daimon.core.membership import CachedMembershipResolver, Membership
+
+    async def fetch(tenant_id, guild_id, user_id):  # type: ignore[no-untyped-def]
+        return Membership(is_member=True)
+
+    def initialize(runtime: McpRuntime) -> None:
+        if runtime.membership_resolver is None:
+            object.__setattr__(runtime, "membership_resolver", CachedMembershipResolver(fetch))
+
+    monkeypatch.setattr(McpRuntime, "__post_init__", initialize)
+
+
+@pytest.fixture
+def platform_admin_edge(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Platform facts for transport tests; token claims never serve as attestation."""
+    from daimon.adapters.mcp.middleware import mcp_identity
+    from daimon.testing.admin_facts import platform_authority_from_test_accounts
+
+    monkeypatch.setattr(mcp_identity, "resolve_authority", platform_authority_from_test_accounts)
+
+
+@pytest.fixture(autouse=True)
+def empty_accounts_for_mock_database(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Schema-only unit harnesses have no accounts; real DB tests stay untouched."""
+    from unittest.mock import Mock
+
+    from daimon.adapters.mcp.middleware import mcp_identity
+
+    real = mcp_identity.get_account_with_tenant
+
+    async def lookup(session, *, account_id):
+        if isinstance(session, Mock):
+            return None
+        return await real(session, account_id=account_id)
+
+    monkeypatch.setattr(mcp_identity, "get_account_with_tenant", lookup)

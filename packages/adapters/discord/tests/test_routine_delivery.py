@@ -14,6 +14,7 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_identity import AgentIdentity
 from daimon.core.agent_post_identity import fallback_name_prefix
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.agent_posts import list_posts_in
@@ -62,8 +63,17 @@ def _text_channel(
     return channel
 
 
-async def _routine(db_session: AsyncSession, *, destination_id: str = "555") -> RoutineRow:
+async def _routine(
+    db_session: AsyncSession,
+    *,
+    destination_id: str = "555",
+    destination_kind="channel",
+    channel_id: str | None = None,
+) -> RoutineRow:
     tenant = await make_tenant(db_session, platform="discord", workspace_id=str(_GUILD))
+    from daimon.core.stores.direct_messages import set_dm_enabled
+
+    await set_dm_enabled(db_session, tenant_id=tenant.id, enabled=True)
     row = await create_routine(
         db_session,
         tenant_id=tenant.id,
@@ -73,8 +83,9 @@ async def _routine(db_session: AsyncSession, *, destination_id: str = "555") -> 
         cron_expr="0 9 * * 1",
         timezone_="UTC",
         trigger_message="go",
-        destination_kind="channel",
+        destination_kind=destination_kind,
         destination_id=destination_id,
+        channel_id=channel_id,
     )
     await record_result(
         db_session, row.id, tail="All green @everyone.", error=None, delivery="pending"
@@ -125,9 +136,13 @@ def _poster(
             )
         return found
 
+    async def membership(tenant_id, guild_id, user_id):  # type: ignore[no-untyped-def]
+        return Membership(is_member=True)
+
     return make_discord_routine_poster(
         sm,
         fetch_channel=fetch,
+        membership_resolver=CachedMembershipResolver(membership),
         open_dm=(dms or _Dms()).open,
         dm_policy=lambda row: DirectMessagePolicy(mode=dm_mode),  # type: ignore[arg-type]
         client=MagicMock(spec=discord.Client) if identity is not None else None,
@@ -634,6 +649,566 @@ async def test_a_failed_record_does_not_fail_the_delivery(
 
     assert outcome.status == "delivered", "the result is out; a lost record only loses tidying"
     channel.send.assert_awaited_once()
+
+
+async def test_role_loss_during_destination_lookup_refuses_delayed_delivery(
+    db_session, db_session_factory
+):  # type: ignore[no-untyped-def]
+    from daimon.core.config import DirectMessagePolicy
+
+    row = await _routine(db_session)
+    await set_access_policy(
+        db_session, tenant_id=row.tenant_id, policy=TenantAccessPolicy(invoker_role_ids=("123",))
+    )
+    await db_session.commit()
+    facts = [Membership(is_member=True, role_ids=("123",))]
+    calls = []
+
+    async def member(tenant_id, guild_id, user_id):  # type: ignore[no-untyped-def]
+        calls.append(user_id)
+        return facts[0]
+
+    resolver = CachedMembershipResolver(member)
+    channel = _text_channel()
+    dms = _Dms()
+
+    async def fetch(channel_id):  # type: ignore[no-untyped-def]
+        facts[0] = Membership(is_member=True)
+        return channel
+
+    poster = make_discord_routine_poster(
+        db_session_factory,
+        fetch_channel=fetch,
+        open_dm=dms.open,
+        dm_policy=lambda _: DirectMessagePolicy(),
+        membership_resolver=resolver,
+    )
+    outcome = await poster(row)
+    assert outcome.status == "skipped" and outcome.note == "invoker_not_allowed"
+    channel.send.assert_not_awaited()
+    assert not dms.sent
+    assert calls == ["1", "1"], (
+        "delivery must bypass the positive cache after the destination await"
+    )
+
+
+@pytest.mark.parametrize("explicit_dm", [False, True])
+async def test_routine_dm_does_not_replace_an_active_private_conversation(
+    db_session_factory, explicit_dm
+):
+    from daimon.core.stores.direct_messages import get_conversation
+    from daimon.testing.factories import make_account, make_dm_conversation
+
+    async with db_session_factory() as session:
+        routine = await _routine(session, destination_id="unavailable")
+        active_tenant = await make_tenant(session, workspace_id="700000102")
+        account = await make_account(session, tenant=active_tenant)
+        active = await make_dm_conversation(
+            session,
+            tenant=active_tenant,
+            account_id=account.id,
+            route_key="physical-dm",
+            external_user_id="1",
+        )
+        await session.commit()
+    if explicit_dm:
+        from daimon.core.stores.direct_messages import set_dm_enabled
+        from daimon.core.stores.routines import update_routine
+
+        async with db_session_factory.begin() as session:
+            updated = await update_routine(
+                session,
+                routine.id,
+                edited_by=routine.created_by_user_id,
+                tenant_id=routine.tenant_id,
+                destination_kind="dm",
+            )
+            await set_dm_enabled(session, tenant_id=routine.tenant_id, enabled=True)
+        assert updated is not None
+        routine = updated.model_copy(update={"delivery_payload": "A private notification."})
+    dms = _Dms()
+    outcome = await _poster(db_session_factory, {}, dms=dms)(routine)
+    assert outcome.status == "delivered" and dms.sent
+    async with db_session_factory() as session:
+        after = await get_conversation(
+            session, platform="discord", route_key="physical-dm", external_user_id="1"
+        )
+    assert after == active, "routine output changes neither the active tenant nor private history"
+
+
+@pytest.mark.parametrize(
+    "mode", ["members", "disabled", "tenant_disabled", "blocked", "sealed", "revoked"]
+)
+async def test_explicit_owner_dm_never_looks_up_channel_or_changes_conversation(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    mode: str,
+) -> None:
+    from daimon.core.config import DirectMessagePolicy
+    from daimon.core.stores.direct_messages import set_dm_enabled
+    from daimon.core.stores.routines import update_routine
+
+    row = await _routine(db_session)
+    async with db_session_factory.begin() as session:
+        updated = await update_routine(
+            session,
+            row.id,
+            edited_by=row.created_by_user_id,
+            tenant_id=row.tenant_id,
+            destination_kind="dm",
+        )
+        await set_dm_enabled(session, tenant_id=row.tenant_id, enabled=mode != "tenant_disabled")
+    assert updated is not None
+    if mode == "sealed":
+        from daimon.core.access_policy import ChannelRule
+
+        async with db_session_factory.begin() as session:
+            await set_access_policy(
+                session,
+                tenant_id=row.tenant_id,
+                policy=TenantAccessPolicy(channel_rules={"456": ChannelRule(readers="inside")}),
+            )
+            # The policy may change after creation, before delivery.
+            await update_routine(
+                session,
+                row.id,
+                edited_by=row.created_by_user_id,
+                tenant_id=row.tenant_id,
+                trigger_message="go",
+            )
+        updated = updated.model_copy(update={"channel_id": "456", "source_channel_id": "456"})
+    fetch = AsyncMock(side_effect=AssertionError("a recipient is not a channel"))
+    dms = _Dms(fail=mode == "blocked")
+
+    async def membership(tenant_id, guild_id, user_id):
+        return Membership(is_member=mode != "revoked")
+
+    poster = make_discord_routine_poster(
+        db_session_factory,
+        fetch_channel=fetch,
+        open_dm=dms.open,
+        dm_policy=lambda _: DirectMessagePolicy(
+            mode="disabled" if mode == "disabled" else "members"
+        ),
+        membership_resolver=CachedMembershipResolver(membership),
+    )
+    outcome = await poster(updated.model_copy(update={"delivery_payload": "private @everyone"}))
+    fetch.assert_not_awaited()
+    assert outcome.status == ("delivered" if mode == "members" else "skipped")
+    assert bool(dms.sent) == (mode == "members")
+    if dms.sent:
+        assert dms.sent[0][:2] == (_GUILD, 1)
+        assert "private @everyone" in dms.sent[0][2]
+        assert "Run " in dms.sent[0][2]
+
+
+@pytest.mark.parametrize(
+    "stop", ["partial_failure", "revoked", "destination_changed", "thread_sealed"]
+)
+async def test_dm_partial_delivery_is_never_retried(db_session_factory, stop):
+    from datetime import UTC, datetime
+
+    from daimon.core.config import DirectMessagePolicy
+    from daimon.core.routine_delivery import poll_deliveries_once
+    from daimon.core.stores.routines import get_routine, update_routine
+
+    async with db_session_factory() as session:
+        row = await _routine(
+            session,
+            destination_kind="thread" if stop == "thread_sealed" else "channel",
+            destination_id="789" if stop == "thread_sealed" else "555",
+            channel_id="456" if stop == "thread_sealed" else None,
+        )
+    async with db_session_factory.begin() as session:
+        row = await update_routine(
+            session,
+            row.id,
+            edited_by=row.created_by_user_id,
+            tenant_id=row.tenant_id,
+            destination_kind="dm",
+        )
+        assert row is not None
+        await record_result(session, row.id, tail="private " * 900, error=None, delivery="pending")
+    sends = []
+
+    async def member(*args):
+        return Membership(is_member=not (stop == "revoked" and sends))
+
+    class Dm:
+        async def send(self, *, content, allowed_mentions):
+            assert len(content) <= 2000
+            assert allowed_mentions.to_dict() == {"parse": []}
+            if sends and stop == "partial_failure":
+                raise discord.HTTPException(MagicMock(status=500, reason="failed"), "uncertain")
+            sends.append(content)
+            if stop == "thread_sealed":
+                from daimon.core.access_policy import ChannelRule
+
+                async with db_session_factory.begin() as session:
+                    await set_access_policy(
+                        session,
+                        tenant_id=row.tenant_id,
+                        policy=TenantAccessPolicy(
+                            channel_rules={"789": ChannelRule(readers="inside")}
+                        ),
+                    )
+            if stop == "destination_changed":
+                async with db_session_factory.begin() as session:
+                    await update_routine(
+                        session,
+                        row.id,
+                        edited_by=row.created_by_user_id,
+                        tenant_id=row.tenant_id,
+                        destination_kind="channel",
+                        destination_id="555",
+                    )
+
+    async def open_dm(*args):
+        return Dm()
+
+    poster = make_discord_routine_poster(
+        db_session_factory,
+        fetch_channel=AsyncMock(side_effect=AssertionError("no public fallback")),
+        open_dm=open_dm,
+        dm_policy=lambda _: DirectMessagePolicy(),
+        membership_resolver=CachedMembershipResolver(member),
+    )
+    now = datetime.now(UTC)
+    assert (
+        await poll_deliveries_once(db_session_factory, platform="discord", post=poster, now=now)
+        == 1
+    )
+    assert len(sends) == 1
+    assert (
+        await poll_deliveries_once(db_session_factory, platform="discord", post=poster, now=now)
+        == 0
+    )
+    async with db_session_factory() as session:
+        after = await get_routine(session, row.id, tenant_id=row.tenant_id)
+    assert after is not None and after.delivery_status == "skipped" and after.delivery_note
+
+
+async def test_tenant_dm_disablement_also_blocks_routine_fallback(db_session_factory):
+    from daimon.core.stores.direct_messages import set_dm_enabled
+
+    async with db_session_factory() as session:
+        row = await _routine(session)
+    async with db_session_factory.begin() as session:
+        await set_dm_enabled(session, tenant_id=row.tenant_id, enabled=False)
+    dms = _Dms()
+    result = await _poster(db_session_factory, {}, dms=dms)(row)
+    assert result.status == "skipped" and "disabled" in result.note
+    assert not dms.sent
+
+
+@pytest.mark.parametrize("agent_state", ["pinned_alias", "unrelated_rule", "missing"])
+async def test_dm_delivery_rechecks_all_live_agent_names(db_session_factory, agent_state):
+    from daimon.core.access_policy import AgentRule
+    from daimon.core.config import DirectMessagePolicy
+    from daimon.core.stores.routines import update_routine
+
+    async with db_session_factory() as session:
+        row = await _routine(session)
+    async with db_session_factory.begin() as session:
+        row = await update_routine(
+            session,
+            row.id,
+            edited_by=row.created_by_user_id,
+            tenant_id=row.tenant_id,
+            destination_kind="dm",
+        )
+        assert row is not None
+        await set_access_policy(
+            session,
+            tenant_id=row.tenant_id,
+            policy=TenantAccessPolicy(agent_rules={"pinned name": AgentRule(runs_in=("456",))}),
+        )
+    dms = _Dms()
+
+    async def member(*args):
+        return Membership(is_member=True)
+
+    async def names(_):
+        if agent_state == "missing":
+            return ()
+        return ("daimon", "pinned name") if agent_state == "pinned_alias" else ("daimon",)
+
+    poster = make_discord_routine_poster(
+        db_session_factory,
+        fetch_channel=AsyncMock(side_effect=AssertionError("not a channel")),
+        open_dm=dms.open,
+        dm_policy=lambda _: DirectMessagePolicy(),
+        membership_resolver=CachedMembershipResolver(member),
+        resolve_agent_names=names,
+    )
+    result = await poster(row.model_copy(update={"delivery_payload": "private"}))
+    assert result.status == ("delivered" if agent_state == "unrelated_rule" else "skipped")
+    assert bool(dms.sent) == (agent_state == "unrelated_rule")
+
+
+@pytest.mark.parametrize("destination", ["channel", "dm"])
+@pytest.mark.parametrize("scenario", ["success", "failure", "oversize"])
+async def test_generated_files_share_the_at_most_once_outbox(
+    db_session, db_session_factory, destination, scenario
+):
+    from datetime import UTC, datetime
+
+    import httpx
+    from daimon.core.config import DirectMessagePolicy
+    from daimon.core.routine_delivery import poll_deliveries_once
+    from daimon.core.routine_files import PREFIX, RoutineFile, RoutinePayload
+    from daimon.core.stores.routines import get_routine, update_routine
+    from daimon.testing.ma import MARouter
+    from mux.testing.drivers.anthropic.ma import build_fake_anthropic
+
+    row = await _routine(db_session)
+    payload = (
+        PREFIX
+        + RoutinePayload(
+            text="Report",
+            files=[
+                RoutineFile(
+                    file_id="file_report",
+                    filename="report.csv",
+                    mime_type="text/csv",
+                    size_bytes=11 * 1024 * 1024 if scenario == "oversize" else 4,
+                )
+            ],
+        ).model_dump_json()
+    )
+    async with db_session_factory.begin() as session:
+        if destination == "dm":
+            await update_routine(
+                session,
+                row.id,
+                edited_by=row.created_by_user_id,
+                tenant_id=row.tenant_id,
+                destination_kind="dm",
+            )
+        await record_result(
+            session, row.id, tail="Report", error=None, delivery="pending", delivery_payload=payload
+        )
+    router = MARouter()
+    router.add(
+        "GET", r"/v1/files/([^/]+)/content", lambda r, m: httpx.Response(200, content=b"data")
+    )
+    channel = _text_channel()
+    channel.guild.filesize_limit = 10 * 1024 * 1024
+    dm = MagicMock(spec=discord.DMChannel)
+    dm.guild = None
+    dm.send = AsyncMock()
+    destination_transport = dm if destination == "dm" else channel
+    uploaded = []
+
+    async def send(**kwargs):
+        if "file" in kwargs:
+            uploaded.append(kwargs)
+            if scenario == "failure":
+                raise RuntimeError("uncertain upload")
+        return SimpleNamespace(id=123)
+
+    destination_transport.send = AsyncMock(side_effect=send)
+
+    async def membership(*args):
+        return Membership(is_member=True)
+
+    poster = make_discord_routine_poster(
+        db_session_factory,
+        fetch_channel=AsyncMock(return_value=channel),
+        open_dm=AsyncMock(return_value=dm),
+        dm_policy=lambda _: DirectMessagePolicy(mode="members"),
+        membership_resolver=CachedMembershipResolver(membership),
+        output_client=build_fake_anthropic(router.dispatch),
+    )
+    for _ in range(2):
+        await poll_deliveries_once(
+            db_session_factory, platform="discord", post=poster, now=datetime.now(UTC)
+        )
+    if scenario == "oversize":
+        assert not uploaded
+        notices = [
+            call.kwargs.get("content", "") for call in destination_transport.send.await_args_list
+        ]
+        assert any("upload limit" in text for text in notices)
+    else:
+        assert len(uploaded) == 1
+        assert uploaded[0]["file"].fp.read() == b"data"
+        assert uploaded[0]["allowed_mentions"].everyone is False
+    if destination == "dm":
+        channel.send.assert_not_awaited()
+    else:
+        dm.send.assert_not_awaited()
+    async with db_session_factory() as session:
+        after = await get_routine(session, row.id, tenant_id=row.tenant_id)
+    assert after.delivery_status == ("skipped" if scenario == "failure" else "delivered")
+
+
+async def test_destination_change_between_text_and_file_cancels_payload(
+    db_session, db_session_factory
+):
+    from datetime import UTC, datetime
+
+    from daimon.core.config import DirectMessagePolicy
+    from daimon.core.routine_delivery import poll_deliveries_once
+    from daimon.core.routine_files import PREFIX, RoutineFile, RoutinePayload
+    from daimon.core.stores.routines import get_routine, update_routine
+    from mux.testing.drivers.anthropic.ma import build_fake_anthropic
+
+    row = await _routine(db_session)
+    payload = (
+        PREFIX
+        + RoutinePayload(
+            text="Report",
+            files=[
+                RoutineFile(
+                    file_id="file_report", filename="report.csv", mime_type="text/csv", size_bytes=4
+                )
+            ],
+        ).model_dump_json()
+    )
+    async with db_session_factory.begin() as session:
+        await record_result(
+            session, row.id, tail="Report", error=None, delivery="pending", delivery_payload=payload
+        )
+    channel = _text_channel()
+    channel.guild.filesize_limit = 10 * 1024 * 1024
+
+    async def send(**kwargs):
+        assert "file" not in kwargs
+        async with db_session_factory.begin() as session:
+            await update_routine(
+                session,
+                row.id,
+                edited_by=row.created_by_user_id,
+                tenant_id=row.tenant_id,
+                destination_kind="channel",
+                destination_id="777",
+            )
+        return SimpleNamespace(id=123)
+
+    channel.send = AsyncMock(side_effect=send)
+    reads = []
+
+    def no_reads(request):
+        reads.append(request)
+        raise AssertionError("a cancelled payload must not download files")
+
+    async def membership(*args):
+        return Membership(is_member=True)
+
+    poster = make_discord_routine_poster(
+        db_session_factory,
+        fetch_channel=AsyncMock(return_value=channel),
+        open_dm=AsyncMock(side_effect=AssertionError("no fallback after changing destination")),
+        dm_policy=lambda _: DirectMessagePolicy(mode="members"),
+        membership_resolver=CachedMembershipResolver(membership),
+        output_client=build_fake_anthropic(no_reads),
+    )
+    await poll_deliveries_once(
+        db_session_factory, platform="discord", post=poster, now=datetime.now(UTC)
+    )
+    assert not reads
+    channel.send.assert_awaited_once()
+    async with db_session_factory() as session:
+        after = await get_routine(session, row.id, tenant_id=row.tenant_id)
+    assert after.destination_id == "777"
+    assert after.delivery_payload is None
+
+
+@pytest.mark.parametrize(
+    "revocation", ["dm_disabled", "isolation", "dm_policy", "recipient", "signed_error"]
+)
+async def test_fallback_files_recheck_privacy_after_download(
+    db_session, db_session_factory, monkeypatch, revocation
+):
+    from datetime import UTC, datetime
+
+    from anthropic import AsyncAnthropic
+    from daimon.core.access_policy import ChannelRule
+    from daimon.core.config import DirectMessagePolicy
+    from daimon.core.routine_delivery import poll_deliveries_once
+    from daimon.core.routine_files import PREFIX, RoutineFile, RoutinePayload
+    from daimon.core.stores.direct_messages import set_dm_enabled
+    from daimon.core.stores.routines import get_routine
+    from structlog.testing import capture_logs
+
+    row = await _routine(db_session, destination_kind="thread")
+    payload = (
+        PREFIX
+        + RoutinePayload(
+            text="Report",
+            files=[
+                RoutineFile(
+                    file_id="file_report", filename="report.csv", mime_type="text/csv", size_bytes=4
+                )
+            ],
+        ).model_dump_json()
+    )
+    async with db_session_factory.begin() as session:
+        await record_result(
+            session, row.id, tail="Report", error=None, delivery="pending", delivery_payload=payload
+        )
+    thread = _uncached_thread(parent_id=444)
+    parent = _text_channel(perms=_perms(send=False))
+    dm = MagicMock(spec=discord.DMChannel)
+    dm.guild = None
+    dm.send = AsyncMock()
+    eligible = True
+    policy = DirectMessagePolicy(mode="members")
+    downloads = []
+    completed = []
+    sentinel = "https://upload.invalid/signed?token=secret-sentinel"
+
+    async def download(*args, **kwargs):
+        nonlocal eligible, policy
+        downloads.append(True)
+        async with db_session_factory.begin() as session:
+            if revocation == "dm_disabled":
+                await set_dm_enabled(session, tenant_id=row.tenant_id, enabled=False)
+            elif revocation == "isolation":
+                # The outbox does not store this resolved thread parent.
+                await set_access_policy(
+                    session,
+                    tenant_id=row.tenant_id,
+                    policy=TenantAccessPolicy(
+                        channel_rules={"444": ChannelRule(readers="own", writers="own")}
+                    ),
+                )
+        if revocation == "dm_policy":
+            policy = DirectMessagePolicy(mode="disabled")
+        if revocation == "recipient":
+            eligible = False
+        if revocation == "signed_error":
+            raise discord.HTTPException(MagicMock(status=500, reason="failed"), sentinel)
+        completed.append(True)
+        return b"data"
+
+    async def membership(*args):
+        return Membership(is_member=eligible)
+
+    async def fetch(channel_id):
+        return thread if channel_id == 555 else parent
+
+    monkeypatch.setattr("daimon.core.routine_files.download_output_file", download)
+    poster = make_discord_routine_poster(
+        db_session_factory,
+        fetch_channel=fetch,
+        open_dm=AsyncMock(return_value=dm),
+        dm_policy=lambda _: policy,
+        membership_resolver=CachedMembershipResolver(membership),
+        output_client=AsyncAnthropic(api_key="sk-test"),
+    )
+    with capture_logs() as logs:
+        await poll_deliveries_once(
+            db_session_factory, platform="discord", post=poster, now=datetime.now(UTC)
+        )
+    assert downloads == [True], "the first guard must pass before revocation during download"
+    assert all("file" not in call.kwargs for call in dm.send.await_args_list)
+    assert completed == ([] if revocation == "signed_error" else [True])
+    assert sentinel not in str(logs)
+    async with db_session_factory() as session:
+        after = await get_routine(session, row.id, tenant_id=row.tenant_id)
+    assert after.delivery_status == "skipped"
 
 
 @pytest.mark.parametrize("marked", ["destination", "parent-found-at-delivery"])

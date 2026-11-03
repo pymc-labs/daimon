@@ -18,7 +18,7 @@ import re
 import uuid
 from datetime import UTC, datetime
 from typing import Annotated, Final
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
@@ -56,6 +56,7 @@ from daimon.adapters.mcp.tools.teams._send import (
 )
 from daimon.core.access_policy import DM_SCOPE_PREFIX
 from daimon.core.agent_pins import agent_pin_names
+from daimon.core.config import PollableTool, load_watches_settings
 from daimon.core.continuity.continuation import MAX_REQUESTED_WORK, sanitize_requested_work
 from daimon.core.credential_requests import (
     DEFAULT_TTL,
@@ -64,7 +65,9 @@ from daimon.core.credential_requests import (
     mcp_permission_message,
     mint_request_token,
 )
-from daimon.core.defaults.mcp_merge import get_reserved_mcp_rejection
+from daimon.core.defaults.mcp_merge import (
+    get_reserved_mcp_rejection,
+)
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.env_file import (
     MEMBER_SECRET_SUFFIX_HINT,
@@ -75,6 +78,9 @@ from daimon.core.env_file import (
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_attach import decide_mcp_connect
 from daimon.core.mcp_oauth.urls import McpUrlError, assert_public_host
+from daimon.core.mcp_server_url import ascii_mcp_url, same_ascii_mcp_url
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import retrieve_agent
 from daimon.core.operation_policy import (
     OperationKind,
     PolicyOutcome,
@@ -90,7 +96,9 @@ from daimon.core.stores.credential_requests import (
 )
 from daimon.core.stores.domain import CredentialRequestRow, TurnOriginRow
 from daimon.core.stores.turn_origins import get_active_origin
+from daimon.core.stores.watch_credentials import forget_watch_credential
 from daimon.core.stores.web_notices import WebCredentialNotice, send_web_notice
+from daimon.core.tool_safety import DAIMON_SERVER_NAME, get_mcp_server_name_rejection
 from daimon.core.turn_keys import list_turn_key_names
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -107,7 +115,8 @@ _POSIX_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 def _caller_is_admin(auth: AuthIdentity) -> bool:
     """Whether this caller may REQUEST a key outside the member allowlist.
 
-    `auth.is_admin` is the middleware's gate: the account's live DB role is
+    The live configuration verdict is the middleware’s gate; account roles
+    never cache delegated authority. The verified platform principal is
     ADMIN, or the token is an internal CLI/scheduler/headless token carrying
     the admin claim. An agent-scoped key (`auth.agent_id` set) re-derives its
     role from the account that owns it, which may be an admin — so it is
@@ -119,7 +128,7 @@ def _caller_is_admin(auth: AuthIdentity) -> bool:
     policy, so a mint by an admin-capable token never lets a member store an
     admin-only name.
     """
-    return auth.is_admin and auth.agent_id is None
+    return auth.admin_for() and auth.agent_id is None
 
 
 _PENDING_TASK_DESCRIPTION = (
@@ -296,7 +305,11 @@ async def _decide_attachment_write(
         ma_agent_id=str(ma_agent.id),
         is_daimon_managed=ma_agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
     )
-    return decide_operation(operation, is_admin=auth.is_admin, target=facts), facts
+    return decide_operation(
+        operation,
+        is_admin=auth.admin_for(),
+        target=facts,
+    ), facts
 
 
 async def _require_key_replacement_allowed(
@@ -382,6 +395,7 @@ async def _supersede_live_siblings(
     requester_platform_user_id: str,
     origin_thread_id: str,
     now: datetime,
+    kind: CredentialRequestKind,
 ) -> list[CredentialRequestRow]:
     """Retire every form this person already has open here, and return them.
 
@@ -405,6 +419,9 @@ async def _supersede_live_siblings(
     )
     retired: list[CredentialRequestRow] = []
     for row in live:
+        # A watch key is the person's own, not the agent's: neither kind retires the other.
+        if (row.kind == "watch_credential") != (kind == "watch_credential"):
+            continue
         if await supersede_credential_request(session, token=row.token, now=now) is not None:
             retired.append(row)
     return retired
@@ -427,6 +444,7 @@ async def _mint_and_post(
     requested_work: str | None,
     replaces_updated_at: datetime | None = None,
     branch: str | None = None,
+    changes_agent: bool = True,
 ) -> RequestCredentialResult:
     on_web = origin.platform == "web"
     if on_web and kind != "env":
@@ -435,7 +453,15 @@ async def _mint_and_post(
             "This can't be set up from the web app. Ask for one named key, "
             "or set this up from a chat app."
         )
-    await require_pin_write_access(runtime, auth, ma_agent=ma_agent, origin=origin)
+    # A watch key is the requester's own and changes nothing on the agent.
+    if changes_agent:
+        await require_pin_write_access(
+            runtime,
+            auth,
+            ma_agent=ma_agent,
+            origin=origin,
+            action=None,
+        )
     # A tool-supplied channel cannot redirect a private-input request.
     channel_id = (
         origin.parent_channel_id if auth.platform == "slack" and not on_web else origin.thread_id
@@ -470,6 +496,7 @@ async def _mint_and_post(
             requester_platform_user_id=requester_platform_user_id,
             origin_thread_id=origin.thread_id,
             now=now,
+            kind=kind,
         )
         row = await create_credential_request(
             session,
@@ -681,7 +708,7 @@ def _reject_reserved_server(runtime: McpRuntime, *, server_name: str, url: str) 
     would 409 on every session create with nothing to heal it.
     """
     public_url = runtime.settings.mcp.public_url
-    rejection = get_reserved_mcp_rejection(
+    rejection = get_mcp_server_name_rejection(server_name) or get_reserved_mcp_rejection(
         server_name=server_name,
         url=url,
         public_url=str(public_url) if public_url is not None else None,
@@ -798,6 +825,121 @@ async def _request_mcp_oauth_impl(
         channel_id=channel_id,
         origin=origin,
         requested_work=_bounded_pending_task(pending_task, echoes=(agent_name, server_name)),
+    )
+
+
+async def _watch_server_url(
+    runtime: McpRuntime, auth: AuthIdentity, origin: TurnOriginRow, server: str
+) -> tuple[str, BetaManagedAgentsAgent]:
+    """The canonical URL `server` names: an https URL, or a server name on this agent."""
+    ma_agent = await retrieve_agent(
+        runtime.client,
+        origin.responder_ma_agent_id,
+        scope=resource_scope(tenant_id=str(auth.tenant_id)),
+    )
+    if server.lower().startswith("https://"):
+        return ascii_mcp_url(server), ma_agent
+    attached = [item for item in ma_agent.mcp_servers if getattr(item, "name", None) == server]
+    if len(attached) != 1 or server == DAIMON_SERVER_NAME:
+        raise ToolError("This agent has no such server. Ask me to list its servers.")
+    return ascii_mcp_url(str(getattr(attached[0], "url", ""))), ma_agent
+
+
+def _owner_key_entry(server_url: str) -> PollableTool | None:
+    """A watch-list entry on this exact URL that reads with each owner's own key."""
+    for entry in load_watches_settings().pollable_tools:
+        if (
+            entry.credential == "owner"
+            and entry.server != DAIMON_SERVER_NAME
+            and same_ascii_mcp_url(entry.server, server_url)
+        ):
+            return entry
+    return None
+
+
+async def _request_watch_credential_impl(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    server: str,
+    origin_context_id: str | None,
+) -> RequestCredentialResult:
+    requester = _require_requestable_platform(auth)
+    if auth.platform != "discord":
+        raise ToolError("This chat app can't collect a watch key yet.")
+    if runtime.fernet is None:
+        raise ToolError(
+            "This Daimon cannot store keys yet, so no form was posted. "
+            "Ask whoever runs this Daimon."
+        )
+    origin = await require_turn_origin(runtime, auth, origin_context_id)
+    if not origin.attended:
+        raise ToolError("Ask for this in your own conversation with me.")
+    named_url, ma_agent = await _watch_server_url(runtime, auth, origin, server)
+    entry = _owner_key_entry(named_url)
+    if entry is None:
+        raise ToolError(
+            "No watch here reads that server with your own key, so no form was posted. "
+            "Ask an admin or an owner."
+        )
+    # The listed URL exactly, so the key is stored under the URL every poll uses.
+    server_url = entry.server
+    host = urlsplit(server_url).hostname or server_url
+    return await _mint_and_post(
+        runtime,
+        auth,
+        kind="watch_credential",
+        target=host,
+        mcp_server_url=server_url,
+        agent_id=derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(ma_agent.id)),
+        ma_agent=ma_agent,
+        requester_platform_user_id=requester,
+        agent_name=ma_agent.name,
+        purpose=f"your watch key for {host}",
+        channel_id=origin.thread_id,
+        origin=origin,
+        requested_work=None,
+        changes_agent=False,
+    )
+
+
+class ForgetWatchCredentialResult(BaseModel):
+    """Whether an owner's own watch key for one server was deleted."""
+
+    model_config = ConfigDict(frozen=True)
+
+    server_host: str
+    forgotten: bool
+    message: str
+
+
+async def _forget_watch_credential_impl(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    server: str,
+    origin_context_id: str | None,
+) -> ForgetWatchCredentialResult:
+    origin = await require_turn_origin(runtime, auth, origin_context_id)
+    if not origin.attended:
+        raise ToolError("Ask for this in your own conversation with me.")
+    server_url, _ = await _watch_server_url(runtime, auth, origin, server)
+    async with runtime.session_factory.begin() as session:
+        removed = await forget_watch_credential(
+            session,
+            tenant_id=auth.tenant_id,
+            owner_account_id=auth.account_id,
+            server_url=server_url,
+        )
+    host = urlsplit(server_url).hostname or server_url
+    return ForgetWatchCredentialResult(
+        server_host=host,
+        forgotten=removed > 0,
+        message=(
+            f"Your key for {host} is deleted. Watches that used it pause at their next check."
+            if removed
+            else f"You had no saved key for {host}. Nothing changed."
+        ),
     )
 
 
@@ -949,4 +1091,44 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
             pending_task=pending_task,
             origin_context_id=origin_context_id,
             expected_ma_agent_id=expected_ma_agent_id,
+        )
+
+    @mcp.tool(tags={"discord"})
+    async def request_watch_credential(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context,
+        origin_context_id: str,
+        server: Annotated[
+            str,
+            Field(description="The server's https URL, or its name on this agent."),
+        ],
+    ) -> RequestCredentialResult:
+        """Ask the person for their own read-only key for a server their watches check.
+
+        Use it when create_watch says the tool reads with the owner's own key and none
+        is saved. The server must be on this deployment's watch list with credential
+        owner. Posts a card in this conversation; only the requester can open its
+        private form, and it expires in 30 minutes. The key never appears in chat or in
+        tool arguments. It is stored encrypted, used only by that person's own watches,
+        and sent only to that exact server URL. It should be read-only: for example a
+        read-scoped API key the person creates on that server. Sending a new key replaces
+        the old one from the next check. Needs an attended conversation where watches run."""
+        return await _request_watch_credential_impl(
+            runtime, await _auth(ctx), server=server, origin_context_id=origin_context_id
+        )
+
+    @mcp.tool(tags={"discord"})
+    async def forget_watch_credential(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context,
+        origin_context_id: str,
+        server: Annotated[
+            str,
+            Field(description="The server's https URL, or its name on this agent."),
+        ],
+    ) -> ForgetWatchCredentialResult:
+        """Delete your own saved watch key for one server.
+
+        Only ever deletes the caller's own key. Watches that read with it pause at their
+        next check and their owner is told. Needs an attended conversation."""
+        return await _forget_watch_credential_impl(
+            runtime, await _auth(ctx), server=server, origin_context_id=origin_context_id
         )

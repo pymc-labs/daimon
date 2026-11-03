@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 133 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 178 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -37,6 +37,16 @@ BM25 search transform, so an ordinary session discovers tools by searching the c
 rather than listing it in full. Sessions narrowed to agent-chat tools or to an operator
 token's scopes skip the transform and see their tools directly.
 
+## `admins`
+
+Tenant-wide Daimon admin delegation, with fresh platform-only mutation gates.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `grant_admin` | admin only | Granted admins can change what agents do, including agents platform admins use. |
+| `list_admins` | operator tokens with tenant:read | List this tenant's explicit Daimon admin grants (any member). |
+| `revoke_admin` | admin only | Revoke an explicit Daimon admin grant immediately (platform admins only). |
+
 ## `agent_chat`
 
 Agent-chat primitives plus bounded ``ask`` and completed-chart delivery.
@@ -46,7 +56,7 @@ Agent-chat primitives plus bounded ``ask`` and completed-chart delivery.
 | `archive_my_session` | agent tokens only | Archive a session when its conversation is finished. |
 | `ask` | agent tokens only | Ask one question and wait for the final answer and any chart images. |
 | `cancel_turn` | agent tokens only | Stop a running turn immediately. |
-| `continue_turn` | agent tokens only | Send a follow-up message on an existing session. |
+| `continue_turn` | agent tokens only | Send a follow-up message on an existing session, or resume a paused one. |
 | `deliver_turn_charts` | agent tokens only | Return the newest completed reply with its chart images and optional links. |
 | `describe_agent` | agent tokens only | Describe the agent associated with this MCP token. |
 | `get_my_session` | agent tokens only | Get one session's status and metadata (no reply text, read-only). |
@@ -95,13 +105,13 @@ Agent tools: list / get / create / update / fork / archive.
 
 ## `channel_budgets`
 
-Channel budget tools: read a channel's spending budget; admins set, clear and list them.
+Channel budgets for platform admins acting directly with personal user credentials.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `clear_channel_budget` | admin only, operator tokens with channels:write | Remove a channel's spending budget, so only the balance and caps apply. |
 | `get_channel_budget` | Discord callers, Slack callers, Teams callers, operator tokens with tenant:read | Show a channel's spending budget: its limit, window and what it has spent. |
-| `list_channel_budgets` | admin only, operator tokens with tenant:read | List every channel budget in this workspace with its spend. |
+| `list_channel_budgets` | admin only, operator tokens with tenant:read | List channel budgets with a personal platform-admin CLI credential. |
 | `set_channel_budget` | admin only, operator tokens with channels:write | Set or replace a channel's spending budget. |
 
 ## `channel_copies`
@@ -123,7 +133,7 @@ Channel environment tools: which environment a channel's turns run in.
 
 ## `channel_rules`
 
-Rule tools: who reads a channel and who posts there, and where an agent runs.
+Channel and agent rules.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
@@ -168,15 +178,26 @@ get_cli_token MCP tool.
 | --- | --- | --- |
 | `get_cli_token` | all callers | Mint a short-lived CLI access token for the named service. |
 
+## `cost_footer`
+
+Cost footer tools: show or hide the line under each finished answer, workspace-wide.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `get_cost_footer` | all callers | Report whether finished answers here end with the cost footer. |
+| `set_cost_footer` | admin only | Show or hide the footer under each finished answer. |
+
 ## `credential_requests`
 
 Post requester-only private forms for agent keys, MCP tokens and GitHub access.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
+| `forget_watch_credential` | Discord callers | Delete your own saved watch key for one server. |
 | `request_agent_key` | Discord callers, Slack callers, Teams callers, web app callers | Give an agent an API key or token for any service: Toggl, OpenAI, Higgsfield, or a platform that just launched. |
 | `request_mcp_oauth` | Discord callers, Slack callers, Teams callers | Connect an agent to an MCP server that signs people in through the browser, such as Notion or Atlassian. |
 | `request_mcp_token` | Discord callers, Slack callers, Teams callers | Connect an agent such as research-bot to Linear through an MCP endpoint with a bearer token, not browser OAuth. |
+| `request_watch_credential` | Discord callers | Ask the person for their own read-only key for a server their watches check. |
 
 ## `environments`
 
@@ -189,6 +210,25 @@ Environment tools: list / get / create / update / archive.
 | `get_environment` | all callers | Return one environment by name. |
 | `list_environments` | operator tokens with tenant:read | List environments in the tenant pool. |
 | `update_environment` | admin only | Patch-update an environment. |
+
+## `fly`
+
+Native owner-only Fly sessions bound to verified, attended conversation origins.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `fly_extend_session` | all callers | Set your session's expiry to this many hours from now, after owner approval. |
+| `fly_get_session_status` | all callers | Read your session's machine state, capacity and expiry without renewing it. |
+| `fly_launch_session` | all callers | Launch your own temporary Fly machine from an operator image profile. |
+| `fly_list_files` | all callers | List paths and sizes on your session. |
+| `fly_list_sessions` | all callers | List your live sessions in this conversation. |
+| `fly_list_templates` | all callers | List operator image profiles, fixed CPU/RAM and allowed regions. |
+| `fly_read_file` | all callers | Read a file from your session in byte chunks. |
+| `fly_run_bash` | all callers | Run bash on your session; inline by default, returning exit code and stdout. |
+| `fly_stop_session` | all callers | Permanently delete a session and its files. |
+| `fly_task_result` | all callers | Read the end of a background command's output (last 16 KiB). |
+| `fly_task_status` | all callers | Check one of your background commands: state, exit code and output size. |
+| `fly_write_file` | all callers | Write UTF-8 text on your session and renew its idle lease. |
 
 ## `github_app`
 
@@ -247,6 +287,31 @@ Current-place status tool with short text and complete structured facts.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `where_am_i` | all callers | Return the short who-answers-here text and the full structured facts. |
+
+## `lead_intake`
+
+First-party lead intake tools; authority derives only from live server context.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `lead_intake_get` | Discord callers | Read one authorized tenant lead, its review state and durable effect progress. |
+| `lead_intake_health` | Discord callers | Read tenant lead counts, oldest pending age and mailbox coverage. |
+| `lead_intake_list` | Discord callers | Read up to 100 tenant leads the caller may read, oldest first. |
+| `lead_intake_read_source` | Discord callers | Read attachment-free original Gmail text for an unexpired discovered message. |
+| `lead_intake_resolve` | Discord callers | Apply evidence-backed human CRM selections as a sales resolver or core-role member. |
+| `lead_intake_resume` | Discord callers | Recover lead effects and mailbox coverage without blindly retrying uncertain creates. |
+| `lead_intake_submit` | Discord callers | Verify and durably register one classified Gmail or own explicit Discord lead. |
+
+## `long_jobs`
+
+Start approved jobs, manage them as owner/admin, and read under source policy.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `cancel_long_job` | all callers | Request interrupt and archive as owner or current human tenant admin. |
+| `get_long_job` | all callers | Read an owner/admin job; return source-restricted metadata when content is private. |
+| `list_long_jobs` | all callers | List your latest 100 jobs; current human tenant admins may list all tenant jobs. |
+| `start_long_job` | all callers | Run an exact human-approved shell command in a fresh isolated Managed Agents worker. |
 
 ## `media`
 
@@ -314,17 +379,17 @@ Promo code tools: redeem an operator-issued code for the caller's server or work
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `redeem_promo_code` | admin only, operator tokens with promo:redeem | Redeem a promo code for credit on this workspace. |
+| `redeem_promo_code` | admin only, operator tokens with promo:redeem | Redeem credit with a direct personal platform-admin CLI credential. |
 
 ## `promo_issuing`
 
-Promo code issuing for operator tokens: create, list and revoke deployment-wide codes.
+Deployment-wide promo issuance requires the human operator CLI.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `create_promo_code` | operator tokens with promo:create | Create a promo code any workspace can redeem for credit. |
-| `list_promo_codes` | operator tokens with promo:create | List every promo code on this deployment, newest first. |
-| `revoke_promo_code` | operator tokens with promo:create | Stop a promo code from being redeemed again. |
+| `create_promo_code` | operator tokens with promo:create | Unavailable over MCP: issue deployment-wide promos with the human operator CLI. |
+| `list_promo_codes` | operator tokens with promo:create | Unavailable over MCP: list deployment-wide promos with the human operator CLI. |
+| `revoke_promo_code` | operator tokens with promo:create | Unavailable over MCP: revoke deployment-wide promos with the human operator CLI. |
 
 ## `propagation`
 
@@ -354,17 +419,29 @@ Report publishing MCP tools.
 | `delete_report` | all callers | Un-publish a report you published. |
 | `publish_report` | all callers | Publish a report: a page where the named people can read it and ask it questions. |
 
-## `routines`
+## `repo_memory`
 
-Routines tools: create / list / get / update / delete.
+Repository-scoped persistent memory, authorized by the executing turn.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `create_routine` | all callers | Create a routine in the caller's tenant partition. |
+| `repo_memory_delete` | all callers | Forget a memory by slug only when the person explicitly asks. |
+| `repo_memory_list` | all callers | List repository memories: shared entries and your own personal directives. |
+| `repo_memory_save` | all callers | Remember information for the bound working repository across sessions. |
+| `repo_memory_view` | all callers | Read a repository memory's full body by its listed slug. |
+
+## `routines`
+
+Routines tools: create / list / get / update / delete, and an admin's sandbox opt-in.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `create_routine` | all callers | Create a recurring routine; owner DMs run as unattended live-DM turns. |
 | `delete_routine` | all callers | Delete a routine (hard delete, tenant-scoped). |
 | `get_routine` | all callers | Get a routine by id. |
 | `list_routines` | all callers | List the routines you created (an admin sees every routine in the workspace). |
-| `update_routine` | all callers | PATCH-update a routine. |
+| `set_routine_sandbox_tools` | admin only | Turn built-in sandbox tools (bash, file reads and edits and the rest) on or off for one routine's own scheduled runs. |
+| `update_routine` | all callers | PATCH-update a routine, including owner-only DM delivery where supported. |
 
 ## `self_edit`
 
@@ -426,11 +503,20 @@ Conversational task handoff and fresh start.
 
 ## `tenant_summary`
 
-Tenant summary: the balance, funding mode and every configured channel in one read.
+Billing and tenant configuration summaries for direct personal platform admins.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `get_tenant_summary` | admin only, operator tokens with tenant:read | Summarize this workspace: balance, funding mode and each channel. |
+| `get_tenant_summary` | admin only, operator tokens with tenant:read | Read billing and configuration with a personal platform-admin CLI credential. |
+
+## `thread_model`
+
+Switch this conversation's model when someone asks in words ("use opus", "think
+harder").
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `set_thread_model` | all callers | Run this conversation on another model when the person asks in words: "use opus here", "think harder". |
 
 ## `thread_participation`
 
@@ -478,6 +564,22 @@ Vault tool: list_credentials — safe projection of caller's MCP vault credentia
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `list_credentials` | agent tokens only | List credentials in the caller's MCP vault (safe projection — no secrets). |
+
+## `watches`
+
+Owner-bound watch management.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `create_watch` | Discord callers | Watch a listed read tool from this conversation: a Discord reader or an MCP server's. |
+| `delete_watch` | Discord callers | Delete your watch and its retained evidence after cancelling queued wakes; admins may delete within their workspace. |
+| `list_watches` | Discord callers | List your watches in this workspace; admins may list every owner's with scope "all". |
+| `pause_watch` | Discord callers | Pause your watch and cancel its queued wakes. |
+| `preview_watch_edit` | Discord callers | Show what an edit to your watch would change, old and new, without changing it. |
+| `resume_watch` | Discord callers | Resume your paused watch from an attended owner turn after fresh access checks. |
+| `rotate_watch_key` | Discord callers | Rotate a page signing key, revoke the old key and cancel queued wakes. |
+| `show_watch` | Discord callers | Show your watch's immutable destination, source, status and expiry. |
+| `update_watch` | Discord callers | Change your watch in place, after `preview_watch_edit`, with the same changes. |
 
 ## `wizard`
 

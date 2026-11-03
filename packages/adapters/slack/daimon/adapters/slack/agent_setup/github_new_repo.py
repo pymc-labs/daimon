@@ -6,7 +6,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
-from daimon.adapters.slack.admin import resolve_is_admin
+from daimon.adapters.slack.admin import resolve_is_platform_admin
 from daimon.adapters.slack.agent_setup.github_card_ui import github_card_blocks
 from daimon.adapters.slack.agent_setup.github_link import send_link
 from daimon.adapters.slack.credential_submissions import post_ephemeral
@@ -49,7 +49,12 @@ async def send_pending_notice(
         async with runtime.sessionmaker() as session:
             try:
                 account_id = await admin_account_for_platform_user(
-                    session, tenant_id=tenant_id, external_id=user_id
+                    session,
+                    tenant_id=tenant_id,
+                    external_id=user_id,
+                    is_platform_admin=await resolve_is_platform_admin(
+                        client, user_id=user_id, host_team_id=team_id
+                    ),
                 )
             except ValueError:
                 account_id = None
@@ -121,7 +126,9 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
         str(user.get("id") or ""),
     )
     client = await resolve_web_client(runtime, team_id=team_id)
-    if client is None or not await resolve_is_admin(client, user_id=user_id, host_team_id=team_id):
+    if client is None or not await resolve_is_platform_admin(
+        client, user_id=user_id, host_team_id=team_id
+    ):
         return
     try:
         card_value: object = json.loads(str(action.get("value") or ""))
@@ -141,10 +148,10 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
                 tenant_id=tenant_id,
                 platform="slack",
                 platform_user_id=user_id,
-                verified_tenant_admin=True,
+                is_platform_admin=True,
             )
             account_id = await admin_account_for_platform_user(
-                session, tenant_id=tenant_id, external_id=user_id
+                session, tenant_id=tenant_id, external_id=user_id, is_platform_admin=True
             )
             group = await notices_for_day(session, tenant_id=tenant_id, day=day)
             if group is None:
@@ -174,7 +181,7 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
                     tenant_id=tenant_id,
                     platform="slack",
                     platform_user_id=user_id,
-                    verified_tenant_admin=await resolve_is_admin(
+                    is_platform_admin=await resolve_is_platform_admin(
                         client, user_id=user_id, host_team_id=team_id
                     ),
                 )
@@ -184,7 +191,7 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
                     tenant_id=tenant_id,
                     platform="slack",
                     platform_user_id=user_id,
-                    verified_tenant_admin=await resolve_is_admin(
+                    verified_tenant_admin=await resolve_is_platform_admin(
                         client, user_id=user_id, host_team_id=team_id
                     ),
                     workspace_label=str(team.get("name") or "") or None,

@@ -15,6 +15,7 @@ import math
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from typing import Any, cast
 
 import structlog
 from anthropic import AsyncAnthropic
@@ -29,8 +30,11 @@ from daimon.core.output_delivery import (
     render_oversize_notice,
     sweep_session_outputs,
 )
+from daimon.core.turn.output import authorize_output, output_is_guarded
 from slack_sdk.errors import SlackApiError, SlackRequestError
 from slack_sdk.web.async_client import AsyncWebClient
+from slack_sdk.web.async_slack_response import AsyncSlackResponse
+from slack_sdk.web.file_upload_v2_result import FileUploadV2Result
 
 log = structlog.get_logger(__name__)
 
@@ -133,6 +137,22 @@ def _abort_code(exc: OutputPostingUnavailable) -> str:
     return ""
 
 
+class _AuthorizedUploadClient(AsyncWebClient):
+    """Recheck authorization between the SDK upload flow's HTTP steps."""
+
+    async def files_getUploadURLExternal(self, **kwargs: Any) -> AsyncSlackResponse:  # noqa: ANN401
+        await authorize_output()
+        return await super().files_getUploadURLExternal(**kwargs)  # pyright: ignore[reportUnknownMemberType]
+
+    async def _upload_file(self, **kwargs: Any) -> FileUploadV2Result:  # noqa: ANN401
+        await authorize_output()
+        return await super()._upload_file(**kwargs)  # pyright: ignore[reportPrivateUsage]
+
+    async def files_completeUploadExternal(self, **kwargs: Any) -> AsyncSlackResponse:  # noqa: ANN401
+        await authorize_output()
+        return await super().files_completeUploadExternal(**kwargs)  # pyright: ignore[reportUnknownMemberType]
+
+
 def _uploader(web_client: AsyncWebClient, *, size_bytes: int) -> AsyncWebClient:
     """The client to upload ``size_bytes`` with: ``web_client``, or for a large
     file one whose timeout grows with the file.
@@ -141,9 +161,12 @@ def _uploader(web_client: AsyncWebClient, *, size_bytes: int) -> AsyncWebClient:
     the session cannot be given more time. The client built here has no session:
     slack_sdk opens one per call with the client's timeout.
     """
-    if size_bytes <= _SHARED_SESSION_MAX_BYTES:
+    if size_bytes <= _SHARED_SESSION_MAX_BYTES and not output_is_guarded():
         return web_client
-    return AsyncWebClient(
+    client_type = _AuthorizedUploadClient if output_is_guarded() else AsyncWebClient
+    return client_type(
+        session=web_client.session if size_bytes <= _SHARED_SESSION_MAX_BYTES else None,
+        headers=cast(dict[str, str], web_client.headers),  # pyright: ignore[reportUnknownMemberType]
         token=web_client.token,
         base_url=web_client.base_url,
         timeout=_UPLOAD_BASE_TIMEOUT_S + math.ceil(size_bytes / _UPLOAD_MIN_BYTES_PER_S),
@@ -153,21 +176,48 @@ def _uploader(web_client: AsyncWebClient, *, size_bytes: int) -> AsyncWebClient:
     )
 
 
-def _build_poster(
-    web_client: AsyncWebClient, *, channel_id: str, thread_ts: str
+class _SweepMention:
+    """The one mention a sweep makes of the person whose turn wrote its files.
+
+    The sweep runs after the turn has let the thread go, so in a shared thread
+    a file can land after someone else's question. The sweep's first post names
+    them; a Slack mention always pings, so the posts after it do not repeat it.
+    """
+
+    def __init__(self, requester_user_id: str | None) -> None:
+        self._mention = f"<@{requester_user_id}>" if requester_user_id else None
+
+    @property
+    def pending(self) -> str | None:
+        """The mention, until a post carrying it has gone out."""
+        return self._mention
+
+    def posted(self) -> None:
+        self._mention = None
+
+
+def build_output_poster(
+    web_client: AsyncWebClient,
+    *,
+    channel_id: str,
+    thread_ts: str | None,
+    mention: _SweepMention | None = None,
 ) -> Callable[[DeliverableFile], Awaitable[None]]:
     async def post(file: DeliverableFile) -> None:
+        pending = mention.pending if mention is not None else None
         display_name = display_filename_for(file.filename, file.mime_type)
         try:
             # No content_type kwarg: files_upload_v2 forwards it into the
             # files.completeUploadExternal query string, where it is a silent
             # no-op — Slack derives the preview from the filename extension.
+            await authorize_output()
             await _uploader(web_client, size_bytes=len(file.content)).files_upload_v2(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
                 channel=channel_id,
                 thread_ts=thread_ts,
                 filename=display_name,
                 title=display_name,
                 content=file.content,
+                initial_comment=f"For {pending}" if pending else None,
             )
         except (SlackApiError, SlackRequestError) as err:
             code = _slack_error_code(err)
@@ -176,19 +226,32 @@ def _build_poster(
             # Anything else — including every SlackRequestError — is a
             # per-file failure the core engine isolates without deleting.
             raise
+        if mention is not None:
+            mention.posted()
 
     return post
 
 
 def _build_skip_notice(
-    web_client: AsyncWebClient, *, channel_id: str, thread_ts: str, max_bytes: int
+    web_client: AsyncWebClient,
+    *,
+    channel_id: str,
+    thread_ts: str,
+    max_bytes: int,
+    mention: _SweepMention | None = None,
 ) -> Callable[[SkippedFile], Awaitable[None]]:
     async def on_skip(skipped: SkippedFile) -> None:
+        pending = mention.pending if mention is not None else None
+        await authorize_output()
         await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
             channel=channel_id,
             thread_ts=thread_ts,
-            attachments=notice_attachments(render_oversize_notice(skipped, max_bytes=max_bytes)),
+            attachments=notice_attachments(
+                render_oversize_notice(skipped, max_bytes=max_bytes, for_whom=pending)
+            ),
         )
+        if mention is not None:
+            mention.posted()
 
     return on_skip
 
@@ -203,21 +266,31 @@ async def deliver_session_outputs(
     notice_keys: NoticeKeys,
     team_id: str,
     noticed_files: NoticedFiles | None = None,
+    requester_user_id: str | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> None:
     """Sweep the session's outputs into the thread, degrading on abort codes.
+
+    ``requester_user_id`` is the Slack user whose turn wrote the files. The
+    sweep's first upload or oversize notice mentions them, once, because the
+    sweep finishes after the thread is free and can post under another
+    person's later turn.
 
     ``notice_keys`` is the instance-level bounded registry owned by ``SlackApp``,
     keyed per thread for notices and per workspace for the warning log.
     ``noticed_files`` records the kept oversize outputs already announced, so
     a file over the limit gets one notice rather than one per sweep.
     """
-    post = _build_poster(web_client, channel_id=channel_id, thread_ts=thread_ts)
+    mention = _SweepMention(requester_user_id)
+    post = build_output_poster(
+        web_client, channel_id=channel_id, thread_ts=thread_ts, mention=mention
+    )
     on_skip = _build_skip_notice(
         web_client,
         channel_id=channel_id,
         thread_ts=thread_ts,
         max_bytes=SLACK_MAX_BYTES_PER_FILE,
+        mention=mention,
     )
     try:
         await sweep_session_outputs(
@@ -248,6 +321,7 @@ async def deliver_session_outputs(
         async with notice_keys.lock(notice_key):
             if notice_key in notice_keys:
                 return
+            await authorize_output()
             await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
                 channel=channel_id,
                 thread_ts=thread_ts,
@@ -270,5 +344,5 @@ async def deliver_provider_output(
         or file.size_bytes > SLACK_MAX_BYTES_PER_FILE
     ):
         return False
-    await _build_poster(web_client, channel_id=channel_id, thread_ts=thread_ts)(file)
+    await build_output_poster(web_client, channel_id=channel_id, thread_ts=thread_ts)(file)
     return True

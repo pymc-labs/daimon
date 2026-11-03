@@ -8,6 +8,7 @@ from typing import Literal
 import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._admin import current_admin
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._owner import may_own
 from daimon.adapters.mcp.tools._words import space_noun
@@ -35,7 +36,6 @@ from daimon.core.github_credentials import encrypt_token
 from daimon.core.github_panel import requester_manages_agent
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.accounts import get_account
-from daimon.core.stores.domain import Role
 from daimon.core.stores.github_access import (
     list_agent_grants,
     list_authorized_repos,
@@ -219,7 +219,7 @@ async def _github_connect_impl(
         account = await get_account(session, auth.account_id)
         if account is None or account.tenant_id != auth.tenant_id:
             raise ToolError("GitHub setup is unavailable for this account.")
-        is_admin = account.role == Role.ADMIN and auth.is_admin
+        is_admin = await current_admin(session, auth)
         manages = is_admin or await requester_manages_agent(
             session,
             tenant_id=auth.tenant_id,

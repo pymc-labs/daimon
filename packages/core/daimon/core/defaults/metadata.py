@@ -36,6 +36,8 @@ MA_METADATA_KEY_SEALED = "daimon_sealed"
 MA_METADATA_KEY_TENANT = "daimon_tenant"
 MA_METADATA_KEY_NAME = "daimon_name"
 MA_METADATA_KEY_ACCOUNT = "daimon_account"
+# Only agent-chat-created sessions can be driven by headless MCP/hub callers.
+MA_METADATA_KEY_AGENT_CHAT = "daimon_agent_chat"
 MA_METADATA_KEY_MANAGED = "daimon_managed"
 MA_METADATA_KEY_SPEC_HASH = "daimon_spec_hash"
 MA_METADATA_KEY_ISOLATED = "daimon_isolated"

@@ -62,6 +62,8 @@ def audit_list_command(
                     "agent_id",
                     "tool_name",
                     "operation",
+                    "admin_subject_kind",
+                    "admin_subject_id",
                     "outcome",
                     "reason",
                     "token_kind",

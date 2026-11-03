@@ -17,6 +17,7 @@ from daimon.core.pricing import ModelRates, ProviderPrice
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.stores import channel_budgets, tenant_ledger
 from daimon.core.stores.mux_state import PostgresStateStore
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn import driver
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.deps import TurnDeps
@@ -174,6 +175,7 @@ async def context(request, db_preflight, db_session_factory, db_clean, monkeypat
         public_url=None,
         turn_path="legacy" if provider == "anthropic" else "mux",
         state_store=PostgresStateStore(db_session_factory),
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     admission = Admission(
         account_id=ACCOUNT,
@@ -460,6 +462,8 @@ async def test_cancelled_host_turn_is_not_a_successful_first_turn(context):
     receipt = await context.run(cancel=cancel)
     assert not receipt.metered
     assert "HOST_TURN_NOT_SUCCESSFUL_SINGLE_ATTEMPT" in receipt.issues
+    if context.port is not None:
+        assert context.port.sends == [], "a pre-cancelled owner reconciles without new input"
     # The real driver reconciles any provider-reported usage even on failure.
     # Our native fixture has a measured replay snapshot: retain that genuine
     # charge, without mistaking the cancelled turn for completed NEW15 work.

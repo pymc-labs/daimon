@@ -190,3 +190,41 @@ async def test_resume_routine_via_panel_recomputes_next_fire_at(
     assert resumed.next_fire_at is not None and resumed.next_fire_at > now - timedelta(seconds=1), (
         "computed next_fire_at must be at-or-after now"
     )
+
+
+async def test_panel_rows_redact_legacy_diagnostics_for_non_owners(
+    db_session, tenant_id, seed_routine
+):
+    from sqlalchemy import text
+
+    row = await seed_routine(
+        tenant_id=tenant_id,
+        created_by_user_id="owner",
+        last_result_tail="personal-memory-sentinel",
+        last_error="private-error",
+    )
+    await db_session.execute(
+        text(
+            "UPDATE routines SET delivery_note = 'private-note', delivery_payload = 'private-payload' "
+            "WHERE id = :id"
+        ),
+        {"id": row.id},
+    )
+    client = build_stub_anthropic(_handler_with([]))
+    for viewer in (None, "admin", "owner"):
+        entries, _, _ = await load_guild_routines(
+            db_session,
+            client,
+            tenant_id=tenant_id,
+            viewer_user_id=viewer,
+        )
+        result = entries[0].routine
+        if viewer == "owner":
+            assert result.last_result_tail == "personal-memory-sentinel"
+            assert result.last_error == "private-error" and result.delivery_note == "private-note"
+        else:
+            assert result.last_result_tail is None and result.delivery_note is None
+            assert (
+                result.delivery_payload is None and "private-error" not in result.model_dump_json()
+            )
+    await client.close()

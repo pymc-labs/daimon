@@ -22,12 +22,15 @@ import json
 import os
 import stat
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from decimal import Decimal
 from pathlib import Path
 
 import jwt as pyjwt
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.admin_actions import BILLING_PANEL_TOKEN_LABEL
 from daimon.core.authz import (
     Action,
     AgentRef,
@@ -39,6 +42,7 @@ from daimon.core.authz import (
     build_subject,
     build_turn_place,
 )
+from daimon.core.lead_intake_execution import current_intake_execution
 from daimon.core.mcp_hold import HOLD_CLAIM, hold_claim
 from daimon.core.mcp_identity import RELAY_CLAIM, RelayBinding
 from daimon.core.operator_tokens import OperatorScope
@@ -77,6 +81,27 @@ def read_private_credential(path: Path) -> str:
     return token
 
 
+# Only native session construction sets this explicit scope-bound grant. It is
+# separate from ambient rendering/execution origins, including a parent worker.
+_native_session_grant: ContextVar[tuple[Scope, str | None] | None] = ContextVar(
+    "native_mcp_session_grant", default=None
+)
+
+
+@contextmanager
+def native_mcp_session(scope: Scope, grant: str | None) -> Iterator[None]:
+    """Install an isolated provider-session grant before native credential capture.
+
+    A grant carries no origin authority until the prepared driver binds it.
+    Explicit None masks inherited execution grants during child construction.
+    """
+    token = _native_session_grant.set((scope, grant))
+    try:
+        yield
+    finally:
+        _native_session_grant.reset(token)
+
+
 async def resolve_agent_mcp_credential(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
@@ -109,6 +134,56 @@ async def resolve_agent_mcp_credential(
     )
     if await list_mcp_tools(destination, token) != frozenset(tools):
         raise ValueError("target MCP catalogue differs from captured source")
+    if chat_execution and (prepared_grant := _native_session_grant.get()) is not None:
+        authorized, grant = prepared_grant
+        if authorized != scope:
+            raise ValueError("native MCP session grant has a foreign scope")
+        if grant is None:
+            return token
+        claims = pyjwt.decode(token, secret, algorithms=["HS256"], options={"verify_exp": False})
+        return pyjwt.encode({**claims, "chat_session_id": grant}, secret, algorithm="HS256")
+    if chat_execution:
+        from daimon.core.ma_identity import derive_agent_uuid
+        from daimon.core.stores.accounts import get_account_with_tenant
+        from daimon.core.stores.turn_origins import bind_origin_session, get_active_origin
+        from daimon.core.turn_origin import current_execution_origin_id
+
+        origin_id = current_execution_origin_id.get()
+        if origin_id is not None:
+            # Send-time native runtimes resolve inside the executing turn.
+            # run_prepared_turn exposes execution_origin only inside the acquired
+            # lease; its execution cleanup also revokes this origin-unique grant.
+            # Derive a grant from that trusted context, keeping the SAME registry
+            # owner, expiry and revocation as the validated source credential.
+            async with sessionmaker.begin() as db:
+                identity = await get_account_with_tenant(db, account_id=uuid.UUID(scope.account_id))
+                origin = (
+                    None
+                    if identity is None
+                    else await get_active_origin(
+                        db,
+                        origin_id=origin_id,
+                        tenant_id=uuid.UUID(scope.tenant_id),
+                        account_id=uuid.UUID(scope.account_id),
+                        platform=identity.platform,
+                        now=now,
+                    )
+                )
+                if (
+                    origin is None
+                    or derive_agent_uuid(
+                        tenant_id=origin.tenant_id, ma_agent_id=origin.responder_ma_agent_id
+                    )
+                    != agent_id
+                ):
+                    raise ValueError("native MCP origin has no executing session grant")
+                await bind_origin_session(db, origin_id=origin_id, chat_session_id=str(origin_id))
+            claims = pyjwt.decode(
+                token, secret, algorithms=["HS256"], options={"verify_exp": False}
+            )
+            token = pyjwt.encode(
+                {**claims, "chat_session_id": str(origin_id)}, secret, algorithm="HS256"
+            )
     return token
 
 
@@ -123,6 +198,9 @@ def mint_jwt(
     expires_at: dt.datetime | None = None,
     chat_agent_id: uuid.UUID | None = None,
     slack_turn_context_id: uuid.UUID | None = None,
+    routine_id: uuid.UUID | None = None,
+    execution_id: uuid.UUID | None = None,
+    chat_session_id: str | None = None,
     hold: TurnHold | None = None,
     relay: RelayBinding | None = None,
     anthropic_disabled: bool = False,
@@ -144,6 +222,7 @@ def mint_jwt(
       scoped to the agent without trusting tool-supplied parameters.
     - ``chat_agent_id`` identifies the agent executing an ordinary chat session
       without selecting the restricted external agent-chat tool surface.
+    - ``chat_session_id`` binds origin use to one isolated provider session.
     - ``slack_turn_context_id`` is an execution grant used only by isolated Slack
       DM session credentials. Readers require the matching live tenant/account row.
     - ``hold`` signs the channel a held turn is kept to (`daimon.core.mcp_hold`).
@@ -174,6 +253,12 @@ def mint_jwt(
         claims["chat_agent_id"] = str(chat_agent_id)
     if slack_turn_context_id is not None:
         claims["slack_turn_context_id"] = str(slack_turn_context_id)
+    if routine_id is not None and execution_id is not None:
+        claims["routine_id"] = str(routine_id)
+        claims["execution_id"] = str(execution_id)
+    if chat_session_id is not None:
+        claims["chat_session_id"] = chat_session_id
+
     if hold is not None:
         claims[HOLD_CLAIM] = hold_claim(hold)
     if relay is not None:
@@ -189,7 +274,6 @@ def mint_jwt(
 CHAT_TOKEN_TTL = dt.timedelta(hours=1)
 CHAT_TOKEN_REFRESH_MARGIN = dt.timedelta(minutes=50)
 CHAT_TOKEN_LABEL_PREFIX = "vault-chat:"
-PANEL_TOKEN_LABEL = "billing-panel"
 EPHEMERAL_TOKEN_RETENTION = dt.timedelta(days=1)
 
 
@@ -229,6 +313,8 @@ async def mint_chat_mcp_token(
     secret: bytes,
     now: dt.datetime,
     slack_turn_context_id: uuid.UUID | None = None,
+    chat_session_id: str | None = None,
+    routine_execution: tuple[uuid.UUID, uuid.UUID] | None = None,
     hold: TurnHold | None = None,
     relay: RelayBinding | None = None,
     ttl: dt.timedelta = CHAT_TOKEN_TTL,
@@ -272,13 +358,17 @@ async def mint_chat_mcp_token(
         platform=None if hold is None else hold.platform,
         channel_id=None if hold is None else hold.channel_id,
     )
+    execution = (routine_execution or current_intake_execution.get()) if chat_session_id else None
     token = mint_jwt(
+        routine_id=execution[0] if execution else None,
+        execution_id=execution[1] if execution else None,
         account_id=account_id,
         chat_agent_id=agent_id,
         anthropic_disabled=anthropic_disabled,
         secret=secret,
         now=now,
         slack_turn_context_id=slack_turn_context_id,
+        chat_session_id=chat_session_id,
         hold=hold,
         relay=relay,
         jti=jti,
@@ -390,6 +480,7 @@ def registered_agent_claims_match(
     now: dt.datetime,
     chat_execution: bool,
     max_ttl_s: int = 900,
+    allow_session_grant: bool = False,
 ) -> bool:
     """Share the remote credential's exact mint shape with server admission.
 
@@ -399,9 +490,12 @@ def registered_agent_claims_match(
     """
     identity_claim = "chat_agent_id" if chat_execution else "agent_id"
     expiry = claims.get("exp")
+    expected = {"sub", identity_claim, "jti", "exp"}
+    if allow_session_grant and chat_execution and isinstance(claims.get("chat_session_id"), str):
+        expected.add("chat_session_id")
     return (
         0 < max_ttl_s <= 900
-        and set(claims) == {"sub", identity_claim, "jti", "exp"}
+        and set(claims) == expected
         and claims["sub"] == str(row.account_id)
         and claims[identity_claim] == row.agent_id
         and claims["jti"] == str(row.jti)
@@ -576,7 +670,7 @@ async def mint_panel_mcp_token(
         secret=secret,
         now=now,
         expires_at=now + dt.timedelta(minutes=10),
-        label=PANEL_TOKEN_LABEL,
+        label=BILLING_PANEL_TOKEN_LABEL,
     )
 
 

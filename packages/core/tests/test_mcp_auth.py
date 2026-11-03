@@ -622,6 +622,114 @@ async def test_registered_chat_execution_claims_and_registry_share_exact_agent(
     assert claims["exp"] == int((now + dt.timedelta(seconds=900)).timestamp())
 
 
+async def test_native_chat_credential_grant_keeps_source_expiry_and_revocation(
+    db_session_factory, tmp_path, monkeypatch
+):
+    from unittest.mock import AsyncMock
+
+    from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.mcp_auth import resolve_agent_mcp_credential
+    from daimon.core.mux_backend import resource_scope
+    from daimon.core.stores.domain import Role
+    from daimon.core.stores.mcp_tokens import revoke_mcp_token
+    from daimon.core.stores.turn_origins import get_active_origin
+    from daimon.core.turn_origin import execution_origin, turn_origin
+    from daimon.testing.factories import make_account, make_tenant
+
+    now = dt.datetime.now(dt.UTC)
+    async with db_session_factory.begin() as db:
+        tenant = await make_tenant(db, platform="discord")
+        account = await make_account(db, tenant=tenant)
+        agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_native")
+        source = await mint_agent_mcp_token(
+            db,
+            account_id=account.id,
+            tenant_id=tenant.id,
+            agent_id=agent_id,
+            label="native-source",
+            secret=b"s" * 32,
+            now=now,
+            ttl_days=900 / 86400,
+            chat_execution=True,
+        )
+    path = tmp_path / "credential"
+    path.write_text(source)
+    path.chmod(0o600)
+    monkeypatch.setattr(
+        "daimon.core.mcp_oauth.discovery.list_mcp_tools",
+        AsyncMock(return_value=frozenset({"hand_off_task"})),
+    )
+    async with turn_origin(
+        db_session_factory,
+        tenant_id=tenant.id,
+        account_id=account.id,
+        platform="discord",
+        parent_channel_id="parent",
+        thread_id="native",
+        responder_ma_agent_id="agent_native",
+        responder_name="native",
+        role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
+    ) as origin:
+        # Ambient rendering context alone cannot authorize native origin use.
+        with execution_origin(None):
+            unbound = await resolve_agent_mcp_credential(
+                db_session_factory,
+                path=path,
+                secret=b"s" * 32,
+                scope=resource_scope(
+                    tenant_id=str(tenant.id),
+                    account_id=str(account.id),
+                    authorization_id="native-test",
+                ),
+                agent_id=agent_id,
+                destination="https://daimon.example/mcp",
+                tools=("hand_off_task",),
+                now=now,
+                chat_execution=True,
+            )
+        assert unbound == source
+        with execution_origin(origin.id):
+            derived = await resolve_agent_mcp_credential(
+                db_session_factory,
+                path=path,
+                secret=b"s" * 32,
+                scope=resource_scope(
+                    tenant_id=str(tenant.id),
+                    account_id=str(account.id),
+                    authorization_id="native-test",
+                ),
+                agent_id=agent_id,
+                destination="https://daimon.example/mcp",
+                tools=("hand_off_task",),
+                now=now,
+                chat_execution=True,
+            )
+
+        import jwt
+
+        original = jwt.decode(source, b"s" * 32, algorithms=["HS256"])
+        claims = jwt.decode(derived, b"s" * 32, algorithms=["HS256"])
+        assert claims == {**original, "chat_session_id": str(origin.id)}
+        verifier = DaimonJWTVerifier(secret=b"s" * 32, sessionmaker=db_session_factory)
+        verified = await verifier.verify_token(derived)
+        assert verified is not None and verified.claims["chat_session_id"] == str(origin.id)
+        async with db_session_factory.begin() as db:
+            bound = await get_active_origin(
+                db,
+                origin_id=origin.id,
+                tenant_id=tenant.id,
+                account_id=account.id,
+                platform="discord",
+                now=now,
+            )
+            assert bound is not None and bound.chat_session_id == str(origin.id)
+            await revoke_mcp_token(db, jti=uuid.UUID(original["jti"]), now=now)
+        assert await verifier.verify_token(derived) is None
+
+
 async def test_selfhosted_chat_credential_keeps_no_anthropic_flag_without_resource_row(
     db_session: AsyncSession,
 ) -> None:

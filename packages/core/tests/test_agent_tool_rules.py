@@ -137,6 +137,17 @@ def test_rule_channel_is_parent_and_dm_is_excluded() -> None:
         channel_for_tool_rules(platform="discord", channel_id="source", private_dm_id="dm") is None
     )
 
+    assert (
+        channel_for_tool_rules(
+            platform="slack", channel_id="C123:1234.5678", private_dm_id="routine:job"
+        )
+        == "C123"
+    )
+    assert (
+        channel_for_tool_rules(platform="discord", channel_id=None, private_dm_id="routine:job")
+        is None
+    )
+
 
 def test_nullable_global_key_has_unique_index() -> None:
     indexes: dict[str, Index] = {

@@ -95,6 +95,67 @@ Nothing seeds `agents-optional/`. To opt in, move a file into
 deployment with `daimon agents create <path>`, which marks it unmanaged so the
 sweep leaves it alone.
 
+## Optional write skills and agents
+
+Some seeded skills write to outside services through a shared credential. Each
+runs on its own optional agent in `defaults/agents-optional/`, never on default
+Daimon.
+
+| Skill | Agent | Credential | Does |
+| --- | --- | --- | --- |
+| `workspace-write` | `workspace-writer` | Google binding | Gmail send and draft, Drive create, copy and rename, Docs edits, Calendar create and update |
+| `slides-workflow` | `workspace-writer` | Google binding | Copy a named template or edit a named deck, then render changed slides to check them |
+| `toggl-edits` | `time-editor` | `TOGGL_API_TOKEN` | Edit stopped Toggl entries for a named member, up to 365 days old |
+| `image-workflow` | `image-maker` | `OPENAI_API_KEY` | Generate or edit one PNG into `/mnt/session/outputs` |
+| `lead-intake` | none | none | Classify enquiries and draft replies for [lead intake](lead-intake.md) |
+
+To opt in, deliver the skills, create the agent, then bind its credential:
+
+```bash
+daimon defaults apply
+daimon agents create defaults/agents-optional/workspace-writer.yaml
+daimon agents bind-google workspace-writer <shared-email> --scopes <scope>...
+```
+
+Collect Toggl and OpenAI keys with `request_agent_key`. The specs hold no
+credentials and attach nothing on their own.
+
+A Google binding uses `credentials.google_user_json` when its email matches
+`credentials.google_user_email`, else the service account in
+`credentials.google_sa_json` with domain-wide delegation. With a user
+credential, bind only the scopes its sign-in was granted, or Google refuses the
+refresh with `invalid_scope`. A matching binding never falls back to the
+service account. Full Drive scope is needed for existing shared files.
+
+The skills never share files, change permissions, delete permanently or move
+Drive files. Writes are not retried, so check an uncertain result before
+trying again. Pillow must be in custom sandbox images for the image and slides
+checks.
+
+> **Warning:** Everyone who can reach one of these agents acts as its account,
+> including reading Drive and sending mail. A separate agent name is not an
+> access limit.
+
+Limit who can reach them:
+
+- **Discord:** set the agent rule's `invoker_role_ids`. Role-gated agents
+  refuse routines.
+- **Slack and Teams:** there is no per-person gate. Route the agent only to
+  private channels with restricted members, and set `runs_in`.
+- **CLI:** `--agent` is not checked per agent, so keep CLI access to trusted
+  operators.
+- **Routines:** outside the Discord role gate, only the skill text forbids
+  unattended writes. Do not schedule routines on these agents.
+
+The shared I/O helper has one source,
+`defaults/skills/workspace-write/scripts/workflow_io.py`. After changing it, copy
+it into each skill and check the copies match:
+
+```bash
+uv run python scripts/sync_workflow_runtime.py
+uv run python scripts/sync_workflow_runtime.py --check
+```
+
 ## Add invocation context fragments
 
 Core adds a `turn_context` block before the user message, chosen by the

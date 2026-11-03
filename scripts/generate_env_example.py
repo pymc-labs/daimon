@@ -33,6 +33,7 @@ from _settings_walk import (
     stringify_default,
 )
 from daimon.adapters.scheduler.settings import SchedulerSettings
+from daimon.adapters.sidecar.settings import SidecarSettings
 from daimon.core.config import Settings
 from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined
@@ -118,6 +119,14 @@ def _build_sections() -> list[Section]:
     scheduler_leaves = collect_leaves(SchedulerSettings, "DAIMON_SCHEDULER__")
     sections.append(
         Section(title="Scheduler", variables=[_build_env_var(v) for v in scheduler_leaves])
+    )
+    sections.append(
+        Section(
+            title="Sidecar",
+            variables=[
+                _build_env_var(v) for v in collect_leaves(SidecarSettings, "DAIMON_SIDECAR__")
+            ],
+        )
     )
     return sections
 

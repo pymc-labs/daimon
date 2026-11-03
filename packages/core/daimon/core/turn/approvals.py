@@ -15,7 +15,9 @@ state, and `build_decision_events` sends each call's own allow/deny.
 The decider builders are the policy shells over
 `daimon.core.tool_safety.decide_tool_call`. `unattended_decider` never waits
 on anyone; `interactive_decider` hands `ask` verdicts to the adapter's
-`ConfirmationHook`. Neither does I/O of its own — the hook is the only thing
+`ConfirmationHook`. Each takes optional lookups for the call's agent rule and
+the call's own MCP annotations (`daimon.core.mcp_tool_annotations`), read only
+when they could change the verdict. Neither does I/O of its own — the hook is the only thing
 that talks to a platform, and a hook that raises counts as a refusal."""
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ from datetime import UTC, datetime, timedelta
 import structlog
 from anthropic.types.beta.sessions import BetaManagedAgentsUserToolConfirmationEventParams
 from anthropic.types.beta.sessions.beta_managed_agents_session_status_idle_event import StopReason
+from daimon.core.approval_gate import ApprovalGate
 from daimon.core.confirmation import (
     ApprovedConfirmation,
     CardRefusal,
@@ -36,23 +39,27 @@ from daimon.core.confirmation import (
     no_confirmation_surface,
     prompt_for_tool_call,
 )
+from daimon.core.defaults.metadata import is_private_routine_stamp
 from daimon.core.stores import agent_tool_rules
 from daimon.core.stores.agent_tool_rules import DaimonRuleSet
 from daimon.core.tool_safety import (
     DAIMON_SERVER_NAME,
     WILDCARD_TOOL,
     ResolvedAgentToolRule,
+    ToolAnnotations,
     ToolCall,
     ToolSafetyPolicy,
     ToolVerdict,
+    classify_tool,
     decide_tool_call,
+    gate_protected_tool,
     is_publish_call,
+    needs_annotations,
     proxy_refusal,
     stricter_agent_tool_rule,
     unwrap_daimon_call,
 )
 from daimon.core.turn.posture import (
-    AutoApprove,
     PolicyApproval,
     RequireApproval,
     ToolCallDecider,
@@ -64,14 +71,16 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
 RuleLookup = Callable[[ToolCall], Awaitable[ResolvedAgentToolRule | None]]
+AnnotationLookup = Callable[[ToolCall], Awaitable[ToolAnnotations | None]]
 RuleCardFor = Callable[[ToolCall], ToolRuleCardReference | None]
 
 
 def channel_for_tool_rules(
     *, platform: str, channel_id: str | None, private_dm_id: str | None
 ) -> str | None:
-    """Use the admitted parent channel; a DM never inherits its source's rule."""
-    if private_dm_id is not None or channel_id is None:
+    """Use the execution channel; routine privacy does not make it a DM."""
+    genuine_dm = private_dm_id is not None and not is_private_routine_stamp(private_dm_id)
+    if genuine_dm or channel_id is None:
         return None
     return channel_id.partition(":")[0] if platform == "slack" else channel_id
 
@@ -197,6 +206,54 @@ async def _rule_for(
         return None, True
 
 
+async def _annotations(
+    policy: ToolSafetyPolicy,
+    call: ToolCall,
+    trusted_servers: frozenset[str],
+    annotations_for: AnnotationLookup | None,
+) -> ToolAnnotations | None:
+    """The call's own MCP hints, only when they could change the verdict.
+
+    A lookup that raises answers `None`: the name decides, as without hints.
+    """
+    if annotations_for is None or not needs_annotations(
+        policy, call, trusted_servers=trusted_servers
+    ):
+        return None
+    try:
+        return await annotations_for(call)
+    except Exception as err:
+        log.warning("tool_safety.annotations_unavailable", tool=call.key, error=str(err))
+        return None
+
+
+def _log_annotation_allow(
+    policy: ToolSafetyPolicy,
+    call: ToolCall,
+    verdict: ToolVerdict,
+    hints: ToolAnnotations | None,
+    *,
+    attended: bool,
+) -> None:
+    """Record each call that runs as a read because its server said `readOnlyHint`.
+
+    `by_name` is what the name alone would have made it, so an audit can find
+    the calls the hint let through that would otherwise have asked.
+    """
+    if verdict.outcome != "allow" or verdict.reason != "read" or hints is None:
+        return
+    if hints.read_only_hint is not True or hints.destructive_hint is True:
+        return
+    log.info(
+        "tool_safety.annotation_read_allowed",
+        server=call.server_name,
+        tool=call.tool_name,
+        attended=attended,
+        hint="readOnlyHint",
+        by_name=classify_tool(policy, server_name=call.server_name or "", tool_name=call.tool_name),
+    )
+
+
 def _skips_daimon_rules(
     call: ToolCall, trusted_servers: frozenset[str], daimon_rules: bool
 ) -> bool:
@@ -205,7 +262,13 @@ def _skips_daimon_rules(
     Such an agent keeps today's behaviour on every daimon card, and a paused
     `add_skill`, publish or backend-switch call costs no query.
     """
-    return call.server_name in trusted_servers and not daimon_rules
+    # The precomputed rule index covers the reserved name only. Legacy endpoint
+    # aliases still need their own name-bound rules read on every paused call.
+    return (
+        call.server_name == DAIMON_SERVER_NAME
+        and call.server_name in trusted_servers
+        and not daimon_rules
+    )
 
 
 def _proxied_approval_refusal(
@@ -398,6 +461,36 @@ def _answer_message(call: ToolCall, answer: str) -> str:
     )
 
 
+async def tool_call_verdict(
+    policy: ToolSafetyPolicy,
+    call: ToolCall,
+    *,
+    attended: bool,
+    trusted_servers: frozenset[str],
+    confirmed_tools: frozenset[str],
+    agent_rule: ResolvedAgentToolRule | None,
+    annotations_for: AnnotationLookup | None = None,
+) -> ToolVerdict:
+    """Decide one attended or unattended call; both deciders come through here.
+
+    `needs_annotations` checks operator trust before invoking the callback,
+    even if that callback was built for an untrusted server. A missing or
+    failed catalogue leaves the name to decide.
+    """
+    hints = await _annotations(policy, call, trusted_servers, annotations_for)
+    verdict = decide_tool_call(
+        policy,
+        call,
+        attended=attended,
+        trusted_servers=trusted_servers,
+        confirmed_tools=confirmed_tools,
+        agent_rule=agent_rule,
+        annotations=hints,
+    )
+    _log_annotation_allow(policy, call, verdict, hints, attended=attended)
+    return verdict
+
+
 def unattended_decider(
     policy: ToolSafetyPolicy,
     *,
@@ -405,6 +498,7 @@ def unattended_decider(
     confirmed_tools: frozenset[str] = frozenset(),
     rules_for: RuleLookup | None = None,
     daimon_rules: bool = False,
+    annotations_for: AnnotationLookup | None = None,
 ) -> ToolCallDecider:
     """Decider for runs nobody is watching: reads run, writes are refused
     unless the operator allowed them there."""
@@ -419,13 +513,14 @@ def unattended_decider(
         rule, read_error = await _rule_for(
             policy, call, rules_for, skip=_skips_daimon_rules(call, trusted_servers, daimon_rules)
         )
-        verdict = decide_tool_call(
+        verdict = await tool_call_verdict(
             policy,
             call,
             attended=False,
             trusted_servers=trusted_servers,
             confirmed_tools=confirmed_tools,
             agent_rule=rule,
+            annotations_for=annotations_for,
         )
         if read_error:
             verdict = _read_error_verdict(verdict, attended=False)
@@ -479,6 +574,9 @@ def interactive_decider(
     rules_for: RuleLookup | None = None,
     rule_card_for: RuleCardFor | None = None,
     daimon_rules: bool = False,
+    annotations_for: AnnotationLookup | None = None,
+    approval_gate_for: Callable[[], Awaitable[ApprovalGate | None]] | None = None,
+    server_urls: Mapping[str, str] | None = None,
 ) -> ToolCallDecider:
     """Decider for chat: reads run, writes wait for `confirm`.
 
@@ -486,6 +584,8 @@ def interactive_decider(
     surface without cards gets. A hook that raises is logged and the write is
     refused, with words saying the card could not be shown — a write never
     runs because the card failed to post.
+    Overrides require an effective server binding and a fresh `approval_gate_for`
+    read after classification. A missing or failed read falls back to the card.
     """
 
     async def _decide(call: ToolCall) -> ToolConfirmationResult:
@@ -498,16 +598,50 @@ def interactive_decider(
         rule, read_error = await _rule_for(
             policy, call, rules_for, skip=_skips_daimon_rules(call, trusted_servers, daimon_rules)
         )
-        verdict = decide_tool_call(
+        verdict = await tool_call_verdict(
             policy,
             call,
             attended=True,
             trusted_servers=trusted_servers,
             confirmed_tools=confirmed_tools,
             agent_rule=rule,
+            annotations_for=annotations_for,
         )
         if read_error:
             verdict = _read_error_verdict(verdict, attended=True)
+        protected_name = gate_protected_tool(call.tool_name)
+        if (
+            policy.enabled
+            and policy.allow_gate_overrides
+            and not protected_name
+            and approval_gate_for is not None
+            and call.server_name in (server_urls or {})
+            and not read_error
+            and verdict.outcome == "ask"
+            and verdict.reason == "write_needs_confirmation"
+            and bool(call.server_name)
+            and call.server_name not in trusted_servers
+            and "/" not in call.server_name
+        ):
+            # The admission value is diagnostic only. Re-read after all rule and
+            # annotation awaits, immediately before granting automatic authority.
+            try:
+                gate = await approval_gate_for()
+            except Exception:
+                log.warning("tool_safety.gate_override_read_failed", tool=call.key)
+                gate = None
+            if gate is not None and gate.value == "off" and gate.set_by:
+                log.info(
+                    "tool_safety.gate_override_allowed",
+                    tool=call.key,
+                    outcome="allow",
+                    reason="approval_gate_off",
+                    attended=True,
+                    scope=gate.scope,
+                    set_by=gate.set_by,
+                    tenant_id=str(gate.tenant_id) if gate.tenant_id is not None else None,
+                )
+                return ToolConfirmationResult(allow=True)
         log.info(
             "tool_safety.decided",
             tool=call.key,
@@ -533,6 +667,7 @@ def interactive_decider(
                 requester_platform_user_id=requester_platform_user_id,
                 now=asked,
                 timeout=timeout,
+                trusted_servers=trusted_servers,
             )
             if policy.enabled and policy.agent_rules:
                 prompt = prompt.model_copy(update={"tool_rules_enabled": True})
@@ -595,26 +730,6 @@ def interactive_decider(
     return _decide
 
 
-def headless_tool_confirmation(
-    policy: ToolSafetyPolicy,
-    *,
-    trusted_servers: frozenset[str] = frozenset(),
-    rules_for: RuleLookup | None = None,
-    daimon_rules: bool = False,
-) -> ToolConfirmation:
-    """Posture for a run nobody is watching (routines, smoke, transfers).
-
-    Disabled keeps `AutoApprove`, byte-identical to before the policy existed.
-    """
-    if not policy.enabled:
-        return AutoApprove()
-    return PolicyApproval(
-        decide=unattended_decider(
-            policy, trusted_servers=trusted_servers, rules_for=rules_for, daimon_rules=daimon_rules
-        )
-    )
-
-
 def chat_tool_confirmation(
     policy: ToolSafetyPolicy,
     *,
@@ -626,8 +741,11 @@ def chat_tool_confirmation(
     confirmed_tools: frozenset[str] = frozenset(),
     rules_for: RuleLookup | None = None,
     rule_card_for: RuleCardFor | None = None,
+    annotations_for: AnnotationLookup | None = None,
     daimon_rules: bool = False,
     provider_permissions: bool = False,
+    approval_gate_for: Callable[[], Awaitable[ApprovalGate | None]] | None = None,
+    server_urls: Mapping[str, str] | None = None,
 ) -> ToolConfirmation:
     """Posture for a chat turn.
 
@@ -652,7 +770,10 @@ def chat_tool_confirmation(
             confirmed_tools=confirmed_tools,
             rules_for=rules_for,
             rule_card_for=rule_card_for,
+            annotations_for=annotations_for,
             daimon_rules=daimon_rules,
+            approval_gate_for=approval_gate_for,
+            server_urls=server_urls,
         )
         if attended
         else unattended_decider(
@@ -660,6 +781,7 @@ def chat_tool_confirmation(
             trusted_servers=trusted_servers,
             confirmed_tools=confirmed_tools,
             rules_for=rules_for,
+            annotations_for=annotations_for,
             daimon_rules=daimon_rules,
         )
     )

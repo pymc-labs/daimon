@@ -140,6 +140,7 @@ async def _caller(
             shared_channel=False,
             expires_at=now + dt.timedelta(minutes=10),
             now=now,
+            chat_session_id="test-session",
         )
         origin_id = str(origin.id)
     if platform == "slack":
@@ -157,6 +158,7 @@ async def _caller(
             account_id=principal.account_id,
             agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=chat_agent),
             secret=_SECRET,
+            chat_session_id="test-session",
             now=dt.datetime.now(dt.UTC),
         )
     await db_session.commit()
@@ -903,3 +905,132 @@ async def test_discord_search_hint_does_not_depend_on_the_raw_total_once_sealed(
 
     assert answers[0] == answers[1], f"the raw total leaks through: {answers}"
     assert answers[0][0] == 1
+
+
+@pytest.mark.parametrize(
+    "inside,attended,ambiguous",
+    [(False, True, False), (True, True, False), (True, False, False), (True, True, True)],
+)
+async def test_lead_get_list_apply_dossier_thread_readers(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    inside: bool,
+    attended: bool,
+    ambiguous: bool,
+) -> None:
+    from daimon.core.access_policy import ChannelRule
+    from daimon.core.discord_membership import DiscordRestMembershipResolver
+    from daimon.core.lead_intake import IntakeConfig, LeadEvidence, LeadSource, LeadSubmission
+    from daimon.core.ma_identity import derive_tenant_uuid
+    from daimon.core.membership import Membership
+    from daimon.core.stores.lead_intake import IntakeStore
+
+    token, _ = await _caller(
+        db_session,
+        platform="discord",
+        workspace_id=_GUILD,
+        user_id=_CALLER,
+        policy=TenantAccessPolicy(channel_rules={"999": ChannelRule(readers="inside")}),
+        origin_channel_id=_SEALED if inside else _OTHER,
+        origin_thread_id="999" if inside else "888",
+    )
+    tenant = derive_tenant_uuid(platform="discord", workspace_id=_GUILD)
+    account = await db_session.scalar(
+        text(
+            "SELECT account_id FROM platform_principals WHERE platform='discord' AND external_id=:user"
+        ),
+        {"user": _CALLER},
+    )
+    assert account is not None
+    await db_session.execute(
+        text("UPDATE turn_origins SET attended=:attended WHERE chat_session_id='test-session'"),
+        {"attended": attended},
+    )
+    # An attended sales conversation for the same account/agent is concurrent,
+    # but grants no read or approval authority to this calling session.
+    await create_origin(
+        db_session,
+        tenant_id=tenant,
+        account_id=account,
+        platform="discord",
+        parent_channel_id=_SEALED,
+        thread_id="999",
+        responder_ma_agent_id="agent_x",
+        responder_name="daimon",
+        configuration_target_ma_agent_id=None,
+        configuration_target_name=None,
+        role=Role.USER,
+        expires_at=dt.datetime.now(dt.UTC) + dt.timedelta(minutes=10),
+        now=dt.datetime.now(dt.UTC),
+        chat_session_id="test-session" if ambiguous else "other-session",
+        attended=True,
+        sender_foreign=False,
+        shared_channel=False,
+    )
+    await db_session.commit()
+    store = IntakeStore(sessionmaker, build_multifernet((_FERNET_KEY,)), tenant)
+    config = IntakeConfig(
+        agent_id=derive_agent_uuid(tenant_id=tenant, ma_agent_id="agent_x"),
+        guild_id=_GUILD,
+        channel_id=_SEALED,
+        source_connection_id="gmail",
+        gmail_mailbox="owner@example.test",
+        crm_connection_id="crm",
+        portal_id="3",
+        reconciliation_start=dt.datetime.now(dt.UTC),
+    )
+    await store.configure(config, {"hubspot_access_token": "synthetic"})
+    record = await store.accept(
+        config,
+        LeadSubmission(
+            source=LeadSource(kind="gmail", mailbox="owner@example.test", message_id="immutable"),
+            evidence=LeadEvidence(original_text="PRIVATE DOSSIER SENTINEL"),
+            classification="project",
+            opportunity_description="Consulting project",
+            thread_title="Synthetic",
+            thread_content="PRIVATE DOSSIER SENTINEL",
+        ),
+        _CALLER,
+    )
+    record.progress.discord_thread_id = "999"
+    await store.save(record)
+
+    async def membership(
+        self: DiscordRestMembershipResolver, tenant_id: uuid.UUID, guild_id: str, user_id: str
+    ) -> Membership:
+        return Membership(is_member=True, role_ids=("555",))
+
+    monkeypatch.setattr(DiscordRestMembershipResolver, "_fetch_member", membership)
+    perms = _VIEW_SEND_AND_HISTORY | (1 << 35) | (1 << 38)
+
+    async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
+        if route.path == "/guilds/{guild_id}":
+            return {
+                **_payloads._guild_payload(guild_id=_GUILD),
+                "roles": [
+                    _payloads._everyone_role(_GUILD, 0),
+                    {**_payloads._everyone_role(_GUILD, perms), "id": "555"},
+                ],
+            }  # pyright: ignore[reportPrivateUsage]
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return {**_payloads._member_payload(_CALLER), "roles": ["555"]}  # pyright: ignore[reportPrivateUsage]
+        if route.path == "/channels/{channel_id}":
+            if str(route.channel_id) == "999":
+                return _payloads._thread_payload(thread_id="999", parent_id=_SEALED)  # pyright: ignore[reportPrivateUsage]
+            return _payloads._text_channel_payload(channel_id=_SEALED, guild_id=_GUILD)  # pyright: ignore[reportPrivateUsage]
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    patch_discord_http(monkeypatch, handler)
+    app = _app(sessionmaker)
+    for tool, arguments in (
+        ("lead_intake_get", {"intake_id": str(record.id)}),
+        ("lead_intake_list", {}),
+    ):
+        result = await _call(app, token, tool, arguments)
+        if inside and attended and not ambiguous:
+            assert "PRIVATE DOSSIER SENTINEL" in _text(result), result
+        else:
+            assert "PRIVATE DOSSIER SENTINEL" not in _text(result), result
+            if tool == "lead_intake_get":
+                assert result.get("isError") is True, result

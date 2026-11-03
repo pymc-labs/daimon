@@ -41,7 +41,7 @@ from daimon.core.errors import TurnError, UserFacingError
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.scope import ResolvedConfig
 from daimon.core.stores import tenant_ledger
-from daimon.core.stores.tenants import set_funding_mode
+from daimon.core.stores.tenants import set_cost_footer, set_funding_mode
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.admission import Admission
@@ -384,7 +384,7 @@ async def test_terminal_edit_has_an_application_timeout(monkeypatch: pytest.Monk
     assert lc._card_writes.key(_SENTINEL_REF) in lc._card_writes.terminal_ready
 
 
-@pytest.mark.parametrize("held_stage", ["edit", "replacement_send"])
+@pytest.mark.parametrize("held_stage", ["edit", "replacement_send", "confirmation_lookup"])
 async def test_ceiling_render_supersedes_retained_terminal_replacement(
     monkeypatch: pytest.MonkeyPatch, held_stage: str
 ) -> None:
@@ -464,11 +464,18 @@ async def test_ceiling_render_supersedes_retained_terminal_replacement(
         turn_path="legacy",
         backend=None,
     )
+
+    async def no_confirmed_tools(_deps: object, _tenant: uuid.UUID) -> frozenset[str]:
+        if held_stage == "confirmation_lookup":
+            await release.wait()
+        return frozenset()
+
+    monkeypatch.setattr(turn_runner, "confirmed_tools_for_tenant", no_confirmed_tools)
     monkeypatch.setattr(turn_runner, "run_turn", fake_driver)
     monkeypatch.setattr(turn_runner, "chat_tool_confirmation", lambda *args, **kwargs: None)
     monkeypatch.setattr(turn_runner, "trusted_servers_for", lambda *args: ())
     monkeypatch.setattr(turn_runner, "context_prompt", lambda *args, **kwargs: "")
-    monkeypatch.setattr(turn_runner, "decide_before_send", lambda *args: None)
+    monkeypatch.setattr(turn_runner, "decide_before_send", lambda *args, **kwargs: None)
     reconciled: list[str] = []
 
     async def fake_settle(_anthropic: Any, _sessionmaker: Any, session_id: str, **_: Any) -> None:
@@ -2041,7 +2048,32 @@ async def test_terminal_footer_shows_prepaid_balance_only(
     assert "left" not in _terminal_footer(edits)
 
 
-def _window_fixture() -> tuple[DiscordTurnLifecycle, list[tuple[Any, dict[str, Any]]]]:
+@pytest.mark.asyncio
+async def test_hidden_cost_footer_leaves_the_answer_bare(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    async with db_session_factory() as s, s.begin():
+        await set_cost_footer(s, tenant_id=tenant.id, shown=False)
+    lc, _sends, edits = _make_lifecycle(sessionmaker=db_session_factory, tenant_id=tenant.id)
+    await lc.on_sse_event(_thinking_event())
+    await lc.on_render(TurnState())
+    await lc.on_terminal_success(_make_success_state())
+
+    terminal_embeds = [kw["embeds"] for _ref, kw in edits if "embeds" in kw]
+    assert all(embed.footer.text is None for embeds in terminal_embeds for embed in embeds), (
+        "no card the turn leaves behind may carry the footer"
+    )
+    _ref, answer = edits[-1]
+    assert answer["content"] == "Hello response"
+    assert answer["embeds"] == [], "the answer replaces the card with no summary embed"
+
+
+def _window_fixture(
+    **lifecycle_kwargs: Any,
+) -> tuple[DiscordTurnLifecycle, list[tuple[Any, dict[str, Any]]]]:
     """A lifecycle whose card is message 100 and whose sends post messages 101, 102, ..."""
     edits: list[tuple[Any, dict[str, Any]]] = []
     next_id = 100
@@ -2056,7 +2088,9 @@ def _window_fixture() -> tuple[DiscordTurnLifecycle, list[tuple[Any, dict[str, A
         edits.append((ref, kwargs))
         return types.SimpleNamespace(id=ref.id, edited_at=datetime.now(UTC))
 
-    lc = DiscordTurnLifecycle(send=send, edit=edit, agent_name="test-agent", model_id="m")
+    lc = DiscordTurnLifecycle(
+        send=send, edit=edit, agent_name="test-agent", model_id="m", **lifecycle_kwargs
+    )
     return lc, edits
 
 
@@ -2114,6 +2148,30 @@ async def test_a_stopped_turn_has_no_answer_for_files() -> None:
     await lc.on_terminal_success(TurnState(content=[]))
 
     assert lc.answer_message is None, "the sweep posts files on their own"
+
+
+@pytest.mark.asyncio
+async def test_files_posted_apart_reply_to_the_persons_own_message() -> None:
+    """#788: a file that cannot go on the answer replies to the message that asked
+    for it, so in a shared thread it reads as that person's, not the latest turn's."""
+    trigger = types.SimpleNamespace(id=55, channel=types.SimpleNamespace(id=123))
+    lc, _edits = _window_fixture(requester_id=7, trigger_message=trigger)
+    await lc.on_sse_event(_thinking_event())
+    await lc.on_terminal_success(_make_success_state())
+
+    assert lc.requester_id == 7
+    assert lc.files_reply_to(123) == 55, "the person's own message, in this thread"
+    assert lc.files_reply_to(999) == 100, "a message in another channel falls back to the answer"
+
+
+@pytest.mark.asyncio
+async def test_without_an_answer_or_a_message_in_the_thread_files_reply_to_nothing() -> None:
+    lc, _edits = _window_fixture()
+    await lc.on_sse_event(_thinking_event())
+    await lc.on_terminal_success(TurnState(content=[]))
+
+    assert lc.requester_id is None
+    assert lc.files_reply_to(123) is None
 
 
 @pytest.mark.asyncio
@@ -3336,6 +3394,102 @@ async def test_rendered_table_expansion_respects_last_answer_slot(monkeypatch, t
     assert "answer.txt" in edits[-1][1]["content"]
     assert "A compact table." in edits[-1][1]["attachments"][0].fp.read().decode()
     assert file.fp.closed
+
+
+@pytest.mark.parametrize("ending", ["success", "failure"])
+async def test_refused_watch_final_ends_card_and_stops_cancel(ending, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from daimon.core.turn.run import _DeferredFailureLifecycle
+
+    cancel_view = discord.ui.View(timeout=None)
+    inner, sends, edits = _make_lifecycle(cancel_view=cancel_view)
+    await inner.post_initial()
+    before = (len(sends), len(edits))
+    monkeypatch.setattr("daimon.core.turn.run.asyncio.sleep", AsyncMock())
+    lifecycle = _DeferredFailureLifecycle(
+        inner=inner, authorize_final=AsyncMock(side_effect=OSError("connection reset"))
+    )
+    state = _make_success_state("Private answer")
+    if ending == "success":
+        await lifecycle.on_terminal_success(state)
+    else:
+        await lifecycle.on_terminal_failure(state, RuntimeError("model failed"))
+        await lifecycle.flush_held_failure()
+    assert inner._terminal
+    assert inner._ended_before is not None
+    assert cancel_view.is_finished()
+    assert (len(sends), len(edits)) == before
+
+
+@pytest.mark.parametrize("ending", ["success", "interrupted", "error", "chunks", "attachment"])
+async def test_watch_output_revocation_latches_all_discord_writes(ending):
+    import contextlib
+    import io
+
+    from daimon.core.turn.errors import AdmissionDenied
+    from daimon.core.turn.output import OutputAuthorization
+
+    lifecycle, sends, edits = _make_lifecycle()
+    await lifecycle.post_initial()
+    allowed = True
+
+    async def authorize():
+        if not allowed:
+            raise AdmissionDenied(reason="invoker_not_allowed")
+
+    guard = OutputAuthorization(authorize)
+    lifecycle.set_output_authorization(guard)
+    allowed = False
+    with pytest.raises(AdmissionDenied):
+        await lifecycle.edit_card(content="retained answer")
+    allowed = True  # A later success/re-enable cannot clear the failed check.
+    before = (len(sends), len(edits))
+    state = TurnState(content=[TextBlock(kind="text", text="retained answer " * 500)])
+    with contextlib.suppress(AdmissionDenied):
+        if ending == "error":
+            await lifecycle.on_terminal_failure(state, RuntimeError("private failure"))
+        elif ending == "attachment":
+            await lifecycle.edit_card(
+                attachments=[discord.File(io.BytesIO(b"private"), "private.txt")]
+            )
+        else:
+            if ending == "interrupted":
+                state = replace(state, termination=TerminationReason.INTERRUPTED)
+            await lifecycle.on_terminal_success(state)
+    assert (len(sends), len(edits)) == before
+    assert guard.failed
+
+
+async def test_watch_revocation_between_chunks_rechecks_each_discord_write():
+    import contextlib
+
+    from daimon.core.turn.errors import AdmissionDenied
+    from daimon.core.turn.output import OutputAuthorization
+
+    lifecycle, sends, edits = _make_lifecycle()
+    await lifecycle.post_initial()
+
+    def count():
+        return len(sends) + len(edits)
+
+    checks = 0
+
+    async def authorize():
+        nonlocal checks
+        checks += 1
+        if checks > 1:
+            raise AdmissionDenied(reason="invoker_not_allowed")
+
+    guard = OutputAuthorization(authorize)
+    lifecycle.set_output_authorization(guard)
+    before = count()
+    with contextlib.suppress(AdmissionDenied):
+        await lifecycle.on_terminal_success(
+            TurnState(content=[TextBlock(kind="text", text="secret " * 4000)])
+        )
+    assert count() - before == 1
+    assert guard.failed
 
 
 class TestOtherAppsNeverNamed:

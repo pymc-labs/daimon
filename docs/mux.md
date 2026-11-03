@@ -93,7 +93,8 @@ configured has no revision and runs as before. A configured channel must pass
 A channel with `thread_mode="shared"` shares one session per new thread
 between everyone who writes in it. Threads where someone already has a session
 stay per caller. A shared session carries no caller's credentials, so the
-agent must run in GitHub App mode. Usage is still recorded against the person
+agent must run in GitHub App mode. The agent's agent-wide MCP tokens still
+reach it, through a vault that belongs to the thread alone. Usage is still recorded against the person
 who wrote each turn. The OpenAI and Gemini backends do not support shared
 threads.
 

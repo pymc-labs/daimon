@@ -189,3 +189,36 @@ async def test_create_rejects_a_bad_cron_then_creates_the_routine_for_the_admin(
     assert row.next_fire_at is not None
     edits = [r for r in teams_api_fake.activity_requests if r.method == "PUT"]
     assert edits and edits[-1].url.endswith("/activities/m-7"), "the panel refreshes in place"
+
+
+@pytest.mark.parametrize("owner", [AAD_OBJECT_ID, OTHER_AAD_OBJECT_ID])
+@pytest.mark.parametrize("failed", [False, True])
+async def test_legacy_output_is_owner_only_even_for_admins(
+    db_session_factory, teams_api_fake, owner, failed
+):
+    from daimon.core.stores.routines import record_result
+
+    row = await _routine(db_session_factory, owner=owner, message="legacy")
+    async with db_session_factory.begin() as session:
+        await record_result(
+            session,
+            row.id,
+            tail="personal-memory-sentinel",
+            error="private-error" if failed else None,
+        )
+    async with _running(db_session_factory, teams_api_fake, (AAD_OBJECT_ID,)) as service:
+        response = await post_activity(service, _click("output", row))
+    body = json.dumps(response)
+    if owner == AAD_OBJECT_ID:
+        assert ("private-error" if failed else "personal-memory-sentinel") in body
+    else:
+        assert "Only the owner" in body
+        assert "private-error" not in body and "personal-memory-sentinel" not in body
+
+
+async def test_resume_of_running_routine_is_a_plain_reply(db_session_factory, teams_api_fake):
+    row = await _routine(db_session_factory, owner=AAD_OBJECT_ID, message="my standup")
+    async with _running(db_session_factory, teams_api_fake) as service:
+        response = await post_activity(service, _click("resume", row))
+    assert response["value"] == "This routine is already on."
+    assert await _load(db_session_factory, row) == row

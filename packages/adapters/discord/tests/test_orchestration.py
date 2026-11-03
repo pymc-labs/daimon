@@ -95,7 +95,9 @@ def _make_runtime(
     discord_settings.bot_display_name = "daimon"
     settings.discord = discord_settings
     settings.thread_naming = ThreadNamingSettings(enabled=False)
-    anthropic = AsyncMock()
+    anthropic = AsyncMock(max_retries=8)
+    anthropic.with_options = MagicMock(return_value=anthropic)
+    anthropic.with_middleware = MagicMock(return_value=anthropic)
     anthropic.beta.agents.retrieve = AsyncMock(return_value=ma_agent())
     anthropic.beta.environments.retrieve = AsyncMock(return_value=ma_environment())
     # Dead-session recovery's transcript rescue (`_replay_previous_session`)
@@ -1506,7 +1508,10 @@ class TestSetupHook:
         ):
             await bot.setup_hook()
 
-        assert len(add_cog_calls) == 10, "setup_hook should add exactly 10 Cogs"
+        assert len(add_cog_calls) == 13, "setup_hook should add exactly 13 Cogs"
+        assert sum(type(cog).__name__ == "LeadsCog" for cog in add_cog_calls) == 1
+        assert sum(type(cog).__name__ == "CostFooterCog" for cog in add_cog_calls) == 1
+        assert sum(type(cog).__name__ == "ModelCog" for cog in add_cog_calls) == 1
         assert sum(isinstance(cog, DirectMessageCog) for cog in add_cog_calls) == 1
         mock_github_cog.assert_called_once_with(bot)
         mock_help_cog.assert_called_once_with(bot)

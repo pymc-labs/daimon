@@ -18,12 +18,14 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._rule_view import load_isolation_view
 from daimon.adapters.mcp.tools.setup_target import refuse_helper, require_turn_origin
+from daimon.core.anthropic_guard import anthropic_disabled
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.helpers import MAX_ASKS
 from daimon.core.stores import helper_asks
 from daimon.core.stores.agent_helpers import list_helper_ids
 from daimon.core.stores.domain import HelperAskRow, HelperAskStatus, TurnOriginRow
+from daimon.core.stores.selfhosted_resources import list_live_agent_facts
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, Field
@@ -74,7 +76,12 @@ async def _roster(
         )
     if not ids:
         return []
-    agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
+    if auth.anthropic_disabled or anthropic_disabled():
+        # A self-hosted conversation: its agents are the tenant's own records.
+        async with runtime.session_factory() as session:
+            agents = await list_live_agent_facts(session, tenant_id=auth.tenant_id)
+    else:
+        agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
     view = await load_isolation_view(
         runtime, auth, agents=agents, location_channel_id=origin.parent_channel_id
     )

@@ -1,8 +1,10 @@
 """Store for agent_google_binding.
 
 Holds the operator-configured Google Workspace identity overlay for an
-agent: which email and scope set the token broker impersonates via
-domain-wide delegation against the tenant service account. Written by
+agent: which email and scope set the token broker mints for, either by
+refreshing the operator's authorized-user credential (when the email matches
+``credentials.google_user_email``) or via domain-wide delegation against the
+tenant service account. Written by
 the admin CLI (`daimon agents bind-google`); read by the GWS token
 broker provider.
 """

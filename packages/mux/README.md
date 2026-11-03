@@ -219,6 +219,10 @@ delegated to session administration. Closed `anthropic.session_create@1` and
 `anthropic.session_resource_create@1` configs preserve omitted and explicit empty
 fields, agent overrides and mount ordering. Session specs carry extensions and
 records carry an opaque optional native snapshot for the temporary host codec.
+The driver exports `SESSION_READS_NAMESPACE` alongside the `SessionReads` port.
+Hosts use that address to request the actual Managed Agents snapshot for
+unattended send gates; unsupported backends refuse confirmations instead of
+substituting another runtime's session read.
 
 Anthropic model spans convert to `UsageObservation` in the usage driver,
 retaining event IDs, timestamps and the untouched native meter. Neutral input
@@ -371,6 +375,17 @@ generic session records retain their validation. Turn seal stamping uses this
 read and the existing metadata-only update port, with no extra provider request.
 Prepared legacy replay and interruption pass the caller's admitted scope to the
 private transport while preserving SDK traffic and recovery behavior.
+
+The Anthropic legacy turn transport bounds idempotent reads (status, replay and
+idle history) to 60 seconds including retries and pagination; a replay may be
+given a longer budget by its caller. Its read client
+uses a 30-second request timeout and at most two retries. Turn mutations (input,
+confirmations, interrupt and archive) retain the original client timeout and
+always disable automatic SDK retries, including attended turns. An unknown
+liveness probe keeps the turn held and probes again until a definitive result,
+cancellation or the overall turn ceiling. Live streams retain their separate
+read timeout.
+
 The Anthropic environment driver exposes a scoped create-and-discard edge for legacy environment forks that ignored the SDK reply. It validates the request configuration and tenant authorization without decoding unused response fields; generic Environment records retain their existing validation.
 
 MCP agent chat and session inspection use tenant/account scopes derived from
@@ -525,13 +540,14 @@ consumes them. Shared turns retain their persisted accountless slot and the
 writer's operation scope. Send claims survive restart; uncertain delivery never
 permits automatic resend. The Anthropic stop observer can forward its normalized
 wait events to this same journal without changing provider requests. Legacy
-turns and unbound direct port callers retain their previous behavior. These host
+turns and unbound direct port callers do not gain durable host claims. These host
 proofs do not promote the separate C01–C18 adapter's PENDING entries.
 
 Claimed Anthropic mutations suppress SDK retries only during their delivery
 call, so losing an acknowledgement leaves an unknown outcome for reconciliation
-instead of a second native POST. Read operations and legacy requests retain the
-injected client's retry budget; the shared client is never modified.
+instead of a second native POST. Turn sends, confirmations, interrupts and
+archives disable SDK retries even without a durable claim. Idempotent reads
+have separate budgets; the shared client is never modified.
 
 Host codecs carry native `UsageObservation` values separately from display
 events and expose an async `replay_usage()` walk for interrupted, failed and
@@ -980,6 +996,10 @@ native cancel/EOF occupancy, ambiguous-delivery recovery, all fenced store
 boundaries and monotonic terminal settlement. Historical certificates and
 standard pending declarations are unchanged; see
 [money and scenario boundaries](docs/drivers/gemini/LIVE-ROUND.md).
+
+Offline Gemini round fixtures stamp workspace creation and activity from current
+UTC time. Stale-response cases use relative offsets so the intended seven-day
+workspace expiry does not make the fixtures expire as the calendar advances.
 
 
 Explicit native credential offers share one profile-bound host adapter and MCP grant
@@ -1447,3 +1467,9 @@ python -m mux.testing.harness_conformance --harness-url http://127.0.0.1:8088 --
 `HarnessTarget.tool_name` and `mcp_tool_name` map tool names for engines that prefix them.
 `tests/harness_conformance` runs the kit against `apps/harness` offline in CI, once per model
 loop (the Codex loop runs when `HARNESS_CODEX_BINARY` points at the pinned binary).
+
+
+The Anthropic session-create extension accepts an explicit `system` override,
+including `null` to clear it. This lets isolated long-job workers replace the
+parent agent instructions without changing the agent resource. Omission preserves
+the existing session-create payload.

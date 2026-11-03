@@ -65,7 +65,7 @@ async def _run(
         return None
 
     monkeypatch.setattr(github_command, "resolve_web_client", AsyncMock(return_value=client))
-    monkeypatch.setattr(github_command, "resolve_is_admin", AsyncMock(return_value=admin))
+    monkeypatch.setattr(github_command, "resolve_is_platform_admin", AsyncMock(return_value=admin))
     monkeypatch.setattr(github_command, "list_agents_by_tenant", AsyncMock(return_value=agents))
     monkeypatch.setattr(github_command, "find_agent_by_derived_uuid", live)
     await github_command.handle_github_command(

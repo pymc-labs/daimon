@@ -83,7 +83,7 @@ async def selector_host(db_preflight, db_session_factory, db_clean, request, ini
     except ValueError:
         pytest.skip("native selector proofs require an owned lane DB or isolated CI")
     async with db_session_factory.begin() as db:
-        tenant = await make_tenant(db, id=TENANT)
+        tenant = await make_tenant(db, id=TENANT, platform="slack")
         account = await make_account(db, tenant=tenant, id=ACCOUNT)
         await make_platform_principal(
             db, platform="slack", external_id="caller", tenant=tenant, account=account
@@ -113,6 +113,7 @@ async def selector_host(db_preflight, db_session_factory, db_clean, request, ini
     ancillary = build_turn_router(str(TENANT))
     memory = make_fake_memory_store_handler()
     calls, created = [], []
+    handover_agents = {}
 
     def create(req, match):
         body = json_body(req)
@@ -120,18 +121,21 @@ async def selector_host(db_preflight, db_session_factory, db_clean, request, ini
         created.append(id_)
         result = ma_session(
             id=id_,
-            agent_id="ag_parity_test",
+            agent_id=body["agent"] if isinstance(body["agent"], str) else body["agent"]["id"],
             environment_id="env_parity_test",
             metadata=body.get("metadata"),
             resources=body.get("resources", ()),
         )
-        ancillary.add_session(result)
+        ancillary.add_session(result, with_archive=True)
         return httpx.Response(200, json=result.model_dump(mode="json"))
 
     ancillary.add("POST", r"/v1/sessions", create)
 
     def handle(req):
         calls.append(req)
+        target = handover_agents.get(req.url.path.rsplit("/", 1)[-1])
+        if req.method == "GET" and req.url.path.startswith("/v1/agents/") and target is not None:
+            return httpx.Response(200, json=target.model_dump(mode="json"))
         return (
             memory(req) if req.url.path.startswith("/v1/memory_stores") else ancillary.dispatch(req)
         )
@@ -162,10 +166,35 @@ async def selector_host(db_preflight, db_session_factory, db_clean, request, ini
             base_url="https://anthropic.invalid",
         ) as client,
     ):
+
+        async def read_counterpart(selected):
+            from daimon.core.stores.neutral_catalog import AgentRevision
+            from mux.contracts.resources import Agent
+
+            return AgentRevision(
+                catalog_id="handover-counterpart",
+                local_revision=1,
+                principal_id="host",
+                agent=Agent(
+                    ref=ResourceRef(
+                        id="native-agent",
+                        kind="agent",
+                        provider="openai",
+                        account_scope_id="project",
+                        tenant_id=selected.scope.tenant_id,
+                        account_id=selected.scope.account_id,
+                    ),
+                    revision=Revision(local=1),
+                    created_at=datetime.now(UTC),
+                    spec=selected.target_spec,
+                ),
+            )
+
         runtime = OpenAIHostRuntime(
             lambda revision, scope: SDKTransport(sdk),
             OpenAIRecoveryJournal(),
             OpenAIUsageRevisions(),
+            read_agent_counterpart=read_counterpart,
             account_scope_id="project",
             session_plan=plan,
             authorization=lambda scope, kind, id_: scope == SCOPE,
@@ -205,6 +234,7 @@ async def selector_host(db_preflight, db_session_factory, db_clean, request, ini
         async def admit_thread(thread, **options):
             current = await admit_impl(
                 deps,
+                origin="chat",
                 tenant_id=TENANT,
                 requester_org=RequesterOrg.HOST,
                 platform="slack",
@@ -217,7 +247,7 @@ async def selector_host(db_preflight, db_session_factory, db_clean, request, ini
             admitted.append(current)
             return current
 
-        async def prepare(thread):
+        async def prepare(thread, **options):
             current = await admit_thread(thread)
             return await bind_session(
                 deps,
@@ -228,6 +258,7 @@ async def selector_host(db_preflight, db_session_factory, db_clean, request, ini
                 thread_id=thread,
                 session_account_id=ACCOUNT,
                 reuse_existing=True,
+                **options,
             )
 
         async def change(config=None):
@@ -247,6 +278,7 @@ async def selector_host(db_preflight, db_session_factory, db_clean, request, ini
             created=created,
             native=native,
             admitted=admitted,
+            handover_agents=handover_agents,
             prepare=prepare,
             admit=admit_thread,
             change=change,
@@ -616,6 +648,7 @@ async def test_legacy_or_unconfigured_admission_does_not_read_native_bindings(
     monkeypatch.setattr(channel_backend, "resolve_turn_backend", forbidden)
     current = await admit_impl(
         replace(host.deps, turn_path=path, channel_backends=enabled),
+        origin="chat",
         tenant_id=TENANT,
         requester_org=RequesterOrg.HOST,
         platform="slack",
@@ -644,6 +677,7 @@ async def test_another_caller_never_selects_the_private_native_binding(selector_
     before = len(host.wire.requests)
     current = await admit_impl(
         host.deps,
+        origin="chat",
         tenant_id=TENANT,
         requester_org=RequesterOrg.HOST,
         platform="slack",
@@ -894,5 +928,119 @@ async def test_a_release_interrupted_after_its_binding_write_is_finished_not_red
     assert await _apply(host) is True
     after = await host.store.get_binding(host.slot, include_released=True)
     assert after.generation == seen.generation + 1
+    async with host.sessions() as db:
+        assert await pending_releases(db, tenant_id=TENANT) == []
+
+
+@pytest.mark.parametrize("initial_backend", [None], indirect=True)
+@pytest.mark.parametrize("slot_state", ["unbound", "retained", "released"])
+async def test_button_resend_uses_normal_provider_retention_and_confirmed_release(
+    selector_host, slot_state
+):
+    from daimon.core.native_admins import AdminCaller
+    from daimon.core.stores.task_continuations import list_pending_continuations
+    from daimon.core.thread_handoff import switch_thread_on_request
+    from daimon.core.thread_release import pending_releases, request_thread_release
+    from daimon.testing.ma_models import ma_agent
+
+    host = selector_host
+    if slot_state != "unbound":
+        await host.prepare("thread")
+    before = await host.store.get_binding(host.slot)
+    if slot_state == "unbound":
+        assert before is None
+    else:
+        assert before is not None and before.provider == "anthropic"
+    target_agent = ma_agent(id="ag_handover_target", name="handover-target", tenant_id=TENANT)
+    host.handover_agents[target_agent.id] = target_agent
+    from daimon.core.turn.prepare import admitted_session_scope
+    from daimon.core.turn.runtime_manifest import capture_preparation_source
+
+    # Configure the destination through today's consent path, including native
+    # counterpart readback; a hand-over itself never grants source-capability drops.
+    probe = await host.admit("preference-probe")
+    probe = replace(
+        probe,
+        agent=target_agent,
+        config=probe.config.model_copy(
+            update={"agent_name": target_agent.name, "responder_ma_agent_id": target_agent.id}
+        ),
+    )
+    now = datetime.now(UTC)
+    request = ProviderPreparationRequest(
+        host.deps,
+        probe,
+        admitted_session_scope(probe, tenant_id=TENANT, session_id="probe"),
+        TENANT,
+        "slack",
+        "caller",
+        "preference-probe",
+        ACCOUNT,
+        True,
+        DEFAULT_MA_CAPABILITIES,
+        None,
+        now + timedelta(seconds=30),
+        lambda: now,
+    )
+    target = await capture_preparation_source(request, fresh=True)
+
+    async def capture(_agent):
+        return await capture_preparation_source(request, fresh=True)
+
+    service = channel_backend.AgentBackendService(
+        host.sessions, enabled=True, capture_source=capture
+    )
+    actor = channel_backend.BackendActor(TENANT, ACCOUNT, Subject(is_admin=True))
+    quote = await service.preview(target, "openai")
+    await service.set_backend(
+        target,
+        "openai",
+        0,
+        actor,
+        accepted_drops=quote.declared_drops,
+        expected_preview_digest=quote.digest,
+    )
+    if slot_state == "released":
+        async with host.sessions.begin() as db:
+            await request_thread_release(
+                db, host.slot, generation=before.generation, now=datetime.now(UTC)
+            )
+    async with host.sessions() as db:
+        pending_before = await pending_releases(db, tenant_id=TENANT)
+    outcome = await switch_thread_on_request(
+        host.deps.anthropic,
+        host.sessions,
+        tenant_id=TENANT,
+        platform="slack",
+        parent_channel_id="channel",
+        thread_id="thread",
+        ma_agent_id=target_agent.id,
+        caller=AdminCaller(platform_user_id="caller", is_server_admin=True),
+        default=host.deps.deployment_default,
+        channel="this channel",
+        now=datetime.now(UTC),
+    )
+    assert outcome.switched
+    async with host.sessions() as db:
+        assert await pending_releases(db, tenant_id=TENANT) == pending_before
+        assert (
+            await list_pending_continuations(
+                db, tenant_id=TENANT, platform="slack", thread_id="thread"
+            )
+            == []
+        )
+    # The adapter integrations exercise this same ordinary admit/bind entry.
+    # A click adds no provider transition of its own: the re-sent message follows
+    # the answering agent's selection (M03), so a retained slot moves as well.
+    prepared = await host.prepare("thread")
+    after = await host.store.get_binding(host.slot)
+    assert after is not None
+    assert prepared.admission.agent.id == target_agent.id
+    assert after.provider == "openai"
+    assert prepared.session_ref is not None
+    if slot_state == "released":
+        assert after.id == before.id
+        assert after.generation == before.generation + 2
+        assert after.native_refs["session"] != before.native_refs["session"]
     async with host.sessions() as db:
         assert await pending_releases(db, tenant_id=TENANT) == []

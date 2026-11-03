@@ -11,8 +11,9 @@ import uuid
 from anthropic import AsyncAnthropic
 from daimon.adapters.slack.admin import resolve_is_admin
 from daimon.adapters.slack.routines_panel.state import RoutineEntry
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.defaults.ma_index import list_agents_by_tenant
-from daimon.core.routines import derive_glyph, panel_rows, routine_label
+from daimon.core.routines import derive_glyph, panel_rows, routine_for_reader, routine_label
 from daimon.core.stores.routines import list_routines_for_tenant
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -48,6 +49,7 @@ async def load_routines(
     rows = await list_routines_for_tenant(session, tenant_id=tenant_id)
     if viewer_user_id is not None:
         rows = [row for row in rows if row.created_by_user_id == viewer_user_id]
+    rows = [routine_for_reader(row, user_id=viewer_user_id) for row in rows]
     agents = await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
 
     agent_name_map: dict[str, str] = {}
@@ -75,5 +77,10 @@ async def routines_viewer(client: AsyncWebClient, *, user_id: str, team_id: str)
 
     A failed admin lookup counts as not admin, so it narrows rather than widens.
     """
-    is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
-    return None if is_admin else user_id
+    return (
+        None
+        if await resolve_is_admin(
+            client, user_id=user_id, host_team_id=team_id, action=DelegatedAction.ROUTINES
+        )
+        else user_id
+    )

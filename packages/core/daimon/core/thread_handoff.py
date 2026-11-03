@@ -45,13 +45,14 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Literal
 
 import anthropic as anthropic_pkg
 import structlog
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import TenantAccessPolicy, agent_invoker_roles
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.authz import (
     Action,
@@ -65,6 +66,7 @@ from daimon.core.authz import (
     build_agent_ref,
     build_subject,
 )
+from daimon.core.continuity.continuation import MAX_REQUESTED_WORK, sanitize_requested_work
 from daimon.core.continuity.handoff import (
     HandoffAllowed,
     HandoffRefused,
@@ -73,7 +75,9 @@ from daimon.core.continuity.handoff import (
 )
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
 from daimon.core.errors import DaimonError
-from daimon.core.native_admins import AdminCaller
+from daimon.core.membership import MembershipResolver
+from daimon.core.membership_subject import resolve_subject
+from daimon.core.native_admins import AdminCaller, load_live_subject
 from daimon.core.panel_audit import PanelOutcome, record_panel_write
 from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.session_ports_compat import retrieve_session_record, session_scope
@@ -97,6 +101,7 @@ from daimon.core.stores.thread_sessions import (
 )
 from daimon.core.stores.turn_origins import thread_requester_accounts
 from daimon.core.turn.agent_notices import HANDED_OVER_NOTICE
+from daimon.core.turn.invocation import human_invocation
 from daimon.core.turn_hold import TurnHold
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -104,6 +109,7 @@ if TYPE_CHECKING:
     from anthropic import AsyncAnthropic
 
 __all__ = [
+    "HANDOVER_FALLBACK_SEED",
     "HandoffCaller",
     "HandoffDestination",
     "RecordedSession",
@@ -140,6 +146,7 @@ class HandoffCaller:
     account_id: uuid.UUID | None
     admin: AdminCaller
     via_agent_key: bool = False
+    human_invocation: bool = False
     # A person's own unheld credential (not a client): their own agents count. Only a
     # caller that checked this sets it; the ownership itself is read here, never passed.
     may_own: bool = False
@@ -282,8 +289,11 @@ async def _subject(
     session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, caller: HandoffCaller
 ) -> Subject:
     who = caller.admin
+    live = await load_live_subject(
+        session, tenant_id=tenant_id, platform=platform, caller=who, action=DelegatedAction.ROUTING
+    )
     return build_subject(
-        is_admin=who.is_server_admin,
+        is_admin=live.is_admin,
         platform_user_id=who.platform_user_id,
         via_agent_key=caller.via_agent_key,
         client=caller.client,
@@ -322,6 +332,7 @@ async def hand_over_thread(
     default: DeploymentDefault,
     now: datetime,
     recorded: Sequence[RecordedSession] | None = None,
+    membership_resolver: MembershipResolver | None = None,
 ) -> ThreadAgentBindingRow:
     """Decide the switch on the policy as it is now, then bind the thread to `destination`.
 
@@ -357,6 +368,26 @@ async def hand_over_thread(
         session, tenant_id=tenant_id, platform=platform, thread_id=thread_id
     )
     subject = await _subject(session, tenant_id=tenant_id, platform=platform, caller=caller)
+    target_roles = agent_invoker_roles(policy, destination.agent.names)
+    if target_roles and not caller.human_invocation:
+        raise ThreadHandoffRefused(
+            HandoffRefused(
+                reason="invoker_not_allowed",
+                destination_name=destination.name,
+                authz_reason="invoker_not_allowed",
+            )
+        )
+    if target_roles and subject.platform_user_id is not None:
+        subject = await resolve_subject(
+            async_sessionmaker(bind=session.bind),
+            membership_resolver,
+            tenant_id=tenant_id,
+            user_id=subject.platform_user_id,
+            require_fresh=True,
+            session=session,
+            action=DelegatedAction.ROUTING,
+        )
+        subject = replace(subject, via_agent_key=caller.via_agent_key, client=caller.client)
     owned = False
     if caller.may_own and caller.account_id is not None and not caller.via_agent_key:
         from daimon.core.ma_identity import derive_agent_uuid
@@ -401,7 +432,10 @@ async def hand_over_thread(
             destination_name=destination.name,
             destination_reachable=reachable,
             existing_binding_kind=binding.kind if binding is not None else None,
-            origin_responder_ma_agent_id=current_responder_ma_agent_id,
+            origin_responder_ma_agent_id=(
+                current_responder_ma_agent_id
+                or (binding.responder_ma_agent_id if binding is not None else None)
+            ),
             access=access,
             caller_is_admin=caller.admin.is_server_admin and not caller.via_agent_key,
             caller_owns=as_owner,
@@ -506,11 +540,23 @@ class SwitchOutcome:
     destination_name: str | None = None
 
 
+# The resent turn when the clicker left nothing to resend. The new agent hears
+# of the hand-over once, from HANDED_OVER_NOTICE in front of this, so it says
+# nothing of it.
+HANDOVER_FALLBACK_SEED = "Continue from the latest message here."
+
+
+def handover_seed(text: str | None, *, agent_name: str) -> str:
+    """The clicker's bounded work request, without a bare confirmation or name echo."""
+    return (sanitize_requested_work(text, echoes=(agent_name,)) or HANDOVER_FALLBACK_SEED)[
+        :MAX_REQUESTED_WORK
+    ]
+
+
 def render_switched(name: str) -> str:
     return (
-        f"{name} answers in this conversation from the next message. The conversation "
-        f"and its working files move across, and {name} uses its own keys, connections "
-        "and memory."
+        f"Your latest message is being sent to {name}. "
+        f"{name} uses its own keys, connections and memory."
     )
 
 
@@ -527,6 +573,7 @@ async def switch_thread_on_request(
     default: DeploymentDefault,
     channel: str,
     now: datetime,
+    membership_resolver: MembershipResolver | None = None,
 ) -> SwitchOutcome:
     """The hand-over button: switch this thread to `ma_agent_id` for the person who clicked.
 
@@ -588,6 +635,7 @@ async def switch_thread_on_request(
                 caller=HandoffCaller(
                     account_id=principal.account_id if principal is not None else None,
                     admin=caller,
+                    human_invocation=human_invocation("handoff", True),
                 ),
                 destination=HandoffDestination(
                     ma_agent_id=agent.id,
@@ -595,12 +643,12 @@ async def switch_thread_on_request(
                     agent=build_agent_ref(agent.name, agent.metadata, name),
                     is_daimon_managed=agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
                 ),
-                # The session here belongs to another agent; a second click
-                # rewrites the same binding.
+                # The locked binding also rejects repeated clicks.
                 current_responder_ma_agent_id=None,
                 default=default,
                 now=now,
                 recorded=recorded,
+                membership_resolver=membership_resolver,
             )
             # The person hears of it from the agent now answering, not from Daimon.
             await record_agent_notices(

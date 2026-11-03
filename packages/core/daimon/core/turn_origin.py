@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 import re
 import uuid
-from collections.abc import AsyncIterator, Mapping
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterator, Mapping
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -54,6 +54,21 @@ def words_sentence(platform: ChatPlatform) -> str:
 
 _TEAMS_CHANNEL_SUFFIXES = ("@thread.tacv2", "@thread.skype")
 current_origin_id: ContextVar[uuid.UUID | None] = ContextVar("turn_origin_id", default=None)
+# A prepared driver explicitly grants its own origin, apart from
+# `current_origin_id`, which nested contexts inherit.
+current_execution_origin_id: ContextVar[uuid.UUID | None] = ContextVar(
+    "execution_origin_id", default=None
+)
+
+
+@contextmanager
+def execution_origin(origin_id: uuid.UUID | None) -> Iterator[None]:
+    """Authorize origin credential derivation only inside this prepared execution."""
+    token = current_execution_origin_id.set(origin_id)
+    try:
+        yield
+    finally:
+        current_execution_origin_id.reset(token)
 
 
 class SessionState(BaseModel):
@@ -151,6 +166,8 @@ async def turn_origin(
     configuration_target_ma_agent_id: str | None = None,
     configuration_target_name: str | None = None,
     is_setup: bool = False,
+    attended: bool = True,
+    chat_session_id: str | None = None,
     message_text: str | None = None,
     queued_message: bool = False,
     platform_channel_id: str | None = None,
@@ -191,6 +208,8 @@ async def turn_origin(
             expires_at=now + timedelta(hours=2),
             now=now,
             is_setup=is_setup,
+            attended=attended,
+            chat_session_id=chat_session_id,
             sender_foreign=sender_foreign,
             shared_channel=shared_channel,
             platform_channel_id=platform_channel_id,
@@ -247,6 +266,7 @@ def _words_for_origin(origin: TurnOriginRow) -> dict[str, str] | None:
 def render_turn_origin(
     origin: TurnOriginRow,
     *,
+    effective_is_admin: bool,
     responder_handle: str | None = None,
     responder_account: ResponderAccount | None = None,
     session_state: SessionState | None = None,
@@ -320,6 +340,7 @@ def render_turn_origin(
     words = _words_for_origin(origin)
     if words is not None:
         controls["words"] = words
+    controls["effective_role"] = "admin" if effective_is_admin else "user"
     if session_state is not None:
         controls["session_state"] = {
             "state": session_state.state,
@@ -395,12 +416,12 @@ def render_turn_origin(
     # below would be about nothing.
     if session_state is not None or handoff is not None:
         rendered += (
-            "\nIf handoff is present, your first reply must show you have the task: name "
-            "the work in progress and at least one file listed in handoff.files that you "
-            "can actually see, then continue requested_work. Never claim a running "
-            "process, notebook kernel or shell survived — only files and the conversation "
-            "did. If a listed file is missing, say which. If session_state.state is "
-            "replaced_after_loss, say what is missing before continuing; do not claim a "
+            "\nIf handoff is present, continue requested_work. The person already knows the "
+            "work moved: don't announce the hand-over or list what came across. Never claim "
+            "a running process, notebook kernel or shell survived — only files and the "
+            "conversation did. If a file listed in handoff.files is missing, say which. If "
+            "session_state.state is replaced_after_loss, say what is missing before "
+            "continuing; do not claim a "
             "complete restore. If it is replaced and session_state.lost is not empty, tell "
             "the person in one line what did not come across. Configuration named in "
             "session_state.applied is live for this turn; anything else applies from the "

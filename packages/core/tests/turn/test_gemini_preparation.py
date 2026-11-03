@@ -17,6 +17,7 @@ from daimon.core.mux_backend import TurnRuntime
 from daimon.core.pricing import ProviderPrice
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.stores.mux_state import PostgresStateStore
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.binding import prepared_persistence
 from daimon.core.turn.deps import TurnDeps
@@ -132,6 +133,7 @@ async def host(db_session_factory: async_sessionmaker[AsyncSession]) -> AsyncIte
             channel_backends=True,
             turn_runtimes={PROFILE: runtime},
             state_store=store,
+            tool_safety=OPEN_TOOL_SAFETY,
         )
         admission = Admission(
             account_id=ACCOUNT,

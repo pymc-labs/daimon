@@ -7,7 +7,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
-from daimon.adapters.slack.admin import resolve_is_admin
+from daimon.adapters.slack.admin import resolve_is_platform_admin
 from daimon.adapters.slack.agent_setup.github_card_ui import github_card_blocks
 from daimon.adapters.slack.agent_setup.github_link import send_link
 from daimon.adapters.slack.blockkit import notice_fields
@@ -314,7 +314,7 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
                 error=True,
             )
             return
-        if not await resolve_is_admin(client, user_id=user_id, host_team_id=team_id):
+        if not await resolve_is_platform_admin(client, user_id=user_id, host_team_id=team_id):
             await post_ephemeral(
                 client,
                 channel_id=channel_id,
@@ -352,7 +352,7 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
         )
         return
     if principal is None and shared:
-        if not await resolve_is_admin(client, user_id=user_id, host_team_id=team_id):
+        if not await resolve_is_platform_admin(client, user_id=user_id, host_team_id=team_id):
             await _replace_modal(
                 client, payload, "Only a workspace admin can approve GitHub requests."
             )
@@ -363,7 +363,7 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
                 tenant_id=tenant_id,
                 platform="slack",
                 platform_user_id=user_id,
-                verified_tenant_admin=True,
+                is_platform_admin=True,
             )
             principal = await find_platform_principal(
                 session, tenant_id=tenant_id, platform="slack", external_id=user_id
@@ -420,7 +420,7 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
             "Hidden for you." if changed else "This request is unavailable.", error=not changed
         )
         return
-    is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
+    is_admin = await resolve_is_platform_admin(client, user_id=user_id, host_team_id=team_id)
     if not is_admin:
         await respond("Only a workspace admin can approve GitHub requests.", error=True)
         return
@@ -481,7 +481,7 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
                 tenant_id=tenant_id,
                 platform="slack",
                 platform_user_id=user_id,
-                verified_tenant_admin=is_admin,
+                is_platform_admin=is_admin,
             )
             url = await connect_link(
                 session,

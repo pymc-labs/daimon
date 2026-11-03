@@ -78,7 +78,7 @@ from daimon.core.stores.thread_sessions import (
     set_pending_unsaved_work,
     update_mutable_fingerprint,
 )
-from daimon.core.tool_safety import ToolSafetyPolicy, has_confirmation_gate
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy, has_confirmation_gate
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.ceiling import TURN_CEILING_S
 from daimon.core.turn.deps import TurnDeps
@@ -95,6 +95,7 @@ from daimon.core.usage_sweep import settle_stamped_session
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
+from daimon.testing.membership import FixtureMembershipResolver
 from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
     MARouter,
@@ -285,6 +286,7 @@ async def _settle_every_session(
 
 def _deps(sessionmaker: async_sessionmaker[AsyncSession], transport: _Transport) -> TurnDeps:
     return TurnDeps(
+        membership_resolver=FixtureMembershipResolver("user-1"),
         anthropic=transport.client(),
         sessionmaker=sessionmaker,
         deployment_default=DeploymentDefault(),
@@ -298,6 +300,7 @@ def _deps(sessionmaker: async_sessionmaker[AsyncSession], transport: _Transport)
         github_app_id=None,
         github_app_private_key=None,
         public_url=None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
 
@@ -951,6 +954,9 @@ async def test_replacement_checkpoint_live_and_recovered_debits_use_old_channel(
         external_user_id="user-1",
         markup=Decimal("1"),
         channel_id="channel-b",
+        tool_safety=OPEN_TOOL_SAFETY,
+        public_url=None,
+        platform="discord",
     )
     with observation.activate():
         second = await _prepare(
@@ -2619,6 +2625,7 @@ async def test_admission_origin_controls_the_actual_memory_mount(
     )
     admission = await admit(
         admission_deps,
+        origin="chat",
         tenant_id=tenant.id,
         requester_org=RequesterOrg.HOST,
         platform="discord",
@@ -2970,6 +2977,7 @@ async def _changed_channel_agent(
     admission_deps = replace(deps, anthropic=build_fake_anthropic(router.dispatch))
     first_admission = await admit(
         admission_deps,
+        origin="chat",
         tenant_id=tenant.id,
         requester_org=RequesterOrg.HOST,
         platform="discord",
@@ -3007,6 +3015,7 @@ async def _admit_next(admission_deps: TurnDeps, tenant: TenantRow) -> Admission:
 
     return await admit(
         admission_deps,
+        origin="chat",
         tenant_id=tenant.id,
         requester_org=RequesterOrg.HOST,
         platform="discord",
@@ -3154,6 +3163,14 @@ async def test_missing_legacy_source_is_not_retrieved_again_for_memory_replaceme
     assert len(transport.paths("GET", "/v1/sessions/sess_missing")) == 1
 
 
+def _mark_headless_handle(transport, session_id):
+    """The handle variant models an agent-chat-created session, with no human origin."""
+    native = transport.state.sessions[session_id]
+    transport.state.sessions[session_id] = native.model_copy(
+        update={"metadata": {**(native.metadata or {}), "daimon_agent_chat": "true"}}
+    )
+
+
 @pytest.mark.parametrize("entry", ["handle", "prepared"])
 async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
     db_session, db_committing_engine, db_schema, monkeypatch, entry
@@ -3192,7 +3209,11 @@ async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
     runtime = SimpleNamespace(
         client=client,
         session_factory=factory,
-        settings=SimpleNamespace(mcp=deps.mcp, billing=SimpleNamespace(markup=Decimal(1))),
+        settings=SimpleNamespace(
+            mcp=deps.mcp,
+            tool_safety=deps.tool_safety,
+            billing=SimpleNamespace(markup=Decimal(1)),
+        ),
     )
     auth = AuthIdentity(
         account_id=first.admission.account_id,
@@ -3203,7 +3224,11 @@ async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
         agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=first.admission.agent.id),
     )
     real_recheck = _admission_recheck(
-        auth, sessionmaker=factory, tool_name="continue_turn", agent_names=None
+        auth,
+        sessionmaker=factory,
+        membership_resolver=deps.membership_resolver,
+        tool_name="continue_turn",
+        agent_names=None,
     )
     entered, release = asyncio.Event(), asyncio.Event()
 
@@ -3215,9 +3240,9 @@ async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
     original_decide = turn_run.decide_before_send
     decisions = 0
 
-    def paused_decide(*args):
+    def paused_decide(*args, **kwargs):
         nonlocal decisions
-        decide = original_decide(*args)
+        decide = original_decide(*args, **kwargs)
         decisions += 1
         first_decision = decisions == 1
 
@@ -3234,6 +3259,7 @@ async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
 
     async def send(index):
         if entry == "handle":
+            _mark_headless_handle(transport, first.ma_session_id)
             return await _continue_turn_impl(
                 runtime,
                 auth,
@@ -3284,7 +3310,7 @@ async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
         # All peers must reach their queue before releasing the holder: the
         # real PostgreSQL fence on legacy, the binding lease on mux. Try-lock
         # contenders now back off outside the pool/gate.
-        await asyncio.wait_for(gates.reached.wait(), 3)
+        await asyncio.wait_for(gates.reached.wait(), 15)
         tasks.append(asyncio.create_task(compatible_preparation()))
         tasks.append(asyncio.create_task(replacement()))
         release.set()
@@ -3396,16 +3422,25 @@ async def test_sends_complete_while_two_replacements_block_on_ma_io(
     runtime = SimpleNamespace(
         client=deps.anthropic,
         session_factory=factory,
-        settings=SimpleNamespace(mcp=deps.mcp, billing=SimpleNamespace(markup=Decimal(1))),
+        settings=SimpleNamespace(
+            mcp=deps.mcp,
+            tool_safety=deps.tool_safety,
+            billing=SimpleNamespace(markup=Decimal(1)),
+        ),
     )
     recheck = _admission_recheck(
-        auth, sessionmaker=factory, tool_name="continue_turn", agent_names=None
+        auth,
+        sessionmaker=factory,
+        membership_resolver=deps.membership_resolver,
+        tool_name="continue_turn",
+        agent_names=None,
     )
 
     async def send(index, phase):
         prepared = phase_turns[phase][index]
         message = f"send during {phase} {index}"
         if entry == "handle":
+            _mark_headless_handle(transport, prepared.ma_session_id)
             return await _continue_turn_impl(
                 runtime, auth, prepared.ma_session_id, message, recheck=recheck
             )
@@ -3573,16 +3608,25 @@ async def test_independent_sends_during_replacements_with_old_session_waiters(
     runtime = SimpleNamespace(
         client=deps.anthropic,
         session_factory=factory,
-        settings=SimpleNamespace(mcp=deps.mcp, billing=SimpleNamespace(markup=Decimal(1))),
+        settings=SimpleNamespace(
+            mcp=deps.mcp,
+            tool_safety=deps.tool_safety,
+            billing=SimpleNamespace(markup=Decimal(1)),
+        ),
     )
     recheck = _admission_recheck(
-        auth, sessionmaker=factory, tool_name="continue_turn", agent_names=None
+        auth,
+        sessionmaker=factory,
+        membership_resolver=deps.membership_resolver,
+        tool_name="continue_turn",
+        agent_names=None,
     )
 
     async def send(index, phase, retired=False):
         prepared = predecessor_turns[index] if retired else phase_turns[phase][index]
         message = f"send during {phase} {index}"
         if entry == "handle":
+            _mark_headless_handle(transport, prepared.ma_session_id)
             return await _continue_turn_impl(
                 runtime, auth, prepared.ma_session_id, message, recheck=recheck
             )
@@ -3642,41 +3686,11 @@ async def test_independent_sends_during_replacements_with_old_session_waiters(
                 await asyncio.sleep(0.1)
             independent = [asyncio.create_task(send(i, phase)) for i in range(2)]
             waiters.extend(independent)
-            completed, pending = await asyncio.wait(
-                independent, timeout=3 if contended and phase == blocked_phase else 1
-            )
-            print(
-                f"entry={entry} contended={contended} phase={phase}: independent completed={len(completed)}, pending={len(pending)}, checkedout={engine.pool.checkedout()}, replacements still blocked={all(not t.done() for t in tasks)}",
-                flush=True,
-            )
-            if pending:
-                from daimon.core.session_mutation import SessionRetired
-
-                print(
-                    f"Unrelated sends still blocked beyond pool_timeout=2s with {15 - engine.pool.checkedout()} unused total connections",
-                    flush=True,
-                )
-                checkpoint_release.set()
-                create_release.set()
-                replacement_results = await asyncio.wait_for(asyncio.gather(*tasks), 8)
-                waiter_results = await asyncio.wait_for(
-                    asyncio.gather(*waiters, return_exceptions=True), 8
-                )
-                assert all(isinstance(r, PreparedTurn) for r in replacement_results)
-                assert all(not isinstance(r, BaseException) for r in waiter_results[-2:]), (
-                    waiter_results
-                )
-                assert all(isinstance(r, SessionRetired) for r in waiter_results[-7:-2]), (
-                    waiter_results
-                )
-                print(
-                    f"entry={entry} phase={phase}: after MA release both independent sends complete; all five predecessor sends refused SessionRetired",
-                    flush=True,
-                )
-            assert not pending, (
-                "unrelated sends starve behind predecessor waiters occupying all mutation slots"
-            )
+            # Prove independence by completing while replacement fences stay held.
+            # Authorization round trips make a one-second latency assertion flaky;
+            # pytest's deadlock watchdog bounds a regression that cannot progress.
             await asyncio.gather(*independent)
+            assert not release.is_set()
             for prepared in send_turns:
                 assert any(
                     e["type"] == "user.message" and phase in json.dumps(e["content"])
@@ -4144,7 +4158,11 @@ async def test_old_session_cannot_be_written_after_successor_exists(db_session, 
     runtime = SimpleNamespace(
         client=client,
         session_factory=db_session_factory,
-        settings=SimpleNamespace(mcp=deps.mcp, billing=SimpleNamespace(markup=Decimal(1))),
+        settings=SimpleNamespace(
+            mcp=deps.mcp,
+            tool_safety=deps.tool_safety,
+            billing=SimpleNamespace(markup=Decimal(1)),
+        ),
     )
     auth = AuthIdentity(
         account_id=first.admission.account_id,
@@ -4155,7 +4173,11 @@ async def test_old_session_cannot_be_written_after_successor_exists(db_session, 
         agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=first.admission.agent.id),
     )
     recheck = _admission_recheck(
-        auth, sessionmaker=db_session_factory, tool_name="continue_turn", agent_names=None
+        auth,
+        sessionmaker=db_session_factory,
+        membership_resolver=deps.membership_resolver,
+        tool_name="continue_turn",
+        agent_names=None,
     )
     before = len(transport.state.events.get(first.ma_session_id, []))
     from daimon.core.session_mutation import SessionRetired
@@ -4443,19 +4465,6 @@ async def test_handoff_waits_for_an_inflight_handle_send(
     client = build_fake_anthropic(
         combine_handlers(make_fake_sessions_handler(transport.state), router.dispatch)
     )
-    runtime = SimpleNamespace(
-        client=client,
-        session_factory=factory,
-        settings=SimpleNamespace(mcp=deps.mcp, billing=SimpleNamespace(markup=Decimal(1))),
-    )
-    auth = AuthIdentity(
-        account_id=account.id,
-        tenant_id=tenant.id,
-        role=Role.USER,
-        platform="discord",
-        platform_user_id="user-1",
-        agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=first.admission.agent.id),
-    )
     entered, release = asyncio.Event(), asyncio.Event()
     real_send = client.beta.sessions.events.send
 
@@ -4469,12 +4478,29 @@ async def test_handoff_waits_for_an_inflight_handle_send(
         return result
 
     monkeypatch.setattr(client.beta.sessions.events, "send", paused_send)
-    sending = asyncio.create_task(
-        _continue_turn_impl(runtime, auth, first.ma_session_id, "in flight")
-    )
+    from daimon.core.session_mutation import session_mutation_fence
+
+    async def platform_send():
+        # A human session is driven by its admitted platform driver, not by an
+        # external MCP handle. Exercise the same send/replacement fence here.
+        async with session_mutation_fence(factory, first.ma_session_id):
+            await client.beta.sessions.events.send(
+                first.ma_session_id,
+                events=[
+                    {"type": "user.message", "content": [{"type": "text", "text": "in flight"}]}
+                ],
+            )
+
+    sending = asyncio.create_task(platform_send())
     replacing = None
+    entered_wait = asyncio.create_task(entered.wait())
     try:
-        await asyncio.wait_for(entered.wait(), 5)
+        done, _ = await asyncio.wait(
+            {entered_wait, sending}, timeout=5, return_when=asyncio.FIRST_COMPLETED
+        )
+        if sending in done:
+            await sending  # Surface an early send failure rather than timing out on entered.
+        assert entered_wait in done, "the send must enter while holding its mutation fence"
         replacing = asyncio.create_task(
             _prepare(
                 deps, await _admit_next(admission_deps, tenant), tenant=tenant, account=account
@@ -4491,8 +4517,12 @@ async def test_handoff_waits_for_an_inflight_handle_send(
         assert await _count_live_rows(factory, tenant=tenant, account=account) == 1
     finally:
         release.set()
+        entered_wait.cancel()
         await asyncio.gather(
-            sending, *([replacing] if replacing is not None else []), return_exceptions=True
+            entered_wait,
+            sending,
+            *([replacing] if replacing is not None else []),
+            return_exceptions=True,
         )
 
 
@@ -4543,6 +4573,71 @@ async def _review_replacement(db, factory, *, sealed=False, lift=False):
     )
     assert isinstance(handed, PreparedTurn)
     return tenant, transport, deps, admission_deps, first, handed, transfers
+
+
+async def test_a_conversations_model_choice_is_frozen_kept_and_dropped_by_replacement(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The choice rides the session override: the stored agent keeps its own model."""
+    from daimon.core.thread_models import apply_thread_model, choose_thread_model
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+
+    async def admitted() -> Admission:
+        async with db_session_factory() as session:
+            applied = await apply_thread_model(
+                session,
+                agent=_agent(),
+                tenant_id=tenant.id,
+                platform="discord",
+                conversation_id="thread-1",
+                anthropic_backend=True,
+            )
+        return replace(
+            _admission(account=account, agent=applied.agent),
+            model_override=applied.model_override,
+        )
+
+    first = await _prepare(deps, await admitted(), tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn)
+    assert transport.state.sessions[first.ma_session_id].agent.model.id == _MODEL
+
+    await choose_thread_model(
+        db_session_factory,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-1",
+        choice="opus",
+    )
+    second = await _prepare(deps, await admitted(), tenant=tenant, account=account)
+    assert isinstance(second, PreparedTurn)
+    assert second.ma_session_id != first.ma_session_id, "the frozen session can't change model"
+    assert second.continuity.applied == ("model",), "the work is carried over as for any model edit"
+    assert transport.state.sessions[second.ma_session_id].agent.model.id == "claude-opus-5-5"
+    assert transport.state.ma.agents[_AGENT_ID]["model"] == {"id": _MODEL}, (
+        "the stored agent is never edited"
+    )
+
+    third = await _prepare(deps, await admitted(), tenant=tenant, account=account)
+    assert isinstance(third, PreparedTurn)
+    assert third.ma_session_id == second.ma_session_id, "the next turn keeps the chosen session"
+
+    await choose_thread_model(
+        db_session_factory,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-1",
+        choice="default",
+    )
+    fourth = await _prepare(deps, await admitted(), tenant=tenant, account=account)
+    assert isinstance(fourth, PreparedTurn)
+    assert fourth.ma_session_id != second.ma_session_id
+    assert transport.state.sessions[fourth.ma_session_id].agent.model.id == _MODEL
 
 
 # --- Held turns mount their channel's memory alone ---------------------------

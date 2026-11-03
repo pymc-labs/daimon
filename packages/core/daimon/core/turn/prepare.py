@@ -40,8 +40,8 @@ from anthropic.types.beta.sessions.beta_managed_agents_github_repository_resourc
 )
 from daimon.core.channel_backend import BackendUnsupported
 from daimon.core.channel_skills import PLATFORM_SKILL_RETRY_AFTER
-from daimon.core.config import load_turn_settings
-from daimon.core.confirmation import confirmed_tools_for_turn
+from daimon.core.config import get_repo_memory_settings, load_turn_settings
+from daimon.core.confirmation import confirmed_tools_for_tenant
 from daimon.core.credential_env import assemble_env_bytes
 from daimon.core.github_app_session import AppSessionAccess, token_scopes_for_tokens
 from daimon.core.ma_identity import derive_agent_uuid
@@ -203,6 +203,8 @@ class PreparedTurn:
     session_account_id: uuid.UUID
     _record: UsageRecorder | ObservationRecorder
     continuity: ContinuityOutcome = CONTINUED
+    # Capability decisions follow the session snapshot, including reused sessions.
+    session_model_id: str | None = field(default=None, kw_only=True)
     _finalize: Callable[[], Awaitable[None]] | None = field(
         default=None, kw_only=True, compare=False, repr=False
     )
@@ -212,7 +214,9 @@ class PreparedTurn:
     session_ref: ResourceRef | None = None
     runtime: TurnRuntime | None = None
     native_footer_cost: NativeFooterCostContext | None = None
+    native_chat_session_id: str | None = field(default=None, kw_only=True)
     _scope: Scope | None = field(default=None, kw_only=True, compare=False, repr=False)
+    _native_spec: AgentSpec | None = field(default=None, kw_only=True, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -454,8 +458,13 @@ async def create_ma_session(
             # person and may carry that person's own memory.
             personal_memory=True,
             tool_safety=deps.tool_safety,
+            legacy_memory_servers=(
+                get_repo_memory_settings(deps).legacy_mcp_server_names
+                if get_repo_memory_settings(deps).enabled
+                else ()
+            ),
             asks_before_publishing=admission.asks_before_publishing,
-            confirmed_tools=confirmed_tools_for_turn(deps),
+            confirmed_tools=await confirmed_tools_for_tenant(deps, tenant_id),
             daimon_rule_tools=admission.daimon_rule_tools,
             slack_turn_context_id=admission.slack_turn_context_id,
             # A held turn mounts its own channel-bound Daimon credential; a shared
@@ -471,6 +480,7 @@ async def create_ma_session(
             before_create=fence,
             on_app_access=capture_app_access,
             channel_skills=skills,
+            model_override=admission.model_override,
             system_override=system_for_platform(admission.agent.system, platform),
             relay_session_key=mapping_id,
         )
@@ -1160,6 +1170,14 @@ async def bind_session_impl(
 
                 selected = await read_preparation_counterpart(request)
             result = await prepare(selected)
+            # Unattended execution must inspect actual provider tools, not the
+            # source's Anthropic representation or a retained origin grant.
+            native_spec = (
+                selected.verified_counterpart.agent.spec
+                if selected.verified_counterpart is not None
+                else selected.target_spec
+            )
+            result = replace(result, _native_spec=native_spec)
             ref = result.session_ref
             backend = result.backend
             if ref is None or (
@@ -1211,9 +1229,13 @@ async def bind_session_impl(
             anthropic=deps.anthropic,
             sessionmaker=deps.sessionmaker,
             tenant_id=tenant_id,
+            fernet=deps.fernet,
             account_id=current.account_id,
             external_user_id=external_user_id,
             markup=deps.markup,
+            tool_safety=deps.tool_safety,
+            public_url=deps.public_url,
+            platform=platform,
             channel_id=admission.budget_channel_id,
             turn_path=deps.turn_path,
         )

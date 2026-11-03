@@ -52,7 +52,12 @@ ContinuationReason = Literal[
     "private_input_applied",
     "timer",
     "github_access_ready",
+    "watch_fired",
+    "job_finished",
+    "watch_report",
 ]
+#: Where a watch reports each fire.
+WatchDelivery = Literal["thread", "dm", "new_thread"]
 ContinuationStatus = Literal["pending", "claimed", "delivered", "skipped", "cancelled"]
 UserSkillSource = Literal["repo", "upload"]
 
@@ -212,7 +217,7 @@ class TenantDependentCounts:
 CatchUpPolicy = Literal["skip", "run-once"]
 
 
-RoutineDestinationKind = Literal["channel", "thread"]
+RoutineDestinationKind = Literal["channel", "thread", "dm"]
 RoutineDeliveryStatus = Literal["pending", "claimed", "delivered", "skipped"]
 
 
@@ -224,6 +229,17 @@ class UnattendedRequester(BaseModel):
     platform_user_id: str
     is_admin: bool = False
     role_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SandboxPin:
+    """The agent version and environment revision an admin's routine opt-in covers."""
+
+    agent_id: str
+    agent_version: int
+    environment_id: str
+    #: Environments are edited in place; their `updated_at` is their revision.
+    environment_updated_at: datetime
 
 
 class RoutineRow(BaseModel):
@@ -244,6 +260,14 @@ class RoutineRow(BaseModel):
     last_skip_reason: Literal["stale", "in_flight"] | None = None
     next_fire_at: datetime | None
     last_fired_at: datetime | None
+    source_routine_id: uuid.UUID | None = None
+    seeded_after: datetime | None = None
+    last_fired_slot: datetime | None = None
+    last_finished_at: datetime | None = None
+    handback_paused_at: datetime | None = None
+    handback_enabled: bool | None = None
+    handback_next_fire_at: datetime | None = None
+    last_finished_claim_at: datetime | None = None
     last_error: str | None
     last_result_tail: str | None
     destination_kind: RoutineDestinationKind | None = None
@@ -251,8 +275,22 @@ class RoutineRow(BaseModel):
     delivery_status: RoutineDeliveryStatus | None = None
     delivery_note: str | None = None
     delivery_payload: str | None = None
+    delivery_lease_owner: str | None = None
+    delivery_lease_expires_at: datetime | None = None
     delivered_at: datetime | None = None
     channel_id: str | None = None
+    source_provenance_known: bool = False
+    source_channel_id: str | None = None
+    source_thread_id: str | None = None
+    #: An admin opted this routine's own runs in to built-in sandbox tools.
+    sandbox_tools_enabled: bool = False
+    sandbox_tools_set_by: str | None = None
+    sandbox_tools_set_at: datetime | None = None
+    #: The agent version and environment revision the opt-in covers.
+    sandbox_agent_id: str | None = None
+    sandbox_agent_version: int | None = None
+    sandbox_environment_id: str | None = None
+    sandbox_environment_updated_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -336,6 +374,7 @@ class TaskContinuationRow(BaseModel):
 
     id: uuid.UUID
     tenant_id: uuid.UUID
+    attended: bool = False
     platform: str
     thread_id: str
     parent_channel_id: str
@@ -1173,6 +1212,10 @@ class TurnOriginRow(BaseModel):
     id: uuid.UUID
     tenant_id: uuid.UUID
     account_id: uuid.UUID
+    chat_session_id: str | None = None
+    human_invocation: bool | None = None
+    memory_read_only: bool | None = None
+    attended: bool = False
     platform: str
     parent_channel_id: str
     thread_id: str
@@ -1339,6 +1382,66 @@ class CompatibilityPreview(_BackendConsentFacts):
     target_settings: dict[str, JsonValue] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+
+
+class WatchRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    owner_account_id: uuid.UUID
+    owner_external_id: str
+    platform: str
+    parent_channel_id: str
+    thread_id: str
+    agent_id: str
+    agent_name: str
+    session_id: str | None
+    delivery: WatchDelivery = "thread"
+    instructions: str
+    producer: str
+    page_id: uuid.UUID
+    revision: int
+    source: str
+    status: str
+    # None is a permanent watch.
+    expires_at: datetime | None
+    permanent_approved_by: uuid.UUID | None = None
+    paused_at: datetime | None = None
+    max_turns_per_day: int
+    max_fires: int | None
+    fire_count: int
+    baseline: dict[str, object]
+    rule: dict[str, object]
+    source_state: dict[str, object]
+    lease_owner: str | None
+    lease_expires_at: datetime | None
+    next_check_at: datetime | None
+    backoff_until: datetime | None
+    consecutive_errors: int
+
+
+class WatchEvidenceRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+    id: uuid.UUID
+    watch_id: uuid.UUID
+    producer: str
+    event_id: str
+    payload: str
+    wake_key: uuid.UUID
+    accepted_at: datetime
+
+
+class WatchFiringRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+    wake_key: uuid.UUID
+    watch_id: uuid.UUID
+    revision: int
+    generation: int
+    events: list[dict[str, str]]
+    omitted: int
+    created_at: datetime
+    delivery_thread_id: str | None = None
+    delivery_session_id: str | None = None
 
 
 WebPersonKind = Literal["member", "visitor"]

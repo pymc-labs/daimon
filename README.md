@@ -50,7 +50,7 @@ or self-host it from this repo.
   Teams, a deployment serves one Microsoft 365 organisation.
 
 Everything is done in conversation. Slash commands (`/here`, `/agent-setup`,
-`/github`, `/routines`, `/billing`, `/privacy`, `/help`) exist for people who
+`/github`, `/routines`, `/model`, `/billing`, `/privacy`, `/help`) exist for people who
 prefer them; on Teams they are plain words (`setup`, `routines`, `help`) sent in a
 1:1 chat with the bot.
 

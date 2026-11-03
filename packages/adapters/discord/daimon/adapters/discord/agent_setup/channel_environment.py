@@ -17,6 +17,7 @@ import structlog
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.checks import admin_caller
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Subject
 from daimon.core.channel_environments import (
     ENVIRONMENT_OPTION_INHERIT,
@@ -83,15 +84,17 @@ async def load_picker_subject(
 ) -> Subject:
     """The caller as `authorize` sees them on this panel.
 
-    ``live`` reads Manage Server off the member instead of the panel state;
-    clicks pass it, rendering does not. Anyone else costs one grant read.
+    Platform authority comes from the current member, never rendered state.
+    Delegation is re-read for rendering and every action.
     """
     caller = admin_caller(interaction.user)
-    if not live:
-        caller = caller.model_copy(update={"is_server_admin": state.is_admin})
     async with runtime.sessionmaker() as session:
         return await load_live_subject(
-            session, tenant_id=panel_tenant_id(state), platform="discord", caller=caller
+            session,
+            tenant_id=panel_tenant_id(state),
+            platform="discord",
+            caller=caller,
+            action=DelegatedAction.ENVIRONMENTS,
         )
 
 

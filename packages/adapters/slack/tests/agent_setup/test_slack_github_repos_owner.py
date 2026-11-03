@@ -57,7 +57,7 @@ async def _open(
     client.views_push = AsyncMock()
     connect = AsyncMock(return_value="https://mcp.test/oauth/github/connect/token")
     sync = AsyncMock()
-    monkeypatch.setattr(actions_module, "resolve_is_admin", AsyncMock(return_value=admin))
+    monkeypatch.setattr(actions_module, "resolve_is_platform_admin", AsyncMock(return_value=admin))
     monkeypatch.setattr(
         actions_module,
         "load_panel_roster",

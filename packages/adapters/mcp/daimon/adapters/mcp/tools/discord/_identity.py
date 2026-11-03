@@ -29,6 +29,7 @@ from daimon.adapters.mcp.tools.discord._models import DisplayIdentityRow
 from daimon.adapters.mcp.tools.discord._send import (
     _fetch_attachment,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.core.admin_actions import DelegatedAction
 from fastmcp.exceptions import ToolError
 
 # Discord's nickname limit.
@@ -68,7 +69,7 @@ async def _set_display_identity_impl(  # pyright: ignore[reportUnusedFunction]
     if display_name is None and avatar_url is None:
         raise ToolError("pass display_name, avatar_url or both")
     validated_name = _validate_display_name(display_name) if display_name is not None else None
-    _require_admin(auth)
+    _require_admin(auth, action=DelegatedAction.AGENT_SETTINGS)
     user_id = _require_discord_identity(auth)
     guild_id = _require_guild_id(auth)
     token = _require_bot_token(runtime)

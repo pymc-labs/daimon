@@ -318,10 +318,12 @@ async def desired_snapshot_for(
     recorded: SessionSnapshot | None,
     tool_safety: ToolSafetyPolicy,
     public_url: str | None,
+    requires_chat_session: bool = False,
     memory_read_only: bool = False,
     asks_before_publishing: bool = False,
     confirmed_tools: frozenset[str] = frozenset(),
     daimon_rule_tools: frozenset[str] = frozenset(),
+    legacy_memory_servers: tuple[str, ...] = (),
     channel_skills: Sequence[MaSkill] = (),
     system_override: str | None = None,
     mcp_hold: str | None = None,
@@ -394,7 +396,7 @@ async def desired_snapshot_for(
     # Token scopes are labelled only in multi mode. A surviving installation
     # still needs the helper when another installation refused its mint.
     has_multi_installation_tokens = bool(app_urls[2])
-    return desired_snapshot(
+    desired = desired_snapshot(
         agent,
         hidden_mcp_server_names=await resolve_hidden_mcp_server_names(
             sessionmaker,
@@ -423,7 +425,9 @@ async def desired_snapshot_for(
         asks_before_publishing=asks_before_publishing,
         confirmed_tools=confirmed_tools,
         daimon_rule_tools=daimon_rule_tools,
+        legacy_memory_servers=legacy_memory_servers,
         vault_id=None if recorded is None else recorded.vault_id,
+        chat_session_id=None if recorded is None else recorded.chat_session_id,
         env_file_id=None if recorded is None else recorded.env_file_id,
         repo_mount_path=None if recorded is None else recorded.repo_mount_path,
         repo_token_issued_at=None if recorded is None else recorded.repo_token_issued_at,
@@ -436,4 +440,13 @@ async def desired_snapshot_for(
         memory_scope=memory_scope(memory_hold),
         tool_safety=tool_safety,
         public_url=public_url,
+    )
+    return desired.model_copy(
+        update={
+            "chat_session_id": (
+                (recorded.chat_session_id if recorded is not None else None) or "required"
+            )
+            if requires_chat_session
+            else None
+        }
     )

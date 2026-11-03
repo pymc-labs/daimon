@@ -616,3 +616,40 @@ async def test_timed_out_fire_reschedules_to_next_cron_slot(
         "next_fire_at must advance to next cron slot at claim time, "
         "NOT be touched by the timeout path (A3)"
     )
+
+
+@pytest.mark.parametrize("failed_check", ["cap", "configuration"])
+async def test_checks_after_claim_record_failure_completion(
+    db_session, db_session_factory, monkeypatch, failed_check
+):
+    from unittest.mock import AsyncMock
+
+    import daimon.core.scheduler as scheduler
+
+    now = datetime.now(UTC)
+    row = await _seed_due_routine(db_session, now=now, created_by_user_id="owner")
+    await db_session.commit()
+    if failed_check == "configuration":
+        monkeypatch.setattr(
+            scheduler, "configured_routines", AsyncMock(side_effect=RuntimeError("unavailable"))
+        )
+    fire = AsyncMock()
+    await run_one_tick(
+        now=now,
+        sm=db_session_factory,
+        caps=_FakeCaps(raises=failed_check == "cap"),
+        fire=fire,
+        max_age=timedelta(minutes=15),
+        max_concurrent_fires=1,
+        dispatch_timeout_s=30,
+        wait_for_completion=True,
+    )
+    fire.assert_not_awaited()
+    async with db_session_factory() as session:
+        stored = await get_routine(session, row.id, tenant_id=row.tenant_id)
+    assert stored.last_fired_slot == now - timedelta(minutes=1)
+    assert stored.last_finished_at is not None
+    assert stored.last_finished_claim_at == stored.last_fired_at == now
+    assert stored.last_error == (
+        "cap_check_failed" if failed_check == "cap" else "routine_configuration_check_failed"
+    )

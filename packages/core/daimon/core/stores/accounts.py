@@ -51,7 +51,8 @@ async def get_account_with_tenant(
         .outerjoin(
             PlatformPrincipal,
             (PlatformPrincipal.account_id == Account.id)
-            & (PlatformPrincipal.platform == Tenant.platform),
+            & (PlatformPrincipal.platform == Tenant.platform)
+            & (PlatformPrincipal.tenant_id == Tenant.id),
         )
         .where(Account.id == account_id)
     )
@@ -179,6 +180,13 @@ async def count_user_config_for_account(session: AsyncSession, *, account_id: uu
 
 async def delete_account(session: AsyncSession, *, account_id: uuid.UUID) -> int:
     """Delete the account row by id. Returns rowcount; never raises on 0."""
+    from daimon.core._models import RepoMemory
+
+    await session.execute(
+        delete(RepoMemory).where(
+            RepoMemory.created_by_account_id == account_id, RepoMemory.scope == "user"
+        )
+    )
     result = await session.execute(delete(Account).where(Account.id == account_id))
     rowcount = cast(CursorResult[Any], result).rowcount
     await session.flush()

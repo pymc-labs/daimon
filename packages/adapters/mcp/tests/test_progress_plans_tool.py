@@ -91,6 +91,8 @@ def _auth(*, tenant_id: uuid.UUID, admin: bool, platform: str | None = "discord"
         role=Role.ADMIN if admin else Role.USER,
         platform=platform,
         is_admin=admin,
+        is_platform_admin=admin,
+        token_kind="cli",
     )
 
 

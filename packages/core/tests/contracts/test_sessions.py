@@ -67,3 +67,21 @@ async def test_session_event_list_returns_iterable(
     ):
         events.append(e)
     assert isinstance(events, list), "events.list must return an async iterable"
+
+
+async def test_a_live_session_carries_only_capabilities_the_unattended_gate_knows(
+    anthropic_client: AsyncAnthropic,
+    live_agent: BetaManagedAgentsAgent,
+    live_environment: BetaEnvironment,
+) -> None:
+    """Every unattended turn refuses a session with an agent field, tool type or
+    setting the release does not know; the provider's real snapshot must pass,
+    or every routine would be refused after an API addition."""
+    from daimon.core.turn.unattended_capabilities import require_allowed_capabilities
+
+    session = await anthropic_client.beta.sessions.create(
+        agent=live_agent.id,
+        environment_id=live_environment.id,
+    )
+    snapshot = await anthropic_client.beta.sessions.retrieve(session.id)
+    require_allowed_capabilities(snapshot, allow_skills=True)

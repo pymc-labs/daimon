@@ -8,16 +8,21 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import helpers as tool
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
+from daimon.core.anthropic_guard import without_anthropic
 from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import helper_asks
 from daimon.core.stores.agent_helpers import set_helpers
 from daimon.core.stores.domain import Role, TurnOriginRow
+from daimon.core.stores.selfhosted_resources import SelfHostedAgents
 from daimon.core.stores.turn_origins import create_origin, mark_serving_helpers
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent
 from fastmcp.exceptions import ToolError
+from mux.contracts.ids import ModelRef, Scope
+from mux.contracts.resources import AgentSpec
+from mux.profiles.selfhosted import LOOP
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -68,6 +73,7 @@ async def _setup(
         shared_channel=False,
         expires_at=now + timedelta(minutes=10),
         now=now,
+        chat_session_id="test-session",
         helper_of=helper_of,
     )
     if serving:
@@ -87,7 +93,11 @@ async def _setup(
             ).model_dump(mode="json")
         )
     auth = AuthIdentity(
-        account_id=account.id, tenant_id=tenant.id, role=Role.USER, platform="slack"
+        account_id=account.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        platform="slack",
+        chat_session_id="test-session",
     )
     return world, auth, origin
 
@@ -104,6 +114,39 @@ async def test_the_roster_lists_live_helpers_only(
     assert [(h.agent_id, h.name, h.purpose) for h in listed.helpers] == [
         ("ag_argon", "argon", "Reads papers")
     ], "an archived or deleted helper and an agent not on the list never show"
+
+
+async def test_a_self_hosted_agent_lists_its_self_hosted_helpers(
+    db_session: AsyncSession, committing_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    world, auth, origin = await _setup(db_session, committing_sessionmaker)
+    scope = Scope(
+        tenant_id=str(auth.tenant_id),
+        account_id=str(auth.account_id),
+        principal_id="operator",
+        authorization_id="test",
+    )
+    agents = SelfHostedAgents(committing_sessionmaker)
+    ids = [
+        (
+            await agents.create(
+                scope,
+                AgentSpec(name=name, model=ModelRef(provider=LOOP.provider, id="gpt-6-luna")),
+                key=name,
+            )
+        ).ref.id
+        for name in ("lead-sh", "argon-sh")
+    ]
+    async with committing_sessionmaker.begin() as session:
+        await set_helpers(session, tenant_id=auth.tenant_id, agent_id=ids[0], helper_ids=ids[1:])
+    origin = origin.model_copy(update={"responder_ma_agent_id": ids[0]})
+
+    with without_anthropic():
+        roster = await tool._roster(world.runtime(), auth, origin)  # pyright: ignore[reportPrivateUsage]
+
+    assert [(h.agent_id, h.name) for h in roster] == [(ids[1], "argon-sh")], (
+        "a self-hosted conversation reads the tenant's own agents, never Anthropic"
+    )
 
 
 async def test_an_ask_waits_for_the_helpers_reply(

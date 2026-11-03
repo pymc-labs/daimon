@@ -10,7 +10,7 @@ from daimon.adapters.discord.agent_setup.github_home import connect_button_view,
 from daimon.adapters.discord.agent_setup.hydrate import load_roster_state
 from daimon.adapters.discord.checks import (
     admin_caller,
-    is_guild_admin,
+    is_platform_admin,
     require_registered_guild,
     resolve_tenant_for_interaction,
 )
@@ -77,7 +77,7 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
             runtime,
             interaction,
             tenant_id=tenant_id,
-            is_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
+            is_admin=is_platform_admin(interaction),  # pyright: ignore[reportArgumentType]
         )
         home = await load_home(state, runtime=runtime, user_id=interaction.user.id)
         message = await interaction.edit_original_response(
@@ -86,7 +86,7 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
             allowed_mentions=discord.AllowedMentions.none(),
         )
         home.attach_message(message)
-        if is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]
+        if is_platform_admin(interaction):  # pyright: ignore[reportArgumentType]
             from daimon.adapters.discord.agent_setup.github_new_repo import (
                 send_pending_notice as send_pending_new_repo_notice,
             )
@@ -102,7 +102,7 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
     @require_registered_guild
     async def connect(self, interaction: BotInteraction, agent: str | None = None) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
-        admin = is_guild_admin(interaction)  # pyright: ignore[reportArgumentType]
+        admin = is_platform_admin(interaction)  # pyright: ignore[reportArgumentType]
         runtime = cast(DiscordRuntime, interaction.client.runtime)  # type: ignore[attr-defined]
         root = runtime.settings.mcp.app_root_url
         config = runtime.settings.github_app

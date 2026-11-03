@@ -19,6 +19,7 @@ nav:
       - Self-hosting: self-hosting.md
       - Model providers: providers.md
       - Operations: operations.md
+      - Fly compute: compute.md
   - Connect:
       - Slack: slack.md
       - Microsoft Teams: teams.md
@@ -29,11 +30,20 @@ nav:
   - Customise:
       - Defaults: defaults.md
       - Routines: routines.md
+      - Move routines in: routine-migration.md
+      - Watches: watches.md
+      - Direct messages: direct-messages.md
+      - Repository memory: repo-memory.md
+      - Context providers: context-providers.md
+      - Lead intake: lead-intake.md
   - Concepts:
       - Architecture: architecture.md
       - Isolation: isolation.md
       - Permissions: permissions.md
+      - Admins: admins.md
+      - Unattended turns: unattended.md
       - Billing: billing.md
+      - Long jobs: long-jobs.md
       - Agent identity: agent-identity.md
       - Managed agents (mux): mux.md
   - Reference:

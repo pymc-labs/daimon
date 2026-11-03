@@ -10,14 +10,24 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import re
+from collections.abc import Callable
 from typing import Any
 
 import httpx
+import pytest
+from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.core.config import McpSettings
 from daimon.core.headless_runner import run_turn
 from daimon.core.sessions import create_session
-from daimon.core.tool_safety import ToolSafetyPolicy
-from daimon.testing.ma_models import ma_agent, ma_environment
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
+from daimon.core.turn.errors import AdmissionDenied
+from daimon.testing.ma_models import (
+    ma_agent,
+    ma_environment,
+    with_coordinator,
+    with_hidden_capability,
+)
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, sse_response
 from mux.testing.drivers.anthropic.ma_models import ma_session
 from pydantic import HttpUrl
@@ -34,14 +44,16 @@ _LINEAR_TOOLSET: dict[str, object] = {
 }
 
 
-def _events() -> list[dict[str, Any]]:
+def _events(
+    server: str = "linear", name: str = "create_issue", tool_input: dict[str, Any] | None = None
+) -> list[dict[str, Any]]:
     return [
         {
             "id": "evt_tu",
             "type": "agent.mcp_tool_use",
-            "name": "create_issue",
-            "mcp_server_name": "linear",
-            "input": {"title": "Nightly bug"},
+            "name": name,
+            "mcp_server_name": server,
+            "input": tool_input if tool_input is not None else {"title": "Nightly bug"},
             "evaluated_permission": "ask",
             "processed_at": _NOW.isoformat(),
         },
@@ -66,7 +78,16 @@ def _events() -> list[dict[str, Any]]:
     ]
 
 
-def _router(*, creates: list[dict[str, Any]], sends: list[dict[str, Any]]) -> MARouter:
+def _router(
+    *,
+    creates: list[dict[str, Any]],
+    sends: list[dict[str, Any]],
+    events: list[dict[str, Any]] | None = None,
+    agent_tools: list[dict[str, Any]] | None = None,
+    agent_servers: list[dict[str, Any]] | None = None,
+    unconstrainable: Callable[[BetaManagedAgentsSession], BetaManagedAgentsSession] | None = None,
+    updates: list[dict[str, Any]] | None = None,
+) -> MARouter:
     router = MARouter()
 
     def handle_create(request: httpx.Request, match: Any) -> httpx.Response:
@@ -83,8 +104,9 @@ def _router(*, creates: list[dict[str, Any]], sends: list[dict[str, Any]]) -> MA
     def handle_agent(request: httpx.Request, match: Any) -> httpx.Response:
         agent = ma_agent(
             id="agent_x",
-            tools=[_LINEAR_TOOLSET],
-            mcp_servers=[{"name": "linear", "type": "url", "url": "https://mcp.linear.app/mcp"}],
+            tools=agent_tools or [_LINEAR_TOOLSET],
+            mcp_servers=agent_servers
+            or [{"name": "linear", "type": "url", "url": "https://mcp.linear.app/mcp"}],
         )
         return httpx.Response(200, json=agent.model_dump(mode="json"))
 
@@ -93,7 +115,33 @@ def _router(*, creates: list[dict[str, Any]], sends: list[dict[str, Any]]) -> MA
         return httpx.Response(200, json=env.model_dump(mode="json"))
 
     router.add("POST", r"/v1/sessions", handle_create)
-    router.add("GET", r"/v1/sessions/[^/]+/events/stream", lambda r, m: sse_response(_events()))
+    # The unattended gate reads the session before each send.
+    frozen = ma_session(
+        id="ses_1",
+        agent=ma_agent(
+            id="agent_x",
+            tools=agent_tools or [_LINEAR_TOOLSET],
+            mcp_servers=agent_servers
+            or [{"name": "linear", "type": "url", "url": "https://mcp.linear.app/mcp"}],
+        ),
+    )
+    if unconstrainable is not None:
+        frozen = unconstrainable(frozen)
+    router.add(
+        "GET",
+        r"/v1/sessions/ses_1$",
+        lambda _r, _m: httpx.Response(200, json=frozen.model_dump(mode="json")),
+    )
+
+    def handle_update(request: httpx.Request, match: Any) -> httpx.Response:
+        if updates is not None:
+            updates.append(json.loads(request.content))
+        return router.dispatch(httpx.Request("GET", request.url))
+
+    router.add("POST", r"/v1/sessions/ses_1$", handle_update)
+    router.add(
+        "GET", r"/v1/sessions/[^/]+/events/stream", lambda r, m: sse_response(events or _events())
+    )
     router.add("POST", r"/v1/sessions/[^/]+/events", handle_send)
     router.add("GET", r"/v1/agents/([^/]+)", handle_agent)
     router.add("GET", r"/v1/environments/([^/]+)", handle_env)
@@ -143,13 +191,15 @@ async def test_routine_session_is_unchanged_when_the_policy_is_off(
 ) -> None:
     creates: list[dict[str, Any]] = []
     sends: list[dict[str, Any]] = []
-    client = build_fake_anthropic(_router(creates=creates, sends=sends).dispatch)
+    updates: list[dict[str, Any]] = []
+    client = build_fake_anthropic(_router(creates=creates, sends=sends, updates=updates).dispatch)
 
     await run_turn(
         anthropic=client,
         agent_id="agent_x",
         environment_id="env_x",
         trigger_message="file tonight's bugs",
+        tool_safety=OPEN_TOOL_SAFETY,
         tenant_id=headless_identity.tenant_id,
         account_id=headless_identity.account_id,
         turn_path=turn_path,
@@ -157,8 +207,12 @@ async def test_routine_session_is_unchanged_when_the_policy_is_off(
 
     turn_io_used.assert_ran(turn_path)
     assert creates[0]["agent"] == "agent_x", "no override when enforcement is off"
+    # The fake keeps serving the frozen snapshot, so every gate rewrites it.
+    assert updates
+    (toolset,) = updates[0]["agent"]["tools"]
+    assert toolset["default_config"]["permission_policy"] == {"type": "always_ask"}
     (sent,) = _confirmations(sends)
-    assert sent["result"] == "allow", "AutoApprove, as before"
+    assert sent["result"] == "allow", "off allows an ordinary third-party call"
 
 
 _PUBLIC_URL = "https://mcp.example.com/mcp"
@@ -223,6 +277,98 @@ async def test_without_a_daimon_endpoint_the_reserved_name_is_gated_like_any_ser
     assert _policies(agent) == {"daimon-mcp": "always_ask", "linear": "always_ask"}
 
 
+@pytest.mark.parametrize("trusted", [("linear",), ()], ids=["trusted", "untrusted"])
+async def test_routine_read_marked_read_only_by_a_trusted_server_runs(
+    monkeypatch: pytest.MonkeyPatch, trusted: tuple[str, ...], headless_identity: HeadlessIdentity
+) -> None:
+    """The production wiring: a routine's decider reads a trusted server's
+    catalogue, so a noun-first read the server marks `readOnlyHint` runs where
+    its name alone would have been refused. With no database the read is
+    anonymous. A server outside `trusted_annotations` is never listed and its
+    name decides."""
+    from daimon.core import mcp_tool_annotations
+    from daimon.core.mcp_oauth import discovery
+
+    tokens: list[str | None] = []
+
+    async def _catalogue(url: str, token: str | None) -> list[dict[str, Any]]:
+        assert url == "https://mcp.linear.app/mcp"
+        tokens.append(token)
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            assert str(request.url) == url
+            assert request.headers.get("authorization") is None
+            body = json.loads(request.content)
+            if body["method"] == "notifications/initialized":
+                return httpx.Response(204)
+            result = (
+                {
+                    "tools": [
+                        {"name": "memory_flag_list", "annotations": {"readOnlyHint": True}},
+                        {"name": "create_issue", "annotations": {"readOnlyHint": False}},
+                    ]
+                }
+                if body["method"] == "tools/list"
+                else {}
+            )
+            return httpx.Response(200, json={"id": body["id"], "result": result})
+
+        original = httpx.AsyncClient
+
+        def client(**kwargs: Any) -> httpx.AsyncClient:
+            return original(transport=httpx.MockTransport(handle), **kwargs)
+
+        with monkeypatch.context() as scoped:
+            scoped.setattr(httpx, "AsyncClient", client)
+            scoped.setattr(discovery, "assert_public_https_url", lambda *a, **k: None)
+            return list(await discovery.read_mcp_catalogue(url, token))
+
+    monkeypatch.setattr(mcp_tool_annotations, "read_mcp_catalogue", _catalogue)
+    creates: list[dict[str, Any]] = []
+    sends: list[dict[str, Any]] = []
+    router = _router(creates=creates, sends=sends)
+    events = _events()
+    events[0] = {**events[0], "name": "memory_flag_list", "input": {}}
+    # The session freezes the agent with its servers, which is where the
+    # decider finds the URL to read.
+    frozen = ma_session(
+        id="ses_1",
+        agent=ma_agent(
+            id="agent_x",
+            tools=[_LINEAR_TOOLSET],
+            mcp_servers=[{"name": "linear", "type": "url", "url": "https://mcp.linear.app/mcp"}],
+        ),
+        environment_id="env_x",
+    ).model_dump(mode="json")
+    router.routes[:0] = [
+        ("POST", re.compile(r"/v1/sessions$"), lambda r, m: httpx.Response(200, json=frozen)),
+        (
+            "GET",
+            re.compile(r"/v1/sessions/[^/]+/events/stream"),
+            lambda r, m: sse_response(events),
+        ),
+    ]
+    client = build_fake_anthropic(router.dispatch)
+
+    await run_turn(
+        anthropic=client,
+        agent_id="agent_x",
+        environment_id="env_x",
+        trigger_message="list the flags",
+        tool_safety=ToolSafetyPolicy(enabled=True, trusted_annotations=trusted),
+        tenant_id=headless_identity.tenant_id,
+        account_id=headless_identity.account_id,
+    )
+
+    (sent,) = _confirmations(sends)
+    if trusted:
+        assert sent["result"] == "allow", "readOnlyHint made memory_flag_list a read"
+        assert tokens == [None]
+    else:
+        assert sent["result"] == "deny", "the name decides: a noun-first read is a write"
+        assert tokens == [], "no tools/list for an untrusted server"
+
+
 async def _create_with_rules(
     rule_tools: frozenset[str], *, policy: ToolSafetyPolicy
 ) -> dict[str, Any]:
@@ -261,7 +407,19 @@ async def test_a_session_for_an_agent_with_daimon_rules_asks_on_call_tool_and_th
     asked = sorted(
         c["name"] for c in daimon["configs"] if c["permission_policy"]["type"] == "always_ask"
     )
-    assert asked == ["add_skill", "call_tool", "hubspot_update_objects"]
+    # Enrollment requires a person's card independently of agent-specific rules.
+    assert asked == [
+        "add_skill",
+        "call_tool",
+        "create_watch",
+        "fly_extend_session",
+        "fly_launch_session",
+        "hubspot_update_objects",
+        "resume_watch",
+        "rotate_watch_key",
+        "start_long_job",
+        "update_watch",
+    ]
 
 
 async def test_a_session_for_an_agent_without_daimon_rules_is_exactly_as_before() -> None:
@@ -273,4 +431,187 @@ async def test_a_session_for_an_agent_without_daimon_rules_is_exactly_as_before(
 
     assert without == inert, "rules that are not applied leave the session's tools alone"
     (daimon,) = [t for t in without["tools"] if t.get("mcp_server_name") == "daimon-mcp"]
-    assert [c["name"] for c in daimon["configs"]] == ["add_skill"]
+    assert [c["name"] for c in daimon["configs"]] == [
+        "add_skill",
+        "create_watch",
+        "fly_extend_session",
+        "fly_launch_session",
+        "resume_watch",
+        "rotate_watch_key",
+        "start_long_job",
+        "update_watch",
+    ]
+
+
+def test_no_production_signature_defaults_the_policy() -> None:
+    """Design test 6: safety off is an explicit policy; omitting one is an error."""
+    import dataclasses
+    import inspect
+
+    from daimon.core import headless_runner, session_snapshot, sessions, smoke
+    from daimon.core.turn.deps import TurnDeps
+
+    for fn in (
+        headless_runner.run_turn,
+        headless_runner.run_turn_impl,
+        sessions.create_session,
+        sessions.create_isolated_session,
+        sessions.project_session_resources,
+        session_snapshot.desired_snapshot,
+        smoke.run_smoke_check,
+    ):
+        param = inspect.signature(fn).parameters["tool_safety"]
+        assert param.default is inspect.Parameter.empty, fn.__qualname__
+    field = next(f for f in dataclasses.fields(TurnDeps) if f.name == "tool_safety")
+    assert field.default is dataclasses.MISSING and field.default_factory is dataclasses.MISSING
+
+
+async def test_run_turn_without_a_policy_is_a_type_error() -> None:
+    with pytest.raises(TypeError, match="tool_safety"):
+        await run_turn(  # type: ignore[call-arg]  # pyright: ignore[reportCallIssue]
+            anthropic=build_fake_anthropic(MARouter().dispatch),
+            agent_id="ag",
+            environment_id="env",
+            trigger_message="hi",
+        )
+
+
+@pytest.mark.parametrize("enabled", [False, True], ids=["off", "on"])
+async def test_a_routine_never_sends_microsoft_mail_policy_on_or_off(
+    enabled: bool, headless_identity: HeadlessIdentity
+) -> None:
+    """Design §3 routines row: the one unattended decider, never AutoApprove; the
+    session asks on Daimon's card-only actions and the routine refuses them."""
+    daimon = {"name": "daimon-mcp", "type": "url", "url": _PUBLIC_URL}
+    creates: list[dict[str, Any]] = []
+    sends: list[dict[str, Any]] = []
+    client = build_fake_anthropic(
+        _router(
+            creates=creates,
+            sends=sends,
+            events=_events("daimon-mcp", "microsoft_send", {"action": "send_mail"}),
+            agent_tools=[_toolset("daimon-mcp")],
+            agent_servers=[daimon],
+        ).dispatch
+    )
+    await run_turn(
+        anthropic=client,
+        agent_id="agent_x",
+        environment_id="env_x",
+        trigger_message="mail the summary",
+        mcp_settings=McpSettings(public_url=HttpUrl(_PUBLIC_URL)),
+        tool_safety=ToolSafetyPolicy(enabled=enabled),
+        tenant_id=headless_identity.tenant_id,
+        account_id=headless_identity.account_id,
+    )
+    (created,) = creates
+    (toolset,) = created["agent"]["tools"]
+    asked = {c["name"] for c in toolset["configs"]}
+    assert "microsoft_send" in asked
+    (sent,) = _confirmations(sends)
+    assert sent["result"] == "deny"
+
+
+_BUILTINS: dict[str, object] = {
+    "type": "agent_toolset_20260401",
+    "configs": [],
+    "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+}
+
+
+@pytest.mark.parametrize(
+    "unconstrainable",
+    [with_coordinator, with_hidden_capability],
+    ids=["coordinator", "hidden_field"],
+)
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_a_routine_on_a_coordinator_session_is_refused_before_its_message(
+    enabled: bool,
+    unconstrainable: Callable[[BetaManagedAgentsSession], BetaManagedAgentsSession],
+    headless_identity: HeadlessIdentity,
+) -> None:
+    """The roster cannot be removed from a live session, so nothing is sent."""
+    creates: list[dict[str, Any]] = []
+    sends: list[dict[str, Any]] = []
+    client = build_fake_anthropic(
+        _router(creates=creates, sends=sends, unconstrainable=unconstrainable).dispatch
+    )
+
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        await run_turn(
+            anthropic=client,
+            agent_id="agent_x",
+            environment_id="env_x",
+            trigger_message="file tonight's bugs",
+            tool_safety=ToolSafetyPolicy(enabled=enabled),
+            tenant_id=headless_identity.tenant_id,
+            account_id=headless_identity.account_id,
+        )
+
+    assert sends == []
+
+
+async def test_a_routine_disables_its_sandbox_before_sending(
+    headless_identity: HeadlessIdentity,
+) -> None:
+    """Routines cannot generate files using sandbox tools."""
+    creates: list[dict[str, Any]] = []
+    sends: list[dict[str, Any]] = []
+    updates: list[dict[str, Any]] = []
+    tools = [_BUILTINS, _LINEAR_TOOLSET]
+    client = build_fake_anthropic(
+        _router(creates=creates, sends=sends, agent_tools=tools, updates=updates).dispatch
+    )
+
+    await run_turn(
+        anthropic=client,
+        agent_id="agent_x",
+        environment_id="env_x",
+        trigger_message="write the report",
+        tool_safety=ToolSafetyPolicy(enabled=True),
+        tenant_id=headless_identity.tenant_id,
+        account_id=headless_identity.account_id,
+    )
+
+    assert updates, "the unattended gate rewrites the MCP toolset before the message"
+    for body in updates:
+        (builtins,) = [t for t in body["agent"]["tools"] if t["type"] == "agent_toolset_20260401"]
+        assert builtins["default_config"]["enabled"] is False
+        assert all(config["enabled"] is False for config in builtins.get("configs", []))
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_a_routines_own_daimon_tools_pause_for_the_decider(
+    enabled: bool, headless_identity: HeadlessIdentity
+) -> None:
+    """Trusted is not unasked: Daimon's ordinary tools pause, and the decider allows them."""
+    creates: list[dict[str, Any]] = []
+    sends: list[dict[str, Any]] = []
+    updates: list[dict[str, Any]] = []
+    client = build_fake_anthropic(
+        _router(
+            creates=creates,
+            sends=sends,
+            updates=updates,
+            agent_tools=[_toolset("daimon-mcp")],
+            agent_servers=[{"name": "daimon-mcp", "type": "url", "url": _PUBLIC_URL}],
+            events=_events(server="daimon-mcp", name="list_agents", tool_input={}),
+        ).dispatch
+    )
+
+    await run_turn(
+        anthropic=client,
+        agent_id="agent_x",
+        environment_id="env_x",
+        trigger_message="list them",
+        tool_safety=ToolSafetyPolicy(enabled=enabled),
+        mcp_settings=McpSettings(public_url=HttpUrl(_PUBLIC_URL)),
+        tenant_id=headless_identity.tenant_id,
+        account_id=headless_identity.account_id,
+    )
+
+    toolset = updates[-1]["agent"]["tools"][0]
+    assert toolset["mcp_server_name"] == "daimon-mcp"
+    assert toolset["default_config"]["permission_policy"] == {"type": "always_ask"}
+    (sent,) = _confirmations(sends)
+    assert sent["result"] == "allow"

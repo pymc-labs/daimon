@@ -44,7 +44,8 @@ import structlog
 from anthropic._models import construct_type_unchecked
 from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.core.authz import build_agent_ref
-from daimon.core.confirmation import confirmed_tools_for_turn
+from daimon.core.config import get_repo_memory_settings
+from daimon.core.confirmation import confirmed_tools_for_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_BUDGET_CHANNEL
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
@@ -511,7 +512,7 @@ async def _run_replacement(
                 destination_agent_name=admission.agent.name,
                 requested_work=None,
                 unsaved_work=row.pending_unsaved_work,
-                before_send=decide_before_send(deps, admission),
+                before_send=decide_before_send(deps, admission, attended=False),
             )
             stage = "upload"
             await _advance(
@@ -772,6 +773,7 @@ async def _prepare_session_for_turn_locked(
                 agent_id=current.agent.id,
             ),
             continuity=continuity,
+            session_model_id=model_id,
         )
 
     async def from_fresh(
@@ -942,10 +944,21 @@ async def _prepare_session_for_turn_locked(
             fernet=deps.fernet,
             recorded=recorded,
             tool_safety=deps.tool_safety,
+            legacy_memory_servers=(
+                get_repo_memory_settings(deps).legacy_mcp_server_names
+                if get_repo_memory_settings(deps).enabled
+                else ()
+            ),
             public_url=deps.public_url,
+            requires_chat_session=(
+                admission.shared_owner is None
+                and deps.mcp.public_url is not None
+                and deps.mcp.jwt_secret is not None
+                and any(server.name == "daimon-mcp" for server in admission.agent.mcp_servers)
+            ),
             memory_read_only=admission.memory_read_only,
             asks_before_publishing=admission.asks_before_publishing,
-            confirmed_tools=confirmed_tools_for_turn(deps),
+            confirmed_tools=await confirmed_tools_for_tenant(deps, tenant_id),
             daimon_rule_tools=admission.daimon_rule_tools,
             channel_skills=admission.channel_skills,
             system_override=system_for_platform(admission.agent.system, platform),
@@ -1151,15 +1164,12 @@ async def _prepare_session_for_turn_locked(
 
         assert recorded is not None, "an in-place path always has a recorded snapshot"
         applying: tuple[UpdateOp, ...] = decision.ops if isinstance(decision, UpdateInPlace) else ()
-        if admission.shared_owner is None and not any(
-            isinstance(op, RemirrorVaultCredentials) for op in applying
-        ):
+        if not any(isinstance(op, RemirrorVaultCredentials) for op in applying):
             # Every reused session has re-mirrored the caller's vault on every
             # turn since that path existed; a compatible session keeps doing so.
+            # A shared thread re-mirrors its own vault instead: it never takes
+            # any one caller's (`apply_update_ops`).
             applying = (*applying, RemirrorVaultCredentials())
-        if admission.shared_owner is not None:
-            # A shared thread's workspace never takes any one caller's vault.
-            applying = tuple(op for op in applying if not isinstance(op, RemirrorVaultCredentials))
 
         async def run_ops() -> AppliedOps | SessionBusy:
             return await apply_update_ops(
@@ -1182,9 +1192,14 @@ async def _prepare_session_for_turn_locked(
                 agent_github_app=deps.agent_github_app,
                 now=moment,
                 asks_before_publishing=admission.asks_before_publishing,
-                confirmed_tools=confirmed_tools_for_turn(deps),
+                confirmed_tools=await confirmed_tools_for_tenant(deps, tenant_id),
                 daimon_rule_tools=admission.daimon_rule_tools,
                 mcp_vault_ids=deps.resolver_cache.mcp_vault_ids,
+                legacy_memory_servers=(
+                    get_repo_memory_settings(deps).legacy_mcp_server_names
+                    if get_repo_memory_settings(deps).enabled
+                    else ()
+                ),
             )
 
         if isinstance(decision, ReuseAsIs):

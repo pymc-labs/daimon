@@ -11,12 +11,13 @@ import contextlib
 from collections.abc import AsyncIterator
 
 import httpx
+import pytest
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
 from daimon.core.stores import accounts
 from daimon.core.stores.domain import Role
 from daimon.testing.asgi import INIT_BODY, INIT_HEADERS, asgi_lifespan, parse_jsonrpc_response
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from fastmcp import Context, FastMCP
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -32,6 +33,9 @@ _SEARCH: dict[str, object] = {
     "method": "tools/call",
     "params": {"name": "search_tools", "arguments": {"query": "archive agent"}},
 }
+
+
+pytestmark = pytest.mark.usefixtures("platform_admin_edge")
 
 
 def _app(sessionmaker: async_sessionmaker[AsyncSession]) -> Starlette:
@@ -59,6 +63,12 @@ async def _tokens(sessionmaker: async_sessionmaker[AsyncSession]) -> tuple[str, 
         admin = await make_account(s, tenant=tenant)
         await accounts.set_role(s, admin.id, Role.ADMIN)
         member = await make_account(s, tenant=tenant)
+        await make_platform_principal(
+            s, tenant=tenant, account=admin, platform="discord", external_id="admin"
+        )
+        await make_platform_principal(
+            s, tenant=tenant, account=member, platform="discord", external_id="member"
+        )
     return await registered_account_token(
         sessionmaker, account_id=admin.id
     ), await registered_account_token(sessionmaker, account_id=member.id)

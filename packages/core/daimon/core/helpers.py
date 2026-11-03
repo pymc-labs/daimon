@@ -220,6 +220,7 @@ class _Desk:
                 origin,
                 **backend_facts(admission),
                 session_state=None if continued else prepared.continuity.session_state(),
+                effective_is_admin=admission.is_admin,
             )
             message = f"{controls}\n\n{self.asker_name} asks:\n{ask.message}"
 
@@ -292,11 +293,17 @@ async def serve_helpers(
 ) -> AsyncIterator[None]:
     """Run this turn's helper asks while the turn runs; stop them all when it ends.
 
-    A no-op unless the turn is a person's own message with a trusted origin, and
-    its agent has helpers, so other turns pay one query at most.
+    A no-op unless a person invoked the turn (a message, not a wake), it has a
+    trusted origin and its agent has helpers, so other turns pay one query at most.
     """
     origin_id = current_origin_id.get()
-    if origin not in SERVING_ORIGINS or origin_id is None or admission.request is None:
+    if (
+        origin not in SERVING_ORIGINS
+        or admission.grant is None
+        or not admission.grant.human_invocation
+        or origin_id is None
+        or admission.request is None
+    ):
         yield
         return
     async with deps.sessionmaker() as session:

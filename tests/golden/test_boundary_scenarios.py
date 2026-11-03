@@ -24,9 +24,11 @@ from anthropic import AsyncAnthropic
 from cryptography.fernet import Fernet
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
+from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.slack.app import SlackApp
 from daimon.core.config import McpSettings, TurnQueueSettings
 from daimon.core.github_credentials import build_multifernet, encrypt_token
+from daimon.core.membership import Membership
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.turn import driver as turn_driver
 from daimon.core.turn.ceiling import CEILING_MESSAGE
@@ -194,6 +196,7 @@ async def test_cold_thread_feedback_before_session_create(
     runtime = replace(runtime, turn_deps=deps)
     if platform == "discord":
         bot = driver._make_bot(runtime)
+        bot.membership_resolver.members[user] = Membership(is_member=True)
         message = driver._make_message(
             workspace_id=workspace, channel_id=channel, user_id=user, text="cold hello"
         )
@@ -231,12 +234,21 @@ async def test_dm_reply_delivery_and_deduplication(
         db_session, db_session_factory
     )
     await existing._start(tenant, deps, admission)
-    runtime = MagicMock()
-    runtime.sessionmaker = db_session_factory
-    runtime.turn_deps = deps
-    runtime.settings.discord.max_concurrent_turns = 10
-    runtime.settings.turn_queue = TurnQueueSettings()
+    settings = MagicMock()
+    settings.discord.max_concurrent_turns = 10
+    settings.turn_queue = TurnQueueSettings()
+    runtime = DiscordRuntime(
+        settings=settings,
+        anthropic=deps.anthropic,
+        sessionmaker=db_session_factory,
+        notebook_rate_limiter=MagicMock(),
+        billing_config=None,
+        deployment_default=deps.deployment_default,
+        resolver_cache=deps.resolver_cache,
+        turn_deps=deps,
+    )
     bot: Any = DaimonBot(runtime=runtime, intents=discord.Intents.default())
+    bot.runtime = replace(bot.runtime, turn_deps=deps)
     guild = MagicMock(spec=discord.Guild)
     guild.owner_id = 1
     member = MagicMock(spec=discord.Member)
@@ -247,7 +259,11 @@ async def test_dm_reply_delivery_and_deduplication(
     guild.fetch_member = AsyncMock(return_value=member)
     channel = MagicMock(spec=discord.DMChannel)
     channel.id = "dm-42"
-    channel.send = AsyncMock(return_value=None)
+    sent = MagicMock(spec=discord.Message)
+    sent.id = 4200
+    sent.channel = channel
+    sent.edit = AsyncMock(return_value=sent)
+    channel.send = AsyncMock(return_value=sent)
 
     @asynccontextmanager
     async def typing() -> AsyncIterator[None]:

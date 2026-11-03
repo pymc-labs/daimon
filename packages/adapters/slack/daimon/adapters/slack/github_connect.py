@@ -9,7 +9,7 @@ from typing import Any, cast
 import anthropic
 import httpx
 import structlog
-from daimon.adapters.slack.admin import resolve_is_admin
+from daimon.adapters.slack.admin import resolve_is_platform_admin
 from daimon.adapters.slack.blockkit import notice_fields, notice_update_fields
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
@@ -69,7 +69,7 @@ async def handle_github_command(runtime: SlackRuntime, payload: dict[str, Any]) 
         if not parts or parts[0].casefold() != "connect":
             await reply("Run /github connect [agent].", error=False)
             return
-        admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
+        admin = await resolve_is_platform_admin(client, user_id=user_id, host_team_id=team_id)
         user_info = await client.users_info(user=user_id)  # pyright: ignore[reportUnknownMemberType]
         user = cast(dict[str, Any], user_info.get("user") or {})
         if user.get("team_id") != team_id or user.get("is_stranger"):

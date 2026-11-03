@@ -21,6 +21,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._owner import caller_owns_agent
 from daimon.adapters.mcp.tools._words import admin_noun
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL, agent_pin_names
 from daimon.core.authz import Action, AgentRef, Place, authorize
 from daimon.core.native_admins import AdminCaller
@@ -38,7 +39,8 @@ def admin_caller(auth: AuthIdentity) -> AdminCaller:
     """The caller's native admin status; an agent key has no admin authority."""
     return AdminCaller(
         platform_user_id=auth.platform_user_id if auth.agent_id is None else None,
-        is_server_admin=auth.is_admin and auth.agent_id is None,
+        is_server_admin=auth.is_platform_admin and auth.agent_id is None,
+        role_ids=auth.verified_role_ids,
     )
 
 
@@ -63,7 +65,7 @@ async def target_facts(
 
 async def require_admin(runtime: McpRuntime, auth: AuthIdentity, *, channel_id: str) -> None:
     """Refuse a channel change unless the caller is a native admin."""
-    if auth.is_admin and auth.agent_id is None:
+    if auth.admin_for(DelegatedAction.CHANNEL_PERMISSIONS) and auth.agent_id is None:
         return
     raise ToolError(
         f"This change needs {admin_noun(auth.platform)}. Tell the caller who can make "
@@ -98,7 +100,7 @@ async def require_bindable_as_channel_default(
         # Nobody, server admins included: the agent would refuse every turn here.
         decision = authorize(
             policy,
-            subject=mcp_subject(auth, is_admin=auth.is_admin),
+            subject=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.CHANNEL_PERMISSIONS)),
             action=Action.BIND_CHANNEL_DEFAULT,
             agent=AgentRef.of(*names),
             place=Place(channel_id=channel_id),
@@ -118,7 +120,7 @@ async def require_bindable_as_channel_default(
                 "every request here and cannot be this channel's default. Nothing was changed. "
                 "Pick another agent, or ask an admin to change its rule. Do not retry."
             )
-        if auth.is_admin and auth.agent_id is None:
+        if auth.admin_for(DelegatedAction.CHANNEL_PERMISSIONS) and auth.agent_id is None:
             return
     raise ToolError(
         f"Only {admin_noun(auth.platform)} can make this the channel's default. "
@@ -134,7 +136,7 @@ async def require_admin_for_reachable_agent(
     agent: BetaManagedAgentsAgent | None = None,
 ) -> None:
     """Require the agent's owner or an admin for an agent setup change."""
-    if auth.is_admin and auth.agent_id is None:
+    if auth.admin_for(DelegatedAction.CHANNEL_PERMISSIONS) and auth.agent_id is None:
         return
     if agent is not None and await caller_owns_agent(runtime, auth, agent.id):
         return

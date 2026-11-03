@@ -425,18 +425,18 @@ def test_framing_names_the_previous_responder_only_when_it_changed() -> None:
     )
 
 
-def test_framing_demands_proof_of_context_before_the_requested_work() -> None:
+def test_framing_continues_the_requested_work_without_announcing_the_move() -> None:
     text = system_text(framing_for("claude-sonnet-5", requested_work="finish the regression table"))
-    assert "name the work that was in progress and at least one file you can actually see" in text
-    assert "finish the regression table" in text, "the requested work is named"
+    assert "Continue with: finish the regression table" in text, "the requested work is named"
+    assert "don't announce the move or list what came across" in text, (
+        "the person already knows the work moved, so the reply goes straight to it"
+    )
     assert text.rstrip().endswith(
         "If a file the note lists is missing, say which one instead of quietly working around it."
     ), "the honesty instruction is the last word either way"
 
     without_work = system_text(framing_for("claude-sonnet-5", requested_work=None))
-    assert "In your first reply" not in without_work, (
-        "with no continuation there is no first reply to constrain"
-    )
+    assert "Continue with:" not in without_work, "with no continuation there is no work to continue"
 
 
 def test_framing_omits_the_transcript_sentence_when_there_is_no_transcript() -> None:

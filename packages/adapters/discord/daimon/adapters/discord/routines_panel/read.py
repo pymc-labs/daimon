@@ -11,6 +11,7 @@ from daimon.adapters.discord.routines_panel.state import (
     picker_label,
 )
 from daimon.core.defaults.ma_index import list_agents_by_tenant
+from daimon.core.routines import routine_for_reader
 from daimon.core.stores.routines import list_routines_for_tenant
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,6 +23,7 @@ async def load_guild_routines(
     anthropic: AsyncAnthropic,
     *,
     tenant_id: uuid.UUID,
+    viewer_user_id: str | None = None,
 ) -> tuple[list[RoutineEntry], int, dict[str, str]]:
     """Fetch routines + tenant agents; sort, cap, and decorate per entry.
 
@@ -40,6 +42,7 @@ async def load_guild_routines(
 
     entries: list[RoutineEntry] = []
     for row in rows:
+        row = routine_for_reader(row, user_id=viewer_user_id)
         glyph, color = derive_state(row)
         agent_name = agent_name_map.get(row.agent_id, f"<agent {row.agent_id[:8]}>")
         label = picker_label(row)

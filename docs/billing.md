@@ -1,8 +1,7 @@
 # Billing and credits
 
-How Daimon meters model use, prices it and stops a turn when credit runs out.
-Read it if you run a deployment that serves more than one Discord server,
-Slack workspace or Teams tenant on one provider key.
+How Daimon meters model use, prices it and stops a turn when credit runs out,
+for deployments that serve several servers or workspaces on one provider key.
 
 Every model call is priced in USD and debited from the tenant that caused it.
 By default a turn cannot start unless that tenant has credit left. Metering and
@@ -71,18 +70,25 @@ channel budget.
    even with no Stripe setup, so a spent trial credit blocks the tenant.
 2. **Cap.** A person's spend in the current UTC calendar month must be under
    their cap. Caps are per person with a tenant-wide default. There is no
-   tenant total, per-session cap or other window.
+   tenant total, per-session cap or other window. [Long jobs](#long-jobs) add
+   a separate per-job limit.
 3. **Channel budget.** The channel's spend in its window must be under its
    [budget](#channel-budgets).
 
 A denial aborts the turn with a plain notice, such as "Your team's Daimon
 credit has run out." The turn never falls back to a cheaper model. MCP tools that start a turn,
 routine runs and wakes pass the same gates. Unprompted thread participation skips silently when one refuses.
+A watch wake checks all three again before each model call, approval card and
+report it sends.
 
 A finished turn ends with one summary line: the agent, the time, what the turn
 was debited and the money left, for example `Ada  12s  $0.042 used  $41.20
 left`. The money left is the channel budget's remainder, else the prepaid
 balance.
+
+An admin can hide that line for the whole server with `/cost-footer hide` on
+Discord, or the `set_cost_footer` tool on any platform. Failure notices still
+show, and billing is unchanged.
 
 ### Overdraft bound
 
@@ -96,21 +102,16 @@ times one turn's cost. The cap is the adapter's
 balance gate again once it holds a slot.
 
 MCP `start_turn` sessions are worse. Their spend reaches the ledger only when
-a read sees the turn end or the sweep settles it, and MCP turns have no
-concurrency cap. The overdraft is then bounded by what a tenant runs before
-those reads, not by the cap.
+a read or the sweep settles it, and they have no concurrency cap.
 
 ### Exempt usage
 
 A caller with no platform user, such as an operator, the CLI or an internal
 token, runs with no balance check, no cap check and no debit. The operator
 absorbs that spend. The session is stamped billing-exempt when created, so its
-creator's posture covers every turn on it, even a platform user's. An exempt
-caller on a billed session, such as `daimon run --session` on a chat thread's
-session, is debited to the tenant.
-
-`daimon sessions create` makes an ephemeral session with no tenant stamp and no
-row, so it is never settled. It is the session `daimon run` normally targets.
+creator's posture covers every turn on it. An exempt caller on a billed
+session, such as `daimon run --session` on a chat thread, is debited to the
+tenant. `daimon sessions create` makes a session that is never settled.
 
 To see absorbed spend, total the `usage_sweep.exempt_skipped` log lines by
 distinct `managed_session_id`, taking the latest line of each.
@@ -163,9 +164,8 @@ token and the amount from Stripe, and a repeated completion event cannot add a
 second top-up. Refunds and disputes debit the ledger, never more than the
 original credit.
 
-A credit that conflicts with an existing one for the same payment fails
-processing and stays retryable. Inspect the Stripe event, payment and tenant
-before replaying it, since a retry cannot fix inconsistent data.
+A credit that conflicts with an existing one for the same payment fails and
+stays retryable. Inspect the Stripe event before replaying it.
 
 Without Stripe, operators credit a tenant directly and set caps:
 
@@ -181,10 +181,10 @@ Credit prints the new balance. Repeating the same arguments with the same
 
 ## Promo codes
 
-A promo code hands out credit. A **server-wide** code is redeemed by a server
-or workspace admin and credits the tenant. A **channel** code
-(`--channel-cap`) is redeemed by any member and credits their channel.
-`/billing` shows **Redeem code** only once some code can be redeemed.
+A promo code hands out credit. A **server-wide** code credits the tenant, and
+a **channel** code (`--channel-cap`) credits the channel it is redeemed in.
+Only a platform admin can redeem either. `/billing` shows **Redeem code** to
+platform admins once some code can be redeemed.
 
 ```sh
 daimon promo create --amount 20                    # prints the code once
@@ -204,7 +204,7 @@ often it can be redeemed. A tenant redeems a server-wide code at most once.
 - **Credit** codes add ordinary credit at once. It never expires.
 - **Channel** codes need `--channel-cap` of at least `--amount`, and cannot be
   timed. Each person redeems once per channel, until the channel has taken the
-  cap. With `--amount 10 --channel-cap 30`, three people can each add $10. The
+  cap. With `--amount 10 --channel-cap 30`, three admins can each add $10. The
   credit also raises that channel's budget limit. They cannot be redeemed in a
   DM, a group DM, a Teams 1:1 chat or by MCP tool.
 - **Timed** codes grant only between `--starts` and `--ends`. After the window
@@ -218,10 +218,11 @@ Five refused redemptions in 15 minutes pause that person's attempts only. Every
 attempt is audited. Revoking stops new redemptions only, and credit already
 redeemed stays.
 
-An integration can issue codes over MCP with an operator token holding
-`promo:create`, using `create_promo_code`, `list_promo_codes` and
-`revoke_promo_code`. A token minted with `--max-issued-usd` can issue at most
-that much in total, counted as `amount_usd × max_redemptions` per code.
+Issuing, listing and revoking codes uses the local `daimon promo` CLI only.
+
+Budgets, caps, promo redemption and checkout need a platform admin acting
+directly, never a chat turn, routine, agent key or operator token. See
+[admins](admins.md#changes-that-need-a-person).
 
 ## What admins see
 
@@ -234,8 +235,7 @@ calendar month.
   person** picker.
 - **Expiry dates** list timed credit with its end date, soonest first.
 
-Panel figures are before markup. Tenant totals leave out usage with no platform
-user, and exempt usage appears only in the settle logs. For one finished turn,
+Panel figures are before markup and leave out exempt usage. For one finished turn,
 `get_turn_cost` returns a raw, pre-markup figure, and `None` rather than zero
 for an unpriced model.
 
@@ -248,6 +248,12 @@ daimon usage turns <tenant-uuid> --days 7 --json
 Add `--channel <channel-id>` or `--origin routine` to filter, or `--summary`
 to group by platform, channel and origin. It reads the local database and is
 telemetry, not an accounting source. The ledger is authoritative for charges.
+
+## Long jobs
+
+A [long job](long-jobs.md) bills its owner and passes the balance and cap
+gates. Its own dollar limit is checked on every heartbeat against provider
+cost before markup, and a breach stops it as `over_budget`.
 
 ## Turn it on
 

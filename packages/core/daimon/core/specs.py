@@ -35,6 +35,7 @@ from daimon.core.context_prompt import ContextFragment, TurnContext, encode_frag
 from daimon.core.errors import SpecError
 from daimon.core.model_presets import ModelSelection, resolve_model
 from daimon.core.stores.domain import ChatPlatform
+from daimon.core.tool_safety import get_mcp_server_name_rejection
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -376,8 +377,9 @@ def load_agent_spec(path: Path) -> AgentSpec:
     """Read, parse, and validate an `AgentSpec` YAML file.
 
     Raises `SpecError` (preserving the underlying cause via `__cause__`) when
-    the file is missing, contains malformed YAML, or fails `AgentSpec`
-    validation. Never returns on failure.
+    the file is missing, contains malformed YAML, fails `AgentSpec`
+    validation, or names an MCP server with a `/`
+    (`get_mcp_server_name_rejection`). Never returns on failure.
     """
     try:
         text = path.read_text()
@@ -388,9 +390,13 @@ def load_agent_spec(path: Path) -> AgentSpec:
     except yaml.YAMLError as err:
         raise SpecError(f"agent spec at {path} is not valid YAML: {err}") from err
     try:
-        return AgentSpec.model_validate(data)
+        spec = AgentSpec.model_validate(data)
     except ValidationError as err:
         raise SpecError(f"agent spec at {path} failed validation: {err}") from err
+    for server in spec.mcp_servers or []:
+        if (rejection := get_mcp_server_name_rejection(server["name"])) is not None:
+            raise SpecError(f"agent spec at {path}: {rejection}")
+    return spec
 
 
 def load_environment_spec(path: Path) -> EnvironmentSpec:

@@ -33,6 +33,8 @@ def test_routine_row_validates_from_orm_instance_with_all_fields_populated() -> 
         trigger_message="run morning standup",
         enabled=True,
         catch_up_policy="skip",
+        source_provenance_known=False,
+        sandbox_tools_enabled=False,
         next_fire_at=next_fire,
         last_fired_at=fired,
         last_error=None,
@@ -71,6 +73,8 @@ def test_routine_row_handles_optional_fields_as_none() -> None:
         trigger_message="ping",
         enabled=True,
         catch_up_policy="skip",
+        source_provenance_known=False,
+        sandbox_tools_enabled=False,
         next_fire_at=None,
         last_fired_at=None,
         last_error=None,
@@ -91,3 +95,6 @@ def test_routine_row_handles_optional_fields_as_none() -> None:
     assert row.last_skipped_from is None
     assert row.last_skipped_until is None
     assert row.last_skip_reason is None
+    assert row.sandbox_tools_enabled is False, "sandbox tools are off unless an admin opts in"
+    assert row.sandbox_tools_set_by is None
+    assert row.sandbox_tools_set_at is None

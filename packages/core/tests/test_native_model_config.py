@@ -12,6 +12,7 @@ from daimon.core.authz import Subject
 from daimon.core.channel_backend import load_backend_agent
 from daimon.core.mux_compat import agent_spec
 from daimon.core.sessions import create_session, project_session_resources
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.runtime_manifest import classify_source_obligations, preview_source_drops
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
@@ -69,6 +70,7 @@ async def test_real_root_model_survives_session_source_projection(
         account_id=account,
         resource_scope=scope,
         memory_read_only=False,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     target = preview_source_drops(projected, ModelRef(provider="anthropic", id=model["id"]))
     assert target.declared_drops == ()
@@ -189,7 +191,9 @@ async def test_ordinary_native_session_references_root_without_recompiling_its_m
         )
     )
     async with transport.client() as client:
-        await create_session(client, agent=agent, environment=ma_environment())
+        await create_session(
+            client, agent=agent, environment=ma_environment(), tool_safety=OPEN_TOOL_SAFETY
+        )
     transport.assert_consumed()
     body = transport.requests[0].json()
     assert body["agent"] == agent.id

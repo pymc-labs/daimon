@@ -42,6 +42,7 @@ from daimon.core.config import (
     DatabaseSettings,
     McpSettings,
     Settings,
+    TurnSettings,
 )
 from daimon.core.mcp_auth import mint_chat_mcp_token, mint_jwt
 from daimon.core.tool_safety import backend_switch_tools, microsoft_send_tools
@@ -102,6 +103,9 @@ CHAT_TURN_TOOL_REACHABILITY: dict[str, ExpectedOutcome] = {
     # read stays open so a member hears whether it is on and who can change it.
     "set_plain_text_mentions": ExpectedOutcome(discoverable=False),
     "get_plain_text_mentions": ExpectedOutcome(discoverable=True),
+    # cost_footer.py — the same split: an admin hides it, anyone may ask.
+    "set_cost_footer": ExpectedOutcome(discoverable=False),
+    "get_cost_footer": ExpectedOutcome(discoverable=True),
 }
 """Source of truth for what the seeded prompt may claim a chat turn can do.
 The four chat-removal tools land in a later plan and are covered by the
@@ -144,6 +148,7 @@ _CALL_ARGS: dict[str, dict[str, object]] = {
     },
     "get_thread_participation": {"thread_id": "thread-1", "channel_id": "channel-1"},
     "get_plain_text_mentions": {},
+    "get_cost_footer": {},
 }
 
 
@@ -152,6 +157,7 @@ def _make_app(sessionmaker: async_sessionmaker[AsyncSession], anthropic: AsyncAn
         settings=Settings(
             database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
             anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
+            turn=TurnSettings(channel_backends=False, agent_backends=False),
             mcp=McpSettings(
                 legacy_token_cutoff=dt.datetime.now(dt.UTC) + dt.timedelta(hours=1),
                 allow_legacy_tokens=True,
@@ -351,10 +357,15 @@ async def test_chat_execution_identity_preserves_exact_tools_list(
     assert {tool["name"] for tool in chat["result"]["tools"]} == {
         "call_tool",
         "search_tools",
+        # Backend selection and Microsoft accounts are off; routine sandbox
+        # configuration stays hidden from these non-admin credentials.
+        # Completion wakes can read this directly without discovery/call_tool.
+        "get_long_job",
         # Unregistered here: backend selection and Microsoft accounts are off.
         *(
             APPROVAL_TOOLS
             - backend_switch_tools(enabled=True)
             - microsoft_send_tools(enabled=True, tool_safety_on=True)
+            - {"set_routine_sandbox_tools"}
         ),
     }

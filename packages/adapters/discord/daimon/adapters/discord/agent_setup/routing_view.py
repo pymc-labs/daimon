@@ -45,16 +45,16 @@ from daimon.adapters.discord.agent_setup.operator_tokens_view import (
 )
 from daimon.adapters.discord.agent_setup.permissions_view import (
     PERMISSIONS_LABEL,
-    PermissionsView,
-    load_rule_status,
+    build_permissions_view,
 )
 from daimon.adapters.discord.agent_setup.scope_default import resolve_account_display
 from daimon.adapters.discord.agent_setup.state import PanelState
-from daimon.adapters.discord.checks import refuse_if_not_admin
+from daimon.adapters.discord.checks import refuse_if_not_admin, refuse_if_not_platform_admin
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.layout import hairline, header
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.answering_map import AnsweringMap
 from daimon.core.channel_environments import EnvironmentPicker
 from daimon.core.errors import DaimonError
@@ -526,23 +526,22 @@ class RoutingView(PanelViewBase):
 
     async def _on_permissions(self, interaction: discord.Interaction) -> None:
         """Open this channel's permissions screen; Manage Server is re-checked live."""
-        if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
+        if await refuse_if_not_admin(interaction, action=DelegatedAction.ROUTING):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
             return
         await interaction.response.defer()
-        status = await load_rule_status(self.runtime, state=self.state)
         await self.swap_to(
             interaction,
-            PermissionsView(
-                self.state,
+            await build_permissions_view(
+                interaction,
+                state=self.state,
                 runtime=self.runtime,
                 allowed_user_id=self.allowed_user_id,
-                status=status,
             ),
         )
 
     async def _on_channel_skills(self, interaction: discord.Interaction) -> None:
         """Open this channel's skills screen; Manage Server is re-checked live."""
-        if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
+        if await refuse_if_not_admin(interaction, action=DelegatedAction.ROUTING):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
             return
         await interaction.response.defer()
         rows = await load_channel_skills(self.runtime, state=self.state)
@@ -555,7 +554,7 @@ class RoutingView(PanelViewBase):
 
     async def _on_operator_tokens(self, interaction: discord.Interaction) -> None:
         """Open the operator tokens screen; Manage Server is re-checked live."""
-        if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
+        if await refuse_if_not_platform_admin(interaction):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
             return
         await interaction.response.defer()
         rows = await load_operator_tokens(self.runtime, state=self.state)

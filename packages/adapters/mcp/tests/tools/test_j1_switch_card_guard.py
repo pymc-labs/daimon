@@ -185,6 +185,7 @@ async def fresh_chat(request, db_preflight, db_nullpool_engine, monkeypatch):
             shared_channel=False,
             now=datetime.now(UTC),
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            chat_session_id="fixture-session-grant",
         )
     ma = FakeMA(tenant.id)
     daimon = ma_agent(
@@ -226,9 +227,11 @@ async def fresh_chat(request, db_preflight, db_nullpool_engine, monkeypatch):
             account_id=account.id,
             role=Role.ADMIN if admin else Role.USER,
             is_admin=admin,
+            is_platform_admin=admin,
             platform="discord",
             platform_user_id="123",
             chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_daimon"),
+            chat_session_id="fixture-session-grant",
         )
         yield Chat(runtime, auth, origin, ma, trace)
 
@@ -363,6 +366,7 @@ async def test_after_yes_make_the_copy_the_switch_card_is_posted_in_that_turn(
         tenant_id=chat.auth.tenant_id,
         account_id=chat.auth.account_id,
         current_admin=_AsyncMock(return_value=chat.auth.is_admin),
+        current_platform_admin=_AsyncMock(return_value=False),
     )
     card = await prepare(
         prompt_for_tool_call(
@@ -437,6 +441,7 @@ async def test_after_yes_make_the_copy_the_switch_card_is_posted_in_that_turn(
     )
     admission = await admit(
         deps,
+        origin="chat",
         tenant_id=chat.auth.tenant_id,
         requester_org=RequesterOrg.HOST,
         platform="discord",
@@ -645,6 +650,7 @@ async def _card(chat: Chat, name: str, preview, **extra):
         tenant_id=chat.auth.tenant_id,
         account_id=chat.auth.account_id,
         current_admin=AsyncMock(return_value=chat.auth.is_admin),
+        current_platform_admin=AsyncMock(return_value=False),
     )
     return await prepare(
         prompt_for_tool_call(
@@ -908,8 +914,11 @@ async def _message(chat: Chat, key: str):
         channel_id="fresh-channel",
         thread_id="thread",
         now=datetime.now(UTC),
+        origin="chat",
     )
-    controls = render_turn_origin(chat.origin, **backend_facts(admission))
+    controls = render_turn_origin(
+        chat.origin, **backend_facts(admission), effective_is_admin=admission.is_admin
+    )
     prepared = await bind_session_impl(
         deps,
         admission,
@@ -1176,6 +1185,7 @@ async def test_m03_a_card_confirmed_mid_message_keeps_its_move_when_the_follow_f
             channel_id="fresh-channel",
             thread_id="thread",
             now=datetime.now(UTC),
+            origin="chat",
         )
     assert confirmed, "the card was confirmed during the message"
     async with sm() as session:

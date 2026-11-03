@@ -5,6 +5,7 @@ import uuid
 import httpx
 import pytest
 from daimon.core import headless_runner
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.state import TurnState
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.errors import ScopeViolation
@@ -68,6 +69,7 @@ async def test_headless_resource_requests_match_direct_sdk(
         async with after.client() as client:
             with pytest.raises(ScopeViolation, match="require the authorized tenant/account"):
                 await headless_runner.run_turn(
+                    tool_safety=OPEN_TOOL_SAFETY,
                     anthropic=client,
                     agent_id=agent.id,
                     environment_id=environment.id,
@@ -88,6 +90,7 @@ async def test_headless_resource_requests_match_direct_sdk(
                 tenant_id=tenant_id,
                 account_id=_ACCOUNT_ID,
                 trigger_message="headless",
+                tool_safety=OPEN_TOOL_SAFETY,
                 turn_path=turn_path,
             )
             == ""

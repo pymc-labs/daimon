@@ -48,10 +48,16 @@ async def run_connect_notice_poller(
     deliver: Callable[[ConnectNotice], Awaitable[bool]],
     should_stop: Callable[[], bool],
     interval_s: float = 60.0,
+    after_poll: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
     while not should_stop():
         try:
             await poll_once(sessionmaker, platform=platform, deliver=deliver)
         except Exception:
             _log.exception("github_connect.poll_failed", platform=platform)
+        if after_poll is not None:
+            try:
+                await after_poll()
+            except Exception:
+                _log.warning("adapter.notice_poll_failed", platform=platform)
         await asyncio.sleep(interval_s)

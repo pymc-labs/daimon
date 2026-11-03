@@ -7,7 +7,7 @@ import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
@@ -450,8 +450,21 @@ async def test_protected_thread_posts_nothing_and_keeps_file() -> None:
 
 
 async def test_tool_turn_sweeps_detached_and_same_session_sweeps_chain() -> None:
-    runtime = MagicMock()
-    bot = DaimonBot(runtime=cast(DiscordRuntime, runtime), intents=discord.Intents.default())
+    from daimon.core.ma_resolver import new_resolver_cache
+    from daimon.core.scope import DeploymentDefault
+    from daimon.testing.turn_fakes import deps_for
+
+    runtime = DiscordRuntime(
+        settings=MagicMock(),
+        anthropic=MagicMock(),
+        sessionmaker=MagicMock(),
+        notebook_rate_limiter=MagicMock(),
+        billing_config=None,
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+        turn_deps=deps_for(),
+    )
+    bot = DaimonBot(runtime=runtime, intents=discord.Intents.default())
     thread = _thread()
     tenant_id = uuid.uuid4()
     text_outcome = RunOutcome(
@@ -494,6 +507,38 @@ async def test_tool_turn_sweeps_detached_and_same_session_sweeps_chain() -> None
         await asyncio.gather(*list(bot._bg_tasks))  # pyright: ignore[reportPrivateUsage]
         await asyncio.sleep(0)
         assert bot._output_sweeps == {}  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_the_sweep_names_the_turns_person_and_replies_to_their_message() -> None:
+    from .harness import make_bot
+
+    bot = make_bot(MagicMock())
+    thread = _thread()
+    outcome = RunOutcome(
+        TurnState(
+            content=[
+                ToolUseBlock(
+                    kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}
+                )
+            ]
+        ),
+        "sesn_1",
+        None,
+        False,
+    )
+    lifecycle = MagicMock(output_authorization=None)
+    lifecycle.requester_id = 4242
+    lifecycle.files_reply_to = MagicMock(return_value=5150)
+
+    with patch("daimon.adapters.discord.bot.deliver_session_outputs") as deliver:
+        bot._schedule_output_sweep(  # pyright: ignore[reportPrivateUsage]
+            outcome, thread=thread, tenant_id=uuid.uuid4(), lifecycle=lifecycle
+        )
+        await asyncio.gather(*list(bot._bg_tasks))  # pyright: ignore[reportPrivateUsage]
+
+    lifecycle.files_reply_to.assert_called_once_with(thread.id)
+    assert deliver.await_args.kwargs["requester_id"] == 4242
+    assert deliver.await_args.kwargs["reply_to"] == 5150
 
 
 # --- Files go onto the turn's answer -----------------------------------------
@@ -665,7 +710,8 @@ async def test_a_failed_answer_edit_posts_the_file_and_never_reposts_the_answer(
     transport_send.assert_not_awaited()
     thread.send.assert_awaited_once()
     sent = thread.send.await_args.kwargs
-    assert set(sent) == {"file"}, "the fallback is the file alone, not the answer's text"
+    assert set(sent) == {"file", "allowed_mentions"}
+    assert sent["allowed_mentions"].everyone is False
     assert sent["file"].filename == "brief_short.pdf"
     assert deleted == ["file_a"]
 
@@ -982,9 +1028,190 @@ async def test_neutral_answer_full_falls_back_to_real_discord_file() -> None:
     assert (file.filename, file.fp.read()) == ("report.txt", b"data")
 
 
+def _per_session_client(files: dict[str, tuple[str, int]]) -> AsyncAnthropic:
+    """Fake MA where each session lists only its own file, as the Files API scopes them.
+
+    ``files`` maps a session id to its (filename, size); a file leaves its
+    listing once deleted.
+    """
+    deleted: set[str] = set()
+    router = MARouter()
+
+    def list_files(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        session_id = request.url.params["scope_id"]
+        filename, size = files[session_id]
+        file_id = f"file_{session_id}"
+        if file_id in deleted:
+            return list_response([])
+        return list_response(
+            [
+                FileMetadata(
+                    id=file_id,
+                    created_at=NOW,
+                    filename=filename,
+                    mime_type="application/pdf",
+                    size_bytes=size,
+                    type="file",
+                    downloadable=True,
+                ).model_dump(mode="json")
+            ]
+        )
+
+    def on_delete(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        deleted.add(match.group(1))
+        return httpx.Response(200, json={"id": match.group(1), "type": "file_deleted"})
+
+    router.add("GET", r"/v1/files", list_files)
+    router.add(
+        "GET",
+        r"/v1/files/([^/]+)/content",
+        lambda request, match: httpx.Response(200, content=b"pdf"),
+    )
+    router.add("DELETE", r"/v1/files/([^/]+)", on_delete)
+    return build_fake_anthropic(router.dispatch)
+
+
+_ALICE, _BOB = 1111, 2222
+_ALICE_ASKED, _BOB_ASKED = 5001, 5002
+_ALICE_ANSWER, _BOB_ANSWER = 6001, 6002
+
+
+async def _overlapping_sweeps(
+    thread: discord.Thread,
+    client: AsyncAnthropic,
+    *,
+    alice_answer: AnswerMessage | None,
+    bob_answer: AnswerMessage | None,
+) -> list[str]:
+    """Alice's sweep settles while Bob's turn runs and sweeps in the same thread.
+
+    Returns the order files and notices reached the thread.
+    """
+    bob_done = asyncio.Event()
+    alice_settling = asyncio.Event()
+
+    async def alice_settles(delay: float) -> None:
+        # The real settle floor is 6 s, by when the thread is free and Bob's
+        # queued turn runs on his own session.
+        alice_settling.set()
+        await bob_done.wait()
+
+    alice = asyncio.create_task(
+        deliver_session_outputs(
+            client,
+            thread,
+            session_id="sesn_alice",
+            may_post=_allowed,
+            notice_thread_ids=set(),
+            answer=alice_answer,
+            requester_id=_ALICE,
+            reply_to=_ALICE_ASKED,
+            sleep=alice_settles,
+        )
+    )
+    await alice_settling.wait()
+    for session_id in ("sesn_bob", "sesn_bob_big"):
+        await deliver_session_outputs(
+            client,
+            thread,
+            session_id=session_id,
+            may_post=_allowed,
+            notice_thread_ids=set(),
+            answer=bob_answer,
+            requester_id=_BOB,
+            reply_to=_BOB_ASKED,
+            sleep=_no_sleep,
+        )
+    bob_done.set()
+    await alice
+    order: list[str] = []
+    for call in thread.send.await_args_list:
+        file = call.kwargs.get("file")
+        order.append(file.filename if file is not None else call.kwargs["embed"].description)
+    return order
+
+
+def _assert_attributed(call: Any, *, user: int, asked: int) -> None:
+    kwargs = call.kwargs
+    text = kwargs["content"] if "file" in kwargs else kwargs["embed"].description
+    assert text.startswith(f"For <@{user}>"), "the post names whose turn made it"
+    reference = kwargs["reference"]
+    assert isinstance(reference, discord.MessageReference)
+    assert (reference.message_id, reference.channel_id) == (asked, 123)
+    assert reference.fail_if_not_exists is False, "a deleted message must not lose the file"
+    mentions = kwargs["allowed_mentions"]
+    assert mentions.users is False and mentions.replied_user is False, "nobody is pinged"
+
+
+async def test_overlapping_turns_post_each_file_as_a_reply_to_its_own_turn() -> None:
+    """#788, Discord fallback: no answer to attach to (Bob) and a full answer
+    (Alice). Alice's file lands after Bob's, yet each post replies to the
+    message that asked for it and names its person."""
+    client = _per_session_client(
+        {
+            "sesn_alice": ("alice_report.pdf", 3),
+            "sesn_bob": ("bob_chart.pdf", 3),
+            "sesn_bob_big": ("bob_dump.pdf", 11 * _MIB),
+        }
+    )
+    full = [_attachment(f"table{i}.png") for i in range(MAX_ATTACHMENTS_PER_MESSAGE)]
+    alice_full = _answer_message(full)
+    alice_full.id = _ALICE_ANSWER
+    thread = _answer_thread(alice_full)
+    alice_answer, alice_edits = _recording_edit([])
+
+    order = await _overlapping_sweeps(thread, client, alice_answer=alice_answer, bob_answer=None)
+
+    assert alice_edits == [], "a full answer takes no more files"
+    assert order[0] == "bob_chart.pdf" and order[-1] == "alice_report.pdf", order
+    bob_post, bob_notice, alice_post = thread.send.await_args_list
+    _assert_attributed(bob_post, user=_BOB, asked=_BOB_ASKED)
+    _assert_attributed(alice_post, user=_ALICE, asked=_ALICE_ASKED)
+    _assert_attributed(bob_notice, user=_BOB, asked=_BOB_ASKED)
+    assert "`bob_dump.pdf` is 11 MB" in bob_notice.kwargs["embed"].description
+
+
+async def test_overlapping_turns_attach_each_file_to_its_own_answer() -> None:
+    """#788, Discord main path: each sweep edits its own turn's answer, so
+    Alice's late file goes on Alice's answer, never under Bob's."""
+    client = _per_session_client(
+        {
+            "sesn_alice": ("alice_report.pdf", 3),
+            "sesn_bob": ("bob_chart.pdf", 3),
+            "sesn_bob_big": ("bob_dump.pdf", 1),
+        }
+    )
+    answers = {_ALICE_ANSWER: _answer_message([]), _BOB_ANSWER: _answer_message([])}
+    for message_id, message in answers.items():
+        message.id = message_id
+    thread = _answer_thread(answers[_ALICE_ANSWER])
+    thread.fetch_message = AsyncMock(side_effect=lambda message_id: answers[message_id])
+    edited: list[tuple[int, str]] = []
+
+    async def edit(message: discord.Message, **kwargs: object) -> discord.Message:
+        files = [
+            a for a in cast(list[object], kwargs["attachments"]) if isinstance(a, discord.File)
+        ]
+        edited.extend((message.id, file.filename) for file in files)
+        return message
+
+    await _overlapping_sweeps(
+        thread,
+        client,
+        alice_answer=AnswerMessage(message_id=_ALICE_ANSWER, edit=edit),
+        bob_answer=AnswerMessage(message_id=_BOB_ANSWER, edit=edit),
+    )
+
+    thread.send.assert_not_awaited()
+    assert edited == [
+        (_BOB_ANSWER, "bob_chart.pdf"),
+        (_BOB_ANSWER, "bob_dump.pdf"),
+        (_ALICE_ANSWER, "alice_report.pdf"),
+    ]
+
+
 def test_selfhosted_tool_turn_does_not_schedule_anthropic_file_sweep() -> None:
-    runtime = MagicMock()
-    bot = DaimonBot(runtime=cast(DiscordRuntime, runtime), intents=discord.Intents.default())
+    bot = MagicMock(spec=DaimonBot)
     outcome = RunOutcome(
         TurnState(
             content=[
@@ -998,6 +1225,127 @@ def test_selfhosted_tool_turn_does_not_schedule_anthropic_file_sweep() -> None:
         False,
     )
     with patch.object(bot, "_spawn", side_effect=AssertionError("no Anthropic output sweep")):
-        bot._schedule_output_sweep(  # pyright: ignore[reportPrivateUsage]
-            outcome, thread=_thread(), tenant_id=uuid.uuid4(), selfhosted=True
+        DaimonBot._schedule_output_sweep(  # pyright: ignore[reportPrivateUsage]
+            bot, outcome, thread=_thread(), tenant_id=uuid.uuid4(), selfhosted=True
         )
+
+
+# --- Direct messages ----------------------------------------------------------
+
+
+def _dm() -> discord.DMChannel:
+    channel = MagicMock(spec=discord.DMChannel)
+    channel.id = 321
+    channel.guild = None
+    channel.me.id = 42
+    channel.send = AsyncMock()
+    return cast(discord.DMChannel, channel)
+
+
+async def test_a_dm_gets_the_file_and_the_listing_entry_is_cleared() -> None:
+    client, deleted = _client_with_file(filename="clip", size_bytes=9, content=b"mp4-bytes")
+    channel = _dm()
+
+    await deliver_session_outputs(
+        client,
+        channel,
+        session_id="sesn_1",
+        may_post=_allowed,
+        notice_thread_ids=set(),
+        sleep=_no_sleep,
+    )
+
+    file = cast(AsyncMock, channel.send).await_args.kwargs["file"]
+    assert isinstance(file, discord.File)
+    assert file.fp.read() == b"mp4-bytes"
+    assert deleted == ["file_chart"]
+
+
+async def test_a_dm_skips_a_file_over_discords_default_limit_and_keeps_it() -> None:
+    client, deleted = _client_with_file(filename="clip.mp4", size_bytes=11 * _MIB)
+    channel = _dm()
+
+    await deliver_session_outputs(
+        client,
+        channel,
+        session_id="sesn_1",
+        may_post=_allowed,
+        notice_thread_ids=set(),
+        sleep=_no_sleep,
+    )
+
+    notice = cast(AsyncMock, channel.send).await_args.kwargs["embed"].description
+    assert "over the 10 MB upload limit" in notice, "a DM is held to Discord's default limit"
+    assert deleted == [], "the oversize file stays in the session"
+
+
+async def test_a_file_the_agent_already_sent_in_the_dm_is_not_sent_again() -> None:
+    client, deleted = _client_with_file(filename="chart", size_bytes=9, content=b"png-bytes")
+    channel = _dm()
+    channel.history = _history(_posted(author_id=42, filename="chart.png", size=9))
+
+    await deliver_session_outputs(
+        client,
+        channel,
+        session_id="sesn_1",
+        may_post=_allowed,
+        notice_thread_ids=set(),
+        turn_window=_WINDOW,
+        sleep=_no_sleep,
+    )
+
+    cast(AsyncMock, channel.send).assert_not_awaited()
+    assert deleted == ["file_chart"]
+
+
+async def test_a_refused_dm_upload_keeps_the_file_and_asks_for_no_permission() -> None:
+    client, deleted = _client_with_file(filename="chart.png", size_bytes=9, content=b"png-bytes")
+    channel = _dm()
+    forbidden = discord.Forbidden(MagicMock(status=403, reason="Forbidden"), "Cannot send")
+    channel.send = AsyncMock(side_effect=forbidden)
+
+    await deliver_session_outputs(
+        client,
+        channel,
+        session_id="sesn_1",
+        may_post=_allowed,
+        notice_thread_ids=set(),
+        sleep=_no_sleep,
+    )
+
+    assert channel.send.await_count == 1, "no Attach Files notice in a DM"
+    assert deleted == []
+
+
+async def test_a_dm_sweep_attaches_to_the_answer_names_nobody_and_chains_per_session() -> None:
+    from .harness import make_bot
+
+    bot = make_bot(MagicMock())
+    channel = _dm()
+    lifecycle = MagicMock(output_authorization=MagicMock())
+    lifecycle.requester_id = 4242
+    lifecycle.answer_message = AnswerMessage(message_id=_ANSWER_ID, edit=AsyncMock())
+    started = [asyncio.Event(), asyncio.Event()]
+    release = asyncio.Event()
+    calls: list[dict[str, Any]] = []
+
+    async def sweep(*args: object, **kwargs: Any) -> None:
+        calls.append(kwargs)
+        started[len(calls) - 1].set()
+        await release.wait()
+
+    with patch("daimon.adapters.discord.bot.deliver_session_outputs", side_effect=sweep):
+        bot.schedule_dm_output_sweep(channel, "sesn_1", may_post=_allowed, lifecycle=lifecycle)
+        await started[0].wait()
+        bot.schedule_dm_output_sweep(channel, "sesn_1", may_post=_allowed, lifecycle=lifecycle)
+        await asyncio.sleep(0)
+        assert len(calls) == 1, "a DM sweep waits for the session's earlier sweep"
+        release.set()
+        await started[1].wait()
+        await asyncio.gather(*list(bot._bg_tasks))  # pyright: ignore[reportPrivateUsage]
+
+    first = calls[0]
+    assert first["may_post"] is _allowed, "the DM's own delivery check gates every file"
+    assert first["answer"] is lifecycle.answer_message
+    assert first["requester_id"] is None and first["reply_to"] is None
+    lifecycle.files_reply_to.assert_not_called()

@@ -35,6 +35,7 @@ from daimon.adapters.teams.image_preview import MAX_PREVIEWS
 from daimon.adapters.teams.progress_receipt import InitialProgressReceipt
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
+from daimon.core.cost_footer import cost_footer_shown
 from daimon.core.message_split import split_fenced
 from daimon.core.native_footer_cost import native_footer_text
 from daimon.core.observability import capture_exception_with_scope
@@ -44,6 +45,7 @@ from daimon.core.teams_markdown import has_math
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
 from daimon.core.turn.notices import RefusalNouns, render_termination_notice
+from daimon.core.turn.output import OutputGate
 from daimon.core.turn.provider_events import ProviderDraft
 from daimon.core.turn.state import (
     ToolUseBlock,
@@ -159,7 +161,7 @@ class _CardEdits:
     stopping: asyncio.Task[None] | None = None
 
 
-class TeamsTurnLifecycle:
+class TeamsTurnLifecycle(OutputGate):
     """Implements `daimon.core.turn.lifecycle.TurnLifecycle`. One per turn attempt."""
 
     def __init__(
@@ -263,6 +265,7 @@ class TeamsTurnLifecycle:
 
     async def _send(self, activity: MessageActivityInput, *, message_id: str | None) -> str:
         activity.id = message_id
+        await self.check_output()
         sent = await self._sender.send(
             self._conversation_id, activity, service_url=self._service_url
         )
@@ -464,11 +467,18 @@ class TeamsTurnLifecycle:
         self._notices[message_id] = (actions, summary, error)
         self._shown[message_id] = text
 
-    async def _summary(self, state: TurnState, *, named_above: bool = False) -> str:
+    async def _summary(self, state: TurnState, *, named_above: bool = False) -> str | None:
         """Slack's summary line: the agent, the time, what was debited, the money left.
 
         `named_above`: agent identity's bold name leads the answer just above it.
+        None when an admin hid the footer.
         """
+        if (
+            self._sessionmaker is not None
+            and self._tenant_id is not None
+            and not await cost_footer_shown(self._sessionmaker, tenant_id=self._tenant_id)
+        ):
+            return None
         t = state.usage_totals
         cost = None
         if self._provider_draft is None and not isinstance(t, ProviderUsageTotals):
@@ -570,7 +580,11 @@ class TeamsTurnLifecycle:
             if fresh:  # retire before the best-effort controls so a lost post can't strand it
                 await self._retire_card()
             await self._post_controls(
-                state, hold=self._hold_controls and _may_have_outputs(state), cancelled=cancelled
+                state,
+                hold=self._hold_controls
+                and self.output_authorization is None
+                and _may_have_outputs(state),
+                cancelled=cancelled,
             )
         except TEAMS_SEND_ERRORS as exc:
             log.error("teams.turn.answer_delivery_failed", exc_info=True)

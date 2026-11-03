@@ -122,11 +122,15 @@ async def _choose(view: discord.ui.LayoutView, index: int, value: str, click: Ma
 def test_screen_offers_both_sides_a_copy_and_a_release(account_id: uuid.UUID) -> None:
     runtime = _runtime(MagicMock())
     open_view = _view(runtime, account_id)
-    assert _labels(open_view) == {"◀ Back", COPY_LABEL, "Done"}, "an open channel can take a copy"
+    assert _labels(open_view) == {"◀ Back", "Admins", COPY_LABEL, "Done"}, (
+        "an open channel can take a copy"
+    )
     defaults = [next(o.value for o in s.options if o.default) for s in _selects(open_view)]
     assert defaults == ["any", "any"], "each select shows the current side"
     kept = _view(runtime, account_id, rule=OWN, agents=("alpha",))
-    assert _labels(kept) == {"◀ Back", "Done"}, "own agents are released by changing readers"
+    assert _labels(kept) == {"◀ Back", "Admins", "Done"}, (
+        "own agents are released by changing readers"
+    )
     assert (
         "Who can read it: Only its own agents\n\nWho can post: Only its own agents\n\n"
         "Agents kept here: alpha"
@@ -236,3 +240,104 @@ async def test_writers_none_closes_the_channel(
     async with db_session_factory() as session:
         policy = await load_access_policy(session, tenant_id=tenant.id)
     assert policy.channel_rules == {str(CHANNEL_ID): ChannelRule(readers="inside", writers="none")}
+
+
+def test_permissions_shows_outsider_warning_and_confidential_shortcut(
+    account_id: uuid.UUID,
+) -> None:
+    from daimon.core.outsiders import OutsiderVisibility
+
+    base = _view(_runtime(MagicMock()), account_id)
+    for rule in (OPEN_RULE, OWN):
+        view = PermissionsView(
+            base.state,
+            runtime=base.runtime,
+            allowed_user_id=42,
+            status=ChannelRuleStatus(rule, ()),
+            visibility=OutsiderVisibility(outsiders_can_view=True),
+        )
+        assert ("outside your organisation" in _text(view)) is (rule.readers != "own")
+        assert ("Make confidential" in _labels(view)) is (rule.readers != "own")
+
+
+async def test_confidential_click_rechecks_admin_and_writes_rule(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session, platform="discord", workspace_id=str(GUILD_ID))
+        account = await make_account(session, tenant=tenant)
+        await set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=tenant.id, channel_id=str(CHANNEL_ID)),
+            tenant_id=tenant.id,
+            agent_name="alpha",
+            mode="agent",
+        )
+    agents = FakeMAState()
+    agent = ma_agent(id="agent_alpha", name="alpha", tenant_id=tenant.id)
+    agents.agents[agent.id] = agent.model_dump(mode="json")
+    view = _view(_runtime(db_session_factory, agents), account.id)
+    await view._on_confidential(_interaction(admin=False))  # pyright: ignore[reportPrivateUsage]
+    async with db_session_factory() as session:
+        assert (await load_access_policy(session, tenant_id=tenant.id)).channel_rules == {}
+    await view._on_confidential(_interaction(admin=True))  # pyright: ignore[reportPrivateUsage]
+    async with db_session_factory() as session:
+        rule = (await load_access_policy(session, tenant_id=tenant.id)).channel_rules[
+            str(CHANNEL_ID)
+        ]
+    assert rule.readers == "own"
+
+
+async def test_internal_role_picker_rechecks_admin_and_preserves_other_rules(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session, platform="discord", workspace_id=str(GUILD_ID))
+        account = await make_account(session, tenant=tenant)
+        await set_access_policy(
+            session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(channel_rules={str(CHANNEL_ID): ChannelRule(writers="none")}),
+        )
+    view = _view(_runtime(db_session_factory), account.id)
+    view.internal_roles_select._values = [discord.Object(id=222, type=discord.Role)]  # pyright: ignore[reportPrivateUsage]
+    await view._on_internal_roles(_interaction(admin=False))  # pyright: ignore[reportPrivateUsage]
+    async with db_session_factory() as session:
+        assert (await load_access_policy(session, tenant_id=tenant.id)).internal_role_ids == ()
+    await view._on_internal_roles(_interaction(admin=True))  # pyright: ignore[reportPrivateUsage]
+    async with db_session_factory() as session:
+        policy = await load_access_policy(session, tenant_id=tenant.id)
+    assert policy.internal_role_ids == ("222",)
+    assert policy.channel_rules[str(CHANNEL_ID)].writers == "none"
+
+
+async def test_here_confidential_shortcut_rechecks_admin(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.adapters.discord.confidential import MakeConfidentialView
+
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session, platform="discord", workspace_id=str(GUILD_ID))
+        await set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=tenant.id, channel_id=str(CHANNEL_ID)),
+            tenant_id=tenant.id,
+            agent_name="alpha",
+            mode="agent",
+        )
+    agents = FakeMAState()
+    agent = ma_agent(id="agent_alpha", name="alpha", tenant_id=tenant.id)
+    agents.agents[agent.id] = agent.model_dump(mode="json")
+    view = MakeConfidentialView(_runtime(db_session_factory, agents), tenant.id, str(CHANNEL_ID))
+    member = _interaction(admin=False)
+    await view.make_confidential.callback(member)
+    member.response.send_message.assert_awaited_once()
+    async with db_session_factory() as session:
+        assert (await load_access_policy(session, tenant_id=tenant.id)).channel_rules == {}
+    admin = _interaction(admin=True)
+    admin.edit_original_response = AsyncMock()
+    await view.make_confidential.callback(admin)
+    async with db_session_factory() as session:
+        assert (await load_access_policy(session, tenant_id=tenant.id)).channel_rules[
+            str(CHANNEL_ID)
+        ].readers == "own"

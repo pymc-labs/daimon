@@ -25,6 +25,9 @@ async def _routine(
     db_session: AsyncSession, *, kind: str, destination_id: str, agent_name: str = "daimon"
 ) -> RoutineRow:
     tenant = await make_tenant(db_session, platform="slack", workspace_id="T_ROUTINES")
+    from daimon.core.stores.direct_messages import set_dm_enabled
+
+    await set_dm_enabled(db_session, tenant_id=tenant.id, enabled=True)
     row = await create_routine(
         db_session,
         tenant_id=tenant.id,
@@ -43,13 +46,14 @@ async def _routine(
 
 
 def _poster(
-    sm: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+    sm: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    dm_policies: dict | None = None,
 ) -> tuple[Any, MagicMock]:
     client = MagicMock()
     client.chat_postMessage = AsyncMock()
-    client.users_info = AsyncMock(
-        return_value={"user": {"id": "U1", "team_id": "T_ROUTINES", "deleted": False}}
-    )
+    client.users_info = AsyncMock(return_value={"user": {"id": "U1", "team_id": "T_ROUTINES"}})
     client.conversations_open = AsyncMock(return_value={"channel": {"id": "D_CREATOR"}})
     client.conversations_info = AsyncMock(
         side_effect=lambda channel: {"channel": {"id": channel, "is_private": False}}
@@ -67,7 +71,9 @@ def _poster(
         SimpleNamespace(
             sessionmaker=sm,
             anthropic=MagicMock(),
-            settings=SimpleNamespace(direct_message_policies={}),
+            settings=SimpleNamespace(
+                direct_message_policies=dm_policies if dm_policies is not None else {}
+            ),
             deployment_default=DeploymentDefault(),
         ),
     )
@@ -278,6 +284,7 @@ async def test_no_dm_for_a_creator_the_dm_policy_excludes(
         SlackRuntime,
         SimpleNamespace(
             sessionmaker=db_session_factory,
+            anthropic=MagicMock(),
             settings=SimpleNamespace(
                 direct_message_policies={row.tenant_id: DirectMessagePolicy(mode="disabled")}
             ),
@@ -405,7 +412,7 @@ async def test_long_routine_delivers_every_word_to_thread_or_creator(
     row = row.model_copy(update={"delivery_payload": result})
     post, client = _poster(db_session_factory, monkeypatch)
     if fallback:
-        row = row.model_copy(update={"destination_id": "missing-thread-separator"})
+        client.conversations_replies = AsyncMock(return_value={"messages": []})
     outcome = await post(row)
     assert outcome.status == "delivered"
     calls = client.chat_postMessage.await_args_list
@@ -415,6 +422,196 @@ async def test_long_routine_delivers_every_word_to_thread_or_creator(
     assert all(call.kwargs["channel"] == expected_channel for call in calls)
     if not fallback:
         assert all(call.kwargs["thread_ts"] == "1717.5" for call in calls)
+
+
+async def test_dm_row_is_explicitly_refused_without_channel_or_dm_io(
+    db_session, db_session_factory, monkeypatch
+):
+    row = await _routine(db_session, kind="channel", destination_id="C1")
+    row = row.model_copy(update={"destination_kind": "dm", "destination_id": "U1"})
+    post, client = _poster(db_session_factory, monkeypatch)
+    result = await post(row)
+    assert result.status == "skipped" and "not supported here" in result.note
+    client.chat_postMessage.assert_not_awaited()
+    client.conversations_open.assert_not_awaited()
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+async def test_generated_files_use_existing_slack_upload_path(
+    db_session, db_session_factory, monkeypatch, fallback
+):
+    import httpx
+    from daimon.core.routine_files import OUTBOX_FILES, PREFIX, RoutineFile, RoutinePayload
+    from daimon.testing.ma import MARouter
+    from mux.testing.drivers.anthropic.ma import build_fake_anthropic
+
+    row = await _routine(db_session, kind="thread", destination_id="C1:1717.5")
+    row = row.model_copy(
+        update={
+            "delivery_note": OUTBOX_FILES,
+            "delivery_payload": PREFIX
+            + RoutinePayload(
+                text="Report",
+                files=[
+                    RoutineFile(
+                        file_id="file_report",
+                        filename="report.csv",
+                        mime_type="text/csv",
+                        size_bytes=4,
+                    )
+                ],
+            ).model_dump_json(),
+        }
+    )
+    router = MARouter()
+    router.add(
+        "GET", r"/v1/files/([^/]+)/content", lambda r, m: httpx.Response(200, content=b"data")
+    )
+    provider = build_fake_anthropic(router.dispatch)
+    original = poster_mod.deliver_routine_files
+
+    async def deliver(_client, *args, **kwargs):
+        await original(provider, *args, **kwargs)
+
+    monkeypatch.setattr(poster_mod, "deliver_routine_files", deliver)
+    post, client = _poster(db_session_factory, monkeypatch)
+    client.files_upload_v2 = AsyncMock()
+    if fallback:
+        client.conversations_replies = AsyncMock(return_value={"messages": []})
+    outcome = await post(row)
+    assert outcome.status == "delivered"
+    client.files_upload_v2.assert_awaited_once()
+    upload = client.files_upload_v2.await_args.kwargs
+    assert upload["content"] == b"data"
+    assert upload["channel"] == ("D_CREATOR" if fallback else "C1")
+    assert upload["thread_ts"] == (None if fallback else "1717.5")
+
+
+@pytest.mark.parametrize(
+    "revocation", ["dm_disabled", "isolation", "dm_policy", "recipient", "signed_error"]
+)
+async def test_fallback_files_recheck_privacy_after_download(
+    db_session, db_session_factory, monkeypatch, revocation
+):
+    from datetime import UTC, datetime
+
+    from daimon.core.access_policy import ChannelRule
+    from daimon.core.config import DirectMessagePolicy
+    from daimon.core.routine_delivery import poll_deliveries_once
+    from daimon.core.routine_files import PREFIX, RoutineFile, RoutinePayload
+    from daimon.core.stores.direct_messages import set_dm_enabled
+    from daimon.core.stores.routines import get_routine, record_result
+    from slack_sdk.errors import SlackApiError
+    from structlog.testing import capture_logs
+
+    row = await _routine(db_session, kind="thread", destination_id="C1:1717.5")
+    payload = (
+        PREFIX
+        + RoutinePayload(
+            text="Report",
+            files=[
+                RoutineFile(
+                    file_id="file_report", filename="report.csv", mime_type="text/csv", size_bytes=4
+                )
+            ],
+        ).model_dump_json()
+    )
+    async with db_session_factory.begin() as session:
+        await record_result(
+            session, row.id, tail="Report", error=None, delivery="pending", delivery_payload=payload
+        )
+    dm_policies = {}
+    post, client = _poster(db_session_factory, monkeypatch, dm_policies=dm_policies)
+    client.conversations_replies = AsyncMock(return_value={"messages": []})
+    client.files_upload_v2 = AsyncMock()
+    downloads = []
+    completed = []
+    sentinel = "https://upload.invalid/signed?token=secret-sentinel"
+
+    async def download(*args, **kwargs):
+        downloads.append(True)
+        async with db_session_factory.begin() as session:
+            if revocation == "dm_disabled":
+                await set_dm_enabled(session, tenant_id=row.tenant_id, enabled=False)
+            elif revocation == "isolation":
+                await set_access_policy(
+                    session,
+                    tenant_id=row.tenant_id,
+                    policy=TenantAccessPolicy(
+                        channel_rules={"C1": ChannelRule(readers="own", writers="own")}
+                    ),
+                )
+        if revocation == "dm_policy":
+            dm_policies[row.tenant_id] = DirectMessagePolicy(mode="disabled")
+        if revocation == "recipient":
+            client.users_info = AsyncMock(
+                return_value={"user": {"team_id": "T_ROUTINES", "deleted": True}}
+            )
+        if revocation == "signed_error":
+            raise SlackApiError(sentinel, {"ok": False, "error": sentinel})
+        completed.append(True)
+        return b"data"
+
+    monkeypatch.setattr("daimon.core.routine_files.download_output_file", download)
+    with capture_logs() as logs:
+        await poll_deliveries_once(
+            db_session_factory, platform="slack", post=post, now=datetime.now(UTC)
+        )
+    assert downloads == [True]
+    client.files_upload_v2.assert_not_awaited()
+    assert completed == ([] if revocation == "signed_error" else [True])
+    assert sentinel not in str(logs)
+    async with db_session_factory() as session:
+        after = await get_routine(session, row.id, tenant_id=row.tenant_id)
+    assert after.delivery_status == "skipped"
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+async def test_upload_failure_does_not_log_signed_url(
+    db_session, db_session_factory, monkeypatch, fallback
+):
+    from datetime import UTC, datetime
+
+    from daimon.core.routine_delivery import poll_deliveries_once
+    from daimon.core.routine_files import PREFIX, RoutineFile, RoutinePayload
+    from daimon.core.stores.routines import get_routine, record_result
+    from structlog.testing import capture_logs
+
+    row = await _routine(db_session, kind="thread", destination_id="C1:1717.5")
+    payload = (
+        PREFIX
+        + RoutinePayload(
+            text="Report",
+            files=[
+                RoutineFile(
+                    file_id="file_report", filename="report.csv", mime_type="text/csv", size_bytes=4
+                )
+            ],
+        ).model_dump_json()
+    )
+    async with db_session_factory.begin() as session:
+        await record_result(
+            session, row.id, tail="Report", error=None, delivery="pending", delivery_payload=payload
+        )
+    post, client = _poster(db_session_factory, monkeypatch)
+    if fallback:
+        client.conversations_replies = AsyncMock(return_value={"messages": []})
+    sentinel = "https://upload.invalid/signed?token=secret-sentinel"
+    client.files_upload_v2 = AsyncMock(side_effect=RuntimeError(sentinel))
+    monkeypatch.setattr(
+        "daimon.core.routine_files.download_output_file", AsyncMock(return_value=b"data")
+    )
+    with capture_logs() as logs:
+        await poll_deliveries_once(
+            db_session_factory, platform="slack", post=post, now=datetime.now(UTC)
+        )
+    client.files_upload_v2.assert_awaited_once()
+    assert sentinel not in str(logs)
+    failures = [entry for entry in logs if entry["event"] == "routine.delivery_failed"]
+    assert failures[0]["error_type"] == "RuntimeError"
+    async with db_session_factory() as session:
+        after = await get_routine(session, row.id, tenant_id=row.tenant_id)
+    assert after.delivery_status == "skipped"
 
 
 async def test_a_shared_channels_routine_never_leaves_it_by_dm(

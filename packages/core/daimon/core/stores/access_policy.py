@@ -29,11 +29,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 class AccessPolicyUnreadable(UserFacingError):
     """The stored policy does not parse; callers must refuse, never assume open."""
 
-    def __init__(self, *, tenant_id: uuid.UUID) -> None:
+    def __init__(self, *, tenant_id: uuid.UUID, detail: str | None = None) -> None:
         # Adapters render this text as-is, so it names no tenant id.
         super().__init__(
-            "the access settings here can't be read, so Daimon can't reply; "
-            "ask an admin to fix them"
+            detail
+            or (
+                "the access settings here can't be read, so Daimon can't reply; "
+                "ask an admin to fix them"
+            )
         )
         self.tenant_id = tenant_id
 
@@ -136,6 +139,23 @@ async def lock_access_policy(session: AsyncSession, *, tenant_id: uuid.UUID) -> 
     ).scalar_one()
 
 
+async def _roles_supported(
+    session: AsyncSession, tenant_id: uuid.UUID, policy: TenantAccessPolicy
+) -> bool:
+    """Role access needs a Discord tenant and never names @everyone (the guild id)."""
+    role_ids = (
+        *policy.invoker_role_ids,
+        *policy.internal_role_ids,
+        *(role for rule in policy.agent_rules.values() for role in rule.invoker_role_ids),
+    )
+    if not role_ids:
+        return True
+    tenant = await session.get(Tenant, tenant_id)
+    return (
+        tenant is not None and tenant.platform == "discord" and tenant.external_id not in role_ids
+    )
+
+
 def _with_default_backends(policy: TenantAccessPolicy) -> TenantAccessPolicy:
     default = default_enabled_backends()
     if policy.enabled_backends == default:
@@ -167,7 +187,15 @@ async def load_access_policy(session: AsyncSession, *, tenant_id: uuid.UUID) -> 
         }
     try:
         # JSON null, an array or a string fail validation like a bad field does.
-        return TenantAccessPolicy.model_validate(payload)
+        policy = TenantAccessPolicy.model_validate(payload)
+        if not await _roles_supported(session, tenant_id, policy):
+            raise AccessPolicyUnreadable(
+                tenant_id=tenant_id,
+                detail=(
+                    "this space has unsupported role access settings; ask an admin to fix them"
+                ),
+            )
+        return policy
     except ValidationError as exc:
         raise AccessPolicyUnreadable(tenant_id=tenant_id) from exc
 
@@ -177,6 +205,10 @@ async def set_access_policy(
 ) -> None:
     await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
     await lock_access_policy(session, tenant_id=tenant_id)
+    if not await _roles_supported(session, tenant_id, policy):
+        raise ValueError(
+            "Discord roles require a Discord tenant and cannot include @everyone (guild id)"
+        )
     payload = policy.model_dump(mode="json")
     # A list that differs from the deployment default is a choice even when the
     # caller rebuilt the policy from a defaulted one (a model_dump round trip).
@@ -187,9 +219,18 @@ async def set_access_policy(
     # never written back as a choice, and older builds read Anthropic only.
     chosen = payload.pop("enabled_backends")
     backends = chosen if explicit else [MANAGED_AGENTS.provider]
+    # Older readers already imply the default admin bypass and forbid unknown keys.
+    if policy.invoker_admin_bypass:
+        payload.pop("invoker_admin_bypass")
     # Leave empty keys out, so a build from before them still reads a row
     # that sets none of them.
-    for key in ("channel_rules", "category_rules", "agent_rules"):
+    for key in (
+        "channel_rules",
+        "category_rules",
+        "agent_rules",
+        "invoker_role_ids",
+        "internal_role_ids",
+    ):
         if not payload.get(key):
             payload.pop(key, None)
     await session.execute(

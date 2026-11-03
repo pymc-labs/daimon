@@ -35,6 +35,7 @@ from typing import Any, Literal, cast
 from unittest.mock import MagicMock, patch
 
 import httpx
+from aioresponses import CallbackResult
 from aioresponses import aioresponses as AioResponsesMock
 from cryptography.fernet import Fernet
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
@@ -101,6 +102,7 @@ from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from mux.testing.drivers.anthropic.ma_models import ma_session
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from yarl import URL
 
 from .cards import CapturedCard, read_slack_card
 from .protocol import PanelAction, parity_account_id, pin_agent
@@ -123,6 +125,25 @@ _CAP_BLOCKED_TEXT = "You've used your monthly limit.\n\nAsk the team running Dai
 _ALLOWANCE_BLOCKED_TEXT = "You've used your Daimon credit.\n\nAsk an admin to add more."
 
 
+def _platform_user(url: URL, *, team_id: str, is_admin: bool) -> CallbackResult:
+    return CallbackResult(
+        payload={
+            "ok": True,
+            "user": {
+                "id": url.query["user"],
+                "team_id": team_id,
+                "deleted": False,
+                "is_bot": False,
+                "is_admin": is_admin,
+                "is_owner": False,
+                "is_primary_owner": False,
+                "is_restricted": False,
+                "is_ultra_restricted": False,
+            },
+        }
+    )
+
+
 def _register_slack_defaults(mock: AioResponsesMock, *, team_id: str) -> None:
     """Canned ok=True responses for the Slack Web API methods a turn touches.
 
@@ -136,15 +157,7 @@ def _register_slack_defaults(mock: AioResponsesMock, *, team_id: str) -> None:
     """
     mock.get(  # pyright: ignore[reportUnknownMemberType]  # aioresponses has no type stubs
         _USERS_INFO_PATTERN,
-        payload={
-            "ok": True,
-            "user": {
-                "is_admin": False,
-                "is_owner": False,
-                "is_primary_owner": False,
-                "team_id": team_id,
-            },
-        },
+        callback=lambda url, **_: _platform_user(url, team_id=team_id, is_admin=False),
         repeat=True,
     )
     # The channel is not shared with another organisation: a turn asks once.
@@ -265,17 +278,7 @@ def _register_credential_defaults(mock: AioResponsesMock, *, channel_id: str, te
     """
     mock.get(  # pyright: ignore[reportUnknownMemberType]  # aioresponses has no type stubs
         _USERS_INFO_PATTERN,
-        payload={
-            "ok": True,
-            "user": {
-                "team_id": team_id,
-                "is_admin": True,
-                "is_owner": False,
-                "is_primary_owner": False,
-                "is_restricted": False,
-                "is_ultra_restricted": False,
-            },
-        },
+        callback=lambda url, **_: _platform_user(url, team_id=team_id, is_admin=True),
         repeat=True,
     )
     mock.get(  # pyright: ignore[reportUnknownMemberType]
@@ -480,6 +483,8 @@ class SlackDriver:
             external_id=_LIFECYCLE_WORKSPACE_ID,
             platform_user_id=_LIFECYCLE_USER_ID,
             is_admin=True,
+            is_platform_admin=True,
+            token_kind="cli",
         )
         return runtime, auth
 
@@ -635,6 +640,7 @@ class SlackDriver:
             fernet=build_multifernet((self._fernet_key,)),
         )
         auth = AuthIdentity(
+            chat_session_id="parity-card-session",
             account_id=parity_account_id(tenant_id, user_id),
             tenant_id=tenant_id,
             role=Role.ADMIN,
@@ -642,6 +648,7 @@ class SlackDriver:
             external_id=workspace_id,
             platform_user_id=user_id,
             is_admin=True,
+            is_platform_admin=True,
         )
         # The tools refuse to mint for an agent they cannot pin by MA id, and
         # take that id off the origin's configuration target when the caller
@@ -665,6 +672,7 @@ class SlackDriver:
                 shared_channel=False,
                 expires_at=now + timedelta(minutes=30),
                 now=now,
+                chat_session_id="parity-card-session",
             )
 
         with AioResponsesMock() as mock:
@@ -900,17 +908,7 @@ class SlackDriver:
         """
         mock.get(  # pyright: ignore[reportUnknownMemberType]  # aioresponses has no type stubs
             _USERS_INFO_PATTERN,
-            payload={
-                "ok": True,
-                "user": {
-                    "team_id": team_id,
-                    "is_admin": is_admin,
-                    "is_owner": False,
-                    "is_primary_owner": False,
-                    "is_restricted": False,
-                    "is_ultra_restricted": False,
-                },
-            },
+            callback=lambda url, **_: _platform_user(url, team_id=team_id, is_admin=is_admin),
             repeat=True,
         )
         mock.get(  # pyright: ignore[reportUnknownMemberType]

@@ -42,7 +42,7 @@ def _session_payload(session_id: str, *, account_id: str) -> dict[str, Any]:
         id=session_id,
         agent_id=AGENT_ID,
         environment_id="env_parity_test",
-        metadata={MA_METADATA_KEY_ACCOUNT: account_id},
+        metadata={"daimon_agent_chat": "true", MA_METADATA_KEY_ACCOUNT: account_id},
     ).model_dump(mode="json")
 
 
@@ -87,7 +87,7 @@ async def _hub_app(
             session_id=m.group(1),
             status="idle",
             agent_id=AGENT_ID,
-            metadata={MA_METADATA_KEY_ACCOUNT: _owner(m.group(1))},
+            metadata={"daimon_agent_chat": "true", MA_METADATA_KEY_ACCOUNT: _owner(m.group(1))},
         ),
     )
     router.add(

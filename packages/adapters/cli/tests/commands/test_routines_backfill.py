@@ -27,8 +27,10 @@ from ..harness import build_cli_runtime
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("dry_run", [False, True])
 async def test_backfill_is_a_no_op_post_0012(
     db_session_factory: async_sessionmaker[AsyncSession],
+    dry_run: bool,
 ) -> None:
     """After 0012 NOT NULL, no row can have agent_name=NULL, so backfill makes
     zero MA calls and exits cleanly.
@@ -36,7 +38,7 @@ async def test_backfill_is_a_no_op_post_0012(
     # Seed one normal row (agent_name already set, as the column requires).
     async with db_session_factory() as s, s.begin():
         tenant = await make_tenant(s)
-        await create_routine(
+        row = await create_routine(
             s,
             created_by_user_id="u1",
             agent_id="agent_aaa",
@@ -47,10 +49,16 @@ async def test_backfill_is_a_no_op_post_0012(
             tenant_id=tenant.id,
         )
 
+        from daimon.core.stores.routines import record_result
+
+        await record_result(s, row.id, tail="personal-memory-sentinel", error="private-error")
+
     # Router with no handlers: any MA call would raise (no route matches).
     router = MARouter()
     console = Console(file=StringIO(), force_terminal=False, highlight=False, width=200)
     rt = build_cli_runtime(db_session_factory, router=router)
 
     # Must not raise: list_routines_missing_agent_name returns [] post-0012.
-    await run_backfill_agent_names(rt=rt, console=console, dry_run=False)
+    await run_backfill_agent_names(rt=rt, console=console, dry_run=dry_run)
+    output = console.file.getvalue()
+    assert "personal-memory-sentinel" not in output and "private-error" not in output

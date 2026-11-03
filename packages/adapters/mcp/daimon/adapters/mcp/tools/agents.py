@@ -55,6 +55,7 @@ from daimon.adapters.mcp.tools.setup_target import (
     resolve_setup_agent,
 )
 from daimon.core import agent_editing, channel_backend
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_fork import copy_agent
 from daimon.core.agent_identity import queue_agent_face
 from daimon.core.agent_lifecycle import forget_archived_agent
@@ -87,6 +88,7 @@ from daimon.core.skill_sync import SyncRepoFailure, sync_agent_skills, sync_repo
 from daimon.core.specs import AgentSpec, SkillRepo, merge_default_agent_toolset
 from daimon.core.stores.domain import BackendAgent, TurnOriginRow
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
+from daimon.core.tool_safety import get_mcp_server_name_rejection
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from mux.contracts.config import DEFAULT_BACKEND, ThreadMode
@@ -277,7 +279,9 @@ async def _with_answering_note(
     return info.model_copy(
         update={
             "answering": build_unrouted_note(
-                agent_name=info.name, channel_label=None, is_admin=auth.is_admin
+                agent_name=info.name,
+                channel_label=None,
+                is_admin=auth.admin_for(DelegatedAction.AGENT_SETTINGS),
             )
         }
     )
@@ -432,7 +436,7 @@ async def _list_agents_impl(
         for a in rows
     ]
     infos = await _with_providers(runtime, auth, infos)
-    if auth.is_admin:
+    if auth.admin_for(DelegatedAction.AGENT_SETTINGS):
         return infos
     hidden = {row.id for row in rows if _setup_hidden(row, auth)}
     return [
@@ -464,7 +468,9 @@ async def _get_agent_impl(
     # agent's prompt stays withheld even from admins — the edit path is a fork,
     # and the fork's own prompt is then readable.
     owned = await caller_owns_agent(runtime, auth, agent.id)
-    sees_setup = auth.is_admin or (owned and not _setup_hidden(agent, auth))
+    sees_setup = auth.admin_for(DelegatedAction.AGENT_SETTINGS) or (
+        owned and not _setup_hidden(agent, auth)
+    )
     if sees_setup and _system_agent_rejection(agent) is None:
         info = info.model_copy(update={"system": agent.system or ""})
     if not sees_setup:
@@ -686,6 +692,9 @@ def _build_create_spec(
     """
     model = _resolve_native_agent_model(model)
     _reject_unknown_model(model)
+    for server in mcp_servers or []:
+        if (rejection := get_mcp_server_name_rejection(str(server.get("name") or ""))) is not None:
+            raise ToolError(f"create_agent: {rejection} Nothing was saved.")
     try:
         return AgentSpec(
             name=name,
@@ -776,6 +785,8 @@ async def _create_agent_impl(
     """Create `spec`; `backend` (from `_create_model`) starts it on another provider."""
     from daimon.core.turn.notices import provider_name
 
+    if spec.mcp_servers and not may_own(auth):
+        _require_admin(auth)
     if spec.skills:
         raise ToolError(
             "create_agent: skills must be empty. To add skills, either sync a "
@@ -971,6 +982,9 @@ def _reject_reserved_servers(
     runtime: McpRuntime, mcp_servers: list[BetaManagedAgentsURLMCPServerParams]
 ) -> None:
     """The same reserved-name guard `attach_mcp_server` applies, for `update_agent`."""
+    for server in mcp_servers:
+        if (rejection := get_mcp_server_name_rejection(str(server.get("name") or ""))) is not None:
+            raise ToolError(f"update_agent: {rejection} Nothing was saved.")
     rejection = agent_editing.reserved_server_rejection(mcp_servers, _edit_deps(runtime).public_url)
     if rejection is not None:
         raise ToolError(f"update_agent: {rejection} Nothing was saved.")
@@ -1008,6 +1022,8 @@ async def _update_agent_impl(
         location_channel_id=origin_channel_id(origin),
     )
     _reject_system_agent(agent)
+    if mcp_servers is not None:
+        await _require_connection_editor(runtime, auth, agent)
     await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
 
     touched_fields = {field_name for field_name, value in scalars.items() if value is not None}
@@ -1094,6 +1110,15 @@ async def _update_agent_impl(
     return result
 
 
+async def _require_connection_editor(
+    runtime: McpRuntime, auth: AuthIdentity, agent: BetaManagedAgentsAgent
+) -> None:
+    """Keep native admin exemptions and the independent ownership right separate."""
+    if auth.admin_for() or await caller_owns_agent(runtime, auth, agent.id):
+        return
+    raise ToolError("Connections require a platform admin or this agent's owner.")
+
+
 async def _require_mcp_replace_allowed(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -1149,7 +1174,9 @@ async def _attach_mcp_server_impl(
         if runtime.settings.mcp.public_url is not None
         else None
     )
-    rejection = get_reserved_mcp_rejection(server_name=server_name, url=url, public_url=public_url)
+    rejection = get_mcp_server_name_rejection(server_name) or get_reserved_mcp_rejection(
+        server_name=server_name, url=url, public_url=public_url
+    )
     if rejection is not None:
         raise ToolError(rejection)
     origin = await get_chat_origin(runtime, auth, origin_context_id)
@@ -1161,6 +1188,7 @@ async def _attach_mcp_server_impl(
         location_channel_id=origin_channel_id(origin),
     )
     _reject_system_agent(agent)
+    await _require_connection_editor(runtime, auth, agent)
     await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
     await reachability.require_admin_for_reachable_agent(
         runtime, auth, agent_name=agent_name, agent=agent
@@ -1283,8 +1311,10 @@ async def _fork_agent_impl(
     # channel pin of its own, so it is free to run anywhere the source can't. Anyone
     # may copy the agent answering their own chat turn (it is theirs to own; TARGET-V2
     # J10), so only a person's own turn credential gets that far.
-    if not auth.is_admin and (auth.chat_agent_id is None or not may_own(auth)):
-        _require_admin(auth)  # pyright: ignore[reportPrivateUsage]
+    if not auth.admin_for(DelegatedAction.AGENT_LIFECYCLE) and (
+        auth.chat_agent_id is None or not may_own(auth)
+    ):
+        _require_admin(auth, action=DelegatedAction.AGENT_LIFECYCLE)
     origin = await get_chat_origin(runtime, auth, origin_context_id)
     public_url = runtime.settings.mcp.public_url
     async with contextlib.AsyncExitStack() as stack:
@@ -1336,7 +1366,7 @@ async def _fork_agent_impl(
                 source=source,
                 new_name=new_name,
                 public_url=str(public_url) if public_url is not None else None,
-                subject=mcp_subject(auth, is_admin=auth.is_admin),
+                subject=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.AGENT_LIFECYCLE)),
                 default_agent_name=runtime.deployment_default.agent_name,
                 # Whoever made the copy owns it.
                 owner=auth.account_id if may_own(auth) else None,
@@ -1380,7 +1410,7 @@ async def _archive_agent_impl(
     name: str,
     expected_ma_agent_id: str | None = None,
 ) -> None:
-    _require_admin(auth)  # pyright: ignore[reportPrivateUsage]
+    _require_admin(auth, action=DelegatedAction.AGENT_LIFECYCLE)
     agent = await resolve_setup_agent(
         runtime, auth, name=name, expected_ma_agent_id=expected_ma_agent_id
     )
@@ -1466,7 +1496,7 @@ async def _capture_backend_source(
             channel_id=origin.parent_channel_id if origin is not None else None,
             thread_id=origin.thread_id if origin is not None else None,
         ),
-        subject=mcp_subject(auth, is_admin=auth.is_admin),
+        subject=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.AGENT_SETTINGS)),
         place=turn_origin_place(origin) if origin is not None else Place(),
         is_dm=False,
         slack_turn_context_id=None,
@@ -1697,7 +1727,7 @@ async def _set_agent_backend_impl(
     actor = channel_backend.BackendActor(
         tenant_id=auth.tenant_id,
         account_id=auth.account_id,
-        subject=mcp_subject(auth, is_admin=auth.is_admin),
+        subject=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.AGENT_SETTINGS)),
     )
     on_now: Provider | None = None
     try:
@@ -1838,6 +1868,7 @@ async def _post_own_switch_card(
         tenant_id=auth.tenant_id,
         account_id=auth.account_id,
         current_admin=current_admin,
+        current_platform_admin=current_admin,
         default_agent_name=runtime.deployment_default.agent_name,
         place_word=space_noun(auth.platform),
         answering_agent_name=origin.responder_name,
@@ -2016,7 +2047,7 @@ async def _request_agent_backend_switch_impl(
             BackendActor(
                 tenant_id=auth.tenant_id,
                 account_id=auth.account_id,
-                subject=mcp_subject(auth, is_admin=auth.is_admin),
+                subject=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.AGENT_SETTINGS)),
             ),
             auth,
         )
@@ -2040,7 +2071,9 @@ async def _request_agent_backend_switch_impl(
                 summary=handoff_summary,
                 switch="check",
             )
-        if thread_mode == "shared" and not (auth.is_admin and auth.agent_id is None):
+        if thread_mode == "shared" and not (
+            auth.admin_for(DelegatedAction.AGENT_SETTINGS) and auth.agent_id is None
+        ):
             # The service refuses it too; say so before a card is posted.
             raise ToolError(
                 f"Sharing threads applies in every channel, so it needs "
@@ -2142,7 +2175,7 @@ async def _request_agent_backend_switch_impl(
             actor = BackendActor(
                 tenant_id=auth.tenant_id,
                 account_id=auth.account_id,
-                subject=mcp_subject(auth, is_admin=auth.is_admin),
+                subject=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.AGENT_SETTINGS)),
             )
             from daimon.core.turn.notices import conversations_follow_line, provider_name
 

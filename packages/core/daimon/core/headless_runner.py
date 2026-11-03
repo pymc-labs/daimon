@@ -5,7 +5,7 @@ Open a fresh MA session, then delegate the drain to the core turn driver
 A routine turn inherits the driver's full liveness story — status-checked
 eventless-cycle reconnect, the per-call read timeout, the cancel race,
 the hardened render error policy — instead of a bespoke bare drain
-loop, and answers tool confirmations via `headless_tool_confirmation`.
+loop, and answers tool confirmations via `unattended_posture`.
 
 A routine/headless turn is bounded end to end by the core per-turn ceiling
 (`daimon.core.turn.ceiling`, ~45 minutes): one shared deadline covers BOTH
@@ -63,34 +63,35 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_ev
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
 from cryptography.fernet import MultiFernet
-from daimon.core.config import GithubAppSettings, McpSettings, load_turn_settings
+from daimon.core.config import (
+    GithubAppSettings,
+    McpSettings,
+    RepoMemorySettings,
+    load_turn_settings,
+)
 from daimon.core.context_prompt import TurnContext, context_prompt
 from daimon.core.github_app_session import close_headless_app_session
 from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
 from daimon.core.mux_compat import legacy_call, sdk_agent, sdk_environment
 from daimon.core.platform_system import system_for_platform
+from daimon.core.routine_sandbox import RoutineSandbox, run_matches_pin
 from daimon.core.rule_views import RoutineOrigin
 from daimon.core.sessions import create_session
-from daimon.core.tool_safety import (
-    OPEN_TOOL_SAFETY,
-    ToolSafetyPolicy,
-    daimon_endpoint,
-    trusted_servers_for,
-)
-from daimon.core.turn.approvals import (
-    agent_rule_lookup,
-    daimon_rule_tools_for,
-    headless_tool_confirmation,
-)
+from daimon.core.stores import access_policy as policy_store
+from daimon.core.tool_safety import ToolSafetyPolicy
+from daimon.core.turn.approvals import daimon_rule_tools_for
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.driver import run_turn as drive_turn
+from daimon.core.turn.driver import unattended_sends
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.persistence import MutationRetry, TurnPersistence, current_persistence
 from daimon.core.turn.posture import Billed, BillingExempt, BillingPosture, ExemptReason
 from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.core.turn.termination import TerminationReason
+from daimon.core.turn.unattended import session_gate, unattended_posture
+from daimon.core.turn.unattended_capabilities import protected_tools
 from daimon.core.turn_hold import TurnHold
 from mux.contracts.ids import ChannelRef, Scope, ThreadRef
 from mux.contracts.resources import ProviderBinding
@@ -158,6 +159,7 @@ async def run_turn(
     trigger_message: str,
     origin: TurnContext = "routine",
     mcp_settings: McpSettings | None = None,
+    repo_memory: RepoMemorySettings | None = None,
     account_id: uuid.UUID | None = None,
     usage_record_factory: Callable[[str, str], Callable[..., Awaitable[object]]] | None = None,
     tenant_id: uuid.UUID | None = None,
@@ -169,15 +171,17 @@ async def run_turn(
     github_app_private_key: str | None = None,
     agent_github_app: GithubAppSettings | None = None,
     deadline: datetime | None = None,
-    tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
+    tool_safety: ToolSafetyPolicy,
     on_state: Callable[[TurnState], None] | None = None,
+    on_session: Callable[[str], None] | None = None,
     budget_channel_id: str | None = None,
     origin_place: RoutineOrigin | None = None,
     model_override: str | None = None,
-    personal_memory: bool = False,
+    sandbox: RoutineSandbox | None = None,
     platform: str | None = None,
     hold: TurnHold | None = None,
     turn_path: TurnPath | None = None,
+    personal_memory: bool = False,
 ) -> str:
     observation = current_outcome.get()
     owns_observation = observation is None
@@ -191,6 +195,7 @@ async def run_turn(
             trigger_message=trigger_message,
             origin=origin,
             mcp_settings=mcp_settings,
+            repo_memory=repo_memory,
             account_id=account_id,
             usage_record_factory=usage_record_factory,
             tenant_id=tenant_id,
@@ -204,13 +209,15 @@ async def run_turn(
             deadline=deadline,
             tool_safety=tool_safety,
             on_state=on_state,
+            on_session=on_session,
             budget_channel_id=budget_channel_id,
             origin_place=origin_place,
             model_override=model_override,
-            personal_memory=personal_memory,
+            sandbox=sandbox,
             platform=platform,
             hold=hold,
             turn_path=turn_path,
+            personal_memory=personal_memory,
         )
     observation.agent_id = agent_id
     observation.account_id = account_id
@@ -224,6 +231,7 @@ async def run_turn(
                 trigger_message=trigger_message,
                 origin=origin,
                 mcp_settings=mcp_settings,
+                repo_memory=repo_memory,
                 account_id=account_id,
                 usage_record_factory=usage_record_factory,
                 tenant_id=tenant_id,
@@ -237,13 +245,15 @@ async def run_turn(
                 deadline=deadline,
                 tool_safety=tool_safety,
                 on_state=on_state,
+                on_session=on_session,
                 budget_channel_id=budget_channel_id,
                 origin_place=origin_place,
                 model_override=model_override,
-                personal_memory=personal_memory,
+                sandbox=sandbox,
                 platform=platform,
                 hold=hold,
                 turn_path=turn_path,
+                personal_memory=personal_memory,
             )
     except BaseException as exc:
         # The enclosing scheduler owns its deadline and classifies wait_for cancellation.
@@ -285,6 +295,7 @@ async def run_turn_impl(
     trigger_message: str,
     origin: TurnContext = "routine",
     mcp_settings: McpSettings | None = None,
+    repo_memory: RepoMemorySettings | None = None,
     account_id: uuid.UUID | None = None,
     usage_record_factory: Callable[[str, str], Callable[..., Awaitable[object]]] | None = None,
     tenant_id: uuid.UUID | None = None,
@@ -296,15 +307,17 @@ async def run_turn_impl(
     github_app_private_key: str | None = None,
     agent_github_app: GithubAppSettings | None = None,
     deadline: datetime | None = None,
-    tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
+    tool_safety: ToolSafetyPolicy,
     on_state: Callable[[TurnState], None] | None = None,
+    on_session: Callable[[str], None] | None = None,
     budget_channel_id: str | None = None,
     origin_place: RoutineOrigin | None = None,
     model_override: str | None = None,
-    personal_memory: bool = False,
+    sandbox: RoutineSandbox | None = None,
     platform: str | None = None,
     hold: TurnHold | None = None,
     turn_path: TurnPath | None = None,
+    personal_memory: bool = False,
 ) -> str:
     """Run a single non-interactive turn end-to-end and return its complete final reply.
 
@@ -327,10 +340,12 @@ async def run_turn_impl(
        even without a per-agent PAT.
     3. The drain is delegated to ``daimon.core.turn.driver.run_turn`` with a
        no-op lifecycle (nothing to render to), ``tool_confirmation`` from
-       ``headless_tool_confirmation(tool_safety)`` (``AutoApprove`` while the
-       tool-safety policy is off; with it on, reads run and third-party
-       writes are refused unless the operator allowed them in unattended
-       runs — nobody is here to press Approve), ``deadline=effective_deadline``
+       ``unattended_posture(tool_safety, ...)`` (nobody is here to press
+       Approve: with the policy on, reads run and writes are refused unless
+       the operator allowed them; with it off, ordinary third-party calls
+       run; ``daimon.core.turn.unattended`` has the rest), each send gated
+       first and sent once
+       (`unattended_sends`), ``deadline=effective_deadline``
        (the same instant that bounded step 1/2's assembly, so the driver's own
        ``remaining_s`` naturally subtracts the time assembly already spent —
        one window, two disjoint legs, no double enforcement), and a billing
@@ -344,7 +359,8 @@ async def run_turn_impl(
        the hardened render error policy — instead of a bespoke bare drain
        loop with no reconnect and stream-end-as-success.
     4. After the driver returns: ``extract_final_response(state.content)``.
-       ``on_state``, when given, is called first with the final ``TurnState``
+       ``on_session`` receives the successful session id for output collection.
+       ``on_state``, when given, is called with the final ``TurnState``
        of a successful turn, for a caller that needs the tool trail too (the
        scheduler checks whether the agent posted a routine's result itself).
 
@@ -380,7 +396,14 @@ async def run_turn_impl(
     ``personal_memory`` also mounts ``account_id``'s personal store, with the
     same (read-only, for a routine) access as the shared one. The scheduler
     sets it only for a routine whose result reaches nobody but its owner,
-    decided again at every fire (`rule_views.routine_answers_only_owner`).
+    decided again at every fire (`routines.mounts_personal_memory`).
+
+    ``sandbox`` is the routine's admin opt-in to built-in sandbox tools. They
+    are on only when this run's own session uses exactly the agent version
+    and environment revision the opt-in recorded (`routine_sandbox`); on any
+    mismatch the run goes ahead with them off and ``sandbox.on_drift`` is
+    called once. Without it they are off, as for every other unattended run
+    (`unattended_capabilities.capability_policy`).
 
     ``hold`` runs the turn held to a shared channel (`routine_hold.routine_hold`):
     the channel's own store replaces the agent-wide and personal ones, and the
@@ -405,6 +428,11 @@ async def run_turn_impl(
         )
 
     effective_deadline = deadline if deadline is not None else turn_deadline(now=datetime.now(UTC))
+    public_url = (
+        str(mcp_settings.public_url)
+        if mcp_settings is not None and mcp_settings.public_url is not None
+        else None
+    )
     # Decided before the session exists so the session carries it: an
     # unrecorded run is stamped exempt, and the usage sweep then skips it
     # instead of debiting the tenant for a turn nobody meant to bill.
@@ -444,6 +472,15 @@ async def run_turn_impl(
                 )
             )
         )
+        if session_factory is not None and tenant_id is not None:
+            from daimon.core.access_policy import agent_invoker_roles
+            from daimon.core.authz import build_agent_ref
+            from daimon.core.turn.errors import AdmissionDenied
+
+            async with session_factory() as db:
+                access = await policy_store.load_access_policy(db, tenant_id=tenant_id)
+            if agent_invoker_roles(access, build_agent_ref(agent.name, agent.metadata).names):
+                raise AdmissionDenied(reason="invoker_not_allowed")
         environment = sdk_environment(
             await legacy_call(
                 backend.environments.retrieve(
@@ -457,6 +494,8 @@ async def run_turn_impl(
             environment=environment,
             mcp_settings=mcp_settings,
             daimon_rule_tools=daimon_rule_tools,
+            # Daimon's card-only actions ask here and are refused unattended.
+            confirmed_tools=protected_tools(tool_safety),
             account_id=account_id,
             tenant_id=tenant_id,
             agent_uuid=agent_uuid,
@@ -466,15 +505,16 @@ async def run_turn_impl(
             github_app_id=github_app_id,
             github_app_private_key=github_app_private_key,
             agent_github_app=agent_github_app,
+            legacy_memory_servers=(
+                repo_memory.legacy_mcp_server_names
+                if repo_memory is not None and repo_memory.enabled
+                else ()
+            ),
             requester_is_headless=True,
             billing_exempt=billing_exempt,
             memory_read_only=origin == "routine",
-            # Only a routine whose result reaches nobody but its owner
-            # (`rule_views.routine_answers_only_owner`); read-only like the
-            # shared mount, since a routine's memory is always read-only.
             personal_memory=personal_memory,
-            # A fire into a shared channel runs held to it: that channel's own
-            # (read-only) memory and the held credential, never agent-wide memory.
+            # A held fire mounts only channel-local memory.
             hold=hold,
             memory_hold=hold,
             tool_safety=tool_safety,
@@ -503,6 +543,25 @@ async def run_turn_impl(
         raise ceiling_error() from err
 
     try:
+        routine_memory = ""
+        if (
+            repo_memory is not None
+            and repo_memory.enabled
+            and origin == "routine"
+            and tenant_id is not None
+            and session_factory is not None
+        ):
+            from daimon.core.ma_identity import derive_agent_uuid
+            from daimon.core.repo_memory import turn_memory_prefix
+
+            # Headless executions create a fresh session, so each needs its first block.
+            routine_memory = await turn_memory_prefix(
+                session_factory,
+                tenant_id=tenant_id,
+                agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=session.agent.id),
+                account_id=None,
+                allowed=hold is None,
+            )
         if (observation := current_outcome.get()) is not None:
             observation.session_id = session.id
             observation.model_by_session[session.id] = model_choice_id(session.agent.model)
@@ -511,6 +570,21 @@ async def run_turn_impl(
         usage_record: Callable[..., Awaitable[object]] | None = None
         if usage_record_factory is not None:
             usage_record = usage_record_factory(session.id, model_choice_id(session.agent.model))
+
+        sandbox_tools = False
+        if sandbox is not None:
+            sandbox_tools = await run_matches_pin(
+                anthropic, sandbox.pin, session, tenant_id=tenant_id
+            )
+            if not sandbox_tools:
+                log.warning(
+                    "headless.sandbox_pin_mismatch",
+                    session_id=session.id,
+                    agent_id=session.agent.id,
+                    agent_version=session.agent.version,
+                    environment_id=session.environment_id,
+                )
+                await sandbox.on_drift()
 
         billing: BillingPosture
         if usage_record is not None:
@@ -575,6 +649,11 @@ async def run_turn_impl(
         # bespoke loop) is fully delegated below.
         # A routine turn runs on Managed Agents; its driver lines name it, as a
         # chat turn's do (`run_prepared_turn`).
+        gate_scope = (
+            turn_scope
+            if turn_scope is not None
+            else Scope.legacy_host_authorized(call_site="headless_runner:run_turn:gate")
+        )
         with (
             structlog.contextvars.bound_contextvars(
                 backend=MANAGED_AGENTS.provider,
@@ -582,46 +661,47 @@ async def run_turn_impl(
                 model=model_choice_id(session.agent.model),
             ),
             persistence.activate() if persistence is not None else contextlib.nullcontext(),
+            unattended_sends(
+                session_gate(
+                    anthropic,
+                    session.id,
+                    tool_safety,
+                    scope=gate_scope,
+                    public_url=public_url,
+                    session_factory=session_factory,
+                    tenant_id=tenant_id,
+                    entry_point="routine",
+                    routine_sandbox_tools=sandbox_tools,
+                )
+            ),
         ):
             state: TurnState = await drive_turn(
                 anthropic=anthropic,
                 path=selected_path,
                 scope=turn_scope,
                 session_id=session.id,
-                user_message=context_prompt(origin, system=session.agent.system) + trigger_message,
+                user_message=(
+                    context_prompt(origin, system=session.agent.system)
+                    + routine_memory
+                    + trigger_message
+                ),
                 lifecycle=_NoOpLifecycle(),
                 cancel=cancel,
                 render_interval_s=2.0,  # nothing renders; do not spin the diff timer
                 billing=billing,
-                tool_confirmation=headless_tool_confirmation(
+                # Nobody is here to press a card: the one unattended decider,
+                # from the policy now in force, never `AutoApprove`.
+                tool_confirmation=unattended_posture(
                     tool_safety,
-                    rules_for=(
-                        agent_rule_lookup(
-                            session_factory,
-                            tenant_id=tenant_id,
-                            agent_id=agent_id,
-                            server_urls={s.name: s.url for s in session.agent.mcp_servers},
-                            also_urls=daimon_endpoint(
-                                str(mcp_settings.public_url)
-                                if mcp_settings is not None and mcp_settings.public_url is not None
-                                else None
-                            ),
-                            channel_id=origin_place.channel_id
-                            if origin_place is not None
-                            else None,
-                        )
-                        if tool_safety.enabled
-                        and tool_safety.agent_rules
-                        and session_factory is not None
-                        and tenant_id is not None
-                        else None
-                    ),
-                    daimon_rules=bool(daimon_rule_tools),
-                    trusted_servers=trusted_servers_for(
-                        str(mcp_settings.public_url)
-                        if mcp_settings is not None and mcp_settings.public_url is not None
-                        else None
-                    ),
+                    session=session,
+                    fernet=fernet,
+                    agent_id=agent_uuid,
+                    public_url=public_url,
+                    session_factory=session_factory,
+                    tenant_id=tenant_id,
+                    channel_id=origin_place.channel_id if origin_place is not None else None,
+                    entry_point="routine",
+                    routine_sandbox_tools=sandbox_tools,
                 ),
                 deadline=effective_deadline,
             )
@@ -631,6 +711,8 @@ async def run_turn_impl(
         if state.error is not None:
             raise state.error
 
+        if on_session is not None:
+            on_session(session.id)
         if on_state is not None:
             on_state(state)
         return extract_final_response(state.content)

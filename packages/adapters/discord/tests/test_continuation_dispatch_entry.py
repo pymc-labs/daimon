@@ -14,6 +14,7 @@ controls the follow-up runs with, not the session-preparation pipeline.
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -83,6 +84,9 @@ def _make_guild(
     """
     guild = MagicMock(spec=discord.Guild)
     guild.owner_id = 1
+    guild.unavailable = False
+    if member is not None:
+        member.guild = guild
     guild.get_member = MagicMock(return_value=cached_member)
     if member is not None:
         guild.fetch_member = AsyncMock(return_value=member)
@@ -97,6 +101,7 @@ def _make_guild(
 def _make_member(*, admin: bool) -> MagicMock:
     member = MagicMock(spec=discord.Member)
     member.id = 555
+    member.roles = []
     member.guild_permissions.administrator = admin
     member.guild_permissions.manage_guild = False
     return member
@@ -317,6 +322,7 @@ def _make_continuation_row(
         target_name="test-agent" if target_ma_agent_id == "ag_test" else "target-agent",
         requested_work="finish the migration",
         reason=reason,
+        attended=True,
         status="claimed",
         skip_reason=None,
         idempotency_key=uuid.uuid4(),
@@ -372,6 +378,7 @@ async def _run_continuation(
     *,
     workspace_id: str,
     reason: ContinuationReason,
+    attended: bool = True,
     guild: MagicMock | None = None,
     prior_role: Role | None = None,
     target_ma_agent_id: str = "ag_test",
@@ -400,6 +407,16 @@ async def _run_continuation(
 
     bot = make_bot(_make_runtime(db_session_factory))
     thread = _make_thread(guild=guild)
+    bot.get_guild = MagicMock(return_value=thread.guild)
+    bot.fetch_guild = AsyncMock(return_value=thread.guild)
+    if guild is not None:
+        from daimon.adapters.discord.membership import GatewayMembershipResolver
+
+        bot.membership_resolver = GatewayMembershipResolver(bot)
+        bot.runtime = replace(
+            bot.runtime,
+            turn_deps=replace(bot.runtime.turn_deps, membership_resolver=bot.membership_resolver),
+        )
     row = _make_continuation_row(
         tenant_id=tenant.id,
         account_id=account.id,
@@ -407,6 +424,8 @@ async def _run_continuation(
         target_ma_agent_id=target_ma_agent_id,
     )
     decision = ContinuationDecision(action="dispatch", seed_user_message="finish the migration")
+
+    row = row.model_copy(update={"attended": attended})
 
     with (
         patch(
@@ -434,6 +453,33 @@ async def _run_continuation(
             mapping_id=None,
             recovered=False,
         )
+
+        async def check_origin(*args, **kwargs):
+            from daimon.core.stores.turn_origins import get_active_origin
+            from daimon.core.turn_origin import current_origin_id
+
+            origin_id = current_origin_id.get()
+            assert origin_id is not None
+            async with db_session_factory() as session:
+                principal = await get_or_create_platform_principal(
+                    session,
+                    tenant_id=tenant.id,
+                    platform=row.platform,
+                    external_id=row.requester_external_user_id,
+                )
+                origin = await get_active_origin(
+                    session,
+                    origin_id=origin_id,
+                    tenant_id=tenant.id,
+                    account_id=principal.account_id,
+                    platform=row.platform,
+                    now=datetime.now(UTC),
+                )
+            assert origin is not None
+            assert origin.attended is kwargs["attended"]
+            return run_turn.return_value
+
+        run_turn.side_effect = check_origin
         await bot._run_continuation_turn(  # pyright: ignore[reportPrivateUsage]
             row, decision, thread=thread, tenant_id=tenant.id, guild_id=workspace_id
         )
@@ -453,6 +499,7 @@ async def _run_continuation(
         row.parent_channel_id,
         str(thread.id),
     )
+    assert run_turn.await_args.kwargs["attended"] is (row.attended and row.reason != "timer")
     user_message = run_turn.await_args.kwargs["user_message"]
     assert isinstance(user_message, str), "user_message should be the rendered controls + seed"
     return user_message, tenant.id
@@ -472,7 +519,7 @@ async def test_continuation_turn_omits_handoff_notice_for_private_input(
     assert '"handoff"' not in private_controls, (
         f"a private-input continuation must carry no handoff block, got {private_controls}"
     )
-    assert "your first reply must show you have the task" not in private_controls, (
+    assert "If handoff is present" not in private_controls, (
         "the handoff instruction paragraph must be absent with no handoff block"
     )
     assert private_controls.endswith("finish the migration"), (
@@ -536,34 +583,55 @@ async def test_continuation_turn_runs_as_admin_when_requester_is_a_guild_admin(
 
 
 @pytest.mark.parametrize(
-    ("workspace_id", "guild"),
+    ("workspace_id", "guild", "member_present"),
     [
         pytest.param(
-            "710000020", _make_guild(member=_make_member(admin=False)), id="non-admin-member"
+            "710000020", _make_guild(member=_make_member(admin=False)), True, id="non-admin-member"
         ),
-        pytest.param("710000021", _make_guild(), id="requester-left-the-guild"),
+        pytest.param("710000021", _make_guild(), False, id="requester-left-the-guild"),
         pytest.param(
             "710000023",
             _make_guild(member=_make_member(admin=False), cached_member=_make_member(admin=True)),
+            True,
             id="stale-cached-admin-lost-the-role",
         ),
         pytest.param(
             "710000024",
             _make_guild(cached_member=_make_member(admin=True)),
+            False,
             id="stale-cached-admin-left-the-guild",
         ),
         pytest.param(
             "710000022",
             _make_guild(fetch_error=discord.HTTPException(MagicMock(status=503), "unavailable")),
+            False,
             id="discord-lookup-failed",
         ),
     ],
 )
 async def test_continuation_turn_never_runs_as_admin_without_a_live_admin_requester(
-    db_session_factory: async_sessionmaker[AsyncSession], workspace_id: str, guild: MagicMock
+    db_session_factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+    guild: MagicMock,
+    member_present: bool,
 ) -> None:
     """A non-admin's form never produces an admin continuation -- even when
     the requester's account was admin on an earlier turn."""
+    if not member_present:
+        from daimon.core.ma_identity import derive_tenant_uuid
+        from daimon.core.turn.errors import AdmissionDenied
+
+        with pytest.raises(AdmissionDenied, match="invoker_not_allowed"):
+            await _run_continuation(
+                db_session_factory,
+                workspace_id=workspace_id,
+                reason="private_input_applied",
+                guild=guild,
+                prior_role=Role.ADMIN,
+            )
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=workspace_id)
+        assert await _requester_account_role(db_session_factory, tenant_id) == Role.USER
+        return
     controls, tenant_id = await _run_continuation(
         db_session_factory,
         workspace_id=workspace_id,
@@ -808,6 +876,7 @@ async def test_a_fired_timer_resumes_the_thread_with_its_note(
 
     run_turn.assert_awaited_once()
     assert run_turn.await_args is not None
+    assert run_turn.await_args.kwargs["attended"] is False
     user_message = run_turn.await_args.kwargs["user_message"]
     assert "[timer] You set this timer" in user_message
     assert user_message.endswith("check the build again")
@@ -982,3 +1051,50 @@ async def test_continuation_turn_backend_switch_card_captures_through_its_own_ad
         str(_THREAD_ID - 1),
         str(_THREAD_ID),
     )
+
+
+@pytest.mark.parametrize("attended", [False, True])
+async def test_handoff_retains_initiation_at_dispatch(db_session_factory, attended):
+    await _run_continuation(
+        db_session_factory, workspace_id="710000177", reason="task_handoff", attended=attended
+    )
+
+
+async def test_job_wake_refuses_revoked_private_thread_before_preparation(
+    db_session_factory, monkeypatch
+):
+    """The review probe must stop before admit, card intent, bind or turn."""
+    from daimon.adapters.discord import bot as bot_module
+    from daimon.core.turn.errors import AdmissionDenied
+
+    from .watch_fixtures import WatchDiscordRest
+
+    original = make_bot
+    rests = []
+
+    def bot_with_denied_membership(runtime):
+        bot = original(runtime)
+        rest = WatchDiscordRest(bot)
+        rest.private = True
+        rest.membership_error = discord.NotFound(MagicMock(status=404, reason="gone"), "gone")
+        rests.append(rest)
+        return bot
+
+    monkeypatch.setattr(
+        __import__(__name__, fromlist=["make_bot"]), "make_bot", bot_with_denied_membership
+    )
+    admit_spy = AsyncMock(wraps=bot_module.admit)
+    card_spy = AsyncMock()
+    monkeypatch.setattr(bot_module, "admit", admit_spy)
+    monkeypatch.setattr(bot_module, "post_initial_turn_card", card_spy)
+    with pytest.raises(AdmissionDenied):
+        await _run_continuation(
+            db_session_factory,
+            workspace_id="710000099",
+            reason="job_finished",
+            attended=False,
+            guild=_make_guild(member=_make_member(admin=False)),
+        )
+    rests[0].http.get_thread_member.assert_awaited_once()
+    admit_spy.assert_not_awaited()
+    card_spy.assert_not_awaited()

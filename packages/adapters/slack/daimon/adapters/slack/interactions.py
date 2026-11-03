@@ -9,6 +9,7 @@ handler can call one function instead of duplicating the decrypt dance.
 
 from __future__ import annotations
 
+from daimon.adapters.slack.admin import WorkspaceWebClient
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.github_credentials import decrypt_token
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
@@ -56,6 +57,6 @@ async def resolve_web_client(runtime: SlackRuntime, *, team_id: str) -> AsyncWeb
     if row is None:
         return None
     token = decrypt_token(runtime.fernet, row.encrypted_token)
-    return AsyncWebClient(  # per-event only — never cache
+    return WorkspaceWebClient(  # per-event only — never cache
         token=token, retry_handlers=build_retry_handlers(), session=runtime.slack_http
-    )
+    ).bind_workspace(runtime, team_id)

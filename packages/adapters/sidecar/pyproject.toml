@@ -1,0 +1,16 @@
+[project]
+name = "daimon-adapter-sidecar"
+version = "0.2.0"
+description = "Bounded callback event ingress for Daimon watches"
+requires-python = ">=3.12"
+dependencies = ["daimon-core", "aiohttp>=3.10", "sqlalchemy[asyncio]>=2", "asyncpg>=0.29", "pydantic-settings>=2.4"]
+
+[project.scripts]
+daimon-sidecar = "daimon.adapters.sidecar.main:run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["daimon"]

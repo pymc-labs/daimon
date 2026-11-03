@@ -122,6 +122,7 @@ async def test_handoff_continuation_dispatches_exactly_one_follow_up_turn(
             target_ma_agent_id=AGENT_ID,
             target_name="test-agent",
             reason="task_handoff",
+            attended=True,  # This fixture represents a human-initiated handoff.
             idempotency_key=idempotency_key,
             requested_work=requested_work,
         )
@@ -249,6 +250,7 @@ async def test_slack_handoff_continuation_dispatches_exactly_one_follow_up_turn(
             target_ma_agent_id=AGENT_ID,
             target_name="test-agent",
             reason="task_handoff",
+            attended=True,  # This fixture represents a human-initiated handoff.
             idempotency_key=idempotency_key,
             requested_work=requested_work,
         )

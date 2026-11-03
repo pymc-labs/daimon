@@ -9,6 +9,7 @@ every call. No method-level mocks anywhere.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from datetime import UTC, datetime
 from typing import Any
@@ -16,6 +17,8 @@ from typing import Any
 import daimon.adapters.slack.output_delivery as delivery_module
 import httpx
 import pytest
+from aioresponses import CallbackResult
+from aioresponses import aioresponses as AioResponsesMock
 from anthropic.types.beta import FileMetadata
 from daimon.adapters.slack.blockkit import ERROR_COLOR
 from daimon.adapters.slack.output_delivery import (
@@ -849,3 +852,180 @@ async def test_notice_and_log_retention_is_bounded(
     assert len(notice_keys) <= 3
     assert "notice:T_RACE:C1:5.0:missing_scope" in notice_keys
     assert len(_post_message_calls(fake_slack_web_client.mock)) == 6
+
+
+def _per_session_files(files: dict[str, list[tuple[str, int]]]) -> Any:
+    """Fake MA where each session lists only its own files, as the Files API scopes them.
+
+    ``files`` maps a session id to its (filename, size) entries; a file leaves
+    its listing once deleted.
+    """
+    deleted: set[str] = set()
+    router = MARouter()
+
+    def list_files(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        session_id = request.url.params["scope_id"]
+        return list_response(
+            [
+                FileMetadata(
+                    id=f"file_{session_id}_{index}",
+                    created_at=NOW,
+                    filename=filename,
+                    mime_type="text/csv",
+                    size_bytes=size,
+                    type="file",
+                    downloadable=True,
+                ).model_dump(mode="json")
+                for index, (filename, size) in enumerate(files[session_id])
+                if f"file_{session_id}_{index}" not in deleted
+            ]
+        )
+
+    def on_delete(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        deleted.add(match.group(1))
+        return httpx.Response(200, json={"id": match.group(1), "type": "file_deleted"})
+
+    router.add("GET", r"/v1/files", list_files)
+    router.add(
+        "GET",
+        r"/v1/files/([^/]+)/content",
+        lambda request, match: httpx.Response(200, content=b"a,b\n1,2\n"),
+    )
+    router.add("DELETE", r"/v1/files/([^/]+)", on_delete)
+    return build_fake_anthropic(router.dispatch)
+
+
+async def test_overlapping_turns_in_one_thread_each_attribute_their_own_files() -> None:
+    """#788: Alice's sweep settles after the thread is free, so Bob's turn runs
+    and his files land first. Each sweep's first post names whose turn made its
+    files, once: a Slack mention pings, so the rest of the sweep does not repeat
+    it."""
+    big = SLACK_MAX_BYTES_PER_FILE + 1
+    anthropic_client = _per_session_files(
+        {
+            "sesn_alice": [("alice_numbers.csv", 8)],
+            "sesn_bob": [("bob_chart.csv", 8), ("bob_table.csv", 8), ("bob_dump.csv", big)],
+            "sesn_alice_big": [("alice_dump.csv", big)],
+        }
+    )
+    completed: list[dict[str, str]] = []
+    upload_ids = iter(["F_1", "F_2", "F_3"])
+
+    def on_get_url(url: URL, **kwargs: Any) -> CallbackResult:
+        file_id = next(upload_ids)
+        return CallbackResult(
+            payload={
+                "ok": True,
+                "file_id": file_id,
+                "upload_url": f"https://files.slack.com/upload/v1/{file_id}",
+            }
+        )
+
+    def on_complete(url: URL, **kwargs: Any) -> CallbackResult:
+        completed.append(dict(url.query))
+        return CallbackResult(payload={"ok": True, "files": [{"id": "F"}]})
+
+    bob_done = asyncio.Event()
+    alice_settling = asyncio.Event()
+
+    async def alice_settles(delay: float) -> None:
+        # The real settle floor is 6 s, by when the thread is free and Bob's
+        # queued turn runs on his own session.
+        alice_settling.set()
+        await bob_done.wait()
+
+    async def no_sleep(delay: float) -> None:
+        pass
+
+    with AioResponsesMock() as mock:
+        mock.post(_GET_URL, callback=on_get_url, repeat=True)
+        mock.post(_UPLOAD, body="OK", content_type="text/plain", repeat=True)
+        mock.post(_COMPLETE, callback=on_complete, repeat=True)
+        mock.post(
+            "https://slack.com/api/chat.postMessage",
+            payload={"ok": True, "ts": "2.0", "channel": "C1"},
+            repeat=True,
+        )
+        web_client = AsyncWebClient(token="xoxb-test")
+
+        def sweep(session_id: str, user_id: str, sleep: Any) -> Any:
+            return deliver_session_outputs(
+                anthropic_client,
+                web_client,
+                session_id=session_id,
+                channel_id="C1",
+                thread_ts="1.0",
+                notice_keys=NoticeKeys(),
+                team_id="T1",
+                requester_user_id=user_id,
+                sleep=sleep,
+            )
+
+        alice = asyncio.create_task(sweep("sesn_alice", "U_ALICE", alice_settles))
+        await alice_settling.wait()
+        await sweep("sesn_bob", "U_BOB", no_sleep)
+        await sweep("sesn_alice_big", "U_ALICE", no_sleep)
+        bob_done.set()
+        await alice
+        notices = [_notice_text(call) for call in _post_message_calls(mock)]
+
+    uploads = [
+        (json.loads(params["files"])[0]["title"], params.get("initial_comment"))
+        for params in completed
+    ]
+    assert uploads == [
+        ("bob_chart.csv", "For <@U_BOB>"),
+        ("bob_table.csv", None),
+        ("alice_numbers.csv", "For <@U_ALICE>"),
+    ], "Alice's file lands after Bob's; each sweep names its person on its first post only"
+    assert all(params["thread_ts"] == "1.0" for params in completed)
+    assert len(notices) == 2
+    bob_notice, alice_notice = notices
+    assert bob_notice.startswith("`bob_dump.csv`"), "Bob was already named in this sweep"
+    assert alice_notice.startswith("For <@U_ALICE>: `alice_dump.csv`"), (
+        "a sweep whose first post is the notice names the person there"
+    )
+
+
+@pytest.mark.parametrize("revoke_at", ["before_upload", "before_complete"])
+async def test_watch_attachments_recheck_before_slack_upload_and_publication(
+    fake_slack_web_client, revoke_at
+):
+    from daimon.core.turn.errors import AdmissionDenied
+    from daimon.core.turn.output import OutputAuthorization, output_authorization
+
+    allowed = revoke_at != "before_upload"
+
+    async def authorize():
+        if not allowed:
+            raise AdmissionDenied(reason="invoker_not_allowed")
+
+    guard = OutputAuthorization(authorize)
+    mock = fake_slack_web_client.mock
+    mock.post(
+        _GET_URL,
+        payload={
+            "ok": True,
+            "file_id": "F1",
+            "upload_url": "https://files.slack.com/upload/v1/watch",
+        },
+    )
+
+    def uploaded(url, **kwargs):
+        nonlocal allowed
+        allowed = False
+        return CallbackResult(status=200, body="OK", content_type="text/plain")
+
+    mock.post(_UPLOAD, callback=uploaded)
+    mock.post(_COMPLETE, payload={"ok": True, "files": [{"id": "F1"}]})
+    with output_authorization(guard), pytest.raises(AdmissionDenied):
+        await deliver_provider_output(
+            DeliverableFile("watch-file", "private", "text/plain", 7, b"private"),
+            fake_slack_web_client.client,
+            channel_id="C1",
+            thread_ts="1.2",
+        )
+    assert guard.failed
+    assert not any("completeUploadExternal" in str(url) for (_, url) in mock.requests)
+    if revoke_at == "before_upload":
+        assert not mock.requests

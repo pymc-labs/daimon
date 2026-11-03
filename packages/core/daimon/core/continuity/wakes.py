@@ -157,6 +157,7 @@ async def _record_wake(
         target_ma_agent_id=request.target_ma_agent_id,
         target_name=request.target_name,
         reason=request.reason,
+        attended=request.attended,
         idempotency_key=request.idempotency_key,
         requested_work=request.requested_work,
         available_at=available_at,

@@ -6,6 +6,7 @@ import uuid
 
 from daimon.adapters.discord.checks import is_guild_admin
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_identity import identity_enabled_for, is_builtin_agent
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.panel_audit import PanelOutcome, record_panel_write
@@ -57,7 +58,7 @@ async def _may_edit(
     change: bool,
 ) -> bool:
     identity_on = identity_enabled_for(runtime.settings, "discord", interaction.guild_id)
-    admin = identity_on and is_guild_admin(interaction)  # pyright: ignore[reportArgumentType]
+    admin = identity_on and await is_guild_admin(interaction, action=DelegatedAction.AGENT_SETTINGS)  # pyright: ignore[reportArgumentType]
     if admin:
         agent = await find_agent_by_daimon_tag(
             runtime.anthropic, tenant_id=tenant_id, name=agent_name

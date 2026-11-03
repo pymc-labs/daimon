@@ -207,6 +207,40 @@ async def test_a_dm_fallback_sends_no_notice(
     assert teams.posts and feed.calls == [], "no notice for a 1:1 chat"
 
 
+async def test_dm_row_is_explicitly_refused_without_channel_or_dm_io(db_session_factory):
+    teams = _Teams()
+    result = await _post(
+        db_session_factory, teams, _row(destination_kind="dm", destination_id=CREATOR)
+    )
+    assert result.status == "skipped" and "not supported here" in result.note
+    assert not teams.posts
+
+
+async def test_generated_files_get_plain_unsupported_note(db_session_factory):
+    from daimon.core.routine_files import OUTBOX_FILES, PREFIX, RoutineFile, RoutinePayload
+
+    payload = (
+        PREFIX
+        + RoutinePayload(
+            text="Report",
+            files=[
+                RoutineFile(
+                    file_id="file_report", filename="report.csv", mime_type="text/csv", size_bytes=4
+                )
+            ],
+        ).model_dump_json()
+    )
+    teams = _Teams()
+    outcome = await _post(
+        db_session_factory, teams, _row(delivery_payload=payload, delivery_note=OUTBOX_FILES)
+    )
+    assert outcome.status == "delivered"
+    [(where, text)] = teams.posts
+    assert where == f"{CHANNEL};messageid=17"
+    assert "Report" in text and "files are not supported here" in text
+    assert "file_report" not in text
+
+
 async def _shared_tenant_row(
     factory: async_sessionmaker[AsyncSession], **overrides: object
 ) -> RoutineRow:

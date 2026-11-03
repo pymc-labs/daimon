@@ -6,9 +6,10 @@ fields (matches ``DiscordSettings``/``McpSettings`` boundary).
 
 from __future__ import annotations
 
+from daimon.core.routine_move import RoutineFreshnessSettings
 from daimon.core.turn.ceiling import TURN_CEILING_S
 from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import SettingsConfigDict
 
 # Headroom above the core ~45-minute ceiling for the pre-turn adapter work
 # `_fire` does OUTSIDE headless_runner's two ceiling-covered legs (routine
@@ -20,7 +21,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 DISPATCH_TIMEOUT_MARGIN_S: float = 300.0
 
 
-class SchedulerSettings(BaseSettings):
+class SchedulerSettings(RoutineFreshnessSettings):
     model_config = SettingsConfigDict(
         env_prefix="DAIMON_SCHEDULER__",
         env_nested_delimiter="__",
@@ -44,14 +45,6 @@ class SchedulerSettings(BaseSettings):
             "first). It reads only the sessions those requests name. When off, "
             "such a session is billed the next time a read sees its last turn "
             "ended."
-        ),
-    )
-
-    max_age_s: float = Field(
-        default=900.0,
-        description=(
-            "Freshness window for routines with catch_up_policy=skip. Older slots "
-            "are recorded as skipped and advanced; run-once routines ignore this window."
         ),
     )
 

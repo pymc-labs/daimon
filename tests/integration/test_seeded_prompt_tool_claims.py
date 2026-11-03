@@ -32,6 +32,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 
 import httpx
+import pytest
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core.config import (
     AnthropicSettings,
@@ -80,6 +81,7 @@ _ADMIN_HANDOFF_TOOLS: set[str] = {
     "set_agent_rule",
     "set_channel_budget",
     "set_plain_text_mentions",
+    "set_cost_footer",
 }
 
 
@@ -182,6 +184,14 @@ def _make_app(sessionmaker: async_sessionmaker[AsyncSession]) -> ASGIApp:
         sessionmaker=sessionmaker,
         anthropic=build_fake_anthropic(MARouter().dispatch),
     )
+
+
+@pytest.fixture(autouse=True)
+def platform_admin_edge(monkeypatch):
+    from daimon.adapters.mcp.middleware import mcp_identity
+    from daimon.testing.admin_facts import platform_authority_from_test_accounts
+
+    monkeypatch.setattr(mcp_identity, "resolve_authority", platform_authority_from_test_accounts)
 
 
 async def _seed_admin_token(sessionmaker: async_sessionmaker[AsyncSession]) -> str:

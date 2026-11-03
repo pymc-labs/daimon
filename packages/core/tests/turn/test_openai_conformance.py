@@ -505,6 +505,7 @@ async def test_c14_normal_current_config_retains_native_binding(
         async def prepare(thread: str) -> PreparedTurn:
             admitted = await admit_impl(
                 deps,
+                origin="chat",
                 tenant_id=TENANT,
                 requester_org=RequesterOrg.HOST,
                 platform="slack",

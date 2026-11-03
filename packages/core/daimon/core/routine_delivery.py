@@ -20,7 +20,8 @@ things follow from it, and nothing changes for a routine without one:
    allowed to invoke the agent, settles the row `skipped` instead.
 
 Delivery is at most once: claim (with a lease) → post → settle; a claim whose
-lease ran out is settled `skipped/interrupted`, never re-posted.
+lease ran out is settled `skipped/interrupted`, never replayed by another poll.
+Platform SDKs may retry a single send after a server error or connection reset.
 """
 
 from __future__ import annotations
@@ -43,14 +44,18 @@ from daimon.core.agent_identity import (
     is_builtin_agent,
     resolve_agent_identity,
 )
-from daimon.core.authz import Action, Place, Subject, Surface, authorize, build_subject
+from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize, build_subject
 from daimon.core.config import Settings
 from daimon.core.cron_words import routine_phrase, schedule_words
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
-from daimon.core.permissions import any_writers_none
+from daimon.core.membership import MembershipResolver
+from daimon.core.membership_subject import resolve_subject
+from daimon.core.permissions import any_writers_none, limiting_ids_at
 from daimon.core.platform_words import scrub_other_platforms, turn_words
+from daimon.core.routine_files import decode_payload, payload_for
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
+from daimon.core.stores.direct_messages import dm_enabled
 from daimon.core.stores.domain import CHAT_PLATFORMS, Role, RoutineRow
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.routines import (
@@ -61,6 +66,7 @@ from daimon.core.stores.routines import (
     routine_platform,
     settle_routine_delivery,
 )
+from daimon.core.stores.tenants import get_tenant
 from daimon.core.turn.notices import RefusalNouns, render_termination_notice
 from daimon.core.turn.state import ToolUseBlock, TurnState, daimon_tool_arguments
 from daimon.core.turn.termination import TerminationReason
@@ -74,15 +80,18 @@ __all__ = [
     "DeliveryTarget",
     "RoutinePoster",
     "agent_posted_to",
+    "claim_still_current",
     "destination_shape_error",
     "failure_notice_text",
     "record_failure",
+    "record_routine_failure",
     "render_fallback_dm",
     "DirectPost",
     "clear_creator",
     "discord_creator_may_post",
     "slack_creator_may_post",
     "teams_thread_id",
+    "tenant_dm_still_open",
     "creator_refusal_for",
     "placement_unknown_is_unsafe",
     "delivery_refusal",
@@ -123,6 +132,9 @@ SkipReason = Literal[
     "post_failed",
     "no_result",
     "own_agents_only",
+    "routine_dms_disabled",
+    "restricted_source",
+    "agent_not_allowed",
 ]
 
 
@@ -143,7 +155,7 @@ class DeliveryTarget:
 def delivery_target(row: RoutineRow, *, platform: str) -> DeliveryTarget | None:
     """The row's destination for `platform`, or `None` when it has none or it
     is malformed (a Slack thread without `channel:ts`)."""
-    if row.destination_kind is None or row.destination_id is None:
+    if row.destination_kind in (None, "dm") or row.destination_id is None:
         return None
     if platform == "teams" and row.destination_kind == "thread":
         thread = _TEAMS_THREAD.fullmatch(row.destination_id)
@@ -195,7 +207,11 @@ def render_routine_controls(
             "destination": {
                 "platform": platform,
                 "kind": row.destination_kind,
-                "channel_id": target.channel_id if target else row.destination_id,
+                **(
+                    {"user_id": row.destination_id}
+                    if row.destination_kind == "dm"
+                    else {"channel_id": target.channel_id if target else row.destination_id}
+                ),
                 **({"thread_ts": target.thread_ts} if target and target.thread_ts else {}),
                 # A Teams thread is posted to by its own id.
                 **(
@@ -208,7 +224,12 @@ def render_routine_controls(
     }
     if platform in CHAT_PLATFORMS:
         controls["words"] = turn_words(platform, place="channel")
-    if direct_post == "allowed":
+    if row.destination_kind == "dm":
+        delivery = (
+            "Daimon delivers your final reply privately to the routine owner. "
+            "Do not call messaging tools to deliver this result yourself."
+        )
+    elif direct_post == "allowed":
         delivery = (
             "If you do not post it to the destination yourself with send_message, daimon "
             "posts your full final reply there for you."
@@ -254,7 +275,7 @@ def agent_posted_to(state: TurnState, row: RoutineRow) -> bool:
     post to the bare channel of a Slack thread destination is not the thread,
     and does not count.
     """
-    if row.destination_id is None:
+    if row.destination_kind == "dm" or row.destination_id is None:
         return False
     return any(
         _posted_channel(block) == row.destination_id
@@ -270,6 +291,8 @@ def destination_shape_error(platform: str, kind: str, destination_id: str) -> st
     `C…`/`G…` ids and a Slack thread is `<channel id>:<thread ts>`. A Teams
     channel is `19:…@thread.tacv2` and a thread `<channel>;messageid=<root id>`.
     """
+    if kind == "dm" and platform != "discord":
+        return "DM routines are supported only on Discord"
     if platform == "discord":
         return None if destination_id.isdigit() else "a Discord channel or thread id is a number"
     if platform == "slack":
@@ -341,6 +364,7 @@ async def record_failure(
     *,
     error: str,
     reason: TerminationReason | None,
+    expected_row: RoutineRow | None = None,
 ) -> None:
     """Record a failed run and, for the first failure in a row, queue a notice.
 
@@ -354,9 +378,37 @@ async def record_failure(
         notice = failure_notice_text(
             reason, platform=await routine_platform(session, routine_id) or ""
         )
-        if await queue_failure_notice(session, routine_id, notice=notice):
+        if await queue_failure_notice(
+            session, routine_id, notice=notice, expected_row=expected_row
+        ):
             log.info("routine.failure_notice_queued", routine_id=str(routine_id))
-    await record_result(session, routine_id, tail=None, error=error)
+    await record_result(session, routine_id, tail=None, error=error, expected_row=expected_row)
+
+
+async def record_routine_failure(
+    session: AsyncSession,
+    row: RoutineRow,
+    *,
+    error: str,
+    reason: TerminationReason | None,
+) -> None:
+    """Record a fire that failed or was refused, fenced on the row it was claimed as.
+
+    An owner-DM routine records only the error, and only while its private
+    revision and destination are unchanged; any other routine goes through
+    `record_failure`.
+    """
+    if row.destination_kind == "dm":
+        await record_result(
+            session,
+            row.id,
+            tail=None,
+            error=error,
+            expected_destination=(row.destination_kind, row.destination_id),
+            expected_private=row,
+        )
+    else:
+        await record_failure(session, row.id, error=error, reason=reason, expected_row=row)
 
 
 def render_fallback_post(
@@ -371,7 +423,7 @@ def render_fallback_post(
     only where `routine_phrase` can say it exactly. A queued failure notice
     says the run failed instead of introducing a result.
     """
-    payload = scrub_other_platforms((row.delivery_payload or "").strip(), platform)
+    payload = scrub_other_platforms(decode_payload(payload_for(row)).text.strip(), platform)
     phrase = routine_phrase(row.cron_expr, row.timezone)
     if row.delivery_note == FAILURE_NOTICE:
         owner = "The" if as_agent else f"{row.agent_name}'s"
@@ -450,7 +502,7 @@ def render_fallback_dm(row: RoutineRow, reason: str, *, platform: str | None = N
     which on a chat `platform` never names another chat app.
     """
     schedule = schedule_words(row.cron_expr, row.timezone)
-    payload = scrub_other_platforms((row.delivery_payload or "").strip(), platform)
+    payload = scrub_other_platforms(decode_payload(payload_for(row)).text.strip(), platform)
     if row.delivery_note == FAILURE_NOTICE:
         why: tuple[str, ...] = ("Your routine failed, so there's no result this time.",)
     else:
@@ -464,6 +516,8 @@ def delivery_refusal(
     target: DeliveryTarget,
     creator_platform_user_id: str | None,
     creator_is_admin: bool,
+    creator_role_ids: tuple[str, ...] = (),
+    creator_verified_membership: bool | None = None,
     parent_channel_id: str | None = None,
     category_id: str | None = None,
 ) -> SkipReason | None:
@@ -476,7 +530,11 @@ def delivery_refusal(
     under one), which a caller may answer with the direct-message fallback.
     """
     creator_refusal = creator_refusal_for(
-        policy, creator_platform_user_id=creator_platform_user_id, creator_is_admin=creator_is_admin
+        policy,
+        creator_platform_user_id=creator_platform_user_id,
+        creator_is_admin=creator_is_admin,
+        creator_role_ids=creator_role_ids,
+        creator_verified_membership=creator_verified_membership,
     )
     if creator_refusal is not None:
         return creator_refusal
@@ -496,12 +554,22 @@ def delivery_refusal(
 
 
 def creator_refusal_for(
-    policy: TenantAccessPolicy, *, creator_platform_user_id: str | None, creator_is_admin: bool
+    policy: TenantAccessPolicy,
+    *,
+    creator_platform_user_id: str | None,
+    creator_is_admin: bool,
+    creator_role_ids: tuple[str, ...] = (),
+    creator_verified_membership: bool | None = None,
 ) -> SkipReason | None:
     """`invoker_not_allowed` unless the routine's creator may still invoke."""
     if not authorize(
         policy,
-        subject=build_subject(is_admin=creator_is_admin, platform_user_id=creator_platform_user_id),
+        subject=build_subject(
+            is_admin=creator_is_admin,
+            platform_user_id=creator_platform_user_id,
+            role_ids=creator_role_ids,
+            verified_membership=creator_verified_membership,
+        ),
         action=Action.ACT_FOR_CREATOR,
         surface=Surface.ROUTINE,
     ):
@@ -510,7 +578,11 @@ def creator_refusal_for(
 
 
 async def clear_creator(
-    sessionmaker: async_sessionmaker[AsyncSession], row: RoutineRow, *, platform: str
+    sessionmaker: async_sessionmaker[AsyncSession],
+    row: RoutineRow,
+    *,
+    platform: str,
+    membership_resolver: MembershipResolver | None = None,
 ) -> TenantAccessPolicy | SkipReason:
     """The tenant's policy if the routine may send anything at all, else why not.
 
@@ -521,12 +593,36 @@ async def clear_creator(
     after this, and only choose where a cleared result goes.
     """
     async with sessionmaker() as session:
+        if row.destination_kind == "dm":
+            tenant = await get_tenant(session, row.tenant_id)
+            if tenant is None or tenant.archived_at is not None or platform != "discord":
+                return "destination_unavailable"
+            if not await dm_enabled(session, tenant_id=row.tenant_id):
+                return "routine_dms_disabled"
         try:
             policy = await load_access_policy(session, tenant_id=row.tenant_id)
         except AccessPolicyUnreadable:
             return "access_policy_unreadable"
+        if row.destination_kind == "dm":
+            if not row.source_provenance_known:
+                return "restricted_source"
+            if row.source_channel_id is not None and limiting_ids_at(
+                policy,
+                channel_id=row.source_channel_id,
+                thread_id=row.source_thread_id,
+            ):
+                return "restricted_source"
+            if not authorize(
+                policy,
+                subject=Subject(),
+                action=Action.RUN_AGENT,
+                surface=Surface.ROUTINE,
+                agent=AgentRef.of(row.agent_name),
+                place=Place(),
+            ):
+                return "agent_not_allowed"
         is_admin = False
-        if row.created_by_user_id is not None:
+        if platform != "discord" and row.created_by_user_id is not None:
             principal = await find_platform_principal(
                 session,
                 tenant_id=row.tenant_id,
@@ -536,8 +632,23 @@ async def clear_creator(
             if principal is not None:
                 account = await get_account(session, principal.account_id)
                 is_admin = account is not None and account.role is Role.ADMIN
+    if platform == "discord" and row.created_by_user_id is not None:
+        subject = await resolve_subject(
+            sessionmaker,
+            membership_resolver,
+            tenant_id=row.tenant_id,
+            user_id=row.created_by_user_id,
+            require_fresh=True,
+        )
+        if subject.verified_membership is not True or not authorize(
+            policy, subject=subject, action=Action.ACT_FOR_CREATOR, surface=Surface.ROUTINE
+        ):
+            return "invoker_not_allowed"
+        return policy
     refusal = creator_refusal_for(
-        policy, creator_platform_user_id=row.created_by_user_id, creator_is_admin=is_admin
+        policy,
+        creator_platform_user_id=row.created_by_user_id,
+        creator_is_admin=is_admin and platform != "discord",
     )
     return refusal if refusal is not None else policy
 
@@ -605,6 +716,34 @@ def placement_unknown_is_unsafe(
     return any_writers_none(policy, categories_only=True)
 
 
+def claim_still_current(current: RoutineRow, row: RoutineRow, now: datetime) -> bool:
+    """Whether the delivery lease `row` was claimed with is still held and unexpired.
+
+    `current` is the routine as read now. A row that was not claimed has no
+    lease to lose.
+    """
+    return row.delivery_status != "claimed" or (
+        current.delivery_status == "claimed"
+        and current.delivery_lease_owner == row.delivery_lease_owner
+        and current.delivery_lease_expires_at is not None
+        and current.delivery_lease_expires_at > now
+    )
+
+
+async def tenant_dm_still_open(
+    sessionmaker: async_sessionmaker[AsyncSession], row: RoutineRow, external_id: str
+) -> bool:
+    """Whether `row`'s tenant is still the live workspace `external_id` with routine DMs on."""
+    async with sessionmaker() as session:
+        tenant = await get_tenant(session, row.tenant_id)
+        return (
+            tenant is not None
+            and tenant.archived_at is None
+            and tenant.external_id == external_id
+            and await dm_enabled(session, tenant_id=row.tenant_id)
+        )
+
+
 @dataclass(frozen=True)
 class DeliveryOutcome:
     status: Literal["delivered", "skipped"]
@@ -635,7 +774,8 @@ async def poll_deliveries_once(
             session, platform=platform, owner=lease_owner, now=now, lease=DELIVERY_LEASE
         )
     for row in claimed:
-        if not (row.delivery_payload or "").strip():
+        payload = decode_payload(payload_for(row))
+        if not (payload.text.strip() or payload.files):
             outcome = DeliveryOutcome(status="skipped", note="no_result")
         else:
             try:
@@ -644,8 +784,17 @@ async def poll_deliveries_once(
                 # Named boundary: the poster is adapter code talking to a chat
                 # API. Settling `skipped` (not back to pending) keeps delivery
                 # at most once — a failure may have landed after the post.
-                log.warning("routine.delivery_failed", routine_id=str(row.id), error=str(err))
-                outcome = DeliveryOutcome(status="skipped", note="post_failed")
+                log.warning(
+                    "routine.delivery_failed", routine_id=str(row.id), error_type=type(err).__name__
+                )
+                outcome = DeliveryOutcome(
+                    status="skipped",
+                    note=(
+                        "File delivery failed or was interrupted; it will not be retried."
+                        if payload.files
+                        else "post_failed"
+                    ),
+                )
         async with sessionmaker() as session, session.begin():
             settled = await settle_routine_delivery(
                 session,

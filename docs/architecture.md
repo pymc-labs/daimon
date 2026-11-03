@@ -15,6 +15,7 @@ flowchart TB
         Teams
         MCP
         Scheduler
+        Sidecar
         CLI
     end
 
@@ -39,13 +40,14 @@ authenticated call back from the agent's sandbox.
 
 | Package | Path | Owns |
 | --- | --- | --- |
-| `daimon.core` | `packages/core/daimon/core/` | Schema and migrations, stores, the turn pipeline. Imports no adapter. |
+| `daimon.core` | `packages/core/daimon/core/` | Schema and migrations, stores, the turn pipeline and pre-turn context providers. Imports no adapter. |
 | `daimon.adapters.discord` | `packages/adapters/discord/` | Discord I/O, rendering, permissions, slash commands. |
 | `daimon.adapters.slack` | `packages/adapters/slack/` | Slack I/O, Block Kit rendering, per-user OAuth. |
 | `daimon.adapters.teams` | `packages/adapters/teams/` | Teams HTTP ingress, Adaptive Card rendering, private replies, file delivery. |
 | `daimon.adapters.web` | `packages/adapters/web/` | Web app server: Discord sign-in, sessions, connection nodes, the JSON API and the built single-page app. |
 | `daimon.adapters.mcp` | `packages/adapters/mcp/` | The MCP server the agent calls, plus the OAuth, webhook and hub HTTP routes. |
-| `daimon.adapters.scheduler` | `packages/adapters/scheduler/` | The routine poll loop. |
+| `daimon.adapters.scheduler` | `packages/adapters/scheduler/` | Routine dispatch, long-job workers and maintenance sweeps. |
+| `daimon.adapters.sidecar` | `packages/adapters/sidecar/` | Signed watch callbacks and poll scheduling. Runs no turns and holds no provider key. |
 | `daimon.adapters.cli` | `packages/adapters/cli/` | The `daimon` admin binary. |
 | `daimon.testing` | `packages/testing/` | Shared fixtures. |
 | `mux` | `packages/mux/` | The provider-neutral managed-agent contract, a separate namespace. See [mux.md](mux.md). |
@@ -53,9 +55,8 @@ authenticated call back from the agent's sandbox.
 
 ### Why the boundaries exist
 
-`import-linter` contracts in the root `pyproject.toml` enforce the layout.
-Run them with `uv run lint-imports`; pre-commit and CI do too. The rules that
-shape most changes:
+`import-linter` contracts in `pyproject.toml` enforce the layout
+(`uv run lint-imports`). The rules that shape most changes:
 
 - Core never imports an adapter, and adapters never import each other. A
   change to how Slack renders a table cannot reach Discord, and core can be
@@ -97,7 +98,9 @@ configuration, and no provider call happens before the cheap checks.
 2. Refuse a reply into a channel set to `writers: none`, admins included.
 3. Apply the tenant's invoker policy.
 4. Resolve config through the cascade thread, channel, tenant, deployment. The
-   bottom tier comes from [defaults](defaults.md).
+   bottom tier comes from [defaults](defaults.md). A model chosen for the
+   conversation with `/model` replaces the agent's own, or falls back with a
+   note.
 5. Resolve the agent and environment to live provider ids, reconciling
    defaults if a tag no longer resolves.
 6. Check the tenant balance, the monthly cap and the channel budget. See
@@ -110,9 +113,10 @@ Each refusal carries a reason that the adapter words in its platform's nouns.
 
 Each adapter process limits simultaneous chat turns per tenant, and Discord
 also has an optional process-wide limit. A turn over a limit joins an
-in-memory queue and waits for a slot after its progress card is posted.
-Tenants are served round-robin, and turns within a tenant first in, first out.
-A restart drops the queue. Routine and MCP turns are exempt.
+in-memory queue after its progress card is posted. Tenants are served
+round-robin, and a restart drops the queue. Routine and MCP turns are exempt.
+A mention queued behind a turn older than three minutes gets one short notice
+that it runs next.
 
 `daimon tenants turn-cap PLATFORM WORKSPACE_ID N` overrides a tenant's limit;
 `default` clears it. See
@@ -161,27 +165,25 @@ without a terminal event is never reported as completed.
 `turn/notices.py` turns a reason into a short failure notice: a headline, the
 cause, what survived, the next step and a request id that only admins see.
 
-Each turn also writes a best-effort outcome row, queried with
-`daimon usage turns`. It is not an audit log: a crash can lose a row, and a
-failed write never changes admission, billing or the reply.
+Each turn also writes a best-effort outcome row for `daimon usage turns`. It
+is not an audit log.
 
-On shutdown the Discord adapter refuses new turns and waits up to 60 seconds
-for turns in progress. It then cancels what is left, which ends this
-process's delivery but not the provider session. The next process's orphan
-sweep delivers the answer if the session finished, or posts a restart notice
-and interrupts it. A long turn does not survive a deploy.
+On shutdown the Discord adapter refuses new turns, waits up to 60 seconds,
+then cancels the rest. The next process delivers a finished answer or posts a
+restart notice. A long turn does not survive a deploy.
 
 ### Outside text is data
 
 Anything Daimon quotes into a turn from someone other than the requester goes
 through one envelope, `core/untrusted.py`: an element marked
-`trust="untrusted"`, opened by a line saying the content is data, not
-instructions, with every value escaped. Replayed thread history, channel
-backfill and quoted previous sessions use it, and channel read tools return
-rows carrying the same marker. The agent guidance tells every agent what the
-marker means, and only the `<user_query>` is the request. Third-party MCP tool
-results reach the model without passing through Daimon, so the guidance covers
-them by name.
+`trust="untrusted"`, with every value escaped. Replayed history, channel
+backfill, quoted sessions and channel read tools use it. Only the
+`<user_query>` is the request. Third-party MCP tool results bypass Daimon, so
+the agent guidance covers them by name.
+
+Before the message, a [context provider](context-providers.md) bound to the
+channel or agent can add short cards. A failure or timeout runs the turn
+without them.
 
 ## Trust model
 
@@ -202,7 +204,9 @@ an admin. So an admin is exempt only where the output reaches no one else.
 | An agent key minted in a channel with limited readers, or one its agent's rule names | runs inside that channel only | runs inside that channel only |
 
 - **One decision function.** `daimon.core.authz.authorize` decides channel
-  rules, agent rules, the invoker allowlist and fork. The turn pipeline, MCP
+  rules, agent rules, the invoker allowlist, [agent invoker
+  roles](admins.md#limit-an-agent-to-roles) and fork. Agent roles are checked
+  before any admin exemption. The turn pipeline, MCP
   gates and channel, routine and handoff tools gather facts and ask it.
 - **Where an agent with a rule can post.** Even on an admin's turn, only its
   rule's channels and their threads, the requester's own 1:1 DM, and direct
@@ -211,12 +215,12 @@ an admin. So an admin is exempt only where the output reaches no one else.
 - **`readers: own` limits agents, not callers.** A caller with no executing
   agent, such as the CLI, may still post into such a channel.
 - **Private DM sessions.** Admins never read a DM session from the hub.
-- **Who counts as an admin.** An operator token is an admin only while its
-  account's stored role is, checked on every request. Agent-scoped keys,
+- **Who counts as an admin.** See [admins](admins.md). Agent-scoped keys,
   chat-turn credentials in the hub and tokens with no platform user are never
-  admins on these surfaces, whatever role their account holds.
-- **Stale roles.** A demoted admin keeps their stored role until their next
-  platform turn. Revoke an operator token to stop it at once.
+  admins on these surfaces. Revoke an operator token to stop it at once.
+- **Origins.** A tool that acts on a conversation needs its origin id and the
+  calling session's own signed grant. See
+  [unattended turns](unattended.md#origins).
 
 An MCP server listed in
 [`DAIMON_MCP_IDENTITY__SERVERS`](configuration.md#daimon_mcp_identity__servers)
@@ -249,8 +253,7 @@ The sandbox `source`s that env file, so `core/credential_env.py` quotes every
 value and `core/env_file.py` limits key names. Names that steer an
 interpreter, loader, git or an SDK's endpoint (`BASH_ENV`, `LD_PRELOAD`,
 `*_BASE_URL`) are denied for everyone. A non-admin may add only secret-style
-names ending in `_KEY`, `_TOKEN` or `_PASSWORD`. This stops one member giving
-another client's agent code execution through a key.
+names ending in `_KEY`, `_TOKEN` or `_PASSWORD`.
 
 ## Sessions and Managed Agents
 
@@ -263,7 +266,8 @@ survive a session replacement with its context intact.
 Each caller has their own row per thread. A channel configured for shared
 threads instead keys the row on an owner derived from the thread, so everyone
 in it uses one session with the agent's own credentials
-(`core/shared_threads.py`).
+(`core/shared_threads.py`). That session mounts a vault of the thread's own,
+holding only the agent-wide MCP tokens, refreshed on each member's turn.
 
 The provider holds the agent, environment, skills and transcript. Postgres
 holds metadata: identity, the mapping above, the config cascade, credentials
@@ -288,18 +292,22 @@ creation and driver.
 
 - **Scheduled routines** run through `core/headless_runner.py` under the same
   ceiling. The scheduler runs the balance, cap and channel budget gates itself
-  before each fire. See [routines](routines.md).
+  before each fire. An owner-DM routine instead runs as a live DM turn. See
+  [routines](routines.md).
 - **MCP agent-chat tools** drive a session directly. They re-run the balance
   and cap gates.
 - **`daimon run`** is a single-turn subprocess entry that calls the driver
   directly, billing-exempt.
 - **Wakes** run a turn in an existing thread with nobody mentioning the bot:
-  a handoff's first turn, work unblocked by a private form, or a timer from
-  `create_timer`. Each chat adapter polls for due wakes and dispatches them
-  through the three stages like a mention, so every gate applies. A wake
-  interrupted mid-run is never run twice.
+  a handoff's first turn, work unblocked by a private form, a timer, a
+  finished [long job](long-jobs.md) or a [watch](watches.md) report. Each chat
+  adapter polls for due wakes and dispatches them through the three stages,
+  so every gate applies. A wake interrupted mid-run is never run twice.
+- **Watch polls** run in the `watch-executor` service and start no turn.
 
-A new entry point should reuse `admit()`, not re-derive the gate order.
+Every entry point but a person's own message runs
+[unattended](unattended.md). A new entry point should reuse `admit()`, not
+re-derive the gate order.
 
 ## Standalone apps
 

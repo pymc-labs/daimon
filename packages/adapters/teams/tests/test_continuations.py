@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -204,7 +204,26 @@ async def test_a_refused_turn_tells_only_a_live_person_then_raises(
     denied = AsyncMock(side_effect=AdmissionDenied(reason=reason))
     with patch.object(app_module, "admit", denied), pytest.raises(AdmissionDenied):
         await teams._run_turn(make_inbound("w"), TENANT, reraise=True)
-    queued = cast(TaskContinuationRow, object())
+    queued = TaskContinuationRow(
+        id=uuid.uuid4(),
+        tenant_id=TENANT,
+        platform="teams",
+        thread_id=CONVERSATION_ID,
+        parent_channel_id=CONVERSATION_ID,
+        requester_account_id=uuid.uuid4(),
+        requester_external_user_id=AAD_OBJECT_ID,
+        target_ma_agent_id="agent",
+        target_name="agent",
+        requested_work="queued request",
+        reason="task_handoff",
+        attended=True,
+        status="pending",
+        skip_reason=None,
+        idempotency_key=uuid.uuid4(),
+        created_at=datetime.now(UTC),
+        claimed_at=None,
+        delivered_at=None,
+    )
     with patch.object(app_module, "admit", denied), pytest.raises(AdmissionDenied):
         await teams._run_turn(make_inbound("w"), TENANT, reraise=True, continuation=queued)
     assert [shown_text(a) for a in sender.activities] == [copy], "queued work settles silently"
@@ -559,3 +578,49 @@ async def test_turn_backend_switch_card_captures_through_its_own_admission(
     assert args[1] is source
     context = kwargs["context"]
     assert context.platform == "teams"
+
+
+@pytest.mark.parametrize("attended", [False, True])
+async def test_handoff_dispatch_retains_attendance(db_session_factory, attended):
+    teams, account_id = await _app(db_session_factory, FakeSender())
+    key = await _hand_off(db_session_factory, account_id)
+    async with db_session_factory() as session:
+        row = await get_continuation(session, idempotency_key=key)
+    assert row is not None
+    row = row.model_copy(update={"attended": attended, "target_ma_agent_id": "agent_test_id"})
+    bind = AsyncMock()
+    with patched_admission(), patch.object(teams, "_bind_and_run", bind):
+        await teams._run_turn(
+            make_inbound("finish the writeup"), TENANT, continuation=row, reraise=True
+        )
+    assert bind.await_args.kwargs["attended"] is attended
+
+
+async def test_job_completion_fails_closed_without_output(db_session_factory):
+    sender = FakeSender()
+    teams, account_id = await _app(db_session_factory, sender)
+    now = datetime.now(UTC)
+    row = TaskContinuationRow(
+        id=uuid.uuid4(),
+        tenant_id=TENANT,
+        platform="teams",
+        parent_channel_id=CHANNEL_ID,
+        thread_id=THREAD_ID,
+        requester_account_id=account_id,
+        requester_external_user_id=AAD_OBJECT_ID,
+        target_ma_agent_id=_TARGET,
+        target_name="stats-bot",
+        requested_work="read job",
+        reason="job_finished",
+        idempotency_key=uuid.uuid4(),
+        status="claimed",
+        skip_reason=None,
+        created_at=now,
+        claimed_at=now,
+        delivered_at=None,
+    )
+    with patch.object(teams, "_bind_and_run", new_callable=AsyncMock) as bind:
+        with pytest.raises(AdmissionDenied):
+            await teams._run_continuation(row, "read job", TENANT, SERVICE_URL)
+        bind.assert_not_awaited()
+    assert not sender.sent

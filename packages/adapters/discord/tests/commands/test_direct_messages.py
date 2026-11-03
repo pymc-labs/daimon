@@ -29,16 +29,22 @@ _OVER_BUDGET = "This channel's budget is used up.\n\nAn admin can raise it."
 @pytest.mark.parametrize(
     ("admin", "action", "expected"),
     [
-        (False, "enable", "Only a server admin can turn Daimon DMs on or off here."),
+        (False, "enable", "Only a platform admin can turn Daimon DMs on or off here."),
         (True, "enable", "Daimon DMs are on for this server."),
         (True, "disable", "Daimon DMs are off for this server."),
     ],
 )
 async def test_dm_policy_replies_use_server_words(
-    monkeypatch: pytest.MonkeyPatch, admin: bool, action: str, expected: str
+    monkeypatch: pytest.MonkeyPatch,
+    admin: bool,
+    action: str,
+    expected: str,
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    await provision_tenant(db_session_factory, platform="discord", workspace_id=str(_GUILD))
     save = AsyncMock()
     monkeypatch.setattr(dm_module, "set_dm_enabled", save)
+    monkeypatch.setattr(dm_module, "is_member_daimon_admin", AsyncMock(return_value=True))
     member = MagicMock()
     member.guild_permissions.administrator = admin
     member.guild_permissions.manage_guild = admin
@@ -46,13 +52,16 @@ async def test_dm_policy_replies_use_server_words(
     guild.id = _GUILD
     guild.owner_id = 1
     guild.fetch_member = AsyncMock(return_value=member)
+    member.guild = guild
+    member.id = 999
+    member.roles = []
     interaction = MagicMock()
     interaction.guild = guild
     interaction.channel = MagicMock(spec=discord.TextChannel)
     interaction.user.id = 999
     interaction.response.defer = AsyncMock()
     interaction.followup.send = AsyncMock()
-    runtime = MagicMock()
+    runtime = MagicMock(sessionmaker=db_session_factory)
     cog = DirectMessageCog(MagicMock(runtime=runtime))
     await cog.dm.callback.__wrapped__(cog, interaction, action)  # pyright: ignore[reportFunctionMemberAccess]
     sent = interaction.followup.send.await_args
@@ -168,7 +177,7 @@ async def test_a_later_dm_turn_over_its_source_budget_tells_the_member(
         )
     monkeypatch.setattr(
         dm_module,
-        "reply_to_dm",
+        "reply_to_dm_result",
         AsyncMock(side_effect=AdmissionDenied(reason="channel_budget_exceeded")),
     )
     member = MagicMock()
@@ -180,6 +189,13 @@ async def test_a_later_dm_turn_over_its_source_budget_tells_the_member(
     bot = MagicMock()
     bot.draining = False
     bot.runtime.sessionmaker = db_session_factory
+    bot.runtime.turn_deps.sessionmaker = db_session_factory
+    from daimon.core.membership import CachedMembershipResolver, Membership
+
+    bot.runtime.turn_deps.membership_resolver = CachedMembershipResolver(
+        AsyncMock(return_value=Membership(is_member=True))
+    )
+    bot.runtime.settings.direct_message_policies = {}
     bot.get_guild.return_value = guild
     bot.turn_queue = TurnQueue(
         platform="discord", global_cap=1, max_queued_per_tenant=1, max_queued=1, max_wait_s=60
@@ -202,3 +218,70 @@ async def test_a_later_dm_turn_over_its_source_budget_tells_the_member(
 
 def test_command_is_registered_as_dm_me() -> None:
     assert DirectMessageCog.dm.name == "dm-me"
+
+
+async def test_role_loss_while_dm_runs_prevents_private_result_delivery(
+    db_session_factory, monkeypatch
+):  # type: ignore[no-untyped-def]
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.membership import CachedMembershipResolver, Membership
+    from daimon.core.stores.access_policy import set_access_policy
+
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session, workspace_id=str(_GUILD))
+        account = await make_account(session, tenant=tenant)
+        await make_dm_conversation(
+            session,
+            tenant=tenant,
+            account_id=account.id,
+            route_key="5",
+            external_user_id="999",
+            workspace_id=str(_GUILD),
+            source_channel_id=str(_PARENT),
+        )
+        await set_access_policy(
+            session, tenant_id=tenant.id, policy=TenantAccessPolicy(invoker_role_ids=("123",))
+        )
+    from .test_cold_direct_messages import private_reply
+
+    async def answer(deps, **kwargs):
+        from daimon.core.stores.direct_messages import get_conversation
+
+        async with db_session_factory() as session:
+            row = await get_conversation(
+                session, platform="discord", route_key="5", external_user_id="999"
+            )
+        return private_reply(row, "private secret")
+
+    monkeypatch.setattr(dm_module, "reply_to_dm_result", AsyncMock(side_effect=answer))
+    member = MagicMock()
+    member.guild_permissions.administrator = False
+    member.guild_permissions.manage_guild = False
+    guild = MagicMock()
+    guild.owner_id = 1
+    guild.fetch_member = AsyncMock(return_value=member)
+    bot = MagicMock()
+    bot.draining = False
+    bot.runtime.sessionmaker = db_session_factory
+    bot.runtime.turn_deps.sessionmaker = db_session_factory
+    bot.runtime.turn_deps.membership_resolver = CachedMembershipResolver(
+        AsyncMock(
+            side_effect=[Membership(is_member=True, role_ids=("123",)), Membership(is_member=True)]
+        )
+    )
+    bot.runtime.settings.direct_message_policies = {}
+    bot.get_guild.return_value = guild
+    bot.turn_queue = TurnQueue(
+        platform="discord", global_cap=1, max_queued_per_tenant=1, max_queued=1, max_wait_s=60
+    )
+    message = MagicMock()
+    message.author.bot = False
+    message.author.id = 999
+    message.channel = MagicMock(spec=discord.DMChannel)
+    message.channel.id = 5
+    message.channel.send = AsyncMock()
+    message.content = "hello"
+    await DirectMessageCog(bot).on_message(message)
+    sent = [call.args[0] for call in message.channel.send.await_args_list]
+    assert not sent, "revoked access suppresses the private result without replying"
+    dm_module.reply_to_dm_result.assert_awaited_once()

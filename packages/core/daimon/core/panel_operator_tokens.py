@@ -3,9 +3,9 @@
 The panel offers only the tenant scopes; `promo:create` acts for the whole
 deployment, so only `daimon mcp mint-operator-token` mints it, and a token
 carrying it is neither listed nor revoked here. The adapter
-checks the clicker is a server admin live before calling in; minting stores
-that role on their account, as a turn does, because the verifier reads the
-stored role on every call.
+checks live platform authority before calling in. Minting never changes
+account roles and requires the native snapshot the verifier enforces; a
+missing snapshot is refused before a token exists.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from daimon.core.operator_tokens import (
     OperatorTokenError,
     parse_operator_scopes,
 )
-from daimon.core.stores.accounts import set_role
+from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import McpTokenRow, Role
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.mcp_tokens import get_mcp_token, list_mcp_tokens, revoke_mcp_token
@@ -61,6 +61,7 @@ async def mint_panel_operator_token(
     tenant_id: uuid.UUID,
     platform: str,
     platform_user_id: str,
+    is_platform_admin: bool,
     scopes: Iterable[str],
     label: str | None,
     secret: bytes,
@@ -70,6 +71,8 @@ async def mint_panel_operator_token(
 
     Raises `OperatorTokenError` for no scope, an unknown one, or a deployment scope.
     """
+    if is_platform_admin is not True:
+        raise OperatorTokenError("Only platform admins can mint operator tokens")
     parsed = parse_operator_scopes(scopes)
     beyond = sorted(parsed.difference(PANEL_SCOPES))
     if beyond:
@@ -80,7 +83,13 @@ async def mint_panel_operator_token(
     principal = await get_or_create_platform_principal(
         session, tenant_id=tenant_id, platform=platform, external_id=platform_user_id
     )
-    await set_role(session, principal.account_id, Role.ADMIN)
+    account = await get_account(session, principal.account_id)
+    if account is None or account.role is not Role.ADMIN:
+        raise OperatorTokenError(
+            "Your platform admin role has not been recorded yet. "
+            "Send Daimon a message in this server or workspace, then try minting again. "
+            "No operator token was created"
+        )
     token = await mint_operator_mcp_token(
         session,
         account_id=principal.account_id,

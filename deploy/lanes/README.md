@@ -28,3 +28,21 @@ docker compose --env-file .env -f compose.lane.yml up -d
 ```
 
 To run Slack, add its credentials from `.env.example` and include `--profile slack` before `up`. For a fuller installation guide, see [self-hosting](../../docs/self-hosting.md).
+
+## Optional profiles
+
+Three more profiles are off by default:
+
+| Profile | Services | Use |
+| --- | --- | --- |
+| `preview-sidecar` | `sidecar`, `sidecar-proxy`, `watch-executor` | Signed page-event and polled watches |
+| `preview-parity` | `preview-parity-mcp` | A synthetic MCP server for approval tests |
+| `preview-notebook` | `preview-notebook` | A standalone notebook host |
+
+The sidecar needs its own database login granted only `daimon_sidecar`, set in `DAIMON_SIDECAR__DATABASE_URL`, and signing keys in `DAIMON_SIDECAR__SIGNING_KEYS`. Set `DAIMON_SIDECAR_PUBLIC_HOST` to a separate hostname; only the proxy publishes TLS. Watches stay off until both `DAIMON_WATCHES__ENABLED` and the database `global` gate are on. See [watches](../../docs/routines.md) for owner tools and limits.
+
+The notebook host needs `DAIMON_NOTEBOOK_IMAGE`, an admin secret of at least 32 characters and a non-empty allowed-origins list.
+
+## Migrations
+
+Run one migrator at a time per database. Alembic takes no advisory lock, so a second concurrent `alembic upgrade head` can fail with a DDL conflict. Let the first finish, then retry. The `init` service runs one upgrade before the other services start.

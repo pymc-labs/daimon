@@ -35,6 +35,7 @@ from daimon.core.stores import gemini_runtime_state as gemini_state_store
 from daimon.core.stores import github_connect as github_connect_store
 from daimon.core.stores import github_links as github_links_store
 from daimon.core.stores import identity as identity_store
+from daimon.core.stores import lead_intake as lead_intake_store
 from daimon.core.stores import mcp_tokens as mcp_tokens_store
 from daimon.core.stores import message_feedback as message_feedback_store
 from daimon.core.stores import microsoft_user_tokens as microsoft_tokens_store
@@ -48,6 +49,7 @@ from daimon.core.stores import support_escalation as support_escalation_store
 from daimon.core.stores import teams_message_admissions as teams_admissions_store
 from daimon.core.stores import tenants as tenants_store
 from daimon.core.stores import user_skills as user_skills_store
+from daimon.core.stores import watches as watches_store
 from daimon.core.stores import web_people as web_people_store
 from daimon.core.stores import web_roles as web_roles_store
 from daimon.core.stores import wizard_session as wizard_session_store
@@ -79,6 +81,7 @@ class PurgePreview(BaseModel):
     model_config = ConfigDict(frozen=True)
     linked_principals: PurgePreviewRow  # combined CLI + platform
     principal_links: PurgePreviewRow
+    watches: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     routines: PurgePreviewRow
     user_configs: PurgePreviewRow
     account: PurgePreviewRow  # singular: 1 if row exists else 0
@@ -96,11 +99,13 @@ class PurgePreview(BaseModel):
     wizard_sessions: PurgePreviewRow
     message_feedback: PurgePreviewRow
     support_escalations: PurgePreviewRow
+    daimon_admins: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     channel_admins: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     agent_post_requesters: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     platform_user_names: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     teams_messages: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     microsoft_user_tokens: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    lead_intakes: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     web_people: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     web_admin_grants: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     # Provider-neutral conversation state erased with the account (stores.mux_erasure),
@@ -124,6 +129,8 @@ def summary_line(preview: PurgePreview) -> str:
     categories = (
         (preview.linked_principals, "linked account"),
         (preview.routines, "routine"),
+        (preview.watches, "page watch"),
+        (preview.lead_intakes, "lead intake"),
         (preview.user_configs, "saved settings"),
         (preview.user_skills, "skill you synced"),
         (preview.github_connect_requests, "GitHub setup request"),
@@ -135,6 +142,7 @@ def summary_line(preview: PurgePreview) -> str:
         (preview.slack_user_tokens, "saved access token"),
         (preview.slack_turn_contexts, "temporary request record"),
         (preview.direct_message_conversations, "private conversation"),
+        (preview.daimon_admins, "Daimon admin grants"),
         (preview.channel_admins, "channel admin list"),
         (preview.agent_post_requesters, "post an agent made for you"),
         (preview.platform_user_names, "remembered name"),
@@ -156,6 +164,8 @@ def summary_line(preview: PurgePreview) -> str:
 
 
 def _plural(label: str) -> str:
+    if label == "page watch":
+        return "page watches"
     if label == "skill you synced":
         return "skills you synced"
     if label == "link from an agent to your GitHub keys":
@@ -429,6 +439,16 @@ async def collect_purge_preview(
         support_escalations = PurgePreviewRow(count=support_escalations_count, example=None)
 
         # 16. channel_admins — the channels whose grant lists this person's id.
+        from daimon.core.stores.daimon_admins import count_user_rows
+
+        daimon_admins_total = 0
+        for pp in pp_list:
+            daimon_admins_total += await count_user_rows(
+                session,
+                tenant_id=pp.tenant_id,
+                platform=pp.platform,
+                platform_user_id=pp.external_id,
+            )
         channel_admins_total = 0
         for pp in pp_list:
             channel_admins_total += await channel_admins_store.count_channel_admin_grants_for_user(
@@ -466,6 +486,11 @@ async def collect_purge_preview(
                 teams_messages_total += await teams_admissions_store.count_teams_messages_for_user(
                     session, tenant_id=pp.tenant_id, user_id=pp.external_id
                 )
+        lead_intakes_total = 0
+        for pp in pp_list:
+            lead_intakes_total += await lead_intake_store.count_actor(
+                session, pp.tenant_id, pp.external_id
+            )
         # 20. microsoft_user_tokens — a Teams person's Connect Microsoft token.
         microsoft_user_tokens_total = 0
         for pp in pp_list:
@@ -475,6 +500,7 @@ async def collect_purge_preview(
                         session, tenant_id=pp.tenant_id, user_id=pp.external_id
                     )
                 )
+        watches_count = await watches_store.count_for_account(session, account_id=account_id)
         web_people_total = await web_people_store.count_for_account(session, account_id=account_id)
         web_admin_grants_total = await web_roles_store.count_admin_grants_for_account(
             session, account_id=account_id
@@ -497,6 +523,8 @@ async def collect_purge_preview(
     return PurgePreview(
         linked_principals=linked_principals,
         principal_links=principal_links,
+        watches=PurgePreviewRow(count=watches_count, example=None),
+        lead_intakes=PurgePreviewRow(count=lead_intakes_total, example=None),
         routines=routines,
         user_configs=user_configs,
         account=account,
@@ -515,6 +543,7 @@ async def collect_purge_preview(
         wizard_sessions=wizard_sessions,
         message_feedback=message_feedback,
         support_escalations=support_escalations,
+        daimon_admins=PurgePreviewRow(count=daimon_admins_total, example=None),
         channel_admins=PurgePreviewRow(count=channel_admins_total, example=None),
         agent_post_requesters=PurgePreviewRow(count=agent_post_requesters_total, example=None),
         direct_message_conversations=PurgePreviewRow(count=direct_message_count, example=None),

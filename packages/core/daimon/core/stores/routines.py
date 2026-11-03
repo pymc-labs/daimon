@@ -15,23 +15,39 @@ from __future__ import annotations
 
 import uuid as _uuid
 from collections.abc import Collection, Mapping
-from datetime import datetime, timedelta
-from typing import Any, Literal, cast
+from datetime import UTC, datetime, timedelta
+from typing import Any, Final, Literal, cast
 
 import structlog
-from daimon.core._models import Account, PlatformPrincipal, Routine, Tenant
+from daimon.core._models import (
+    Account,
+    PlatformPrincipal,
+    Routine,
+    RoutineSandboxHistoryRecord,
+    Tenant,
+)
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.authz import Action, Subject, authorize
 from daimon.core.cron import next_slot_at_or_after
-from daimon.core.errors import StoreError
+from daimon.core.errors import RoutineAlreadyRunning, StoreError
+from daimon.core.permissions import limiting_ids_at
+from daimon.core.routine_files import OUTBOX_FILES, PREFIX, plain_payload
+from daimon.core.routine_move import routine_never_fired
+from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import (
     CatchUpPolicy,
     Role,
     RoutineDestinationKind,
     RoutineRow,
+    SandboxPin,
     UnattendedRequester,
 )
-from sqlalchemy import and_, delete, false, func, or_, select, update
+from daimon.core.stores.security_audit import append_event
+from sqlalchemy import and_, delete, false, func, or_, select, true, update
 from sqlalchemy.engine import CursorResult
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 log = structlog.get_logger(__name__)
 
@@ -45,6 +61,93 @@ The poster renders such a payload as a failure notice instead of a result.
 Settling replaces the note as for any post."""
 
 
+def _captured_routine(row: RoutineRow) -> ColumnElement[bool]:
+    """The same owner, destination and configuration revision as the fire.
+
+    Resolver healing changes only agent_id, without a configuration revision.
+    Keep matching that fire's outcome even if its captured ID is now stale.
+    """
+    return and_(
+        Routine.tenant_id == row.tenant_id,
+        Routine.created_by_user_id.is_not_distinct_from(row.created_by_user_id),
+        Routine.agent_name.is_not_distinct_from(row.agent_name),
+        Routine.updated_at == row.updated_at,
+        Routine.destination_kind.is_not_distinct_from(row.destination_kind),
+        Routine.destination_id.is_not_distinct_from(row.destination_id),
+    )
+
+
+async def link_source_routine(
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    routine_id: _uuid.UUID,
+    source_routine_id: _uuid.UUID,
+    apply: bool = False,
+) -> RoutineRow:
+    """Link a paused, never-fired routine; caller owns the transaction.
+
+    Serialize competing links for the same tenant/source identity, then lock
+    the target against resume, edits and scheduler claims. The unique constraint
+    also protects against writers that do not take the advisory lock.
+    """
+    tenant = await session.scalar(
+        select(Tenant).where(Tenant.id == tenant_id, Tenant.archived_at.is_(None))
+    )
+    if tenant is None:
+        raise StoreError("Select an active team. Nothing was changed.")
+    if apply:
+        await session.execute(
+            select(
+                func.pg_advisory_xact_lock(
+                    func.hashtextextended(f"routine-link:{tenant_id}:{source_routine_id}", 0)
+                )
+            )
+        )
+    statement = select(Routine).where(Routine.id == routine_id, Routine.tenant_id == tenant_id)
+    if apply:
+        statement = statement.with_for_update()
+    orm = await session.scalar(statement.execution_options(populate_existing=True))
+    if orm is None:
+        raise StoreError(f"{routine_id}: routine does not exist in the selected team.")
+    row = RoutineRow.model_validate(orm)
+    if row.source_routine_id is not None:
+        raise StoreError(
+            f"{routine_id}: already linked to source routine {row.source_routine_id}; no overwrite."
+        )
+    if row.enabled:
+        raise StoreError(f"{routine_id}: routine is enabled; pause it before linking.")
+    if not routine_never_fired(row):
+        raise StoreError(f"{routine_id}: routine has execution or delivery state; cannot link.")
+    linked_id = await session.scalar(
+        select(Routine.id).where(
+            Routine.tenant_id == tenant_id,
+            Routine.source_routine_id == source_routine_id,
+        )
+    )
+    if linked_id is not None:
+        raise StoreError(
+            f"{source_routine_id}: source id is already linked to routine {linked_id} "
+            "in the selected team."
+        )
+    if apply:
+        try:
+            async with session.begin_nested():
+                await session.execute(
+                    update(Routine)
+                    .where(Routine.id == routine_id, Routine.tenant_id == tenant_id)
+                    .values(source_routine_id=source_routine_id)
+                )
+        except IntegrityError as exc:
+            if "uq_routines_tenant_source_id" not in str(exc.orig):
+                raise
+            raise StoreError(
+                f"{source_routine_id}: source id was linked to another routine "
+                "in the selected team concurrently. Nothing was changed."
+            ) from exc
+    return row
+
+
 async def create_routine(
     session: AsyncSession,
     *,
@@ -55,19 +158,39 @@ async def create_routine(
     cron_expr: str,
     timezone_: str,
     trigger_message: str,
+    source_routine_id: _uuid.UUID | None = None,
     enabled: bool = True,
     catch_up_policy: CatchUpPolicy = "skip",
     next_fire_at: datetime | None = None,
     destination_kind: RoutineDestinationKind | None = None,
     destination_id: str | None = None,
     channel_id: str | None = None,
+    source_thread_id: str | None = None,
+    source_channel_id: str | None = None,
+    source_provenance_known: bool | None = None,
 ) -> RoutineRow:
     """`channel_id` is the channel the routine's spend counts against (see `Routine`)."""
     if catch_up_policy not in ("skip", "run-once"):
         raise StoreError("catch_up_policy must be skip or run-once")
-    _check_destination(destination_kind, destination_id)
+    destination_id = await _resolve_destination(
+        session, tenant_id, destination_kind, destination_id, created_by_user_id
+    )
+    # Adapter-supplied provenance is an explicit creation snapshot, including
+    # a verified source-free origin. Older host callers use their creation place.
+    if source_provenance_known is None:
+        source_channel_id = source_channel_id or channel_id
+        if destination_kind == "thread":
+            source_thread_id = source_thread_id or destination_id
+        elif destination_kind == "channel":
+            source_channel_id = source_channel_id or destination_id
+        source_provenance_known = destination_kind != "thread" or source_channel_id is not None
+    if destination_kind == "dm":
+        if not source_provenance_known:
+            raise StoreError("Recreate the routine from the channel or thread to get DM delivery.")
+        await validate_dm_source(session, tenant_id, source_channel_id, source_thread_id)
     orm = Routine(
         tenant_id=tenant_id,
+        source_routine_id=source_routine_id,
         created_by_user_id=created_by_user_id,
         agent_id=agent_id,
         agent_name=agent_name,
@@ -80,6 +203,9 @@ async def create_routine(
         destination_kind=destination_kind,
         destination_id=destination_id,
         channel_id=channel_id,
+        source_thread_id=source_thread_id,
+        source_channel_id=source_channel_id,
+        source_provenance_known=source_provenance_known,
     )
     session.add(orm)
     await session.flush()
@@ -212,43 +338,56 @@ async def update_routine(
     destination_id: str | None = None,
     clear_destination: bool = False,
     channel_id: str | None = None,
+    expected_updated_at: datetime | None = None,
+    edited_by: str = "unknown",
 ) -> RoutineRow | None:
     """PATCH: `None` leaves a field alone. A destination is set as a pair, with
     the `channel_id` it resolves to; `clear_destination=True` removes the pair
-    (and any pending delivery) but keeps `channel_id`, so the routine's spend
-    still counts toward the same budget."""
+    (and any pending delivery) but keeps the source channel/thread provenance
+    and `channel_id`, so the routine's spend still counts toward the same budget.
+    A concurrent edit raises StoreError; callers can also supply the revision
+    used for authorization so a stale authorized view cannot be applied.
+    `edited_by` must be the authenticated platform user id for behavior edits.
+    Changing the message, agent or target transfers execution authority to
+    that editor and audits the transfer atomically. Pause/resume retain it.
+    """
+    # Read exactly once: validation, erasure and the write share this revision.
+    # A concurrent edit must fail the CAS rather than reuse stale classification.
+    current = await get_routine(session, routine_id, tenant_id=tenant_id)
+    if current is None:
+        return None
+    if expected_updated_at is not None and current.updated_at != expected_updated_at:
+        raise StoreError("Routine changed while being edited; reload it and try again.")
     values: dict[str, str | bool | datetime | None] = {}
     if clear_destination:
         if destination_kind is not None or destination_id is not None:
             raise StoreError("clear_destination cannot be combined with a new destination")
-        values.update(
-            destination_kind=None,
-            destination_id=None,
-            delivery_status=None,
-            delivery_payload=None,
-            delivery_note=None,
-        )
+        values.update(destination_kind=None, destination_id=None)
     elif destination_kind is not None or destination_id is not None:
-        _check_destination(destination_kind, destination_id)
+        destination_id = await _resolve_destination(
+            session, tenant_id, destination_kind, destination_id, current.created_by_user_id
+        )
+        if destination_kind == "dm":
+            if not current.source_provenance_known:
+                raise StoreError(
+                    "Recreate the routine from the channel or thread to get DM delivery."
+                )
+            await validate_dm_source(
+                session, tenant_id, current.source_channel_id, current.source_thread_id
+            )
         values.update(
             destination_kind=destination_kind,
             destination_id=destination_id,
-            channel_id=channel_id,
+            channel_id=current.channel_id if destination_kind == "dm" else channel_id,
         )
-        current = await get_routine(session, routine_id, tenant_id=tenant_id)
-        if (
-            current is not None
-            and current.delivery_status == "pending"
-            and (current.destination_kind, current.destination_id)
-            != (destination_kind, destination_id)
-        ):
-            # A result queued for the old destination is not posted to the
-            # new one.
-            values.update(
-                delivery_status="skipped",
-                delivery_note="destination_changed",
-                delivery_payload=None,
-            )
+    # Metadata-only edits must also respect a seal added after conversion.
+    if current.destination_kind == "dm" and not clear_destination and destination_kind is None:
+        await validate_dm_source(
+            session,
+            tenant_id,
+            current.source_channel_id,
+            current.source_thread_id,
+        )
     if catch_up_policy is not None:
         if catch_up_policy not in ("skip", "run-once"):
             raise StoreError("catch_up_policy must be skip or run-once")
@@ -268,19 +407,164 @@ async def update_routine(
     if next_fire_at is not None:
         values["next_fire_at"] = next_fire_at
     if not values:
-        return await get_routine(session, routine_id, tenant_id=tenant_id)
+        return current
+
+    return await _save_routine_edit(session, current, values, edited_by=edited_by)
+
+
+#: What an admin approved when opting a routine in to sandbox tools: who runs
+#: it, what it is told, and where it posts. Changing any of them clears the opt-in.
+_SANDBOX_MATERIAL: Final = (
+    "agent_id",
+    "agent_name",
+    "trigger_message",
+    "destination_kind",
+    "destination_id",
+    "channel_id",
+)
+
+
+async def _save_routine_edit(
+    session: AsyncSession,
+    current: RoutineRow,
+    values: dict[str, str | bool | datetime | None],
+    *,
+    expected_updated_at: datetime | None = None,
+    edited_by: str = "unknown",
+) -> RoutineRow:
+    """All configuration writers share CAS, monotone revisions and erasure.
+
+    An edit that changes what an admin approved (`_SANDBOX_MATERIAL`) turns
+    the routine's sandbox opt-in off and logs it (`via="edit"`) in the same
+    transaction, so the owner cannot carry an opt-in over to a new agent,
+    prompt or destination.
+    """
+    if "enabled" in values:
+        values.update(
+            handback_paused_at=None,
+            handback_enabled=None,
+            handback_next_fire_at=None,
+        )
+    material_changed = any(
+        key in values and values[key] != getattr(current, key) for key in _SANDBOX_MATERIAL
+    )
+    if material_changed and (not edited_by.strip() or edited_by == "unknown"):
+        raise StoreError("Changing a routine's behavior requires its editor's platform user id.")
+    authority_transferred = material_changed and edited_by != current.created_by_user_id
+    if authority_transferred:
+        values["created_by_user_id"] = edited_by
+        if values.get("destination_kind", current.destination_kind) == "dm":
+            # Private delivery follows the new author, never the prior author's
+            # credential, inbox or personal memory.
+            values["destination_id"] = await _resolve_destination(
+                session, current.tenant_id, "dm", None, edited_by
+            )
+    sandbox_cleared = current.sandbox_tools_enabled and material_changed
+    cleared_at = datetime.now(UTC)
+    if sandbox_cleared:
+        values.update(
+            sandbox_tools_enabled=False,
+            sandbox_tools_set_by=edited_by,
+            sandbox_tools_set_at=cleared_at,
+            **_PIN_CLEARED,
+        )
+    if expected_updated_at is not None and current.updated_at != expected_updated_at:
+        raise StoreError("Routine changed while being edited; reload it and try again.")
+    if (
+        authority_transferred
+        or current.destination_kind == "dm"
+        or (
+            "agent_id" in values
+            or "agent_name" in values
+            or "destination_kind" in values
+            or "destination_id" in values
+        )
+    ):
+        # Any private edit or producer/destination change invalidates content.
+        # This also erases retained previews from legacy owner-only routines.
+        # Agent reassignment and destination ABA cannot reclassify old content.
+        cleared_public = (
+            current.destination_kind != "dm"
+            and "destination_kind" in values
+            and values["destination_kind"] is None
+        )
+        values.update(
+            last_result_tail=None,
+            last_error=None,
+            delivery_payload=None,
+            delivery_status=None if cleared_public else "skipped",
+            delivery_note=(
+                None
+                if cleared_public
+                else "private_revision_changed"
+                if current.destination_kind == "dm"
+                else "destination_changed"
+                if "destination_kind" in values
+                else "authority_changed"
+                if authority_transferred
+                else "agent_changed"
+            ),
+            delivery_lease_owner=None,
+            delivery_lease_expires_at=None,
+        )
 
     stmt = (
         update(Routine)
-        .where(Routine.id == routine_id, Routine.tenant_id == tenant_id)
-        .values(**values, updated_at=func.now())
+        .where(
+            Routine.id == current.id,
+            Routine.tenant_id == current.tenant_id,
+            Routine.updated_at == current.updated_at,
+        )
+        .values(
+            **values,
+            updated_at=func.greatest(
+                func.clock_timestamp(), Routine.updated_at + timedelta(microseconds=1)
+            ),
+        )
         .returning(Routine)
         .execution_options(synchronize_session=False)
     )
     result = await session.execute(stmt)
     orm = result.scalar_one_or_none()
     if orm is None:
-        return None
+        raise StoreError("Routine changed while being edited; reload it and try again.")
+    if authority_transferred:
+        tenant = await session.get(Tenant, current.tenant_id)
+        if tenant is None:
+            raise StoreError("Routine tenant no longer exists.")
+        await append_event(
+            session,
+            tenant_id=current.tenant_id,
+            account_id=None,
+            agent_id=None,
+            platform=tenant.platform,
+            platform_user_id=edited_by,
+            admin_subject_kind="user" if current.created_by_user_id is not None else None,
+            admin_subject_id=current.created_by_user_id,
+            tool_name="routines",
+            operation="transfer_authority",
+            outcome="allowed",
+            reason="material_edit",
+            turn_ref=f"routine:{current.id}",
+        )
+    if sandbox_cleared:
+        session.add(
+            RoutineSandboxHistoryRecord(
+                tenant_id=current.tenant_id,
+                routine_id=current.id,
+                before_enabled=True,
+                after_enabled=False,
+                set_by=edited_by,
+                set_at=cleared_at,
+                via="edit",
+            )
+        )
+        log.info(
+            "routine.sandbox_tools_cleared_by_edit",
+            tenant_id=str(current.tenant_id),
+            routine_id=str(current.id),
+            edited_by=edited_by,
+        )
     await session.flush()
     return RoutineRow.model_validate(orm)
 
@@ -289,6 +573,8 @@ async def update_routine_agent_id(
     session: AsyncSession,
     routine_id: _uuid.UUID,
     new_agent_id: str,
+    *,
+    expected_updated_at: datetime | None = None,
 ) -> bool:
     """Update only ``routines.agent_id``. Used by the scheduler resolver path
     when the resolver heals a stale id. Does NOT touch
@@ -296,9 +582,10 @@ async def update_routine_agent_id(
 
     Returns True if a row was updated, False otherwise.
     """
-    result = await session.execute(
-        update(Routine).where(Routine.id == routine_id).values(agent_id=new_agent_id)
-    )
+    statement = update(Routine).where(Routine.id == routine_id)
+    if expected_updated_at is not None:
+        statement = statement.where(Routine.updated_at == expected_updated_at)
+    result = await session.execute(statement.values(agent_id=new_agent_id))
     return cast(CursorResult[Any], result).rowcount > 0
 
 
@@ -377,26 +664,263 @@ async def get_first_routine_for_principal(
     return None if orm is None else RoutineRow.model_validate(orm)
 
 
-async def pause_routine(
-    session: AsyncSession, routine_id: _uuid.UUID, *, tenant_id: _uuid.UUID
-) -> RoutineRow | None:
-    """Set ``enabled=False`` and ``next_fire_at=NULL`` atomically.
+type SandboxVia = Literal["mcp", "cli"]
 
-    Returns the updated row, or ``None`` if no row matched ``routine_id``
-    (including a routine_id that exists under a different tenant_id).
+PIN_UNAVAILABLE_REFUSAL = (
+    "Can't read the routine's agent version or environment, so sandbox tools can't be "
+    "turned on for it. Nothing was changed."
+)
+#: The setter a fire records when it finds the agent or environment changed.
+SANDBOX_DRIFT_SETTER: Final = "agent_changed"
+
+DM_SANDBOX_REFUSAL = (
+    "DM routines can't use sandbox tools: they run as the owner's private conversation. "
+    "Nothing was changed."
+)
+
+
+async def set_sandbox_tools(
+    session: AsyncSession,
+    routine_id: _uuid.UUID,
+    *,
+    tenant_id: _uuid.UUID,
+    enabled: bool,
+    set_by: str,
+    actor: Subject,
+    via: SandboxVia,
+    pin: SandboxPin | None = None,
+) -> tuple[RoutineRow, bool] | None:
+    """Opt one routine's own runs in to (or out of) built-in sandbox tools.
+
+    An opt-in covers exactly `pin`, the agent version and environment
+    revision read just before (`routine_sandbox.current_pin`); without one it
+    is refused (StoreError). Turning tools off forgets the pin. Opting in
+    again with a different pin records the new one.
+
+    Only a current human admin may (`Action.SET_ROUTINE_SANDBOX_TOOLS`); owning
+    the routine is not enough. A DM routine cannot be opted in (StoreError):
+    it runs as the owner's private DM turn, and converting a routine to DM
+    clears an opt-in (`_save_routine_edit`). Returns the row and whether it changed, or None
+    for an unknown id. Setting the value it already has writes nothing, so a
+    repeated opt-in is a no-op; a change records `set_by`/`set_at` on the row
+    and appends a `routine_sandbox_history` row.
     """
-    stmt = (
-        update(Routine)
+    if not authorize(TenantAccessPolicy(), subject=actor, action=Action.SET_ROUTINE_SANDBOX_TOOLS):
+        raise PermissionError("only a workspace admin may change a routine's sandbox tools")
+    orm = await session.scalar(
+        select(Routine)
         .where(Routine.id == routine_id, Routine.tenant_id == tenant_id)
-        .values(enabled=False, next_fire_at=None, updated_at=func.now())
-        .returning(Routine)
-        .execution_options(synchronize_session=False)
+        .with_for_update()
     )
-    orm = (await session.execute(stmt)).scalar_one_or_none()
     if orm is None:
         return None
+    if enabled and orm.destination_kind == "dm":
+        raise StoreError(DM_SANDBOX_REFUSAL)
+    if enabled and pin is None:
+        raise StoreError(PIN_UNAVAILABLE_REFUSAL)
+    before = orm.sandbox_tools_enabled
+    recorded = pin_of_orm(orm)
+    if before == enabled and (not enabled or recorded == pin):
+        return RoutineRow.model_validate(orm), False
+    now = datetime.now(UTC)
+    kept = pin if enabled else None
+    orm.sandbox_tools_enabled = enabled
+    orm.sandbox_tools_set_by = set_by
+    orm.sandbox_tools_set_at = now
+    orm.sandbox_agent_id = kept.agent_id if kept else None
+    orm.sandbox_agent_version = kept.agent_version if kept else None
+    orm.sandbox_environment_id = kept.environment_id if kept else None
+    orm.sandbox_environment_updated_at = kept.environment_updated_at if kept else None
+    orm.updated_at = now
+    session.add(
+        RoutineSandboxHistoryRecord(
+            tenant_id=tenant_id,
+            routine_id=routine_id,
+            before_enabled=before,
+            after_enabled=enabled,
+            set_by=set_by,
+            set_at=now,
+            via=via,
+            agent_id=kept.agent_id if kept else None,
+            agent_version=kept.agent_version if kept else None,
+            environment_id=kept.environment_id if kept else None,
+            environment_updated_at=kept.environment_updated_at if kept else None,
+        )
+    )
     await session.flush()
-    return RoutineRow.model_validate(orm)
+    log.info(
+        "routine.sandbox_tools_set",
+        tenant_id=str(tenant_id),
+        routine_id=str(routine_id),
+        enabled=enabled,
+        set_by=set_by,
+        via=via,
+    )
+    return RoutineRow.model_validate(orm), True
+
+
+def pin_of_orm(orm: Routine) -> SandboxPin | None:
+    if (
+        orm.sandbox_agent_id is None
+        or orm.sandbox_agent_version is None
+        or orm.sandbox_environment_id is None
+        or orm.sandbox_environment_updated_at is None
+    ):
+        return None
+    return SandboxPin(
+        agent_id=orm.sandbox_agent_id,
+        agent_version=orm.sandbox_agent_version,
+        environment_id=orm.sandbox_environment_id,
+        environment_updated_at=orm.sandbox_environment_updated_at,
+    )
+
+
+_PIN_CLEARED: Final = {
+    "sandbox_agent_id": None,
+    "sandbox_agent_version": None,
+    "sandbox_environment_id": None,
+    "sandbox_environment_updated_at": None,
+}
+
+
+async def clear_sandbox_drift(
+    session: AsyncSession,
+    routine_id: _uuid.UUID,
+    *,
+    tenant_id: _uuid.UUID,
+    pin: SandboxPin,
+) -> bool:
+    """Turn off an opt-in whose agent or environment changed since `pin` was recorded.
+
+    Called when a fire found its session no longer matches the pin. Only the
+    opt-in that recorded `pin` is cleared, so a newer admin opt-in is never
+    undone. The routine's revision (`updated_at`) is left alone so the run
+    that noticed, which went ahead without built-ins, still records its
+    result. Logs a `via="edit"` history row by `SANDBOX_DRIFT_SETTER`.
+    """
+    now = datetime.now(UTC)
+    result = cast(
+        "CursorResult[Any]",
+        await session.execute(
+            update(Routine)
+            .where(
+                Routine.id == routine_id,
+                Routine.tenant_id == tenant_id,
+                Routine.sandbox_tools_enabled.is_(True),
+                Routine.sandbox_agent_id == pin.agent_id,
+                Routine.sandbox_agent_version == pin.agent_version,
+                Routine.sandbox_environment_id == pin.environment_id,
+                Routine.sandbox_environment_updated_at == pin.environment_updated_at,
+            )
+            .values(
+                sandbox_tools_enabled=False,
+                sandbox_tools_set_by=SANDBOX_DRIFT_SETTER,
+                sandbox_tools_set_at=now,
+                **_PIN_CLEARED,
+            )
+            .execution_options(synchronize_session=False)
+        ),
+    )
+    if not result.rowcount:
+        return False
+    session.add(
+        RoutineSandboxHistoryRecord(
+            tenant_id=tenant_id,
+            routine_id=routine_id,
+            before_enabled=True,
+            after_enabled=False,
+            set_by=SANDBOX_DRIFT_SETTER,
+            set_at=now,
+            via="edit",
+        )
+    )
+    await session.flush()
+    log.info(
+        "routine.sandbox_tools_cleared_by_drift",
+        tenant_id=str(tenant_id),
+        routine_id=str(routine_id),
+    )
+    return True
+
+
+SANDBOX_SETTER_ERASED: Final = "erased"
+
+
+async def erase_sandbox_setter(
+    session: AsyncSession,
+    *,
+    ids: Collection[str],
+    platform_users: Collection[tuple[_uuid.UUID, str]] = (),
+) -> int:
+    """Privacy erasure: replace a purged person's id as a sandbox opt-in setter.
+
+    `set_by` holds an account id (MCP), a CLI principal id (CLI) or, for a
+    panel edit, a platform user id. `ids` are matched anywhere; each
+    `platform_users` pair only within its tenant. The id becomes
+    `SANDBOX_SETTER_ERASED`; when, which routine and through what are kept, so
+    the change log stays complete. Returns the history rows rewritten.
+    """
+    erased = 0
+    for tenant_id, setter in [(None, i) for i in ids] + [(t, u) for t, u in platform_users]:
+        history = update(RoutineSandboxHistoryRecord).where(
+            RoutineSandboxHistoryRecord.set_by == setter
+        )
+        routines = update(Routine).where(Routine.sandbox_tools_set_by == setter)
+        if tenant_id is not None:
+            history = history.where(RoutineSandboxHistoryRecord.tenant_id == tenant_id)
+            routines = routines.where(Routine.tenant_id == tenant_id)
+        result = cast(
+            "CursorResult[Any]",
+            await session.execute(history.values(set_by=SANDBOX_SETTER_ERASED)),
+        )
+        erased += result.rowcount or 0
+        await session.execute(
+            routines.values(sandbox_tools_set_by=SANDBOX_SETTER_ERASED).execution_options(
+                synchronize_session=False
+            )
+        )
+    return erased
+
+
+async def sandbox_tools_history(
+    session: AsyncSession, routine_id: _uuid.UUID, *, tenant_id: _uuid.UUID
+) -> list[RoutineSandboxHistoryRecord]:
+    """Every recorded sandbox opt-in change for one routine, oldest first."""
+    return list(
+        (
+            await session.scalars(
+                select(RoutineSandboxHistoryRecord)
+                .where(
+                    RoutineSandboxHistoryRecord.tenant_id == tenant_id,
+                    RoutineSandboxHistoryRecord.routine_id == routine_id,
+                )
+                .order_by(RoutineSandboxHistoryRecord.set_at, RoutineSandboxHistoryRecord.id)
+            )
+        ).all()
+    )
+
+
+async def pause_routine(
+    session: AsyncSession,
+    routine_id: _uuid.UUID,
+    *,
+    tenant_id: _uuid.UUID,
+    expected_updated_at: datetime | None = None,
+) -> RoutineRow | None:
+    """Pause the captured revision, erase private output and clear its next slot.
+
+    Missing/cross-tenant rows return None. A stale authorized revision or a
+    concurrent configuration edit raises StoreError rather than overwriting it.
+    """
+    row = await get_routine(session, routine_id, tenant_id=tenant_id)
+    if row is None:
+        return None
+    return await _save_routine_edit(
+        session,
+        row,
+        {"enabled": False, "next_fire_at": None},
+        expected_updated_at=expected_updated_at,
+    )
 
 
 async def resume_routine(
@@ -405,29 +929,28 @@ async def resume_routine(
     *,
     tenant_id: _uuid.UUID,
     now: datetime,
+    expected_updated_at: datetime | None = None,
 ) -> RoutineRow | None:
-    """Set ``enabled=True`` and ``next_fire_at`` to the next cron slot at-or-after ``now``.
+    """Resume only the revision whose cron/timezone supplied the next slot.
 
-    Caller injects ``now`` so this helper stays clock-free. Returns the
-    updated row, or ``None`` if no row matched ``routine_id``
-    (including a routine_id that exists under a different tenant_id).
+    Missing/cross-tenant rows return None. A concurrent edit raises StoreError;
+    callers must reload/revalidate instead of saving an obsolete computed slot.
     """
     row = await get_routine(session, routine_id, tenant_id=tenant_id)
     if row is None:
         return None
+    if row.enabled:
+        raise RoutineAlreadyRunning("This routine is already on.")
     nxt = next_slot_at_or_after(row.cron_expr, row.timezone, now)
-    stmt = (
-        update(Routine)
-        .where(Routine.id == routine_id, Routine.tenant_id == tenant_id)
-        .values(enabled=True, next_fire_at=nxt, updated_at=func.now())
-        .returning(Routine)
-        .execution_options(synchronize_session=False)
+    return await _save_routine_edit(
+        session,
+        row,
+        {
+            "enabled": True,
+            "next_fire_at": nxt,
+        },
+        expected_updated_at=expected_updated_at,
     )
-    orm = (await session.execute(stmt)).scalar_one_or_none()
-    if orm is None:
-        return None
-    await session.flush()
-    return RoutineRow.model_validate(orm)
 
 
 async def record_result(
@@ -438,12 +961,20 @@ async def record_result(
     error: str | None,
     delivery: Literal["pending", "skipped"] | None = None,
     delivery_note: str | None = None,
+    delivery_payload: str | None = None,
+    expected_destination: tuple[str | None, str | None] | None = None,
+    expected_private: RoutineRow | None = None,
+    expected_row: RoutineRow | None = None,
+    producing_agent_id: str | None = None,
 ) -> None:
     """Set `last_result_tail` and `last_error` in a single UPDATE.
 
     `error=None` clears `last_error` (sets NULL); `error="..."` sets it.
     `tail` accepts the complete final reply. The preview keeps its last 1000
     characters, with an explicit truncation marker when shortened.
+
+    `delivery_payload` may override the reply with a versioned file-reference
+    envelope; the preview always remains plain text.
 
     `delivery` is only passed for a routine with a destination:
     `pending` queues this fire's complete reply for the adapter to post (copied into
@@ -467,20 +998,69 @@ async def record_result(
         preview = marker + preview
     values: dict[str, object] = {"last_result_tail": preview, "last_error": error}
     if delivery is not None:
+        queued_payload = delivery_payload if delivery_payload is not None else plain_payload(tail)
         values.update(
             delivery_status=delivery,
-            delivery_note=delivery_note,
-            delivery_payload=tail if delivery == "pending" else None,
+            delivery_note=(
+                OUTBOX_FILES
+                if delivery == "pending"
+                and queued_payload is not None
+                and queued_payload.startswith(PREFIX)
+                else delivery_note
+            ),
+            delivery_payload=queued_payload if delivery == "pending" else None,
             delivery_lease_owner=None,
             delivery_lease_expires_at=None,
             delivered_at=None,
         )
-    await session.execute(update(Routine).where(Routine.id == routine_id).values(**values))
+    statement = update(Routine).where(Routine.id == routine_id)
+    if expected_destination is not None:
+        kind, recipient = expected_destination
+        statement = statement.where(
+            Routine.destination_kind.is_not_distinct_from(kind),
+            Routine.destination_id.is_not_distinct_from(recipient),
+        )
+    if expected_row is not None:
+        statement = statement.where(_captured_routine(expected_row))
+    if expected_private is not None:
+        statement = statement.where(
+            Routine.tenant_id == expected_private.tenant_id,
+            Routine.created_by_user_id == expected_private.created_by_user_id,
+            Routine.agent_id == expected_private.agent_id,
+            Routine.agent_name == expected_private.agent_name,
+            Routine.updated_at == expected_private.updated_at,
+            Routine.destination_kind == "dm",
+            Routine.destination_id == expected_private.destination_id,
+        )
+        if producing_agent_id is not None:
+            # Persist the actual producer, including resolver self-healing, in
+            # the same fenced write as its content. Delivery verifies THIS ID.
+            values["agent_id"] = producing_agent_id
+    await session.execute(statement.values(**values))
+    # Completion is independent of content/configuration fences: even a fire
+    # whose edited destination rejects its result has finished. Fence by claim
+    # time so an older completion cannot settle a newer claim.
+    completion = update(Routine).where(Routine.id == routine_id)
+    fired_row = expected_row or expected_private
+    if fired_row is not None:
+        completion = completion.where(
+            Routine.tenant_id == fired_row.tenant_id,
+            Routine.last_fired_at == fired_row.last_fired_at,
+        )
+    await session.execute(
+        completion.values(
+            last_finished_at=datetime.now(UTC), last_finished_claim_at=Routine.last_fired_at
+        )
+    )
     await session.flush()
 
 
 async def queue_failure_notice(
-    session: AsyncSession, routine_id: _uuid.UUID, *, notice: str
+    session: AsyncSession,
+    routine_id: _uuid.UUID,
+    *,
+    notice: str,
+    expected_row: RoutineRow | None = None,
 ) -> bool:
     """Queue `notice` for the destination if this failure starts a failing streak.
 
@@ -497,6 +1077,7 @@ async def queue_failure_notice(
             update(Routine)
             .where(
                 Routine.id == routine_id,
+                _captured_routine(expected_row) if expected_row is not None else true(),
                 Routine.destination_kind.is_not(None),
                 Routine.last_error.is_(None),
                 or_(
@@ -527,11 +1108,47 @@ async def routine_platform(session: AsyncSession, routine_id: _uuid.UUID) -> str
     )
 
 
+async def validate_dm_source(
+    session: AsyncSession,
+    tenant_id: _uuid.UUID,
+    channel_id: str | None,
+    thread_id: str | None = None,
+) -> None:
+    """Shared save/dry-run source sealing check, including the original thread."""
+    if thread_id is not None and channel_id is None:
+        raise StoreError("a source thread requires its parent channel")
+    policy = await load_access_policy(session, tenant_id=tenant_id)
+    if channel_id is not None and limiting_ids_at(
+        policy, channel_id=channel_id, thread_id=thread_id
+    ):
+        raise StoreError("a routine from a restricted source cannot deliver by DM")
+
+
+async def _resolve_destination(
+    session: AsyncSession,
+    tenant_id: _uuid.UUID,
+    kind: str | None,
+    destination_id: str | None,
+    owner: str | None,
+) -> str | None:
+    if kind == "dm":
+        if owner is None or not owner.isdecimal():
+            raise StoreError("a DM routine requires a Discord owner")
+        if destination_id is not None and destination_id != owner:
+            raise StoreError("a DM routine can deliver only to its owner")
+        tenant = await session.get(Tenant, tenant_id)
+        if tenant is None or tenant.platform != "discord":
+            raise StoreError("DM routines are supported only on Discord")
+        destination_id = owner
+    _check_destination(kind, destination_id)
+    return destination_id
+
+
 def _check_destination(kind: str | None, destination_id: str | None) -> None:
     if (kind is None) != (destination_id is None):
         raise StoreError("destination_kind and destination_id are set together")
-    if kind is not None and kind not in ("channel", "thread"):
-        raise StoreError("destination_kind must be channel or thread")
+    if kind is not None and kind not in ("channel", "thread", "dm"):
+        raise StoreError("destination_kind must be channel, thread or dm")
     if destination_id is not None and not destination_id.strip():
         raise StoreError("destination_id must not be empty")
 
@@ -651,9 +1268,10 @@ async def claim_due_fireable(
     """Step 1: atomically claim due rows. Step 2: recompute next_fire_at.
 
     Returned rows reflect the row state BEFORE step-2 recompute (matches
-    predecessor): callers see `next_fire_at=None` and `last_fired_at=now`
-    on each claimed row, while the table itself has the freshly-computed
-    next slot stamped per row.
+    predecessor): callers see `next_fire_at=None`, `last_fired_at=now`,
+    the original scheduled slot in `last_fired_slot`, and no completion on
+    each claimed row. The table itself has the freshly-computed next slot.
+    Run-once coalescing retains the overdue slot selected, not the wall time.
     """
     window_start = now - max_age
 
@@ -678,7 +1296,13 @@ async def claim_due_fireable(
     claim_stmt = (
         update(Routine)
         .where(Routine.id.in_(id_subq))
-        .values(next_fire_at=None, last_fired_at=now)
+        .values(
+            next_fire_at=None,
+            last_fired_at=now,
+            last_fired_slot=Routine.next_fire_at,
+            last_finished_at=None,
+            last_finished_claim_at=None,
+        )
         .returning(Routine)
         .execution_options(synchronize_session=False)
     )

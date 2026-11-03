@@ -14,6 +14,7 @@ from __future__ import annotations
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import cast
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -27,7 +28,7 @@ from daimon.core.mcp_rpc import (
     mcp_request,
     open_mcp_session,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, JsonValue
 
 _RESOURCE_METADATA_RE = re.compile(r'resource_metadata="([^"]+)"', re.IGNORECASE)
 
@@ -200,12 +201,32 @@ async def list_mcp_tools(mcp_server_url: str, bearer_token: str) -> frozenset[st
     The configured destination is the only authority; redirects are disabled.
     Both JSON and the protocol's SSE response form are accepted.
     """
+    return frozenset(
+        cast(str, tool["name"]) for tool in await read_mcp_catalogue(mcp_server_url, bearer_token)
+    )
+
+
+async def read_mcp_catalogue(
+    mcp_server_url: str, bearer_token: str | None
+) -> tuple[dict[str, JsonValue], ...]:
+    """Every tool definition the server lists, as sent: name, schema, annotations.
+
+    Same protocol and limits as `list_mcp_tools`; `bearer_token=None` sends no
+    `Authorization` header. Raises `ValueError` on any refusal or malformed page.
+    """
     assert_public_https_url(mcp_server_url, what="connection URL")
-    headers = mcp_headers(bearer_token)
+    if bearer_token is not None:
+        headers = mcp_headers(bearer_token)
+    else:
+        headers = {
+            "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": PROTOCOL_VERSION,
+        }
     try:
         async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as http:
             await open_mcp_session(http, mcp_server_url, headers)
             names: set[str] = set()
+            listed: list[dict[str, JsonValue]] = []
             cursor: str | None = None
             seen: set[str] = set()
             for page in range(100):
@@ -228,9 +249,10 @@ async def list_mcp_tools(mcp_server_url: str, bearer_token: str) -> frozenset[st
                     if not isinstance(name, str) or not name or name in names:
                         raise ValueError("invalid or duplicate MCP tool")
                     names.add(name)
+                    listed.append(cast(dict[str, JsonValue], tool))
                 following = result.get("nextCursor")
                 if following is None:
-                    return frozenset(names)
+                    return tuple(listed)
                 if not isinstance(following, str) or not following or following in seen:
                     raise ValueError("invalid MCP catalogue cursor")
                 seen.add(following)

@@ -55,12 +55,12 @@ from daimon.core.smoke import SMOKE_MODEL, SMOKE_TOPUP_USD, SmokeCheckError, run
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.stores import tenants as tenants_store
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.testing.drivers.anthropic.ma import (
     MARouter,
     build_fake_anthropic,
     list_response,
-    session_response,
     sse_response,
 )
 from mux.testing.drivers.anthropic.ma_models import ma_model_usage, ma_session, ma_session_agent
@@ -221,9 +221,9 @@ def _register_turn_routes(
 ) -> None:
     """POST /v1/sessions (create) + GET stream (SSE) + POST events (send).
 
-    `terminal_less_script=True` additionally registers `GET /v1/sessions/{id}`
-    (status "idle", no reopen) and `GET /v1/sessions/{id}/events` (replay,
-    the same `event_dicts`) -- required whenever `event_dicts` does not end
+    `GET /v1/sessions/{id}` supplies the unattended send gate's snapshot.
+    `terminal_less_script=True` additionally registers
+    `GET /v1/sessions/{id}/events` (replay, the same `event_dicts`) -- required whenever `event_dicts` does not end
     in a real terminal event (`session.status_idle`/`session.status_terminated`).
     A `session.error` event alone is not stream-terminal to the driver's
     consume loop, so the stream ending right after one is a clean close that
@@ -270,12 +270,12 @@ def _register_turn_routes(
         handle_stream_hang if hang else handle_stream,  # pyright: ignore[reportArgumentType]
     )
     router.add("POST", r"/v1/sessions/[^/]+/events", handle_send)
+    router.add(
+        "GET",
+        r"/v1/sessions/[^/]+$",
+        lambda req, _m: httpx.Response(200, json=session_json),
+    )
     if terminal_less_script:
-        router.add(
-            "GET",
-            r"/v1/sessions/[^/]+$",
-            lambda req, _m: session_response(session_id=session_id, status="idle"),
-        )
         router.add(
             "GET",
             r"/v1/sessions/[^/]+/events",
@@ -346,6 +346,7 @@ async def test_run_smoke_check_writes_usage_event_and_returns_result_when_turn_c
         topup_key="happy-path",
         markup=Decimal("1.0"),
         on_stage=lambda msg: None,
+        tool_safety=OPEN_TOOL_SAFETY,
         turn_path=turn_path,
     )
 
@@ -391,6 +392,7 @@ async def test_run_smoke_check_runs_the_turn_as_the_provisioned_smoke_account(
     workspace = _Workspace()
 
     result = await run_smoke_check(
+        tool_safety=OPEN_TOOL_SAFETY,
         session_factory=db_session_factory,
         anthropic=_build_happy_client(workspace),
         defaults_root=tmp_path,
@@ -418,6 +420,41 @@ async def test_run_smoke_check_runs_the_turn_as_the_provisioned_smoke_account(
     turn_io_used.assert_ran(turn_path)
 
 
+async def test_run_smoke_check_runs_its_turn_under_the_policy_it_is_given(
+    tmp_path: Path,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Design test 6: the smoke turn never falls back to a default (open) policy."""
+    from daimon.core import smoke
+    from daimon.core.tool_safety import ToolSafetyPolicy
+
+    _write_seed_tree(tmp_path)
+    client = _build_happy_client(_Workspace())
+    seen: list[object] = []
+    real_run_turn = smoke.run_turn
+
+    async def spy(**kwargs: Any) -> str:
+        seen.append(kwargs["tool_safety"])
+        return await real_run_turn(**kwargs)
+
+    monkeypatch.setattr(smoke, "run_turn", spy)
+    policy = ToolSafetyPolicy(enabled=True)
+    await run_smoke_check(
+        session_factory=db_session_factory,
+        anthropic=client,
+        defaults_root=tmp_path,
+        agent_tag="daimon",
+        environment_tag="default",
+        resolver_cache=new_resolver_cache(),
+        topup_key="policy",
+        markup=Decimal("1.0"),
+        on_stage=lambda msg: None,
+        tool_safety=policy,
+    )
+    assert seen == [policy]
+
+
 async def test_run_smoke_check_is_idempotent_when_called_twice(
     tmp_path: Path,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -437,6 +474,7 @@ async def test_run_smoke_check_is_idempotent_when_called_twice(
         topup_key="idempotent-1",
         markup=Decimal("1.0"),
         on_stage=lambda msg: None,
+        tool_safety=OPEN_TOOL_SAFETY,
         turn_path=turn_path,
     )
     second = await run_smoke_check(
@@ -449,6 +487,7 @@ async def test_run_smoke_check_is_idempotent_when_called_twice(
         topup_key="idempotent-2",
         markup=Decimal("1.0"),
         on_stage=lambda msg: None,
+        tool_safety=OPEN_TOOL_SAFETY,
         turn_path=turn_path,
     )
 
@@ -485,6 +524,7 @@ async def test_run_smoke_check_recreates_agent_when_ma_agent_missing(
         topup_key="self-heal",
         markup=Decimal("1.0"),
         on_stage=lambda msg: None,
+        tool_safety=OPEN_TOOL_SAFETY,
         turn_path=turn_path,
     )
 
@@ -503,6 +543,7 @@ async def test_run_smoke_check_recreates_agent_when_ma_agent_missing(
         topup_key="self-heal",
         markup=Decimal("1.0"),
         on_stage=lambda msg: None,
+        tool_safety=OPEN_TOOL_SAFETY,
         turn_path=turn_path,
     )
 
@@ -551,6 +592,7 @@ async def test_run_smoke_check_raises_when_no_usage_event_written(
             topup_key="no-usage-event",
             markup=Decimal("1.0"),
             on_stage=lambda msg: None,
+            tool_safety=OPEN_TOOL_SAFETY,
             turn_path=turn_path,
         )
     turn_io_used.assert_ran(turn_path)
@@ -600,6 +642,7 @@ async def test_run_smoke_check_propagates_session_error_when_stream_errors(
             topup_key="session-error",
             markup=Decimal("1.0"),
             on_stage=lambda msg: None,
+            tool_safety=OPEN_TOOL_SAFETY,
             turn_path=turn_path,
         )
 
@@ -627,6 +670,7 @@ async def test_run_smoke_check_inserts_topup_when_balance_zero(
         topup_key="topup-zero-balance",
         markup=Decimal("1.0"),
         on_stage=lambda msg: None,
+        tool_safety=OPEN_TOOL_SAFETY,
         turn_path=turn_path,
     )
 
@@ -669,6 +713,7 @@ async def test_run_smoke_check_skips_topup_when_balance_positive(
         topup_key="skip-topup",
         markup=Decimal("1.0"),
         on_stage=lambda msg: None,
+        tool_safety=OPEN_TOOL_SAFETY,
         turn_path=turn_path,
     )
 
@@ -700,6 +745,7 @@ async def test_run_smoke_check_does_not_double_credit_when_topup_key_repeats(
         topup_key="repeat-key",
         markup=Decimal("1.0"),
         on_stage=lambda msg: None,
+        tool_safety=OPEN_TOOL_SAFETY,
         turn_path=turn_path,
     )
 
@@ -726,6 +772,7 @@ async def test_run_smoke_check_does_not_double_credit_when_topup_key_repeats(
         topup_key="repeat-key",
         markup=Decimal("1.0"),
         on_stage=lambda msg: None,
+        tool_safety=OPEN_TOOL_SAFETY,
         turn_path=turn_path,
     )
 
@@ -764,6 +811,7 @@ async def test_run_smoke_check_raises_timeout_error_when_turn_exceeds_timeout(
             markup=Decimal("1.0"),
             timeout_s=0.05,
             on_stage=lambda msg: None,
+            tool_safety=OPEN_TOOL_SAFETY,
             turn_path=turn_path,
         )
     turn_io_used.assert_ran(turn_path)
@@ -789,6 +837,7 @@ async def test_run_smoke_check_reports_each_stage_via_on_stage(
         topup_key="stage-reporting",
         markup=Decimal("1.0"),
         on_stage=stages.append,
+        tool_safety=OPEN_TOOL_SAFETY,
         turn_path=turn_path,
     )
 

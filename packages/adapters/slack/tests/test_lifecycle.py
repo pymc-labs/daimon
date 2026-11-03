@@ -2120,6 +2120,71 @@ async def test_eye_cleanup_failure_does_not_break_terminal_delivery(fake_slack_w
     assert deregistered
 
 
+@pytest.mark.parametrize("ending", ["success", "interrupted", "error", "chunks"])
+async def test_watch_output_revocation_latches_all_slack_writes(fake_slack_web_client, ending):
+    import contextlib
+
+    from daimon.core.turn.errors import AdmissionDenied
+    from daimon.core.turn.output import OutputAuthorization
+
+    lifecycle, *_ = _make_lifecycle(fake_slack_web_client)
+    await lifecycle.post_initial()
+    allowed = True
+
+    async def authorize():
+        if not allowed:
+            raise AdmissionDenied(reason="invoker_not_allowed")
+
+    guard = OutputAuthorization(authorize)
+    lifecycle.set_output_authorization(guard)
+    allowed = False
+    with pytest.raises(AdmissionDenied):
+        await lifecycle.post_notice("retained answer")
+    allowed = True
+    before = (_post_count(fake_slack_web_client), _update_count(fake_slack_web_client))
+    state = TurnState(content=[TextBlock(kind="text", text="retained answer " * 1000)])
+    with contextlib.suppress(AdmissionDenied):
+        if ending == "error":
+            await lifecycle.on_terminal_failure(state, RuntimeError("private failure"))
+        else:
+            if ending == "interrupted":
+                state = dataclasses.replace(state, termination=TerminationReason.INTERRUPTED)
+            await lifecycle.on_terminal_success(state)
+    assert (_post_count(fake_slack_web_client), _update_count(fake_slack_web_client)) == before
+    assert guard.failed
+
+
+async def test_watch_revocation_between_chunks_rechecks_each_slack_write(fake_slack_web_client):
+    import contextlib
+
+    from daimon.core.turn.errors import AdmissionDenied
+    from daimon.core.turn.output import OutputAuthorization
+
+    lifecycle, *_ = _make_lifecycle(fake_slack_web_client)
+    await lifecycle.post_initial()
+
+    def count():
+        return _post_count(fake_slack_web_client) + _update_count(fake_slack_web_client)
+
+    checks = 0
+
+    async def authorize():
+        nonlocal checks
+        checks += 1
+        if checks > 1:
+            raise AdmissionDenied(reason="invoker_not_allowed")
+
+    guard = OutputAuthorization(authorize)
+    lifecycle.set_output_authorization(guard)
+    before = count()
+    with contextlib.suppress(AdmissionDenied):
+        await lifecycle.on_terminal_success(
+            TurnState(content=[TextBlock(kind="text", text="secret " * 4000)])
+        )
+    assert count() - before == 1
+    assert guard.failed
+
+
 async def test_nothing_posted_names_another_app(fake_slack_web_client: Any) -> None:
     inner, *_ = _make_lifecycle(fake_slack_web_client)
     lc = OtherAppsScrubbedLifecycle(inner, "slack")

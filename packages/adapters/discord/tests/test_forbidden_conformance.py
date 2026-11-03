@@ -46,6 +46,7 @@ from daimon.core.turn.outcomes import drain_outcomes
 from daimon.testing.db import require_owned_sessionmaker
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
+from daimon.testing.membership import FixtureMembershipResolver
 from discord.http import HTTPClient
 from mux.contracts.config import BackendConfig, ConfigRevision
 from mux.contracts.ids import Provider, Scope
@@ -205,6 +206,13 @@ async def ingress(
         turn_deps=deps,
     )
     bot = DaimonBot(runtime=runtime, intents=discord.Intents.none())
+    bot.membership_resolver = FixtureMembershipResolver("103")  # type: ignore[assignment]
+    bot.runtime = dataclasses.replace(
+        bot.runtime,
+        turn_deps=dataclasses.replace(
+            bot.runtime.turn_deps, membership_resolver=bot.membership_resolver
+        ),
+    )
     state = bot._connection  # pyright: ignore[reportPrivateUsage]
     state.user = discord.ClientUser(
         state=state,

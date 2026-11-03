@@ -7,6 +7,7 @@ import os
 import uuid
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any, NoReturn, cast
+from unittest.mock import patch
 
 import discord
 import pytest
@@ -21,6 +22,7 @@ from daimon.core.stores.routines import create_routine, get_routine, record_resu
 from daimon.testing.db import require_owned_sessionmaker
 from daimon.testing.discord_surface import DiscordSurfaceHarness, OfflineDiscordGateway
 from daimon.testing.factories import make_tenant
+from daimon.testing.membership import FixtureMembershipResolver
 from daimon.testing.routine_clock import (
     ClockedRoutineJobs,
     LongWaitUnavailable,
@@ -208,13 +210,26 @@ async def _bound(
         fetch_channel=fetch,
         open_dm=dm,
         dm_policy=lambda _: DirectMessagePolicy(),
+        membership_resolver=FixtureMembershipResolver("103"),
     )
+
+    class AdapterDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock.wall_time().astimezone(tz)
+
+    async def clocked_post(due: RoutineRow) -> DeliveryOutcome:
+        # The adapter rechecks the delivery lease against wall time too. Keep
+        # that read on the same clock as the real claim/finalize jobs.
+        with patch("daimon.adapters.discord.routine_delivery.datetime", AdapterDatetime):
+            return await post(due)
+
     jobs = ClockedRoutineJobs(
         sessionmaker=sm,
         clock=clock,
         caps=NoCaps(),
         fire=fire,
-        post=post,
+        post=clocked_post,
         gateway=harness.gateway,
         bindings=(RoutineBinding(row.tenant_id, row.id),),
     )

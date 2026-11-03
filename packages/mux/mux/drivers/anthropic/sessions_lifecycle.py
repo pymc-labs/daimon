@@ -188,6 +188,9 @@ class SessionWalk(Protocol):
     def walk(self, scope: Scope) -> AsyncIterator[Session]: ...
 
 
+SESSION_READS_NAMESPACE = "anthropic.session_reads"
+
+
 class SessionReads(Protocol):
     async def read_native(self, scope: Scope, ref: ResourceRef) -> dict[str, JsonValue]: ...
 

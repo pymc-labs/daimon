@@ -12,7 +12,7 @@ from daimon.core.panel_operator_tokens import (
     mint_panel_operator_token,
     revoke_panel_operator_token,
 )
-from daimon.core.stores.accounts import get_account_with_tenant
+from daimon.core.stores.accounts import get_account_with_tenant, set_role
 from daimon.core.stores.domain import Role
 from daimon.core.stores.mcp_tokens import get_mcp_token
 from daimon.testing.factories import make_account, make_tenant
@@ -21,9 +21,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 NOW = dt.datetime(2026, 9, 1, tzinfo=dt.UTC)
 
 
-async def _mint(session: AsyncSession, tenant_id: uuid.UUID, scopes: list[str]):
+async def _mint(
+    session: AsyncSession, tenant_id: uuid.UUID, scopes: list[str], *, recorded_admin: bool = True
+):
+    if recorded_admin:
+        from daimon.core.stores.identity import get_or_create_platform_principal
+
+        principal = await get_or_create_platform_principal(
+            session, tenant_id=tenant_id, platform="slack", external_id="U1"
+        )
+        await set_role(session, principal.account_id, Role.ADMIN)
     return await mint_panel_operator_token(
         session,
+        is_platform_admin=True,
         tenant_id=tenant_id,
         platform="slack",
         platform_user_id="U1",
@@ -38,12 +48,22 @@ def test_the_panel_never_offers_the_deployment_scope() -> None:
     assert PANEL_SCOPES == ("tenant:read", "channels:write", "agents:archive", "promo:redeem")
 
 
-async def test_mint_stores_the_admin_role_and_refuses_promo_create(
+async def test_mint_requires_recorded_platform_authority_and_refuses_promo_create(
     db_session: AsyncSession,
 ) -> None:
     tenant = await make_tenant(db_session)
-    with pytest.raises(OperatorTokenError, match="can't be granted from here"):
-        await _mint(db_session, tenant.id, ["tenant:read", "promo:create"])
+    with pytest.raises(OperatorTokenError, match="can.t be granted from here"):
+        await _mint(db_session, tenant.id, ["tenant:read", "promo:create"], recorded_admin=False)
+    with pytest.raises(OperatorTokenError, match="Send Daimon a message"):
+        await _mint(db_session, tenant.id, ["tenant:read"], recorded_admin=False)
+    assert await list_panel_operator_tokens(db_session, tenant_id=tenant.id, now=NOW) == []
+    from daimon.core.stores.identity import get_or_create_platform_principal
+
+    principal = await get_or_create_platform_principal(
+        db_session, tenant_id=tenant.id, platform="slack", external_id="U1"
+    )
+    before = await get_account_with_tenant(db_session, account_id=principal.account_id)
+    assert before is not None and before.role is Role.USER
     minted = await _mint(db_session, tenant.id, ["tenant:read"])
     (row,) = await list_panel_operator_tokens(db_session, tenant_id=tenant.id, now=NOW)
     identity = await get_account_with_tenant(db_session, account_id=row.account_id)

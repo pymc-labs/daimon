@@ -509,12 +509,49 @@ async def test_claims_are_per_platform(db_session: AsyncSession) -> None:
     )
 
 
-async def test_clearing_the_destination_drops_a_pending_post(db_session: AsyncSession) -> None:
+@pytest.mark.parametrize("claimed", [False, True])
+async def test_clearing_the_destination_drops_a_pending_post(
+    db_session: AsyncSession, claimed: bool
+) -> None:
     row = await _routine(db_session)
-    await record_result(db_session, row.id, tail="t", error=None, delivery="pending")
-    await update_routine(db_session, row.id, tenant_id=row.tenant_id, clear_destination=True)
+    from daimon.core.routine_files import PREFIX, RoutineFile, RoutinePayload
+
+    payload = (
+        PREFIX
+        + RoutinePayload(
+            text="t",
+            files=[
+                RoutineFile(
+                    file_id="file_report", filename="report.csv", mime_type="text/csv", size_bytes=4
+                )
+            ],
+        ).model_dump_json()
+    )
+    await record_result(
+        db_session,
+        row.id,
+        tail="t",
+        error="old diagnostic",
+        delivery="pending",
+        delivery_payload=payload,
+    )
+    if claimed:
+        claims = await claim_routine_deliveries(
+            db_session, platform="discord", owner="a", now=_NOW, lease=timedelta(minutes=2)
+        )
+        assert len(claims) == 1 and claims[0].delivery_status == "claimed"
+    await update_routine(
+        db_session,
+        row.id,
+        edited_by=row.created_by_user_id,
+        tenant_id=row.tenant_id,
+        clear_destination=True,
+    )
     after = await get_routine(db_session, row.id, tenant_id=row.tenant_id)
     assert after is not None
+    assert after.delivery_payload is None and after.delivery_note is None
+    assert after.last_result_tail is None and after.last_error is None
+    assert after.delivery_lease_owner is None and after.delivery_lease_expires_at is None
     assert (after.destination_kind, after.destination_id, after.delivery_status) == (
         None,
         None,
@@ -584,9 +621,13 @@ async def test_clear_creator_returns_the_policy_or_why_not(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from unittest.mock import AsyncMock
+
     import daimon.core.routine_delivery as delivery_mod
+    from daimon.core.membership import CachedMembershipResolver, Membership
     from daimon.core.stores.access_policy import AccessPolicyUnreadable
 
+    resolver = CachedMembershipResolver(AsyncMock(return_value=Membership(is_member=True)))
     row = await _routine(db_session)
     await set_access_policy(
         db_session,
@@ -595,7 +636,13 @@ async def test_clear_creator_returns_the_policy_or_why_not(
     )
     await db_session.commit()
 
-    cleared = await clear_creator(db_session_factory, row, platform="discord")
+    assert (
+        await clear_creator(db_session_factory, row, platform="discord") == "invoker_not_allowed"
+    ), "missing membership credentials must not grant delivery under an open invoker policy"
+
+    cleared = await clear_creator(
+        db_session_factory, row, platform="discord", membership_resolver=resolver
+    )
     assert isinstance(cleared, TenantAccessPolicy)
     assert {c: r.writers for c, r in cleared.category_rules.items()} == {"CAT": "none"}
 
@@ -603,17 +650,17 @@ async def test_clear_creator_returns_the_policy_or_why_not(
         db_session, tenant_id=row.tenant_id, policy=TenantAccessPolicy(invoker_user_ids=("U9",))
     )
     await db_session.commit()
-    assert await clear_creator(db_session_factory, row, platform="discord") == (
-        "invoker_not_allowed"
-    )
+    assert await clear_creator(
+        db_session_factory, row, platform="discord", membership_resolver=resolver
+    ) == ("invoker_not_allowed")
 
     async def unreadable(*args: object, **kwargs: object) -> TenantAccessPolicy:
         raise AccessPolicyUnreadable(tenant_id=row.tenant_id)
 
     monkeypatch.setattr(delivery_mod, "load_access_policy", unreadable)
-    assert await clear_creator(db_session_factory, row, platform="discord") == (
-        "access_policy_unreadable"
-    )
+    assert await clear_creator(
+        db_session_factory, row, platform="discord", membership_resolver=resolver
+    ) == ("access_policy_unreadable")
 
 
 @pytest.mark.parametrize(
@@ -708,6 +755,33 @@ async def test_full_result_is_queued_separately_from_marked_tail(db_session, del
     assert saved.last_result_tail.endswith("LAST COMPLETE PARAGRAPH.")
     assert "HEAD-ONLY" not in saved.last_result_tail
     assert saved.delivery_payload == (result if delivery == "pending" else None)
+
+
+def test_dm_controls_require_host_delivery_and_never_count_channel_tool_as_delivery() -> None:
+    row = _row(destination_kind="dm", destination_id="123", created_by_user_id="123")
+    text = render_routine_controls(row, platform="discord")
+    assert "Daimon delivers your final reply privately" in text
+    assert "Do not call messaging tools" in text
+    assert not agent_posted_to(TurnState(content=[_post_block("123")]), row)
+    assert delivery_target(row, platform="discord") is None
+
+
+async def test_delivery_failure_never_logs_signed_upload_url(db_session, db_session_factory):
+    from structlog.testing import capture_logs
+
+    row = await _routine(db_session)
+    await record_result(db_session, row.id, tail="Report", error=None, delivery="pending")
+    await db_session.commit()
+    sentinel = "https://upload.invalid/signed?token=secret-sentinel"
+
+    async def post(claimed):
+        raise RuntimeError(sentinel)
+
+    with capture_logs() as logs:
+        await poll_deliveries_once(db_session_factory, platform="discord", post=post, now=_NOW)
+    assert sentinel not in str(logs)
+    failures = [entry for entry in logs if entry["event"] == "routine.delivery_failed"]
+    assert failures[0]["error_type"] == "RuntimeError"
 
 
 @pytest.mark.parametrize(

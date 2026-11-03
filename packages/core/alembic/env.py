@@ -16,7 +16,7 @@ config = context.config
 db_url = os.environ.get("DAIMON_DATABASE_URL") or os.environ.get("DAIMON_DATABASE__URL")
 if db_url:
     config.set_main_option("sqlalchemy.url", db_url)
-elif not config.get_main_option("sqlalchemy.url"):
+elif not config.get_main_option("sqlalchemy.url") and "connection" not in config.attributes:
     # Flat DAIMON_DATABASE_URL is intentional — alembic CLI runs outside
     # pydantic-settings. The app uses nested DAIMON_DATABASE__URL.
     raise RuntimeError(
@@ -59,5 +59,7 @@ async def run_migrations_online() -> None:
 
 if context.is_offline_mode():
     run_migrations_offline()
+elif "connection" in config.attributes:
+    do_run_migrations(config.attributes["connection"])
 else:
     asyncio.run(run_migrations_online())

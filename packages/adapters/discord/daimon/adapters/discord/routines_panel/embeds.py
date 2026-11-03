@@ -22,7 +22,31 @@ from daimon.core.cron_words import schedule_words
 
 import discord
 
-_EMPTY_HINT = 'No routines yet.\n\nAsk your agent: "Schedule a daily summary at 9am."'
+ADMIN_ONLY = "Only a server admin can create routines."
+INVALID_SCHEDULE = "That schedule or time zone isn't valid.\n\nCheck both and try again."
+SOURCE_UNVERIFIED = "The routine's source channel could not be verified."
+AGENT_UNAVAILABLE = "No agent with that name exists on this server."
+SAVE_REFUSED = (
+    "This agent's rules do not allow a routine without a channel destination. Nothing was saved."
+)
+GONE = "This routine no longer exists."
+WRONG_TENANT = "This routine is from another server."
+DELETE_REFUSED = "Only its creator or a server admin can delete it."
+DELETE_CONFIRM = "Delete this routine? This cannot be undone."
+DELETED = "Routine deleted."
+CANCELLED = "Deletion cancelled."
+FIELDS_REQUIRED = "Agent and message are required."
+CONFIRM_USER_ONLY = "Only the person who opened this can use it."
+
+
+def created_message(agent_name: str, cron_expr: str, timezone: str) -> str:
+    return f"Routine created for {agent_name}, {schedule_words(cron_expr, timezone)}."
+
+
+_EMPTY_HINT = (
+    "No routines yet.\n\nServer admins can use New, or ask your agent: "
+    '"Schedule a daily summary at 9am."'
+)
 
 
 def _humanize_delta(target: datetime, now: datetime) -> str:
@@ -89,6 +113,25 @@ def build_panel_container(
         timeline_body = f"{next_line}\n\n{last_line}"
     else:
         timeline_body = next_line
+
+    routine = selected.routine
+    destination = (
+        "Owner DM"
+        if routine.destination_kind == "dm"
+        else (routine.destination_id or "No automatic delivery")
+    )
+    timeline_body += f"\n\nDelivery: {destination}"
+    if routine.delivery_status is not None:
+        timeline_body += f"\nStatus: {routine.delivery_status}"
+    if routine.delivery_note is not None:
+        timeline_body += "\n" + routine.delivery_note.replace("_", " ")
+    # An admin's per-routine opt-in; off for every routine unless set.
+    if routine.destination_kind == "dm":
+        timeline_body += "\n\nSandbox tools: off (DM routines can't use sandbox tools)"
+    elif routine.sandbox_tools_enabled:
+        timeline_body += "\n\nSandbox tools: on (admin opt-in)"
+    else:
+        timeline_body += "\n\nSandbox tools: off"
 
     # Accent: only non-blurple states carry the color bar
     accent: int | None = color_int if color_int != theme.COLOR_BLURPLE else None

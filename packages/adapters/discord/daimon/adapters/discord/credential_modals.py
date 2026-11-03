@@ -125,6 +125,7 @@ from daimon.core.credential_requests import (
 from daimon.core.credential_submit import (
     apply_env_file_submit,
     apply_env_submit,
+    apply_watch_credential_submit,
     consume_credential_submit,
     guard_credential_save,
     prepare_env_submit,
@@ -383,7 +384,7 @@ async def _decide_key_replacement(
     the consume's transaction opens, so no row lock is ever held across an
     MA listing.
     """
-    if is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]  # discord.Interaction vs Interaction[commands.Bot]; is_guild_admin only reads user/guild
+    if await is_guild_admin(interaction, action=None):  # pyright: ignore[reportArgumentType]  # discord.Interaction vs Interaction[commands.Bot]; is_guild_admin only reads user/guild
         return "allow"
     agent = await resolve_ma_agent_for_uuid(
         runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
@@ -439,9 +440,7 @@ async def _decide_mcp_connect_at_submit(
         server_name=row.target,
         url=row.mcp_server_url,
         platform="discord",
-        caller=admin_caller(interaction.user).model_copy(
-            update={"is_server_admin": is_guild_admin(interaction)}  # pyright: ignore[reportArgumentType]  # discord.Interaction vs Interaction[commands.Bot]; is_guild_admin only reads user/guild
-        ),
+        caller=admin_caller(interaction.user),
         default=runtime.deployment_default,
         shares_token=True,
     )
@@ -501,7 +500,7 @@ class EnvCredentialModal(discord.ui.Modal):
         # The name a member may store is re-checked against the submitter's
         # live role: a key minted while they were an admin must not land as a
         # member. `key_add` itself needs no gate, but the NAME does.
-        is_admin = is_guild_admin(interaction)  # pyright: ignore[reportArgumentType]
+        is_admin = await is_guild_admin(interaction, action=None)  # pyright: ignore[reportArgumentType]
         name_problem = env_name_problem(self._row.target, is_admin=is_admin)
         if name_problem is not None:
             await interaction.followup.send(
@@ -695,7 +694,7 @@ class EnvFileModal(discord.ui.Modal):
         try:
             entries = parse_env_file(
                 decode_env_bytes(raw),
-                member_writable_only=not is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
+                member_writable_only=not await is_guild_admin(interaction, action=None),  # pyright: ignore[reportArgumentType]
             )
         except EnvFileRejected as rejected:
             # The request is deliberately NOT consumed: a typo in the file
@@ -1034,6 +1033,88 @@ class McpCredentialModal(discord.ui.Modal):
                 await _dispatch_origin_thread(interaction, consumed_row)
 
 
+class WatchCredentialModal(discord.ui.Modal):
+    """The requester's own read-only key for one server, used only by their watches.
+
+    Requester-only like every form here (`interaction_check`), and the store
+    keys it by the row's tenant, requester account and exact server URL. It
+    changes no agent, so no admin or pin gate applies. The value is never
+    logged, echoed or put in an exception message.
+    """
+
+    def __init__(self, *, runtime: DiscordRuntime, request_row: CredentialRequestRow) -> None:
+        super().__init__(title=f"Your watch key for {request_row.target}"[:_MAX_TITLE_CHARS])
+        self._runtime = runtime
+        self._row = request_row
+        self.add_item(
+            discord.ui.TextDisplay(
+                f"-# Only your own watches use it, to check {request_row.mcp_server_url}. "
+                "Use a read-only key."
+            )
+        )
+        key_label: discord.ui.Label[WatchCredentialModal] = discord.ui.Label(
+            text="Key",
+            component=discord.ui.TextInput(required=True, max_length=4000),
+        )
+        self.key_input = _text_input_of(key_label)
+        self.add_item(key_label)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        # Requester, install, platform and card, rechecked at submit.
+        if not is_credential_interaction_valid(interaction, self._row):
+            await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
+            return
+        value = str(self.key_input.value or "").strip()
+        if not value:
+            await interaction.followup.send("The key cannot be empty. Try again.", ephemeral=True)
+            return
+        if len(value.encode()) > MAX_SECRET_VALUE_BYTES:
+            await interaction.followup.send(
+                f"That key is too long. The most is {MAX_SECRET_VALUE_BYTES} bytes.",
+                ephemeral=True,
+            )
+            return
+        fernet = self._runtime.turn_deps.fernet
+        if fernet is None:
+            await interaction.followup.send(
+                "Daimon cannot store keys yet. Ask whoever runs this Daimon. Nothing was saved.",
+                ephemeral=True,
+            )
+            return
+        try:
+            consumed = await apply_watch_credential_submit(
+                self._runtime.sessionmaker,
+                row=self._row,
+                fernet=fernet,
+                value=value,
+                now=datetime.now(UTC),
+            )
+        except Exception as err:
+            # Class name only: the exception may carry the submitted value.
+            _log.warning("credential_modal.watch_key_failed", err_type=type(err).__name__)
+            await interaction.followup.send(
+                "Something went wrong. Nothing was saved. Try again.", ephemeral=True
+            )
+            return
+        if consumed is None:
+            await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
+            return
+        _log.info("credential_modal.watch_key.submit", outcome="applied")
+        await edit_posted_card(interaction.client, row=consumed, state="received")
+        await edit_posted_card(
+            interaction.client,
+            row=consumed,
+            state="applied",
+            outcome=ConfigurationChange(
+                target_name=_agent_name(consumed),
+                kind="watch_key",
+                availability="saved",
+                detail=consumed.target,
+            ),
+        )
+
+
 class SkillRepoModal(discord.ui.Modal):
     """Collect a GitHub token, import skills, and attach them to the requested agent.
 
@@ -1205,7 +1286,7 @@ class SkillRepoModal(discord.ui.Modal):
                         path=path,
                         tenant_id=consumed_row.tenant_id,
                         seeded_skill_names=seeded_skill_names,
-                        is_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]  # see refuse_if_shared_and_not_admin_for_request
+                        is_admin=await is_guild_admin(interaction, action=None),  # pyright: ignore[reportArgumentType]  # see refuse_if_shared_and_not_admin_for_request
                         token=pat,
                     )
             except DaimonError:

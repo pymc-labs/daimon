@@ -1,8 +1,4 @@
-"""RoutinesPanelView (LayoutView) + picker + pause/resume button.
-
-The panel is read-mostly: the only write is a Pause/Resume toggle gated on
-creator-or-manage_guild at click time (TOCTOU-safe refetch inside the
-session.begin() block).
+"""RoutinesPanelView with routine creation, deletion and run controls.
 
 V2 Components format: the panel is a Container with ActionRows for controls
 appended inside the card, no embed.
@@ -16,9 +12,10 @@ from datetime import UTC, datetime
 import anthropic
 import sentry_sdk
 import structlog
-from daimon.adapters.discord import layout
+from daimon.adapters.discord import checks, layout
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.routines_panel.embeds import build_panel_container
+from daimon.adapters.discord.routines_panel.forms import DeleteButton, NewButton
 from daimon.adapters.discord.routines_panel.read import load_guild_routines
 from daimon.adapters.discord.routines_panel.state import RoutinesPanelState, state_label
 from daimon.adapters.discord.routines_panel.write import (
@@ -26,11 +23,17 @@ from daimon.adapters.discord.routines_panel.write import (
     resume_routine_via_panel,
 )
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.admin_actions import DelegatedAction
+from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize, build_agent_ref
+from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.permissions import any_agent_rules
 from daimon.core.posted_controls.routines import apply_routine_action
+from daimon.core.routines import can_read_routine_output
+from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import RoutineRow
-from daimon.core.stores.routines import get_routine
+from daimon.core.stores.routines import get_routine, update_routine
 from daimon.core.stores.tenants import get_tenant
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -112,6 +115,69 @@ class _RoutinePicker(discord.ui.Select["RoutinesPanelView"]):
             await _send_callback_error(interaction, exc)
 
 
+class _DestinationPicker(discord.ui.Select["RoutinesPanelView"]):
+    def __init__(self, state: RoutinesPanelState) -> None:
+        super().__init__(
+            placeholder="Change delivery… (owner only)",
+            options=[
+                discord.SelectOption(label="Direct message to me", value="dm"),
+                discord.SelectOption(label="No automatic delivery", value="none"),
+            ],
+            disabled=state.selected is None,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if self.view is None or self.view.state.selected is None:
+            return
+        selected = self.view.state.selected.routine
+        try:
+            async with self.view.runtime.sessionmaker.begin() as session:
+                row = await get_routine(session, selected.id, tenant_id=selected.tenant_id)
+                if row is None or row.created_by_user_id != str(interaction.user.id):
+                    await interaction.response.send_message(
+                        "Only the routine owner can change private delivery.", ephemeral=True
+                    )
+                    return
+                policy = await load_access_policy(session, tenant_id=row.tenant_id)
+                agent_ref = AgentRef.of(row.agent_name)
+                if self.values[0] == "dm" and any_agent_rules(policy):
+                    agent = await find_agent_by_daimon_tag(
+                        self.view.runtime.anthropic, tenant_id=row.tenant_id, name=row.agent_name
+                    )
+                    if agent is None:
+                        await interaction.response.send_message(
+                            "The routine agent is unavailable.", ephemeral=True
+                        )
+                        return
+                    agent_ref = build_agent_ref(agent.name, agent.metadata, row.agent_name)
+                if self.values[0] == "dm" and not authorize(
+                    policy,
+                    subject=Subject(),
+                    action=Action.SAVE_ROUTINE,
+                    surface=Surface.ROUTINE,
+                    agent=agent_ref,
+                    place=Place(),
+                ):
+                    await interaction.response.send_message(
+                        "This agent cannot run a private routine.", ephemeral=True
+                    )
+                    return
+                await update_routine(
+                    session,
+                    row.id,
+                    tenant_id=row.tenant_id,
+                    expected_updated_at=row.updated_at,
+                    destination_kind="dm" if self.values[0] == "dm" else None,
+                    clear_destination=self.values[0] == "none",
+                    edited_by=str(interaction.user.id),
+                )
+            await _rerender(interaction, self.view)
+        except DaimonError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+        except Exception as exc:  # routines-panel callback boundary
+            await _send_callback_error(interaction, exc)
+
+
 class _PauseButton(discord.ui.Button["RoutinesPanelView"]):
     def __init__(self, state: RoutinesPanelState) -> None:
         if state.selected is not None and not state.selected.routine.enabled:
@@ -140,9 +206,8 @@ class _PauseButton(discord.ui.Button["RoutinesPanelView"]):
             async with runtime.sessionmaker() as session, session.begin():
 
                 async def allowed(row: RoutineRow) -> bool:
-                    member = interaction.user
-                    is_admin = (
-                        isinstance(member, discord.Member) and member.guild_permissions.manage_guild
+                    is_admin = await checks.is_guild_admin(
+                        interaction, action=DelegatedAction.ROUTINES
                     )
                     is_creator = (
                         row.created_by_user_id is not None
@@ -163,6 +228,7 @@ class _PauseButton(discord.ui.Button["RoutinesPanelView"]):
                     check_tenant=True,
                 )
                 refusals = {
+                    "already_running": "This routine is already on.",
                     "gone": "This routine no longer exists.",
                     "wrong_tenant": "This routine is from another server.",
                     "not_owner": ("Only its creator or a server admin can pause it."),
@@ -198,6 +264,16 @@ class _ViewOutputButton(discord.ui.Button["RoutinesPanelView"]):
             )
 
             row = self.view.state.selected.routine
+            async with self.view.runtime.sessionmaker() as session:
+                current = await get_routine(session, row.id, tenant_id=row.tenant_id)
+            if current is None or (
+                not can_read_routine_output(current, user_id=str(interaction.user.id))
+            ):
+                await interaction.response.send_message(
+                    "Only the owner can read a private routine result.", ephemeral=True
+                )
+                return
+            row = current
             await interaction.response.send_message(
                 view=ViewLastOutputSubView(row, allowed_user_id=self.view.allowed_user_id),
                 ephemeral=True,
@@ -274,6 +350,8 @@ class RoutinesPanelView(discord.ui.LayoutView):
         )
         container.add_item(layout.hairline())
         container.add_item(picker_row)
+        container.add_item(discord.ui.ActionRow(_DestinationPicker(state)))
+        container.add_item(discord.ui.ActionRow(NewButton(), DeleteButton(state)))
         container.add_item(buttons_row)
         self.add_item(container)
 
@@ -302,6 +380,7 @@ async def _rerender(interaction: discord.Interaction, view: RoutinesPanelView) -
             session,
             runtime.anthropic,
             tenant_id=tenant_id,
+            viewer_user_id=str(view.allowed_user_id),
         )
     new_state = RoutinesPanelState.initial(
         rows=entries,

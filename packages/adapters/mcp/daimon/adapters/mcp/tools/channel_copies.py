@@ -18,6 +18,7 @@ from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._channel_target import parse_channel_target
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
 from daimon.core.authz import Action
 from daimon.core.channel_copies import ChannelCopyArchiveRefused, archive_channel_copy
@@ -73,7 +74,7 @@ async def _archive_channel_copy_impl(
             tenant_id=auth.tenant_id,
             name=name.strip(),
             closing_channel_id=closing,
-            subject=mcp_subject(auth, is_admin=auth.is_admin),
+            subject=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.CHANNEL_PERMISSIONS)),
             default=runtime.deployment_default,
             expected_ma_agent_id=expected_ma_agent_id,
         )

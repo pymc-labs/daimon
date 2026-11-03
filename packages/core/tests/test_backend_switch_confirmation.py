@@ -6,6 +6,7 @@ import pytest
 from daimon.core.confirmation import prompt_for_tool_call
 from daimon.core.tool_safety import (
     DAIMON_SERVER_NAME,
+    OPEN_TOOL_SAFETY,
     ToolCall,
     ToolSafetyPolicy,
     decide_tool_call,
@@ -209,6 +210,7 @@ async def test_server_preview_and_current_admin_are_the_only_card_authority(owne
         tenant_id=agent.tenant_id,
         account_id=actor.account_id,
         current_admin=admin,
+        current_platform_admin=AsyncMock(return_value=False),
     )
     trace.queue(reply())
     prepared = await prepare(prompt)
@@ -247,6 +249,7 @@ async def test_a_click_claiming_drops_against_an_undeclared_preview_refuses(owne
         tenant_id=agent.tenant_id,
         account_id=actor.account_id,
         current_admin=admin,
+        current_platform_admin=AsyncMock(return_value=False),
     )
     preview = await service.preview(agent, "openai")
     assert not preview.declared_drops, "this fixture's agent must declare no drops"
@@ -279,6 +282,7 @@ async def test_click_rechecks_real_preview_and_rejects_changed_facts(owned_previ
         tenant_id=agent.tenant_id,
         account_id=actor.account_id,
         current_admin=admin,
+        current_platform_admin=AsyncMock(return_value=False),
     )
     if change == "configuration":
         payload["system"] = "Configuration changed after preview"
@@ -319,6 +323,7 @@ async def test_card_scope_refuses_before_any_agent_read(owned_preview, bad_scope
         tenant_id=tenant_id,
         account_id=account_id,
         current_admin=admin,
+        current_platform_admin=AsyncMock(return_value=False),
     )
     assert await check(prompt, "other" if bad_scope == "requester" else "requester") is not None
     admin.assert_not_awaited()
@@ -439,6 +444,8 @@ async def test_permission_revocation_during_awaited_evidence_refuses(
             admin_state["allowed"] = False
         return result
 
+    from unittest.mock import AsyncMock
+
     async def current_admin(clicker):
         return admin_state["allowed"]
 
@@ -451,6 +458,7 @@ async def test_permission_revocation_during_awaited_evidence_refuses(
         tenant_id=agent.tenant_id,
         account_id=actor.account_id,
         current_admin=current_admin,
+        current_platform_admin=AsyncMock(return_value=False),
     )
     trace.queue(reply())
     assert await check(prompt, "requester") is not None
@@ -490,6 +498,7 @@ async def test_malformed_service_preview_cannot_claim_an_admin_card(
         tenant_id=agent.tenant_id,
         account_id=actor.account_id,
         current_admin=AsyncMock(return_value=True),
+        current_platform_admin=AsyncMock(return_value=False),
     )
     trace.queue(reply())
     assert await check(prompt, "requester") is not None
@@ -683,6 +692,7 @@ async def test_real_sdk_create_and_desired_snapshot_use_the_same_opt_in_tools(se
             environment=ma_environment(),
             mcp_settings=settings,
             confirmed_tools=confirmed,
+            tool_safety=OPEN_TOOL_SAFETY,
         )
         if not selected:
             trace.queue(
@@ -697,6 +707,7 @@ async def test_real_sdk_create_and_desired_snapshot_use_the_same_opt_in_tools(se
                 agent=native,
                 environment=ma_environment(),
                 mcp_settings=settings,
+                tool_safety=OPEN_TOOL_SAFETY,
             )
             assert trace.requests[0].body == trace.requests[1].body
     sent = trace.requests[0].json()
@@ -725,6 +736,7 @@ async def test_real_sdk_create_and_desired_snapshot_use_the_same_opt_in_tools(se
         vault_id=None,
         public_url=str(settings.public_url),
         confirmed_tools=confirmed,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     assert snapshot.tools_sha256 == hash_tools(tools)
     assert snapshot.mcp_servers_sha256 == hash_mcp_servers(servers)
@@ -794,6 +806,7 @@ async def test_real_sdk_refresh_preserves_default_bytes_and_the_selected_gate(ow
         memory_store_id=None,
         vault_id=None,
         public_url=str(settings.public_url),
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     selected = frozenset({"request_agent_backend_switch"})
     bodies = []
@@ -902,6 +915,7 @@ async def test_card_names_the_model_and_where_the_switch_applies(
         tenant_id=agent.tenant_id,
         account_id=actor.account_id,
         current_admin=AsyncMock(return_value=True),
+        current_platform_admin=AsyncMock(return_value=False),
         default_agent_name="Researcher" if default_agent else "daimon",
         place_word=place,
     )
@@ -946,6 +960,7 @@ async def test_the_agents_owner_may_confirm_without_being_an_admin(owned_preview
         tenant_id=agent.tenant_id,
         account_id=actor.account_id,
         current_admin=admin,
+        current_platform_admin=AsyncMock(return_value=False),
     )
     async with sessions.begin() as session:
         await agent_owners.set_owner(
@@ -1015,6 +1030,7 @@ async def test_the_card_says_plainly_that_saved_keys_wont_be_available(owned_pre
         tenant_id=agent.tenant_id,
         account_id=actor.account_id,
         current_admin=AsyncMock(return_value=True),
+        current_platform_admin=AsyncMock(return_value=False),
     )
     prompt = prompt_for_tool_call(
         _call(
@@ -1052,6 +1068,7 @@ async def test_the_card_says_this_conversation_moves_only_when_the_agent_answers
         tenant_id=agent.tenant_id,
         account_id=actor.account_id,
         current_admin=AsyncMock(return_value=True),
+        current_platform_admin=AsyncMock(return_value=False),
         answering_agent_name=answering,
     )
     trace.queue(reply())
@@ -1094,6 +1111,7 @@ async def test_a_hand_off_in_this_thread_decides_whose_conversation_moves(owned_
         tenant_id=agent.tenant_id,
         account_id=actor.account_id,
         current_admin=AsyncMock(return_value=True),
+        current_platform_admin=AsyncMock(return_value=False),
         answering_agent_name="daimon",
         handoff_thread=("discord", "parent-1", "thread-1"),
     )
@@ -1127,6 +1145,7 @@ def _switch_callbacks(owned_preview, *, default_agent_name: str = "daimon"):
         tenant_id=agent.tenant_id,
         account_id=actor.account_id,
         current_admin=AsyncMock(return_value=True),
+        current_platform_admin=AsyncMock(return_value=False),
         default_agent_name=default_agent_name,
         answering_agent_name="Researcher",
     )
@@ -1250,6 +1269,7 @@ async def test_the_card_never_promises_a_move_in_a_setup_conversation(owned_prev
         tenant_id=agent.tenant_id,
         account_id=actor.account_id,
         current_admin=AsyncMock(return_value=True),
+        current_platform_admin=AsyncMock(return_value=False),
         answering_agent_name="Researcher",
         handoff_thread=("discord", "parent-1", "thread-1"),
     )

@@ -29,6 +29,14 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 
+def _current_member(*, is_admin: bool = False):  # type: ignore[no-untyped-def]
+    from daimon.core.membership import CachedMembershipResolver, Membership
+
+    return CachedMembershipResolver(
+        AsyncMock(return_value=Membership(is_member=True, is_admin=is_admin))
+    )
+
+
 async def test_admit_denies_when_over_balance(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -84,7 +92,7 @@ _BALANCE_OK = patch("daimon.core.spend_gate.is_over_balance", new=AsyncMock(retu
         (TenantAccessPolicy(invoker_user_ids=("u1",)), Role.USER),
         (TenantAccessPolicy(invoker_user_ids=("staff",)), Role.ADMIN),
     ],
-    ids=["no-policy-row", "allowlisted", "stored-admin"],
+    ids=["no-policy-row", "allowlisted", "live-admin"],
 )
 async def test_admit_passes_whoever_the_invoker_policy_allows(
     db_session: AsyncSession,
@@ -93,10 +101,12 @@ async def test_admit_passes_whoever_the_invoker_policy_allows(
     role: Role,
 ) -> None:
     auth = await _member(db_session, policy=policy, role=role)
+    auth = dataclasses.replace(auth, platform="discord")
     with _BALANCE_OK:
         result = await _admit(
             auth,
             sessionmaker=db_session_factory,
+            membership_resolver=_current_member(is_admin=role is Role.ADMIN),
             billing_config=None,
             markup=Decimal(1),
             tool_name="ask",
@@ -263,6 +273,7 @@ async def test_admit_refuses_a_bound_key_over_its_channel_budget(
     with _BALANCE_OK, pytest.raises(ToolError, match="This channel has used its spending budget"):
         await _admit(
             bound,
+            membership_resolver=_current_member(is_admin=False),
             sessionmaker=db_session_factory,
             billing_config=None,
             markup=Decimal(1),
@@ -272,6 +283,7 @@ async def test_admit_refuses_a_bound_key_over_its_channel_budget(
     with _BALANCE_OK:
         result = await _admit(
             unbound,
+            membership_resolver=_current_member(is_admin=False),
             sessionmaker=db_session_factory,
             billing_config=None,
             markup=Decimal(1),
@@ -324,6 +336,7 @@ async def test_a_hub_run_of_an_isolated_channels_agent_is_held_to_that_channels_
     with _BALANCE_OK, pytest.raises(ToolError, match="This channel has used its spending budget"):
         await _admit(
             auth,
+            membership_resolver=_current_member(is_admin=True),
             sessionmaker=db_session_factory,
             billing_config=None,
             markup=Decimal(1),
@@ -335,6 +348,7 @@ async def test_a_hub_run_of_an_isolated_channels_agent_is_held_to_that_channels_
         assert (
             await _admit(
                 auth,
+                membership_resolver=_current_member(is_admin=True),
                 sessionmaker=db_session_factory,
                 billing_config=None,
                 markup=Decimal(1),
@@ -405,6 +419,189 @@ async def test_admit_over_the_cap_says_the_cap_is_the_callers_and_an_operator_ra
     assert str(refused.value) == (
         "TERMINAL ERROR: You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
     ), "the MCP refusal uses the shared cap wording"
+
+
+async def test_mcp_role_gate_uses_resolver_without_gateway_facts(db_session, db_session_factory):  # type: ignore[no-untyped-def]
+    from daimon.core.membership import CachedMembershipResolver, Membership
+
+    auth = await _member(db_session, policy=TenantAccessPolicy(invoker_role_ids=("123",)))
+    auth = dataclasses.replace(auth, platform="discord")
+    facts = [Membership(is_member=True, role_ids=("123",))]
+
+    async def fetch(tenant_id, guild_id, user_id):  # type: ignore[no-untyped-def]
+        return facts[0]
+
+    resolver = CachedMembershipResolver(fetch)
+    with _BALANCE_OK:
+        assert (
+            await _admit(
+                auth,
+                sessionmaker=db_session_factory,
+                membership_resolver=resolver,
+                billing_config=None,
+                markup=Decimal(1),
+                tool_name="ask",
+            )
+            is auth
+        )
+    facts[0] = Membership(is_member=True)
+    tenant = await get_tenant(db_session, auth.tenant_id)
+    assert tenant is not None
+    resolver.invalidate(auth.tenant_id, tenant.external_id, "u1")
+    with pytest.raises(ToolError, match="TERMINAL ERROR"):
+        await _admission_recheck(
+            auth,
+            sessionmaker=db_session_factory,
+            membership_resolver=resolver,
+            tool_name="ask",
+            agent_names=None,
+        )()
+
+
+async def test_private_result_delivery_bypasses_cached_role_grant(db_session, db_session_factory):  # type: ignore[no-untyped-def]
+    from types import SimpleNamespace
+
+    from daimon.adapters.mcp.tools.agent_chat import _require_live_result_access
+    from daimon.core.membership import CachedMembershipResolver, Membership
+
+    auth = dataclasses.replace(
+        await _member(db_session, policy=TenantAccessPolicy(invoker_role_ids=("123",))),
+        platform="discord",
+    )
+    tenant = await get_tenant(db_session, auth.tenant_id)
+    assert tenant is not None
+    fetch = AsyncMock(return_value=Membership(is_member=True))
+    resolver = CachedMembershipResolver(fetch)
+    resolver.observe(
+        auth.tenant_id, tenant.external_id, "u1", Membership(is_member=True, role_ids=("123",))
+    )
+    runtime = SimpleNamespace(session_factory=db_session_factory, membership_resolver=resolver)
+    with pytest.raises(ToolError, match="TERMINAL ERROR"):
+        await _require_live_result_access(runtime, auth)  # type: ignore[arg-type]
+    fetch.assert_awaited_once_with(auth.tenant_id, tenant.external_id, "u1")
+
+
+@pytest.mark.parametrize("policy", [None, TenantAccessPolicy(invoker_user_ids=("u1",))])
+async def test_discord_human_without_membership_credentials_is_refused_before_billing(
+    db_session, db_session_factory, policy
+):  # type: ignore[no-untyped-def]
+    auth = dataclasses.replace(await _member(db_session, policy=policy), platform="discord")
+    with (
+        patch(
+            "daimon.core.spend_gate.is_over_balance",
+            new=AsyncMock(
+                side_effect=AssertionError("unknown membership must refuse before billing")
+            ),
+        ),
+        pytest.raises(ToolError, match="TERMINAL ERROR"),
+    ):
+        await _admit(
+            auth,
+            sessionmaker=db_session_factory,
+            membership_resolver=None,
+            billing_config=None,
+            markup=Decimal(1),
+            tool_name="ask",
+        )
+
+
+@pytest.mark.parametrize("pin_exempt", [False, True])
+@pytest.mark.parametrize("human", [False, True])
+async def test_agent_chat_role_gate_cannot_be_bypassed_by_hub_admin_or_internal_key(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    pin_exempt: bool,
+    human: bool,
+) -> None:
+    from daimon.core.access_policy import AgentRule
+    from daimon.core.membership import CachedMembershipResolver, Membership
+
+    auth = await _member(
+        db_session,
+        role=Role.ADMIN,
+        policy=TenantAccessPolicy(agent_rules={"restricted": AgentRule(invoker_role_ids=("123",))}),
+    )
+    auth = dataclasses.replace(auth, platform="discord", platform_user_id="u1" if human else None)
+    fetch = AsyncMock(return_value=Membership(is_member=True, is_admin=True))
+    names = AsyncMock(return_value=("restricted",))
+    with pytest.raises(ToolError, match="You aren't on"):
+        await _admit(
+            auth,
+            sessionmaker=db_session_factory,
+            membership_resolver=CachedMembershipResolver(fetch),
+            billing_config=None,
+            markup=Decimal(1),
+            tool_name="ask",
+            agent_names=names,
+            pin_exempt=pin_exempt,
+        )
+    names.assert_awaited_once()
+
+
+async def test_agent_chat_role_revoked_before_message_send_denied_without_invalidation(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.access_policy import AgentRule
+    from daimon.core.membership import CachedMembershipResolver, Membership
+
+    auth = dataclasses.replace(
+        await _member(
+            db_session,
+            policy=TenantAccessPolicy(
+                agent_rules={"restricted": AgentRule(invoker_role_ids=("123",))}
+            ),
+        ),
+        platform="discord",
+    )
+    fetch = AsyncMock(return_value=Membership(is_member=True, role_ids=("123",)))
+    resolver = CachedMembershipResolver(fetch)
+    names = AsyncMock(return_value=("restricted",))
+    with _BALANCE_OK:
+        await _admit(
+            auth,
+            sessionmaker=db_session_factory,
+            membership_resolver=resolver,
+            billing_config=None,
+            markup=Decimal(1),
+            tool_name="ask",
+            agent_names=names,
+        )
+    fetch.return_value = Membership(is_member=True)
+    with pytest.raises(ToolError, match="You aren't on"):
+        await _admission_recheck(
+            auth,
+            sessionmaker=db_session_factory,
+            membership_resolver=resolver,
+            tool_name="ask",
+            agent_names=names,
+        )()
+
+
+async def test_ungated_hub_admin_keeps_lookup_exemption(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    auth = dataclasses.replace(
+        await _member(db_session, policy=_PINNED, role=Role.ADMIN),
+        platform="discord",
+    )
+    names = AsyncMock(side_effect=AssertionError("ungated hub admin must not need MA lookup"))
+    with _BALANCE_OK:
+        assert (
+            await _admit(
+                auth,
+                sessionmaker=db_session_factory,
+                membership_resolver=_current_member(is_admin=True),
+                billing_config=None,
+                markup=Decimal(1),
+                tool_name="ask",
+                agent_names=names,
+                pin_exempt=True,
+            )
+            is auth
+        )
+    names.assert_not_awaited()
 
 
 async def test_admit_with_an_exhausted_allowance_refuses_in_the_shared_words(

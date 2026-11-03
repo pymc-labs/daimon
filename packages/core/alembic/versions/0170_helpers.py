@@ -15,8 +15,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.postgresql import UUID
 
-revision: str = "0159_helpers"
-down_revision: str | None = "0158_usage_agent_backfill"
+revision: str = "0170_helpers"
+down_revision: str | None = "0169_continuation_reasons"
 branch_labels: str | None = None
 depends_on: str | None = None
 

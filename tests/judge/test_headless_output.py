@@ -13,6 +13,7 @@ import httpx
 import pytest
 from daimon.core import headless_runner
 from daimon.core.config import TurnSettings
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn import driver
 from daimon.core.turn.state import TurnState
 from daimon.testing.ma_models import ma_agent, ma_environment
@@ -95,6 +96,11 @@ async def test_captures_actual_headless_host_return_not_pretool_text_or_truncate
         ),
         ScriptedReply.stream("/v1/sessions/session_x/events/stream", events),
         ScriptedReply(
+            "GET",
+            "/v1/sessions/session_x",
+            httpx.Response(200, json=session.model_dump(mode="json")),
+        ),
+        ScriptedReply(
             "POST", "/v1/sessions/session_x/events", httpx.Response(200, json={"data": None})
         ),
     )
@@ -108,6 +114,7 @@ async def test_captures_actual_headless_host_return_not_pretool_text_or_truncate
                 agent_id=agent.id,
                 environment_id=environment.id,
                 trigger_message="Answer",
+                tool_safety=OPEN_TOOL_SAFETY,
                 on_state=states.append,
             )
 
@@ -119,7 +126,7 @@ async def test_captures_actual_headless_host_return_not_pretool_text_or_truncate
     assert receipt.text == expected
     assert receipt.has_visible_text == bool(expected) and receipt.returned_s == 2.0
     assert states and any(block.kind == "tool_use" for block in states[0].content)
-    assert not transport.violations and not transport.replies and len(transport.requests) == 5
+    assert not transport.violations and not transport.replies and len(transport.requests) == 6
     assert HeadlessOutput.model_validate_json(receipt.model_dump_json()) == receipt
 
 

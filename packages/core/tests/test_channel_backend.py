@@ -24,6 +24,7 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import TenantRow
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.admission import Admission, admit
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied
@@ -194,12 +195,14 @@ def _deps(
         github_app_private_key=None,
         public_url=None,
         channel_backends=channel_backends,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
 
 async def _admit(deps: TurnDeps, tenant: TenantRow, channel_id: str = "chan-1") -> Admission:
     return await admit(
         deps,
+        origin="chat",
         tenant_id=tenant.id,
         requester_org=RequesterOrg.HOST,
         platform="discord",

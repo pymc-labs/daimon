@@ -10,6 +10,7 @@ from typing import Annotated, Literal
 
 import anthropic
 import typer
+from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.adapters.cli.logging import configure_admin_logging
 from daimon.adapters.cli.run.events import (
     TerminalFailed,
@@ -19,19 +20,26 @@ from daimon.adapters.cli.run.events import (
 from daimon.adapters.cli.run.lifecycle import NdjsonLifecycle
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.adapters.cli.tenant import discover_tenant
-from daimon.core.config import load_settings, load_turn_settings
+from daimon.core.config import Settings, load_settings, load_turn_settings
+from daimon.core.defaults.metadata import MA_METADATA_KEY_TENANT
 from daimon.core.errors import UserFacingError
-from daimon.core.mux_backend import resource_scope
+from daimon.core.github_credentials import build_multifernet
+from daimon.core.mux_backend import platform_scope, resource_scope
+from daimon.core.session_ports_compat import retrieve_session_record
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.identity import get_or_create_cli_principal
+from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import session_owner_tenants
-from daimon.core.tool_safety import trusted_servers_for
-from daimon.core.turn.approvals import chat_tool_confirmation
 from daimon.core.turn.ceiling import turn_deadline
-from daimon.core.turn.driver import run_turn
+from daimon.core.turn.driver import run_turn, unattended_sends
 from daimon.core.turn.outcomes import current_outcome, observe_turn
 from daimon.core.turn.posture import BillingExempt, RequireApproval, ToolConfirmation
 from daimon.core.turn.state import TurnState
+from daimon.core.turn.unattended import (
+    session_gate,
+    session_rules_channel,
+    unattended_posture,
+)
 from mux.errors import ScopeViolation
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -79,38 +87,88 @@ def run_command(
     user_message = _resolve_user_message(raw_message)
 
     settings = load_settings()
-    # The turn path is resolved once, here at the edge, and passed down. The
-    # conversation functions below never read settings themselves.
     path = load_turn_settings().path
+    try:
+        exit_code = asyncio.run(_run_with_defaults(settings, session, user_message, path=path))
+    except SessionTenantMismatch as err:
+        print(f"✗ {err}", file=sys.stderr)
+        raise typer.Exit(code=1) from err
+    raise typer.Exit(code=exit_code)
 
-    # No card surface here: with the tool-safety policy on, reads run and
-    # third-party writes are refused (`no_confirmation_surface`); off, this is
-    # the driver's default `RequireApproval`.
-    tool_confirmation = chat_tool_confirmation(
-        settings.tool_safety,
-        requester_platform_user_id=settings.cli.local_user or "cli",
-        confirm=None,
-        trusted_servers=trusted_servers_for(
-            str(settings.mcp.public_url) if settings.mcp.public_url is not None else None
-        ),
-    )
 
-    async def _with_defaults() -> int:
-        async with build_runtime(settings) as rt:
+async def _run_with_defaults(
+    settings: Settings, session: str, user_message: str, *, path: TurnPath | None = None
+) -> int:
+    """Gate the operator's session, then run the turn under the unattended rules.
+
+    Nobody answers a card here, so this is an unattended turn: before the
+    message the session's own tool config is rewritten from the current
+    policy (`gate_session_snapshot`), whatever it was created with, and every
+    pause is decided by `unattended_posture`.
+    """
+    path = path if path is not None else load_turn_settings().path
+    async with build_runtime(settings) as rt:
+        public_url = str(settings.mcp.public_url) if settings.mcp.public_url is not None else None
+        scope = platform_scope("CLI operator run gate")
+        snapshot = await retrieve_session_record(rt.anthropic, session, scope=scope)
+        tenant_id, platform = await _session_tenant(rt, snapshot)
+        if path == "mux":
+            async with rt.sessionmaker() as db:
+                local_tenant = await discover_tenant(db)
+                if tenant_id != local_tenant:
+                    raise SessionTenantMismatch(session, tenant_id)
+                await _refuse_foreign_session(db, session_id=session, tenant_id=local_tenant)
+        gate = session_gate(
+            rt.anthropic,
+            session,
+            settings.tool_safety,
+            scope=scope,
+            public_url=public_url,
+            session_factory=rt.sessionmaker,
+            tenant_id=tenant_id,
+            entry_point="cli_run",
+        )
+        # Decide on what a first gate leaves (a healed reserved URL, for one);
+        # the driver gates again before the message and every confirmation.
+        await gate()
+        snapshot = await retrieve_session_record(rt.anthropic, session, scope=scope)
+        keys = tuple(key.get_secret_value() for key in rt.settings.crypto.keys)
+        with unattended_sends(gate):
             return await run_conversation(
                 rt=rt,
                 session_id=session,
                 user_message=user_message,
                 path=path,
-                tool_confirmation=tool_confirmation,
+                tool_confirmation=unattended_posture(
+                    settings.tool_safety,
+                    session=snapshot,
+                    public_url=public_url,
+                    session_factory=rt.sessionmaker,
+                    tenant_id=tenant_id,
+                    channel_id=session_rules_channel(snapshot, platform=platform),
+                    fernet=build_multifernet(keys) if keys else None,
+                    entry_point="cli_run",
+                ),
             )
 
-    try:
-        exit_code = asyncio.run(_with_defaults())
-    except SessionTenantMismatch as err:
-        print(f"✗ {err}", file=sys.stderr)
-        raise typer.Exit(code=1) from err
-    raise typer.Exit(code=exit_code)
+
+async def _session_tenant(
+    rt: CliRuntime, session: BetaManagedAgentsSession
+) -> tuple[uuid.UUID, str]:
+    """The tenant and platform whose rules the operator's session runs under.
+
+    A session stamped for a tenant (a chat or agent-chat conversation) keeps
+    that tenant's rules and its channel's; only an unstamped operator session
+    falls back to the local CLI tenant.
+    """
+    stamped = (session.metadata or {}).get(MA_METADATA_KEY_TENANT)
+    async with rt.sessionmaker() as db:
+        if stamped is None:
+            return await discover_tenant(db), "cli"
+        tenant = await get_tenant(db, uuid.UUID(stamped))
+    if tenant is None:
+        raise ScopeViolation(session.id, "the session's tenant is not on this deployment")
+    return tenant.id, tenant.platform
 
 
 # `RequireApproval` is frozen and field-less; one shared default (ruff B008).

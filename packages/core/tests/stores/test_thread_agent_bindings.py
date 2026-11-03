@@ -16,6 +16,7 @@ from daimon.core.stores.thread_agent_bindings import (
     get_binding,
     list_active_bindings,
     list_active_setup_bindings_for_tenant,
+    list_answering_bindings,
     update_channel_lifecycle,
     update_lifecycle,
     upsert_responder_binding,
@@ -537,3 +538,53 @@ async def test_tenant_wide_listing_isolates_one_tenant_and_one_platform(
     assert [row.thread_id for row in rows] == ["ours"], (
         "another tenant's and another platform's conversations must not leak into the listing"
     )
+
+
+async def test_answering_bindings_keep_closed_threads_and_drop_deleted_and_dms(
+    db_session: AsyncSession,
+) -> None:
+    """Every binding that still answers in the server, ordered by parent then thread."""
+    tenant = await make_tenant(db_session, workspace_id="guild-1")
+    other = await make_tenant(db_session, workspace_id="guild-2")
+    for tenant_id, platform, parent, thread_id in (
+        (tenant.id, "discord", "channel-b", "setup"),
+        (tenant.id, "discord", "channel-a", "handoff"),
+        (tenant.id, "discord", "channel-a", "archived"),
+        (tenant.id, "discord", "channel-a", "locked"),
+        (tenant.id, "discord", "channel-a", "deleted"),
+        (tenant.id, "discord", "dm-channel", "dm:user"),
+        (tenant.id, "slack", "channel-a", "other-platform"),
+        (other.id, "discord", "channel-a", "other-tenant"),
+    ):
+        await create_binding(
+            db_session,
+            tenant_id=tenant_id,
+            platform=platform,
+            parent_channel_id=parent,
+            thread_id=thread_id,
+            responder_ma_agent_id="agent_daimon",
+            responder_name="daimon",
+            kind="handoff" if thread_id == "handoff" else "setup",
+        )
+    for thread_id, field in (
+        ("archived", "archived"),
+        ("locked", "locked"),
+        ("deleted", "deleted"),
+    ):
+        await update_lifecycle(
+            db_session,
+            tenant_id=tenant.id,
+            platform="discord",
+            parent_channel_id="channel-a",
+            thread_id=thread_id,
+            **{field: True},
+        )
+
+    rows = await list_answering_bindings(db_session, tenant_id=tenant.id, platform="discord")
+
+    assert [(row.parent_channel_id, row.thread_id) for row in rows] == [
+        ("channel-a", "archived"),
+        ("channel-a", "handoff"),
+        ("channel-a", "locked"),
+        ("channel-b", "setup"),
+    ], "deleted bindings, DM scopes, other platforms and other tenants are left out"

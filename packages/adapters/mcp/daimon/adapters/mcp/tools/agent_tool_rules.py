@@ -11,6 +11,7 @@ from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivat
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.adapters.mcp.tools._words import admin_noun
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Action, Place, authorize
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.security_audit import record_authz_denial, record_policy_decision
@@ -25,7 +26,7 @@ _PERSON_ONLY = (
 
 
 def _require_person(auth: AuthIdentity) -> None:
-    if auth.agent_id is not None or auth.chat_agent_id is not None:
+    if not auth.is_personal_user:
         raise ToolError(_PERSON_ONLY)
 
 
@@ -35,7 +36,7 @@ def _require_rule_access(auth: AuthIdentity, channel_id: str | None) -> None:
     )
     decision = authorize(
         TenantAccessPolicy(),
-        subject=mcp_subject(auth, is_admin=auth.is_admin),
+        subject=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.TOOL_RULES)),
         action=action,
         place=Place(channel_id=channel_id),
     )
@@ -122,7 +123,7 @@ async def _set(
             rule=rule,
             scope=scope,
             set_by=str(auth.account_id),
-            actor=mcp_subject(auth, is_admin=auth.is_admin),
+            actor=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.TOOL_RULES)),
         )
     return {"rule": row, "active": _active(runtime)}
 
@@ -157,7 +158,7 @@ async def _clear(
             channel_id=channel,
             server_url=url,
             set_by=str(auth.account_id),
-            actor=mcp_subject(auth, is_admin=auth.is_admin),
+            actor=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.TOOL_RULES)),
         )
     return {"rule": row, "active": _active(runtime)}
 

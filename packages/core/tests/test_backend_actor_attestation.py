@@ -242,3 +242,38 @@ async def test_rechecks_permission_and_principal_every_call(actor):
 
     with pytest.raises(AgentBackendRefused, match="actor not found"):
         await read(actor, payloads(), before_reply=revoke)
+
+
+async def test_grant_is_not_authority_for_long_job_or_unspecified_policy(actor):
+    from daimon.core.admin_actions import DelegatedAction
+    from daimon.core.stores.daimon_admins import change_grant
+
+    sm, tenant, _ = actor
+    async with sm.begin() as db:
+        await change_grant(
+            db,
+            tenant_id=tenant.id,
+            platform="discord",
+            subject_kind="user",
+            subject_id=USER,
+            actor_user_id=OTHER,
+            is_platform_admin=True,
+        )
+    async with httpx.AsyncClient(transport=transport(payloads(permissions="0"), [])) as client:
+        with pytest.raises(AgentBackendRefused):
+            await verify_backend_actor(
+                sm,
+                tenant_id=tenant.id,
+                platform_user_id=USER,
+                settings=SETTINGS,
+                http_client=client,
+            )
+        allowed = await verify_backend_actor(
+            sm,
+            tenant_id=tenant.id,
+            platform_user_id=USER,
+            settings=SETTINGS,
+            http_client=client,
+            action=DelegatedAction.AGENT_SETTINGS,
+        )
+    assert allowed.subject.is_admin

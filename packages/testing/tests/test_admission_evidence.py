@@ -22,6 +22,7 @@ from daimon.core.config import McpSettings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.admission import AdmissionDecision, AdmissionObserver, admit
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied, MissingTurnConfigError
@@ -118,6 +119,7 @@ async def setup(
         github_app_id=None,
         github_app_private_key=None,
         public_url=None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     scope = Scope(
         tenant_id=str(tenant.id),
@@ -398,12 +400,14 @@ async def test_observer_preserves_real_acceptance_denial_and_warm_dispatch(
         now=datetime.now(UTC),
     )
     if gate == "allowed":
-        result = await admit(deps, **kwargs, observer=observer if installed else None)  # pyright: ignore[reportArgumentType]
+        result = await admit(
+            deps, origin="chat", **kwargs, observer=observer if installed else None
+        )  # pyright: ignore[reportArgumentType]
         assert str(result.account_id) == scope.account_id
         assert decisions[0].admitted if installed else decisions == []
     else:
         with pytest.raises(AdmissionDenied) as error:
-            await admit(deps, **kwargs, observer=observer if installed else None)  # pyright: ignore[reportArgumentType]
+            await admit(deps, origin="chat", **kwargs, observer=observer if installed else None)  # pyright: ignore[reportArgumentType]
         assert error.value.reason == gate
         assert decisions[0].reason == gate if installed else decisions == []
     assert native_count(native) == 0
@@ -437,6 +441,7 @@ async def test_non_decision_errors_do_not_create_an_admission_receipt(
     with pytest.raises(type(error)) as raised:
         await admit(
             deps,
+            origin="chat",
             tenant_id=uuid.UUID(scope.tenant_id),
             requester_org=RequesterOrg.HOST,
             platform="discord",

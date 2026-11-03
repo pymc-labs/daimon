@@ -124,8 +124,8 @@ async def _read_policy(
     elif read.hold is not None:
         in_group_chat = is_group_chat(read.hold.channel_id)
     else:
-        # A chat token names no turn: any of its turns running in a group chat refuses
-        # a call that names no origin, as `_held_origin` holds one.
+        # A signed session grant still identifies a group-chat execution when
+        # the model omits its origin, as `_held_origin` identifies its hold.
         in_group_chat = read.origin_place is None and any(
             is_group_chat(origin.parent_channel_id)
             for origin in await list_running_origins(runtime, auth)

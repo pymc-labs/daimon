@@ -75,8 +75,10 @@ def test_a_foreign_senders_turn_controls_carry_those_words(place: Place) -> None
     channel = {"parent_channel_id": "19:abc123@thread.tacv2", "thread_id": _THREADS[place]}
     guest = _origin("teams", sender_foreign=True, **channel)
 
-    foreign = json.loads(render_turn_origin(guest).split("\n")[1])
-    local = json.loads(render_turn_origin(_origin("teams", **channel)).split("\n")[1])
+    foreign = json.loads(render_turn_origin(guest, effective_is_admin=False).split("\n")[1])
+    local = json.loads(
+        render_turn_origin(_origin("teams", **channel), effective_is_admin=False).split("\n")[1]
+    )
 
     assert foreign["words"]["setup"] == f"ask {_HOST} to send `setup`"
     _no_private_chat(json.dumps(foreign["words"]))

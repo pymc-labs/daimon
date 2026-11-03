@@ -31,7 +31,7 @@ from daimon.core.posted_controls.confirmation import (
     build_confirmation_card,
 )
 from daimon.core.posted_controls.lifecycle import drain_card_edits
-from daimon.core.tool_safety import ToolCall
+from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall
 
 
 def _prompt(*, expires_in: timedelta = timedelta(minutes=10)) -> ConfirmationPrompt:
@@ -741,14 +741,21 @@ async def test_admin_await_cannot_bypass_requester_expiry_or_fail_closed(
         await asyncio.gather(waiting, return_exceptions=True)
 
 
-async def test_runtime_hook_reuses_live_guild_admin_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_runtime_hook_reuses_live_guild_admin_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory,
+) -> None:
     from uuid import uuid4
 
     from daimon.core import confirmation
     from daimon.core.config import TurnSettings
+    from daimon.testing.factories import make_tenant
 
-    tenant, account = uuid4(), uuid4()
+    async with db_session_factory.begin() as session:
+        tenant_row = await make_tenant(session)
+    tenant, account = tenant_row.id, uuid4()
     runtime = MagicMock()
+    runtime.sessionmaker = db_session_factory
     runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
     channel = MagicMock(spec=discord.TextChannel)
     channel.guild.owner_id = 999
@@ -816,6 +823,128 @@ async def test_complete_backend_loss_list_survives_native_card_rendering(state):
     )
     rendered = "\n".join(_texts(build_confirmation_view(card, prompt)))
     assert (losses in rendered.replace(r"\_", "_")) == (state in {"pending", "approved"})
+
+
+_INTAKE = str(uuid.UUID(int=7))
+_IDS = {
+    "company_id": "1" * 20,
+    "contact_id": "2" * 20,
+    "deal_id": "3" * 20,
+    "discord_message_id": "4" * 20,
+}
+
+
+def _lead_prompt(evidence: str, **resolution: object) -> ConfirmationPrompt:
+    call = ToolCall(
+        tool_use_id="resolve",
+        server_name=DAIMON_SERVER_NAME,
+        tool_name="lead_intake_resolve",
+        input={
+            "intake_id": _INTAKE,
+            "resolution": {**_IDS, "separate_opportunity_confirmed": True, **resolution}
+            | {"evidence": evidence},
+        },
+    )
+    return prompt_for_tool_call(call, requester_platform_user_id="111", now=datetime.now(UTC))
+
+
+def _lead_view(
+    prompt: ConfirmationPrompt, state: ConfirmationCardState = "pending", *, allowed: bool = True
+) -> discord.ui.LayoutView:
+    async def lead_details(_prompt: ConfirmationPrompt, _clicker: str) -> tuple[str, ...]:
+        return ("Live record evidence: " + "*_~`|>\\@everyone " * 200,) if allowed else ()
+
+    card = build_confirmation_card(
+        prompt,
+        state=state,
+        token="tok_abcdefgh" if state == "pending" else None,
+        answered_by_platform_user_id=None if state == "pending" else "111",
+    )
+    return confirmation_module._ConfirmationView(  # pyright: ignore[reportPrivateUsage]
+        card, prompt, None, lead_details=lead_details
+    )
+
+
+@pytest.mark.parametrize("state", ["pending", "approved", "denied"])
+def test_a_lead_card_keeps_every_selection_visible_in_every_state(
+    state: ConfirmationCardState,
+) -> None:
+    prompt = _lead_prompt("Verified with the sales lead on the call.")
+    shown = "\n".join(_texts(_lead_view(prompt, state)))
+    for value in (_INTAKE, *_IDS.values()):
+        assert value in shown, (state, value)
+    assert "Separate opportunity: yes" in shown and "Starter post absent: no" in shown
+    assert "Verified with the sales lead" not in shown, "evidence stays behind Details"
+
+
+async def test_lead_details_send_max_escape_heavy_evidence_in_bounded_pages() -> None:
+    evidence = ("*_~`|>\\@everyone " * 200)[:2000]
+    prompt = _lead_prompt(evidence)
+    click = _interaction(222)
+    await _buttons(_lead_view(prompt))[-1].callback(click)
+    click.response.defer.assert_awaited_once()
+    pages = [sent.kwargs["embed"].description for sent in click.followup.send.await_args_list]
+    assert 1 < len(pages) <= confirmation_module.DETAILS_MAX_PAGES
+    assert all(len(page) <= confirmation_module.DETAILS_PAGE_LIMIT for page in pages)
+    assert all(not page.endswith("\\") or page.endswith("\\\\") for page in pages)
+    assert prompt.detail_lines == ()
+    assert "Live record evidence:" in pages[0]
+    for sent in click.followup.send.await_args_list:
+        assert sent.kwargs["ephemeral"] is True
+        assert sent.kwargs["allowed_mentions"].to_dict() == {"parse": []}
+
+
+def test_details_past_the_page_cap_are_unavailable_rather_than_cut() -> None:
+    assert confirmation_module.details_pages(("x" * 2000,) * 4) is not None
+    assert confirmation_module.details_pages(("x" * 2000,) * 5) is None
+    assert confirmation_module.details_pages(("\\" * 3000,)) is not None
+
+
+async def test_lead_details_are_refused_to_a_clicker_who_cannot_read_the_lead() -> None:
+    prompt = _lead_prompt("Private enquirer evidence that must stay hidden.")
+    click = _interaction(333)
+    await _buttons(_lead_view(prompt, allowed=False))[-1].callback(click)
+    sent = [call.kwargs["embed"].description for call in click.followup.send.await_args_list]
+    assert sent == [confirmation_module.LEAD_DETAILS_REFUSED_MESSAGE]
+    click.response.send_message.assert_not_awaited()
+
+
+async def test_lead_details_without_a_reader_check_are_refused() -> None:
+    prompt = _lead_prompt("Private enquirer evidence that must stay hidden.")
+    card = build_confirmation_card(prompt, state="pending", token="tok_abcdefgh")
+    click = _interaction(333)
+    await _buttons(build_confirmation_view(card, prompt))[-1].callback(click)
+    sent = [call.kwargs["embed"].description for call in click.followup.send.await_args_list]
+    assert sent == [confirmation_module.LEAD_DETAILS_REFUSED_MESSAGE]
+
+
+@pytest.mark.parametrize(
+    "resolution", [{"company_id": "9" * 200}, {"deal_id": "1\n2"}, {"contact_id": "x" * 121}]
+)
+def test_a_lead_card_that_cannot_show_its_selections_is_refused(
+    resolution: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError, match="visible_lines"):
+        _lead_prompt("Verified with the sales lead on the call.", **resolution)
+
+
+async def test_lead_details_reload_on_every_click_and_ignore_cached_prompt_lines() -> None:
+    prompt = _lead_prompt("Evidence supplied in the proposed resolution.")
+    assert prompt.detail_lines == ()
+    # Even an old serialized prompt cannot supply the details being returned.
+    prompt = prompt.model_copy(update={"detail_lines": ("stale private evidence",)})
+    load = AsyncMock(side_effect=[("live evidence v1",), ("live evidence v2",)])
+    card = build_confirmation_card(prompt, state="pending", token="tok_abcdefgh")
+    view = confirmation_module._ConfirmationView(  # pyright: ignore[reportPrivateUsage]
+        card, prompt, None, lead_details=load
+    )
+    for version in (1, 2):
+        click = _interaction(222)
+        await _buttons(view)[-1].callback(click)
+        assert click.followup.send.await_args.kwargs["embed"].description == (
+            f"live evidence v{version}"
+        )
+    assert load.await_count == 2
 
 
 def test_an_approval_card_shows_the_call_exactly_even_when_it_names_another_app() -> None:
@@ -925,9 +1054,18 @@ async def test_dm_admin_card_checks_the_tenants_server_live(
     member.roles = []
     member.guild_permissions = discord.Permissions(manage_guild=True)
     guild.fetch_member = AsyncMock(return_value=member)
+    callers = []
+
+    async def live_subject(_session, *, caller, **_kwargs):  # type: ignore[no-untyped-def]
+        # No Daimon admin grants: only the live server role counts.
+        callers.append(caller)
+        return SimpleNamespace(is_admin=caller.is_server_admin)
+
+    monkeypatch.setattr(confirmation_module, "load_live_subject", live_subject)
     factory, lookup = _dm_runtime_hook(monkeypatch, client=MagicMock(), guild=guild)
     check = factory.call_args.kwargs["current_admin"]
     assert await check("111") is True
+    assert callers[-1].platform_user_id == "111"
     member.guild_permissions = discord.Permissions.none()
     assert await check("111") is False
     assert guild.fetch_member.await_count == 2

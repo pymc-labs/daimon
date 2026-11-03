@@ -106,7 +106,13 @@ class _Recorder:
 def _gate(tmp_path: Path, *, expires: dt.datetime = NOW + dt.timedelta(minutes=5)):
     recorder = _Recorder()
     bearer = RunBearer(token="run-bearer", expires_at=expires, revoked_marker=tmp_path / "revoked")
-    gate = McpGate(recorder, bearer=bearer, daimon_token="daimon-token", clock=lambda: NOW)
+    gate = McpGate(
+        recorder,
+        bearer=bearer,
+        daimon_token="daimon-token",
+        allowed_tools=ALLOWED_TOOLS,
+        clock=lambda: NOW,
+    )
     return gate, recorder, bearer
 
 

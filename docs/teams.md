@@ -1,8 +1,7 @@
 # Microsoft Teams
 
 Connect Daimon to Microsoft Teams, then learn how it behaves in 1:1 chats,
-channels and group chats. Read this if you run the deployment or administer a
-Microsoft 365 organisation.
+channels and group chats.
 
 ## Before you start
 
@@ -72,8 +71,8 @@ az bot msteams create -g <resource-group> -n <bot-name>
 
 Pick the admin team. Its owners are Daimon's admins, who create routines,
 replace shared keys, top up and see everyone's usage. In Teams, open the team's more menu, select **Get link to team** and copy the
-`groupId` parameter. To change admins, change the team's owners. A removed
-owner loses admin within about a minute.
+`groupId` parameter. To change admins, change the team's owners. Owners are
+read fresh, so a removed owner loses admin at once.
 
 Add the values to `.env`:
 
@@ -247,7 +246,7 @@ Shared channels hosted by another organisation cannot be subscribed.
 | 1:1 chats work but channel @mentions do not | The app was added to the team before the endpoint was right. Remove it under team > **Manage team** > **Apps** and add it again. Also pick the mention from autocomplete. |
 | A reply on a bot message gets no answer in a private channel | Teams sends only posts that @mention the bot. Mention it, or enable private-channel messages. |
 | Every Daimon process fails at startup | A `DAIMON_TEAMS__` value is missing, or `DAIMON_TEAMS__ADMIN_TEAM_ID` is not a group ID. |
-| Nobody is an admin | `DAIMON_TEAMS__ADMIN_TEAM_ID` is unset, or the app is not installed in that team. `teams.admin_team.lookup_failed` in the logs gives the reason. After a failed read the last owners count for up to an hour. |
+| Nobody is an admin | `DAIMON_TEAMS__ADMIN_TEAM_ID` is unset, or the app is not installed in that team. `teams.admin_team.lookup_failed` in the logs gives the reason. A failed read grants no admin. |
 | `teams.tenant_reconcile_failed` in the logs | Daimon could not finish setting up your organisation and refuses turns until it does. The log line says why. |
 | It stopped answering after months | The client secret has likely expired. Create a new one (step 1), update `.env` and run `docker compose --profile teams up -d`, which also recreates `mcp`. |
 
@@ -301,8 +300,9 @@ agent.
 | `billing` | Your usage and credit left. Admins also see spend, channel budgets and can add credit. |
 | `support` | Ask a person, spending one support credit. |
 
-Admins are the owners of the admin team, and nobody else. The app must be
-installed in that team so Daimon can read its owners. Channel rules, budgets
+Platform admins are the owners of the admin team. The app must be
+installed in that team so Daimon can read its owners. See
+[admins](admins.md) for granted admins. Channel rules, budgets
 and environments work as on Discord and Slack.
 
 ### Files

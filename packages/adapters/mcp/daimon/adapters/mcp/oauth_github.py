@@ -14,6 +14,7 @@ import secrets
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, cast
@@ -27,7 +28,6 @@ from daimon.adapters.mcp.github_pages import github_page
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
 from daimon.adapters.mcp.web_icons import icon, platform_mark
 from daimon.core.agent_ownership import owns_agent
-from daimon.core.agent_pins import agent_pin_names
 from daimon.core.config import Settings
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
@@ -42,9 +42,11 @@ from daimon.core.github_connect_cards import (
     audience_line,
 )
 from daimon.core.github_credentials import decrypt_token, encrypt_token
-from daimon.core.github_panel import requester_manages_agent
 from daimon.core.github_requester_access import list_github_pages
-from daimon.core.native_admins import AdminAttestationUnavailable, attest_discord_admin
+from daimon.core.native_admins import (
+    AdminAttestationUnavailable,
+    attest_discord_membership,
+)
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import github_access, github_app_installations, github_connect
 from daimon.core.stores.accounts import get_account_with_tenant
@@ -114,21 +116,25 @@ async def _attest_native_admin(
     sessionmaker: async_sessionmaker[AsyncSession],
     fernet: MultiFernet,
     http_client: httpx.AsyncClient | None = None,
+    db_session: AsyncSession | None = None,
 ) -> bool:
-    """Read native authority for the invitation's bound principal, outside a write transaction."""
+    """Attest live platform authority; GitHub never accepts delegated authority."""
     user_id = requester.platform_user_id
     if user_id is None:
         raise AdminAttestationUnavailable("platform principal unavailable")
     if requester.platform == "discord":
-        return await attest_discord_admin(
+        facts = await attest_discord_membership(
             guild_id=requester.external_id,
             platform_user_id=user_id,
             settings=settings,
             http_client=http_client,
         )
+        return facts.is_admin
     if requester.platform == "slack":
         try:
-            async with sessionmaker() as session:
+            async with (
+                nullcontext(db_session) if db_session is not None else sessionmaker()
+            ) as session:
                 row = await get_slack_bot_token(session, team_id=requester.external_id)
         except SQLAlchemyError as exc:
             raise AdminAttestationUnavailable("workspace bot token lookup failed") from exc
@@ -2059,21 +2065,26 @@ def build_oauth_github_routes(
             return requester.tenant_id == invitation.tenant_id and requester.role == Role.ADMIN
         if deployment_default is None:
             return False
-        metadata = live.metadata if live is not None else {}
-        return await requester_manages_agent(
-            session,
-            tenant_id=invitation.tenant_id,
-            account_id=invitation.requester_account_id,
-            platform=requester.platform,
-            platform_user_id=requester.platform_user_id,
-            agent_name=invitation.agent_name,
-            ma_agent_id=invitation.agent_ma_id,
-            default=deployment_default,
-            is_daimon_managed=(
-                None if live is None else metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-            ),
-            other_names=agent_pin_names(live.name, metadata) if live is not None else (),
-        )
+        if live is None or requester.tenant_id != invitation.tenant_id:
+            return False
+        # A current owner manages their own agent without platform authority.
+        if await requester_owns_agent(session, invitation, live):
+            return True
+        # Only platform authority enters account roles. Preserve the existing
+        # native snapshot for viewing this link; every save separately attests
+        # live authority below. Delegates need a fresh check even to view it.
+        if requester.role is Role.ADMIN:
+            return True
+        try:
+            return await _attest_native_admin(
+                requester=requester,
+                settings=settings,
+                sessionmaker=sessionmaker,
+                fernet=fernet,
+                db_session=session,
+            )
+        except AdminAttestationUnavailable:
+            return False
 
     async def requester_owns_agent(
         session: AsyncSession,
@@ -2110,7 +2121,9 @@ def build_oauth_github_routes(
             )
             authenticated = invitation is not None
             if invitation is None and invitation_hash:
-                status, candidate = await github_connect.invitation_status(session, invitation_hash)
+                status, candidate = await github_connect.invitation_status(
+                    session, invitation_hash, settings=settings
+                )
                 if status == "used" and candidate is not None:
                     invitation = candidate
             if invitation is None:
@@ -2157,7 +2170,9 @@ def build_oauth_github_routes(
         token = request.path_params["token"]
         invitation_hash = github_connect.digest(token)
         async with sessionmaker() as session:
-            status, invitation = await github_connect.invitation_status(session, invitation_hash)
+            status, invitation = await github_connect.invitation_status(
+                session, invitation_hash, settings=settings
+            )
             if status != "active":
                 if invitation is None:
                     return _error()
@@ -2192,7 +2207,10 @@ def build_oauth_github_routes(
             .decode()
         )
         async with sessionmaker.begin() as session:
-            if await github_connect.get_invitation(session, invitation_hash) is None:
+            if (
+                await github_connect.get_invitation(session, invitation_hash, settings=settings)
+                is None
+            ):
                 return _error()
             await github_connect.create_flow(
                 session,
@@ -2229,9 +2247,13 @@ def build_oauth_github_routes(
         cookie = request.cookies.get(_COOKIE, "")
         if not code:
             async with sessionmaker() as session:
-                refused_flow = await github_connect.get_flow(session, state=state, cookie=cookie)
+                refused_flow = await github_connect.get_flow(
+                    session, state=state, cookie=cookie, settings=settings
+                )
                 refused_invitation = (
-                    await github_connect.get_invitation(session, refused_flow.invitation_hash)
+                    await github_connect.get_invitation(
+                        session, refused_flow.invitation_hash, settings=settings
+                    )
                     if refused_flow is not None
                     else None
                 )
@@ -2248,7 +2270,9 @@ def build_oauth_github_routes(
                 else ""
             )
         async with sessionmaker() as session:
-            flow = await github_connect.get_flow(session, state=state, cookie=cookie)
+            flow = await github_connect.get_flow(
+                session, state=state, cookie=cookie, settings=settings
+            )
         if flow is None or flow.encrypted_user_token is not None:
             return _error()
         verifier = decrypt_token(fernet, flow.encrypted_verifier)
@@ -2281,7 +2305,12 @@ def build_oauth_github_routes(
             retry_url = f"{root}/oauth/github/connect/{retry_token}" if retry_token else None
             return _error("Couldn't reach GitHub", 502, retry_url)
         async with sessionmaker.begin() as session:
-            if await github_connect.get_flow(session, state=state, cookie=cookie) is None:
+            if (
+                await github_connect.get_flow(
+                    session, state=state, cookie=cookie, settings=settings
+                )
+                is None
+            ):
                 return _error()
             saved = await github_connect.set_user_token(
                 session,
@@ -2298,7 +2327,7 @@ def build_oauth_github_routes(
         state = request.query_params.get("state") or request.cookies.get(_STATE_COOKIE, "")
         async with sessionmaker() as session:
             flow = await github_connect.get_flow(
-                session, state=state, cookie=request.cookies.get(_COOKIE, "")
+                session, state=state, cookie=request.cookies.get(_COOKIE, ""), settings=settings
             )
         if flow is None or flow.encrypted_user_token is None:
             return _error()
@@ -2337,7 +2366,9 @@ def build_oauth_github_routes(
                 used = await successful_page(state, cookie)
                 return used if used is not None else _cancelled_page()
             async with sessionmaker() as session:
-                invitation = await github_connect.get_invitation(session, cancelled.invitation_hash)
+                invitation = await github_connect.get_invitation(
+                    session, cancelled.invitation_hash, settings=settings
+                )
                 requester = (
                     await get_account_with_tenant(
                         session, account_id=invitation.requester_account_id
@@ -2374,13 +2405,17 @@ def build_oauth_github_routes(
             return _error(message, status, retry_confirm_url)
 
         async with sessionmaker() as session:
-            flow = await github_connect.get_flow(session, state=state, cookie=cookie)
+            flow = await github_connect.get_flow(
+                session, state=state, cookie=cookie, settings=settings
+            )
             if flow is None or flow.encrypted_user_token is None or flow.github_user_id is None:
                 used = await successful_page(state, cookie, invitation_hash)
                 if used is not None:
                     return used
                 return _error()
-            invitation = await github_connect.get_invitation(session, flow.invitation_hash)
+            invitation = await github_connect.get_invitation(
+                session, flow.invitation_hash, settings=settings
+            )
             if invitation is None:
                 used = await successful_page(state, cookie, invitation_hash)
                 if used is not None:
@@ -2641,6 +2676,7 @@ def build_oauth_github_routes(
                 )
                 for repo_id in selected_ids
             ]
+            still_admin = False
             acts_as_owner = False
             if not invitation.operator_issued:
                 if (
@@ -2699,6 +2735,7 @@ def build_oauth_github_routes(
                         cookie=cookie,
                         github_user_id=flow.github_user_id,
                         repos=repos,
+                        verified_platform_admin=still_admin,
                         requester_manages_agent=manages,
                         expected_agent_snapshot=snapshot,
                     )
@@ -2962,9 +2999,7 @@ def build_oauth_github_routes(
                 for repo_id in selected_ids
             ]
             live = await live_agent(invitation)
-            is_daimon_managed = (
-                None if live is None else live.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-            )
+            still_admin = False
             if not invitation.operator_issued:
                 if (
                     invitation.requester_platform_user_id is not None
@@ -2996,21 +3031,9 @@ def build_oauth_github_routes(
                         cookie=cookie,
                         github_user_id=flow.github_user_id,
                         repos=repos,
+                        verified_platform_admin=still_admin,
                         requester_manages_agent=deployment_default is not None
-                        and await requester_manages_agent(
-                            session,
-                            tenant_id=invitation.tenant_id,
-                            account_id=invitation.requester_account_id,
-                            platform=requester.platform,
-                            platform_user_id=requester.platform_user_id,
-                            agent_name=invitation.agent_name,
-                            ma_agent_id=invitation.agent_ma_id,
-                            default=deployment_default,
-                            is_daimon_managed=is_daimon_managed,
-                            other_names=agent_pin_names(live.name, live.metadata)
-                            if live is not None
-                            else (),
-                        ),
+                        and await may_manage_agent(session, invitation, requester, live),
                     )
                     if saved:
                         for detail in sorted(details, key=lambda item: item.installation_id):

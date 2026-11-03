@@ -88,7 +88,13 @@ async def test_update_agent_tool_and_service_make_the_same_ma_write(
     servers: list[Any] = [{"name": "docs", "type": "url", "url": "https://docs.example.com/mcp"}]
 
     via_tool: list[dict[str, Any]] = []
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     await _update_agent_impl(
         _runtime(_recording_client(tenant_id, via_tool), db_session_factory),
         auth,

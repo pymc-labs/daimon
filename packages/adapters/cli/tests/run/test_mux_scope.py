@@ -369,7 +369,7 @@ def test_command_resolves_the_path_once_and_reports_a_refusal_cleanly(
     async def build_runtime(_settings: Settings):  # type: ignore[no-untyped-def]
         yield None
 
-    async def conversation(**kwargs: object) -> int:
+    async def conversation(_settings, _session, _message, **kwargs: object) -> int:
         seen.append(str(kwargs["path"]))
         raise SessionTenantMismatch("session-foreign", owner)
 
@@ -382,7 +382,7 @@ def test_command_resolves_the_path_once_and_reports_a_refusal_cleanly(
     monkeypatch.setattr(command, "load_settings", lambda: settings)
     monkeypatch.setattr(command, "load_turn_settings", lambda: TurnSettings(path="mux"))
     monkeypatch.setattr(command, "build_runtime", build_runtime)
-    monkeypatch.setattr(command, "run_conversation", conversation)
+    monkeypatch.setattr(command, "_run_with_defaults", conversation)
 
     result = CliRunner().invoke(main_mod.app, ["run", "hi", "--session", "session-foreign"])
 

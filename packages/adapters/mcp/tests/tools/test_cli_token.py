@@ -133,10 +133,8 @@ async def test_get_cli_token_gcloud_with_no_agent_id_in_jwt_raises_no_binding(
     import json
 
     fernet_key = SecretStr(Fernet.generate_key().decode("ascii"))
-    # gcloud provider checks settings.credentials.google_sa_json FIRST, then
-    # agent_id (Pitfall 2). To exercise the agent_id-missing path we must
-    # supply a non-None google_sa_json (the JSON is never parsed because the
-    # agent_id check fails first).
+    # Agent identity is checked before credential selection. This deliberately
+    # incomplete service-account JSON must never be parsed without an agent_id.
     sa_json = json.dumps({"type": "service_account", "client_email": "x@x"})
     settings = Settings(
         database=DatabaseSettings(

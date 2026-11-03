@@ -34,6 +34,7 @@ from daimon.adapters.mcp.tools._ctx import (
 )
 from daimon.adapters.mcp.tools.discord import verify_participation_scope
 from daimon.adapters.mcp.tools.teams._participation import verify_teams_participation_scope
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.scope_cascade import resolve_above
 from daimon.core.stores.thread_participation import (
     clear_participation_mode,
@@ -162,7 +163,7 @@ async def _set_thread_participation_impl(
 
     scope, scope_id = _target_scope(thread_id, channel_id)
     if scope is not ParticipationScope.THREAD:
-        _require_admin(auth)
+        _require_admin(auth, action=DelegatedAction.CHANNEL_PERMISSIONS)
     if scope is ParticipationScope.THREAD and mode == "disabled":
         raise ToolError(_DISABLED_NEEDS_A_WIDER_SCOPE)
     parent_id = await _verify_scope(runtime, auth, scope, scope_id)

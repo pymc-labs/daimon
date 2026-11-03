@@ -38,13 +38,14 @@ from daimon.adapters.slack.routines_panel.views import (
     build_loading_view,
 )
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.posted_controls.routines import apply_routine_action
-from daimon.core.routines import can_manage_routine, routine_label
+from daimon.core.routines import can_manage_routine, can_read_routine_output, routine_label
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import get_routine, pause_routine, resume_routine
 from slack_sdk.errors import SlackApiError
@@ -185,7 +186,12 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
             async with runtime.sessionmaker() as session, session.begin():
 
                 async def allowed(row: RoutineRow) -> bool:
-                    is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
+                    is_admin = await resolve_is_admin(
+                        client,
+                        user_id=user_id,
+                        host_team_id=team_id,
+                        action=DelegatedAction.ROUTINES,
+                    )
                     return can_manage_routine(row, user_id=user_id, is_admin=is_admin)
 
                 result = await apply_routine_action(
@@ -203,6 +209,8 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
                     text = (
                         "This routine no longer exists."
                         if result == "gone"
+                        else "This routine is already on."
+                        if result == "already_running"
                         else "Only the routine's creator or a workspace admin "
                         "can pause or resume this routine."
                     )
@@ -250,7 +258,9 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
                 return
             # Authority gate before showing the confirm modal (re-checked at
             # submit for TOCTOU safety). Admin OR creator.
-            is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
+            is_admin = await resolve_is_admin(
+                client, user_id=user_id, host_team_id=team_id, action=DelegatedAction.ROUTINES
+            )
             if not can_manage_routine(row, user_id=user_id, is_admin=is_admin):
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel_id or user_id,
@@ -288,7 +298,9 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
             # Same authority as pause/resume/delete. last_result_tail is the
             # agent's own output from a scheduled run and routinely carries
             # business data, so reading it is not a lesser act than pausing.
-            is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
+            is_admin = await resolve_is_admin(
+                client, user_id=user_id, host_team_id=team_id, action=DelegatedAction.ROUTINES
+            )
             if not can_manage_routine(row, user_id=user_id, is_admin=is_admin):
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel_id or user_id,
@@ -297,6 +309,14 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
                         "Only the routine's creator or a workspace admin "
                         "can read this routine's output."
                     ),
+                )
+                return
+
+            if not can_read_routine_output(row, user_id=user_id):
+                await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+                    channel=channel_id or user_id,
+                    user=user_id,
+                    text="Only the owner can read a private routine result.",
                 )
                 return
 
@@ -331,7 +351,9 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
 
         elif action_value == "create":
             # Admin gate at click time. Refused → ephemeral.
-            is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
+            is_admin = await resolve_is_admin(
+                client, user_id=user_id, host_team_id=team_id, action=DelegatedAction.ROUTINES
+            )
             if not is_admin:
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel_id or user_id,

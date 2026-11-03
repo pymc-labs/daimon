@@ -46,6 +46,7 @@ from daimon.core.stores.thread_sessions import (
     get_live_thread_session,
     get_thread_session_by_id,
 )
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import MARouter, list_response
@@ -152,6 +153,7 @@ def _snapshot(
         repo_branch=None,
         memory_store_id=None,
         vault_id=None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     return snapshot.model_copy(update={"env_resource_id": env_resource_id})
 

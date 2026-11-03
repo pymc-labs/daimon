@@ -33,7 +33,7 @@ from daimon.adapters.discord.agent_setup.expiry import (
 )
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.agent_setup.tenant import resolve_tenant_for_panel
-from daimon.adapters.discord.checks import admin_caller, is_guild_admin
+from daimon.adapters.discord.checks import admin_caller
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_ownership import owns_agent
@@ -146,14 +146,16 @@ async def send_coding_tools_access(
         )
         return
     agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(ma_agent.id))
-    caller = admin_caller(interaction.user).model_copy(
-        update={"is_server_admin": is_guild_admin(interaction)}  # pyright: ignore[reportArgumentType]  # reads only user and guild
-    )
+    caller = admin_caller(interaction.user)
     try:
         async with runtime.sessionmaker() as session:
             policy = await load_access_policy(session, tenant_id=tenant_id)
             subject = await load_live_subject(
-                session, tenant_id=tenant_id, platform="discord", caller=caller
+                session,
+                tenant_id=tenant_id,
+                platform="discord",
+                caller=caller,
+                action=None,
             )
             owned = not subject.is_admin and await owns_agent(
                 session,

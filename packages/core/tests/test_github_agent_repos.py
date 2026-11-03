@@ -13,7 +13,7 @@ from daimon.core._models import (
     TenantGitHubRepo,
 )
 from daimon.core.access_policy import AgentRule, TenantAccessPolicy
-from daimon.core.github_panel import can_manage_agent_github, requester_manages_agent
+from daimon.core.github_panel import can_manage_agent_github
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.native_admins import AdminCaller
 from daimon.core.scope import DeploymentDefault
@@ -483,18 +483,6 @@ async def test_server_wide_and_scoped_rows_coexist_and_the_agents_own_row_wins(
 @pytest.mark.asyncio
 async def test_confirm_refuses_a_non_admin_requester(db_session: AsyncSession) -> None:
     world = await _world(db_session)
-    manages = await requester_manages_agent(
-        db_session,
-        tenant_id=world.tenant_id,
-        account_id=world.member_id,
-        platform="discord",
-        platform_user_id="u1",
-        agent_name="TeamA",
-        ma_agent_id="ma_team_a",
-        default=DEFAULT,
-        is_daimon_managed=False,
-    )
-    assert not manages
     assert (
         await _connect(
             db_session,
@@ -504,7 +492,7 @@ async def test_confirm_refuses_a_non_admin_requester(db_session: AsyncSession) -
             ma_agent_id="ma_team_a",
             repo_ids=(101,),
             manages=True,
-            manages_at_confirm=manages,
+            manages_at_confirm=False,
         )
         is None
     )

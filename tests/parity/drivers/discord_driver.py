@@ -27,8 +27,9 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from itertools import count
 from types import SimpleNamespace
-from typing import Any, Literal, cast
+from typing import Any, ClassVar, Literal, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
@@ -66,6 +67,7 @@ from daimon.core.credential_requests import CUSTOM_ID_PATTERN, CUSTOM_ID_PREFIX
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
+from daimon.core.membership import Membership
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.posted_controls import CardKind
 from daimon.core.purge import AccountPurgeResult
@@ -76,6 +78,7 @@ from daimon.core.stores.domain import CredentialRequestRow, Role
 from daimon.core.stores.tenants import set_provision_status
 from daimon.core.stores.turn_origins import create_origin
 from daimon.core.turn.deps import build_turn_deps
+from daimon.testing.membership import FixtureMembershipResolver
 from daimon.testing.turn_fakes import deps_for
 from daimon.testing.turn_leg import turn_leg
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
@@ -289,6 +292,8 @@ class _ParityBotUser(SimpleNamespace):
 class DiscordDriver:
     """Drives turns through `DaimonBot.on_message`, the real Discord entry point."""
 
+    _request_ids: ClassVar[Iterator[int]] = count(1_000_000)
+
     param_id: str = "discord"
     #: Every card this driver posted or edited, oldest first.
     _cards: list[CapturedCard] = field(default_factory=list[CapturedCard])
@@ -355,6 +360,11 @@ class DiscordDriver:
         intents = discord.Intents.default()
         intents.message_content = True
         bot = DaimonBot(runtime=runtime, intents=intents)
+        bot.membership_resolver = FixtureMembershipResolver()  # type: ignore[assignment]
+        bot.runtime = replace(
+            bot.runtime,
+            turn_deps=replace(bot.runtime.turn_deps, membership_resolver=bot.membership_resolver),
+        )
         bot._connection.user = cast(discord.ClientUser, _ParityBotUser(id=999))  # pyright: ignore[reportPrivateUsage]
         return bot
 
@@ -362,6 +372,8 @@ class DiscordDriver:
         self, *, workspace_id: str, channel_id: str, user_id: str, text: str
     ) -> discord.Message:
         message = MagicMock(spec=discord.Message)
+        # Keep request identity concrete when a reused session renders a delta.
+        message.id = next(self._request_ids)
         message.content = f"<@999> {text}"
         message.author = MagicMock()
         message.author.bot = False
@@ -412,6 +424,7 @@ class DiscordDriver:
     ) -> list[str]:
         runtime = self._make_runtime(sessionmaker, router, billing_config=billing_config)
         bot = self._make_bot(runtime)
+        bot.membership_resolver.members[user_id] = Membership(is_member=True)  # type: ignore[attr-defined]
         message = self._make_message(
             workspace_id=workspace_id, channel_id=channel_id, user_id=user_id, text=text
         )
@@ -487,6 +500,8 @@ class DiscordDriver:
             external_id=workspace_id,
             platform_user_id=user_id,
             is_admin=True,
+            is_platform_admin=True,
+            token_kind="cli",
         )
         return runtime, auth
 
@@ -675,6 +690,7 @@ class DiscordDriver:
             deployment_default=DeploymentDefault(),
         )
         auth = AuthIdentity(
+            chat_session_id="parity-card-session",
             account_id=parity_account_id(tenant_id, user_id),
             tenant_id=tenant_id,
             role=Role.ADMIN,
@@ -682,6 +698,7 @@ class DiscordDriver:
             external_id=workspace_id,
             platform_user_id=user_id,
             is_admin=True,
+            is_platform_admin=True,
         )
         # The tools refuse to mint for an agent they cannot pin by MA id, and
         # take that id off the origin's configuration target when the caller
@@ -705,6 +722,7 @@ class DiscordDriver:
                 shared_channel=False,
                 expires_at=now + timedelta(minutes=30),
                 now=now,
+                chat_session_id="parity-card-session",
             )
 
         posted: list[dict[str, Any]] = []

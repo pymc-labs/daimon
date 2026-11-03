@@ -200,6 +200,7 @@ async def build_runtime(settings: Settings) -> AsyncIterator[SlackRuntime]:
             resolver_cache=resolver_cache,
             billing_config=billing_config,
         )
+        turn_deps.start_context_providers()
         try:
             yield SlackRuntime(
                 settings=settings,
@@ -214,6 +215,7 @@ async def build_runtime(settings: Settings) -> AsyncIterator[SlackRuntime]:
                 slack_http=slack_http,
             )
         finally:
+            await turn_deps.context_providers.aclose()
             await drain_outcomes()
             await drain_budget_notices()
             await engine.dispose()

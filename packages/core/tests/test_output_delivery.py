@@ -998,6 +998,16 @@ def test_oversize_notice_names_the_file_the_limit_and_how_to_get_it() -> None:
     ), "notice text"
 
 
+def test_oversize_notice_names_whose_file_it_is() -> None:
+    """In a shared thread the notice can land during another person's turn, so
+    it says whose session kept the file."""
+    notice = render_oversize_notice(
+        SkippedFile(file_id="f", filename="big.csv", size_bytes=25 * 1024 * 1024),
+        for_whom="<@U_ALICE>",
+    )
+    assert notice.startswith("For <@U_ALICE>: `big.csv` is 25 MB"), notice
+
+
 def test_oversize_notice_quotes_the_callers_limit() -> None:
     notice = render_oversize_notice(
         SkippedFile(file_id="f", filename="render.mp4", size_bytes=int(182.34 * 1024 * 1024)),

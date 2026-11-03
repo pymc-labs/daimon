@@ -332,6 +332,7 @@ async def ready_and_continue(
             target_ma_agent_id=row.ma_agent_id,
             target_name=row.agent_name,
             reason="github_access_ready",
+            attended=True,
             idempotency_key=row.id,
             requested_work=row.requested_work,
             available_at=current,

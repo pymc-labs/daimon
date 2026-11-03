@@ -176,7 +176,7 @@ async def handle_coding_tools_click(
         )
         return
 
-    is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
+    is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id, action=None)
     async with runtime.sessionmaker() as session:
         roster = await load_panel_roster(
             session,
@@ -209,9 +209,7 @@ async def handle_coding_tools_click(
             channel_id=channel_id or None,
             target=target,
             account_id=account_id,
-            caller=await admin_caller(
-                runtime, client, tenant_id=tenant_id, user_id=user_id, is_admin=is_admin
-            ),
+            caller=await admin_caller(client, user_id=user_id),
         )
     except AccessPolicyUnreadable:
         await post_ephemeral(
@@ -388,7 +386,11 @@ async def _authorize_mint(
     async with runtime.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=tenant_id)
         subject = await load_live_subject(
-            session, tenant_id=tenant_id, platform="slack", caller=caller
+            session,
+            tenant_id=tenant_id,
+            platform="slack",
+            caller=caller,
+            action=None,
         )
         owned = not subject.is_admin and await owns_agent(
             session,

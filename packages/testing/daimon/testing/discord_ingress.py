@@ -12,6 +12,7 @@ import json
 import time
 import uuid
 from collections.abc import Callable, Coroutine, Mapping
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -20,7 +21,7 @@ from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core._models import ProviderBindingSlot, ThreadLease, TurnCardIntent
 from daimon.core.channel_backend import channel_ref, current_backend
-from daimon.core.stores.accounts import get_account
+from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.mux_state import get_binding
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import list_live_thread_sessions
@@ -29,6 +30,7 @@ from daimon.testing.discord_runtime_capture import (
     require_discord_runtime_capture as _require_runtime_bound,
 )
 from daimon.testing.discord_surface import DiscordPostEvent, OfflineDiscordGateway
+from daimon.testing.membership import FixtureMembershipResolver
 from discord.http import HTTPClient, MultipartParameters
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import Provider, Scope, ThreadRef
@@ -503,7 +505,7 @@ class DiscordIngress:
         async with self.bot.runtime.sessionmaker() as session:
             tenant, account = (
                 await get_tenant(session, tenant_id),
-                await get_account(session, account_id),
+                await get_account_with_tenant(session, account_id=account_id),
             )
             backend = await current_backend(
                 session, channel_ref(tenant_id, "discord", str(channel["id"]))
@@ -532,6 +534,13 @@ class DiscordIngress:
             state,
             actual_guild.id,
             state.user.id,
+        )
+        self.bot.membership_resolver = FixtureMembershipResolver(account.platform_user_id or "")  # type: ignore[assignment]
+        self.bot.runtime = replace(
+            self.bot.runtime,
+            turn_deps=replace(
+                self.bot.runtime.turn_deps, membership_resolver=self.bot.membership_resolver
+            ),
         )
         self._backend_revision = backend
         self._opened = True

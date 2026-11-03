@@ -289,12 +289,17 @@ async def _hand_off_task_impl(
             target_name=destination_name,
             requested_work=queued_work,
             reason="task_handoff",
+            attended=origin.attended,
             idempotency_key=uuid.uuid4(),
         )
     )
 
     # Queued work reaches only a destination that can read the caller's session.
-    admin = AdminCaller(platform_user_id=auth.platform_user_id, is_server_admin=auth.is_admin)
+    admin = AdminCaller(
+        platform_user_id=auth.platform_user_id,
+        is_server_admin=auth.is_platform_admin,
+        role_ids=auth.verified_role_ids,
+    )
     recorded = (
         await recorded_thread_sessions(
             runtime.client,
@@ -333,6 +338,7 @@ async def _hand_off_task_impl(
                     account_id=auth.account_id,
                     admin=admin,
                     via_agent_key=auth.agent_id is not None,
+                    human_invocation=origin.human_invocation is True,
                     # A person's own unheld credential: a copy they own may take
                     # this thread even before it answers anywhere.
                     may_own=may_own(auth) and auth.hold is None,
@@ -344,6 +350,7 @@ async def _hand_off_task_impl(
                 default=runtime.deployment_default,
                 now=datetime.now(UTC),
                 recorded=recorded,
+                membership_resolver=runtime.membership_resolver,
             )
             recorded = await locked_thread_sessions(
                 session, tenant_id=auth.tenant_id, platform=platform, thread_id=origin.thread_id
@@ -431,6 +438,7 @@ async def _hand_off_task_impl(
                     target_ma_agent_id=request.target_ma_agent_id,
                     target_name=request.target_name,
                     reason=request.reason,
+                    attended=request.attended,
                     idempotency_key=request.idempotency_key,
                     requested_work=request.requested_work,
                 )
@@ -726,6 +734,11 @@ def register_task_continuity_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         connections and memory; conversation, decisions and files move with the
         requester. Posted files stay posted. No extra billed turn unless
         `continuation` is set.
+
+        `origin_context_id` must name this execution's origin and match the
+        calling session's signed grant. Empty IDs and other sessions' origins
+        refuse, even for the same account and agent. Attendance comes from
+        that verified origin; queueing work does not grant human approval.
 
         `agent_id`: the destination's current id from `list_agents`; a recreated
         namesake is refused. `continuation` is null unless the person asked the

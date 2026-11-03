@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import json
 import os
 import unittest.mock
 import uuid
@@ -35,6 +36,7 @@ from daimon.adapters.scheduler.main import (
     _run_loops,  # pyright: ignore[reportPrivateUsage]  # tick and usage-sweep loops
     _settle_promo_credit,  # pyright: ignore[reportPrivateUsage]  # test seam for the promo settlement wrapper
     _sweep_github_issued_tokens,  # pyright: ignore[reportPrivateUsage]  # test seam for the closed-token prune wrapper
+    _sweep_long_jobs,  # pyright: ignore[reportPrivateUsage]  # long-job claim boundary
     _sweep_privacy_deletes,  # pyright: ignore[reportPrivateUsage]  # privacy retry boundary
     _sweep_retired_turn_card_intents,  # pyright: ignore[reportPrivateUsage]  # test seam for the card-intent sweep wrapper
     _sweep_slack_event_dedup,  # pyright: ignore[reportPrivateUsage]  # test seam for the slack_event_dedup sweep wrapper
@@ -64,8 +66,8 @@ from daimon.core.stores import (
 from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores.accounts import delete_account
 from daimon.core.stores.domain import RoutineRow
-from daimon.core.stores.identity import find_platform_principal
-from daimon.core.stores.routines import create_routine, get_routine
+from daimon.core.stores.identity import find_platform_principal, get_or_create_platform_principal
+from daimon.core.stores.routines import create_routine, get_routine, update_routine
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.tenants import set_provision_status
 from daimon.core.stores.thread_sessions import create_thread_session
@@ -449,6 +451,8 @@ async def _refresh_mapped(
     monkeypatch.setattr("daimon.adapters.scheduler.main.rotate_live_app_tokens", rotate)
     archive = unittest.mock.AsyncMock()
     anthropic = SimpleNamespace(beta=SimpleNamespace(sessions=SimpleNamespace(archive=archive)))
+    anthropic.with_options = unittest.mock.Mock(return_value=anthropic)
+    anthropic.with_middleware = unittest.mock.Mock(return_value=anthropic)
     await _refresh_github_app_sessions(
         anthropic,
         db_session_factory,
@@ -1155,6 +1159,8 @@ async def test_mcp_app_session_with_erased_requester_is_retired(
             vaults=SimpleNamespace(archive=archive_vault),
         )
     )
+    anthropic.with_options = unittest.mock.Mock(return_value=anthropic)
+    anthropic.with_middleware = unittest.mock.Mock(return_value=anthropic)
     await _refresh_github_app_sessions(
         anthropic,
         db_session_factory,
@@ -1168,6 +1174,7 @@ async def test_mcp_app_session_with_erased_requester_is_retired(
     )
     desired.assert_not_awaited()
     archive_session.assert_awaited_once_with("mcp-erased-requester")
+    anthropic.with_options.assert_called_once_with(max_retries=0)
     archive_vault.assert_awaited_once_with("mcp-vault")
     revoke.assert_awaited_once()
 
@@ -2378,6 +2385,16 @@ async def test_fire_closure_threads_public_url_from_settings(
     await fake_client.close()
 
 
+async def test_sweep_long_jobs_logs_database_error_instead_of_ending_the_tick() -> None:
+    executor = SimpleNamespace(sweep=unittest.mock.AsyncMock(side_effect=SQLAlchemyError("boom")))
+
+    with structlog.testing.capture_logs() as logs:
+        await _sweep_long_jobs(executor)  # pyright: ignore[reportArgumentType]
+
+    executor.sweep.assert_awaited_once()
+    assert [entry["event"] for entry in logs] == ["scheduler.long_jobs_sweep.failed"]
+
+
 async def test_sweep_wizard_sessions_swallows_sqlalchemy_error(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -2603,6 +2620,8 @@ async def test_run_loops_keeps_ticking_while_a_usage_pass_is_in_flight() -> None
         await _run_loops(
             tick=tick,
             usage_sweep=endless_pass,
+            compute_sweep=unittest.mock.AsyncMock(),
+            compute_task_poll=unittest.mock.AsyncMock(),
             privacy_sweep=unittest.mock.AsyncMock(),
             interval_s=0.01,
             stop_event=stop,
@@ -2632,6 +2651,8 @@ async def test_run_loops_repeats_usage_passes_while_a_tick_is_in_flight() -> Non
         await _run_loops(
             tick=slow_tick,
             usage_sweep=usage_pass,
+            compute_sweep=unittest.mock.AsyncMock(),
+            compute_task_poll=unittest.mock.AsyncMock(),
             privacy_sweep=unittest.mock.AsyncMock(),
             interval_s=0.01,
             stop_event=stop,
@@ -2655,6 +2676,8 @@ async def test_run_loops_ends_when_a_usage_pass_crashes() -> None:
             await _run_loops(
                 tick=tick,
                 usage_sweep=crashing_pass,
+                compute_sweep=unittest.mock.AsyncMock(),
+                compute_task_poll=unittest.mock.AsyncMock(),
                 privacy_sweep=unittest.mock.AsyncMock(),
                 interval_s=0.01,
                 stop_event=asyncio.Event(),
@@ -2685,6 +2708,8 @@ async def test_run_loops_ends_when_a_tick_crashes() -> None:
             await _run_loops(
                 tick=crashing_tick,
                 usage_sweep=endless_pass,
+                compute_sweep=unittest.mock.AsyncMock(),
+                compute_task_poll=unittest.mock.AsyncMock(),
                 privacy_sweep=unittest.mock.AsyncMock(),
                 interval_s=0.01,
                 stop_event=asyncio.Event(),
@@ -2722,6 +2747,8 @@ async def test_run_loops_keeps_ticking_while_privacy_upstream_is_slow() -> None:
         await _run_loops(
             tick=tick,
             usage_sweep=unittest.mock.AsyncMock(),
+            compute_sweep=unittest.mock.AsyncMock(),
+            compute_task_poll=unittest.mock.AsyncMock(),
             privacy_sweep=slow_privacy,
             interval_s=0.01,
             stop_event=stop,
@@ -2809,6 +2836,7 @@ async def _fire_with_fake_turn(
     destination: tuple[str, str] | None,
     agent_posts_to: str | None,
     policy: object | None = None,
+    membership_resolver=None,
 ) -> tuple[RoutineRow, dict[str, object]]:
     from daimon.core.turn.state import ToolUseBlock, TurnState
 
@@ -2867,6 +2895,7 @@ async def _fire_with_fake_turn(
         settings=_make_test_settings(monkeypatch),
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
+        membership_resolver=membership_resolver,
     )
 
     async def fake_resolve(*args: object, **kwargs: object) -> str:
@@ -3285,6 +3314,8 @@ async def test_run_loops_without_a_usage_sweep_still_runs_privacy_deletes() -> N
         await _run_loops(
             tick=tick,
             usage_sweep=None,
+            compute_sweep=unittest.mock.AsyncMock(),
+            compute_task_poll=unittest.mock.AsyncMock(),
             privacy_sweep=privacy_sweep,
             interval_s=0.01,
             stop_event=stop,
@@ -3313,19 +3344,20 @@ async def test_only_a_routine_answering_its_owner_alone_reads_their_personal_mem
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Decided from the row at every fire: the same routine reads its owner's
-    personal memory while it posts nowhere, and stops once it gets a destination."""
+    """A routine with no destination and no channel mounts its owner's personal
+    memory; the same routine with a destination, or only a channel, does not."""
     now = datetime(2026, 5, 30, 12, 0, 0, tzinfo=UTC)
     tenant = await make_tenant(db_session)
     await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
     row = await create_routine(
         db_session,
-        created_by_user_id="u-owner",
+        created_by_user_id="123",
         agent_id="agent_z",
         agent_name="daimon",
         cron_expr="* * * * *",
         timezone_="UTC",
         trigger_message="trigger",
+        destination_kind=None,
         next_fire_at=now - timedelta(minutes=1),
         tenant_id=tenant.id,
     )
@@ -3346,10 +3378,13 @@ async def test_only_a_routine_answering_its_owner_alone_reads_their_personal_mem
         settings=_make_test_settings(monkeypatch),
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
+        membership_resolver=None,
     )
     posting = row.model_copy(
         update={"destination_kind": "channel", "destination_id": "chan-9", "channel_id": "chan-9"}
     )
+    # Made in a channel with no automatic delivery: the channel can still read it.
+    channel_only = row.model_copy(update={"channel_id": "chan-9"})
     with (
         unittest.mock.patch(
             "daimon.adapters.scheduler.main.run_turn", side_effect=capturing_run_turn
@@ -3359,10 +3394,17 @@ async def test_only_a_routine_answering_its_owner_alone_reads_their_personal_mem
     ):
         await fire(row)
         await fire(posting)
+        await fire(channel_only)
     await fake_client.close()
 
-    assert [call["personal_memory"] for call in calls] == [True, False]
-    assert calls[0]["account_id"] is not None, "the owner's account selects the store"
+    assert [call["personal_memory"] for call in calls] == [True, False, False]
+    async with db_session_factory() as session:
+        owner = await get_or_create_platform_principal(
+            session, tenant_id=tenant.id, platform=tenant.platform, external_id="123"
+        )
+    assert all(call["account_id"] == owner.account_id for call in calls), (
+        "personal memory and credentials are the routine owner's own"
+    )
 
 
 async def test_routine_fires_into_a_shared_channel_run_held_and_never_unheld(
@@ -3422,9 +3464,6 @@ async def test_routine_fires_into_a_shared_channel_run_held_and_never_unheld(
             update={"destination_kind": "channel", "destination_id": channel, "channel_id": channel}
         )
 
-    unplaced_thread = row.model_copy(
-        update={"destination_kind": "thread", "destination_id": "thread-1", "channel_id": None}
-    )
     with (
         unittest.mock.patch(
             "daimon.adapters.scheduler.main.run_turn", side_effect=capturing_run_turn
@@ -3435,6 +3474,18 @@ async def test_routine_fires_into_a_shared_channel_run_held_and_never_unheld(
         await fire(to_channel("chan-shared"))
         await fire(to_channel("chan-private"))
         await fire(row)
+        async with db_session_factory.begin() as session:
+            await update_routine(
+                session,
+                row.id,
+                tenant_id=tenant.id,
+                destination_kind="thread",
+                destination_id="thread-1",
+                channel_id=None,
+                edited_by="u-owner",
+            )
+            unplaced_thread = await get_routine(session, row.id, tenant_id=tenant.id)
+        assert unplaced_thread is not None
         await fire(unplaced_thread)
     await fake_client.close()
 
@@ -3478,6 +3529,389 @@ async def test_mcp_token_sweep_prunes_only_past_the_retention_grace(
     async with db_session_factory() as session:
         assert await get_mcp_token(session, jti=expired_jti) is None
         assert await get_mcp_token(session, jti=recent_jti) is not None
+
+
+@pytest.mark.parametrize("allowed", [True, False])
+async def test_role_gated_fire_fetches_fresh_creator_facts(
+    db_session, db_session_factory, monkeypatch, allowed
+):  # type: ignore[no-untyped-def]
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.membership import CachedMembershipResolver, Membership
+
+    calls = []
+
+    async def fetch(tenant_id, guild_id, user_id):  # type: ignore[no-untyped-def]
+        calls.append(user_id)
+        return Membership(is_member=True, role_ids=("123",) if allowed else ())
+
+    resolver = CachedMembershipResolver(fetch)
+    after, seen = await _fire_with_fake_turn(
+        db_session,
+        db_session_factory,
+        monkeypatch,
+        destination=None,
+        agent_posts_to=None,
+        policy=TenantAccessPolicy(invoker_role_ids=("123",)),
+        membership_resolver=resolver,
+    )
+    assert calls == ["U_DEST"]
+    if allowed:
+        assert seen and after.last_result_tail == "Weekly summary: all green."
+    else:
+        assert not seen and after.last_error == "invoker_not_allowed"
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["tenant_disabled", "outbound_disabled", "revoked", "unknown", "sealed", "thread_sealed"],
+)
+async def test_dm_fire_refuses_disabled_or_unverified_private_access(
+    db_session, db_session_factory, monkeypatch, mode
+):
+    from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
+    from daimon.core.config import DirectMessagePolicy
+    from daimon.core.membership import CachedMembershipResolver, Membership
+    from daimon.core.stores.access_policy import set_access_policy
+    from daimon.core.stores.direct_messages import set_dm_enabled
+
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="424242")
+    row = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="123",
+        agent_id="ag",
+        agent_name="daimon",
+        cron_expr="0 9 * * *",
+        timezone_="UTC",
+        trigger_message="summary",
+        destination_kind="dm",
+        channel_id="456",
+        source_thread_id="789",
+    )
+    await set_dm_enabled(db_session, tenant_id=tenant.id, enabled=mode != "tenant_disabled")
+    if mode in ("sealed", "thread_sealed"):
+        await set_access_policy(
+            db_session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(
+                channel_rules={
+                    "789" if mode == "thread_sealed" else "456": ChannelRule(readers="inside")
+                }
+            ),
+        )
+    await db_session.commit()
+    settings = _make_test_settings(monkeypatch).model_copy(
+        update={
+            "direct_message_policies": {
+                tenant.id: DirectMessagePolicy(
+                    mode="disabled" if mode == "outbound_disabled" else "members"
+                )
+            }
+        }
+    )
+
+    async def member(*args):
+        return Membership(is_member=None if mode == "unknown" else mode != "revoked")
+
+    client = AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999")
+    fire = await _build_fire(
+        client=client,
+        sm=db_session_factory,
+        settings=settings,
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+        membership_resolver=CachedMembershipResolver(member),
+    )
+    with unittest.mock.patch("daimon.adapters.scheduler.main.run_turn") as turn:
+        await fire(row)
+        turn.assert_not_called()
+    async with db_session_factory() as session:
+        after = await get_routine(session, row.id, tenant_id=tenant.id)
+    assert after is not None and after.last_error and after.delivery_status is None
+    await client.close()
+
+
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
+@pytest.mark.parametrize("kind", ["channel", "thread"])
+async def test_legacy_public_routines_still_fire_with_unknown_creation_source(
+    db_session, db_session_factory, monkeypatch, platform, kind
+):
+    tenant = await make_tenant(db_session, platform=platform)
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    target = "789"
+    if kind == "thread" and platform == "slack":
+        target = "456:1710000000.000001"
+    elif kind == "thread" and platform == "teams":
+        target = "19:channel@thread.tacv2;messageid=789"
+    row = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="123",
+        agent_id="agent_z",
+        agent_name="daimon",
+        cron_expr="0 9 * * *",
+        timezone_="UTC",
+        trigger_message="summary",
+        destination_kind=kind,
+        destination_id=target,
+        channel_id="456",
+        source_provenance_known=False,
+    )
+    await db_session.commit()
+    client = AsyncAnthropic(api_key="offline", base_url="http://localhost:99999")
+    fire = await _build_fire(
+        client=client,
+        sm=db_session_factory,
+        settings=_make_test_settings(monkeypatch),
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+    )
+
+    async def resolve(*args, **kwargs):
+        return "agent_z"
+
+    with (
+        unittest.mock.patch("daimon.adapters.scheduler.main.resolve_agent", resolve),
+        unittest.mock.patch("daimon.adapters.scheduler.main.resolve_environment", resolve),
+        unittest.mock.patch("daimon.adapters.scheduler.main.run_turn", return_value="tail") as turn,
+    ):
+        await fire(row)
+        turn.assert_called_once()
+    async with db_session_factory() as session:
+        saved = await get_routine(session, row.id, tenant_id=tenant.id)
+    assert saved is not None and saved.delivery_status == "pending"
+    assert not saved.source_provenance_known
+    await client.close()
+
+
+@pytest.mark.parametrize("sandbox", ["default", "opted_in", "agent_changed", "environment_changed"])
+@pytest.mark.parametrize("agent_posted", [False, True])
+async def test_fire_has_no_sandbox_file_outputs_from_real_headless_turn(
+    db_session, db_session_factory, monkeypatch, agent_posted, sandbox
+):
+    """Sandbox tools are disabled before a routine runs, so it produces no files.
+
+    Only a routine an admin opted in keeps them on the wire at send time, and
+    only while the run's agent version and environment are the ones the
+    admin approved. After an edit to either, the run goes ahead without them
+    and the opt-in is cleared.
+    """
+    from dataclasses import replace
+    from datetime import timedelta
+
+    from daimon.core.authz import Subject
+    from daimon.core.routine_files import decode_payload
+    from daimon.core.stores.domain import SandboxPin
+    from daimon.core.stores.routines import set_sandbox_tools
+    from daimon.testing.ma import MARouter
+    from daimon.testing.ma_models import ma_agent, ma_environment
+    from mux.testing.drivers.anthropic.ma import build_fake_anthropic, list_response, sse_response
+    from mux.testing.drivers.anthropic.ma_models import ma_session
+
+    environment = ma_environment(id="env")
+    approved = SandboxPin(
+        agent_id="ag",
+        agent_version=ma_session(agent_id="ag").agent.version,
+        environment_id="env",
+        environment_updated_at=datetime.fromisoformat(environment.updated_at),
+    )
+    pin = {
+        "agent_changed": replace(approved, agent_version=approved.agent_version - 1),
+        "environment_changed": replace(
+            approved, environment_updated_at=approved.environment_updated_at - timedelta(hours=1)
+        ),
+    }.get(sandbox, approved)
+    builtins_on = sandbox == "opted_in"
+
+    tenant = await make_tenant(db_session, platform="slack")
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    row = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="U1",
+        agent_id="ag",
+        agent_name="daimon",
+        cron_expr="0 9 * * 1",
+        timezone_="UTC",
+        trigger_message="go",
+        destination_kind="channel",
+        destination_id="C123",
+    )
+    if sandbox != "default":
+        result = await set_sandbox_tools(
+            db_session,
+            row.id,
+            tenant_id=tenant.id,
+            enabled=True,
+            pin=pin,
+            set_by="admin",
+            actor=Subject(is_admin=True),
+            via="cli",
+        )
+        assert result is not None
+        row = result[0]
+    await db_session.commit()
+    router = MARouter()
+    snapshot = ma_session(id="ses_output", agent_id="ag", environment_id="env").model_dump(
+        mode="json"
+    )
+    snapshot["agent"]["tools"] = [
+        {
+            "type": "agent_toolset_20260401",
+            "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+            "configs": [
+                {"name": "bash", "enabled": True, "permission_policy": {"type": "always_allow"}}
+            ],
+        }
+    ]
+
+    def update_session(request, match):
+        snapshot["agent"].update(json.loads(request.content)["agent"])
+        return httpx.Response(200, json=snapshot)
+
+    def send_event(request, match):
+        [builtins] = snapshot["agent"]["tools"]
+        assert builtins["default_config"]["enabled"] is builtins_on
+        assert all(config["enabled"] is builtins_on for config in builtins["configs"])
+        return httpx.Response(200, json={"data": None})
+
+    router.add("POST", r"/v1/sessions/[^/]+$", update_session)
+    router.add(
+        "GET",
+        r"/v1/agents/([^/]+)",
+        lambda r, m: httpx.Response(200, json=ma_agent(id="ag").model_dump(mode="json")),
+    )
+    router.add(
+        "GET",
+        r"/v1/environments/([^/]+)",
+        lambda r, m: httpx.Response(200, json=environment.model_dump(mode="json")),
+    )
+    router.add(
+        "POST",
+        r"/v1/sessions",
+        lambda r, m: httpx.Response(
+            200,
+            json=snapshot,
+        ),
+    )
+    router.add(
+        "GET",
+        r"/v1/sessions/[^/]+$",
+        lambda r, m: httpx.Response(
+            200,
+            json=snapshot,
+        ),
+    )
+    router.add("POST", r"/v1/sessions/[^/]+/events", send_event)
+    now = datetime.now(UTC)
+    router.add(
+        "GET",
+        r"/v1/sessions/[^/]+/events/stream",
+        lambda r, m: sse_response(
+            [
+                *(
+                    [
+                        {
+                            "id": "evt_tool",
+                            "type": "agent.mcp_tool_use",
+                            "name": "send_message",
+                            "mcp_server_name": "daimon-mcp",
+                            "input": {"channel_id": "C123", "content": "Report"},
+                            "processed_at": now.isoformat(),
+                        },
+                        {
+                            "id": "evt_result",
+                            "type": "agent.mcp_tool_result",
+                            "mcp_tool_use_id": "evt_tool",
+                            "content": [{"type": "text", "text": "posted"}],
+                            "is_error": False,
+                            "processed_at": now.isoformat(),
+                        },
+                    ]
+                    if agent_posted
+                    else []
+                ),
+                {
+                    "id": "evt_msg",
+                    "type": "agent.message",
+                    "processed_at": now.isoformat(),
+                    "content": [{"type": "text", "text": "Here is the report."}],
+                },
+                {
+                    "id": "evt_end",
+                    "type": "session.status_idle",
+                    "processed_at": now.isoformat(),
+                    "stop_reason": {"type": "end_turn"},
+                },
+            ]
+        ),
+    )
+    router.add(
+        "GET",
+        r"/v1/files",
+        lambda r, m: list_response([]),
+    )
+    router.add(
+        "GET", r"/v1/vaults", lambda r, m: httpx.Response(200, json={"data": [], "has_more": False})
+    )
+    router.add(
+        "POST",
+        r"/v1/vaults",
+        lambda r, m: httpx.Response(
+            200,
+            json={
+                "id": "vlt_session",
+                "type": "vault",
+                "display_name": "test",
+                "metadata": None,
+                "archived_at": None,
+                "created_at": now.isoformat(),
+            },
+        ),
+    )
+    router.add(
+        "POST",
+        r"/v1/vaults/[^/]+/archive",
+        lambda r, m: httpx.Response(200, json={"id": "vlt_session", "type": "vault"}),
+    )
+    router.add(
+        "GET",
+        r"/v1/vaults/[^/]+/credentials",
+        lambda r, m: httpx.Response(200, json={"data": [], "has_more": False}),
+    )
+    monkeypatch.setattr(
+        "daimon.adapters.scheduler.main.resolve_agent", unittest.mock.AsyncMock(return_value="ag")
+    )
+    monkeypatch.setattr(
+        "daimon.adapters.scheduler.main.resolve_environment",
+        unittest.mock.AsyncMock(return_value="env"),
+    )
+    settings = _make_test_settings(monkeypatch)
+    settings = settings.model_copy(
+        update={"mcp": settings.mcp.model_copy(update={"public_url": None})}
+    )
+    fire = await _build_fire(
+        client=build_fake_anthropic(router.dispatch),
+        sm=db_session_factory,
+        settings=settings,
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+    )
+    await fire(row)
+    async with db_session_factory() as session:
+        after = await get_routine(session, row.id, tenant_id=tenant.id)
+    assert after is not None
+    assert after.last_error is None
+    assert after.delivery_status == ("skipped" if agent_posted else "pending")
+    assert after.delivery_note == ("agent_posted" if agent_posted else None)
+    payload = decode_payload(after.delivery_payload)
+    assert payload.text == ("" if agent_posted else "Here is the report.")
+    assert payload.files == []
+    assert after.last_result_tail == "Here is the report."
+    # A drifted opt-in is cleared, by the fire, without touching the run's result.
+    assert after.sandbox_tools_enabled is (sandbox == "opted_in")
+    if sandbox in ("agent_changed", "environment_changed"):
+        assert after.sandbox_tools_set_by == "agent_changed"
 
 
 @pytest.mark.parametrize("at_destination", [False, True], ids=["origin", "destination"])
@@ -3616,3 +4050,27 @@ async def test_thread_routine_checks_parent_and_retained_backend_before_anthropi
     )
     assert after.last_error == expected
     assert after.last_result_tail is None
+
+
+async def test_routine_cannot_fire_role_gated_agent_even_for_live_creator(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.core.access_policy import AgentRule, TenantAccessPolicy
+    from daimon.core.membership import CachedMembershipResolver, Membership
+
+    async def fetch(*_args: object) -> Membership:
+        return Membership(is_member=True, role_ids=("123",), is_admin=True)
+
+    after, seen = await _fire_with_fake_turn(
+        db_session,
+        db_session_factory,
+        monkeypatch,
+        destination=None,
+        agent_posts_to=None,
+        policy=TenantAccessPolicy(agent_rules={"daimon": AgentRule(invoker_role_ids=("123",))}),
+        membership_resolver=CachedMembershipResolver(fetch),
+    )
+    assert not seen
+    assert after.last_error == "invoker_not_allowed"

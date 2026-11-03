@@ -60,6 +60,7 @@ from daimon.core.stores.thread_sessions import (
     list_orphaned_turns,
 )
 from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.posture import Billed, BillingPosture
 from daimon.core.turn.prepare import ContinuityOutcome
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
@@ -266,6 +267,7 @@ def _seeded_snapshot(*, agent_id: str, environment_id: str) -> SessionSnapshot:
         repo_branch=None,
         memory_store_id=None,
         vault_id=None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
 
@@ -1265,6 +1267,9 @@ async def test_orchestrate_first_turn_when_new_thread_creates_session_row_and_wr
         assert delivery_kwargs["session_id"] == "sess-first-001"
         assert delivery_kwargs["channel_id"] == channel
         assert delivery_kwargs["thread_ts"] == thread_ts
+        assert delivery_kwargs["requester_user_id"] == event["user"], (
+            "the files name the person whose turn made them (#788)"
+        )
 
     # Assert thread_sessions row was created with platform="slack".
     async with db_session_factory() as s:
@@ -3266,7 +3271,16 @@ async def test_orchestrate_eyes_reaction_transport_error_does_not_leak_thread_sl
         )
     fake_slack_web_client.mock.get(  # pyright: ignore[reportUnknownMemberType]
         re.compile(r"https://slack\.com/api/users\.info.*"),
-        payload={"ok": True, "user": {"id": "U_TEST", "name": "tester", "team_id": team_id}},
+        payload={
+            "ok": True,
+            "user": {
+                "deleted": False,
+                "is_bot": False,
+                "id": "U_TEST_EYES_XPORT",
+                "name": "tester",
+                "team_id": team_id,
+            },
+        },
         repeat=True,
     )
     fake_slack_web_client.mock.get(  # pyright: ignore[reportUnknownMemberType]
@@ -3279,7 +3293,9 @@ async def test_orchestrate_eyes_reaction_transport_error_does_not_leak_thread_sl
         payload={
             "ok": True,
             "user": {
-                "id": "U_TEST",
+                "deleted": False,
+                "is_bot": False,
+                "id": "U_TEST_EYES_XPORT",
                 "name": "tester",
                 "is_admin": False,
                 "is_owner": False,
@@ -4389,6 +4405,22 @@ async def test_run_thread_turn_bind_phase_ceiling_does_not_escape_handle_app_men
         "text": "<@U_BOT> hello",
     }
 
+    _override_users_info(
+        fake_slack_web_client.mock,
+        payload={
+            "ok": True,
+            "user": {
+                "id": event["user"],
+                "team_id": team_id,
+                "deleted": False,
+                "is_bot": False,
+                "is_admin": False,
+                "is_owner": False,
+                "is_primary_owner": False,
+            },
+        },
+    )
+
     with (
         patch(
             "daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock
@@ -4606,6 +4638,22 @@ async def test_bind_phase_failure_leaves_no_cancel_registry_entry(
         "user": "U_AUTHOR_BIND_FAIL",
         "text": "<@U_BOT> hello",
     }
+
+    _override_users_info(
+        fake_slack_web_client.mock,
+        payload={
+            "ok": True,
+            "user": {
+                "id": event["user"],
+                "team_id": team_id,
+                "deleted": False,
+                "is_bot": False,
+                "is_admin": False,
+                "is_owner": False,
+                "is_primary_owner": False,
+            },
+        },
+    )
 
     with (
         patch(
@@ -6151,8 +6199,10 @@ class TestPerTurnRoleUpsert:
                 "ok": True,
                 "user": {
                     "id": "U_ROLE_ADMIN",
-                    "name": "admin_user",
                     "team_id": team_id,
+                    "deleted": False,
+                    "is_bot": False,
+                    "name": "admin_user",
                     "is_admin": True,
                     "is_owner": False,
                     "is_primary_owner": False,
@@ -6246,8 +6296,21 @@ class TestPerTurnRoleUpsert:
             )
             await s.commit()
 
-        # conftest's default users.info payload (non-admin) is already registered
-        # by fake_slack_web_client; no override needed.
+        _override_users_info(
+            fake_slack_web_client.mock,
+            payload={
+                "ok": True,
+                "user": {
+                    "id": "U_ROLE_USER",
+                    "team_id": team_id,
+                    "deleted": False,
+                    "is_bot": False,
+                    "is_admin": False,
+                    "is_owner": False,
+                    "is_primary_owner": False,
+                },
+            },
+        )
 
         app, _ = make_orchestrate_app(db_session_factory)
 
@@ -6434,8 +6497,10 @@ class TestPerTurnRoleUpsert:
                 "ok": True,
                 "user": {
                     "id": "U_ROLE_ADMISSION_DENIED",
-                    "name": "member",
                     "team_id": team_id,
+                    "deleted": False,
+                    "is_bot": False,
+                    "name": "member",
                     "is_admin": False,
                     "is_owner": False,
                     "is_primary_owner": False,
@@ -7427,3 +7492,121 @@ async def test_a_failed_switch_read_drops_the_typed_bot_name_quietly(
     assert "plain_text_mention.lookup_failed" in [entry["event"] for entry in logs], (
         "the failure must be logged"
     )
+
+
+async def test_long_turn_queue_notice_posts_once() -> None:
+    from daimon.core.turn.thread_queue import QUEUE_NOTICE, QUEUE_NOTICE_AFTER_S, HeldThreads
+
+    app = _make_app()
+    now = [0.0]
+    app._processing = HeldThreads(clock=lambda: now[0])
+    app._processing.add(("T1", "C1", "100"))
+    client = MagicMock()
+    client.reactions_add = AsyncMock()
+    client.chat_postMessage = AsyncMock()
+    with patch("daimon.adapters.slack.app.get_turn_cap", new=AsyncMock(return_value=3)):
+        for ts, elapsed in [("101", 0.0), ("102", QUEUE_NOTICE_AFTER_S), ("103", 999.0)]:
+            now[0] = elapsed
+            await app._orchestrate(
+                {"ts": ts, "thread_ts": "100", "user": "U1", "text": "next"},
+                team_id="T1",
+                channel="C1",
+                event_ts=ts,
+                web_client=client,
+                tenant_id=uuid.uuid4(),
+            )
+            if ts == "101":
+                client.chat_postMessage.assert_not_awaited()
+    client.chat_postMessage.assert_awaited_once_with(
+        channel="C1", thread_ts="100", text=QUEUE_NOTICE
+    )
+    assert client.reactions_add.await_count == 3
+
+
+@pytest.mark.parametrize("transition", ["released", "next_turn"])
+async def test_queue_notice_delayed_by_reaction_is_fenced_to_held_turn(transition: str) -> None:
+    from daimon.core.turn.thread_queue import QUEUE_NOTICE_AFTER_S, HeldThreads
+
+    app = _make_app()
+    now = [0.0]
+    app._processing = HeldThreads(clock=lambda: now[0])
+    key = ("T1", "C1", "100")
+    app._processing.add(key)
+    now[0] = QUEUE_NOTICE_AFTER_S
+
+    async def react(**_kwargs: object) -> None:
+        await asyncio.sleep(0)
+        if transition == "released":
+            app._processing.discard(key)
+        else:
+            app._processing.start_turn(key)
+
+    client = MagicMock()
+    client.reactions_add = AsyncMock(side_effect=react)
+    client.chat_postMessage = AsyncMock()
+    with patch("daimon.adapters.slack.app.get_turn_cap", new=AsyncMock(return_value=3)):
+        await app._orchestrate(
+            {"ts": "101", "thread_ts": "100", "user": "U1", "text": "next"},
+            team_id="T1",
+            channel="C1",
+            event_ts="101",
+            web_client=client,
+            tenant_id=uuid.uuid4(),
+        )
+    client.chat_postMessage.assert_not_awaited()
+    client.reactions_add.assert_awaited_once()
+
+
+@pytest.mark.parametrize("external", [False, True])
+async def test_approval_thread_modal_acks_before_dispatch_and_rejects_external(external):
+    app = _make_app()
+    socket = _FakeSocketClient()
+
+    async def handle(runtime, payload):
+        socket.call_log.append("approval-thread")
+
+    with (
+        patch("daimon.adapters.slack.app.handle_here_approval_submission", new=handle),
+        patch("daimon.adapters.slack.app.is_external_interactive", return_value=external),
+    ):
+        await app.on_request(
+            socket,
+            SocketModeRequest(
+                type="interactive",
+                envelope_id="approval-thread-envelope",
+                payload={
+                    "type": "view_submission",
+                    "team": {"id": "T_TEST"},
+                    "user": {"id": "U_TEST"},
+                    "view": {"callback_id": "here_approvals_thread"},
+                },
+            ),
+        )
+        await asyncio.gather(*list(app._bg_tasks))
+    assert socket.call_log == (
+        ["send_socket_mode_response"]
+        if external
+        else ["send_socket_mode_response", "approval-thread"]
+    )
+
+
+@pytest.mark.parametrize("external", [False, True])
+async def test_approval_select_uses_verified_host_block_action_dispatch(external):
+    app = _make_app()
+    socket = _FakeSocketClient()
+    payload = _make_block_actions_payload(action_id="here_approvals")
+    payload["user"]["team_id"] = "T_OTHER" if external else "T_TEST"
+    handled = AsyncMock()
+    refused = AsyncMock()
+    with (
+        patch("daimon.adapters.slack.app.handle_here_approvals", new=handled),
+        patch.object(app, "_refuse_external_click", new=refused),
+    ):
+        await app.on_request(
+            socket,
+            SocketModeRequest(type="interactive", envelope_id="gate-select", payload=payload),
+        )
+        await asyncio.gather(*list(app._bg_tasks))
+    assert socket.call_log[0] == "send_socket_mode_response"
+    assert handled.await_count == (0 if external else 1)
+    assert refused.await_count == (1 if external else 0)

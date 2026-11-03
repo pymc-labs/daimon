@@ -8,7 +8,15 @@ Subprocess-driven turn surface. One process per turn. Stdout is NDJSON; stderr i
 Creates an MA session + local row. `--json` emits `{"session_id","agent","environment"}`.
 
 ### `daimon run --session ID [message | --message -]`
-Single turn. Streams NDJSON on stdout.
+Single turn. Streams NDJSON on stdout. Nobody answers a confirmation card
+here, so the turn is unattended: before the message, and before each batch of
+tool confirmations, the session's tool settings are set again from the current
+tool-safety policy, and every paused call is decided by the unattended rules
+(with tool safety on, reads run and a third-party write runs only if
+`DAIMON_TOOL_SAFETY__UNATTENDED_WRITES` lists it; on or off, a backend switch
+and Microsoft mail and invites are refused, and Microsoft file changes too with
+it on). The session's own tenant and channel tool rules apply. A failed gate
+stops the send and the turn fails.
 
 ### `daimon sessions get ID --json`
 Dump MA session transcript + metadata.

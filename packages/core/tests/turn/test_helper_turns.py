@@ -28,6 +28,7 @@ from daimon.core.stores import agent_helpers, helper_asks
 from daimon.core.stores.domain import HelperAskRow, Role, TenantRow
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.stores.thread_sessions import get_live_thread_session
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.admission import admit
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.prepare import bind_session
@@ -213,6 +214,7 @@ async def run_asking_turn(
         public_url=None,
         turn_path="mux",
         channel_backends=True,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     admission = await admit(
         deps,
@@ -223,6 +225,7 @@ async def run_asking_turn(
         channel_id="channel",
         thread_id=THREAD,
         now=datetime.now(UTC),
+        origin="chat",
     )
     assert admission.agent.id == PARENT_ID, "the thread is answered by the asking agent"
     prepared = await bind_session(

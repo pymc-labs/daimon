@@ -106,9 +106,10 @@ An agent has two kinds of memory store:
   depends on the agent following its instructions.
 
 Personal stores are mounted on chat turns on every platform, on the hub's `ask`
-and `start_turn`, and read-only on a routine whose result reaches only its
-owner. Per-agent keys, operator and CLI tokens, `daimon sessions create` and
-routines with a destination get the shared store alone.
+and `start_turn`, on a routine that reports to its owner's DM, and read-only on
+a routine with no destination or channel. Per-agent keys, operator and CLI
+tokens, `daimon sessions create` and every other routine get the shared store
+alone.
 
 Both mounts are read-only in three cases. This stops a turn from writing; it
 does not hide what others wrote to the shared store.
@@ -116,7 +117,7 @@ does not hide what others wrote to the shared store.
 - A channel or thread with limited readers, unless the agent is that channel's
   own.
 - A DM, when the tenant sets `dm_memory_read_only`.
-- A routine run.
+- A routine run, except an owner-DM routine, which follows the DM rule.
 
 Tightening access replaces an idle writable session. An active session refuses
 the restricted turn instead. The replacement skips the old session's checkpoint
@@ -201,7 +202,8 @@ A Discord private scope carries none, so nobody can, not even its owner.
 
 A DM shares the agent's shared memory and mounts the person's personal memory,
 both read-only if the tenant says so. Its spend counts toward the channel it
-came from.
+came from. A cold DM on Discord starts with no source channel and copies no
+public history. See [direct messages](direct-messages.md).
 
 ### Agent-initiated DMs
 
@@ -219,7 +221,8 @@ DM conversations are off until the tenant enables them. An admin runs
 `/dm-me enable` or `/dm-me disable`. Disabling stops new turns without
 cancelling a running one. `/dm-me` in a channel moves its recent text and a
 source link into a new private scope. Run it again to reset or pick another
-channel. Replies are text only, delivered when the turn completes.
+channel. On Discord a DM shows a progress card, approval cards and files.
+Elsewhere replies are text only, delivered when the turn completes.
 
 `/dm-me` is refused from a channel with limited readers, or a Discord thread
 under one, because the DM sits outside the rule and could reach open channels.
@@ -236,7 +239,8 @@ paths still carry something from one person to the other.
    messages, Daimon's answers and fetchable file URLs. The second person's agent
    can fetch those files into its sandbox and send them again.
 2. **Delivered outputs.** A file one session produced is posted to the thread,
-   so both see it.
+   so both see it. Each delivery names the person whose turn made it,
+   because it can land after the other person's turn has started.
 3. **Notebook links.** A link carries its access token, so the other person can
    open it, and run code in it if it is editable.
 4. **Shared agent memory.** What one session writes there, the other reads, in

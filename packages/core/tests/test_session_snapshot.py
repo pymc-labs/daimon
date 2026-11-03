@@ -61,6 +61,7 @@ from daimon.core.session_snapshot import (
     snapshot_from_retrieved_session,
 )
 from daimon.core.stores.domain import AgentFileRow
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 
 _NOW = datetime(2026, 9, 13, 12, 0, tzinfo=UTC)
 
@@ -103,6 +104,7 @@ def test_fingerprints_are_identical_when_the_same_configuration_is_rebuilt() -> 
         repo_branch=None,
         memory_store_id="memstore_1",
         vault_id="vault_1",
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     second = desired_snapshot(
         _agent(),
@@ -113,6 +115,7 @@ def test_fingerprints_are_identical_when_the_same_configuration_is_rebuilt() -> 
         repo_branch=None,
         memory_store_id="memstore_1",
         vault_id="vault_1",
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert fingerprint_identity(first) == fingerprint_identity(second), (
@@ -210,6 +213,7 @@ def test_env_hash_matches_the_bytes_the_credential_assembler_produces() -> None:
         repo_branch=None,
         memory_store_id=None,
         vault_id=None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert snapshot.env_sha256 == hash_env_bytes(assemble_env_bytes(rows)), (
@@ -234,6 +238,7 @@ def test_absent_system_prompt_hashes_differently_from_an_empty_one() -> None:
             repo_branch=None,
             memory_store_id=None,
             vault_id=None,
+            tool_safety=OPEN_TOOL_SAFETY,
         )
     )
     empty = fingerprint_identity(
@@ -246,6 +251,7 @@ def test_absent_system_prompt_hashes_differently_from_an_empty_one() -> None:
             repo_branch=None,
             memory_store_id=None,
             vault_id=None,
+            tool_safety=OPEN_TOOL_SAFETY,
         )
     )
 
@@ -353,6 +359,7 @@ def test_snapshot_survives_a_json_round_trip() -> None:
         env_file_id="file_env",
         repo_mount_path="/mnt/session/repo",
         repo_token_issued_at=1789000000,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     restored = SessionSnapshot.model_validate_json(snapshot.model_dump_json())
@@ -374,6 +381,7 @@ def test_identity_fingerprint_ignores_handles_and_diagnostics() -> None:
         repo_branch="main",
         memory_store_id="memstore_7",
         vault_id="vault_9",
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     rehandled = base.model_copy(
         update={
@@ -404,6 +412,7 @@ def test_a_model_change_moves_only_the_identity_fingerprint() -> None:
         repo_branch=None,
         memory_store_id=None,
         vault_id=None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     sonnet = desired_snapshot(
         _agent(model_id="claude-sonnet-5"),
@@ -414,6 +423,7 @@ def test_a_model_change_moves_only_the_identity_fingerprint() -> None:
         repo_branch=None,
         memory_store_id=None,
         vault_id=None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert fingerprint_identity(haiku) != fingerprint_identity(sonnet), (
@@ -434,6 +444,7 @@ def test_an_env_change_moves_only_the_mutable_fingerprint() -> None:
         repo_branch=None,
         memory_store_id=None,
         vault_id=None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     after = desired_snapshot(
         _agent(),
@@ -444,6 +455,7 @@ def test_an_env_change_moves_only_the_mutable_fingerprint() -> None:
         repo_branch=None,
         memory_store_id=None,
         vault_id=None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert fingerprint_mutable(before) != fingerprint_mutable(after), (
@@ -491,6 +503,7 @@ def test_a_hidden_server_is_not_in_the_desired_mutable_fingerprint() -> None:
         repo_branch=None,
         memory_store_id=None,
         vault_id=None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert filtered.mcp_servers_sha256 == hash_mcp_servers([daimon]), (
@@ -512,6 +525,7 @@ def test_read_only_policy_without_a_memory_store_does_not_create_phantom_drift()
         memory_store_id=None,
         memory_read_only=True,
         vault_id=None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     absent_mount = desired.model_copy(update={"memory_read_only": False})
     assert fingerprint_identity(desired) == fingerprint_identity(absent_mount)
@@ -565,6 +579,7 @@ def _desired_for(agent: BetaManagedAgentsAgent) -> SessionSnapshot:
         repo_branch=None,
         memory_store_id=None,
         vault_id=None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
 
@@ -760,6 +775,7 @@ def test_memory_access_covers_every_mounted_store(
         personal_memory_store_id="memstore_alice" if personal else None,
         memory_read_only=True,
         vault_id=None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert observed.memory_read_only is read_only
@@ -784,6 +800,7 @@ def test_a_snapshot_without_a_personal_store_keeps_its_recorded_fingerprint() ->
         repo_branch=None,
         memory_store_id="memstore_7",
         vault_id=None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     legacy = SessionSnapshot.model_validate(
         snapshot.model_dump(exclude={"personal_memory_store_id"})
@@ -806,6 +823,7 @@ def test_a_snapshot_recorded_with_the_external_flag_still_parses() -> None:
         repo_branch=None,
         memory_store_id=None,
         vault_id=None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     stored = json.loads(snapshot.model_dump_json()) | {"is_external": True}
 
@@ -827,6 +845,7 @@ def test_old_snapshot_unavailability_fields_are_ignored() -> None:
         repo_branch=None,
         memory_store_id=None,
         vault_id=None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     legacy = SessionSnapshot.model_validate(
         {
@@ -852,6 +871,7 @@ def test_refusal_keeps_first_time_and_announces_once_until_access_returns() -> N
         repo_branch=None,
         memory_store_id=None,
         vault_id=None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     first = snapshot.model_copy(update=refreshed_unavailable_state(snapshot, (url,), now=_NOW))
     assert first.unavailable_repos == ((url, _NOW),)
@@ -893,6 +913,7 @@ def test_native_fast_model_is_in_session_identity_and_pricing():
         repo_branch=None,
         memory_store_id=None,
         vault_id=None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     standard = desired_snapshot(agent, **kwargs)
     agent = agent.model_copy(
@@ -1003,6 +1024,7 @@ def _desired(system_override: str | None) -> SessionSnapshot:
         memory_store_id="memstore_1",
         vault_id="vault_1",
         system_override=system_override,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
 
