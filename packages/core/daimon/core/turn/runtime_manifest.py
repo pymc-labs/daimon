@@ -22,11 +22,16 @@ from daimon.core.turn.ceiling import remaining_s, turn_deadline
 from daimon.core.turn.errors import AdmissionDenied
 from mux.contracts.config import CapabilityRequirement, ConfigRevision, ThreadMode
 from mux.contracts.extensions import ExtensionConfig
-from mux.contracts.ids import ModelRef, ResourceRef, SkillRef
+from mux.contracts.ids import ModelRef, Provider, ResourceRef, SkillRef
 from mux.contracts.profile import Capability
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, ResourceBinding, ToolSpec
 from mux.errors import InvalidConfig, MuxError, UnsupportedCapability
-from mux.profiles import backend_selection, get_profile, native_agent_tools
+from mux.profiles import (
+    CONSENTED_DEFAULT_MODELS,
+    backend_selection,
+    get_profile,
+    native_agent_tools,
+)
 from mux.state.operations import request_digest
 from pydantic import (
     AfterValidator,
@@ -1281,22 +1286,16 @@ def preview_source_drops(source: BackendAgent, model: ModelRef) -> AgentSpec:
 #: switch card itself (`tool_safety.self_carded_tools`).
 _SWITCH_TOOL_DROP: Final[str] = f"mcp_tool:{DAIMON_SERVER_NAME}:request_agent_backend_switch"
 
-#: The provider defaults every consent on a default-model setting was recorded
-#: under: unchanged since agents could switch provider, and a consent stores no
-#: model (a release before this one must still read the row). When a default
-#: moves, those consents compare by digest alone again.
-_CONSENTED_DEFAULT_MODELS: Final[Mapping[str, str]] = {
-    "gemini": "gemini-3.8-flash",
-    "openai": "gpt-6-luna",
-}
 
-
-def _model_consented(backend: str, model: str | None, picked: str | None) -> bool:
+def _model_consented(backend: Provider, model: str | None, picked: str | None) -> bool:
     """The resolved `model` is the one the consent was confirmed for.
 
-    No model means the source's own, which the source pin covers.
+    A consent stores no model (a release before this one must still read the
+    row), so a default-model setting counts only while the provider default is
+    still the one such consents were recorded under. No model means the
+    source's own, which the source pin covers.
     """
-    return model is None or model == (picked or _CONSENTED_DEFAULT_MODELS.get(backend))
+    return model is None or model == (picked or CONSENTED_DEFAULT_MODELS.get(backend))
 
 
 def _consented(target: AgentSpec | None, consent: _BackendDropConsent) -> bool:
