@@ -5,7 +5,7 @@ import { MemoryRouter } from "react-router"
 import { describe, expect, it, vi } from "vitest"
 
 import { InheritedSegmented } from "./inherited"
-import { AgentLink, ChannelLink } from "./links"
+import { AgentLink, ChannelLink, EnvLink, SkillLink } from "./links"
 import { MultiPicker } from "./picker"
 
 const withMe = (caps: string[], ui: React.ReactNode) => {
@@ -52,6 +52,14 @@ describe("entity links", () => {
     withMe(["agents.view", "channels.view"], <><AgentLink id="ag_1" name="CLV Analyst" node="skill:s1" /><ChannelLink id="c1" name="Launch" kind="thread" /></>)
     expect(screen.getByRole("link", { name: /CLV Analyst/ })).toHaveAttribute("href", "/agents/ag_1?node=skill%3As1")
     expect(screen.getByRole("link", { name: "Launch" })).toHaveAttribute("href", "/channels?channel=c1")
+  })
+  it("opens skills and sandboxes only for editors, as their endpoints require", () => {
+    const ui = <><SkillLink id="s1" name="Report" /><EnvLink id="e1" name="Sandbox A" /></>
+    const { unmount } = withMe(["agents.view"], ui)
+    expect(screen.queryByRole("link")).not.toBeInTheDocument()
+    unmount()
+    withMe(["agents.edit"], ui)
+    expect(screen.getAllByRole("link")).toHaveLength(2)
   })
   it("reads plain without the capability, and never shows an id for a missing name", () => {
     withMe([], <><AgentLink id="ag_1" name="CLV Analyst" /><AgentLink id="ag_9" name={null} /><ChannelLink id="c9" name={null} /></>)

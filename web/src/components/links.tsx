@@ -36,7 +36,7 @@ export function ChannelLink({ id, name, kind, className }: Omit<Props, "avatar">
 }
 
 export function SkillLink({ id, name, className }: Omit<Props, "avatar">) {
-  return <EntityLink to={id && name ? `/agents/skills/${q(id)}` : null} cap="agents.view" label={name ?? "Deleted skill"} className={className} />
+  return <EntityLink to={id && name ? `/agents/skills/${q(id)}` : null} cap="agents.edit" label={name ?? "Deleted skill"} className={className} />
 }
 
 export function RoutineLink({ id, name, className }: Omit<Props, "avatar">) {
@@ -50,5 +50,5 @@ export function PersonLink({ id, name, avatar, className }: Props) {
 }
 
 export function EnvLink({ id, name, className }: Omit<Props, "avatar">) {
-  return <EntityLink to={id && name ? `/agents/environments?env=${q(id)}` : null} cap="agents.view" label={name ?? "Deleted sandbox"} className={className} />
+  return <EntityLink to={id && name ? `/agents/environments?env=${q(id)}` : null} cap="agents.edit" label={name ?? "Deleted sandbox"} className={className} />
 }
