@@ -44,6 +44,7 @@ from daimon.core.channel_tidy import record_turn_post
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.membership import MembershipResolver
 from daimon.core.message_split import split_fenced
+from daimon.core.outbound.opt_out import untag_opted_out
 from daimon.core.output_delivery import DeliverableFile
 from daimon.core.permissions import any_agent_rules, any_own_readers
 from daimon.core.routine_delivery import (
@@ -83,6 +84,15 @@ IdentityResolver = Callable[[RoutineRow, str], Awaitable[AgentIdentity]]
 AgentNamesResolver = Callable[[RoutineRow], Awaitable[tuple[str | None, ...]]]
 
 _UNRESOLVED = object()
+
+
+async def _untagged(
+    sessionmaker: async_sessionmaker[AsyncSession], row: RoutineRow, text: str
+) -> str:
+    """``text`` with anyone who opted out of tags shown by plain name."""
+    return await untag_opted_out(
+        sessionmaker, tenant_id=row.tenant_id, platform="discord", text=text
+    )
 
 
 async def _placement(
@@ -335,7 +345,9 @@ def make_discord_routine_poster(
                 return DeliveryOutcome(status="skipped", note="Fallback DM access changed.")
             dm = await open_dm(int(guild_id), int(creator))
             for chunk in split_fenced(
-                render_fallback_dm(row, reason, platform="discord"),
+                await _untagged(
+                    sessionmaker, row, render_fallback_dm(row, reason, platform="discord")
+                ),
                 _DISCORD_MAX_CHARS,
                 word_boundary=True,
             ):
@@ -408,7 +420,8 @@ def make_discord_routine_poster(
                 dm = await open_dm(int(tenant.external_id), int(row.destination_id))
                 text = (
                     f"Routine {row.trigger_message[:60]}\n"
-                    f"Run {row.id} / {row.last_fired_at}\n\n" + render_fallback_post(row)
+                    f"Run {row.id} / {row.last_fired_at}\n\n"
+                    + await _untagged(sessionmaker, row, render_fallback_post(row))
                 )
                 for chunk in split_fenced(text, _DISCORD_MAX_CHARS, word_boundary=True):
                     if (refused := await creator_still_cleared(row)) is not None:
@@ -493,7 +506,7 @@ def make_discord_routine_poster(
         )
         if client is None or identity is None or identity.builtin:
             for chunk in split_fenced(
-                render_fallback_post(row, platform="discord"),
+                await _untagged(sessionmaker, row, render_fallback_post(row, platform="discord")),
                 _DISCORD_MAX_CHARS,
                 word_boundary=True,
             ):
@@ -517,7 +530,9 @@ def make_discord_routine_poster(
         )
         for index, chunk in enumerate(
             split_fenced(
-                render_fallback_post(row, as_agent=True, platform="discord"),
+                await _untagged(
+                    sessionmaker, row, render_fallback_post(row, as_agent=True, platform="discord")
+                ),
                 limit,
                 word_boundary=True,
             )

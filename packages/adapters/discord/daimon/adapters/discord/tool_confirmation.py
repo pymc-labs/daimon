@@ -34,6 +34,7 @@ from daimon.core.confirmation import (
 )
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.native_admins import AdminCaller, load_live_subject
+from daimon.core.outbound.opt_out import untag_opted_out
 from daimon.core.posted_controls.confirmation import (
     NO_LONGER_PENDING_MESSAGE,
     NOT_YOURS_MESSAGE,
@@ -693,11 +694,19 @@ def discord_confirmation_hook(
 
         async def remind() -> None:
             # Once, after a while: the requester is pinged in the card's own thread.
+            who = f"<@{prompt.requester_platform_user_id}>"
+            if runtime is not None and tenant_id is not None:
+                # Someone who asked never to be tagged is named, not pinged.
+                untagged = await untag_opted_out(
+                    runtime.sessionmaker, tenant_id=tenant_id, platform="discord", text=who
+                )
+            else:
+                untagged = who
             await message.reply(
-                f"<@{prompt.requester_platform_user_id}>",
+                untagged,
                 embed=build_notice_embed(STILL_WAITING_MESSAGE, neutral=True),
                 allowed_mentions=discord.AllowedMentions(
-                    users=True, roles=False, everyone=False, replied_user=False
+                    users=untagged == who, roles=False, everyone=False, replied_user=False
                 ),
                 mention_author=False,
             )

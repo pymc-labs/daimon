@@ -103,6 +103,7 @@ async def deliver_session_outputs(
     turn_window: tuple[int, int] | None = None,
     answer: AnswerMessage | None = None,
     requester_id: int | None = None,
+    requester_label: str | None = None,
     reply_to: int | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> None:
@@ -119,6 +120,8 @@ async def deliver_session_outputs(
     """
     max_bytes = upload_limit(thread)
     mention, attributed = _attribution(thread, requester_id=requester_id, reply_to=reply_to)
+    if mention is not None and requester_label:
+        mention = requester_label
     # With no turn to tie it to, a file posted on its own is the file alone.
     file_attributed: dict[str, Any] = {"allowed_mentions": discord.AllowedMentions.none()}
     if mention is not None:
