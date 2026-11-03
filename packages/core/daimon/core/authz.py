@@ -96,6 +96,9 @@ class Action(StrEnum):
     # Change a workspace-wide access setting: who may start turns, DMs, DM memory,
     # typed @mentions (`daimon.core.workspace_settings`).
     SET_WORKSPACE_SETTINGS = "set_workspace_settings"
+    # Read how the workspace's integrations stand (GitHub, MCP sign-ins) or manage its
+    # operator tokens: server admins only, never an agent key or a client.
+    MANAGE_INTEGRATIONS = "manage_integrations"
     # Archive the copy a channel kept to its own agents was given, as it opens.
     ARCHIVE_CHANNEL_COPY = "archive_channel_copy"
     # Set, clear or raise the budget of one channel (`Place.channel_id`).
@@ -365,6 +368,7 @@ _CLIENT_REFUSED_ACTIONS = frozenset(
         Action.SET_CHANNEL_RULE,
         Action.SET_AGENT_RULE,
         Action.SET_WORKSPACE_SETTINGS,
+        Action.MANAGE_INTEGRATIONS,
         Action.SET_CHANNEL_BUDGET,
         Action.SET_CHANNEL_SKILLS,
         Action.SET_AGENT_TOOL_RULE,
@@ -666,6 +670,7 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         Action.SET_APPROVAL_GATE,
         Action.SET_AGENT_RULE,
         Action.SET_WORKSPACE_SETTINGS,
+        Action.MANAGE_INTEGRATIONS,
     ):
         # none, even on their own channel.
         if subject.is_admin and not subject.via_agent_key:

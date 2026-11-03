@@ -40,6 +40,7 @@ from daimon.adapters.mcp.tools.admins import change_admin
 from daimon.core import admin_authority
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.admin_authority import AUTHORITY_TTL_S, AuthorityCache, resolve_authority
+from daimon.core.authz import Subject
 from daimon.core.config import DiscordSettings
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
@@ -57,7 +58,7 @@ from daimon.core.mcp_auth import (
 )
 from daimon.core.membership import Membership
 from daimon.core.operator_tokens import OperatorTokenError
-from daimon.core.panel_operator_tokens import mint_panel_operator_token
+from daimon.core.panel_operator_tokens import mint_panel_operator_token, panel_admin
 from daimon.core.stores import agent_owners
 from daimon.core.stores.accounts import get_account, set_role
 from daimon.core.stores.daimon_admins import change_grant
@@ -295,13 +296,13 @@ async def test_panel_role_delegate_never_acquires_hub_sealed_transcript_exceptio
                     platform_user_id=principal.external_id,
                     is_platform_admin=authority.platform_admin,
                 )
-            with pytest.raises(OperatorTokenError, match="platform admin"):
+            with pytest.raises(OperatorTokenError, match="Ask an admin"):
                 await mint_panel_operator_token(
                     db_session,
+                    subject=Subject(is_admin=False, platform_user_id=principal.external_id),
                     tenant_id=tenant.id,
                     platform="discord",
                     platform_user_id=principal.external_id,
-                    is_platform_admin=False,
                     scopes=["tenant:read"],
                     label=None,
                     secret=SECRET,
@@ -466,10 +467,10 @@ async def test_panel_operator_mint_refuses_user_snapshot_then_verifies_after_adm
         db_session, tenant=tenant, platform="discord", external_id="111111111111111111"
     )
     arguments = dict(
+        subject=panel_admin(principal.external_id),
         tenant_id=tenant.id,
         platform="discord",
         platform_user_id=principal.external_id,
-        is_platform_admin=True,
         scopes=["tenant:read"],
         label="panel",
         secret=SECRET,

@@ -4,12 +4,15 @@ import datetime as dt
 import uuid
 
 import pytest
+from daimon.core.authz import Subject
 from daimon.core.mcp_auth import mint_agent_mcp_token, mint_operator_mcp_token, token_jti
 from daimon.core.operator_tokens import OperatorTokenError
 from daimon.core.panel_operator_tokens import (
     PANEL_SCOPES,
+    OperatorTokenNotAllowed,
     list_panel_operator_tokens,
     mint_panel_operator_token,
+    panel_admin,
     revoke_panel_operator_token,
 )
 from daimon.core.stores.accounts import get_account_with_tenant, set_role
@@ -19,6 +22,7 @@ from daimon.testing.factories import make_account, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession
 
 NOW = dt.datetime(2026, 9, 1, tzinfo=dt.UTC)
+ADMIN = panel_admin("U1")
 
 
 async def _mint(
@@ -33,7 +37,7 @@ async def _mint(
         await set_role(session, principal.account_id, Role.ADMIN)
     return await mint_panel_operator_token(
         session,
-        is_platform_admin=True,
+        subject=ADMIN,
         tenant_id=tenant_id,
         platform="slack",
         platform_user_id="U1",
@@ -88,13 +92,13 @@ async def test_revoke_touches_only_this_tenants_operator_tokens(db_session: Asyn
         )
     )
     assert not await revoke_panel_operator_token(
-        db_session, tenant_id=other.id, jti=minted.jti, now=NOW
+        db_session, subject=ADMIN, tenant_id=other.id, jti=minted.jti, now=NOW
     ), "another tenant's admin cannot revoke it"
     assert not await revoke_panel_operator_token(
-        db_session, tenant_id=tenant.id, jti=agent_jti, now=NOW
+        db_session, subject=ADMIN, tenant_id=tenant.id, jti=agent_jti, now=NOW
     ), "a coding-tool key is not revoked from here"
     assert await revoke_panel_operator_token(
-        db_session, tenant_id=tenant.id, jti=minted.jti, now=NOW
+        db_session, subject=ADMIN, tenant_id=tenant.id, jti=minted.jti, now=NOW
     )
     assert await list_panel_operator_tokens(db_session, tenant_id=tenant.id, now=NOW) == []
 
@@ -122,7 +126,34 @@ async def test_the_panel_neither_lists_nor_revokes_a_deployment_scoped_token(
     listed = await list_panel_operator_tokens(db_session, tenant_id=tenant.id, now=NOW)
     assert [row.jti for row in listed] == [minted.jti], "only tenant-scoped tokens are listed"
     assert not await revoke_panel_operator_token(
-        db_session, tenant_id=tenant.id, jti=cli_jti, now=NOW
+        db_session, subject=ADMIN, tenant_id=tenant.id, jti=cli_jti, now=NOW
     ), "the deployment's token is revoked only with the CLI"
     row = await get_mcp_token(db_session, jti=cli_jti)
     assert row is not None and row.revoked_at is None, "it keeps working"
+
+
+async def test_a_member_cannot_mint_or_revoke(db_session: AsyncSession) -> None:
+    tenant = await make_tenant(db_session)
+    minted = await _mint(db_session, tenant.id, ["tenant:read"])
+    member = Subject(is_admin=False, platform_user_id="U2")
+    with pytest.raises(OperatorTokenNotAllowed):
+        await mint_panel_operator_token(
+            db_session,
+            subject=member,
+            tenant_id=tenant.id,
+            platform="slack",
+            platform_user_id="U2",
+            scopes=["tenant:read"],
+            label=None,
+            secret=b"s" * 48,
+            now=NOW,
+        )
+    with pytest.raises(OperatorTokenNotAllowed):
+        await revoke_panel_operator_token(
+            db_session, subject=member, tenant_id=tenant.id, jti=minted.jti, now=NOW
+        )
+    keyed = Subject(is_admin=True, platform_user_id="U1", via_agent_key=True)
+    with pytest.raises(OperatorTokenNotAllowed):
+        await revoke_panel_operator_token(
+            db_session, subject=keyed, tenant_id=tenant.id, jti=minted.jti, now=NOW
+        )

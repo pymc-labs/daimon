@@ -30,6 +30,7 @@ from daimon.core.operator_tokens import OperatorTokenError
 from daimon.core.panel_audit import PanelOp, record_panel_write
 from daimon.core.panel_operator_tokens import (
     mint_panel_operator_token,
+    panel_admin,
     revoke_panel_operator_token,
 )
 from slack_sdk.web.async_client import AsyncWebClient
@@ -123,10 +124,10 @@ async def run_operator_token_submission(
         async with runtime.sessionmaker.begin() as session:
             minted = await mint_panel_operator_token(
                 session,
+                subject=panel_admin(user_id),
                 tenant_id=derive_tenant_uuid(platform="slack", workspace_id=team_id),
                 platform="slack",
                 platform_user_id=user_id,
-                is_platform_admin=True,
                 scopes=submission.scopes,
                 label=submission.label,
                 secret=secret.get_secret_value().encode(),
@@ -172,6 +173,7 @@ async def handle_operator_token_revoke(
     async with runtime.sessionmaker.begin() as session:
         revoked = await revoke_panel_operator_token(
             session,
+            subject=panel_admin(user_id),
             tenant_id=derive_tenant_uuid(platform="slack", workspace_id=meta.team_id),
             jti=jti,
             now=dt.datetime.now(dt.UTC),

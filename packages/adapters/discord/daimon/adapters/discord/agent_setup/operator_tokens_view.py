@@ -16,7 +16,7 @@ from typing import Final
 import structlog
 from daimon.adapters.discord.agent_setup.navigation import PanelViewBase
 from daimon.adapters.discord.agent_setup.state import PanelState
-from daimon.adapters.discord.checks import is_platform_admin, refuse_if_not_platform_admin
+from daimon.adapters.discord.checks import refuse_if_not_platform_admin
 from daimon.adapters.discord.layout import hairline, header
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
@@ -29,6 +29,7 @@ from daimon.core.panel_operator_tokens import (
     list_panel_operator_tokens,
     mint_panel_operator_token,
     operator_token_line,
+    panel_admin,
     revoke_panel_operator_token,
 )
 from daimon.core.stores.domain import McpTokenRow
@@ -186,7 +187,11 @@ class OperatorTokensView(PanelViewBase):
         await interaction.response.defer()
         async with self.runtime.sessionmaker.begin() as session:
             revoked = await revoke_panel_operator_token(
-                session, tenant_id=_tenant_id(self.state), jti=jti, now=dt.datetime.now(dt.UTC)
+                session,
+                subject=panel_admin(str(interaction.user.id)),
+                tenant_id=_tenant_id(self.state),
+                jti=jti,
+                now=dt.datetime.now(dt.UTC),
             )
         await self.audit(
             interaction,
@@ -237,10 +242,10 @@ class MintOperatorTokenModal(discord.ui.Modal):
             async with view.runtime.sessionmaker.begin() as session:
                 minted = await mint_panel_operator_token(
                     session,
+                    subject=panel_admin(str(interaction.user.id)),
                     tenant_id=_tenant_id(view.state),
                     platform="discord",
                     platform_user_id=str(interaction.user.id),
-                    is_platform_admin=is_platform_admin(interaction),
                     scopes=self.scopes.values,
                     label=self.label.value,
                     secret=secret.get_secret_value().encode(),
