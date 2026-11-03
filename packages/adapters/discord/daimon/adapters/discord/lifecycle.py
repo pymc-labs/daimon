@@ -530,12 +530,16 @@ class DiscordTurnLifecycle(OutputGate):
         """A person who asked never to be tagged gets the reply without the ping."""
         if self._tenant_id is None or self._requester_id is None:
             return False
-        skip = await tag_opt_outs(
-            self._sessionmaker,
-            tenant_id=self._tenant_id,
-            platform="discord",
-            user_ids=[str(self._requester_id)],
-        )
+        try:
+            skip = await tag_opt_outs(
+                self._sessionmaker,
+                tenant_id=self._tenant_id,
+                platform="discord",
+                user_ids=[str(self._requester_id)],
+            )
+        except Exception:  # named boundary: the answer still lands, just without a ping
+            log.warning("turn.opt_out_lookup_failed", exc_info=True)
+            return True
         return bool(skip)
 
     async def on_acknowledgment(self, phase: Acknowledgment) -> None:

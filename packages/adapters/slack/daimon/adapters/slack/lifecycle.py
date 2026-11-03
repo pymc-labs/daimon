@@ -562,12 +562,16 @@ class SlackTurnLifecycle(OutputGate):
         """A person who asked never to be tagged gets the answer without the ping."""
         if self._tenant_id is None:
             return False
-        skip = await tag_opt_outs(
-            self._sessionmaker,
-            tenant_id=self._tenant_id,
-            platform="slack",
-            user_ids=[self._author_id],
-        )
+        try:
+            skip = await tag_opt_outs(
+                self._sessionmaker,
+                tenant_id=self._tenant_id,
+                platform="slack",
+                user_ids=[self._author_id],
+            )
+        except Exception:  # named boundary: the answer still lands, just without a ping
+            log.warning("turn.opt_out_lookup_failed", exc_info=True)
+            return True
         return bool(skip)
 
     async def _untag(self, text: str) -> str:
@@ -575,24 +579,38 @@ class SlackTurnLifecycle(OutputGate):
         if self._tenant_id is None:
             return text
         new = [uid for uid in mentioned_user_ids(text, "slack") if uid not in self._opted_out]
+        unknown: frozenset[str] = frozenset()
         if new:
-            skip = await tag_opt_outs(
-                self._sessionmaker, tenant_id=self._tenant_id, platform="slack", user_ids=new
-            )
-            self._opted_out.update({uid: uid in skip for uid in new})
-            self._opt_out_names.update(
-                await opt_out_names(
-                    self._sessionmaker, tenant_id=self._tenant_id, platform="slack", user_ids=skip
+            try:
+                skip = await tag_opt_outs(
+                    self._sessionmaker, tenant_id=self._tenant_id, platform="slack", user_ids=new
                 )
-            )
-        skip = frozenset(uid for uid, out in self._opted_out.items() if out)
+                self._opted_out.update({uid: uid in skip for uid in new})
+                self._opt_out_names.update(
+                    await opt_out_names(
+                        self._sessionmaker,
+                        tenant_id=self._tenant_id,
+                        platform="slack",
+                        user_ids=skip,
+                    )
+                )
+            except Exception:  # named boundary: unchecked people are named, not pinged
+                log.warning("turn.opt_out_lookup_failed", exc_info=True)
+                unknown = frozenset(new)
+        skip = unknown | {uid for uid, out in self._opted_out.items() if out}
         return untag(text, "slack", skip, self._opt_out_names)
 
     async def _untag_blocks(self, blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """The card with opted-out mentions as plain names in every text it carries."""
         # One lookup over the whole card fills the cache; the walk then reuses it.
-        await self._untag(json.dumps(blocks))
-        skip = frozenset(uid for uid, out in self._opted_out.items() if out)
+        if self._tenant_id is None:
+            return blocks
+        raw = json.dumps(blocks)
+        await self._untag(raw)
+        # A person the lookup could not check is treated as opted out, as in _untag.
+        skip = frozenset(
+            uid for uid in mentioned_user_ids(raw, "slack") if self._opted_out.get(uid, True)
+        )
         if not skip:
             return blocks
 

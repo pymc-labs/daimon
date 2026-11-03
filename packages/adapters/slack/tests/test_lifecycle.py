@@ -2240,3 +2240,25 @@ async def test_terminal_success_when_answer_tags_an_opted_out_person_then_plain_
     text = _block_text(_last_update_blocks(fake_slack_web_client))
     assert "@Bo" in text and "<@U2>" not in text, "the opted-out person is named, not tagged"
     assert "<@U3>" in text, "everyone else keeps their tag"
+
+
+@pytest.mark.asyncio
+async def test_terminal_success_when_opt_out_lookup_fails_then_answer_lands_unpinged(
+    fake_slack_web_client: Any,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A lookup failure must not lose the answer, and nobody unchecked is pinged."""
+    tenant = await make_tenant(db_session, platform="slack", workspace_id="T_LC_OPT2")
+    await db_session.commit()
+    lc, *_ = _make_lifecycle(
+        fake_slack_web_client, sessionmaker=db_session_factory, tenant_id=tenant.id
+    )
+    await lc.post_initial()
+    with patch.object(lifecycle_mod, "tag_opt_outs", side_effect=OSError("db down")):
+        await lc.on_terminal_success(
+            TurnState(content=[TextBlock(kind="text", text="ask <@U2|Bo> today")])
+        )
+
+    text = _block_text(_last_update_blocks(fake_slack_web_client))
+    assert "ask @Bo today" in text, "the answer lands with the person named, not tagged"
