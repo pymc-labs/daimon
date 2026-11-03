@@ -306,6 +306,68 @@ def test_a_consent_from_before_fleet_removal_still_holds(provider: Provider, mod
     )
 
 
+def test_the_staging_gemini_consent_from_10_25_still_holds() -> None:
+    """Its stored losses in full, on the provider default, against today's gated set."""
+    from daimon.core.turn.runtime_manifest import _model_consented, _same_losses
+
+    gated_then = (
+        "add_skill",
+        "create_attachment_upload_url",
+        "create_notebook_upload_url",
+        "publish_report",
+    )
+    losses = ("builtin_tool:web_fetch", "builtin_tool:web_search", "memory")
+    losses += ("model_controls", "sandbox")
+    then = daimon_copy(
+        "gemini",
+        "gemini-3.8-flash",
+        asks=gated_then,
+        runs=("describe_agent", "get_long_job", "start_long_job", "create_watch"),
+        losses=losses,
+    )
+    assert then.declared_drops == (
+        "builtin_tool:web_fetch",
+        "builtin_tool:web_search",
+        "mcp_tool:daimon-mcp:add_skill",
+        "mcp_tool:daimon-mcp:create_attachment_upload_url",
+        "mcp_tool:daimon-mcp:create_notebook_upload_url",
+        "mcp_tool:daimon-mcp:publish_report",
+        "memory",
+        "model_controls",
+        "sandbox",
+    ), "the drops that consent stored"
+    today = daimon_copy(
+        "gemini",
+        "gemini-3.8-flash",
+        asks=(*gated_then, "start_long_job", "create_watch"),
+        runs=("describe_agent", "get_long_job"),
+        losses=losses,
+    )
+    assert _same_losses(today, consent_for(then)), "only Daimon's gating changed"
+    assert _model_consented("gemini", "gemini-3.8-flash", None), "its default model"
+
+
+@pytest.mark.parametrize(
+    ("backend", "model", "picked", "consented"),
+    [
+        ("gemini", "gemini-3.8-flash", None, True),
+        ("openai", "gpt-6-luna", None, True),
+        ("gemini", "gemini-4-argon", None, False),
+        ("openai", "gpt-6-astra", None, False),
+        ("gemini", "gemini-4-argon", "gemini-4-argon", True),
+        ("gemini", "gemini-3.8-flash", "gemini-4-argon", False),
+        ("anthropic", None, None, True),
+    ],
+)
+def test_losses_count_only_for_the_model_the_consent_was_for(
+    backend: str, model: str | None, picked: str | None, consented: bool
+) -> None:
+    """A moved provider default is another model: it never rides on an old consent."""
+    from daimon.core.turn.runtime_manifest import _model_consented
+
+    assert _model_consented(backend, model, picked) is consented, (backend, model, picked)
+
+
 @pytest.mark.parametrize(("provider", "model"), COPIES)
 def test_an_owner_ask_tool_daimon_later_gates_needs_no_new_confirmation(
     monkeypatch: pytest.MonkeyPatch, provider: Provider, model: str

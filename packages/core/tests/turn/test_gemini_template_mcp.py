@@ -992,7 +992,10 @@ async def test_an_old_consent_with_tools_and_any_other_difference_still_needs_a_
 
 
 @pytest.mark.parametrize(
-    "consent_request", [{**PARAMS, "backend_model": "gemini-4-argon"}], indirect=True
+    "consent_request",
+    [PARAMS, {**PARAMS, "backend_model": "gemini-4-argon"}],
+    indirect=True,
+    ids=["provider_default", "picked"],
 )
 async def test_a_tool_gated_after_the_switch_still_prepares_without_it(template, monkeypatch):
     """A release that gates one more Daimon tool asks no one to confirm again."""
@@ -1013,20 +1016,6 @@ def _asked_again(refused: pytest.ExceptionInfo[BaseException]) -> bool:
     error = refused.value
     cause = error.__cause__ if isinstance(error, AdmissionDenied) else error
     return getattr(cause, "reason", None) == "re_confirm"
-
-
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
-async def test_a_default_model_copy_holds_only_its_exact_consent(template, monkeypatch):
-    """The provider default is not pinned: a tool gated later asks again, as before."""
-    from daimon.core import tool_safety
-    from daimon.core.channel_backend import AgentBackendRefused
-
-    request, *_ = template
-    gated = tool_safety.confirmation_gated_tools() | {"search_tools"}
-    monkeypatch.setattr(tool_safety, "confirmation_gated_tools", lambda: gated)
-    with pytest.raises((AgentBackendRefused, AdmissionDenied)) as refused:
-        await _prepared(request)
-    assert _asked_again(refused), "only a pinned model compares losses"
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)

@@ -1281,6 +1281,23 @@ def preview_source_drops(source: BackendAgent, model: ModelRef) -> AgentSpec:
 #: switch card itself (`tool_safety.self_carded_tools`).
 _SWITCH_TOOL_DROP: Final[str] = f"mcp_tool:{DAIMON_SERVER_NAME}:request_agent_backend_switch"
 
+#: The provider defaults every consent on a default-model setting was recorded
+#: under: unchanged since agents could switch provider, and a consent stores no
+#: model (a release before this one must still read the row). When a default
+#: moves, those consents compare by digest alone again.
+_CONSENTED_DEFAULT_MODELS: Final[Mapping[str, str]] = {
+    "gemini": "gemini-3.8-flash",
+    "openai": "gpt-6-luna",
+}
+
+
+def _model_consented(backend: str, model: str | None, picked: str | None) -> bool:
+    """The resolved `model` is the one the consent was confirmed for.
+
+    No model means the source's own, which the source pin covers.
+    """
+    return model is None or model == (picked or _CONSENTED_DEFAULT_MODELS.get(backend))
+
 
 def _consented(target: AgentSpec | None, consent: _BackendDropConsent) -> bool:
     return (
@@ -1550,12 +1567,12 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
         target = preview_source_drops(
             source, ModelRef(provider=revision.backend, id=revision.model or spec.model.id)
         )
-        # The setting or the source pins the model, unless it is the provider's
-        # default, which a release can move: then only the exact digest holds.
-        model_pinned = revision.model is None or revision.model == setting.model
         if not (
             _consented(target, consent)
-            or (model_pinned and _same_losses(target, consent))
+            or (
+                _model_consented(revision.backend, revision.model, setting.model)
+                and _same_losses(target, consent)
+            )
             or _consented_before(target, spec.system, consent)
         ):
             raise AgentBackendRefused("re_confirm")

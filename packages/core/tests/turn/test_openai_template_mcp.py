@@ -472,12 +472,9 @@ async def test_a_preparation_that_fails_after_minting_revokes_the_credential(tem
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
-@pytest.mark.parametrize("template", ["gpt-6-astra"], indirect=True)
+@pytest.mark.parametrize("template", ["gpt-6-luna", "gpt-6-astra"], indirect=True)
 async def test_a_tool_gated_after_the_switch_keeps_the_copy_running(template, monkeypatch):
-    """A release that gates one more Daimon tool asks no one to confirm again.
-
-    The model is picked: a provider default is not pinned (see the Gemini tests).
-    """
+    """A release that gates one more Daimon tool asks no one to confirm again."""
     from daimon.core import tool_safety
 
     request, quote, wire, _ = template
