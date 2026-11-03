@@ -24,7 +24,7 @@ from daimon.core.outbound.mentions import ping_users
 from daimon.core.outbound.reach import NO_CARD, SHORT_CAPTION, TOO_LONG, ReachPlan, card_title
 from daimon.core.stores.domain import Role, TurnOriginRow
 from daimon.core.stores.reach_tallies import lock_tally
-from daimon.core.stores.turn_origins import create_origin
+from daimon.core.stores.turn_origins import bind_origin_session, create_origin
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall
 from daimon.testing.factories import make_account, make_tenant
 from fastmcp.exceptions import ToolError
@@ -304,3 +304,34 @@ async def test_turn_scope_when_no_running_origin_then_outside_client(
     assert scope.interactive, "outside clients get the length and caption rules"
     assert scope.origin is None, "and no card, so over budget fails closed"
     assert scope.key.startswith("client:jti-1"), "tallied per credential"
+
+
+async def test_turn_scope_when_two_turns_share_a_session_then_neither_borrows_the_other(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime, auth, _ = await _session_turn(sessionmaker, turns=2)
+
+    scope = await _outbound.turn_scope(runtime, auth)
+
+    assert scope.kind == "outside", "an ambiguous turn gets no card"
+    assert not scope.key.startswith("turn:"), "and no other turn's tally or approval"
+
+
+async def test_turn_scope_when_grant_names_its_origin_then_that_turn_only(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime, auth, origins = await _session_turn(sessionmaker, turns=2, session_id=None)
+    async with sessionmaker.begin() as session:
+        for origin in origins:
+            await bind_origin_session(session, origin_id=origin.id, chat_session_id=str(origin.id))
+
+    scopes = [
+        await _outbound.turn_scope(
+            runtime, dataclasses.replace(auth, chat_session_id=str(origin.id))
+        )
+        for origin in origins
+    ]
+
+    assert [s.key for s in scopes] == [f"turn:{o.id}" for o in origins], (
+        "each concurrent turn keeps its own tally"
+    )

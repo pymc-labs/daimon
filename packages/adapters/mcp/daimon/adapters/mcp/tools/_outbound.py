@@ -98,6 +98,18 @@ def _platform(auth: AuthIdentity) -> Platform:
     return "discord"
 
 
+def _own_origin(running: list[TurnOriginRow], session_id: str) -> TurnOriginRow | None:
+    """The calling turn's origin, or None when it cannot be told apart.
+
+    Native runtimes bind the grant to one origin's id. A session grant shared by
+    concurrent turns is ambiguous, so it gets no card and no other turn's tally.
+    """
+    exact = [o for o in running if str(o.id) == session_id]
+    if exact:
+        return exact[0]
+    return running[0] if len(running) == 1 else None
+
+
 async def turn_scope(runtime: McpRuntime, auth: AuthIdentity) -> TurnScope:
     """Unattended only when the server proves it started the turn; anything not a
     live turn with a card is an outside client."""
@@ -112,8 +124,7 @@ async def turn_scope(runtime: McpRuntime, auth: AuthIdentity) -> TurnScope:
             routine_name=(routine.name or routine.agent_name) if routine else None,
         )
     if auth.chat_session_id is not None:
-        running = await list_running_origins(runtime, auth)
-        origin = max(running, key=lambda o: o.created_at) if running else None
+        origin = _own_origin(await list_running_origins(runtime, auth), auth.chat_session_id)
         if origin is not None:
             # Only the server records origins, and it marks the ones nobody attends.
             return TurnScope(
