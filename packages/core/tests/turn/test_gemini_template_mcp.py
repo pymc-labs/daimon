@@ -987,3 +987,19 @@ async def test_an_old_consent_with_tools_and_any_other_difference_still_needs_a_
     monkeypatch.setattr(tool_safety, "self_carded_tools", lambda: frozenset({"add_skill"}))
     with pytest.raises((AgentBackendRefused, AdmissionDenied)):
         await _prepared(request)
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_tool_gated_after_the_switch_still_prepares_without_it(template, monkeypatch):
+    """A release that gates one more Daimon tool asks no one to confirm again."""
+    from daimon.core import tool_safety
+
+    request, quote, *_ = template
+    drop = "mcp_tool:daimon-mcp:search_tools"
+    assert drop not in quote.declared_drops, "search_tools ran when the switch was confirmed"
+    gated = tool_safety.confirmation_gated_tools() | {"search_tools"}
+    monkeypatch.setattr(tool_safety, "confirmation_gated_tools", lambda: gated)
+    selected, _ = await _prepared(request)
+    assert _connection(selected).tool_policy["allowed_tools"] == ["call_tool"], "it never runs"
+    assert drop in selected.target_spec.declared_drops, "still a named loss"
+    assert drop in (selected.target_spec.system or ""), "the model is told it is gone"
