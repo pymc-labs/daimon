@@ -244,7 +244,11 @@ async def test_send_message_when_batch_then_every_message_goes_out_and_counts_to
         },
     )
 
-    assert [(c, t) for c, t, _ in sent] == [("C1", "one"), ("C2", "two")], "each to its own place"
+    # The caller's name is unknown to Slack here, so the line still says someone asked.
+    assert [(c, t) for c, t, _ in sent] == [
+        ("C1", "one\nrequested by someone"),
+        ("C2", "two\nrequested by someone"),
+    ], "each to its own place"
     assert not ok.get("isError"), f"a batch within the plan is sent; got {ok!r}"
     assert refused.get("isError") is True, "three places past a plan of one are refused whole"
     assert len(sent) == 2, "a refused batch posts nothing"

@@ -23,6 +23,7 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.outbound.mentions import ping_users
 from daimon.core.outbound.reach import NO_CARD, SHORT_CAPTION, TOO_LONG, ReachPlan, card_title
 from daimon.core.stores.domain import Role, TurnOriginRow
+from daimon.core.stores.platform_names import KnownName, upsert_user_names
 from daimon.core.stores.reach_tallies import lock_tally
 from daimon.core.stores.tag_opt_outs import set_opt_out
 from daimon.core.stores.tenants import get_tenant
@@ -361,3 +362,32 @@ async def test_turn_scope_when_grant_names_its_origin_then_that_turn_only(
     assert [s.key for s in scopes] == [f"turn:{o.id}" for o in origins], (
         "each concurrent turn keeps its own tally"
     )
+
+
+@pytest.mark.parametrize(("stored", "expected"), [("Ann", "Ann"), (None, "someone")])
+async def test_prepare_posts_when_live_name_unknown_then_stored_name_else_someone(
+    sessionmaker, stored, expected
+):
+    """Who asked is always said: the live name, else the stored one, else "someone"."""
+    runtime, auth = await _setup(sessionmaker, "slack")
+    if stored:
+        async with sessionmaker.begin() as session:
+            tenant = await get_tenant(session, auth.tenant_id)
+            assert tenant is not None, "the tenant _setup made"
+            await make_platform_principal(
+                session, platform="slack", external_id="42", tenant=tenant
+            )
+            await upsert_user_names(
+                session,
+                tenant_id=auth.tenant_id,
+                platform="slack",
+                names={"42": KnownName(display_name=stored)},
+            )
+    [post] = await prepare_posts(
+        runtime,
+        auth,
+        [OutgoingPost(text="hello", place="home")],
+        plan=ReachPlan(threads=0, places=0, people=0),
+        scope=_scope(),
+    )
+    assert post.text == f"hello\nrequested by {expected}", "the attribution line is never dropped"

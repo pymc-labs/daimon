@@ -139,7 +139,7 @@ async def turn_scope(runtime: McpRuntime, auth: AuthIdentity) -> TurnScope:
                 origin=origin,
             )
     return TurnScope(
-        key=client_tally_key(auth.token_jti or str(auth.account_id), datetime.now(UTC)),
+        key=client_tally_key(str(auth.token_jti or auth.account_id), datetime.now(UTC)),
         kind="outside",
         own_places=frozenset(),
         requester_id=auth.platform_user_id,
@@ -180,16 +180,29 @@ async def _slack_user_name(runtime: McpRuntime, team_id: str, user_id: str) -> s
 async def _requester_name(
     runtime: McpRuntime, auth: AuthIdentity, place: str, user_id: str
 ) -> str | None:
-    """A display name for Slack and Teams, which have no mention that does not ping."""
+    """A display name for Slack and Teams, which have no mention that does not ping.
+
+    The live lookup first, then the name Daimon stored, then "someone": the line
+    saying who asked is never dropped.
+    """
+    name: str | None = None
     if auth.platform == "slack" and auth.external_id:
-        return await _slack_user_name(runtime, auth.external_id, user_id)
-    if auth.platform == "teams" and runtime.teams_client is not None:
+        name = await _slack_user_name(runtime, auth.external_id, user_id)
+    elif auth.platform == "teams" and runtime.teams_client is not None:
         try:
             member = await runtime.teams_client.get_member(place.split(";", 1)[0], user_id)
+            name = member.name if member else None
         except (httpx.HTTPError, ValueError):
-            return None
-        return member.name if member else None
-    return None
+            name = None
+    if name:
+        return name
+    stored = await opt_out_names(
+        runtime.session_factory,
+        tenant_id=auth.tenant_id,
+        platform=_platform(auth),
+        user_ids={user_id},
+    )
+    return stored.get(user_id) or "someone"
 
 
 async def prepare_posts(
