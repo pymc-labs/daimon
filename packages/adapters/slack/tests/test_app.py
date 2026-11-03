@@ -3672,13 +3672,13 @@ async def test_run_thread_turn_when_over_balance_blocks_before_session_create(
     assert rows == [], "over-balance turn must write zero usage_events rows"
 
 
-async def test_run_thread_turn_when_allowance_used_up_blocks_before_session_create(
+async def test_run_thread_turn_when_over_monthly_limit_blocks_before_session_create(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
 ) -> None:
-    """A person whose monthly allowance is used up: the gate blocks BEFORE create_session,
-    posts the allowance copy in-thread, and writes no usage_events row.
+    """A person past their monthly limit: the gate blocks BEFORE create_session,
+    posts the monthly-limit copy in-thread, and writes no usage_events row.
     """
     team_id = "T_ORCH_OVER_CAP"
     channel = "C_TEST"
@@ -3741,9 +3741,10 @@ async def test_run_thread_turn_when_allowance_used_up_blocks_before_session_crea
     cap_msgs = [
         b
         for b in post_bodies
-        if shown_text(b) == "You've used your Daimon credit.\n\nAsk an admin to add more."
+        if shown_text(b)
+        == "You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
     ]
-    assert cap_msgs, f"expected the allowance copy via chat.postMessage, got: {post_bodies}"
+    assert cap_msgs, f"expected the monthly-limit copy via chat.postMessage, got: {post_bodies}"
 
     rows = await usage_events.list_for_tenant(db_session, tenant_id=tenant_id)
     assert rows == [], "a refused turn must write zero usage_events rows"
@@ -4011,12 +4012,12 @@ async def test_run_thread_turn_reused_session_over_balance_blocks_and_skips_run_
     assert rows == [], "blocked reused-session turn must write zero usage_events rows"
 
 
-async def test_run_thread_turn_reused_session_allowance_used_up_blocks_and_skips_run_turn(
+async def test_run_thread_turn_reused_session_over_monthly_limit_blocks_and_skips_run_turn(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
 ) -> None:
-    """A follow-up turn on an already-live thread by a person whose allowance is used up
+    """A follow-up turn on an already-live thread by a person past their monthly limit
     is blocked by the gate before run_turn, and writes no usage_events row.
     """
     from daimon.core.stores.identity import get_or_create_platform_principal
@@ -4099,9 +4100,10 @@ async def test_run_thread_turn_reused_session_allowance_used_up_blocks_and_skips
     cap_msgs = [
         b
         for b in post_bodies
-        if shown_text(b) == "You've used your Daimon credit.\n\nAsk an admin to add more."
+        if shown_text(b)
+        == "You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
     ]
-    assert cap_msgs, f"expected the allowance copy via chat.postMessage, got: {post_bodies}"
+    assert cap_msgs, f"expected the monthly-limit copy via chat.postMessage, got: {post_bodies}"
 
     rows = await usage_events.list_for_tenant(db_session, tenant_id=tenant_id)
     assert rows == [], "blocked reused-session turn must write zero usage_events rows"

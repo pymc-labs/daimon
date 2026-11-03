@@ -2436,7 +2436,7 @@ class TestBillingAdmissionGate:
     @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
     @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
-    async def test_used_up_allowance_skips_turn(
+    async def test_over_monthly_limit_skips_turn(
         self,
         mock_resolve: AsyncMock,
         mock_create_session: AsyncMock,
@@ -2446,7 +2446,7 @@ class TestBillingAdmissionGate:
         db_session: AsyncSession,
         db_session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
-        """A person whose monthly allowance is used up gets no MA session and no turn."""
+        """A person past their monthly limit gets no MA session and no turn."""
         tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
         await _setup_workspace_and_config(db_session, tenant.id)
         await allowance_limits.set_default_limit(
@@ -2468,7 +2468,10 @@ class TestBillingAdmissionGate:
         message.create_thread.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         message.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         sent_text: str = message.channel.send.call_args.kwargs["embed"].description  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
-        assert sent_text == "You've used your Daimon credit.\n\nAsk an admin to add more."
+        assert (
+            sent_text
+            == "You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
+        )
 
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)

@@ -88,7 +88,7 @@ async def setup(
             tenant_id=tenant.id,
             policy=TenantAccessPolicy.model_validate({"protected_channel_ids": ("101",)}),
         )
-    if gate == "allowance_exhausted":
+    if gate == "cap_exceeded":
         await make_monthly_limit(session, tenant=tenant, amount=Decimal("0"))
     if gate == "channel_budget_exceeded":
         # Controlled host fixture, NOT NEW15's first actual metered native turn.
@@ -219,10 +219,11 @@ def gateway_message(clock: Clock) -> tuple[discord.Client, discord.Message, Offl
                 "balance_depleted", DISCORD_REFUSAL_NOUNS, cause="no_credit_yet"
             ),
         ),
+        # Main a5097ab195a3d94d999f606e216b7d25120abaec: approved monthly-limit notice (A/O/G).
         (
-            "allowance_exhausted",
-            "turn.skipped.allowance_exhausted",
-            admission_refusal_text("allowance_exhausted", DISCORD_REFUSAL_NOUNS),
+            "cap_exceeded",
+            "turn.skipped.over_cap",
+            admission_refusal_text("cap_exceeded", DISCORD_REFUSAL_NOUNS),
         ),
         ("channel_budget_exceeded", "turn.skipped.over_channel_budget", "budget"),
     ],
@@ -353,7 +354,7 @@ async def test_real_gate_and_adapter_denial_have_no_native_sends_or_provider_roo
         assert native.mock_calls == [], "writers-none runs before metadata reads"
     else:
         assert len(receipt.effects.notices) == 1
-        if gate in ("balance_depleted", "allowance_exhausted"):
+        if gate in ("balance_depleted", "cap_exceeded"):
             assert receipt.effects.notices[0].text == notice
         else:
             assert notice in receipt.effects.notices[0].text
@@ -363,13 +364,7 @@ async def test_real_gate_and_adapter_denial_have_no_native_sends_or_provider_roo
 
 @pytest.mark.parametrize(
     "gate",
-    [
-        "allowed",
-        "writers_none",
-        "balance_depleted",
-        "allowance_exhausted",
-        "channel_budget_exceeded",
-    ],
+    ["allowed", "writers_none", "balance_depleted", "cap_exceeded", "channel_budget_exceeded"],
 )
 @pytest.mark.parametrize("installed", [False, True, "raises"])
 async def test_observer_preserves_real_acceptance_denial_and_warm_dispatch(
