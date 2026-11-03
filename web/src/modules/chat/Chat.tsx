@@ -17,6 +17,7 @@ import { usd } from "@/lib/format"
 import { cn } from "@/lib/utils"
 import { useChatAgents, useMe, useSessions } from "@/lib/hooks"
 import type { AgentRef, ChatSession, CreditMeter } from "@/lib/types"
+import { Pill } from "../agents/bits"
 import { AgentPicker } from "./AgentPicker"
 import { Refusal } from "./Cards"
 import { Composer } from "./Composer"
@@ -152,6 +153,7 @@ export function ChatView() {
   const session = sessions?.find((s) => s.id === id) ?? data?.session
   const agent = session?.agent
   const confirm = useConfirm()
+  const { data: me } = useMe()
   const [renaming, setRenaming] = useState<ChatSession | null>(null)
   const del = useMutation({
     mutationFn: (s: ChatSession) => api.del(`/api/chat/sessions/${s.id}`),
@@ -190,6 +192,7 @@ export function ChatView() {
             <span>{session.agent.name}</span>
             {session.agent.model && <span className="text-faint">{session.agent.model}</span>}
           </span>
+          {me?.role === "visitor" && <Pill>Held to this chat</Pill>}
           {meter && <HeaderMeter meter={meter} />}
           <DropdownMenu>
             <DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" aria-label="Thread actions"><MoreHorizontal /></Button></DropdownMenuTrigger>
