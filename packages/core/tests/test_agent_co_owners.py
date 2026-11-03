@@ -14,6 +14,7 @@ from daimon.core.agent_ownership import (
     clear_agent_owner,
     owns_agent,
     remove_agent_co_owner,
+    replace_agent_owners,
 )
 from daimon.core.agent_reach import load_target_facts
 from daimon.core.ma_identity import derive_agent_uuid
@@ -185,6 +186,26 @@ async def test_a_person_from_another_organisation_is_refused_at_add_and_at_use(p
         )
     assert not await _owns(sessions, tenant, account=co_owner.id)
     assert not await _owns(sessions, tenant, user="U-CO")
+
+
+async def test_a_person_from_another_organisation_cannot_be_made_the_owner(people) -> None:
+    sessions, tenant, agent_id, admin, _, _, member, _ = people
+    async with sessions.begin() as session:
+        await session.execute(
+            update(PlatformPrincipal)
+            .where(PlatformPrincipal.account_id == member.id)
+            .values(foreign_home_id="other-org")
+        )
+    with pytest.raises(ForeignOwnerError):
+        async with sessions.begin() as session:
+            await replace_agent_owners(
+                session,
+                tenant_id=tenant.id,
+                agent_id=agent_id,
+                owner_account_id=member.id,
+                co_owner_account_ids=[],
+                by_account_id=admin.id,
+            )
 
 
 async def test_owned_agents_list_includes_co_owned_ones(people) -> None:

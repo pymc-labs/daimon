@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import uuid
 
+from daimon.core._models import WebPerson
 from daimon.core.stores import web_audit
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .agent_support import OWN, agent_client, agent_people, make_admin, sign_in_token
@@ -97,3 +99,20 @@ async def test_clearing_the_owner_leaves_the_agent_to_admins(
         keys = await client.get("/api/agents/ag_w/keys")
     assert put.status_code == 204, put.text
     assert keys.status_code == 403, "the former owner no longer sees the agent's setup"
+
+
+async def test_an_inactive_member_cannot_be_made_the_owner(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    agents, owner, other = await agent_people(db_session)
+    await make_admin(db_session_factory, other)
+    async with db_session_factory() as db, db.begin():
+        await db.execute(
+            update(WebPerson).where(WebPerson.id == owner.id).values(status="suspended")
+        )
+    token = await sign_in_token(db_session_factory, other)
+    async with agent_client(agents, owner.tenant_id, db_session_factory, token) as client:
+        put = await client.put(
+            "/api/agents/ag_w/owners", json={"owner": str(owner.id), "co_owners": []}, headers=OWN
+        )
+    assert put.status_code == 422, "only an active member, as the options list"

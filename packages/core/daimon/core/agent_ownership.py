@@ -189,6 +189,8 @@ async def replace_agent_owners(
             await agent_owners.clear_owner(session, tenant_id=tenant_id, agent_id=agent_id)
             await _audit(session, tenant_id, agent_id, by_account_id, "clear")
         else:
+            if await agent_owners.has_foreign_principal(session, tenant_id, owner_account_id):
+                raise ForeignOwnerError("a person from another organisation cannot own an agent")
             await agent_owners.set_owner(
                 session,
                 tenant_id=tenant_id,

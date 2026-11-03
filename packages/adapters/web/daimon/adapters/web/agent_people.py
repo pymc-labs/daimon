@@ -44,6 +44,7 @@ def agent_people_router(runtime: WebRuntime) -> APIRouter:
         async with runtime.sessionmaker() as db:
             people = await people_store.list_people(db, tenant_id=caller.person.tenant_id)
         accounts = {str(p.id): p.account_id for p in people}
+        active = {p.account_id for p in people if p.kind == "member" and p.status == "active"}
 
         def account_of(ref: str) -> uuid.UUID:
             if ref in accounts:
@@ -53,12 +54,15 @@ def agent_people_router(runtime: WebRuntime) -> APIRouter:
             except ValueError:
                 raise HTTPException(status_code=422, detail="That person is not in this workspace.")  # noqa: B904
 
+        owner = None if body.owner is None else account_of(body.owner)
+        if owner is not None and owner not in active:
+            raise HTTPException(status_code=422, detail="That person is not an active member.")
         try:
             await agent_admin.set_owners(
                 change_deps(runtime).edit,
                 actor=actor_of(caller),
                 ma_agent_id=agent_id,
-                owner_account_id=None if body.owner is None else account_of(body.owner),
+                owner_account_id=owner,
                 co_owner_account_ids=[account_of(c) for c in body.co_owners],
                 audited=recorded(runtime, caller, "Changed agent owners"),
             )
