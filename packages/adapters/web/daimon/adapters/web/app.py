@@ -9,6 +9,7 @@ from daimon.adapters.web.agent_knowledge import agent_knowledge_router
 from daimon.adapters.web.agent_library import agent_library_router
 from daimon.adapters.web.agent_lifecycle import agent_lifecycle_router
 from daimon.adapters.web.agent_people import agent_people_router
+from daimon.adapters.web.agent_tool_rules import agent_tool_rules_router
 from daimon.adapters.web.agents import agents_router
 from daimon.adapters.web.auth import auth_router
 from daimon.adapters.web.avatars import avatars_router
@@ -105,6 +106,7 @@ def create_app(runtime: WebRuntime) -> FastAPI:
     app.include_router(agent_keys_router(runtime))
     app.include_router(agent_knowledge_router(runtime))
     app.include_router(agent_people_router(runtime))
+    app.include_router(agent_tool_rules_router(runtime))
     app.include_router(agent_lifecycle_router(runtime))
     app.include_router(agent_library_router(runtime))
     app.include_router(agents_router(runtime))
