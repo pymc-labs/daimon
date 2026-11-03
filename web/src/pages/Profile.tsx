@@ -4,6 +4,7 @@ import { toast } from "sonner"
 
 import { Ago } from "@/components/common"
 import { BrandIcon } from "@/components/brand"
+import { AgentLink } from "@/components/links"
 import { QueryState } from "@/components/QueryState"
 import { Page } from "@/components/shell/Page"
 import { Button } from "@/components/ui/button"
@@ -72,7 +73,7 @@ function Body({ d }: { d: Profile }) {
         {!d.memory.length ? <Empty>No agent remembers anything about you</Empty> : d.memory.map((m) => (
           <Row key={m.agent.id}>
             <div className="min-w-0 flex-1">
-              <div className="font-medium">{m.agent.name}</div>
+              <div className="font-medium"><AgentLink id={m.agent.id} name={m.agent.name} /></div>
               <div className="truncate text-xs text-muted-foreground">{plural(m.files.length, "file")}: {m.files.join(", ")}</div>
             </div>
             <Button variant="ghost" size="sm" disabled={forget.isPending} aria-label={`Forget ${m.agent.name}`} onClick={async () => {
@@ -86,8 +87,7 @@ function Body({ d }: { d: Profile }) {
         {d.chat_accounts.map((a) => (
           <Row key={a.platform}>
             <BrandIcon brand={a.platform} />
-            <span className="min-w-0 flex-1 truncate">{a.name ?? "Linked"}</span>
-            <Pill>{a.platform[0]!.toUpperCase() + a.platform.slice(1)}</Pill>
+            <span className="min-w-0 flex-1 truncate">{a.platform[0]!.toUpperCase() + a.platform.slice(1)}{a.name && <span className="text-muted-foreground"> {a.name}</span>}</span>
           </Row>
         ))}
         {d.sign_ins.map((s) => (
@@ -102,7 +102,7 @@ function Body({ d }: { d: Profile }) {
         ))}
         {d.connections.map((c) => (
           <Row key={`${c.kind}:${c.agent?.id}:${c.key}`}>
-            <span className="min-w-0 flex-1 truncate">{c.label}{c.agent && <span className="text-muted-foreground"> for {c.agent.name}</span>}</span>
+            <span className="min-w-0 flex-1 truncate">{c.label}{c.agent && <span className="text-muted-foreground"> for <AgentLink id={c.agent.id} name={c.agent.name} /></span>}</span>
             <Button variant="ghost" size="sm" disabled={disconnect.isPending} aria-label={`Disconnect ${c.label}`} onClick={async () => {
               if (await confirm({ title: `Disconnect ${c.label}?`, action: "Disconnect", destructive: true })) disconnect.mutate(c)
             }}>Disconnect</Button>
@@ -115,7 +115,7 @@ function Body({ d }: { d: Profile }) {
         {!d.keys.length ? <Empty>No coding keys</Empty> : d.keys.map((k) => (
           <Row key={k.id}>
             <div className="min-w-0 flex-1">
-              <div className="font-medium">{k.agent?.name ?? "Agent"}</div>
+              <div className="font-medium"><AgentLink id={k.agent?.id ?? null} name={k.agent?.name ?? null} /></div>
               <div className="text-xs text-muted-foreground">Made <Ago iso={k.created_at} />{k.expires_at ? `, ends ${shortDate(k.expires_at)}` : ""}{k.bound ? ", kept to a channel" : ""}</div>
             </div>
             <Button variant="ghost" size="sm" disabled={revoke.isPending} aria-label={`Revoke key for ${k.agent?.name ?? "agent"}`} onClick={async () => {

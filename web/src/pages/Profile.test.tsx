@@ -23,7 +23,7 @@ const data: Profile = {
 const preview: DeletePreview = { enabled: true, held: ["2 routines"], kept: ["3 conversations shared with other people"] }
 
 const view = () => {
-  vi.mocked(api.get).mockImplementation(async (path: string) => (path === "/api/profile" ? data : path === "/api/me" ? { workspace: { name: "Fernhill" } } : preview) as never)
+  vi.mocked(api.get).mockImplementation(async (path: string) => (path === "/api/profile" ? data : path === "/api/me" ? { workspace: { name: "Fernhill" }, capabilities: [] } : preview) as never)
   vi.mocked(api.post).mockResolvedValue({} as never)
   render(
     <QueryClientProvider client={new QueryClient()}>
