@@ -7,16 +7,17 @@ import { pageTitle } from "@/lib/title"
 import { cn } from "@/lib/utils"
 import { useShell } from "./shell-context"
 
-type Crumb = { label: string; to?: string }
+import { crumbsWithTab, type Crumb, type Tab } from "./crumbs"
 
-export function Page({ crumbs, actions, tabs, children, className, flush }: {
-  crumbs: Crumb[]; actions?: React.ReactNode; tabs?: { label: React.ReactNode; to: string; end?: boolean }[]
+export function Page({ crumbs: given, actions, tabs, children, className, flush }: {
+  crumbs: Crumb[]; actions?: React.ReactNode; tabs?: Tab[]
   children: React.ReactNode; className?: string; flush?: boolean
 }) {
   const { openNav } = useShell()
   const bar = useRef<HTMLDivElement>(null)
   const { pathname } = useLocation()
   const { data: me } = useMe()
+  const crumbs = crumbsWithTab(given, tabs, pathname)
   const title = pageTitle([...crumbs].reverse().map((c) => c.label), me?.workspace.name)
   useEffect(() => { document.title = title }, [title])
   useEffect(() => { bar.current?.querySelector("[aria-current=page]")?.scrollIntoView({ block: "nearest", inline: "nearest" }) }, [pathname])
