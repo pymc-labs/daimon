@@ -35,7 +35,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 
 import structlog
-from daimon.core.agent_ownership import account_owns_agent
+from daimon.core.coding_keys import holds_coding_key_standing
 from daimon.core.config import McpSettings
 from daimon.core.mcp_auth import (
     CHAT_TOKEN_TTL,
@@ -45,7 +45,6 @@ from daimon.core.mcp_auth import (
 from daimon.core.mcp_hold import HOLD_CLAIM, parse_hold_claim
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.domain import AccountIdentityRow, McpTokenRow, Role
-from daimon.core.stores.identity import list_cli_principals_for_account
 from daimon.core.stores.mcp_tokens import get_mcp_token
 from daimon.core.stores.security_audit import append_event
 from fastmcp.server.auth import AccessToken
@@ -198,25 +197,18 @@ async def would_coding_key_pass(
     """
     if not is_coding_key(row):
         return True
-    if identity is None:
-        identity = await get_account_with_tenant(session, account_id=row.account_id)
-    if (
-        identity is None
-        or identity.account_id != row.account_id
-        or identity.tenant_id != row.tenant_id
-        or row.agent_id is None
-    ):
+    if row.agent_id is None:
         return False
-    if identity.role is Role.ADMIN:
-        return True
-    if await list_cli_principals_for_account(session, account_id=identity.account_id):
-        return True
     try:
         agent_id = uuid.UUID(row.agent_id)
     except ValueError:
         return False
-    return await account_owns_agent(
-        session, tenant_id=identity.tenant_id, agent_id=agent_id, account_id=identity.account_id
+    return await holds_coding_key_standing(
+        session,
+        tenant_id=row.tenant_id,
+        account_id=row.account_id,
+        agent_id=agent_id,
+        identity=identity,
     )
 
 

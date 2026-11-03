@@ -584,7 +584,7 @@ def is_tenant_agent(agent: BetaManagedAgentsAgent, tenant_id: uuid.UUID) -> bool
     )
 
 
-async def _people(
+async def people_by_account(
     session: AsyncSession, tenant_id: uuid.UUID, account_ids: Collection[uuid.UUID]
 ) -> dict[uuid.UUID, PersonRef]:
     """The people behind `account_ids`, keyed by account: the web person, else the name
@@ -907,7 +907,7 @@ async def load_agent_facts(
         )
         editors = updated_by or {}
         creators = {agent.id: _creator_of(agent) for agent in agents}
-        people = await _people(
+        people = await people_by_account(
             session,
             tenant_id,
             {
