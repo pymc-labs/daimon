@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
 
 import { api } from "@/lib/api"
-import type { AgentKey, CodingKey, MintedCodingKey, PersonRef } from "../types"
+import type { AgentKey, CodingKey, KnowledgeStores, MintedCodingKey, PersonRef } from "../types"
 
 const fail = (e: Error) => toast.error(e.message)
 
@@ -67,3 +67,18 @@ export function useAgentLifecycle(id: string) {
     copy: useMutation({ mutationFn: (name: string) => api.post<{ id: string; name: string }>(`/api/agents/${id}/copy`, { name }), onSuccess: done, onError: fail }),
   }
 }
+
+/** What the agent remembers, read-only; `enabled` is whether the reader sees setup. */
+export const useKnowledge = (id: string, enabled: boolean) =>
+  useQuery({ queryKey: ["agents", id, "knowledge"], queryFn: () => api.get<KnowledgeStores>(`/api/agents/${id}/knowledge`), enabled, retry: false })
+
+export const useMemoryPaths = (id: string, store: string) =>
+  useQuery({ queryKey: ["agents", id, "knowledge", store], queryFn: () => api.get<string[]>(`/api/agents/${id}/knowledge/paths?store=${encodeURIComponent(store)}`), enabled: !!store, retry: false })
+
+export const useMemoryText = (id: string, store: string, path: string) =>
+  useQuery({
+    queryKey: ["agents", id, "knowledge", store, path],
+    queryFn: () => api.get<{ path: string; content: string }>(`/api/agents/${id}/knowledge/content?store=${encodeURIComponent(store)}&path=${encodeURIComponent(path)}`),
+    enabled: !!store && !!path,
+    retry: false,
+  })

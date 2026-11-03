@@ -73,6 +73,28 @@ export const agentSetupHandlers = [
     KEYS.set(id, (KEYS.get(id) ?? []).filter((k) => k.key !== key))
     return HttpResponse.json({ removed: held })
   }),
+  http.get("/api/agents/:id/knowledge", async ({ params }) => {
+    await wait()
+    const s = setupOf(String(params.id))
+    if (s.res) return s.res
+    return HttpResponse.json({ shared: true, channels: s.v.admin ? [{ store: "discord/c_clv", platform: "discord", name: "client-ventures" }] : [] })
+  }),
+  http.get("/api/agents/:id/knowledge/paths", async ({ params, request }) => {
+    await wait()
+    const s = setupOf(String(params.id))
+    if (s.res) return s.res
+    const store = new URL(request.url).searchParams.get("store")
+    if (store === "shared") return HttpResponse.json(["/style.md", "/glossary.md"])
+    if (store && s.v.admin) return HttpResponse.json(["/room.md"])
+    return notFound()
+  }),
+  http.get("/api/agents/:id/knowledge/content", async ({ params, request }) => {
+    await wait()
+    const s = setupOf(String(params.id))
+    if (s.res) return s.res
+    const path = new URL(request.url).searchParams.get("path") ?? ""
+    return HttpResponse.json({ path, content: `Notes kept in ${path}.\nUse short sentences.` })
+  }),
   http.get("/api/agents/:id/coding-keys", async ({ params }) => {
     await wait()
     const s = setupOf(String(params.id))

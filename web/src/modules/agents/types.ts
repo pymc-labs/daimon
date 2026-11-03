@@ -216,3 +216,7 @@ export type EnvironmentInput = {
   name: string; description: string; network: "limited" | "unrestricted"; allowed_hosts: string[]
   allow_package_managers: boolean; allow_mcp_servers: boolean; packages: Partial<Record<Ecosystem, string[]>>
 }
+
+/** What an agent remembers: whether it has shared memory, and (admins) a store per channel. */
+export type MemoryPlace = { store: string; platform: string; name: string }
+export type KnowledgeStores = { shared: boolean; channels: MemoryPlace[] }

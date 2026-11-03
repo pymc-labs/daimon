@@ -4,7 +4,7 @@ import {
   Background, BackgroundVariant, BaseEdge, type Edge, type EdgeProps, Handle, type Node, Position, ReactFlow, useEdgesState, useNodesState, useReactFlow,
   useStore,
 } from "@xyflow/react"
-import { Blocks, Cpu, KeyRound, Maximize, Minus, Plug, Plus, ScrollText, Sparkles, SquareTerminal, Users, Wrench } from "lucide-react"
+import { Blocks, Brain, Cpu, KeyRound, Maximize, Minus, Plug, Plus, ScrollText, Sparkles, SquareTerminal, Users, Wrench } from "lucide-react"
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react"
 
 import { AgentAvatar, Ago, Avatar, Money } from "@/components/common"
@@ -14,7 +14,7 @@ import { useTheme } from "@/lib/theme-context"
 import { cn } from "@/lib/utils"
 import { pressProps } from "@/lib/filters"
 import { useConnectNode } from "./api"
-import { useAgentKeys, useCodingKeys } from "./setup/api"
+import { useAgentKeys, useCodingKeys, useKnowledge } from "./setup/api"
 import { Dot, Locked, Pill, PlaceIcon, RuleChip } from "./bits"
 import { layoutNarrow, layoutWide, type Dep, type Plan, type Pt, type Size } from "./layout"
 import { EFFORT_LABEL, placeName } from "./lib"
@@ -248,6 +248,17 @@ function KeysNode() {
   )
 }
 
+function KnowledgeNode() {
+  const { agent } = useCanvas()
+  const k = useKnowledge(agent.id, agent.can_view_details)
+  const n = k.data ? Number(k.data.shared) + k.data.channels.length : undefined
+  return (
+    <Card id="knowledge" icon={<Brain />} title="Knowledge" count={n}>
+      <div className="p-3 text-xs text-faint">{k.data ? (n ? `${k.data.shared ? "Shared" : ""}${k.data.shared && k.data.channels.length ? ", " : ""}${k.data.channels.length ? `${k.data.channels.length} in channels` : ""}` : "Nothing yet") : ""}</div>
+    </Card>
+  )
+}
+
 function CodingNode() {
   const { agent } = useCanvas()
   const keys = useCodingKeys(agent.id, agent.can_view_details)
@@ -333,7 +344,7 @@ function HubNode() {
 
 const NODE_TYPES = {
   agent: AgentNode, instructions: InstructionsNode, model: ModelNode, places: PlacesNode,
-  skills: SkillsNode, tools: ToolsNode, people: PeopleNode, keys: KeysNode, coding: CodingNode, mcp: ({ id }: { id: string }) => <McpNode id={id} />,
+  skills: SkillsNode, tools: ToolsNode, people: PeopleNode, keys: KeysNode, coding: CodingNode, knowledge: KnowledgeNode, mcp: ({ id }: { id: string }) => <McpNode id={id} />,
   platform: ({ id }: { id: string }) => <PlatformNode id={id} />, hub: HubNode,
 }
 
@@ -370,7 +381,7 @@ const EDGE_TYPES = { line: LineEdge }
 /** The two columns around the agent; keys and coding keys are setup, for those who see it. */
 const lanes = (agent: Agent) => ({
   left: ["instructions", "model", "places", "people"],
-  right: ["skills", "tools", ...(agent.can_view_details ? ["keys", "coding"] : [])],
+  right: ["skills", "tools", ...(agent.can_view_details ? ["knowledge", "keys", "coding"] : [])],
 })
 const HUB = "connections"
 /** Below this canvas width the editor is one column. */
