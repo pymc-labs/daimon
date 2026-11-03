@@ -222,7 +222,13 @@ async def load_mcp_catalogue(
             session, tenant_id=tenant_id, agent_ids=[a.agent_id for a in agents]
         )
     }
-    counts = await reads.sign_in_counts(session, tenant_id=tenant_id)
+    people: dict[tuple[uuid.UUID, str], set[uuid.UUID]] = {}
+    for grant in await flows_store.list_completed_grants(
+        session, tenant_id=tenant_id, server_urls=[url for a in agents for _, url in a.servers]
+    ):
+        people.setdefault((grant.agent_id, canonical_mcp_url(grant.mcp_server_url)), set()).add(
+            grant.account_id
+        )
     names: dict[str, str] = {}
     users: dict[str, list[McpAgentUse]] = {}
     for agent in agents:
@@ -234,7 +240,7 @@ async def load_mcp_catalogue(
                     agent_id=agent.agent_id,
                     name=agent.name,
                     shared_token=(agent.agent_id, key) in shared,
-                    signed_in=counts.get((agent.agent_id, key), 0),
+                    signed_in=len(people.get((agent.agent_id, key), ())),
                 )
             )
     return sorted(

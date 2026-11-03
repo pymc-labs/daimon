@@ -17,7 +17,6 @@ from daimon.core._models import (
     GitHubAppInstallation,
     GitHubInstallationReconciliation,
     GitHubPushResync,
-    McpOAuthFlow,
     TenantGitHubRepo,
 )
 from pydantic import BaseModel, ConfigDict
@@ -33,7 +32,6 @@ __all__ = [
     "list_granted_repos",
     "list_shared_credentials",
     "list_sync_trouble",
-    "sign_in_counts",
 ]
 
 
@@ -235,19 +233,3 @@ async def list_shared_credentials(
         )
     )
     return [SharedCredentialRow(agent_id=a, server_url=u) for a, u in result.all()]
-
-
-async def sign_in_counts(
-    session: AsyncSession, *, tenant_id: uuid.UUID
-) -> dict[tuple[uuid.UUID, str], int]:
-    """How many people finished a sign-in, per agent and server URL (slash-trimmed)."""
-    result = await session.execute(
-        select(
-            McpOAuthFlow.agent_id,
-            func.rtrim(McpOAuthFlow.mcp_server_url, "/"),
-            func.count(func.distinct(McpOAuthFlow.account_id)),
-        )
-        .where(McpOAuthFlow.tenant_id == tenant_id, McpOAuthFlow.completed_at.is_not(None))
-        .group_by(McpOAuthFlow.agent_id, func.rtrim(McpOAuthFlow.mcp_server_url, "/"))
-    )
-    return {(agent_id, url): n for agent_id, url, n in result.all()}
