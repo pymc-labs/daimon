@@ -15,6 +15,7 @@ import { absolute, channelLabel } from "@/lib/format"
 import { useCan } from "@/lib/hooks"
 import { Pill } from "../agents/bits"
 import { Editor } from "./Editor"
+import { RunNow } from "./RunNow"
 import type { Choices, Routine } from "./types"
 
 const LIST = ["routines", "list"]
@@ -131,6 +132,7 @@ function Detail({ routine: r, choices }: { routine: Routine; choices: Choices })
             <Button variant="outline" size="sm" disabled={toggle.isPending} onClick={() => toggle.mutate()}>
               {r.enabled ? <><Pause />Pause</> : <><Play />Resume</>}
             </Button>
+            <RunNow routine={r} />
             <Button variant="outline" size="sm" className="text-destructive" disabled={del.isPending} onClick={async () => {
               if (await confirm({ title: "Delete routine?", body: `${r.agent.name}, ${r.schedule}`, action: "Delete", destructive: true })) del.mutate()
             }}><Trash2 />Delete</Button>

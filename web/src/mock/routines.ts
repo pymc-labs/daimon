@@ -106,6 +106,16 @@ export const routinesHandlers: HttpHandler[] = [
     r.next_run = r.enabled ? next(r.cron) : null
     return HttpResponse.json(view(r))
   })),
+  http.post("/api/routines/:id/run", async ({ params }) => {
+    await wait(200)
+    const m = me()
+    if (!m?.capabilities.includes("routines.manage")) return forbidden()
+    const r = visible().find((x) => x.id === params.id)
+    if (!r) return notFound()
+    if (!r.enabled) return HttpResponse.json({ detail: "This routine is paused. Resume it to run it." }, { status: 422 })
+    r.next_run = new Date().toISOString()
+    return HttpResponse.json(view(r))
+  }),
   http.delete("/api/routines/:id", async ({ params }) => {
     await wait(200)
     const m = me()

@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncIterator, Collection
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -151,6 +151,7 @@ async def test_visitors_are_refused_every_route(rig: Rig) -> None:
         ("PATCH", f"/api/routines/{some}", {"message": "x"}),
         ("POST", f"/api/routines/{some}/pause", None),
         ("POST", f"/api/routines/{some}/resume", None),
+        ("POST", f"/api/routines/{some}/run", None),
         ("DELETE", f"/api/routines/{some}", None),
     ]
     async with rig.open(as_="visitor") as (client, _, _):
@@ -200,6 +201,38 @@ async def test_a_member_creates_lists_pauses_and_deletes_their_own_routine(rig: 
     ], "every change is recorded with the change"
 
 
+async def test_run_now_makes_a_routine_due_is_audited_and_refused_while_paused(rig: Rig) -> None:
+    async with rig.open() as (client, ws, _):
+        routine = (await client.post("/api/routines", json=_NEW)).json()
+        before = datetime.now(UTC)
+        ran = await client.post(f"/api/routines/{routine['id']}/run")
+        assert ran.status_code == 200, ran.text
+        due = datetime.fromisoformat(ran.json()["next_run"])
+        await client.post(f"/api/routines/{routine['id']}/pause")
+        paused = await client.post(f"/api/routines/{routine['id']}/run")
+        trail = await shown_trail(rig.factory, ws.tenant_id)
+
+    assert before - timedelta(seconds=5) <= due <= datetime.now(UTC), "due as of now"
+    assert (paused.status_code, paused.json()["detail"]) == (
+        422,
+        "This routine is paused. Resume it to run it.",
+    )
+    assert [action for action, _, _ in trail] == [
+        "Created routine",
+        "Ran routine now",
+        "Paused routine",
+    ], "a refused run leaves no row"
+
+
+async def test_an_admin_runs_any_routine_now(rig: Rig) -> None:
+    async with rig.open(as_="owner", discord_id=None) as (client, ws, _):
+        theirs = await _seed(rig.factory, ws.tenant_id, owner="someone-else", message="theirs")
+        ran = await client.post(f"/api/routines/{theirs}/run")
+
+    assert ran.status_code == 200, ran.text
+    assert ran.json()["mine"] is False
+
+
 async def test_a_member_sees_and_changes_only_their_own_routines(rig: Rig) -> None:
     async with rig.open() as (client, ws, member):
         mine = await client.post("/api/routines", json=_NEW)
@@ -210,6 +243,7 @@ async def test_a_member_sees_and_changes_only_their_own_routines(rig: Rig) -> No
             ("GET", f"/api/routines/{theirs}", None),
             ("PATCH", f"/api/routines/{theirs}", {"message": "x"}),
             ("POST", f"/api/routines/{theirs}/pause", None),
+            ("POST", f"/api/routines/{theirs}/run", None),
             ("DELETE", f"/api/routines/{theirs}", None),
         ]:
             res = await client.request(method, path, json=body)

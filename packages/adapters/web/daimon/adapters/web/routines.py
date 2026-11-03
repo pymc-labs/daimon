@@ -59,6 +59,7 @@ _ACTIONS: dict[Happened, str] = {
     "changed": "Changed routine",
     "paused": "Paused routine",
     "resumed": "Resumed routine",
+    "run_now": "Ran routine now",
     "deleted": "Deleted routine",
 }
 
@@ -441,6 +442,15 @@ def routines_router(runtime: WebRuntime) -> APIRouter:
     @router.post("/{routine_id}/resume")
     async def resume(routine_id: uuid.UUID, caller: Manager) -> Routine:  # pyright: ignore[reportUnusedFunction]
         return await toggled(routine_id, caller, enabled=True)
+
+    @router.post("/{routine_id}/run")
+    async def run(routine_id: uuid.UUID, caller: Manager) -> Routine:  # pyright: ignore[reportUnusedFunction]
+        env, acting, _ = await service(caller)
+        try:
+            row = await routine_service.run_now(env, acting, routine_id)
+        except RoutineRefused as refused:
+            raise _refusal(refused) from refused
+        return (await shown(caller, [row], acting))[0]
 
     @router.delete("/{routine_id}", status_code=204)
     async def remove(routine_id: uuid.UUID, caller: Manager) -> None:  # pyright: ignore[reportUnusedFunction]
