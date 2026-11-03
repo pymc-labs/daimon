@@ -7,6 +7,7 @@ import { useMe } from "@/lib/hooks"
 import type { ModuleKey } from "@/lib/types"
 import { homeFor, MODULES, redirectFor } from "@/modules/registry"
 import { InviteLanding } from "@/pages/Invite"
+import { ProfilePage } from "@/pages/Profile"
 import { SignIn } from "@/pages/SignIn"
 import { NotFound, SignedOut } from "@/pages/Status"
 import { Workspaces } from "@/pages/Workspaces"
@@ -38,6 +39,7 @@ export default function App() {
         <Route path="/workspaces" element={<Workspaces />} />
         <Route element={<AppShell />}>
           <Route index element={<Navigate to="/chat" replace />} />
+          <Route path="/profile" element={<ProfilePage />} />
           {MODULES.map((m) => <Route key={m.key} element={<ModuleGate k={m.key} />}>{m.routes}</Route>)}
           <Route path="*" element={<NotFound />} />
         </Route>

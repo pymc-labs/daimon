@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query"
 import {
-  Check, ChevronsUpDown, Keyboard, Link2, LogOut, Monitor, Moon, MoreHorizontal, Plus, Search, Sun, UserRound,
+  Check, ChevronsUpDown, CircleUser, Keyboard, Link2, LogOut, Monitor, Moon, MoreHorizontal, Plus, Search, Sun, UserRound,
 } from "lucide-react"
 import { useMemo, useState } from "react"
 import { Link, NavLink, useMatch, useNavigate } from "react-router"
@@ -239,6 +239,7 @@ function UserMenu() {
             <ChevronsUpDown className="size-4 text-muted-foreground" />
           </DropdownMenuTrigger>
           <DropdownMenuContent side="top" align="start" className="w-56">
+            <DropdownMenuItem asChild><Link to="/profile"><CircleUser />Profile</Link></DropdownMenuItem>
             <DropdownMenuSub>
               <DropdownMenuSubTrigger>
                 {theme === "dark" ? <Moon /> : theme === "light" ? <Sun /> : <Monitor />}

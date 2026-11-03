@@ -69,6 +69,18 @@ its owner with a one-time link:
 
 From then on, invite people and grant roles under **Admin** > **People**.
 
+## Your profile
+
+Everyone signed in opens **Profile** from the user menu. It lists what each
+agent remembers about you, with **Forget**, and the accounts connected to you:
+sign-ins, Microsoft 365 and tool servers, each with a disconnect. Disconnecting
+deletes what Daimon holds; it does not revoke the grant at the other service.
+It also lists your coding keys, which you can revoke.
+
+**Delete my data** shows what is deleted and what stays, the same list as
+`/privacy`. Type your name to confirm. An admin can pause deletion with
+`DAIMON_PRIVACY__DELETE_ENABLED=false`.
+
 ## Connect agents to a data server
 
 A connection node lets agent editors link an agent to a server that keeps its
