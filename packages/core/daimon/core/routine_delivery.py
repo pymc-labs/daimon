@@ -50,6 +50,7 @@ from daimon.core.cron_words import routine_phrase, schedule_words
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
+from daimon.core.outbound.mentions import attribution_line, render_post
 from daimon.core.permissions import any_writers_none, limiting_ids_at
 from daimon.core.platform_words import scrub_other_platforms, turn_words
 from daimon.core.routine_files import decode_payload, payload_for
@@ -429,7 +430,21 @@ def render_fallback_post(
         owner = "The" if as_agent else f"{row.agent_name}'s"
         return f"{owner} {phrase} failed, so there's no result this time.\n\n{payload}"
     owner = "the" if as_agent else f"{row.agent_name}'s"
-    return f"Result from {owner} {phrase}:\n\n{payload}"
+    return _attributed(f"Result from {owner} {phrase}:\n\n{payload}", row, platform)
+
+
+def _attributed(text: str, row: RoutineRow, platform: str | None) -> str:
+    """A routine's post says who asked for it, like every post Daimon makes unasked."""
+    if platform not in ("discord", "slack", "teams"):
+        return text
+    line = attribution_line(
+        platform,
+        # Discord's routine posts never ping, so the creator's tag only names them.
+        requester_id=row.created_by_user_id if platform == "discord" else None,
+        requester_name=None,
+        routine_name=row.name or row.agent_name,
+    )
+    return render_post(text, platform, do_not_tag=frozenset(), attribution=line).text
 
 
 async def resolve_routine_identity(

@@ -2064,6 +2064,62 @@ class ThreadNamingSettings(BaseModel):
     )
 
 
+class OutboundSettings(BaseModel):
+    """Etiquette for posts the agent makes through tools (``DAIMON_OUTBOUND__*``).
+
+    Rules live in `daimon.core.outbound`; unattended turns skip the budget,
+    length and caption limits but keep mentions and attribution.
+    """
+
+    reach_budget_enabled: bool = Field(
+        default=True,
+        description=(
+            "Ask the requester on an approval card before one interactive turn opens "
+            "more threads, posts into more places or tags more people than the limits "
+            "below. Where no card can be shown, the post is refused instead."
+        ),
+    )
+    max_threads: int = Field(
+        default=2,
+        ge=0,
+        le=100,
+        description="New threads or forum posts one interactive turn opens without approval.",
+    )
+    max_places: int = Field(
+        default=2,
+        ge=0,
+        le=100,
+        description=(
+            "Channels, threads and DM recipients outside the own conversation one "
+            "interactive turn posts into without approval."
+        ),
+    )
+    max_people: int = Field(
+        default=5,
+        ge=0,
+        le=200,
+        description="Distinct people one interactive turn tags in tool posts without approval.",
+    )
+    max_length: int = Field(
+        default=1500,
+        ge=0,
+        le=40_000,
+        description=(
+            "Longest tool post, in characters, an interactive turn may send outside its "
+            "own reply. 0 turns the limit off."
+        ),
+    )
+    min_media_caption: int = Field(
+        default=60,
+        ge=0,
+        le=1000,
+        description=(
+            "Shortest caption, in characters without mentions and links, for a video or "
+            "audio file an interactive turn posts. 0 turns the rule off."
+        ),
+    )
+
+
 class PrivateChannelMessagesSettings(BaseModel):
     """Every message in Teams private and shared channels, through Microsoft Graph.
 
@@ -2845,6 +2901,7 @@ class Settings(BaseSettings):
     support: SupportSettings = Field(default_factory=SupportSettings)
     turn: TurnSettings = Field(default_factory=TurnSettings)
     thread_naming: ThreadNamingSettings = Field(default_factory=ThreadNamingSettings)
+    outbound: OutboundSettings = Field(default_factory=OutboundSettings)
     turn_queue: TurnQueueSettings = Field(default_factory=TurnQueueSettings)
     watches: WatchesSettings = Field(default_factory=WatchesSettings)
     private_channel_messages: PrivateChannelMessagesSettings = Field(

@@ -417,7 +417,11 @@ async def test_long_routine_delivers_every_word_to_thread_or_creator(
     assert outcome.status == "delivered"
     calls = client.chat_postMessage.await_args_list
     assert len(calls) > 1 and all(len(call.kwargs["text"]) <= 11800 for call in calls)
-    assert "".join(call.kwargs["text"] for call in calls).split("\n\n")[-1] == result
+    assert (
+        "".join(call.kwargs["text"] for call in calls).split("\n\n")[-1]
+        # The creator's own DM needs no line naming who asked.
+        == (result if fallback else f'{result}\nfrom the routine "daimon"')
+    )
     expected_channel = "D_CREATOR" if fallback else "C1"
     assert all(call.kwargs["channel"] == expected_channel for call in calls)
     if not fallback:

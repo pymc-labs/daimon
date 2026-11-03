@@ -38,9 +38,11 @@ from daimon.core.agent_configuration import (
     provider_preview_digest,
 )
 from daimon.core.microsoft_write_paths import write_kind
+from daimon.core.outbound.reach import ReachPlan, card_title
 from daimon.core.tool_safety import (
     DAIMON_SERVER_NAME,
     PUBLISH_TOOLS,
+    REACH_APPROVAL_TOOLS,
     WATCH_CONFIRMED_TOOLS,
     ToolCall,
     microsoft_send_tools,
@@ -565,6 +567,8 @@ def prompt_for_tool_call(
             admin=True,
             configuration=reference,
         )
+    if call.tool_name == "approve_reach" and own_server:
+        return _reach_prompt(data, requester_platform_user_id, now + timeout)
     if call.tool_name == "request_agent_backend_switch" and own_server:
         reference = BackendSwitchReference.model_validate(
             {
@@ -783,10 +787,31 @@ def prompt_for_tool_call(
     )
 
 
+def _reach_prompt(
+    data: Mapping[str, object], requester_platform_user_id: str, expires_at: datetime
+) -> ConfirmationPrompt:
+    def count(key: str) -> int:
+        value = data.get(key)
+        return value if isinstance(value, int) and value >= 0 else 0
+
+    plan = ReachPlan(threads=count("threads"), places=count("places"), people=count("people"))
+    return ConfirmationPrompt(
+        title=_one_line(
+            card_title(plan, _one_line(str(data.get("where") or ""), limit=60)), limit=200
+        ),
+        consequence="Approve to post them, or cancel.",
+        action="Approve",
+        denied_action="Nothing posted",
+        requester_platform_user_id=requester_platform_user_id,
+        expires_at=expires_at,
+    )
+
+
 def confirmed_tools_for_turn(deps: TurnDeps) -> frozenset[str]:
     """Daimon's tools this turn's session asks before, from already-injected selectors."""
     return (
         WATCH_CONFIRMED_TOOLS
+        | REACH_APPROVAL_TOOLS
         | backend_switch_tools(enabled=deps.backend_selection_enabled)
         | microsoft_send_tools(enabled=deps.microsoft_send, tool_safety_on=deps.tool_safety.enabled)
     )
