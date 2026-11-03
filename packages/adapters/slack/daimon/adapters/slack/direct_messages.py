@@ -22,6 +22,7 @@ from daimon.core.agent_identity import (
     is_builtin_agent,
     resolve_agent_identity,
 )
+from daimon.core.authz import Subject
 from daimon.core.config import Settings
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.direct_messages import (
@@ -38,11 +39,12 @@ from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.handoff_context import TranscriptTurn
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
-from daimon.core.stores.direct_messages import dm_enabled, get_conversation, set_dm_enabled
+from daimon.core.stores.direct_messages import dm_enabled, get_conversation
 from daimon.core.stores.domain import Role
 from daimon.core.turn.admission import admit
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn_hold import RequesterOrg
+from daimon.core.workspace_settings import set_dms
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.exc import SQLAlchemyError
@@ -172,7 +174,13 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
                 refusal = "Only a workspace admin can turn Daimon DMs on or off here."
             else:
                 async with runtime.sessionmaker.begin() as session:
-                    await set_dm_enabled(session, tenant_id=tenant_id, enabled=action == "enable")
+                    await set_dms(
+                        session,
+                        tenant_id=tenant_id,
+                        subject=Subject(is_admin=True, platform_user_id=user_id),
+                        platform="slack",
+                        enabled=action == "enable",
+                    )
                 reply = (
                     "Daimon DMs are on for this workspace."
                     if action == "enable"

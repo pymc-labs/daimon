@@ -64,7 +64,6 @@ from daimon.core.stores.direct_messages import (
     get_conversation,
     get_dm_agent_name,
     set_dm_agent_name,
-    set_dm_enabled,
 )
 from daimon.core.stores.domain import Role, TenantRow
 from daimon.core.stores.tenants import get_tenant, list_tenants_by_platform
@@ -73,6 +72,7 @@ from daimon.core.turn.errors import AdmissionDenialReason, AdmissionDenied
 from daimon.core.turn.output import OutputAuthorization
 from daimon.core.turn.slots import QUEUE_TIMED_OUT_TEXT
 from daimon.core.turn_hold import RequesterOrg
+from daimon.core.workspace_settings import set_dms
 from sqlalchemy.exc import SQLAlchemyError
 
 import discord
@@ -672,7 +672,13 @@ class DirectMessageCog(commands.Cog):
                     await interaction.followup.send("Cold DM agent updated.", ephemeral=True)
                     return
                 async with runtime.sessionmaker.begin() as session:
-                    await set_dm_enabled(session, tenant_id=tenant_id, enabled=action == "enable")
+                    await set_dms(
+                        session,
+                        tenant_id=tenant_id,
+                        subject=Subject(is_admin=True, platform_user_id=str(member.id)),
+                        platform="discord",
+                        enabled=action == "enable",
+                    )
                 await interaction.followup.send(
                     embed=build_notice_embed(
                         "Daimon DMs are on for this server."

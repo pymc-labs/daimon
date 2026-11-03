@@ -18,13 +18,15 @@ from typing import Final
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.errors import StoreError
-from daimon.core.stores.tenants import get_plain_text_mentions, set_plain_text_mentions
+from daimon.core.stores.tenants import get_plain_text_mentions
+from daimon.core.workspace_settings import SettingRefused, set_plain_text_mentions
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -62,7 +64,15 @@ async def _set_plain_text_mentions_impl(
         raise ToolError(_WRONG_PLATFORM)
     async with runtime.session_factory.begin() as session:
         try:
-            await set_plain_text_mentions(session, tenant_id=auth.tenant_id, enabled=enabled)
+            await set_plain_text_mentions(
+                session,
+                tenant_id=auth.tenant_id,
+                subject=mcp_subject(auth, is_admin=True),
+                platform=auth.platform,
+                enabled=enabled,
+            )
+        except SettingRefused as exc:
+            raise ToolError(str(exc)) from exc
         except StoreError as exc:
             raise ToolError("internal: this chat space no longer exists") from exc
     return PlainTextMentionsStatus(enabled=enabled, note=_note(enabled))
