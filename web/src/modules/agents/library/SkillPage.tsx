@@ -17,7 +17,7 @@ import { SkillFilesView } from "../inspector/SkillFilesEditor"
 import { useSkillFilesDraft } from "../inspector/useSkillFilesDraft"
 import type { SkillDetail, SkillFiles, SkillVersion } from "../types"
 import { useLibraryFiles, useSkill, useSkillVersions, useSkillWrites } from "./api"
-import { descriptionOf, sourceLabel, withDescription } from "./skill-meta"
+import { descriptionField, sourceLabel, withDescription } from "./skill-meta"
 
 export function SkillPage() {
   const { id = "" } = useParams()
@@ -80,6 +80,7 @@ function Loaded({ skill, custom, files, filesLoading, versions, viewing }: {
     ...(custom && !skill.default ? [{ label: "Delete", icon: <Trash2 />, destructive: true, onSelect: () => void drop() }] : []),
   ]
   const markdown = draft.read("SKILL.md")
+  const description = descriptionField(markdown)
   const showDirty = custom && !readOnly && draft.dirty
   const reload = () => { draft.discard(); setRefused(false) }
   return (
@@ -118,10 +119,10 @@ function Loaded({ skill, custom, files, filesLoading, versions, viewing }: {
         <aside className="shrink-0 border-t lg:w-80 lg:overflow-y-auto lg:border-t-0 lg:border-l">
           <PanelSection title="About" className="border-t-0">
             <div className="space-y-2.5">
-              {custom && !readOnly && files ? (
+              {custom && !readOnly && files && description.editable ? (
                 <div className="space-y-1 text-sm">
                   <label htmlFor="skill-description" className="text-muted-foreground">Description</label>
-                  <Textarea id="skill-description" rows={3} value={descriptionOf(markdown)} onChange={(e) => draft.setFile("SKILL.md", withDescription(markdown, e.target.value))} />
+                  <Textarea id="skill-description" rows={3} value={description.value} onChange={(e) => draft.setFile("SKILL.md", withDescription(markdown, e.target.value))} />
                 </div>
               ) : <SettingRow label="Description" top><span>{skill.description || "–"}</span></SettingRow>}
               <SettingRow label="Source">
