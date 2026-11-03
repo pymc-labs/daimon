@@ -1281,84 +1281,13 @@ def preview_source_drops(source: BackendAgent, model: ModelRef) -> AgentSpec:
 #: switch card itself (`tool_safety.self_carded_tools`).
 _SWITCH_TOOL_DROP: Final[str] = f"mcp_tool:{DAIMON_SERVER_NAME}:request_agent_backend_switch"
 
-#: Ungated Daimon tools a provider turn lists that it did not before #1686.
-_LISTED_SINCE_GATING: Final[frozenset[str]] = frozenset({"get_long_job"})
 
-
-def _losses_line(drops: tuple[str, ...]) -> str:
-    return "Unavailable capabilities: " + ", ".join(drops) + "."
-
-
-def _gating_drops() -> frozenset[str]:
-    """Drops Daimon's confirmation gating makes, whatever the agent's owner set."""
-    from daimon.core.tool_safety import confirmation_gated_tools, self_carded_tools
-
-    return frozenset(
-        f"mcp_tool:{DAIMON_SERVER_NAME}:{name}"
-        for name in confirmation_gated_tools() - self_carded_tools()
-    )
-
-
-def _consent_view(target: AgentSpec, source_system: str | None) -> AgentSpec:
-    """`target` without what Daimon's own catalogue and gating decide.
-
-    Those change with a Daimon release, not with the agent: the owner's tool
-    settings are already in the source pin, and the server refuses gated tools
-    to provider turns whatever the consent says. The owner's other losses and
-    the rest of the target stay compared.
-    """
-    gating = _gating_drops()
-    drops = tuple(drop for drop in target.declared_drops if drop not in gating)
-    servers = target.mcp_servers
-    if servers is not None:
-        servers = tuple(
-            server.model_copy(
-                update={
-                    "tool_policy": {
-                        key: value
-                        for key, value in server.tool_policy.items()
-                        if key != "allowed_tools"
-                    }
-                }
-            )
-            if server.name == DAIMON_SERVER_NAME
-            else server
-            for server in servers
-        )
-    system = target.system
-    if target.declared_drops:
-        system = compose_source_instructions(source_system, _losses_line(drops) if drops else None)
-    return target.model_copy(
-        update={"mcp_servers": servers, "declared_drops": drops, "system": system}
-    )
-
-
-def consent_target_digest(target: AgentSpec, source_system: str | None) -> str:
-    """The digest a backend-switch consent records for `target`."""
-    return request_digest(_consent_view(target, source_system).model_dump(mode="json"))
-
-
-def _matches(target: AgentSpec | None, consent: _BackendDropConsent) -> bool:
+def _consented(target: AgentSpec | None, consent: _BackendDropConsent) -> bool:
     return (
         target is not None
         and target.declared_drops == consent.declared_drops
         and request_digest(target.model_dump(mode="json")) == consent.target_digest
     )
-
-
-def _consented(
-    target: AgentSpec | None, source_system: str | None, consent: _BackendDropConsent
-) -> bool:
-    """`consent` still covers today's `target` for the same source."""
-    if target is None:
-        return False
-    gating = _gating_drops()
-    # A tool that leaves the gated set stays among the consent's drops: refused.
-    return (
-        _consent_view(target, source_system).declared_drops
-        == tuple(drop for drop in consent.declared_drops if drop not in gating)
-        and consent_target_digest(target, source_system) == consent.target_digest
-    ) or _consented_before(target, source_system, consent)
 
 
 def _with_switch_tool_dropped(target: AgentSpec, source_system: str | None) -> AgentSpec | None:
@@ -1395,7 +1324,9 @@ def _with_switch_tool_dropped(target: AgentSpec, source_system: str | None) -> A
         update={
             "mcp_servers": tuple(servers),
             "declared_drops": drops,
-            "system": compose_source_instructions(source_system, _losses_line(drops)),
+            "system": compose_source_instructions(
+                source_system, "Unavailable capabilities: " + ", ".join(drops) + "."
+            ),
         }
     )
 
@@ -1420,44 +1351,9 @@ def _with_tools_dropped(target: AgentSpec, source_system: str | None) -> AgentSp
         update={
             "tools": (),
             "declared_drops": drops,
-            "system": compose_source_instructions(source_system, _losses_line(drops)),
-        }
-    )
-
-
-def _with_newly_gated_unlisted(
-    target: AgentSpec, source_system: str | None, consent: _BackendDropConsent
-) -> AgentSpec | None:
-    """`target` as a consent recorded before Daimon's server listed more tools names it.
-
-    Its digest covers the whole target, so `_consent_view` cannot apply. That
-    consent's catalogue had neither the gated tools it does not name nor
-    `_LISTED_SINCE_GATING`; only those are taken out.
-    """
-    unlisted = (_gating_drops() & set(target.declared_drops)) - set(consent.declared_drops)
-    names = {drop.rsplit(":", 1)[1] for drop in unlisted} | _LISTED_SINCE_GATING
-    from mux.contracts.resources import MCPConnection
-
-    servers: list[MCPConnection] = []
-    changed = bool(unlisted)
-    for server in target.mcp_servers or ():
-        allowed = server.tool_policy.get("allowed_tools") if server.tool_policy else None
-        if server.name == DAIMON_SERVER_NAME and isinstance(allowed, list):
-            kept = [name for name in allowed if name not in names]
-            changed = changed or len(kept) != len(allowed)
-            server = server.model_copy(
-                update={"tool_policy": {**server.tool_policy, "allowed_tools": kept}}
-            )
-        servers.append(server)
-    drops = tuple(drop for drop in target.declared_drops if drop not in unlisted)
-    # Such a consent always named some gated tool: none left is no such consent.
-    if not changed or not drops:
-        return None
-    return target.model_copy(
-        update={
-            "mcp_servers": tuple(servers) if target.mcp_servers is not None else None,
-            "declared_drops": drops,
-            "system": compose_source_instructions(source_system, _losses_line(drops)),
+            "system": compose_source_instructions(
+                source_system, "Unavailable capabilities: " + ", ".join(drops) + "."
+            ),
         }
     )
 
@@ -1465,25 +1361,19 @@ def _with_newly_gated_unlisted(
 def _consented_before(
     target: AgentSpec, source_system: str | None, consent: _BackendDropConsent
 ) -> bool:
-    """A consent recorded before a template kept the source's tools (#1483),
-    offered the switch tool (#1438), or Daimon's server listed more tools (#1686).
+    """A consent recorded before a template kept the source's tools (#1483) or
+    offered the switch tool (#1438).
 
-    Any of those differences, alone or together, is rebuilt; anything else
-    still needs a fresh confirmation.
+    Either difference alone, or both, is rebuilt; anything else still needs a
+    fresh confirmation.
     """
-    for base in (target, _with_newly_gated_unlisted(target, source_system, consent)):
-        if base is None:
-            continue
-        without_tools = _with_tools_dropped(base, source_system)
-        candidates = (
-            base,
-            _with_switch_tool_dropped(base, source_system),
-            without_tools,
-            _with_switch_tool_dropped(without_tools, source_system) if without_tools else None,
-        )
-        if any(_matches(candidate, consent) for candidate in candidates):
-            return True
-    return False
+    without_tools = _with_tools_dropped(target, source_system)
+    candidates = (
+        _with_switch_tool_dropped(target, source_system),
+        without_tools,
+        _with_switch_tool_dropped(without_tools, source_system) if without_tools else None,
+    )
+    return any(_consented(candidate, consent) for candidate in candidates)
 
 
 def source_preservation_pin(source: BackendAgent) -> str:
@@ -1621,7 +1511,7 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
         target = preview_source_drops(
             source, ModelRef(provider=revision.backend, id=revision.model or spec.model.id)
         )
-        if not _consented(target, spec.system, consent):
+        if not _consented(target, consent) and not _consented_before(target, spec.system, consent):
             raise AgentBackendRefused("re_confirm")
     retain_native = (
         (setting is not None)
