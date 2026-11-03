@@ -92,7 +92,7 @@ function InviteTable({ data }: { data: Invite[] }) {
                 ["Expires", shortDate(i.expires_at)],
                 ["Invited by", i.by],
                 ["Agents", i.agents.length
-                  ? <span key="agents" className="flex flex-col items-end gap-1">{i.agents.map((a) => <AgentLink key={a.id} id={a.id} name={a.name} avatar={a.avatar} />)}</span>
+                  ? <span key="agents" className="flex flex-col items-start gap-1">{i.agents.map((a) => <AgentLink key={a.id} id={a.id} name={a.name} avatar={a.avatar} />)}</span>
                   : "Any agent"],
               ]} />
               {i.role === "visitor" && <FilesRow invite={i.id} on={i.allow_files} />}
