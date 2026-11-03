@@ -684,7 +684,7 @@ async def test_continuation_runs_with_the_requesters_organisation_from_users_inf
         patch(
             "daimon.adapters.slack.app.admit",
             new_callable=AsyncMock,
-            side_effect=AdmissionDenied(reason="cap_exceeded"),
+            side_effect=AdmissionDenied(reason="allowance_exhausted"),
         ) as admit,
         pytest.raises(AdmissionDenied),
     ):

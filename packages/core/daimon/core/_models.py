@@ -920,7 +920,10 @@ class UsageEvent(Base):
 
 
 class TenantUserCap(Base):
-    """Per-(tenant, user) cap. NULL platform_user_id row = tenant-wide default.
+    """Legacy per-(tenant, user) monthly cap, folded into `SpendAllowance` rows.
+
+    Nothing reads it now; the rows record what was converted. NULL platform_user_id
+    row = tenant-wide default.
 
     NULLS NOT DISTINCT on the UNIQUE means the default row collides with itself
     on upsert (one default per tenant). Postgres 15+.

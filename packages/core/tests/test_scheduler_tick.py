@@ -1,6 +1,6 @@
 """DB-backed tests for `daimon.core.scheduler.run_one_tick`.
 
-All collaborators are injected (sm, caps, fire). The fire callable is the
+All collaborators are injected (sm, fire). The fire callable is the
 success-path writer (calls record_result with the tail); the guarded gather
 member is the per-routine error boundary, exercised through run_one_tick.
 
@@ -34,19 +34,6 @@ def db_session_factory(
     db_session triggers schema cleanup; these tests commit setup before dispatch.
     """
     return async_sessionmaker(bind=db_engine, expire_on_commit=False)
-
-
-class _FakeCaps:
-    def __init__(self, *, over: bool = False, raises: bool = False) -> None:
-        self.over = over
-        self.raises = raises
-        self.calls: list[tuple[uuid.UUID, str | None]] = []
-
-    async def is_over_cap(self, tenant_id: uuid.UUID, user_id: str | None) -> bool:
-        self.calls.append((tenant_id, user_id))
-        if self.raises:
-            raise RuntimeError("caps boom")
-        return self.over
 
 
 async def _seed_due_routine(
@@ -85,12 +72,9 @@ async def test_run_one_tick_dispatches_due_routine(
         async with db_session_factory() as s, s.begin():
             await record_result(s, r.id, tail="ok", error=None)
 
-    caps = _FakeCaps(over=False)
-
     await run_one_tick(
         now=now,
         sm=db_session_factory,
-        caps=caps,
         fire=fake_fire,
         max_age=timedelta(minutes=15),
         max_concurrent_fires=10,
@@ -103,82 +87,6 @@ async def test_run_one_tick_dispatches_due_routine(
         fetched = await get_routine(s, row.id, tenant_id=row.tenant_id)
     assert fetched is not None
     assert fetched.last_result_tail == "ok", "fire must have written the success tail"
-
-
-async def test_run_one_tick_records_cap_error(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    now = datetime(2026, 5, 8, 12, 0, 0, tzinfo=UTC)
-    row = await _seed_due_routine(db_session, now=now, created_by_user_id="u1")
-    await db_session.commit()
-
-    fired: list[uuid.UUID] = []
-
-    async def fake_fire(r: RoutineRow) -> None:
-        fired.append(r.id)
-
-    caps = _FakeCaps(over=True)
-
-    await run_one_tick(
-        now=now,
-        sm=db_session_factory,
-        caps=caps,
-        fire=fake_fire,
-        max_age=timedelta(minutes=15),
-        max_concurrent_fires=10,
-        dispatch_timeout_s=5.0,
-        wait_for_completion=True,
-    )
-
-    assert fired == [], "over-cap routine must not be fired"
-    async with db_session_factory() as s:
-        fetched = await get_routine(s, row.id, tenant_id=row.tenant_id)
-    assert fetched is not None
-    assert fetched.last_error == "cap_exceeded", "cap-blocked routine must record the cap error"
-
-
-async def test_run_one_tick_swallows_cap_block_record_result_error(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Regression for BL-03: a transient DB error inside the cap-block
-    record_result must be logged and swallowed, not propagate out and kill
-    the tick. This keeps the cap-block path symmetric with the gather member's
-    own error boundary.
-    """
-    now = datetime(2026, 5, 8, 12, 0, 0, tzinfo=UTC)
-    await _seed_due_routine(db_session, now=now, created_by_user_id="u1")
-    await db_session.commit()
-
-    fired: list[uuid.UUID] = []
-
-    async def fake_fire(r: RoutineRow) -> None:
-        fired.append(r.id)
-
-    async def boom_record_result(*_args: object, **_kwargs: object) -> None:
-        raise RuntimeError("transient db error")
-
-    monkeypatch.setattr(
-        "daimon.core.stores.routines.record_result",
-        boom_record_result,
-    )
-
-    caps = _FakeCaps(over=True)
-
-    # Must not raise.
-    await run_one_tick(
-        now=now,
-        sm=db_session_factory,
-        caps=caps,
-        fire=fake_fire,
-        max_age=timedelta(minutes=15),
-        max_concurrent_fires=10,
-        dispatch_timeout_s=5.0,
-        wait_for_completion=True,
-    )
-    assert fired == [], "over-cap routine must not be fired"
 
 
 async def test_run_one_tick_records_fire_error_via_gather(
@@ -195,7 +103,6 @@ async def test_run_one_tick_records_fire_error_via_gather(
     await run_one_tick(
         now=now,
         sm=db_session_factory,
-        caps=_FakeCaps(),
         fire=boom_fire,
         max_age=timedelta(minutes=15),
         max_concurrent_fires=10,
@@ -226,7 +133,6 @@ async def test_run_one_tick_truncates_long_error_at_500_chars(
     await run_one_tick(
         now=now,
         sm=db_session_factory,
-        caps=_FakeCaps(),
         fire=long_boom_fire,
         max_age=timedelta(minutes=15),
         max_concurrent_fires=10,
@@ -271,7 +177,6 @@ async def test_run_one_tick_dispatches_all_concurrently_up_to_cap(
     await run_one_tick(
         now=now,
         sm=db_session_factory,
-        caps=_FakeCaps(),
         fire=counting_fire,
         max_age=timedelta(minutes=15),
         max_concurrent_fires=10,
@@ -309,7 +214,6 @@ async def test_run_one_tick_bounds_concurrency_to_semaphore(
     await run_one_tick(
         now=now,
         sm=db_session_factory,
-        caps=_FakeCaps(),
         fire=counting_fire,
         max_age=timedelta(minutes=15),
         max_concurrent_fires=5,
@@ -342,7 +246,6 @@ async def test_run_one_tick_isolates_timed_out_fire_from_sibling(
     await run_one_tick(
         now=now,
         sm=db_session_factory,
-        caps=_FakeCaps(),
         fire=maybe_hang,
         max_age=timedelta(minutes=15),
         max_concurrent_fires=10,
@@ -391,7 +294,6 @@ async def test_fire_exception_is_captured_to_sentry_and_still_swallowed(
     await run_one_tick(
         now=now,
         sm=db_session_factory,
-        caps=_FakeCaps(),
         fire=boom_fire,
         max_age=timedelta(minutes=15),
         max_concurrent_fires=10,
@@ -435,7 +337,6 @@ async def test_timed_out_fire_is_captured_to_sentry_and_still_swallowed(
     await run_one_tick(
         now=now,
         sm=db_session_factory,
-        caps=_FakeCaps(),
         fire=hang_fire,
         max_age=timedelta(minutes=15),
         max_concurrent_fires=10,
@@ -476,7 +377,6 @@ async def test_fire_binds_rid_and_tenant_id_into_log_context(
     await run_one_tick(
         now=now,
         sm=db_session_factory,
-        caps=_FakeCaps(),
         fire=snapshotting_fire,
         max_age=timedelta(minutes=15),
         max_concurrent_fires=10,
@@ -518,7 +418,6 @@ async def test_concurrent_fires_get_isolated_rids(
     await run_one_tick(
         now=now,
         sm=db_session_factory,
-        caps=_FakeCaps(),
         fire=interleaving_fire,
         max_age=timedelta(minutes=15),
         max_concurrent_fires=10,
@@ -557,7 +456,6 @@ async def test_fire_timeout_records_exact_error_string(
     await run_one_tick(
         now=now,
         sm=db_session_factory,
-        caps=_FakeCaps(),
         fire=hang_fire,
         max_age=timedelta(minutes=15),
         max_concurrent_fires=10,
@@ -594,7 +492,6 @@ async def test_timed_out_fire_reschedules_to_next_cron_slot(
     await run_one_tick(
         now=now,
         sm=db_session_factory,
-        caps=_FakeCaps(),
         fire=hang_fire,
         max_age=timedelta(minutes=15),
         max_concurrent_fires=10,

@@ -19,6 +19,7 @@ from typing import Any
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
     BetaManagedAgentsSpanModelUsage,
 )
+from daimon.core import allowance_limits
 from daimon.core._models import (
     Account,
     AgentMemoryStore,
@@ -42,7 +43,6 @@ from daimon.core.stores import (
     scoped_config_read,
     scoped_config_write,
     slack_user_tokens,
-    tenant_user_caps,
     thread_sessions,
     usage_events,
 )
@@ -69,10 +69,10 @@ from daimon.core.stores.domain import (
     PrincipalLinkRow,
     RoutineRow,
     SlackUserTokenRow,
+    SpendAllowanceRow,
     TaskContinuationRow,
     TenantLedgerRow,
     TenantRow,
-    TenantUserCapRow,
     ThreadSessionRow,
     UsageEventRow,
     WebPersonRow,
@@ -502,22 +502,24 @@ async def make_slack_user_token(
     )
 
 
-async def make_tenant_user_cap(
+async def make_monthly_limit(
     session: AsyncSession,
     *,
     tenant: TenantRow | None = None,
     user_id: str | None = None,
     amount: Decimal = Decimal("5"),
-) -> TenantUserCapRow:
-    """Upsert a tenant_user_caps row via `tenant_user_caps.set_default` /
-    `set_override`. `user_id=None` (the default) creates the tenant-wide
-    default cap; passing `user_id` creates a per-user override.
-    """
+    now: datetime | None = None,
+) -> SpendAllowanceRow:
+    """A monthly allowance for every agent: the workspace default (`user_id=None`) or one
+    person's own, through `allowance_limits`. It starts at `now` (a year ago by default)."""
     tenant = tenant or await make_tenant(session)
+    at = now or datetime.now(UTC) - timedelta(days=365)
     if user_id is None:
-        return await tenant_user_caps.set_default(session, tenant_id=tenant.id, amount=amount)
-    return await tenant_user_caps.set_override(
-        session, tenant_id=tenant.id, user_id=user_id, amount=amount
+        return await allowance_limits.set_default_limit(
+            session, tenant_id=tenant.id, amount=amount, now=at
+        )
+    return await allowance_limits.set_person_limit(
+        session, tenant_id=tenant.id, platform_user_id=user_id, amount=amount, now=at
     )
 
 

@@ -6,7 +6,7 @@ widget.
 
 **Credits here are a COUNT of human interactions, not money.** They are
 deliberately unrelated to `BillingSettings.signup_credit`, which is USD seeded
-into `tenant_ledger` and gates turns through `is_over_cap`. The two must never
+into `tenant_ledger` and gates turns through the spend gate. The two must never
 share a ledger: metering support against the billing balance would let a
 support request consume the tenant's ability to run turns, and a paid-up
 tenant would silently gain unlimited support. Different unit, different table,

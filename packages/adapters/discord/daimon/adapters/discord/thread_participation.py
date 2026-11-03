@@ -16,7 +16,6 @@ from decimal import Decimal
 
 import structlog
 from anthropic import AsyncAnthropic
-from daimon.core.billing import BillingConfig
 from daimon.core.config import ThreadParticipationSettings
 from daimon.core.participation_gates import ParticipationGates
 from daimon.core.scope import DeploymentDefault
@@ -40,7 +39,6 @@ class ThreadParticipant:
         anthropic: AsyncAnthropic,
         bot_user_id: int,
         bot_display_name: str,
-        billing_config: BillingConfig | None,
         markup: Decimal,
         deployment_default: DeploymentDefault,
         application_id: int | None = None,
@@ -54,7 +52,6 @@ class ThreadParticipant:
             sessionmaker=sessionmaker,
             anthropic=anthropic,
             bot_display_name=bot_display_name,
-            billing_config=billing_config,
             markup=markup,
             deployment_default=deployment_default,
         )

@@ -1,8 +1,8 @@
 """The one spend gate every surface asks before a person's request spends money.
 
 Chat turns, thread participation, routines, MCP tool calls and the web all stop on
-the same four checks, in this order: the workspace's prepaid balance, the person's
-monthly cap, the channel's budget, and the person's spend allowances. Each surface
+the same three checks, in this order: the workspace's prepaid balance, the channel's
+budget, and the person's spend allowances (which carry the per-member monthly limits). Each surface
 words its own refusal; this module only decides. Exceptions propagate: the gate
 fails closed.
 
@@ -20,18 +20,17 @@ from decimal import Decimal
 from typing import Literal, get_args
 
 from daimon.core.allowances import AllowanceVerdict, allowance_verdict, applicable, window_start
-from daimon.core.billing import BillingConfig, is_over_cap
 from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.stores import identity, spend_allowances, web_identities, web_people
 from daimon.core.tenant_balance import is_over_balance
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-SpendBlock = Literal["balance_depleted", "cap_exceeded", "budget_exceeded", "allowance_exhausted"]
+SpendBlock = Literal["balance_depleted", "budget_exceeded", "allowance_exhausted"]
 
 ALL_CHECKS: frozenset[SpendBlock] = frozenset(get_args(SpendBlock))
 AFTER_QUEUE_CHECKS: frozenset[SpendBlock] = frozenset({"balance_depleted", "allowance_exhausted"})
 """What a queued turn is checked against again once it holds its slot: the money that
-can run out while it waited. The cap and the channel budget were decided at admission."""
+can run out while it waited. The channel budget was decided at admission."""
 
 
 @dataclass(frozen=True)
@@ -110,7 +109,7 @@ class SpendRequest:
     """One request to spend: whose, on which agent, counted against which channel.
 
     `platform_user_id=None` is the trusted, unbilled path (operator tokens): only the
-    workspace balance and the channel budget apply to it, never a cap or an allowance.
+    workspace balance and the channel budget apply to it, never an allowance.
     `channel_id` is the channel whose budget the spend counts toward, None for none.
     `person=None` has the gate resolve who the user is from their account.
     """
@@ -171,7 +170,6 @@ async def person_verdict(
 async def spend_gate(
     session: AsyncSession,
     *,
-    billing_config: BillingConfig | None,
     request: SpendRequest,
     markup: Decimal,
     now: datetime,
@@ -182,18 +180,6 @@ async def spend_gate(
         tenant_id=request.tenant_id, session=session
     ):
         return "balance_depleted"
-    if (
-        "cap_exceeded" in checks
-        and request.platform_user_id is not None
-        and await is_over_cap(
-            billing_config=billing_config,
-            tenant_id=request.tenant_id,
-            user_id=request.platform_user_id,
-            now=now,
-            session=session,
-        )
-    ):
-        return "cap_exceeded"
     if "budget_exceeded" in checks and await is_over_channel_budget(
         tenant_id=request.tenant_id,
         platform=request.platform,
@@ -214,7 +200,6 @@ async def spend_gate(
 async def spend_gate_in_new_session(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
-    billing_config: BillingConfig | None,
     request: SpendRequest,
     markup: Decimal,
     now: datetime | None = None,
@@ -224,7 +209,6 @@ async def spend_gate_in_new_session(
     async with sessionmaker() as session:
         return await spend_gate(
             session,
-            billing_config=billing_config,
             request=request,
             markup=markup,
             now=now or datetime.now(UTC),

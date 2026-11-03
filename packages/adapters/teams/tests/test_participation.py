@@ -81,7 +81,6 @@ class _Rig:
             sessionmaker=db,
             anthropic=build_fake_anthropic(_messages),
             bot_display_name="daimon",
-            billing_config=None,
             markup=Decimal("1.0"),
         )
 

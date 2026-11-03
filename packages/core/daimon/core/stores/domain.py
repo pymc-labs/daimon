@@ -619,18 +619,6 @@ class SpendAllowanceRow(BaseModel):
     created_at: datetime
 
 
-class TenantUserCapRow(BaseModel):
-    """Per-(tenant, user) cap row. NULL platform_user_id = tenant default. BILL-01."""
-
-    model_config = ConfigDict(from_attributes=True, frozen=True)
-
-    id: uuid.UUID
-    tenant_id: uuid.UUID
-    platform_user_id: str | None
-    cap_usd: Decimal
-    updated_at: datetime
-
-
 class PaymentEventRow(BaseModel):
     """Stripe webhook dedup row. id = stripe event id (text). BILL-01."""
 

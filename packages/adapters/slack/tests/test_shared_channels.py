@@ -958,7 +958,8 @@ async def test_member_joined_channel_reaches_the_no_op_hook() -> None:
 
 
 @pytest.mark.parametrize(
-    "reason", ["balance_depleted", "cap_exceeded", "invoker_not_allowed", "channel_budget_exceeded"]
+    "reason",
+    ["balance_depleted", "allowance_exhausted", "invoker_not_allowed", "channel_budget_exceeded"],
 )
 def test_admission_refusals_never_send_an_external_member_to_commands_or_admins(
     reason: Any,

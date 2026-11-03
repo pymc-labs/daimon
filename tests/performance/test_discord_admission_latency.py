@@ -305,7 +305,6 @@ async def _run_batch(
         "resolve_agent",
         "resolve_environment",
         "is_over_balance",
-        "is_over_cap",
         "is_over_channel_budget",
     )
     with ExitStack() as stack:

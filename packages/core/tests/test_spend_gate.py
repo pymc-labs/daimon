@@ -1,4 +1,4 @@
-"""The one spend gate: check order, subsets, allowances and the unchanged no-allowance path."""
+"""The one spend gate: check order, subsets and allowances."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ from decimal import Decimal
 import pytest
 from daimon.core import spend_gate as spend_gate_module
 from daimon.core.allowances import AllowanceVerdict
-from daimon.core.billing import BillingConfig
 from daimon.core.spend_gate import (
     AFTER_QUEUE_CHECKS,
     SpendBlock,
@@ -22,7 +21,6 @@ from daimon.core.spend_gate import (
 from daimon.core.stores import (
     spend_allowances,
     tenant_ledger,
-    tenant_user_caps,
     usage_events,
     web_identities,
 )
@@ -34,16 +32,8 @@ from daimon.testing.factories import (
     make_web_person,
 )
 from mux.testing.drivers.anthropic.ma_models import ma_model_usage
-from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession
 
-BILLING = BillingConfig(
-    secret_key=SecretStr("sk_test"),
-    webhook_secret=SecretStr("whsec_test"),
-    prices={10: "p10"},
-    success_url="http://test/success",
-    cancel_url="http://test/cancel",
-)
 MARKUP = Decimal("1.2")
 NOW = datetime.now(UTC)
 
@@ -111,12 +101,8 @@ async def _gate(
         person=person,
     )
     if checks is None:
-        return await spend_gate(
-            session, billing_config=BILLING, request=request, markup=MARKUP, now=NOW
-        )
-    return await spend_gate(
-        session, billing_config=BILLING, request=request, markup=MARKUP, now=NOW, checks=checks
-    )
+        return await spend_gate(session, request=request, markup=MARKUP, now=NOW)
+    return await spend_gate(session, request=request, markup=MARKUP, now=NOW, checks=checks)
 
 
 async def test_a_funded_person_with_no_allowance_is_unlimited(db_session: AsyncSession) -> None:
@@ -132,17 +118,6 @@ async def test_balance_is_checked_first(db_session: AsyncSession) -> None:
     await _allow(db_session, tenant.id, amount="1")
     assert await _gate(db_session, tenant.id) == "balance_depleted", (
         "an unfunded workspace is refused on its balance before any allowance"
-    )
-
-
-async def test_cap_comes_before_allowance(db_session: AsyncSession) -> None:
-    tenant = await make_tenant(db_session)
-    await _fund(db_session, tenant.id)
-    await _spend(db_session, tenant.id, "u1", "a1")
-    await tenant_user_caps.set_default(db_session, tenant_id=tenant.id, amount=Decimal("5"))
-    await _allow(db_session, tenant.id, amount="1")
-    assert await _gate(db_session, tenant.id) == "cap_exceeded", (
-        "a person over the cap and over an allowance is refused on the cap"
     )
 
 
@@ -315,17 +290,16 @@ async def test_the_trusted_path_skips_the_person_checks(db_session: AsyncSession
     )
 
 
-async def test_after_queue_checks_leave_out_the_cap(db_session: AsyncSession) -> None:
+async def test_after_queue_checks_leave_out_the_channel_budget(db_session: AsyncSession) -> None:
     tenant = await make_tenant(db_session)
     await _fund(db_session, tenant.id)
     await _spend(db_session, tenant.id, "u1", "a1")
-    await tenant_user_caps.set_default(db_session, tenant_id=tenant.id, amount=Decimal("1"))
     assert await _gate(db_session, tenant.id, checks=AFTER_QUEUE_CHECKS) is None, (
-        "a queued turn is not stopped again by the cap it passed at admission"
+        "a person with no allowance is not stopped while a queued turn waits"
     )
     await _allow(db_session, tenant.id, amount="1")
     assert await _gate(db_session, tenant.id, checks=AFTER_QUEUE_CHECKS) == "allowance_exhausted", (
-        "but an allowance used up while it waited does stop it"
+        "an allowance used up while it waited does stop it"
     )
 
 

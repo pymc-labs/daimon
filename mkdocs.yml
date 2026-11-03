@@ -34,6 +34,7 @@ nav:
       - Isolation: isolation.md
       - Permissions: permissions.md
       - Billing: billing.md
+      - Allowances: allowances.md
       - Agent identity: agent-identity.md
       - Managed agents (mux): mux.md
   - Reference:

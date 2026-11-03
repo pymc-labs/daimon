@@ -14,7 +14,7 @@ from decimal import Decimal
 from daimon.core._models import SpendAllowance
 from daimon.core.stores import usage_events
 from daimon.core.stores.domain import AllowanceSubjectKind, AllowanceWindow, SpendAllowanceRow
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -59,6 +59,43 @@ async def create_allowance(
     await session.flush()
     await session.refresh(orm)
     return SpendAllowanceRow.model_validate(orm)
+
+
+async def find_month_limit(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    subject_kind: AllowanceSubjectKind,
+    subject_id: str,
+) -> SpendAllowanceRow | None:
+    """The subject's open-ended monthly allowance for every agent, if it has one."""
+    orm = await session.scalar(
+        select(SpendAllowance)
+        .where(
+            SpendAllowance.tenant_id == tenant_id,
+            SpendAllowance.subject_kind == subject_kind,
+            SpendAllowance.subject_id == subject_id,
+            SpendAllowance.agent_id.is_(None),
+            SpendAllowance.window == "month",
+            SpendAllowance.expires_at.is_(None),
+        )
+        .order_by(SpendAllowance.created_at, SpendAllowance.id)
+        .limit(1)
+    )
+    return None if orm is None else SpendAllowanceRow.model_validate(orm)
+
+
+async def set_amount(
+    session: AsyncSession, *, tenant_id: uuid.UUID, allowance_id: uuid.UUID, amount_usd: Decimal
+) -> SpendAllowanceRow | None:
+    """Change what one of the tenant's allowances lets a person spend. None when gone."""
+    orm = await session.scalar(
+        update(SpendAllowance)
+        .where(SpendAllowance.tenant_id == tenant_id, SpendAllowance.id == allowance_id)
+        .values(amount_usd=amount_usd)
+        .returning(SpendAllowance)
+    )
+    return None if orm is None else SpendAllowanceRow.model_validate(orm)
 
 
 async def delete_allowance(

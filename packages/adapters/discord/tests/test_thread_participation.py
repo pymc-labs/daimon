@@ -116,7 +116,6 @@ def _responder(
         anthropic=MagicMock(),
         bot_user_id=BOT_ID,
         bot_display_name="daimon",
-        billing_config=None,
         markup=Decimal("1.0"),
         deployment_default=DeploymentDefault(agent_name="daimon"),
     )

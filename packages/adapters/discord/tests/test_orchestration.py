@@ -23,6 +23,7 @@ from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.theme import COLOR_RED
 from daimon.adapters.discord.views import CancelView
+from daimon.core import allowance_limits
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import McpSettings, ThreadNamingSettings
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -1561,12 +1562,10 @@ class TestInvokerAccessPolicy:
     @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
     @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
-    @patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
     async def test_mention_from_an_allowlisted_user_passes_the_policy(
         self,
         mock_resolve: AsyncMock,
-        mock_is_over_cap: AsyncMock,
         mock_create_session: AsyncMock,
         mock_run_turn: AsyncMock,
         mock_find_env: AsyncMock,
@@ -1579,9 +1578,11 @@ class TestInvokerAccessPolicy:
         await set_access_policy(
             db_session, tenant_id=tenant.id, policy=TenantAccessPolicy(invoker_user_ids=("111",))
         )
+        await allowance_limits.set_default_limit(
+            db_session, tenant_id=tenant.id, amount=Decimal(0), now=datetime.now(UTC)
+        )
         await db_session.commit()
         mock_resolve.return_value = _stub_resolved_config()
-        mock_is_over_cap.return_value = True
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
 
@@ -1590,9 +1591,8 @@ class TestInvokerAccessPolicy:
 
         await bot.on_message(message)
 
-        # Past the policy: the config cascade ran, and the cap gate is what stopped it.
+        # Past the policy: the config cascade ran, and the allowance gate is what stopped it.
         mock_resolve.assert_awaited_once()
-        mock_is_over_cap.assert_awaited_once()
 
 
 class TestProtectedChannelAdmission:
@@ -2248,12 +2248,10 @@ class TestProtectedChannelBeforeAnyNotice:
         ],
         ids=["no-policy", "no-category-policy", "category-policy-fetches-once"],
     )
-    @patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
     async def test_an_uncached_parent_is_fetched_only_for_a_category_policy_and_once(
         self,
         mock_resolve: AsyncMock,
-        mock_is_over_cap: AsyncMock,
         db_session: AsyncSession,
         db_session_factory: async_sessionmaker[AsyncSession],
         policy: TenantAccessPolicy | None,
@@ -2263,9 +2261,11 @@ class TestProtectedChannelBeforeAnyNotice:
         await _setup_workspace_and_config(db_session, tenant.id)
         if policy is not None:
             await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)
+        await allowance_limits.set_default_limit(
+            db_session, tenant_id=tenant.id, amount=Decimal(0), now=datetime.now(UTC)
+        )
         await db_session.commit()
         mock_resolve.return_value = _stub_resolved_config()
-        mock_is_over_cap.return_value = True  # stop right after admission's gates
         bot = make_bot(_make_runtime(tenant.id, db_session_factory))
         message = _make_thread_message(parent_id=789)
         thread = message.channel
@@ -2424,18 +2424,16 @@ class TestContinuationMayPost:
 
 
 class TestBillingAdmissionGate:
-    """is_over_cap admission gate + billing posture wiring."""
+    """The spend gate at admission + billing posture wiring."""
 
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
     @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
-    @patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
-    async def test_over_cap_skips_turn(
+    async def test_used_up_allowance_skips_turn(
         self,
         mock_resolve: AsyncMock,
-        mock_is_over_cap: AsyncMock,
         mock_create_session: AsyncMock,
         mock_run_turn: AsyncMock,
         mock_find_env: AsyncMock,
@@ -2443,12 +2441,14 @@ class TestBillingAdmissionGate:
         db_session: AsyncSession,
         db_session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
-        """When is_over_cap returns True, no MA session is created and no turn runs."""
+        """A person whose monthly allowance is used up gets no MA session and no turn."""
         tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
         await _setup_workspace_and_config(db_session, tenant.id)
+        await allowance_limits.set_default_limit(
+            db_session, tenant_id=tenant.id, amount=Decimal(0), now=datetime.now(UTC)
+        )
 
         mock_resolve.return_value = _stub_resolved_config()
-        mock_is_over_cap.return_value = True
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
 
@@ -2458,29 +2458,21 @@ class TestBillingAdmissionGate:
 
         await bot.on_message(message)
 
-        mock_is_over_cap.assert_awaited_once()
-        cap_kwargs = mock_is_over_cap.call_args.kwargs
-        assert cap_kwargs["tenant_id"] == tenant.id, "cap check must be keyed on tenant_id"
-        assert cap_kwargs["user_id"] == "111", "gate should pass user_id from message author"
         mock_create_session.assert_not_called()
         mock_run_turn.assert_not_called()
         message.create_thread.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         message.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         sent_text: str = message.channel.send.call_args.kwargs["embed"].description  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
-        assert sent_text == (
-            "You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
-        )
+        assert sent_text == "You've used your Daimon credit.\n\nAsk an admin to add more."
 
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
     @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
-    @patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
-    async def test_under_cap_proceeds_normally(
+    async def test_under_the_allowance_proceeds_normally(
         self,
         mock_resolve: AsyncMock,
-        mock_is_over_cap: AsyncMock,
         mock_create_session: AsyncMock,
         mock_run_turn: AsyncMock,
         mock_find_env: AsyncMock,
@@ -2488,12 +2480,11 @@ class TestBillingAdmissionGate:
         db_session: AsyncSession,
         db_session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
-        """Under cap: gate returns False; create_session + run_turn fire normally."""
+        """A person with allowance left: create_session + run_turn fire normally."""
         tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
         await _setup_workspace_and_config(db_session, tenant.id)
 
         mock_resolve.return_value = _stub_resolved_config()
-        mock_is_over_cap.return_value = False
         mock_create_session.return_value = ma_session(id="sess-undercap")
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
@@ -2507,15 +2498,13 @@ class TestBillingAdmissionGate:
         message.create_thread.return_value = mock_thread  # pyright: ignore[reportAttributeAccessIssue]
 
         await bot.on_message(message)
-
-        mock_is_over_cap.assert_awaited_once()
         mock_create_session.assert_called_once()
         mock_run_turn.assert_called_once()
 
-    @patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.spend_gate", new_callable=AsyncMock)
     async def test_dm_no_gate_short_circuit(
         self,
-        mock_is_over_cap: AsyncMock,
+        mock_gate: AsyncMock,
         db_session: AsyncSession,
         db_session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
@@ -2530,18 +2519,16 @@ class TestBillingAdmissionGate:
 
         await bot.on_message(message)
 
-        mock_is_over_cap.assert_not_called()
+        mock_gate.assert_not_called()
 
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
     @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
-    @patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
     async def test_billed_record_wired_with_session_model_id(
         self,
         mock_resolve: AsyncMock,
-        mock_is_over_cap: AsyncMock,
         mock_create_session: AsyncMock,
         mock_run_turn: AsyncMock,
         mock_find_env: AsyncMock,
@@ -2559,7 +2546,6 @@ class TestBillingAdmissionGate:
         await _setup_workspace_and_config(db_session, tenant.id)
 
         mock_resolve.return_value = _stub_resolved_config()
-        mock_is_over_cap.return_value = False
         mock_create_session.return_value = ma_session(id="sess-usage")
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"

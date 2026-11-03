@@ -224,7 +224,6 @@ async def test_session_preparation_failed_renders_copy_and_does_not_run_turn(
         patch(
             "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch(
             "daimon.adapters.slack.app.bind_session", new_callable=AsyncMock
         ) as mock_bind_session,
@@ -235,7 +234,6 @@ async def test_session_preparation_failed_renders_copy_and_does_not_run_turn(
         mock_resolve_agent.return_value = _AGENT_ID
         mock_resolve_env.return_value = _ENV_ID
         mock_over_balance.return_value = False
-        mock_over_cap.return_value = False
         mock_bind_session.side_effect = SessionPreparationFailed(
             reasons=("model",),
             stage="checkpointed",
@@ -313,7 +311,6 @@ async def test_responder_changed_without_handoff_renders_offer_and_does_not_run_
         patch(
             "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch(
             "daimon.adapters.slack.app.bind_session", new_callable=AsyncMock
         ) as mock_bind_session,
@@ -321,7 +318,6 @@ async def test_responder_changed_without_handoff_renders_offer_and_does_not_run_
         mock_resolve_agent.return_value = _AGENT_ID
         mock_resolve_env.return_value = _ENV_ID
         mock_over_balance.return_value = False
-        mock_over_cap.return_value = False
         mock_bind_session.side_effect = SessionAgentMismatch(
             mapping_id=uuid.uuid4(),
             session_id="sess_owned_by_other_agent",
@@ -413,7 +409,6 @@ async def test_is_setup_is_false_for_a_handoff_binding(
         patch(
             "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch(
             "daimon.adapters.slack.app.bind_session", new_callable=AsyncMock
         ) as mock_bind_session,
@@ -424,7 +419,6 @@ async def test_is_setup_is_false_for_a_handoff_binding(
     ):
         mock_resolve_env.return_value = _ENV_ID
         mock_over_balance.return_value = False
-        mock_over_cap.return_value = False
         mock_bind_session.return_value = prepared
         mock_run_prepared_turn.return_value = RunOutcome(
             state=TurnState(),
@@ -478,7 +472,6 @@ async def test_replaced_leaves_the_reply_as_the_agents_text(
         patch(
             "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch(
             "daimon.adapters.slack.app.bind_session", new_callable=AsyncMock
         ) as mock_bind_session,
@@ -489,7 +482,6 @@ async def test_replaced_leaves_the_reply_as_the_agents_text(
         mock_resolve_agent.return_value = _AGENT_ID
         mock_resolve_env.return_value = _ENV_ID
         mock_over_balance.return_value = False
-        mock_over_cap.return_value = False
         mock_bind_session.return_value = prepared
         mock_run_prepared_turn.side_effect = _run_turn_revealing_answer(
             RunOutcome(
@@ -550,7 +542,6 @@ async def test_replaced_with_no_answer_posts_no_summary_message(
         patch(
             "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch(
             "daimon.adapters.slack.app.bind_session", new_callable=AsyncMock
         ) as mock_bind_session,
@@ -561,7 +552,6 @@ async def test_replaced_with_no_answer_posts_no_summary_message(
         mock_resolve_agent.return_value = _AGENT_ID
         mock_resolve_env.return_value = _ENV_ID
         mock_over_balance.return_value = False
-        mock_over_cap.return_value = False
         mock_bind_session.return_value = prepared
         mock_run_prepared_turn.return_value = RunOutcome(
             state=TurnState(),
@@ -624,7 +614,6 @@ async def test_outcome_replaced_after_loss_leaves_the_reply_as_the_agents_text(
         patch(
             "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch(
             "daimon.adapters.slack.app.bind_session", new_callable=AsyncMock
         ) as mock_bind_session,
@@ -635,7 +624,6 @@ async def test_outcome_replaced_after_loss_leaves_the_reply_as_the_agents_text(
         mock_resolve_agent.return_value = _AGENT_ID
         mock_resolve_env.return_value = _ENV_ID
         mock_over_balance.return_value = False
-        mock_over_cap.return_value = False
         mock_bind_session.return_value = prepared
         mock_run_prepared_turn.side_effect = _run_turn_revealing_answer(
             RunOutcome(
@@ -695,7 +683,6 @@ async def test_pending_posts_must_finish_copy_after_the_answer(
         patch(
             "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch(
             "daimon.adapters.slack.app.bind_session", new_callable=AsyncMock
         ) as mock_bind_session,
@@ -706,7 +693,6 @@ async def test_pending_posts_must_finish_copy_after_the_answer(
         mock_resolve_agent.return_value = _AGENT_ID
         mock_resolve_env.return_value = _ENV_ID
         mock_over_balance.return_value = False
-        mock_over_cap.return_value = False
         mock_bind_session.return_value = prepared
         mock_run_prepared_turn.return_value = RunOutcome(
             state=TurnState(),
@@ -769,7 +755,6 @@ async def test_session_busy_renders_must_finish_copy_and_does_not_run_turn(
         patch(
             "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch(
             "daimon.adapters.slack.app.bind_session", new_callable=AsyncMock
         ) as mock_bind_session,
@@ -780,7 +765,6 @@ async def test_session_busy_renders_must_finish_copy_and_does_not_run_turn(
         mock_resolve_agent.return_value = _AGENT_ID
         mock_resolve_env.return_value = _ENV_ID
         mock_over_balance.return_value = False
-        mock_over_cap.return_value = False
         mock_bind_session.side_effect = SessionBusyError(
             pending_reasons=("agent_identity",), retry_after=datetime.now(UTC)
         )
@@ -871,7 +855,6 @@ async def test_the_turn_marker_is_cleared_before_continuations_are_dispatched(
         patch(
             "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch(
             "daimon.adapters.slack.app.bind_session", new_callable=AsyncMock
         ) as mock_bind_session,
@@ -890,7 +873,6 @@ async def test_the_turn_marker_is_cleared_before_continuations_are_dispatched(
         mock_resolve_agent.return_value = _AGENT_ID
         mock_resolve_env.return_value = _ENV_ID
         mock_over_balance.return_value = False
-        mock_over_cap.return_value = False
         mock_bind_session.return_value = prepared
         mock_run_prepared_turn.side_effect = _run_turn_revealing_answer(
             RunOutcome(
@@ -992,7 +974,6 @@ async def test_the_dispatcher_is_told_a_turn_is_running_when_the_row_still_says_
         patch(
             "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch(
             "daimon.adapters.slack.app.bind_session", new_callable=AsyncMock
         ) as mock_bind_session,
@@ -1007,7 +988,6 @@ async def test_the_dispatcher_is_told_a_turn_is_running_when_the_row_still_says_
         mock_resolve_agent.return_value = _AGENT_ID
         mock_resolve_env.return_value = _ENV_ID
         mock_over_balance.return_value = False
-        mock_over_cap.return_value = False
         mock_bind_session.return_value = prepared
         mock_run_prepared_turn.side_effect = _run_turn_revealing_answer(
             RunOutcome(
@@ -1080,7 +1060,6 @@ async def test_mention_turn_backend_switch_card_captures_through_its_own_admissi
         patch(
             "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch(
             "daimon.adapters.slack.app.bind_session", new_callable=AsyncMock
         ) as mock_bind_session,
@@ -1090,7 +1069,6 @@ async def test_mention_turn_backend_switch_card_captures_through_its_own_admissi
     ):
         mock_resolve_env.return_value = _ENV_ID
         mock_over_balance.return_value = False
-        mock_over_cap.return_value = False
         mock_bind_session.return_value = prepared
         mock_run_prepared_turn.return_value = RunOutcome(
             state=TurnState(),

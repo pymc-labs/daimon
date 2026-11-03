@@ -29,6 +29,7 @@ server](https://daimon.decision.ai/) instead.
 - [Isolation](isolation.md) and [Permissions](permissions.md): who can see
   and do what.
 - [Billing](billing.md): how model calls are metered and gated.
+- [Allowances](allowances.md): per-person spend limits.
 - [Agent identity](agent-identity.md) and
   [Managed agents](mux.md): how agents appear and run.
 

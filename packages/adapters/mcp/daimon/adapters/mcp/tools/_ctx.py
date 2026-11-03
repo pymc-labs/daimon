@@ -242,13 +242,11 @@ def _admission_recheck(  # pyright: ignore[reportUnusedFunction]
 
 _GATE_LOG: dict[SpendBlock, str] = {
     "balance_depleted": "balance",
-    "cap_exceeded": "cap",
     "budget_exceeded": "channel_budget",
     "allowance_exhausted": "allowance",
 }
 _BLOCK_REASON: dict[SpendBlock, TerminationReason] = {
     "balance_depleted": TerminationReason.ADMISSION_BALANCE_DEPLETED,
-    "cap_exceeded": TerminationReason.ADMISSION_CAP_EXCEEDED,
     "budget_exceeded": TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED,
     "allowance_exhausted": TerminationReason.ADMISSION_DENIED,
 }
@@ -294,7 +292,7 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
       them.
       ``agent_names`` is called only when a pin exists, so the agent lookup it
       may need costs nothing on unpinned tenants.
-    - Then runs the one spend gate (``daimon.core.spend_gate``): balance, cap,
+    - Then runs the one spend gate (``daimon.core.spend_gate``): balance,
       the channel budget of the isolated channel whose own agent this is (an
       exempt caller's hub or DM run included, else a key's bound channel),
       then the person's spend allowances, on ``agent_id`` when the caller
@@ -323,7 +321,6 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
     async with sessionmaker() as session:
         block = await spend_gate(
             session,
-            billing_config=billing_config,
             request=SpendRequest(
                 tenant_id=auth.tenant_id,
                 platform_user_id=auth.platform_user_id,
@@ -350,8 +347,6 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
             f"TERMINAL ERROR: This {nouns.scope}'s daimon credit is depleted. "
             f"An admin can top up with {nouns.billing}."
         )
-    if block == "cap_exceeded":
-        raise ToolError(f"TERMINAL ERROR: {admission_refusal_text('cap_exceeded', nouns)}")
     if block == "allowance_exhausted":
         raise ToolError(f"TERMINAL ERROR: {admission_refusal_text('allowance_exhausted', nouns)}")
     raise ToolError(
@@ -372,15 +367,14 @@ async def _gate_origin_spend(  # pyright: ignore[reportUnusedFunction]
     """The spend gate for a tool whose channel and agent are known only after admission.
 
     Runs the checks admission could not: the budget of the channel the spend counts
-    toward and the person's allowance on the agent it counts toward. Balance and cap
-    were decided by ``_admit``. No-ops for the unbilled path (no platform user).
+    toward and the person's allowance on the agent it counts toward. Balance
+    was decided by ``_admit``. No-ops for the unbilled path (no platform user).
     """
     if auth.platform_user_id is None:
         return
     async with sessionmaker() as session:
         block = await spend_gate(
             session,
-            billing_config=None,
             request=SpendRequest(
                 tenant_id=auth.tenant_id,
                 platform_user_id=auth.platform_user_id,

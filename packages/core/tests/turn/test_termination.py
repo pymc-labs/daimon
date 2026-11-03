@@ -276,10 +276,6 @@ _REFUSALS: dict[str, tuple[Callable[[], BaseException | None], TerminationReason
         lambda: AdmissionDenied(reason="balance_depleted"),
         TerminationReason.ADMISSION_BALANCE_DEPLETED,
     ),
-    "cap": (
-        lambda: AdmissionDenied(reason="cap_exceeded"),
-        TerminationReason.ADMISSION_CAP_EXCEEDED,
-    ),
     "channel_budget": (
         lambda: AdmissionDenied(reason="channel_budget_exceeded"),
         TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED,

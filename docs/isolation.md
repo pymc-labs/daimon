@@ -182,7 +182,7 @@ would see each other's skills. Agents and environments carry the full id.
 
 One prepaid ledger serves the whole tenant. A channel budget counts a thread
 toward its channel, a DM toward the channel it came from, and an agent kept in
-one channel toward its home. The per-member cap is one row per person with a
+one channel toward its home. A person's monthly limit is an allowance, with a
 tenant default. See [billing.md](billing.md).
 
 A routine belongs to its creator: only the creator or an admin lists, reads,
@@ -253,4 +253,4 @@ paths still carry something from one person to the other.
 
 What does not cross: the session and transcript, the sandbox, the output
 listing, carried work on replacement, OAuth grants, personal memory, the Daimon
-MCP vault, notebook listing and deletion, the per-member cap and routines.
+MCP vault, notebook listing and deletion, allowances and routines.

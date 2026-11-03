@@ -88,11 +88,6 @@ async def _get(sm: async_sessionmaker[AsyncSession], row: RoutineRow) -> Routine
     return fetched
 
 
-class _NoCap:
-    async def is_over_cap(self, tenant_id: object, user_id: str) -> bool:
-        return False
-
-
 async def _tick(
     sm: async_sessionmaker[AsyncSession],
     now: datetime,
@@ -101,7 +96,6 @@ async def _tick(
     await run_one_tick(
         now=now,
         sm=sm,
-        caps=_NoCap(),
         fire=fire,
         max_age=timedelta(minutes=15),
         max_concurrent_fires=1,

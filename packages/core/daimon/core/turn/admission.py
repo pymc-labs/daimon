@@ -1274,12 +1274,11 @@ async def _admit_gates(
         agent_id=agent.id,
         person=spend_person,
     )
-    # One gate decides balance, cap, channel budget and allowance, in that order, on
+    # One gate decides balance, channel budget and allowance, in that order, on
     # one checked-out connection under READ COMMITTED.
     async with deps.sessionmaker() as billing_session:
         block = await spend_gate(
             billing_session,
-            billing_config=deps.billing_config,
             request=spend_request,
             markup=deps.markup,
             now=now,
@@ -1292,8 +1291,6 @@ async def _admit_gates(
             raise AdmissionDenied(
                 reason="balance_depleted", cause=None if credited else "no_credit_yet"
             )
-        if block == "cap_exceeded":
-            raise AdmissionDenied(reason="cap_exceeded")
         if block == "allowance_exhausted":
             raise AdmissionDenied(reason="allowance_exhausted")
         budget_exceeded = block == "budget_exceeded"
@@ -1321,7 +1318,6 @@ async def _admit_gates(
         partial(
             spend_gate_in_new_session,
             deps.sessionmaker,
-            billing_config=deps.billing_config,
             request=spend_request,
             markup=deps.markup,
             checks=AFTER_QUEUE_CHECKS,

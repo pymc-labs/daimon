@@ -52,7 +52,6 @@ async def test_an_exhausted_allowance_skips_the_classifier(
         sessionmaker=db_session_factory,
         anthropic=client,
         bot_display_name="Daimon",
-        billing_config=None,
         markup=Decimal(1),
     )
     try:

@@ -95,7 +95,6 @@ async def test_selfhosted_discord_and_teams_followed_threads_stay_mention_only(
         anthropic=client,
         bot_user_id=999,
         bot_display_name="Daimon",
-        billing_config=None,
         markup=Decimal("1"),
         deployment_default=DeploymentDefault(),
     )
@@ -120,7 +119,6 @@ async def test_selfhosted_discord_and_teams_followed_threads_stay_mention_only(
         sessionmaker=db_session_factory,
         anthropic=client,
         bot_display_name="Daimon",
-        billing_config=None,
         markup=Decimal("1"),
         deployment_default=DeploymentDefault(),
     )

@@ -2428,7 +2428,6 @@ class DaimonBot(commands.Bot):
                 bot_user_id=bot_user_id,
                 application_id=self.application_id,
                 bot_display_name=bot_display_name,
-                billing_config=self.runtime.billing_config,
                 markup=self.runtime.settings.billing.markup,
                 deployment_default=self.runtime.deployment_default,
             )

@@ -45,11 +45,6 @@ _EXPECTED_DELIVERY_CHUNKS = [
 ]
 
 
-class NoCaps:
-    async def is_over_cap(self, tenant_id: uuid.UUID, user_id: str) -> bool:
-        return False
-
-
 async def unused_fire(row: RoutineRow) -> None:
     raise AssertionError("unexpected scheduled fire")
 
@@ -74,7 +69,6 @@ def _runner(sm: async_sessionmaker[AsyncSession]) -> ClockedRoutineJobs:
     return ClockedRoutineJobs(
         sessionmaker=sm,
         clock=clock,
-        caps=NoCaps(),
         fire=unused_fire,
         post=unused_post,
         gateway=gateway,
@@ -212,7 +206,6 @@ async def _bound(
     jobs = ClockedRoutineJobs(
         sessionmaker=sm,
         clock=clock,
-        caps=NoCaps(),
         fire=fire,
         post=post,
         gateway=harness.gateway,

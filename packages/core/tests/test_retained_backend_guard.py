@@ -105,7 +105,6 @@ async def test_participation_uses_retained_backend_before_history_and_classifier
         sessionmaker=db_session_factory,
         anthropic=client,
         bot_display_name="Daimon",
-        billing_config=None,
         markup=Decimal(1),
     )
     try:

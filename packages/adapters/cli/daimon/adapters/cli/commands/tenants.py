@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Annotated, Literal
@@ -14,7 +15,7 @@ from daimon.adapters.cli.flags import JSON_OPTION, YES_OPTION
 from daimon.adapters.cli.output import emit_rows, render_json
 from daimon.adapters.cli.prompt import confirm_or_abort
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
-from daimon.core import channel_backend
+from daimon.core import allowance_limits, channel_backend
 from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
 from daimon.core.billing import credit_note_slug, manual_credit
 from daimon.core.config import load_settings
@@ -27,7 +28,7 @@ from daimon.core.permissions import (
     ChannelWriters,
     agent_permissions,
 )
-from daimon.core.stores import tenant_ledger, tenant_user_caps
+from daimon.core.stores import tenant_ledger
 from daimon.core.stores.access_policy import (
     AccessPolicyUnreadable,
     clear_access_policy,
@@ -513,6 +514,10 @@ def tenants_cap_command(
     usd: str,
     user: Annotated[str | None, typer.Option("--user", help="Platform user id override.")] = None,
 ) -> None:
+    """Set the monthly limit per member, or one person's own with --user.
+
+    It is stored as a monthly spend allowance for every agent, so it appears under Credits.
+    """
     settings = load_settings()
     console = Console(highlight=False)
 
@@ -543,14 +548,20 @@ async def tenants_cap(
     tenant_id = await _existing_tenant_id(rt, platform=platform, external_id=workspace_id)
     if user == "":
         raise typer.BadParameter("user must not be empty")
+    now = datetime.now(UTC)
     async with rt.sessionmaker() as session, session.begin():
         if user is None:
-            await tenant_user_caps.set_default(session, tenant_id=tenant_id, amount=amount)
-        else:
-            await tenant_user_caps.set_override(
-                session, tenant_id=tenant_id, user_id=user, amount=amount
+            await allowance_limits.set_default_limit(
+                session, tenant_id=tenant_id, amount=amount, now=now
             )
-    console.print(f"{platform}:{workspace_id} monthly cap for {user or 'default'}: ${amount:.2f}")
+        else:
+            await allowance_limits.set_person_limit(
+                session, tenant_id=tenant_id, platform_user_id=user, amount=amount, now=now
+            )
+    console.print(
+        f"{platform}:{workspace_id} monthly limit for {user or 'default'}: ${amount:.2f} "
+        "(an allowance, also shown in the web app under Credits)"
+    )
 
 
 def _print_policy(

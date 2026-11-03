@@ -194,7 +194,9 @@ def test_private_stage_and_reason_cannot_escape_the_shared_diagnostic_owner():
     assert logs[0]["stage"] == logs[0]["reason"] == "redacted"
 
 
-@pytest.mark.parametrize("reason", ["balance_depleted", "cap_exceeded", "backend_unsupported"])
+@pytest.mark.parametrize(
+    "reason", ["balance_depleted", "allowance_exhausted", "backend_unsupported"]
+)
 def test_shared_refusal_labels_retain_only_typed_admission_codes(reason):
     from daimon.core.channel_backend import backend_refusal_causes
 

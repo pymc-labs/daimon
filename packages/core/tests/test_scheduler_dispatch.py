@@ -1,7 +1,6 @@
 """Persistent dispatch must keep ticking while routines run, without duplicate fires."""
 
 import asyncio
-import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -30,11 +29,6 @@ def db_session_factory(
 
 
 NOW = datetime(2026, 9, 28, 12, tzinfo=UTC)
-
-
-class NoCaps:
-    async def is_over_cap(self, tenant_id: uuid.UUID, user_id: str) -> bool:
-        return False
 
 
 async def seed(
@@ -83,7 +77,6 @@ async def test_slow_routine_does_not_block_next_tick_or_overlap_itself(
         await run_one_tick(
             now=now,
             sm=db_session_factory,
-            caps=NoCaps(),
             fire=fire,
             max_age=timedelta(minutes=15),
             max_concurrent_fires=2,
@@ -152,7 +145,6 @@ async def test_missed_slots_skip_or_coalesce_once(
         await run_one_tick(
             now=NOW,
             sm=db_session_factory,
-            caps=NoCaps(),
             fire=fire,
             max_age=timedelta(minutes=15),
             max_concurrent_fires=2,
@@ -190,7 +182,6 @@ async def test_capacity_remains_bounded_across_ticks_and_shutdown_joins_fires(
         await run_one_tick(
             now=NOW,
             sm=db_session_factory,
-            caps=NoCaps(),
             fire=fire,
             max_age=timedelta(minutes=15),
             max_concurrent_fires=1,
@@ -239,7 +230,6 @@ async def test_slots_due_between_ticks_are_skipped_when_fire_completes(
     await run_one_tick(
         now=NOW,
         sm=db_session_factory,
-        caps=NoCaps(),
         fire=fire,
         max_age=timedelta(minutes=15),
         max_concurrent_fires=1,
@@ -250,7 +240,6 @@ async def test_slots_due_between_ticks_are_skipped_when_fire_completes(
     await run_one_tick(
         now=finished_at,
         sm=db_session_factory,
-        caps=NoCaps(),
         fire=fire,
         max_age=timedelta(minutes=15),
         max_concurrent_fires=1,
@@ -282,7 +271,6 @@ async def test_tick_returns_dispatcher_without_waiting_for_a_fire(
         run_one_tick(
             now=NOW,
             sm=db_session_factory,
-            caps=NoCaps(),
             fire=fire,
             max_age=timedelta(minutes=15),
             max_concurrent_fires=1,
@@ -319,7 +307,6 @@ async def test_default_skip_claimed_batch_survives_wait_past_freshness_window(
         await run_one_tick(
             now=now,
             sm=db_session_factory,
-            caps=NoCaps(),
             fire=fire,
             max_age=timedelta(minutes=15),
             max_concurrent_fires=1,
@@ -369,7 +356,6 @@ async def test_claimed_queue_stays_bounded_across_ticks(
             await run_one_tick(
                 now=NOW,
                 sm=db_session_factory,
-                caps=NoCaps(),
                 fire=fire,
                 max_age=timedelta(minutes=15),
                 max_concurrent_fires=1,
@@ -467,7 +453,6 @@ async def test_dispatch_timeout_through_headless_records_ceiling(
         dispatcher = await run_one_tick(
             now=NOW,
             sm=db_session_factory,
-            caps=NoCaps(),
             fire=fire,
             max_age=timedelta(minutes=15),
             max_concurrent_fires=1,

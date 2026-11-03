@@ -26,7 +26,6 @@ import functools
 import signal
 import sys
 import time
-import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -49,7 +48,6 @@ from daimon.core.authz import (
     build_agent_ref,
     build_subject,
 )
-from daimon.core.billing import BillingConfig, is_over_cap, load_billing_config
 from daimon.core.channel_backend import effective_thread_backend, is_selfhosted_channel
 from daimon.core.config import Settings, load_settings
 from daimon.core.constants import MA_MAX_RETRIES
@@ -186,33 +184,6 @@ async def _acquire_advisory_lock(engine: AsyncEngine, key: int) -> AsyncConnecti
     return conn
 
 
-class _CapsAdapter:
-    """Wraps the free ``is_over_cap`` function in a ``CapsCheck``-shaped object.
-
-    The core scheduler ``CapsCheck`` Protocol expects an object with
-    ``is_over_cap(tenant_id, user_id) -> bool``; we wrap the free function so
-    the existing ``run_one_tick`` contract holds without leaking sessionmaker
-    into ``run_one_tick``'s signature.
-    """
-
-    def __init__(
-        self,
-        sessionmaker: async_sessionmaker[AsyncSession],
-        billing_config: BillingConfig | None,
-    ) -> None:
-        self._sm = sessionmaker
-        self._billing_config = billing_config
-
-    async def is_over_cap(self, tenant_id: uuid.UUID, user_id: str) -> bool:
-        return await is_over_cap(
-            billing_config=self._billing_config,
-            sessionmaker=self._sm,
-            tenant_id=tenant_id,
-            user_id=user_id,
-            now=datetime.now(UTC),
-        )
-
-
 async def _blocked(
     sm: async_sessionmaker[AsyncSession],
     settings: Settings,
@@ -226,7 +197,6 @@ async def _blocked(
     return (
         await spend_gate_in_new_session(
             sm,
-            billing_config=None,
             request=SpendRequest(
                 tenant_id=row.tenant_id,
                 platform_user_id=row.created_by_user_id,
@@ -424,7 +394,7 @@ async def _build_fire(
             fire_hold = await routine_hold(hold_s, row, platform=platform)
 
         # Admission gate: per-tenant balance — independent of Stripe config.
-        # Keys on row.tenant_id (NOT NULL). Mirror run_one_tick's cap_exceeded skip.
+        # Keys on row.tenant_id (NOT NULL).
         if await _blocked(sm, settings, row, platform=platform, check="balance_depleted"):
             if (observation := current_outcome.get()) is not None:
                 observation.finish(reason=TerminationReason.ADMISSION_BALANCE_DEPLETED)
@@ -1510,7 +1480,6 @@ async def run(
     health_server = await start_liveness_responder(scheduler_settings.health_port)
 
     deployment_default = parse_deployment_default(settings.defaults_root)
-    caps = _CapsAdapter(sm, billing_config=load_billing_config())
     resolver_cache = new_resolver_cache()
     fire = await _build_fire(
         client=client,
@@ -1541,7 +1510,6 @@ async def run(
             await run_one_tick(
                 now=datetime.now(UTC),
                 sm=sm,
-                caps=caps,
                 fire=fire,
                 max_age=timedelta(seconds=scheduler_settings.max_age_s),
                 max_concurrent_fires=scheduler_settings.max_concurrent_fires,
@@ -1583,7 +1551,6 @@ async def run(
             await run_one_tick(
                 now=datetime.now(UTC),
                 sm=sm,
-                caps=caps,
                 fire=fire,
                 max_age=timedelta(seconds=scheduler_settings.max_age_s),
                 max_concurrent_fires=scheduler_settings.max_concurrent_fires,
