@@ -160,13 +160,13 @@ export const budgetStops = (limit: number, spent: number) => limit > 0 && limit 
 export type Part = string | { agent: string }
 export type Change = { what: string; agent?: string; from: Part[]; to: Part[] }
 
-const none: Part[] = ["none"]
+const none: Part[] = ["None"]
 const text = (v: unknown): Part[] => (v == null || v === "" ? none : [String(v)])
 const agents = (keys: string[]): Part[] => keys.flatMap((k, i): Part[] => (i ? [", ", { agent: k }] : [{ agent: k }]))
 
 /** One history row as what changed, from and to; agent keys stay keys so the page can link them. */
 export function describeChange(e: ChannelHistoryEntry, labels: { readers: Choice<Readers>[]; writers: Choice<Writers>[] }): Change {
-  const pick = <T extends string>(opts: Choice<T>[], v: unknown) => opts.find((o) => o.value === v)?.label ?? String(v ?? "none")
+  const pick = <T extends string>(opts: Choice<T>[], v: unknown) => opts.find((o) => o.value === v)?.label ?? String(v ?? "None")
   const obj = (v: unknown) => (v && typeof v === "object" ? (v as Record<string, unknown>) : null)
   const budget = (v: unknown): Part[] => {
     const b = obj(v)
@@ -195,7 +195,7 @@ export function describeChange(e: ChannelHistoryEntry, labels: { readers: Choice
     }
     case "skills": return { what: "Skills", from: list(e.before), to: list(e.after) }
     case "provider_pin": {
-      const model = (v: unknown): Part[] => { const o = obj(v); return o ? [o.model ? modelLabel(String(o.model)) : String(o.backend ?? "none")] : none }
+      const model = (v: unknown): Part[] => { const o = obj(v); return o ? [o.model ? modelLabel(String(o.model)) : String(o.backend ?? "None")] : none }
       return { what: "Model", from: model(e.before), to: model(e.after) }
     }
     case "thread_handoff": {

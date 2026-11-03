@@ -170,10 +170,10 @@ describe("describeChange", () => {
   })
   it("keeps agent keys as keys so they can be linked", () => {
     expect(describeChange(entry("kept_agents", ["a"], ["a", "b"]), labels)).toEqual({ what: "Kept here", from: [], to: ["added ", { agent: "b" }] })
-    expect(describeChange(entry("default_agent", null, "clv"), labels)).toEqual({ what: "Default agent", from: ["none"], to: [{ agent: "clv" }] })
+    expect(describeChange(entry("default_agent", null, "clv"), labels)).toEqual({ what: "Default agent", from: ["None"], to: [{ agent: "clv" }] })
   })
   it("reads budgets", () => {
-    expect(describeChange(entry("budget", null, { limit_usd: "25.00", window: "monthly" }), labels)).toEqual({ what: "Budget", from: ["none"], to: ["$25.00 monthly"] })
+    expect(describeChange(entry("budget", null, { limit_usd: "25.00", window: "monthly" }), labels)).toEqual({ what: "Budget", from: ["None"], to: ["$25.00 monthly"] })
   })
 })
 
