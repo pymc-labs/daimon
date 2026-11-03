@@ -1,0 +1,92 @@
+// Mock API for what an agent holds beyond its config: keys, coding keys, owners, knowledge, lifecycle.
+import { http, HttpResponse } from "msw"
+
+import type { AgentKey, CodingKey, MintedCodingKey } from "@/modules/agents/types"
+import { roster } from "./agents"
+import { forbidden, notFound, unauthorized, wait } from "./util"
+import { PEOPLE } from "./world"
+
+const ago = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString()
+const nameOf = (id: string) => PEOPLE.find((p) => p.id === id)?.name ?? "Daimon"
+
+/** Who sees an agent's setup: the same rule the agent detail applies. */
+function setupOf(id: string) {
+  const v = roster.viewer(), r = roster.find(id)
+  if (!v) return { res: unauthorized() }
+  if (!r) return { res: notFound() }
+  if (!roster.details(r, v)) return { res: forbidden("Keys are for the agent's owner or an admin.") }
+  return { v, r }
+}
+
+const KEYS = new Map<string, AgentKey[]>([
+  ["ag_mmm", [{ key: "WAREHOUSE_API_KEY", updated_at: ago(70) }, { key: "SLACK_BOT_TOKEN", updated_at: ago(300) }]],
+  ["ag_sales", [{ key: "HUBSPOT_ACCESS_TOKEN", updated_at: ago(120) }]],
+])
+const CODING = new Map<string, (CodingKey & { by: string })[]>([
+  ["ag_mmm", [{ id: "ck_1", creator: "Maya Lindqvist", by: "p_maya", created_at: ago(240), expires_at: new Date(Date.now() + 60 * 86_400_000).toISOString(), mine: false }]],
+])
+
+export const agentSetupHandlers = [
+  http.get("/api/agents/:id/keys", async ({ params }) => {
+    await wait()
+    const s = setupOf(String(params.id))
+    return s.res ?? HttpResponse.json(KEYS.get(String(params.id)) ?? [])
+  }),
+  http.put("/api/agents/:id/keys/:key", async ({ params, request }) => {
+    await wait(300)
+    const id = String(params.id), key = String(params.key)
+    const s = setupOf(id)
+    if (s.res) return s.res
+    const { value } = (await request.json()) as { value: string }
+    if (!value.trim()) return HttpResponse.json({ detail: "Enter the value first." }, { status: 422 })
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return HttpResponse.json({ detail: `${key} is not a valid key name (letters, digits, underscores; not leading digit).` }, { status: 422 })
+    const row = { key, updated_at: new Date().toISOString() }
+    KEYS.set(id, [...(KEYS.get(id) ?? []).filter((k) => k.key !== key), row].sort((a, b) => a.key.localeCompare(b.key)))
+    return HttpResponse.json(row)
+  }),
+  http.delete("/api/agents/:id/keys/:key", async ({ params }) => {
+    await wait(300)
+    const id = String(params.id), key = String(params.key)
+    const s = setupOf(id)
+    if (s.res) return s.res
+    const held = (KEYS.get(id) ?? []).some((k) => k.key === key)
+    KEYS.set(id, (KEYS.get(id) ?? []).filter((k) => k.key !== key))
+    return HttpResponse.json({ removed: held })
+  }),
+  http.get("/api/agents/:id/coding-keys", async ({ params }) => {
+    await wait()
+    const s = setupOf(String(params.id))
+    if (s.res) return s.res
+    const mine = s.v.id
+    const rows = (CODING.get(String(params.id)) ?? []).filter((k) => s.v.admin || k.by === mine)
+    return HttpResponse.json(rows.map(({ by, ...k }) => ({ ...k, mine: by === mine })))
+  }),
+  http.post("/api/agents/:id/coding-keys", async ({ params }) => {
+    await wait(400)
+    const id = String(params.id)
+    const s = setupOf(id)
+    if (s.res) return s.res
+    const token = `mock.${Math.random().toString(36).slice(2)}.${Math.random().toString(36).slice(2)}`
+    const expires = new Date(Date.now() + (s.v.admin ? 90 : 30) * 86_400_000).toISOString()
+    const key = `ck_${Date.now().toString(36)}`
+    CODING.set(id, [{ id: key, creator: nameOf(s.v.id), by: s.v.id, created_at: new Date().toISOString(), expires_at: expires, mine: true }, ...(CODING.get(id) ?? [])])
+    const url = "https://daimon.example.com/mcp"
+    const out: MintedCodingKey = {
+      id: key, token, expires_at: expires,
+      command: `claude mcp add --transport http daimon-${s.r.id} ${url} --header "Authorization: Bearer ${token}"`,
+      config: JSON.stringify({ mcpServers: { [`daimon-${s.r.id}`]: { type: "http", url, headers: { Authorization: `Bearer ${token}` } } } }, null, 2),
+    }
+    return HttpResponse.json(out)
+  }),
+  http.delete("/api/agents/:id/coding-keys/:key", async ({ params }) => {
+    await wait(250)
+    const id = String(params.id)
+    const s = setupOf(id)
+    if (s.res) return s.res
+    const rows = CODING.get(id) ?? []
+    const row = rows.find((k) => k.id === params.key && (s.v.admin || k.by === s.v.id))
+    if (!row) return notFound()
+    CODING.set(id, rows.filter((k) => k !== row))
+    return new HttpResponse(null, { status: 204 })
+  }),
+]

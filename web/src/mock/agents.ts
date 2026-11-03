@@ -637,3 +637,6 @@ export const agentsHandlers = [
 
 /** Dev only: forget edits (`window.__resetAgents()`). */
 ;(globalThis as { __resetAgents?: () => void }).__resetAgents = () => { DB = seed(); save() }
+
+/** The roster and who is asking, for the setup handlers in `agent-setup.ts`. */
+export const roster = { all: () => DB, find, viewer, details, save }

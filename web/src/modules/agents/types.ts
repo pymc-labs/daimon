@@ -178,3 +178,12 @@ export type DataServerToolPut = { connection_id: string; tool_name?: string | nu
 
 /** A scope the signed-in person holds on the server: the only ones they may give. */
 export type DataServerScope = { id: string; kind: string; name: string }
+
+/** A stored key as the keys node lists it: its name only, never the value. */
+export type AgentKey = { key: string; updated_at: string }
+
+/** A coding key as listed: who made it and when it ends, never the token. */
+export type CodingKey = { id: string; creator: string; created_at: string; expires_at: string | null; mine: boolean }
+
+/** A coding key as made: `token` appears here once. */
+export type MintedCodingKey = { id: string; token: string; command: string; config: string; expires_at: string }

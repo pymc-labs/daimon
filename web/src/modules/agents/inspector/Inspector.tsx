@@ -13,11 +13,13 @@ import { SkillEditor, SkillsEditor } from "./SkillEditors"
 import { ToolsEditor } from "./ToolsEditor"
 import { NewServer, ServerEditor } from "./ServerEditors"
 import { PlacesEditor } from "./PlacesEditor"
+import { CodingPanel } from "../setup/CodingPanel"
+import { KeysPanel } from "../setup/KeysPanel"
 import { nodeUi } from "../nodes/registry"
 
 const TITLES: Record<string, string> = {
   agent: "Agent", instructions: "Instructions", model: "Model", skills: "Skills", tools: "Tools", places: "Channels",
-  history: "History", "mcp:new": "New MCP server",
+  history: "History", "mcp:new": "New MCP server", keys: "Keys", coding: "Coding tools",
 }
 
 export function Inspector(p: Props) {
@@ -28,7 +30,7 @@ export function Inspector(p: Props) {
   const skill = kind === "skill" ? config.skills.find((s) => `skill:${s.skill_id}` === node) : undefined
   const platform = kind === "node" ? agent.nodes.find((n) => `node:${n.kind}` === node && n.server) : undefined
   const title = server ? "MCP server" : skill ? "Skill" : platform ? platform.label : kind === "place" ? TITLES.places! : TITLES[node] ?? ""
-  const effect = ["history", "mcp:new"].includes(node) || (p.ro && kind !== "node") ? null : nodeEffect(kind === "place" ? "places" : kind, agent.model.backend)
+  const effect = ["history", "mcp:new", "keys", "coding"].includes(node) || (p.ro && kind !== "node") ? null : nodeEffect(kind === "place" ? "places" : kind, agent.model.backend)
   let body: React.ReactNode = null
   if (node === "agent") body = <AgentEditor {...p} />
   else if (node === "instructions") body = <InstructionsEditor {...p} />
@@ -36,6 +38,8 @@ export function Inspector(p: Props) {
   else if (node === "skills") body = <SkillsEditor {...p} />
   else if (skill) body = <SkillEditor {...p} skill={skill} />
   else if (node === "tools") body = <ToolsEditor {...p} />
+  else if (node === "keys") body = <KeysPanel {...p} />
+  else if (node === "coding") body = <CodingPanel {...p} />
   else if (node === "places" || kind === "place") body = <PlacesEditor {...p} />
   else if (node === "mcp:new") body = <NewServer {...p} />
   else if (server) body = <ServerEditor {...p} server={server} />
@@ -50,7 +54,7 @@ export function Inspector(p: Props) {
       <div className="flex h-11 shrink-0 items-center gap-2 border-b px-3">
         <span className="pl-1 text-xs font-medium text-muted-foreground">{title}</span>
         {effect && <EffectTag effect={effect} />}
-        {p.ro && node !== "history" && kind !== "node" && <Pill>View only</Pill>}
+        {p.ro && !["history", "keys", "coding"].includes(node) && kind !== "node" && <Pill>View only</Pill>}
         <Button variant="ghost" size="icon-sm" className="ml-auto" aria-label="Close" onClick={() => select("")}><X /></Button>
       </div>
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">{body}</div>
