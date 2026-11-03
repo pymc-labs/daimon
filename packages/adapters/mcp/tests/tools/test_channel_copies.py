@@ -20,6 +20,10 @@ from daimon.adapters.mcp.tools.channel_rules import (
     _set_channel_rule_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.access_policy import AgentRule, ChannelRule
+from daimon.core.authz import Subject
+from daimon.core.channel_changes import ChannelActor
+from daimon.core.channel_copies import ChannelCopyArchiveRefused
+from daimon.core.channel_settings import retire_channel_copy
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.stores import access_policy
 from daimon.core.stores.access_policy import load_access_policy
@@ -136,6 +140,37 @@ async def test_a_closing_channels_copy_is_archived_with_its_rule_and_default(
     assert {row.channel_id: row.agent_name for row in channels} == {OTHER: "shared"}, (
         "its default is cleared, every other one kept"
     )
+
+
+async def test_a_channel_retires_only_its_own_copy(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    world, runtime = await _own_copy(committing_sessionmaker)
+    actor = ChannelActor(
+        tenant_id=world.tenant_id,
+        account_id=world.account_id,
+        subject=Subject(is_admin=True, platform_user_id="444444444444444444"),
+        surface="web",
+    )
+
+    async def retire(channel_id: str) -> None:
+        await retire_channel_copy(
+            runtime.client,
+            committing_sessionmaker,
+            actor,
+            platform="discord",
+            channel_id=channel_id,
+            name=COPY,
+            default=runtime.deployment_default,
+        )
+
+    with pytest.raises(ChannelCopyArchiveRefused) as refused:
+        await retire(OTHER)
+    assert refused.value.reason == "other_channel"
+    assert not world.archived(COPY), "another channel's page archives nothing"
+
+    await retire(ROOM)
+    assert world.archived(COPY), "the channel's own copy is retired"
 
 
 async def test_only_a_channel_copy_is_archived_and_never_a_default(

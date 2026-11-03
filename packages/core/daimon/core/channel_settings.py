@@ -375,14 +375,17 @@ async def retire_channel_copy(
     default: DeploymentDefault,
     expected_ma_agent_id: str | None = None,
 ) -> ArchivedCopy:
-    """Archive this channel's copy `name`; raises `ChannelCopyArchiveRefused` as it does."""
+    """Archive this channel's own copy `name`; raises `ChannelCopyArchiveRefused` as it does.
+
+    The copy must have been made for `channel_id`; another channel's copy is refused.
+    """
     require_channel_admin(actor)
     archived = await archive_channel_copy(
         client,
         sessionmaker,
         tenant_id=actor.tenant_id,
         name=name,
-        closing_channel_id=None,
+        closing_channel_id=channel_id,
         subject=actor.subject,
         default=default,
         expected_ma_agent_id=expected_ma_agent_id,
