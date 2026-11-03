@@ -152,3 +152,15 @@ __all__ = [
     "remove_channel_skill",
     "remove_skill_from_every_channel",
 ]
+
+
+async def list_tenant_channel_skills(
+    session: AsyncSession, *, tenant_id: uuid.UUID
+) -> list[ChannelSkillRow]:
+    """Every channel skill rule of the tenant, on any platform."""
+    rows = await session.scalars(
+        select(ChannelSkill)
+        .where(ChannelSkill.tenant_id == tenant_id)
+        .order_by(ChannelSkill.platform, ChannelSkill.channel_id, ChannelSkill.skill_id)
+    )
+    return [ChannelSkillRow.model_validate(row) for row in rows]
