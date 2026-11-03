@@ -132,8 +132,8 @@ A Teams 1:1 chat has none.
   or `fixed` (from `starts_at` to `ends_at`).
 - **The gate** trips once spend reaches the limit, so a limit of 0 stops the
   channel. A turn in progress finishes past it.
-- **The notice.** The first chat turn refused in a window DMs the channel's
-  admins, or the server admins if it has none. Raising the budget re-arms it.
+- **The notice.** The first chat turn refused in a window DMs the server
+  admins. Raising the budget re-arms it.
   `DAIMON_BUDGET_NOTICES` turns it off per tenant
   ([configuration.md](configuration.md#daimon_budget_notices)).
 

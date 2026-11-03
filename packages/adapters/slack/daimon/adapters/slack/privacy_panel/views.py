@@ -80,10 +80,6 @@ def _cascade_blocks(preview: PurgePreview) -> list[dict[str, Any]]:
     if preview.direct_message_conversations.count > 0:
         n = amount(preview.direct_message_conversations.count, "private conversation")
         will_happen_lines.append(f"• 💬 Delete Daimon's saved data for {n}")
-    if preview.channel_admins.count > 0:
-        will_happen_lines.append(
-            f"• Remove you from {amount(preview.channel_admins.count, 'channel admin list')}"
-        )
     if preview.mux_slots.count > 0:
         n = amount(preview.mux_slots.count, "saved conversation")
         will_happen_lines.append(f"• 💬 Delete Daimon's copy of {n}, with its messages")

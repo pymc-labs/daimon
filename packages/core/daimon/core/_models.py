@@ -428,43 +428,6 @@ class DaimonAdmin(Base):
     granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-class ChannelAdmin(Base):
-    """Legacy channel grants retained only for privacy erasure."""
-
-    __tablename__ = "channel_admins"
-    __table_args__ = (
-        PrimaryKeyConstraint("tenant_id", "platform", "channel_id", name="pk_channel_admins"),
-        ForeignKeyConstraint(
-            ["tenant_id"], ["tenants.id"], ondelete="CASCADE", name="fk_channel_admins_tenants"
-        ),
-        ForeignKeyConstraint(
-            ["updated_by_account_id"],
-            ["accounts.id"],
-            ondelete="SET NULL",
-            name="fk_channel_admins_updated_by_account_id",
-        ),
-        CheckConstraint(
-            "platform IN ('discord', 'slack', 'teams')", name="ck_channel_admins_platform"
-        ),
-    )
-
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
-    platform: Mapped[str] = mapped_column(Text)
-    channel_id: Mapped[str] = mapped_column(Text)
-    role_ids: Mapped[list[str]] = mapped_column(
-        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
-    )
-    user_ids: Mapped[list[str]] = mapped_column(
-        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
-    )
-    updated_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-
-
 class Routine(Base):
     __tablename__ = "routines"
     __table_args__ = (

@@ -1,10 +1,11 @@
 """This channel's environment, picked on Who answers where.
 
-Server admins and this channel's admins get a select that runs the channel in
-one of the server's environments or hands it back to the default. What the
-panel rendered is a hint: the select re-checks the caller live through
-reach in a sealed channel), and the pick is checked against the environments
-that still exist before anything is written.
+Server admins get a select that runs the channel in one of the server's
+environments or hands it back to the default; every channel write is a
+workspace admin's. What the panel rendered is a hint: the select re-checks the
+caller live through `authorize` (which keeps an unrestricted network out of a
+sealed channel), and the pick is checked against the environments that still
+exist before anything is written.
 """
 
 from __future__ import annotations

@@ -1,8 +1,8 @@
 """This channel's environment, picked on Who answers where.
 
-Workspace admins and this channel's admins get a select there. A pick
-re-checks both live through `authorize` (which keeps an unrestricted network
-member the channel's grant names, directly or through a user group.
+Workspace admins get a select there; every channel write is a workspace
+admin's. A pick re-checks the caller live through `authorize` (which keeps an
+unrestricted network out of a sealed channel).
 """
 
 from __future__ import annotations
