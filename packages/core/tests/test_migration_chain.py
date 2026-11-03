@@ -139,6 +139,8 @@ TAIL = (
     "0175_channel_name_status",
     "0176_routine_names",
     "0177_invite_files",
+    "0178_reach_tallies",
+    "0179_tag_opt_outs",
 )
 HEAD = TAIL[-1]
 
