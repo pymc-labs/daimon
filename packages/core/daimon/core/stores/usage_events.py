@@ -32,7 +32,7 @@ from daimon.core.pricing import (
 from daimon.core.stores.domain import UsageEventRow
 from mux.contracts.usage import UsageObservation
 from mux.errors import ScopeViolation
-from sqlalchemy import ColumnElement, Date, Select, case, delete, func, select, update
+from sqlalchemy import ColumnElement, Date, Select, case, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -676,6 +676,33 @@ async def costs_by_channel_in_tenant_since(
         *_window(since, until),
     )
     return {(channel, origin): cost for (channel, origin), cost in costs.items()}
+
+
+async def channel_costs_by_day_agent_user(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    channel_ids: Sequence[str] = (),
+    channel_prefix: str | None = None,
+    since: datetime,
+) -> dict[tuple[date, str | None, str | None], float]:
+    """Spend on the channels (or ids under `channel_prefix`) by (UTC day, agent, person)."""
+    places: list[ColumnElement[bool]] = []
+    if channel_ids:
+        places.append(UsageEvent.channel_id.in_(channel_ids))
+    if channel_prefix is not None:
+        places.append(UsageEvent.channel_id.startswith(channel_prefix, autoescape=True))
+    if not places:
+        return {}
+    day = func.date(func.timezone("UTC", UsageEvent.occurred_at)).label("spend_day")
+    costs = await _costs_by_keys(
+        session,
+        [day, UsageEvent.agent_id, UsageEvent.platform_user_id],
+        UsageEvent.tenant_id == tenant_id,
+        or_(*places),
+        *_window(since, None),
+    )
+    return {(d, agent, user): cost for (d, agent, user), cost in costs.items()}
 
 
 async def turns_by_channel_in_tenant_since(

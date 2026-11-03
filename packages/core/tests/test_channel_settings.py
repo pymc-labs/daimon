@@ -76,7 +76,7 @@ async def test_a_sandbox_pick_is_compared_confirmed_and_recorded(
     actor = await _actor(db_session)
     client = build_fake_anthropic(_environments(actor.tenant_id).dispatch)
 
-    async def pick(name: str | None, expected: str | None, **kw: bool) -> str | None:
+    async def pick(name: str | None, expected: str | None, *, confirm: bool = False) -> str | None:
         change = await set_environment(
             client,
             db_session_factory,
@@ -86,7 +86,7 @@ async def test_a_sandbox_pick_is_compared_confirmed_and_recorded(
             environment_name=name,
             default=DEFAULT,
             expected=Expected(expected),
-            **kw,
+            confirm_open_network=confirm,
         )
         return change.after
 
@@ -105,7 +105,7 @@ async def test_a_sandbox_pick_is_compared_confirmed_and_recorded(
     await pick("sealed", "open")
     with pytest.raises(ConfirmNeeded):
         await pick("open", "sealed")
-    assert await pick("open", "sealed", confirm_open_network=True) == "open"
+    assert await pick("open", "sealed", confirm=True) == "open"
     records = await list_changes(db_session, tenant_id=actor.tenant_id, channel_id="c1")
     assert [(r.setting, r.after, r.surface) for r in records] == [
         ("environment", "open", "web"),
@@ -274,7 +274,7 @@ async def test_leaving_own_needs_a_choice_for_its_agents(
     await db_session.commit()
     client = build_fake_anthropic(MARouter().dispatch)
 
-    async def leave(**kw: bool) -> None:
+    async def leave(*, release: bool = False, keep: bool = False) -> None:
         await set_access(
             client,
             db_session_factory,
@@ -284,13 +284,14 @@ async def test_leaving_own_needs_a_choice_for_its_agents(
             readers="any",
             writers=None,
             default=DEFAULT,
-            **kw,
+            release_agents=release,
+            keep_rules=keep,
         )
 
-    for flags in ({}, {"release_agents": True, "keep_rules": True}):
+    for release in (False, True):
         with pytest.raises(ChannelChangeRefused) as refused:
-            await leave(**flags)
+            await leave(release=release, keep=release)
         assert refused.value.reason == "choose"
-    await leave(keep_rules=True)
+    await leave(keep=True)
     kept = await load_access_policy(db_session, tenant_id=actor.tenant_id)
     assert kept.agent_rules["helper"].runs_in == ("c1",), "keep leaves the agent's rule"

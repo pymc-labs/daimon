@@ -159,6 +159,8 @@ class NewRoutine:
     catch_up_policy: CatchUpPolicy = "skip"
     destination_kind: RoutineDestinationKind | None = None
     destination_id: str | None = None
+    made_in_channel_id: str | None = None
+    """The channel it was made from; the caller's place when unset."""
 
 
 @dataclass(frozen=True)
@@ -501,6 +503,12 @@ async def create_routine(env: RoutineEnv, caller: RoutineCaller, new: NewRoutine
             destination_kind=new.destination_kind,
             destination_id=new.destination_id,
             channel_id=budget_channel_id,
+            made_in_channel_id=new.made_in_channel_id
+            or (
+                (view.origin.parent_channel_id or view.origin.channel_id)
+                if view.origin is not None
+                else None
+            ),
         )
         await _record(env, session, "created", created)
         return created
