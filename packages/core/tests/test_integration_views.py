@@ -244,12 +244,18 @@ async def test_the_catalogue_groups_agents_by_server_and_never_reads_a_token(
 
 
 def _grant(url: str, *, expires: dt.datetime | None, refresh: bool) -> Any:
-    auth = BetaManagedAgentsMCPOAuthAuthResponse.model_construct(
-        type="mcp_oauth",
-        mcp_server_url=url,
-        expires_at=expires,
-        refresh=object() if refresh else None,
-    )
+    payload: dict[str, Any] = {
+        "type": "mcp_oauth",
+        "mcp_server_url": url,
+        "expires_at": expires,
+    }
+    if refresh:
+        payload["refresh"] = {
+            "client_id": "client",
+            "token_endpoint": "https://auth.example.com/token",
+            "token_endpoint_auth": {"type": "none"},
+        }
+    auth = BetaManagedAgentsMCPOAuthAuthResponse.model_validate(payload)
     return SimpleNamespace(auth=auth)
 
 
