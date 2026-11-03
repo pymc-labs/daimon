@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from daimon.core.channel_listing import store_listing
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.platform_names import ChannelSighting, remember_channel_names, remember_user_name
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -67,3 +68,47 @@ def remember_guild_channels(
             platform="discord",
             names=names,
         )
+
+
+def listed_guild_channels(guild: discord.Guild) -> dict[str, ChannelSighting]:
+    """The guild's text and forum channels and live threads the bot can see, from the cache."""
+    me = guild.me
+    found: dict[str, ChannelSighting] = {}
+    for channel in (*guild.channels, *guild.threads):
+        if not channel.permissions_for(me).view_channel:
+            continue
+        if isinstance(channel, discord.Thread):
+            parent = channel.parent
+            found[str(channel.id)] = ChannelSighting(
+                channel.name,
+                kind="thread",
+                parent_id=str(parent.id) if parent is not None else None,
+                parent_name=parent.name if parent is not None else None,
+                archived=channel.archived,
+            )
+        elif isinstance(channel, (discord.TextChannel, discord.ForumChannel)):
+            category = channel.category
+            found[str(channel.id)] = ChannelSighting(
+                channel.name,
+                kind="forum" if isinstance(channel, discord.ForumChannel) else "text",
+                parent_id=str(category.id) if category is not None else None,
+                parent_name=category.name if category is not None else None,
+                archived=False,
+            )
+    return found
+
+
+async def list_guilds_once(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    guilds: Iterable[discord.Guild],
+) -> int:
+    """Store every guild's listed channels; one round of `run_channel_listing`."""
+    stored = 0
+    for guild in guilds:
+        stored += await store_listing(
+            sessionmaker,
+            tenant_id=derive_tenant_uuid(platform="discord", workspace_id=str(guild.id)),
+            platform="discord",
+            channels=listed_guild_channels(guild),
+        )
+    return stored
