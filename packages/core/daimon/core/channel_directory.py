@@ -4,7 +4,8 @@ There is no channels table: a channel is listed when a setting, a budget, the
 access policy, a known name or spend in the last 30 days names it. The private
 channels DM conversations run in are left out. Web chat is one row,
 `WEB_ROW_ID`, gathering every person's web spend. Spend is read once for all
-rows (`list_channel_spend_totals`, `list_window_spend`).
+rows: usage rows priced like the Credits page (`channel_cost_totals`) for what a channel
+spent, and the ledger (`list_window_spend`) for a budget, which is what the budget gate counts.
 
 `build_channel_rows` is pure; `load_channel_directory` and `load_channel_row`
 are its shell.
@@ -23,7 +24,7 @@ from daimon.core.access_policy import ChannelReaders, ChannelWriters, TenantAcce
 from daimon.core.answering_map import AnsweringMap, load_answering_map
 from daimon.core.billing import month_start
 from daimon.core.channel_budget import ChannelBudgetStatus, budget_period, is_budget_active
-from daimon.core.credit_views import recent_start
+from daimon.core.credit_views import billed, recent_start
 from daimon.core.errors import StoreError
 from daimon.core.permissions import (
     WEB_PLACE_ID,
@@ -41,12 +42,9 @@ from daimon.core.stores.channel_directory import (
 from daimon.core.stores.direct_messages import list_dm_channel_ids
 from daimon.core.stores.domain import ChannelBudgetRow, ChannelNameRow
 from daimon.core.stores.platform_names import list_channel_names
-from daimon.core.stores.tenant_ledger import (
-    ChannelSpendTotals,
-    list_channel_spend_totals,
-    list_window_spend,
-)
+from daimon.core.stores.tenant_ledger import list_window_spend
 from daimon.core.stores.tenants import get_tenant
+from daimon.core.stores.usage_events import ChannelCostTotals, channel_cost_totals
 from sqlalchemy.ext.asyncio import AsyncSession
 
 WEB_ROW_ID = WEB_PLACE_ID
@@ -133,19 +131,21 @@ def is_web_channel(channel_id: str) -> bool:
     return channel_id == WEB_PLACE_ID or channel_id.startswith(WEB_PLACE_PREFIX)
 
 
-def fold_web_spend(totals: Mapping[str, ChannelSpendTotals]) -> dict[str, ChannelSpend]:
-    """Spend by row: every person's web chat adds up under `WEB_ROW_ID`. Pure."""
+def fold_web_spend(
+    totals: Mapping[str, ChannelCostTotals], markup: Decimal
+) -> dict[str, ChannelSpend]:
+    """Billed spend by row: every person's web chat adds up under `WEB_ROW_ID`. Pure."""
     spend: dict[str, ChannelSpend] = {}
     for channel_id, total in totals.items():
         key = WEB_ROW_ID if is_web_channel(channel_id) else channel_id
         prior = spend.get(key, ChannelSpend())
         latest = max(
-            (at for at in (prior.last_active_at, total.last_spent_at) if at is not None),
+            (at for at in (prior.last_active_at, total.last_at) if at is not None),
             default=None,
         )
         spend[key] = ChannelSpend(
-            prior.month_usd + total.since_month_usd,
-            prior.recent_usd + total.since_days_usd,
+            prior.month_usd + billed(total.month_cost, markup),
+            prior.recent_usd + billed(total.days_cost, markup),
             latest,
         )
     return spend
@@ -234,7 +234,12 @@ class _Reads:
 
 
 async def _read(
-    session: AsyncSession, *, tenant_id: uuid.UUID, default: DeploymentDefault, now: datetime
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    default: DeploymentDefault,
+    now: datetime,
+    markup: Decimal,
 ) -> _Reads:
     tenant = await get_tenant(session, tenant_id)
     if tenant is None:
@@ -245,7 +250,7 @@ async def _read(
         for row in await list_channel_budgets(session, tenant_id=tenant_id)
         if row.platform == platform
     ]
-    totals = await list_channel_spend_totals(
+    totals = await channel_cost_totals(
         session,
         tenant_id=tenant_id,
         month_start=month_start(now),
@@ -263,7 +268,7 @@ async def _read(
         },
         shared=await list_shared_channel_ids(session, tenant_id=tenant_id, platform=platform),
         budgets=await _budget_statuses(session, budgets, tenant_id=tenant_id, now=now),
-        spend=fold_web_spend(totals),
+        spend=fold_web_spend(totals, markup),
         dms=await list_dm_channel_ids(session, tenant_id=tenant_id),
     )
 
@@ -282,10 +287,18 @@ def _rows(reads: _Reads, channel_ids: Collection[str]) -> tuple[ChannelRow, ...]
 
 
 async def load_channel_directory(
-    session: AsyncSession, *, tenant_id: uuid.UUID, default: DeploymentDefault, now: datetime
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    default: DeploymentDefault,
+    now: datetime,
+    markup: Decimal,
 ) -> ChannelDirectory:
-    """Every channel of the workspace; raises `AccessPolicyUnreadable` like the policy read."""
-    reads = await _read(session, tenant_id=tenant_id, default=default, now=now)
+    """Every channel of the workspace; raises `AccessPolicyUnreadable` like the policy read.
+
+    Spend is billed dollars: usage priced and multiplied by `markup`.
+    """
+    reads = await _read(session, tenant_id=tenant_id, default=default, now=now, markup=markup)
     used = {cid for cid, spend in reads.spend.items() if spend.recent_usd > 0}
     listed = (
         await list_configured_channel_ids(session, tenant_id=tenant_id, platform=reads.platform)
@@ -309,9 +322,10 @@ async def load_channel_row(
     channel_id: str,
     default: DeploymentDefault,
     now: datetime,
+    markup: Decimal,
 ) -> ChannelRow | None:
     """One channel's row, listed or not; None for a DM's channel."""
-    reads = await _read(session, tenant_id=tenant_id, default=default, now=now)
+    reads = await _read(session, tenant_id=tenant_id, default=default, now=now, markup=markup)
     if channel_id in reads.dms or (channel_id != WEB_ROW_ID and is_web_channel(channel_id)):
         return None
     return _rows(reads, (channel_id,))[0]

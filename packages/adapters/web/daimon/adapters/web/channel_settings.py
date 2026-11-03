@@ -607,7 +607,11 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
         platform = await home(caller)
         async with runtime.sessionmaker() as db:
             found = await load_channel_directory(
-                db, tenant_id=tenant_id, default=runtime.deployment_default, now=datetime.now(UTC)
+                db,
+                tenant_id=tenant_id,
+                default=runtime.deployment_default,
+                now=datetime.now(UTC),
+                markup=settings.billing.markup,
             )
             participation = await switch_json(db, "participation", tenant_id, platform, None)
             plans = await switch_json(db, "progress_plans", tenant_id, platform, None)

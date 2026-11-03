@@ -337,6 +337,7 @@ async def one_row(runtime: WebRuntime, caller: WebCaller, channel_id: str) -> Ch
                 channel_id=channel_id,
                 default=runtime.deployment_default,
                 now=datetime.now(UTC),
+                markup=runtime.settings.billing.markup,
             )
     except AccessPolicyUnreadable as exc:
         raise HTTPException(503, _UNREADABLE) from exc
@@ -392,6 +393,7 @@ def channels_router(runtime: WebRuntime) -> APIRouter:
                     tenant_id=caller.person.tenant_id,
                     default=runtime.deployment_default,
                     now=datetime.now(UTC),
+                    markup=runtime.settings.billing.markup,
                 )
         except AccessPolicyUnreadable as exc:
             raise HTTPException(503, _UNREADABLE) from exc

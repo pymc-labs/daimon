@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Collection, Sequence
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, cast
 
@@ -712,6 +713,54 @@ async def channel_costs_by_day_agent_user(
         *_window(since, None),
     )
     return {(d, agent, user): cost for (d, agent, user), cost in costs.items()}
+
+
+@dataclass(frozen=True)
+class ChannelCostTotals:
+    """One channel's raw model cost since two points in time, and when it last spent."""
+
+    month_cost: float
+    days_cost: float
+    last_at: datetime
+
+
+async def channel_cost_totals(
+    session: AsyncSession, *, tenant_id: uuid.UUID, month_start: datetime, days_start: datetime
+) -> dict[str, ChannelCostTotals]:
+    """Every channel's cost since `month_start` and since `days_start`, from usage rows.
+
+    Only channels with usage since the earlier of the two are returned. Priced like every
+    other usage read, so it does not depend on the ledger having a debit.
+    """
+    since = min(month_start, days_start)
+    in_month = (UsageEvent.occurred_at >= month_start).label("in_month")
+    in_days = (UsageEvent.occurred_at >= days_start).label("in_days")
+    costs = await _costs_by_keys(
+        session,
+        [UsageEvent.channel_id, in_month, in_days],
+        UsageEvent.tenant_id == tenant_id,
+        UsageEvent.channel_id.is_not(None),
+        *_window(since, None),
+    )
+    month: dict[str, float] = {}
+    days: dict[str, float] = {}
+    for (channel_id, month_flag, days_flag), cost in costs.items():
+        month[channel_id] = month.get(channel_id, 0.0) + (cost if month_flag else 0.0)
+        days[channel_id] = days.get(channel_id, 0.0) + (cost if days_flag else 0.0)
+    latest = await session.execute(
+        select(UsageEvent.channel_id, func.max(UsageEvent.occurred_at))
+        .where(
+            UsageEvent.tenant_id == tenant_id,
+            UsageEvent.channel_id.is_not(None),
+            *_window(since, None),
+        )
+        .group_by(UsageEvent.channel_id)
+    )
+    return {
+        channel_id: ChannelCostTotals(month.get(channel_id, 0.0), days.get(channel_id, 0.0), last)
+        for channel_id, last in latest.tuples()
+        if channel_id is not None
+    }
 
 
 async def turns_by_channel_in_tenant_since(

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, cast
@@ -158,46 +157,6 @@ def _is_spend() -> ColumnElement[bool]:
 
 _EARLIEST = datetime(1970, 1, 1, tzinfo=UTC)
 _LATEST = datetime(9999, 1, 1, tzinfo=UTC)
-
-
-@dataclass(frozen=True)
-class ChannelSpendTotals:
-    """One channel's spend since two points in time, and its latest spend."""
-
-    since_month_usd: Decimal
-    since_days_usd: Decimal
-    last_spent_at: datetime | None
-
-
-async def list_channel_spend_totals(
-    session: AsyncSession, *, tenant_id: uuid.UUID, month_start: datetime, days_start: datetime
-) -> dict[str, ChannelSpendTotals]:
-    """Every channel's spend since `month_start` and since `days_start`, in one read.
-
-    Only channels with spend since the earlier of the two are returned.
-    """
-    debit = -TenantLedger.delta_usd
-    zero = Decimal("0")
-    stmt = (
-        select(
-            TenantLedger.channel_id,
-            func.coalesce(func.sum(debit).filter(TenantLedger.occurred_at >= month_start), zero),
-            func.coalesce(func.sum(debit).filter(TenantLedger.occurred_at >= days_start), zero),
-            func.max(TenantLedger.occurred_at),
-        )
-        .where(
-            TenantLedger.tenant_id == tenant_id,
-            TenantLedger.channel_id.is_not(None),
-            TenantLedger.occurred_at >= min(month_start, days_start),
-            _is_spend(),
-        )
-        .group_by(TenantLedger.channel_id)
-    )
-    return {
-        channel_id: ChannelSpendTotals(month, days, last)
-        for channel_id, month, days, last in (await session.execute(stmt)).tuples()
-        if channel_id is not None
-    }
 
 
 async def list_window_spend(
