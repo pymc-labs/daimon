@@ -63,8 +63,38 @@ const money = new Intl.NumberFormat("en", { style: "currency", currency: "USD", 
 // Spend under half a cent would round to $0.00 and read as unused.
 export const usd = (n: number | null | undefined) => (n == null ? "–" : n > 0 && n < 0.005 ? "<$0.01" : money.format(n))
 
+export type ChannelKind = "channel" | "category" | "thread" | "forum_post" | "team"
+
 const UNNAMED_CHANNEL = "Unnamed channel"
 // Labels the server sends for a channel with no name of its own; they never get a "#".
 const PLAIN_CHANNEL_LABELS = new Set([UNNAMED_CHANNEL, "Deleted channel", "Direct message"])
+// Threads, forum posts, categories and teams are named as they are; only a channel gets a "#".
+const HASHLESS = new Set<string>(["thread", "forum_post", "category", "team"])
 /** A channel as people write it; a channel the platform never named stays unnamed. */
-export const channelLabel = (name: string | null | undefined) => (!name ? UNNAMED_CHANNEL : PLAIN_CHANNEL_LABELS.has(name) ? name : `#${name}`)
+export const channelLabel = (name: string | null | undefined, kind: string | null = "channel") =>
+  !name ? UNNAMED_CHANNEL : PLAIN_CHANNEL_LABELS.has(name) || (kind && HASHLESS.has(kind)) ? name : `#${name}`
+
+/** What a cross-reference reads as when its target has no name left. */
+export const ENTITY_FALLBACK = { agent: "Deleted agent", channel: "Deleted channel", person: "Unknown person" } as const
+
+const upper = new Set(["gpt", "ai", "llm"])
+const titled = (w: string) => (upper.has(w) ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1))
+
+/** A model id as people say it: "gpt-5" is "GPT-5", "claude-sonnet-4-5" is "Claude Sonnet 4.5". A known `label` wins. */
+export function modelLabel(id: string, label?: string | null) {
+  if (label) return label
+  const parts: string[] = []
+  for (const w of id.replace(/-\d{8}$/, "").split(/[-_]/).filter(Boolean)) {
+    const last = parts.length - 1
+    if (/^\d+$/.test(w) && last >= 0 && /^\d+(\.\d+)*$/.test(parts[last]!)) parts[last] += `.${w}`
+    else parts.push(w)
+  }
+  const [first, second, ...rest] = parts
+  if (first && upper.has(first) && second && /^\d/.test(second)) return [`${first.toUpperCase()}-${second}`, ...rest.map(titled)].join(" ")
+  return parts.map(titled).join(" ")
+}
+
+const humanise = (key: string) => { const w = key.replaceAll(/[_-]+/g, " ").trim(); return w.charAt(0).toUpperCase() + w.slice(1) }
+
+/** A tool as people read it: server and tool, "Search: Web search", never `search/web_search`. */
+export const toolLabel = (server: string, tool: string) => `${humanise(server)}: ${humanise(tool)}`
