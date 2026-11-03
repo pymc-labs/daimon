@@ -20,7 +20,9 @@ import { useEnvironments, useEnvironmentWrites } from "./api"
 import { LIBRARY_TABS } from "./tabs"
 
 const count = (e: EnvironmentDoc) => Object.values(e.packages).reduce((n, p) => n + (p?.length ?? 0), 0)
-const lines = (text: string) => [...new Set(text.split("\n").map((x) => x.trim()).filter(Boolean))]
+const entries = (text: string, separator: RegExp) => [...new Set(text.split(separator).map((x) => x.trim()).filter(Boolean))]
+const lines = (text: string) => entries(text, /\n/)
+const hostList = (text: string) => entries(text, /[\s,]+/)
 const NETWORK = { limited: "Limited", unrestricted: "Open" }
 
 export function Environments() {
@@ -77,7 +79,7 @@ export function EnvironmentForm({ env, missing }: { env: EnvironmentDoc | null; 
   if (missing) return <div className="p-5 text-sm text-muted-foreground">Not found</div>
   const locked = env?.managed === true || (env !== null && !env.cloud)
   const spec: EnvironmentInput = {
-    ...blank, name: name.trim(), description: description.trim(), network, allowed_hosts: lines(hosts),
+    ...blank, name: name.trim(), description: description.trim(), network, allowed_hosts: hostList(hosts),
     allow_package_managers: managers, allow_mcp_servers: mcp,
     packages: Object.fromEntries(ECOSYSTEMS.map((k) => [k, lines(packages[k] ?? "")]).filter(([, v]) => (v as string[]).length)),
   }
@@ -110,7 +112,7 @@ export function EnvironmentForm({ env, missing }: { env: EnvironmentDoc | null; 
           </ToggleGroup>
           {network === "limited" && (
             <>
-              <Field label="Allowed hosts"><Textarea value={hosts} onChange={(e) => setHosts(e.target.value)} rows={3} className="font-mono text-xs" disabled={locked} /></Field>
+              <Field label="Allowed hosts"><Textarea aria-label="Allowed hosts" value={hosts} onChange={(e) => setHosts(e.target.value)} rows={3} className="font-mono text-xs" disabled={locked} /></Field>
               <label className="flex items-center gap-2 text-sm"><Checkbox checked={managers} onCheckedChange={(c) => setManagers(c === true)} disabled={locked} />Package managers</label>
               <label className="flex items-center gap-2 text-sm"><Checkbox checked={mcp} onCheckedChange={(c) => setMcp(c === true)} disabled={locked} />The agent's own servers</label>
             </>

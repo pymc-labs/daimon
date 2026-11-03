@@ -53,6 +53,16 @@ describe("EnvironmentForm", () => {
     expect(vi.mocked(api.put).mock.calls[0]![1]).toMatchObject({ spec: { packages: { pip: ["numpy>=1.26,<2", "pandas"] } } })
   })
 
+  it("splits allowed hosts on commas and whitespace", async () => {
+    vi.mocked(api.put).mockResolvedValue(env as never)
+    show(env)
+    await userEvent.clear(screen.getByLabelText("Allowed hosts"))
+    await userEvent.type(screen.getByLabelText("Allowed hosts"), "a.com, b.com{Enter}c.com d.com,,a.com")
+    await userEvent.click(screen.getByRole("button", { name: "Save" }))
+    await waitFor(() => expect(api.put).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(api.put).mock.calls[0]![1]).toMatchObject({ spec: { allowed_hosts: ["a.com", "b.com", "c.com", "d.com"] } })
+  })
+
   it("sends the loaded version and says so when it changed meanwhile", async () => {
     vi.mocked(api.put).mockRejectedValue(new ApiError(409, "This environment changed since you opened it. Reload and try again."))
     show(env)
