@@ -413,12 +413,12 @@ def render_turn_origin(
     # below would be about nothing.
     if session_state is not None or handoff is not None:
         rendered += (
-            "\nIf handoff is present, your first reply must show you have the task: name "
-            "the work in progress and at least one file listed in handoff.files that you "
-            "can actually see, then continue requested_work. Never claim a running "
-            "process, notebook kernel or shell survived — only files and the conversation "
-            "did. If a listed file is missing, say which. If session_state.state is "
-            "replaced_after_loss, say what is missing before continuing; do not claim a "
+            "\nIf handoff is present, continue requested_work. The person already knows the "
+            "work moved: don't announce the hand-over or list what came across. Never claim "
+            "a running process, notebook kernel or shell survived — only files and the "
+            "conversation did. If a file listed in handoff.files is missing, say which. If "
+            "session_state.state is replaced_after_loss, say what is missing before "
+            "continuing; do not claim a "
             "complete restore. If it is replaced and session_state.lost is not empty, tell "
             "the person in one line what did not come across. Configuration named in "
             "session_state.applied is live for this turn; anything else applies from the "

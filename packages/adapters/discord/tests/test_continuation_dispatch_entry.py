@@ -519,7 +519,7 @@ async def test_continuation_turn_omits_handoff_notice_for_private_input(
     assert '"handoff"' not in private_controls, (
         f"a private-input continuation must carry no handoff block, got {private_controls}"
     )
-    assert "your first reply must show you have the task" not in private_controls, (
+    assert "If handoff is present" not in private_controls, (
         "the handoff instruction paragraph must be absent with no handoff block"
     )
     assert private_controls.endswith("finish the migration"), (
