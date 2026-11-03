@@ -1,7 +1,7 @@
 // Admin: people, invites, agent web access, audit log and workspace settings.
 import { http, HttpResponse, type HttpHandler } from "msw"
 
-import type { AdminPerson, AgentAccess, AuditEntry, AuditKind, Invite, SettingsPatch, WorkspaceSettings } from "@/modules/admin/types"
+import type { AdminPerson, AgentAccess, AuditEntry, AuditKind, Feedback, Invite, SettingsPatch, WorkspaceSettings } from "@/modules/admin/types"
 import { forbidden, notFound, paged, wait } from "./util"
 import { agent, AGENTS, DOMAIN, me } from "./world"
 import { face } from "./face"
@@ -151,6 +151,22 @@ export const adminHandlers: HttpHandler[] = [
   }),
   http.get("/api/admin/audit/kinds", () =>
     HttpResponse.json([...new Map(audit.map((e) => [e.action, { source: e.source, value: e.action, label: e.action } satisfies AuditKind])).values()])),
+  http.get("/api/admin/feedback", async ({ request }) => {
+    await wait()
+    const days = Number(new URL(request.url).searchParams.get("days")) || 30
+    const k = days / 30
+    const n = (x: number) => Math.round(x * k)
+    const body: Feedback = {
+      days,
+      agents: [
+        { id: "ag_daimon", name: "Daimon", up: n(86), down: n(9), reasons: [{ code: "inaccurate", label: "Wrong or inaccurate", count: n(4) }, { code: "incomplete", label: "Incomplete or cut off", count: n(3) }, { code: "too_slow", label: "Too slow", count: n(2) }] },
+        { id: "ag_mmm", name: "MMM Analyst", up: n(41), down: n(6), reasons: [{ code: "inaccurate", label: "Wrong or inaccurate", count: n(3) }, { code: "ignored_request", label: "Didn't do what I asked", count: n(2) }] },
+        { id: "ag_review", name: "Code Reviewer", up: n(23), down: n(1), reasons: [{ code: "other", label: "Something else", count: n(1) }] },
+        { id: null, name: "Unknown agent", up: n(2), down: 0, reasons: [] },
+      ],
+    }
+    return me()?.capabilities.includes("audit.view") ? HttpResponse.json(body) : forbidden()
+  }),
   http.get("/api/admin/settings", () => HttpResponse.json(settings)),
   http.patch("/api/admin/settings", async ({ request }) => {
     const b = (await request.json()) as SettingsPatch

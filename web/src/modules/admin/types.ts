@@ -76,3 +76,7 @@ export type SettingsPatch = {
   plain_text_mentions?: boolean
   providers?: string[] | "default"
 }
+
+export type FeedbackReason = { code: string; label: string; count: number }
+export type AgentFeedback = { id: string | null; name: string; up: number; down: number; reasons: FeedbackReason[] }
+export type Feedback = { days: number; agents: AgentFeedback[] }

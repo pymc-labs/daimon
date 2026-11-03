@@ -123,6 +123,9 @@ checks apply as in chat, and each change is recorded.
 **Admin** > **Audit** lists changes made in the web app together with chat
 tool calls and panel writes. Filter by source, person, action and date.
 
+**Admin** > **Feedback** counts thumbs and the reasons people gave for each
+agent over 7, 30 or 90 days. It shows counts only, never a message or who voted.
+
 ## Troubleshooting
 
 | Symptom | Fix |
