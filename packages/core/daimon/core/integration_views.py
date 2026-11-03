@@ -30,6 +30,7 @@ from daimon.core.stores import github_access_requests as requests_store
 from daimon.core.stores import integration_reads as reads
 from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores import slack_bot_tokens as slack_store
+from daimon.core.stores import teams_channel_subscriptions as subscriptions_store
 from daimon.core.stores import teams_installations as teams_store
 from daimon.core.stores import tenants as tenants_store
 from daimon.core.stores.github_access_requests import AccessRequest
@@ -126,7 +127,14 @@ async def load_workspace_install(
             status = "disconnected"
     elif tenant.platform == "teams":
         installed = await teams_store.list_teams_installations(session, tenant_id=tenant_id)
-        teams = tuple(TeamInstall(id=t.team_id, name=t.name) for t in installed)
+        seen = await subscriptions_store.list_teams_channel_subscriptions(
+            session, tenant_id=tenant_id
+        )
+        #: A team the install never named keeps the name its channels reported.
+        sighted = {s.team_id: s.team_name for s in seen if s.team_name}
+        teams = tuple(
+            TeamInstall(id=t.team_id, name=t.name or sighted.get(t.team_id)) for t in installed
+        )
     return WorkspaceInstall(
         platform=tenant.platform,
         name=workspace_name,
