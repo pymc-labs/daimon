@@ -12,7 +12,7 @@ Refusals raise `RoutineRefused` with plain text; the surface words them its own 
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, Protocol
@@ -586,17 +586,24 @@ async def create_routine(env: RoutineEnv, caller: RoutineCaller, new: NewRoutine
         return created
 
 
+def readable_routines(
+    caller: RoutineCaller, viewer: RuleViewer, rows: Iterable[RoutineRow]
+) -> list[RoutineRow]:
+    """The rows the caller may list: own or any for an admin, and in view from where they stand."""
+    return [
+        for_reader(caller, row)
+        for row in rows
+        if may_read(caller, row) and sees_routine(viewer, row)
+    ]
+
+
 async def list_routines(env: RoutineEnv, caller: RoutineCaller) -> list[RoutineRow]:
     """The routines the caller may see: their own, or every one for an admin."""
     _require_allowed(caller)
     viewer = (await _view(env)).viewer
     async with env.sessionmaker() as session:
         rows = await routines_store.list_routines_for_tenant(session, tenant_id=caller.tenant_id)
-    return [
-        for_reader(caller, row)
-        for row in rows
-        if may_read(caller, row) and sees_routine(viewer, row)
-    ]
+    return readable_routines(caller, viewer, rows)
 
 
 async def get_routine(env: RoutineEnv, caller: RoutineCaller, routine_id: uuid.UUID) -> RoutineRow:

@@ -134,7 +134,8 @@ class ChannelJson(BaseModel):
     kept_agents: list[str]
     tags: list[Literal["kept_inside", "locked", "shared"]]
     budget: BudgetJson | None
-    spend: SpendJson
+    """None for a member, like `spend`: money figures are an admin's."""
+    spend: SpendJson | None
     last_active_at: str | None
 
 
@@ -242,7 +243,8 @@ def _budget(status: ChannelBudgetStatus | None) -> BudgetJson | None:
     )
 
 
-def channel_json(row: ChannelRow) -> ChannelJson:
+def channel_json(row: ChannelRow, *, figures: bool) -> ChannelJson:
+    """`figures` adds the channel's budget and spend, which members never read."""
     name = row.name
     parent = (
         ParentJson(id=name.parent_id, name=name.parent_name)
@@ -262,17 +264,19 @@ def channel_json(row: ChannelRow) -> ChannelJson:
         writers=row.writers,
         kept_agents=list(row.kept_agents),
         tags=list(row.tags),
-        budget=_budget(row.budget),
+        budget=_budget(row.budget) if figures else None,
         spend=SpendJson(
             month_usd=_usd(row.spend.month_usd), last_30_days_usd=_usd(row.spend.recent_usd)
-        ),
+        )
+        if figures
+        else None,
         last_active_at=_iso(row.spend.last_active_at),
     )
 
 
-def detail_json(row: ChannelRow, *, manage: bool) -> ChannelDetailJson:
+def detail_json(row: ChannelRow, *, manage: bool, figures: bool) -> ChannelDetailJson:
     return ChannelDetailJson(
-        **channel_json(row).model_dump(),
+        **channel_json(row, figures=figures).model_dump(),
         readers_label=READERS_LABELS[row.readers],
         writers_label=WRITERS_LABELS[row.writers],
         readers_options=[ChoiceJson(value=k, label=v) for k, v in READERS_LABELS.items()],
@@ -394,7 +398,9 @@ def channels_router(runtime: WebRuntime) -> APIRouter:
 
     async def readable(caller: WebCaller, channel_id: str) -> ChannelDetailJson:
         row = await one_row(runtime, caller, channel_id)
-        return detail_json(row, manage="channels.manage" in caller.capabilities)
+        return detail_json(
+            row, manage="channels.manage" in caller.capabilities, figures=is_admin(caller.role)
+        )
 
     async def agent_names(caller: WebCaller, name: str) -> tuple[str, ...]:
         """Every name the workspace agent called `name` answers to; 422 when none is."""
@@ -423,7 +429,7 @@ def channels_router(runtime: WebRuntime) -> APIRouter:
             platform=found.platform,
             default_agent=_sourced(found.default_agent),
             default_environment=_sourced(found.default_environment),
-            channels=[channel_json(r) for r in rows],
+            channels=[channel_json(r, figures=is_admin(caller.role)) for r in rows],
         )
 
     @router.get("/{channel_id}")

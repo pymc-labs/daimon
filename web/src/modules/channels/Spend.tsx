@@ -7,7 +7,7 @@ import type { ChannelSettings } from "./types"
 
 const tick = { fontSize: 11, fill: "var(--muted-foreground)" }
 
-function Chart({ spend }: { spend: ChannelSettings["spend"] }) {
+function Chart({ spend }: { spend: NonNullable<ChannelSettings["spend"]> }) {
   const [now] = useState(() => Date.now())
   const rows = useMemo(
     () => fillDays(spend.by_day, spend.days, now).map((d) => ({ ...d, label: dayMonth(new Date(`${d.day}T00:00:00`)) })),
@@ -60,7 +60,7 @@ function Lines({ title, lines }: { title: string; lines: SpendLine[] }) {
 }
 
 /** Spend over the last days, by day, by agent and by person; nothing while there is none. */
-export function SpendBreakdown({ spend }: { spend: ChannelSettings["spend"] }) {
+export function SpendBreakdown({ spend }: { spend: NonNullable<ChannelSettings["spend"]> }) {
   if (!spend.by_day.some((d) => d.usd > 0)) return null
   return (
     <div className="mt-4 space-y-4">

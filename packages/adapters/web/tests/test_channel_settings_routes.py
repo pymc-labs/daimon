@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
+from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+from daimon.adapters.web import channels as channels_module
 from daimon.core.scope_cascade import CascadeMode, CascadeScope
+from daimon.core.stores.routines import create_routine
 from daimon.core.stores.switch_modes import set_switch_mode
+from daimon.testing.turn_router import AGENT_ID
+from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .chat_support import shown_trail
@@ -118,3 +125,48 @@ async def test_a_thread_override_lists_and_clears(
     assert listed == [{"thread_id": "t1", "kind": "progress_plans", "value": "off"}]
     assert (cleared.status_code, again.status_code) == (200, 409)
     assert after == []
+
+
+async def test_a_member_reads_no_spend_or_budget_and_only_the_routines_they_may_list(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def shown(
+        _runtime: object, *, channel_ids: Collection[str], **_: object
+    ) -> frozenset[str]:
+        return frozenset(channel_ids)
+
+    monkeypatch.setattr(channels_module, "readable_channels", shown)
+    async with _channels(web_client, db_session_factory, tmp_path) as admin:
+        async with db_session_factory.begin() as db:
+            for owner, message in ((str(admin.member.id), "mine"), ("someone-else", "theirs")):
+                await create_routine(
+                    db,
+                    tenant_id=admin.ws.tenant_id,
+                    created_by_user_id=owner,
+                    agent_id=AGENT_ID,
+                    agent_name=DEFAULT_AGENT_NAME,
+                    cron_expr="0 9 * * *",
+                    timezone_="UTC",
+                    trigger_message=message,
+                    next_fire_at=datetime(2030, 1, 1, tzinfo=UTC),
+                    destination_kind="channel",
+                    destination_id="c1",
+                    channel_id="c1",
+                )
+        as_admin = (await admin.client.get("/api/channels/c1/settings")).json()
+        admin.as_member()
+        listed = (await admin.client.get("/api/channels")).json()["channels"]
+        one = (await admin.client.get("/api/channels/c1")).json()
+        settings = (await admin.client.get("/api/channels/c1/settings")).json()
+
+    assert as_admin["spend"] is not None and len(as_admin["routines"]) == 2
+    assert {r["id"] for r in listed} >= {"web", "c1"}, "the member lists the channels they can read"
+    assert all(r["spend"] is None and r["budget"] is None for r in listed), "no figures in rows"
+    assert one["spend"] is None and one["budget"] is None and one["budget_editable"] is False
+    assert settings["spend"] is None, "a member reads nobody's spend"
+    assert len(settings["routines"]) == 1, (
+        "only the member's own routine, as the routine list shows"
+    )

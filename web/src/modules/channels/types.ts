@@ -35,8 +35,9 @@ export type Channel = {
   writers: Writers
   kept_agents: string[]
   tags: ChannelTag[]
+  /** Budget and spend are null for a member. */
   budget: ChannelBudget | null
-  spend: { month_usd: number; last_30_days_usd: number }
+  spend: { month_usd: number; last_30_days_usd: number } | null
   last_active_at: string | null
 }
 
@@ -130,7 +131,7 @@ export type ChannelSettings = {
   /** Teams private and shared channels only. */
   teams_subscription: { status: "active" | "expired" | "missing"; expires_at: string | null } | null
   routines: { id: string; agent: string; cron: string; enabled: boolean; relation: "posts_here" | "made_here" | "both" }[]
-  spend: { days: number; by_day: SpendAmount[]; by_agent: SpendAmount[]; by_person: SpendAmount[] }
+  spend: { days: number; by_day: SpendAmount[]; by_agent: SpendAmount[]; by_person: SpendAmount[] } | null
 }
 
 /** PUT /:id/participation, /:id/progress-plans, /api/channel-defaults/{participation,progress-plans}. null mode inherits. */

@@ -24,6 +24,7 @@ function windowText(b: ChannelBudget) {
 
 export function Budget({ c, spend }: { c: ChannelDetail; spend?: ChannelSettings["spend"] }) {
   const b = c.budget
+  if (!c.spend) return null
   return (
     <PanelSection title="Budget and spend">
       {b && (

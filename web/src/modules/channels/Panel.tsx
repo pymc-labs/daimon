@@ -47,7 +47,7 @@ function Header({ c, s }: { c: ChannelDetail; s?: ChannelSettings }) {
       <section className="border-t px-5 py-4">
         <Facts rows={[
           ["Last active", <Ago key="a" iso={c.last_active_at} />],
-          ["This month", <Money key="m" usd={c.spend.month_usd} />],
+          ["This month", c.spend && <Money key="m" usd={c.spend.month_usd} />],
           ["Subscription", sub && (
             <span key="s" className="flex flex-wrap items-center gap-1.5">
               <span className={sub.status === "active" ? undefined : "text-destructive"}>{subscriptionText(sub)}</span>

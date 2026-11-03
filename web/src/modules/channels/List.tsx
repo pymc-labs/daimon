@@ -41,6 +41,7 @@ export function Channels() {
   const rows = useMemo(() => filterChannels(all, { q, platforms, access, budget, agents }), [all, q, platforms, access, budget, agents])
   const groups = useMemo(() => groupChannels(rows), [rows])
   const [, setOpen] = useParam("channel")
+  const figures = all.some((c) => c.spend)
   const platformNames = [...new Set(all.map((c) => c.platform))]
   const drawerIds = groups.flatMap((g) => g.rows.map((c) => c.id))
 
@@ -53,7 +54,7 @@ export function Channels() {
           <Facet label="Platform" value={platforms} onChange={setPlatforms} options={platformNames.map((p) => ({ value: p, label: platformLabel(p), icon: <PlatformIcon platform={p} className="size-3.5" /> }))} />
         )}
         <Facet label="Access" value={access} onChange={setAccess} options={ACCESS_FILTERS} />
-        <Facet label="Budget" value={budget} onChange={setBudget} options={[{ value: "yes", label: "Has budget" }, { value: "no", label: "No budget" }]} />
+        {figures && <Facet label="Budget" value={budget} onChange={setBudget} options={[{ value: "yes", label: "Has budget" }, { value: "no", label: "No budget" }]} />}
         <Facet label="Agent" value={agents} onChange={setAgents} options={agentsOf(all).map((a) => ({ value: a, label: a }))} />
         <span className="ml-auto text-xs text-muted-foreground tabular">{plural(rows.length, "channel")}</span>
       </FilterBar>
@@ -66,8 +67,8 @@ export function Channels() {
                   <TableHead className="pl-4 lg:pl-6">Channel</TableHead>
                   <TableHead className="max-md:hidden">Answers</TableHead>
                   <TableHead className="max-lg:hidden">Access</TableHead>
-                  <TableHead>Budget</TableHead>
-                  <TableHead className="text-right max-sm:hidden">This month</TableHead>
+                  {figures && <TableHead>Budget</TableHead>}
+                  {figures && <TableHead className="text-right max-sm:hidden">This month</TableHead>}
                   <TableHead className="pr-4 text-right lg:pr-6 max-sm:hidden">Last active</TableHead>
                 </TableRow>
               </TableHeader>
@@ -76,7 +77,7 @@ export function Channels() {
                   <Fragment key={g.key}>
                     {g.name && (
                       <TableRow className="bg-muted/40 hover:bg-muted/40">
-                        <TableCell colSpan={6} className="py-1.5 pl-4 text-xs font-medium text-muted-foreground lg:pl-6">{g.name}</TableCell>
+                        <TableCell colSpan={figures ? 6 : 4} className="py-1.5 pl-4 text-xs font-medium text-muted-foreground lg:pl-6">{g.name}</TableCell>
                       </TableRow>
                     )}
                     {g.rows.map((c) => (
@@ -96,8 +97,8 @@ export function Channels() {
                         <TableCell className="max-lg:hidden">
                           <span className="flex flex-wrap gap-1">{c.tags.map((t) => <Tag key={t}>{TAGS[t]}</Tag>)}</span>
                         </TableCell>
-                        <TableCell><Budget c={c} /></TableCell>
-                        <TableCell className="text-right text-muted-foreground max-sm:hidden"><Money usd={c.spend.month_usd} /></TableCell>
+                        {figures && <TableCell><Budget c={c} /></TableCell>}
+                        {figures && <TableCell className="text-right text-muted-foreground max-sm:hidden">{c.spend && <Money usd={c.spend.month_usd} />}</TableCell>}
                         <TableCell className="pr-4 text-right text-muted-foreground lg:pr-6 max-sm:hidden"><Ago iso={c.last_active_at} /></TableCell>
                       </TableRow>
                     ))}

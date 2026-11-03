@@ -93,7 +93,7 @@ export function accessAsk(
 /** Spend a new limit is compared with: the budget's own while its window holds, else this month's. */
 export function spentFor(c: Pick<Channel, "budget" | "spend">, window: ChannelBudget["window"]) {
   const own = c.budget && c.budget.window === window ? c.budget.spent_usd : 0
-  return Math.max(own, window === "monthly" ? c.spend.month_usd : 0)
+  return Math.max(own, window === "monthly" ? (c.spend?.month_usd ?? 0) : 0)
 }
 
 /** A limit at or below spend stops new turns at once. */

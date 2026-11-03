@@ -25,10 +25,16 @@ from daimon.adapters.web.channels import (
     one_row,
 )
 from daimon.adapters.web.runtime import WebRuntime
+from daimon.core import routine_service
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.channel_changes import Expected
 from daimon.core.channel_directory import WEB_ROW_ID, ValueSource, load_channel_directory
-from daimon.core.channel_reads import channel_routines, channel_spend, platform_link
+from daimon.core.channel_reads import (
+    RoutineRelation,
+    channel_routines,
+    channel_spend,
+    platform_link,
+)
 from daimon.core.channel_reads import teams_subscription as read_subscription
 from daimon.core.channel_settings import (
     add_skill,
@@ -48,10 +54,12 @@ from daimon.core.credit_views import recent_start
 from daimon.core.defaults.loader import load_platform_skills
 from daimon.core.defaults.metadata import MA_METADATA_KEY_CHANNEL_COPY
 from daimon.core.errors import SkillsListTruncatedError
+from daimon.core.routine_service import RoutineCaller
 from daimon.core.scope_cascade import CascadeMode, CascadeScope, resolve_modes
 from daimon.core.stores import agent_tool_rules as tool_rules
 from daimon.core.stores.channel_changes import WORKSPACE_ID
 from daimon.core.stores.channel_skills import list_channel_skills
+from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.platform_names import get_user_names
 from daimon.core.stores.switch_modes import Switch, get_switch_modes
 from daimon.core.stores.tenants import get_tenant
@@ -148,7 +156,8 @@ class ChannelSettingsJson(BaseModel):
     link: str | None
     teams_subscription: SubscriptionJson | None
     routines: list[RoutineJson]
-    spend: SpendBreakdownJson
+    spend: SpendBreakdownJson | None
+    """None for a member: spend figures are an admin's."""
 
 
 class SourcedValueJson(BaseModel):
@@ -248,6 +257,28 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
             source=effective.tier,
         )
 
+    async def member_routines(
+        caller: WebCaller, found: list[tuple[RoutineRow, RoutineRelation]]
+    ) -> list[tuple[RoutineRow, RoutineRelation]]:
+        """The routines a member may list in `routine_service.list_routines`, no others."""
+        client = runtime.anthropic or (runtime.turns.deps.anthropic if runtime.turns else None)
+        if client is None:
+            raise HTTPException(503, "Routines are not available right now.")
+        tenant_id = caller.person.tenant_id
+        async with runtime.sessionmaker() as db:
+            principal = await caller.principal(db)
+        view = await routine_service.isolation_view_loader(
+            runtime.sessionmaker, client, tenant_id
+        )()
+        acting = RoutineCaller(
+            tenant_id=tenant_id, subject=principal.subject, platform=principal.platform
+        )
+        shown = {
+            r.id
+            for r in routine_service.readable_routines(acting, view.viewer, [r for r, _ in found])
+        }
+        return [(r, rel) for r, rel in found if r.id in shown]
+
     async def agents(caller: WebCaller) -> list[BetaManagedAgentsAgent]:
         return await listed_agents(runtime, caller.person.tenant_id)
 
@@ -272,7 +303,7 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
 
     async def changed(caller: WebCaller, channel_id: str) -> ChangeResultJson:
         row = await one_row(runtime, caller, channel_id)
-        return ChangeResultJson(channel=detail_json(row, manage=True), notes=[])
+        return ChangeResultJson(channel=detail_json(row, manage=True, figures=True), notes=[])
 
     @router.get("/api/channels/{channel_id}/settings")
     async def get_settings(caller: ChannelViewer, channel_id: str) -> ChannelSettingsJson:  # pyright: ignore[reportUnusedFunction]
@@ -301,18 +332,26 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
                 now=datetime.now(UTC),
             )
             routines = await channel_routines(db, tenant_id=tenant_id, channel_id=channel_id)
-            spend = await channel_spend(
-                db,
-                tenant_id=tenant_id,
-                channel_id=channel_id,
-                since=recent_start(datetime.now(UTC)),
-                markup=settings.billing.markup,
+            spend = (
+                await channel_spend(
+                    db,
+                    tenant_id=tenant_id,
+                    channel_id=channel_id,
+                    since=recent_start(datetime.now(UTC)),
+                    markup=settings.billing.markup,
+                )
+                if is_admin(caller.role)
+                else None
             )
-            people = await get_user_names(
-                db,
-                tenant_id=tenant_id,
-                platform=platform,
-                user_ids=[p for p in spend.by_person if p is not None],
+            people = (
+                await get_user_names(
+                    db,
+                    tenant_id=tenant_id,
+                    platform=platform,
+                    user_ids=[p for p in spend.by_person if p is not None],
+                )
+                if spend is not None
+                else {}
             )
             participation = await switch_json(db, "participation", tenant_id, platform, channel_id)
             plans = await switch_json(db, "progress_plans", tenant_id, platform, channel_id)
@@ -321,6 +360,8 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
             None,
         )
         person_name = {k: v.display_name or v.handle for k, v in people.items()}
+        if not is_admin(caller.role):
+            routines = await member_routines(caller, routines)
         return ChannelSettingsJson(
             participation=participation,
             progress_plans=plans,
@@ -365,7 +406,9 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
                 )
                 for r, rel in routines
             ],
-            spend=SpendBreakdownJson(
+            spend=None
+            if spend is None
+            else SpendBreakdownJson(
                 days=_SPEND_DAYS,
                 by_day=[
                     AmountJson(key=d.isoformat(), name=None, usd=float(v))

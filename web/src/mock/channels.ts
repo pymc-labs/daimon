@@ -14,13 +14,16 @@ const READERS: Record<Readers, string> = { any: "Anyone", inside: "Only this cha
 const WRITERS: Record<Writers, string> = { any: "Anyone", own: "Only its own agents", none: "Nobody" }
 const WORKSPACE = { value: "daimon", source: "workspace" } as const
 
-const C = (id: string, name: string | null, parent: string | null, more: Partial<Channel> = {}): Channel => ({
+/** A channel as stored: members are sent it without its budget and spend. */
+type Stored = Channel & { spend: NonNullable<Channel["spend"]> }
+
+const C = (id: string, name: string | null, parent: string | null, more: Partial<Stored> = {}): Stored => ({
   id, platform: "discord", name, kind: "text", parent: parent ? { id: `k_${parent}`, name: parent } : null, last_seen_at: ago(2),
   agent: WORKSPACE, environment: { value: "default", source: "deployment" }, readers: "any", writers: "any", kept_agents: [], tags: [],
   budget: null, spend: { month_usd: 0, last_30_days_usd: 0 }, last_active_at: null, ...more,
 })
 
-const channels: Channel[] = [
+const channels: Stored[] = [
   C("web", "Web chat", null, { platform: "web", kind: null, last_seen_at: null, spend: { month_usd: 41.2, last_30_days_usd: 58.9 }, last_active_at: ago(0.3) }),
   C("c_board", "board", "Leadership", { readers: "own", writers: "own", tags: ["locked"], agent: { value: "board-desk", source: "channel" }, kept_agents: ["board-desk"] }),
   C("c_clv", "clv-models", "Projects", {
@@ -48,7 +51,7 @@ const curve = (total: number, days: number): { key: string; name: null; usd: num
   const sum = weights.reduce((a, b) => a + b, 0)
   return weights.map((w, i) => ({ key: ago((days - 1 - i) * 24).slice(0, 10), name: null, usd: +((w / sum) * total).toFixed(2) }))
 }
-const settingsOf = (c: Channel): ChannelSettings => ({
+const settingsOf = (c: Stored): ChannelSettings => ({
   participation: sw("off", "deployment"),
   progress_plans: sw("on", "workspace"),
   skills: c.id === "c_clv" ? [{ skill_id: "skill_pymc", name: "pymc-modeling" }, { skill_id: "skill_brief", name: "client-brief" }] : [],
@@ -80,7 +83,7 @@ const settingsOf = (c: Channel): ChannelSettings => ({
   },
 })
 const settings: Record<string, ChannelSettings> = {}
-const settingsFor = (c: Channel) => (settings[c.id] ??= settingsOf(c))
+const settingsFor = (c: Stored) => (settings[c.id] ??= settingsOf(c))
 const defaults: ChannelDefaults = {
   platform: "discord", agent: WORKSPACE, environment: { value: "default", source: "deployment" },
   participation: sw("off", "deployment"), progress_plans: sw("on", "workspace", "on"),
@@ -90,10 +93,11 @@ const confirmNeeded = () => HttpResponse.json({ detail: "This channel is sealed 
 const manage = () => me()?.capabilities.includes("channels.manage") ?? false
 const view = () => me()?.capabilities.includes("channels.view") ?? false
 /** Members see web chat and channels their chat platform shows them, never a locked one. */
-const visible = (c: Channel) => manage() || (!c.tags.includes("locked") && c.id !== "c_partners")
+const visible = (c: Stored) => manage() || (!c.tags.includes("locked") && c.id !== "c_partners")
 const find = (id: string) => channels.find((c) => c.id === id && visible(c))
-const detail = (c: Channel): ChannelDetail => ({
-  ...c, readers_label: READERS[c.readers], writers_label: WRITERS[c.writers],
+const figures = (c: Stored): Channel => (manage() ? c : { ...c, budget: null, spend: null })
+const detail = (c: Stored): ChannelDetail => ({
+  ...figures(c), readers_label: READERS[c.readers], writers_label: WRITERS[c.writers],
   readers_options: Object.entries(READERS).map(([value, label]) => ({ value: value as Readers, label })),
   writers_options: Object.entries(WRITERS).map(([value, label]) => ({ value: value as Writers, label })),
   can_manage: manage(), budget_editable: manage() && c.id !== "web",
@@ -102,7 +106,7 @@ const stale = () => HttpResponse.json({ detail: "This changed since you opened i
 const invalid = (detail: string) => HttpResponse.json({ detail }, { status: 422 })
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 
-function changed(c: Channel, patch: Partial<Channel>, setting: ChannelHistoryEntry["setting"], before: unknown, after: unknown, notes: string[] = []) {
+function changed(c: Stored, patch: Partial<Stored>, setting: ChannelHistoryEntry["setting"], before: unknown, after: unknown, notes: string[] = []) {
   Object.assign(c, patch)
   const who = me()!
   ;(history[c.id] ??= []).unshift({ at: new Date().toISOString(), setting, before, after, actor: { id: who.id, name: who.name }, surface: "web" })
@@ -115,14 +119,14 @@ export const channelsHandlers: HttpHandler[] = [
     if (!view() || (request.method !== "GET" && !manage())) return forbidden()
   })),
   http.get("/api/channels", () => HttpResponse.json<ChannelList>({
-    platform: "discord", default_agent: WORKSPACE, default_environment: { value: "default", source: "deployment" }, channels: channels.filter(visible),
+    platform: "discord", default_agent: WORKSPACE, default_environment: { value: "default", source: "deployment" }, channels: channels.filter(visible).map(figures),
   })),
   http.get("/api/channels/:id/history", ({ params }) => manage() ? HttpResponse.json(history[params.id as string] ?? []) : forbidden()),
   http.get("/api/channels/:id/settings", ({ params }) => {
     const c = find(params.id as string)
     if (!c) return notFound()
     const s = settingsFor(c)
-    return HttpResponse.json({ ...s, tool_rules: { ...s.tool_rules, editable: s.tool_rules.editable && manage() } })
+    return HttpResponse.json({ ...s, spend: manage() ? s.spend : null, tool_rules: { ...s.tool_rules, editable: s.tool_rules.editable && manage() } })
   }),
   ...(["participation", "progress-plans"] as const).map((path) => http.put(`/api/channels/:id/${path}`, async ({ params, request }) => {
     const c = find(params.id as string)
