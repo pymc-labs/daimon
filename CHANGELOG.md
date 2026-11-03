@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+- Remove client-specific references and use neutral self-hosting examples.
+
 - In the web app, a Discord routine can post to its owner by direct message, and a routine shows when sandbox tools are on. Changing a routine there needs a linked chat account, because the routine then runs as you.
 
 - After **Hand over**, the new agent's first reply goes straight to the person's request. Before, it opened by naming the work in progress and the files that came across. It still says when a file it needs is missing or when something could not be carried over.
