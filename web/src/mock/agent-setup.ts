@@ -26,7 +26,27 @@ const CODING = new Map<string, (CodingKey & { by: string })[]>([
   ["ag_mmm", [{ id: "ck_1", creator: "Maya Lindqvist", by: "p_maya", created_at: ago(240), expires_at: new Date(Date.now() + 60 * 86_400_000).toISOString(), mine: false }]],
 ])
 
+const isAdmin = () => roster.viewer()?.admin === true
+
 export const agentSetupHandlers = [
+  http.get("/api/agents/:id/owners/options", async () => {
+    await wait()
+    if (!roster.viewer()) return unauthorized()
+    if (!isAdmin()) return forbidden("Changing owners needs an admin.")
+    return HttpResponse.json(PEOPLE.filter((p) => p.role !== "visitor").map((p) => ({ id: p.id, name: p.name })))
+  }),
+  http.put("/api/agents/:id/owners", async ({ params, request }) => {
+    await wait(300)
+    if (!roster.viewer()) return unauthorized()
+    if (!isAdmin()) return forbidden("Changing owners needs an admin.")
+    const r = roster.find(String(params.id))
+    if (!r) return notFound()
+    const { owner, co_owners } = (await request.json()) as { owner: string | null; co_owners: string[] }
+    r.owner = owner ?? ""
+    r.co_owners = [...new Set(co_owners)].filter((id) => id !== owner)
+    roster.save()
+    return new HttpResponse(null, { status: 204 })
+  }),
   http.get("/api/agents/:id/keys", async ({ params }) => {
     await wait()
     const s = setupOf(String(params.id))

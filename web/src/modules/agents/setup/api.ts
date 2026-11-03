@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
 
 import { api } from "@/lib/api"
-import type { AgentKey, CodingKey, MintedCodingKey } from "../types"
+import type { AgentKey, CodingKey, MintedCodingKey, PersonRef } from "../types"
 
 const fail = (e: Error) => toast.error(e.message)
 
@@ -42,4 +42,18 @@ export function useCodingKeyWrites(id: string) {
     make: useMutation({ mutationFn: () => api.post<MintedCodingKey>(`/api/agents/${id}/coding-keys`), onSuccess: done, onError: fail }),
     revoke: useMutation({ mutationFn: (keyId: string) => api.del(`/api/agents/${id}/coding-keys/${keyId}`), onSuccess: done, onError: fail }),
   }
+}
+
+/** The people an admin may pick as owners. */
+export const useOwnerOptions = (id: string, enabled: boolean) =>
+  useQuery({ queryKey: ["agents", id, "owner-options"], queryFn: () => api.get<PersonRef[]>(`/api/agents/${id}/owners/options`), enabled, retry: false })
+
+/** Set the owner and co-owners as one set; the agent refetches with the new names. */
+export function useSetOwners(id: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (b: { owner: string | null; co_owners: string[] }) => api.put(`/api/agents/${id}/owners`, b),
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: ["agents"] }) },
+    onError: fail,
+  })
 }
