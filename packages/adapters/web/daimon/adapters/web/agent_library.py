@@ -12,6 +12,7 @@ from daimon.core import environment_admin, skill_library, skill_library_files
 from daimon.core.agent_editing import AgentEditError
 from daimon.core.agent_skill_files import SkillFilesDoc
 from daimon.core.environment_admin import EnvironmentDoc, EnvironmentInput, EnvironmentNeedsConfirm
+from daimon.core.platform_names import known_channel_label
 from daimon.core.skill_library import (
     CREATED_ACTION,
     RESTORED_ACTION,
@@ -22,6 +23,7 @@ from daimon.core.skill_library import (
     SyncedSkill,
 )
 from daimon.core.skill_library_files import SkillRef
+from daimon.core.stores.platform_names import get_channel_statuses
 from daimon.core.stores.scoped_config_read import list_environment_picks
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -205,15 +207,22 @@ def agent_library_router(runtime: WebRuntime) -> APIRouter:
             raise edit_refusal(exc) from exc
         async with runtime.sessionmaker() as db:
             picks = await list_environment_picks(db, tenant_id=caller.person.tenant_id)
-        _, found = await channel_names(runtime, caller.person.tenant_id, {c for _, c in picks if c})
+        wanted = {c for _, c in picks if c}
+        platform, found = await channel_names(runtime, caller.person.tenant_id, wanted)
         labels = found.labels()
+        async with runtime.sessionmaker() as db:
+            stored = await get_channel_statuses(
+                db, tenant_id=caller.person.tenant_id, platform=platform, channel_ids=wanted
+            )
         uses: dict[str, list[EnvironmentUse]] = {}
         for env_name, channel_id in picks:
             use = (
                 EnvironmentUse(kind="workspace", id="workspace", name="Workspace default")
                 if channel_id is None
                 else EnvironmentUse(
-                    kind="channel", id=channel_id, name=labels.get(channel_id, "Deleted channel")
+                    kind="channel",
+                    id=channel_id,
+                    name=labels.get(channel_id) or known_channel_label(stored.get(channel_id)),
                 )
             )
             uses.setdefault(env_name, []).append(use)

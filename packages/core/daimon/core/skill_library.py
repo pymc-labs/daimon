@@ -20,12 +20,13 @@ from daimon.core.defaults.metadata import strip_tenant_prefix
 from daimon.core.defaults.report import Action
 from daimon.core.errors import DaimonError
 from daimon.core.mux_compat import list_skill_versions
+from daimon.core.platform_names import known_channel_label
 from daimon.core.skills.attachments import delete_skill_unless_attached
 from daimon.core.skills.fetch import GitHubFetchError
 from daimon.core.skills.pipeline import run_skill_sync
 from daimon.core.stores import web_audit
 from daimon.core.stores.channel_skills import list_tenant_channel_skills
-from daimon.core.stores.platform_names import get_channel_names
+from daimon.core.stores.platform_names import get_channel_names, get_channel_statuses
 from daimon.core.stores.seeded_skills import list_seeded_skill_names
 from daimon.core.stores.user_skills import list_user_skills_for_tenant
 from daimon.core.stores.web_people import get_person_for_account
@@ -123,6 +124,7 @@ async def _library(
         seeded = await list_seeded_skill_names(session, tenant_id=actor.tenant_id)
         rules = await list_tenant_channel_skills(session, tenant_id=actor.tenant_id)
         names: dict[tuple[str, str], str] = {}
+        statuses: dict[tuple[str, str], str] = {}
         for platform in {r.platform for r in rules}:
             found = await get_channel_names(
                 session,
@@ -131,8 +133,18 @@ async def _library(
                 channel_ids={r.channel_id for r in rules if r.platform == platform},
             )
             names.update({(platform, cid): n for cid, n in found.items()})
+            gone = await get_channel_statuses(
+                session,
+                tenant_id=actor.tenant_id,
+                platform=platform,
+                channel_ids={r.channel_id for r in rules if r.platform == platform},
+            )
+            statuses.update({(platform, cid): st for cid, st in gone.items()})
     for rule in rules:
-        label = names.get((rule.platform, rule.channel_id), "Deleted channel")
+        label = names.get(
+            (rule.platform, rule.channel_id),
+            known_channel_label(statuses.get((rule.platform, rule.channel_id))),
+        )
         uses[rule.skill_id].append(
             SkillUse(kind="channel", id=rule.channel_id, name=label, version=rule.version or None)
         )

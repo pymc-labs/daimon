@@ -19,6 +19,7 @@ from daimon.core import platform_names
 from daimon.core._models import PlatformPrincipal
 from daimon.core.platform_names import (
     KnownName,
+    known_channel_label,
     remember_channel_names,
     remember_user_name,
     remember_user_names,
@@ -856,3 +857,10 @@ async def test_a_channel_lookup_asks_for_a_capped_number_at_a_bounded_pace() -> 
     assert len(asked) == 20, "no more than 20 channels are asked about per call"
     assert {guild for guild, _ in asked} == {"g1"}, "every ask carries the tenant's server"
     assert peak <= 5, "no more than five asks run at once"
+
+
+def test_an_unnamed_channel_is_deleted_only_when_its_status_says_so() -> None:
+    assert known_channel_label("gone") == "Deleted channel"
+    assert known_channel_label("direct") == "Direct message"
+    assert known_channel_label(None) == "Unknown channel"
+    assert known_channel_label("named") == "Unknown channel"

@@ -305,6 +305,27 @@ async def list_channel_names(
     return [ChannelNameRow.model_validate(row) for row in rows]
 
 
+async def get_channel_statuses(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_ids: Collection[str],
+) -> dict[str, str]:
+    """The recorded status (`gone` or `direct`) of each of ``channel_ids`` that has one."""
+    if not channel_ids:
+        return {}
+    rows = await session.execute(
+        select(PlatformChannelName.channel_id, PlatformChannelName.status).where(
+            PlatformChannelName.tenant_id == tenant_id,
+            PlatformChannelName.platform == platform,
+            PlatformChannelName.channel_id.in_(list(channel_ids)),
+            PlatformChannelName.status.in_(("gone", "direct")),
+        )
+    )
+    return {channel_id: status for channel_id, status in rows.all()}
+
+
 async def get_channel_names(
     session: AsyncSession,
     *,
