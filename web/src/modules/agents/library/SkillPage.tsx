@@ -1,4 +1,5 @@
 import { ExternalLink, Trash2 } from "lucide-react"
+import { useState } from "react"
 import { useNavigate, useParams } from "react-router"
 
 import { QueryState } from "@/components/QueryState"
@@ -8,6 +9,7 @@ import { PanelMenu, PanelSection, SettingRow, Tag, type MenuAction } from "@/com
 import { Page } from "@/components/shell/Page"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
+import { ApiError } from "@/lib/api"
 import { useConfirm } from "@/lib/confirm"
 import { useParam } from "@/lib/filters"
 import { cn } from "@/lib/utils"
@@ -33,7 +35,7 @@ export function SkillPage() {
     >
       {(s) => (
         <Loaded
-          key={`${s.id}@${s.version}@${files.data?.version ?? (files.isError ? "x" : "")}`}
+          key={`${s.id}@${version ?? ""}`}
           skill={s} custom={custom} files={files.data} filesLoading={custom && files.isPending}
           versions={versions.data ?? []} viewing={version}
         />
@@ -50,9 +52,25 @@ function Loaded({ skill, custom, files, filesLoading, versions, viewing }: {
   const [, setVersion] = useParam("version")
   const { save, restore, remove } = useSkillWrites()
   const readOnly = !custom || skill.default || viewing !== null
+  // The draft outlives refetches. `base` is the version it sits on; if the skill moves past it, or a
+  // save is refused, they pick Reload or Overwrite, so a newer version is never replaced unasked.
+  const [base, setBase] = useState(skill.version)
+  const [refused, setRefused] = useState(false)
   const draft = useSkillFilesDraft(files?.files ?? [], async (body) => {
-    try { await save.mutateAsync({ id: skill.id, files: body, expected_version: skill.version }) } catch { /* the hook has told them */ }
+    try {
+      await save.mutateAsync({ id: skill.id, files: body, expected_version: skill.version })
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) setRefused(true)
+      throw e
+    }
   })
+  if (!draft.dirty && base !== skill.version) setBase(skill.version)
+  const changed = draft.dirty && !draft.busy && (refused || base !== skill.version)
+  const submit = async () => {
+    try { await draft.save() } catch { return }
+    draft.discard()
+    setRefused(false)
+  }
   const drop = async () => {
     if (!(await confirm({ title: `Delete ${skill.title}?`, action: "Delete", destructive: true }))) return
     remove.mutate(skill.id, { onSuccess: () => navigate("/agents/skills") })
@@ -63,6 +81,7 @@ function Loaded({ skill, custom, files, filesLoading, versions, viewing }: {
   ]
   const markdown = draft.read("SKILL.md")
   const showDirty = custom && !readOnly && draft.dirty
+  const reload = () => { draft.discard(); setRefused(false) }
   return (
     <Page
       crumbs={[{ label: "Agents", to: "/agents" }, { label: "Skills", to: "/agents/skills" }, { label: skill.title }]}
@@ -70,13 +89,20 @@ function Loaded({ skill, custom, files, filesLoading, versions, viewing }: {
       actions={
         <>
           {showDirty && <Button size="sm" variant="ghost" disabled={draft.busy} onClick={draft.discard}>Discard</Button>}
-          {showDirty && <Button size="sm" disabled={draft.busy} onClick={() => void draft.save()}>Save version</Button>}
+          {showDirty && !changed && <Button size="sm" disabled={draft.busy} onClick={() => void submit()}>Save version</Button>}
           <PanelMenu items={menu} />
         </>
       }
     >
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto lg:flex-row lg:overflow-hidden">
         <div className="flex h-[70vh] min-h-[360px] min-w-0 flex-col lg:h-auto lg:min-h-0 lg:flex-1">
+          {showDirty && changed && (
+            <div role="alert" className="flex min-h-10 shrink-0 flex-wrap items-center gap-2 border-b bg-muted/40 px-4 py-1.5 text-sm lg:px-6">
+              <span>This skill changed since you started editing.</span>
+              <Button size="xs" variant="ghost" className="ml-auto" disabled={draft.busy} onClick={reload}>Reload</Button>
+              <Button size="xs" disabled={draft.busy} onClick={() => void submit()}>Overwrite</Button>
+            </div>
+          )}
           {viewing && (
             <div className="flex h-10 shrink-0 items-center gap-2 border-b bg-muted/40 px-4 text-sm lg:px-6">
               <span>Viewing version {viewing}</span>

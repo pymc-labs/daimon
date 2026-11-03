@@ -40,10 +40,8 @@ export function useSkillWrites() {
       mutationFn: (b: { id: string; files: Record<string, string | null>; expected_version: string }) =>
         api.put<Ref>(`/api/agents/skills/${b.id}/files`, { files: b.files, expected_version: b.expected_version }),
       onSuccess: done,
-      onError: (e) => {
-        if (e instanceof ApiError && e.status === 409) void done()
-        fail(e)
-      },
+      // A 409 is the page's to explain (Reload or Overwrite); the refetch gives it the new version.
+      onError: (e) => (e instanceof ApiError && e.status === 409 ? done() : fail(e)),
     }),
     restore: useMutation({ mutationFn: (b: { id: string; version: string }) => api.post<Ref>(`/api/agents/skills/${b.id}/restore`, { version: b.version }), onSuccess: done, onError: fail }),
   }
