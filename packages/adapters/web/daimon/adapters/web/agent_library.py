@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from daimon.adapters.web.agent_access import Editor, actor_of, change_deps, edit_refusal
 from daimon.adapters.web.agent_audit import recorded
+from daimon.adapters.web.channel_names import channel_names
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core import environment_admin, skill_library, skill_library_files
 from daimon.core.agent_editing import AgentEditError
@@ -19,6 +22,7 @@ from daimon.core.skill_library import (
     SyncedSkill,
 )
 from daimon.core.skill_library_files import SkillRef
+from daimon.core.stores.scoped_config_read import list_environment_picks
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -48,6 +52,17 @@ class EnvironmentBody(BaseModel):
     spec: EnvironmentInput
     confirm_open_network: bool = False
     expected_updated_at: str | None = None
+
+
+class EnvironmentUse(BaseModel):
+    kind: Literal["channel", "workspace"]
+    id: str
+    name: str
+
+
+class EnvironmentListing(EnvironmentDoc):
+    used_by: list[EnvironmentUse]
+    """The channels and the workspace default that pick it."""
 
 
 class ArchivedDoc(BaseModel):
@@ -181,13 +196,30 @@ def agent_library_router(runtime: WebRuntime) -> APIRouter:
             raise edit_refusal(exc) from exc
 
     @router.get("/environments")
-    async def environments(caller: Editor) -> list[EnvironmentDoc]:  # pyright: ignore[reportUnusedFunction]
+    async def environments(caller: Editor) -> list[EnvironmentListing]:  # pyright: ignore[reportUnusedFunction]
         try:
-            return await environment_admin.list_environments(
+            docs = await environment_admin.list_environments(
                 change_deps(runtime).edit, actor=actor_of(caller)
             )
         except AgentEditError as exc:
             raise edit_refusal(exc) from exc
+        async with runtime.sessionmaker() as db:
+            picks = await list_environment_picks(db, tenant_id=caller.person.tenant_id)
+        _, found = await channel_names(runtime, caller.person.tenant_id, {c for _, c in picks if c})
+        labels = found.labels()
+        uses: dict[str, list[EnvironmentUse]] = {}
+        for env_name, channel_id in picks:
+            use = (
+                EnvironmentUse(kind="workspace", id="workspace", name="Workspace default")
+                if channel_id is None
+                else EnvironmentUse(
+                    kind="channel", id=channel_id, name=labels.get(channel_id, "Deleted channel")
+                )
+            )
+            uses.setdefault(env_name, []).append(use)
+        return [
+            EnvironmentListing(**doc.model_dump(), used_by=uses.get(doc.name, [])) for doc in docs
+        ]
 
     @router.post("/environments")
     async def create_environment(caller: Editor, body: EnvironmentInput) -> EnvironmentDoc:  # pyright: ignore[reportUnusedFunction]

@@ -9,7 +9,9 @@ import httpx
 import pytest
 from anthropic.types.beta import BetaManagedAgentsCustomSkill
 from daimon.core.defaults.report import Action, ResourceOutcome
+from daimon.core.scope import ChannelScopeRef, TenantScopeRef
 from daimon.core.stores import web_audit
+from daimon.core.stores.scoped_config_write import set_fields
 from daimon.testing.ma_models import ma_environment
 from mux.testing.drivers.anthropic.ma import json_body
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -224,6 +226,14 @@ async def test_an_admin_lists_and_changes_an_environment(
         metadata={"daimon_managed": "true"},
     )
     patched = _environments(agents, owner.tenant_id, mine, seeded)
+    async with db_session_factory() as session, session.begin():
+        for scope in (
+            TenantScopeRef(tenant_id=owner.tenant_id),
+            ChannelScopeRef(tenant_id=owner.tenant_id, channel_id="c1"),
+        ):
+            await set_fields(
+                session, scope=scope, tenant_id=owner.tenant_id, environment_name="Data"
+            )
     token = await sign_in_token(db_session_factory, other)
     spec = {"name": "Data", "packages": {"pip": ["numpy"]}, "network": "limited"}
     async with agent_client(agents, owner.tenant_id, db_session_factory, token) as client:
@@ -238,6 +248,8 @@ async def test_an_admin_lists_and_changes_an_environment(
         ("Builtin", True),
         ("Data", False),
     ]
+    uses = {e["name"]: {(u["kind"], u["id"]) for u in e["used_by"]} for e in listed.json()}
+    assert uses == {"Builtin": set(), "Data": {("workspace", "workspace"), ("channel", "c1")}}
     assert saved.status_code == 200, saved.text
     assert patched[0]["config"]["packages"]["pip"] == ["numpy"]
     assert patched[0]["config"]["packages"]["npm"] == [], "a removed package goes"

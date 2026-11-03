@@ -134,6 +134,24 @@ async def resolve(
     return config
 
 
+async def list_environment_picks(
+    session: AsyncSession, *, tenant_id: uuid.UUID
+) -> list[tuple[str, str | None]]:
+    """`(environment name, channel id)` for each pick; the channel is None for the tenant's."""
+    channels = await session.execute(
+        select(ChannelConfig.environment_name, ChannelConfig.channel_id).where(
+            ChannelConfig.tenant_id == tenant_id, ChannelConfig.environment_name.is_not(None)
+        )
+    )
+    tenant = await session.scalar(
+        select(TenantConfig.environment_name).where(TenantConfig.tenant_id == tenant_id)
+    )
+    picks: list[tuple[str, str | None]] = [(n, c) for n, c in channels.tuples() if n is not None]
+    if tenant is not None:
+        picks.append((tenant, None))
+    return picks
+
+
 async def get_scope(
     session: AsyncSession, *, scope: ScopeRef
 ) -> UserConfigRow | ChannelConfigRow | TenantConfigRow | None:

@@ -18,8 +18,6 @@ from anthropic import APIStatusError
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.web.access import Role
 from daimon.adapters.web.audit import (
-    INVITE_LABEL,
-    PERSON_LABEL,
     AuditTarget,
     audit,
     invite_target,
@@ -54,6 +52,7 @@ from daimon.core.stores import tenants as tenants_store
 from daimon.core.stores import web_identities as identities_store
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores.domain import SpendAllowanceRow, WebPersonRow
+from daimon.core.stores.web_audit import INVITE_LABEL, PERSON_LABEL
 from daimon.core.web_identity import linked_identity, principal_of, with_spend_person
 from fastapi import APIRouter, Depends, HTTPException
 from mux.errors import ScopeViolation
@@ -722,7 +721,7 @@ async def _audit_target(db: AsyncSession, tenant_id: uuid.UUID, subject: Subject
     """A group by name; a person or invite by id, which the audit log shows by name while
     they exist. An id that matches no one (a chat-only person) stays a generic label."""
     if subject.kind == "group":
-        label = "Everyone" if subject.id == "everyone" else f"{subject.name or subject.id} group"
+        label = "Everyone" if subject.id == "everyone" else f"{subject.name or 'Deleted'} group"
         return AuditTarget(label)
     try:
         subject_id = uuid.UUID(subject.id)
