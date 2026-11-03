@@ -15,6 +15,9 @@ from daimon.core.outbound.mentions import (
     neutralise_broadcasts,
     render_post,
 )
+from daimon.core.outbound.opt_out import tag_opt_outs, untag_opted_out
+from daimon.core.stores import tag_opt_outs as tag_opt_outs_store
+from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 
 PLATFORMS = ("discord", "slack", "teams")
 
@@ -49,3 +52,56 @@ def test_attribution_when_requester_known_then_discord_id_else_name():
 
 def test_discord_role_tag_when_posted_then_kept_as_text():
     assert render_post("<@&9> ready", "discord").text == "<@&9> ready", "role pings are off"
+
+
+_IDS = {"discord": "123", "slack": "U123", "teams": "aad-123"}
+
+
+@pytest.mark.parametrize("platform", PLATFORMS)
+async def test_never_tag_when_person_opted_out_then_every_platform_skips_them(
+    platform, db_session, db_session_factory
+):
+    tenant = await make_tenant(db_session, platform=platform, workspace_id="W_NT_1")
+    account = await make_account(db_session, tenant=tenant)
+    await make_platform_principal(
+        db_session, platform=platform, external_id=_IDS[platform], tenant=tenant, account=account
+    )
+    await tag_opt_outs_store.set_opt_out(db_session, account_id=account.id, tenant_id=tenant.id)
+    await db_session.commit()
+
+    skipped = await tag_opt_outs(
+        db_session_factory,
+        tenant_id=tenant.id,
+        platform=platform,
+        user_ids=[_IDS[platform], "someone-else"],
+    )
+
+    assert skipped == {_IDS[platform]}, f"{platform}: only the opted-out person is skipped"
+
+
+@pytest.mark.parametrize("platform", ("discord", "slack"))
+async def test_never_tag_when_text_mentions_opted_out_then_plain_name(
+    platform, db_session, db_session_factory
+):
+    tenant = await make_tenant(db_session, platform=platform, workspace_id="W_NT_1")
+    account = await make_account(db_session, tenant=tenant)
+    await make_platform_principal(
+        db_session, platform=platform, external_id=_IDS[platform], tenant=tenant, account=account
+    )
+    await tag_opt_outs_store.set_opt_out(db_session, account_id=account.id, tenant_id=tenant.id)
+    await db_session.commit()
+    other = {"discord": "<@456>", "slack": "<@U456>"}[platform]
+
+    out = await untag_opted_out(
+        db_session_factory,
+        tenant_id=tenant.id,
+        platform=platform,
+        text=f"{render_post_mention(platform)} and {other}",
+    )
+
+    assert "123" not in out.replace("456", ""), f"{platform}: the opted-out id is gone"
+    assert other in out, f"{platform}: others are still tagged"
+
+
+def render_post_mention(platform):
+    return {"discord": "<@123>", "slack": "<@U123>"}[platform]
