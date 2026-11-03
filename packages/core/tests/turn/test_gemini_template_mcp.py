@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import httpx
 import jwt
@@ -989,7 +991,9 @@ async def test_an_old_consent_with_tools_and_any_other_difference_still_needs_a_
         await _prepared(request)
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize(
+    "consent_request", [{**PARAMS, "backend_model": "gemini-4-argon"}], indirect=True
+)
 async def test_a_tool_gated_after_the_switch_still_prepares_without_it(template, monkeypatch):
     """A release that gates one more Daimon tool asks no one to confirm again."""
     from daimon.core import tool_safety
@@ -1003,3 +1007,57 @@ async def test_a_tool_gated_after_the_switch_still_prepares_without_it(template,
     assert _connection(selected).tool_policy["allowed_tools"] == ["call_tool"], "it never runs"
     assert drop in selected.target_spec.declared_drops, "still a named loss"
     assert drop in (selected.target_spec.system or ""), "the model is told it is gone"
+
+
+def _asked_again(refused: pytest.ExceptionInfo[BaseException]) -> bool:
+    error = refused.value
+    cause = error.__cause__ if isinstance(error, AdmissionDenied) else error
+    return getattr(cause, "reason", None) == "re_confirm"
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_default_model_copy_holds_only_its_exact_consent(template, monkeypatch):
+    """The provider default is not pinned: a tool gated later asks again, as before."""
+    from daimon.core import tool_safety
+    from daimon.core.channel_backend import AgentBackendRefused
+
+    request, *_ = template
+    gated = tool_safety.confirmation_gated_tools() | {"search_tools"}
+    monkeypatch.setattr(tool_safety, "confirmation_gated_tools", lambda: gated)
+    with pytest.raises((AgentBackendRefused, AdmissionDenied)) as refused:
+        await _prepared(request)
+    assert _asked_again(refused), "only a pinned model compares losses"
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_moved_provider_default_never_rides_on_the_old_consent(template):
+    """A release that moves the default model asks again, though no loss changed."""
+    from daimon.core.channel_backend import AgentBackendRefused
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores import agent_backends
+
+    request, *_ = template
+    await _prepared(request)
+    # The template serves the new default as it served the old one: same losses.
+    manifest = Path(os.environ["DAIMON_TURN__PROVIDER_RUNTIME_FILE"])
+    (plan,) = json.loads(manifest.read_text())
+    plan["configuration_grant"]["models"].append("gemini-4-argon")
+    manifest.write_text(json.dumps([plan]))
+    agent_id = derive_agent_uuid(
+        tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id
+    )
+    revision = request.admission.backend_revision
+    moved = ConfigRevision.create(
+        revision.channel,
+        revision.local + 1,
+        revision.model_copy(update={"model": "gemini-4-argon"}),
+    )
+    sessions = request.deps.sessionmaker
+    async with sessions.begin() as db:
+        setting = await agent_backends.current(db, request.tenant_id, agent_id, persisted=True)
+        assert setting is not None and setting.model is None, "confirmed for the default"
+        await mux_state.put_config_revision(db, moved, origin="agent", agent_revision=setting)
+    request = replace(request, admission=replace(request.admission, backend_revision=moved))
+    with pytest.raises((AgentBackendRefused, AdmissionDenied)) as refused:
+        await _prepared(request)
+    assert _asked_again(refused), "another model needs a fresh confirmation"

@@ -1550,9 +1550,12 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
         target = preview_source_drops(
             source, ModelRef(provider=revision.backend, id=revision.model or spec.model.id)
         )
+        # The setting or the source pins the model, unless it is the provider's
+        # default, which a release can move: then only the exact digest holds.
+        model_pinned = revision.model is None or revision.model == setting.model
         if not (
             _consented(target, consent)
-            or _same_losses(target, consent)
+            or (model_pinned and _same_losses(target, consent))
             or _consented_before(target, spec.system, consent)
         ):
             raise AgentBackendRefused("re_confirm")
