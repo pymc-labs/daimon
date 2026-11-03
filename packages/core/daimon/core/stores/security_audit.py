@@ -11,9 +11,10 @@ from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
 from daimon.core._models import Account, SecurityAuditEvent, Tenant
+from daimon.core.cursor import Cursor
 from daimon.core.security_audit import GitHubTokenAuditKind
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import delete, func, literal, select, text, tuple_, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -212,6 +213,54 @@ async def list_events(
         .offset(offset)
     )
     return [SecurityAuditRow.model_validate(row) for row in (await session.scalars(stmt)).all()]
+
+
+async def list_recent(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    limit: int = 100,
+    before: Cursor | None = None,
+    account_id: uuid.UUID | None = None,
+    tool_name: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+) -> list[SecurityAuditRow]:
+    """Newest first; `before` is the `(occurred_at, id)` of the last event seen.
+
+    `since` is inclusive and `until` exclusive. Reads the tenant-time index.
+    """
+    stmt = select(SecurityAuditEvent).where(SecurityAuditEvent.tenant_id == tenant_id)
+    if before is not None:
+        stmt = stmt.where(
+            tuple_(SecurityAuditEvent.occurred_at, SecurityAuditEvent.id)
+            < tuple_(literal(before[0]), literal(before[1]))
+        )
+    if account_id is not None:
+        stmt = stmt.where(SecurityAuditEvent.account_id == account_id)
+    if tool_name is not None:
+        stmt = stmt.where(SecurityAuditEvent.tool_name == tool_name)
+    if since is not None:
+        stmt = stmt.where(SecurityAuditEvent.occurred_at >= since)
+    if until is not None:
+        stmt = stmt.where(SecurityAuditEvent.occurred_at < until)
+    stmt = stmt.order_by(SecurityAuditEvent.occurred_at.desc(), SecurityAuditEvent.id.desc())
+    rows = await session.scalars(stmt.limit(limit))
+    return [SecurityAuditRow.model_validate(row) for row in rows]
+
+
+async def list_tool_names(
+    session: AsyncSession, *, tenant_id: uuid.UUID, limit: int = 200
+) -> list[str]:
+    """The distinct tools the workspace's events name, alphabetically."""
+    rows = await session.scalars(
+        select(SecurityAuditEvent.tool_name)
+        .where(SecurityAuditEvent.tenant_id == tenant_id)
+        .distinct()
+        .order_by(SecurityAuditEvent.tool_name)
+        .limit(limit)
+    )
+    return list(rows)
 
 
 async def count_tidy_events(

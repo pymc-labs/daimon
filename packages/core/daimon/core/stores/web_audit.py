@@ -51,14 +51,43 @@ async def list_recent(
     tenant_id: uuid.UUID,
     limit: int = 200,
     before: Cursor | None = None,
+    actor_account_id: uuid.UUID | None = None,
+    action: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
 ) -> list[WebAuditRow]:
-    """The workspace's changes, newest first; `before` is the `(at, id)` of the last one seen."""
+    """The workspace's changes, newest first; `before` is the `(at, id)` of the last one seen.
+
+    `since` is inclusive and `until` exclusive.
+    """
     query = select(WebAudit).where(WebAudit.tenant_id == tenant_id)
     if before is not None:
         query = query.where(
             tuple_(WebAudit.at, WebAudit.id) < tuple_(literal(before[0]), literal(before[1]))
         )
+    if actor_account_id is not None:
+        query = query.where(WebAudit.actor_account_id == actor_account_id)
+    if action is not None:
+        query = query.where(WebAudit.action == action)
+    if since is not None:
+        query = query.where(WebAudit.at >= since)
+    if until is not None:
+        query = query.where(WebAudit.at < until)
     rows = await session.scalars(
         query.order_by(WebAudit.at.desc(), WebAudit.id.desc()).limit(limit)
     )
     return [WebAuditRow.model_validate(r) for r in rows]
+
+
+async def list_actions(
+    session: AsyncSession, *, tenant_id: uuid.UUID, limit: int = 200
+) -> list[str]:
+    """The distinct things the workspace's changes say, alphabetically."""
+    rows = await session.scalars(
+        select(WebAudit.action)
+        .where(WebAudit.tenant_id == tenant_id)
+        .distinct()
+        .order_by(WebAudit.action)
+        .limit(limit)
+    )
+    return list(rows)
