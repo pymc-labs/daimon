@@ -13,7 +13,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { useTheme } from "@/lib/theme-context"
 import { cn } from "@/lib/utils"
 import { pressProps } from "@/lib/filters"
-import { useConnectNode } from "./api"
+import { useAgents, useConnectNode } from "./api"
 import { useAgentKeys, useCodingKeys, useKnowledge } from "./setup/api"
 import { Dot, Locked, Pill, PlaceIcon, RuleChip } from "./bits"
 import { layoutNarrow, layoutWide, type Dep, type Plan, type Pt, type Size } from "./layout"
@@ -199,6 +199,27 @@ function SkillsNode() {
   )
 }
 
+function HelpersNode() {
+  const { config, agent } = useCanvas()
+  const roster = useAgents().data
+  return (
+    <Card id="helpers" icon={<Users />} title="Helpers" count={config.helpers?.length}>
+      {config.helpers == null ? <Locked who={agent.owner.name} className="p-3" /> : !config.helpers.length ? (
+        <div className="p-3 text-xs text-faint">None</div>
+      ) : (
+        <div className="py-1">
+          {config.helpers.map((h) => (
+            <Row key={h.id} k={`helper:${h.id}`}>
+              <AgentAvatar src={roster?.find((a) => a.id === h.id)?.avatar} name={h.name} className="size-4 text-[8px]" />
+              <span className="truncate">{h.name}</span>
+            </Row>
+          ))}
+        </div>
+      )}
+    </Card>
+  )
+}
+
 function ToolsNode() {
   const { config, catalog, changed } = useCanvas()
   const on = config.tools.filter((t) => t.enabled)
@@ -344,7 +365,7 @@ function HubNode() {
 
 const NODE_TYPES = {
   agent: AgentNode, instructions: InstructionsNode, model: ModelNode, places: PlacesNode,
-  skills: SkillsNode, tools: ToolsNode, people: PeopleNode, keys: KeysNode, coding: CodingNode, knowledge: KnowledgeNode, mcp: ({ id }: { id: string }) => <McpNode id={id} />,
+  skills: SkillsNode, tools: ToolsNode, helpers: HelpersNode, people: PeopleNode, keys: KeysNode, coding: CodingNode, knowledge: KnowledgeNode, mcp: ({ id }: { id: string }) => <McpNode id={id} />,
   platform: ({ id }: { id: string }) => <PlatformNode id={id} />, hub: HubNode,
 }
 
@@ -381,7 +402,7 @@ const EDGE_TYPES = { line: LineEdge }
 /** The two columns around the agent; keys and coding keys are setup, for those who see it. */
 const lanes = (agent: Agent) => ({
   left: ["instructions", "model", "places", "people"],
-  right: ["skills", "tools", ...(agent.can_view_details ? ["knowledge", "keys", "coding"] : [])],
+  right: ["skills", "tools", "helpers", ...(agent.can_view_details ? ["knowledge", "keys", "coding"] : [])],
 })
 const HUB = "connections"
 /** Below this canvas width the editor is one column. */
@@ -481,7 +502,7 @@ export function Canvas({ agent, config, catalog, changed, changedNodes, selected
       home.current = null
       return
     }
-    const id = selected.startsWith("skill:") ? "skills" : selected.startsWith("place:") ? "places" : selected.split("/")[0]!
+    const id = selected.startsWith("skill:") ? "skills" : selected.startsWith("place:") ? "places" : selected.startsWith("helper:") ? "helpers" : selected.split("/")[0]!
     const n = rf.getNode(id)
     const el = document.querySelector(".react-flow")
     if (!n?.measured?.width || !el) return

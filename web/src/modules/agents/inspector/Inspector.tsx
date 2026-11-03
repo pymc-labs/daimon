@@ -13,6 +13,7 @@ import { SkillEditor, SkillsEditor } from "./SkillEditors"
 import { ToolsEditor } from "./ToolsEditor"
 import { NewServer, ServerEditor } from "./ServerEditors"
 import { PlacesEditor } from "./PlacesEditor"
+import { HelpersEditor } from "./HelpersEditor"
 import { CodingPanel } from "../setup/CodingPanel"
 import { KnowledgePanel } from "../setup/KnowledgePanel"
 import { GoogleBadge, ToolRulesPanel } from "../setup/ToolRulesPanel"
@@ -21,7 +22,7 @@ import { PeoplePanel } from "../setup/PeoplePanel"
 import { nodeUi } from "../nodes/registry"
 
 const TITLES: Record<string, string> = {
-  agent: "Agent", instructions: "Instructions", model: "Model", skills: "Skills", tools: "Tools", places: "Channels",
+  agent: "Agent", instructions: "Instructions", model: "Model", skills: "Skills", tools: "Tools", places: "Channels", helpers: "Helpers",
   history: "History", "mcp:new": "New MCP server", keys: "Keys", coding: "Coding tools", people: "People", knowledge: "Knowledge",
 }
 
@@ -33,8 +34,8 @@ export function Inspector(p: Props) {
   const server = kind === "mcp" ? config.mcp_servers.find((s) => node.startsWith(`mcp:${s.key}`)) : undefined
   const skill = kind === "skill" ? config.skills.find((s) => `skill:${s.skill_id}` === node) : undefined
   const platform = kind === "node" ? agent.nodes.find((n) => `node:${n.kind}` === node && n.server) : undefined
-  const title = server ? "MCP server" : skill ? "Skill" : platform ? platform.label : kind === "place" ? TITLES.places! : TITLES[node] ?? ""
-  const effect = ["history", "mcp:new", "keys", "coding", "people", "knowledge"].includes(node) || (p.ro && kind !== "node") ? null : nodeEffect(kind === "place" ? "places" : kind, agent.model.backend)
+  const title = server ? "MCP server" : skill ? "Skill" : platform ? platform.label : kind === "place" ? TITLES.places! : kind === "helper" ? TITLES.helpers! : TITLES[node] ?? ""
+  const effect = ["history", "mcp:new", "keys", "coding", "people", "knowledge"].includes(node) || (p.ro && kind !== "node") ? null : nodeEffect(kind === "place" ? "places" : kind === "helper" ? "helpers" : kind, agent.model.backend)
   let body: React.ReactNode = null
   if (node === "agent") body = <AgentEditor {...p} />
   else if (node === "instructions") body = <InstructionsEditor {...p} />
@@ -47,6 +48,7 @@ export function Inspector(p: Props) {
   else if (node === "coding") body = <CodingPanel {...p} />
   else if (node === "knowledge") body = <KnowledgePanel {...p} />
   else if (node === "places" || kind === "place") body = <PlacesEditor {...p} />
+  else if (node === "helpers" || kind === "helper") body = <HelpersEditor {...p} />
   else if (node === "mcp:new") body = <NewServer {...p} />
   else if (server) body = <ServerEditor {...p} server={server} />
   else if (node === "history") body = <History agent={agent} />

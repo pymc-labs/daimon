@@ -40,6 +40,7 @@ from daimon.adapters.mcp.tools.reachability import (
 from daimon.adapters.mcp.tools.setup_target import (
     get_web_turn_origin,
     origin_channel_id,
+    refuse_helper,
     require_turn_origin,
     resolve_setup_agent,
 )
@@ -218,7 +219,9 @@ async def _require_origin(
 ) -> TurnOriginRow:
     """The turn's origin: a web chat's when the id names one, else the chat platform's."""
     web = await get_web_turn_origin(runtime, auth, origin_context_id)
-    return web if web is not None else await require_turn_origin(runtime, auth, origin_context_id)
+    return refuse_helper(
+        web if web is not None else await require_turn_origin(runtime, auth, origin_context_id)
+    )
 
 
 def _bounded_pending_task(pending_task: str | None, *, echoes: tuple[str, ...]) -> str | None:
@@ -869,7 +872,7 @@ async def _request_watch_credential_impl(
             "This Daimon cannot store keys yet, so no form was posted. "
             "Ask whoever runs this Daimon."
         )
-    origin = await require_turn_origin(runtime, auth, origin_context_id)
+    origin = refuse_helper(await require_turn_origin(runtime, auth, origin_context_id))
     if not origin.attended:
         raise ToolError("Ask for this in your own conversation with me.")
     named_url, ma_agent = await _watch_server_url(runtime, auth, origin, server)
@@ -917,7 +920,7 @@ async def _forget_watch_credential_impl(
     server: str,
     origin_context_id: str | None,
 ) -> ForgetWatchCredentialResult:
-    origin = await require_turn_origin(runtime, auth, origin_context_id)
+    origin = refuse_helper(await require_turn_origin(runtime, auth, origin_context_id))
     if not origin.attended:
         raise ToolError("Ask for this in your own conversation with me.")
     server_url, _ = await _watch_server_url(runtime, auth, origin, server)

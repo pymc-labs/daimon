@@ -602,3 +602,38 @@ async def test_resolve_reports_no_binding_kind_for_an_ordinary_thread(
     )
 
     assert resolved.thread_binding_kind is None, "an unbound thread has no binding kind"
+
+
+async def test_resolve_answers_as_the_helper_in_a_handed_over_thread(
+    db_session: AsyncSession,
+) -> None:
+    """A helper answers in the asking turn's thread, whichever agent holds that thread."""
+    from daimon.core.scope import HelperTarget
+    from daimon.core.stores.thread_agent_bindings import create_binding
+
+    tenant = await make_tenant(db_session)
+    await create_binding(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        parent_channel_id="c1",
+        thread_id="handed-over",
+        responder_ma_agent_id="ag_stats",
+        responder_name="stats-bot",
+        kind="handoff",
+    )
+
+    resolved = await resolve(
+        db_session,
+        context=ScopeContext(
+            tenant_id=tenant.id,
+            channel_id="c1",
+            platform="discord",
+            thread_id="handed-over",
+            helper=HelperTarget(ma_agent_id="ag_argon", name="argon"),
+        ),
+        default=_DEFAULT,
+    )
+
+    assert (resolved.agent_name, resolved.responder_ma_agent_id) == ("argon", "ag_argon")
+    assert resolved.thread_binding_kind == "helper" and resolved.thread_binding_id is None

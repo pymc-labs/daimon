@@ -2779,6 +2779,60 @@ class TurnOrigin(Base):
     # The platform's ids for the turn's message: where it can be read, and the message.
     platform_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     platform_message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Set on a helper's turn: the origin of the turn that asked it. A helper asks no
+    # helpers and changes nothing about the conversation it works for.
+    helper_of: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    # The process running this turn serves its helper asks (`daimon.core.helpers`).
+    serves_helpers: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+
+
+class AgentHelper(Base):
+    """An agent another agent may ask for help inside its own turn (`daimon.core.helpers`)."""
+
+    __tablename__ = "agent_helpers"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "agent_id", "helper_agent_id", name="pk_agent_helpers"),
+        ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
+        CheckConstraint("agent_id <> helper_agent_id", name="ck_agent_helpers_not_self"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    agent_id: Mapped[str] = mapped_column(Text)
+    helper_agent_id: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class HelperAsk(Base):
+    """One message from a running turn to one of its helpers, and the helper's reply.
+
+    Lives as long as the asking turn's origin: the cascade removes it with that origin.
+    """
+
+    __tablename__ = "helper_asks"
+    __table_args__ = (
+        ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
+        ForeignKeyConstraint(["origin_id"], ["turn_origins.id"], ondelete="CASCADE"),
+        CheckConstraint(
+            "status IN ('queued', 'running', 'done', 'failed', 'stopped')",
+            name="ck_helper_asks_status",
+        ),
+        Index("helper_asks_origin_idx", "origin_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    origin_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    helper_agent_id: Mapped[str] = mapped_column(Text)
+    helper_name: Mapped[str] = mapped_column(Text)
+    message: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, server_default=text("'queued'"))
+    reply: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class SharedChannel(Base):
@@ -2997,7 +3051,7 @@ class TurnOutcome(Base):
     __tablename__ = "turn_outcomes"
     __table_args__ = (
         CheckConstraint(
-            "origin IN ('chat', 'routine', 'relay', 'handoff')",
+            "origin IN ('chat', 'routine', 'relay', 'handoff', 'helper')",
             name="ck_turn_outcomes_origin",
         ),
         CheckConstraint(

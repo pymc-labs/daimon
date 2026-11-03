@@ -81,6 +81,19 @@ async def get_web_turn_origin(
     return None if origin is None else _held_by_caller(auth, origin)
 
 
+HELPER_REFUSAL = "You are helping another agent, so you can't do this. Tell it what is needed."
+
+
+def refuse_helper(origin: TurnOriginRow) -> TurnOriginRow:
+    """``origin``, unless it is a helper's: a helper works inside another agent's turn, so
+    it may not change who or which model answers the conversation, start what outlives the
+    turn (a timer, watch, long job, compute session, key, access or connection request) or
+    ask helpers itself. Every other tool runs for a helper as for the person."""
+    if origin.helper_of is not None:
+        raise ToolError(HELPER_REFUSAL)
+    return origin
+
+
 def _held_by_caller(auth: AuthIdentity, origin: TurnOriginRow) -> TurnOriginRow:
     # A chat turn's credential names its agent as chat_agent_id, as
     # `get_verified_origin` reads it: it may claim only its own responder's origin.
@@ -173,7 +186,7 @@ async def _set_setup_target_impl(
     origin_context_id: str,
     agent_id: str,
 ) -> TurnOriginRow:
-    origin = await require_turn_origin(runtime, auth, origin_context_id)
+    origin = refuse_helper(await require_turn_origin(runtime, auth, origin_context_id))
     agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
     caller = await load_caller_view(
         runtime,

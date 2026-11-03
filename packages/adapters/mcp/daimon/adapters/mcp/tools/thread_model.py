@@ -19,7 +19,7 @@ from typing import Literal
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
-from daimon.adapters.mcp.tools.setup_target import require_turn_origin
+from daimon.adapters.mcp.tools.setup_target import refuse_helper, require_turn_origin
 from daimon.core.thread_models import ThreadModelRefused, choose_thread_model
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -47,7 +47,7 @@ async def _set_thread_model_impl(
     origin_context_id: str,
     model: str,
 ) -> ThreadModelResult:
-    origin = await require_turn_origin(runtime, auth, origin_context_id)
+    origin = refuse_helper(await require_turn_origin(runtime, auth, origin_context_id))
     if not origin.attended:
         raise ToolError(_UNATTENDED)
     try:

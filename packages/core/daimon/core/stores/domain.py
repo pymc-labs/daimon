@@ -1252,6 +1252,15 @@ class ThreadAgentBindingRow(BaseModel):
     updated_at: datetime
 
 
+def helper_thread_key(thread_id: str, helper_agent_id: str) -> str:
+    """The key of a helper's own conversation in a thread: its session and provider slot.
+
+    One per helper and thread (and, as for any thread, per person), so asking the
+    same helper again in the same thread continues where it left off. Pure.
+    """
+    return f"{thread_id}~helper~{helper_agent_id}"
+
+
 class TurnOriginRow(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 
@@ -1277,6 +1286,33 @@ class TurnOriginRow(BaseModel):
     shared_channel: bool = False
     platform_channel_id: str | None = None
     platform_message_id: str | None = None
+    helper_of: uuid.UUID | None = None
+    serves_helpers: bool = False
+
+    @property
+    def session_thread_id(self) -> str:
+        """The thread key of this turn's session: a helper's own (`helper_thread_key`)."""
+        if self.helper_of is None:
+            return self.thread_id
+        return helper_thread_key(self.thread_id, self.responder_ma_agent_id)
+
+
+HelperAskStatus = Literal["queued", "running", "done", "failed", "stopped"]
+
+
+class HelperAskRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    origin_id: uuid.UUID
+    helper_agent_id: str
+    helper_name: str
+    message: str
+    status: HelperAskStatus
+    reply: str | None
+    created_at: datetime
+    finished_at: datetime | None
 
 
 class _Facts(BaseModel):

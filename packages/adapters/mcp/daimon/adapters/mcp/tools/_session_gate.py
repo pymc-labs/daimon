@@ -81,7 +81,7 @@ async def session_card_gap(
             session,
             tenant_id=auth.tenant_id,
             platform=origin.platform,
-            thread_id=origin.thread_id,
+            thread_id=origin.session_thread_id,
             account_id=auth.account_id,
         )
     if live is None:
@@ -99,7 +99,7 @@ async def session_card_gap(
             facts = session_facts(
                 ma_session.metadata,
                 owned=True,
-                legacy_thread_id=origin.thread_id,
+                legacy_thread_id=origin.session_thread_id,
             )
             # A first mention in a channel creates its session before Discord opens
             # the thread, so that session is stamped with the channel alone. The
@@ -110,7 +110,8 @@ async def session_card_gap(
                 facts.private
                 or facts.channel is None
                 or (
-                    (facts.channel, facts.thread) != (origin.parent_channel_id, origin.thread_id)
+                    (facts.channel, facts.thread)
+                    != (origin.parent_channel_id, origin.session_thread_id)
                     and not opened_here
                 )
             ):

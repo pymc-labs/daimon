@@ -120,8 +120,8 @@ export function useDataServerEdit(agentId: string) {
 
 /** The config being edited: the person's draft if any, else the current version. */
 function configOf(agent: Agent): AgentConfig {
-  const { name, purpose, avatar, model, system, skills, tools, mcp_servers, places } = agent
-  return { name, purpose, avatar, model, system, skills, tools, mcp_servers, places }
+  const { name, purpose, avatar, model, system, skills, tools, mcp_servers, places, helpers } = agent
+  return { name, purpose, avatar, model, system, skills, tools, mcp_servers, places, helpers }
 }
 
 /**
@@ -203,7 +203,7 @@ export function useRevert(id: string) {
 /** What an edit to this node does once applied; mirrors the server's tagging. */
 export function nodeEffect(node: string, backend: Backend): Effect {
   // Connection nodes change on their own server, which applies it on the next call.
-  if (node === "agent" || node === "places" || node === "node") return "live"
+  if (node === "agent" || node === "places" || node === "helpers" || node === "node") return "live"
   if (backend !== "anthropic") return "threads"
   return ["instructions", "model", "skills", "skill"].includes(node.split(":")[0]!) ? "session" : "live"
 }

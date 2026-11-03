@@ -11,6 +11,7 @@ from daimon.core.agent_view import (
     AgentConfigDoc,
     AgentFacts,
     BuiltinTool,
+    HelperDoc,
     McpServer,
     McpTool,
     ModelChoice,
@@ -358,4 +359,82 @@ def test_confidential_place_changes_are_hidden_across_versions() -> None:
     assert hidden == {"c2"}, "an earlier version's config still names the removed place"
     assert agent_changes.without_hidden_place_changes(changes, hidden) == [], (
         "removing the confidential place is not listed"
+    )
+
+
+_SCOUT = HelperDoc(id="ag_scout", name="Scout")
+_WRITER = HelperDoc(id="ag_writer", name="Writer")
+
+
+def test_helper_changes_are_listed_by_id_and_apply_live_on_every_backend() -> None:
+    a = _config(helpers=[_SCOUT])
+    b = _config(helpers=[_WRITER])
+    changes = {change.key: change for change in agent_changes.diff_config(a, b)}
+    assert set(changes) == {"helper:ag_scout", "helper:ag_writer"}, "one entry per helper id"
+    assert (changes["helper:ag_writer"].kind, changes["helper:ag_writer"].label) == (
+        "add",
+        "Writer helper",
+    ), "an added helper is labelled with its name"
+    assert changes["helper:ag_scout"].kind == "remove", "a dropped helper is a removal"
+    assert {c.node for c in changes.values()} == {"helpers"}, "they sit on the helpers node"
+    assert {c.effect for c in changes.values()} == {"live"}, "the list is read each turn"
+    assert agent_changes.change_effect("helper:ag_x", backend="openai") == "live", (
+        "a neutral backend takes a new helper at once too"
+    )
+    assert agent_changes.unsupported(list(changes.values()), a=a, b=b) is None, (
+        "the web may change helpers"
+    )
+
+
+def test_a_config_without_a_helper_list_is_the_same_as_an_empty_one() -> None:
+    assert agent_changes.diff_config(_config(), _config(helpers=[])) == [], (
+        "None and [] both mean no helpers"
+    )
+    renamed = _config(helpers=[HelperDoc(id="ag_scout", name="Scout II")])
+    assert agent_changes.diff_config(_config(helpers=[_SCOUT]), renamed) == [], (
+        "a helper's new name is not a change to the list"
+    )
+
+
+def test_a_copy_without_helpers_keeps_the_stored_ones() -> None:
+    base = _config(helpers=[_SCOUT])
+    kept = agent_changes.keep_helpers(base, _config())
+    assert kept.helpers == [_SCOUT], "an unread list is not an edit that empties it"
+    emptied = agent_changes.keep_helpers(base, _config(helpers=[]))
+    assert emptied.helpers == [], "an empty list is"
+    unseen = agent_changes.keep_unseen(base, _config(helpers=None), details=False, is_admin=False)
+    assert unseen.helpers == [_SCOUT], "a viewer without details cannot have changed them"
+
+
+def test_db_state_and_stored_db_state_move_with_the_helper_ids() -> None:
+    agent = ma_agent(id="ag_x", name="helper")
+    base = _config(helpers=[_SCOUT])
+    assert agent_changes.db_state(base) != agent_changes.db_state(_config()), (
+        "a helper moves the fingerprint"
+    )
+    assert agent_changes.db_state(base) == agent_changes.db_state(
+        _config(helpers=[HelperDoc(id="ag_scout", name="Renamed")])
+    ), "a helper's name does not"
+    assert agent_changes.db_state(_config(helpers=[_SCOUT, _WRITER])) == agent_changes.db_state(
+        _config(helpers=[_WRITER, _SCOUT])
+    ), "their order does not"
+    same = AgentFacts(agent=agent, helpers=[_SCOUT])
+    assert agent_changes.stored_db_state(base, same) == agent_changes.db_state(base), (
+        "a draft whose helpers still stand is current"
+    )
+    moved = AgentFacts(agent=agent, helpers=[_SCOUT, _WRITER])
+    assert agent_changes.stored_db_state(base, moved) != agent_changes.db_state(base), (
+        "a helper added since the base was read makes the draft stale"
+    )
+    gone = AgentFacts(agent=agent)
+    assert agent_changes.stored_db_state(base, gone) != agent_changes.db_state(base), (
+        "a helper removed since does too"
+    )
+
+
+def test_revert_target_carries_the_old_versions_helpers() -> None:
+    current = _config(helpers=[_SCOUT])
+    old = _config(helpers=[_WRITER])
+    assert agent_changes.revert_target(current, old).helpers == [_WRITER], (
+        "a revert restores the helpers the version had"
     )

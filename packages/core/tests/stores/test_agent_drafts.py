@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -13,10 +14,10 @@ from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core import agent_changes
 from daimon.core.agent_changes import AgentChangeDeps
 from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError
-from daimon.core.agent_view import AgentViewDeps, PlaceDoc
+from daimon.core.agent_view import AgentViewDeps, HelperDoc, PlaceDoc
 from daimon.core.authz import Subject, Surface
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.stores import agent_drafts, agent_owners
+from daimon.core.stores import agent_drafts, agent_helpers, agent_owners
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, json_body
@@ -257,3 +258,105 @@ async def test_two_applies_on_one_version_keep_both_history_notes(
     assert row.note == "first / second", "both notes are kept"
     assert [c["key"] for c in row.changes] == ["a", "b"], "both change lists are kept"
     assert row.config == {"k": "b"}, "the config is the newest"
+
+
+def _serve(world: _World, agent: BetaManagedAgentsAgent) -> None:
+    body = agent.model_dump(mode="json")
+    world.router.add(
+        "GET", rf"/v1/agents/{agent.id}$", lambda _r, _m: httpx.Response(200, json=body)
+    )
+
+
+async def _draft_helpers(
+    deps: AgentChangeDeps, actor: AgentActor, world: _World, helpers: list[HelperDoc], **more: str
+) -> None:
+    base = await agent_changes.current_config(deps, tenant_id=actor.tenant_id, agent=world.agent)
+    await agent_changes.save_draft(
+        deps,
+        actor=actor,
+        ma_agent_id="ag_d",
+        base_version=world.agent.version,
+        config=base.model_copy(update={"helpers": helpers, **more}),
+    )
+
+
+async def test_apply_stores_the_helper_list_and_a_revert_restores_it(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    world, deps, actor = await _setup(db_session, db_session_factory)
+    _serve(world, ma_agent(id="ag_h", name="Scout", tenant_id=actor.tenant_id))
+    scout = HelperDoc(id="ag_h", name="Scout")
+    await _draft_helpers(deps, actor, world, [scout], system="Be thorough.")
+    draft = await agent_changes.load_draft(deps, actor=actor, agent=world.agent)
+    assert draft is not None and "helper:ag_h" in {c.key for c in draft.changes}, (
+        "the draft lists the added helper"
+    )
+
+    written = await agent_changes.apply_draft(deps, actor=actor, ma_agent_id="ag_d", note=None)
+    async with db_session_factory() as session:
+        stored = await agent_helpers.list_helper_ids(
+            session, tenant_id=actor.tenant_id, agent_id="ag_d"
+        )
+        latest = (
+            await agent_drafts.list_versions(session, tenant_id=actor.tenant_id, agent_id="ag_d")
+        )[0]
+    assert stored == ["ag_h"], "the helper is stored with the apply"
+    assert "helper:ag_h" in {c["key"] for c in latest.changes}, "the version records the change"
+    assert [h["id"] for h in latest.config["helpers"]] == ["ag_h"], "and its config carries it"
+    config = await agent_changes.current_config(deps, tenant_id=actor.tenant_id, agent=written)
+    assert config.helpers == [scout], "the agent now reads the helper back, by name"
+
+    await agent_changes.revert(deps, actor=actor, ma_agent_id="ag_d", version=3)
+    async with db_session_factory() as session:
+        reverted = await agent_helpers.list_helper_ids(
+            session, tenant_id=actor.tenant_id, agent_id="ag_d"
+        )
+    assert reverted == [], "reverting to a version without helpers takes them off"
+
+
+async def test_apply_refuses_a_helper_that_is_not_a_live_agent_of_the_workspace(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    world, deps, actor = await _setup(db_session, db_session_factory)
+    _serve(world, ma_agent(id="ag_f", name="Foreign", tenant_id=uuid.uuid4()))
+    _serve(world, ma_agent(id="ag_a", name="Gone", tenant_id=actor.tenant_id, archived_at=_AT))
+    missing = {"type": "error", "error": {"type": "not_found_error", "message": "no agent"}}
+    world.router.add(
+        "GET", r"/v1/agents/ag_nope$", lambda _r, _m: httpx.Response(404, json=missing)
+    )
+    for helper_id in ("ag_d", "ag_f", "ag_a", "ag_nope"):
+        await _draft_helpers(deps, actor, world, [HelperDoc(id=helper_id, name="x")])
+        with pytest.raises(AgentEditError) as raised:
+            await agent_changes.apply_draft(deps, actor=actor, ma_agent_id="ag_d", note=None)
+        assert raised.value.kind == "invalid", f"{helper_id} is refused"
+    async with db_session_factory() as session:
+        stored = await agent_helpers.list_helper_ids(
+            session, tenant_id=actor.tenant_id, agent_id="ag_d"
+        )
+    assert stored == [], "nothing is stored by a refused apply"
+
+
+async def test_apply_refuses_a_draft_when_helpers_moved_under_it(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Helpers change without a new provider version; the draft still goes stale."""
+    world, deps, actor = await _setup(db_session, db_session_factory)
+    _serve(world, ma_agent(id="ag_h", name="Scout", tenant_id=actor.tenant_id))
+    base = await agent_changes.current_config(deps, tenant_id=actor.tenant_id, agent=world.agent)
+    await agent_changes.save_draft(
+        deps,
+        actor=actor,
+        ma_agent_id="ag_d",
+        base_version=3,
+        config=base.model_copy(update={"purpose": "Writes reports"}),
+    )
+    async with db_session_factory.begin() as session:
+        await agent_helpers.set_helpers(
+            session, tenant_id=actor.tenant_id, agent_id="ag_d", helper_ids=["ag_h"]
+        )
+    draft = await agent_changes.load_draft(deps, actor=actor, agent=world.agent)
+    assert draft is not None and draft.stale, "the draft shows it went stale"
+    with pytest.raises(AgentEditError) as raised:
+        await agent_changes.apply_draft(deps, actor=actor, ma_agent_id="ag_d", note=None)
+    assert raised.value.kind == "stale", "a draft begun on other helpers is refused (409)"
+    assert world.updates == [], "nothing is written"

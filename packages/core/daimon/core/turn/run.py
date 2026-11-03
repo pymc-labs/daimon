@@ -1107,6 +1107,9 @@ async def run_prepared_turn(
     message and confirmation batch. Runtimes without a session read refuse
     unattended confirmations with a plain reason, including with safety off.
     """
+    # Imported here: `daimon.core.helpers` runs helper turns through this module.
+    from daimon.core.helpers import serve_helpers
+
     observation = (
         prepared.admission.observation
         or current_outcome.get()
@@ -1163,36 +1166,44 @@ async def run_prepared_turn(
     )
     try:
         with observation.activate(), deps.running_turns.track():
-            result = await run_prepared_turn_impl(
+            async with serve_helpers(
                 deps,
-                prepared,
-                tenant_id=tenant_id,
-                platform=platform,
-                thread_id=thread_id,
-                external_user_id=external_user_id,
-                user_message=user_message,
-                lifecycle=lifecycle,
-                cancel=cancel,
-                reseed_user_message=reseed_user_message,
-                recovery_lifecycle=recovery_lifecycle,
+                prepared.admission,
                 origin=origin,
-                context_mention_ids=context_mention_ids if platform == "discord" else (),
-                context_message_text=context_message_text,
-                image_blocks=image_blocks,
-                render_interval_s=render_interval_s,
                 deadline=deadline,
-                now=now,
                 confirm_write=confirm_write,
                 provider_action=provider_action,
-                attended=attended,
-                operation_key=operation_key,
-                active_turn_message_id=active_turn_message_id,
-                before_send=before_send,
-                turn_card_intent_id=turn_card_intent_id,
-                watch_row=watch_row,
-                job_row=job_row,
-                request_text=request_text,
-            )
+            ):
+                result = await run_prepared_turn_impl(
+                    deps,
+                    prepared,
+                    tenant_id=tenant_id,
+                    platform=platform,
+                    thread_id=thread_id,
+                    external_user_id=external_user_id,
+                    user_message=user_message,
+                    lifecycle=lifecycle,
+                    cancel=cancel,
+                    reseed_user_message=reseed_user_message,
+                    recovery_lifecycle=recovery_lifecycle,
+                    origin=origin,
+                    context_mention_ids=context_mention_ids if platform == "discord" else (),
+                    context_message_text=context_message_text,
+                    image_blocks=image_blocks,
+                    render_interval_s=render_interval_s,
+                    deadline=deadline,
+                    now=now,
+                    confirm_write=confirm_write,
+                    provider_action=provider_action,
+                    attended=attended,
+                    operation_key=operation_key,
+                    active_turn_message_id=active_turn_message_id,
+                    before_send=before_send,
+                    turn_card_intent_id=turn_card_intent_id,
+                    watch_row=watch_row,
+                    job_row=job_row,
+                    request_text=request_text,
+                )
     except BaseException as exc:
         observation.finish(error=exc)
         if seeded is not None and not sent:

@@ -64,6 +64,7 @@ async def test_start_binds_approved_provider_identity_before_any_launch(
     origin_id = str(uuid.uuid4())
     origin = SimpleNamespace(
         attended=True,
+        helper_of=None,
         platform="discord",
         parent_channel_id="channel",
         thread_id="thread",
@@ -186,7 +187,7 @@ async def test_start_refuses_origins_without_completion_before_registration_or_s
         role=Role.USER,
         platform_user_id="user",
     )
-    origin = SimpleNamespace(attended=True, platform=platform)
+    origin = SimpleNamespace(attended=True, platform=platform, helper_of=None)
     monkeypatch.setattr(tools, "_auth", AsyncMock(return_value=auth))
     monkeypatch.setattr(tools, "require_turn_origin", AsyncMock(return_value=origin))
     approval = AsyncMock()

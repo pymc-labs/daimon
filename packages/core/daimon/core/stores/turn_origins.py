@@ -36,6 +36,7 @@ async def create_origin(
     chat_session_id: str | None = None,
     platform_channel_id: str | None = None,
     platform_message_id: str | None = None,
+    helper_of: uuid.UUID | None = None,
 ) -> TurnOriginRow:
     await session.execute(delete(TurnOrigin).where(TurnOrigin.expires_at <= now))
     origin = TurnOrigin(
@@ -59,6 +60,7 @@ async def create_origin(
         expires_at=expires_at,
         platform_channel_id=platform_channel_id,
         platform_message_id=platform_message_id,
+        helper_of=helper_of,
     )
     session.add(origin)
     await session.flush()
@@ -177,6 +179,12 @@ async def update_origin_target(
         )
     ).scalar_one()
     return TurnOriginRow.model_validate(origin)
+
+
+async def mark_serving_helpers(session: AsyncSession, *, origin_id: uuid.UUID) -> None:
+    await session.execute(
+        update(TurnOrigin).where(TurnOrigin.id == origin_id).values(serves_helpers=True)
+    )
 
 
 async def bind_origin_session(

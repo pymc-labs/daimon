@@ -12,7 +12,7 @@ from daimon.adapters.mcp.tools import _session_gate
 from daimon.adapters.mcp.tools._channel_policy import load_channel_policy
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._long_job_access import LongJobCaller, long_job_access
-from daimon.adapters.mcp.tools.setup_target import require_turn_origin
+from daimon.adapters.mcp.tools.setup_target import refuse_helper, require_turn_origin
 from daimon.core.defaults.ma_index import find_environment_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_PRIVATE_DM
 from daimon.core.errors import StoreError
@@ -58,7 +58,7 @@ def register_long_job_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         shared memory or credentials are mounted. Jobs are billed to the owner.
         """
         auth = await _auth(ctx)
-        origin = await require_turn_origin(runtime, auth, origin_context_id)
+        origin = refuse_helper(await require_turn_origin(runtime, auth, origin_context_id))
         if origin.platform != "discord":
             raise ToolError("long jobs report back only in Discord threads for now")
         if (

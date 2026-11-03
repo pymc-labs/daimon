@@ -156,6 +156,8 @@ class TidyContext:
     origin: Place | None
     origin_context_id: str | None
     read_policy: ChannelReadPolicy
+    # A helper's turn: it may not schedule its thread's archive (`refuse_helper`).
+    helper: bool = False
 
 
 def executing_agent_id(auth: AuthIdentity) -> uuid.UUID | None:
@@ -206,6 +208,7 @@ async def resolve_tidy_context(
         origin=turn_origin_place(origin) if origin is not None else None,
         origin_context_id=origin_context_id,
         read_policy=read_policy,
+        helper=origin is not None and origin.helper_of is not None,
     )
 
 

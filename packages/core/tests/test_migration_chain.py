@@ -180,6 +180,10 @@ MAIN_BRANCH_COLUMNS = {
 }
 
 
+# Columns added after CONTINUATION_HEAD; heads below HEAD skip them.
+AFTER_MERGE_COLUMNS = {("turn_origins", "helper_of"), ("turn_origins", "serves_helpers")}
+
+
 MAIN_BRANCH_OBJECTS = {"ix_platform_principals_account_id", "usage_observation_binding_id_fkey"}
 
 
@@ -385,7 +389,7 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             return False
         if expected != HEAD:
             table = getattr(getattr(obj, "table", None), "name", None)
-            if kind == "column" and (table, name) in MAIN_BRANCH_COLUMNS:
+            if kind == "column" and (table, name) in MAIN_BRANCH_COLUMNS | AFTER_MERGE_COLUMNS:
                 return False
             if name in MAIN_BRANCH_OBJECTS:
                 return False

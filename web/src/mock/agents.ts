@@ -202,6 +202,9 @@ export function diffConfig(a: AgentConfig, b: AgentConfig): Change[] {
     else if (!!o.default !== !!p.default) add({ key: `place:${id}`, node: "places", label: `${pname(p)} default`, kind: "edit", before: o.default ? "On" : "Off", after: p.default ? "On" : "Off" }, "route")
   }
   for (const [id, p] of pa) if (!pb.has(id)) add({ key: `place:${id}`, node: "places", label: pname(p), kind: "remove" }, "route")
+  const ha = byId(a.helpers ?? [], (h) => h.id), hb = byId(b.helpers ?? [], (h) => h.id)
+  for (const [id, h] of hb) if (!ha.has(id)) add({ key: `helper:${id}`, node: "helpers", label: `${h.name} helper`, kind: "add" }, "route")
+  for (const [id, h] of ha) if (!hb.has(id)) add({ key: `helper:${id}`, node: "helpers", label: `${h.name} helper`, kind: "remove" }, "route")
   return out
 }
 
@@ -347,7 +350,7 @@ const current = (r: Rec) => r.versions.at(-1)!
 /** Strip what this viewer may not read: prompt, credentials, reach detail. */
 function redact(c: AgentConfig, full: boolean): AgentConfig {
   if (full) return c
-  return { ...c, system: null, places: null, mcp_servers: c.mcp_servers.map((s) => ({ ...s, url: "", credential: null })) }
+  return { ...c, system: null, places: null, helpers: null, mcp_servers: c.mcp_servers.map((s) => ({ ...s, url: "", credential: null })) }
 }
 
 /** Agents with the data-server node attached. */

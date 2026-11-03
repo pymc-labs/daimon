@@ -76,7 +76,7 @@ from daimon.core.permissions import (
     home_of,
     limiting_ids_at,
 )
-from daimon.core.scope import ResolvedConfig, ScopeContext
+from daimon.core.scope import HelperTarget, ResolvedConfig, ScopeContext
 from daimon.core.session_fence_retry import retry_fences
 from daimon.core.session_snapshot import MaSkill
 from daimon.core.setup_conversations import get_setup_agent, get_setup_responder
@@ -264,6 +264,45 @@ async def _thread_follow(
 
 
 @dataclass(frozen=True)
+class HelperCall:
+    """A helper's turn: the agent it runs as, and its own conversation's thread key.
+
+    The turn is admitted in the asking turn's channel and thread, so every place
+    rule, seal and hold applies as there; `thread_key` keys only its own session
+    and model-provider slot (`daimon.core.helpers.helper_thread_key`).
+    """
+
+    target: HelperTarget
+    thread_key: str
+
+
+@dataclass(frozen=True)
+class AdmitRequest:
+    """What a turn was admitted on, so a helper's turn is admitted on the same."""
+
+    tenant_id: uuid.UUID
+    platform: str
+    external_user_id: str
+    channel_id: str
+    thread_id: str | None
+    role: Role | None
+    role_ids: tuple[str, ...]
+    verified_membership: bool | None
+    is_dm: bool
+    dm_source_channel_id: str | None
+    category_id: str | None
+    category_unresolved: bool
+    requester_org: RequesterOrg
+    requester_home_id: str | None
+    channel_shared: bool | None
+    origin: str
+    attended: bool | None
+    spend_person: SpendPerson | None
+    surface: Surface | None
+    principal_platform: str | None
+
+
+@dataclass(frozen=True)
 class Admission:
     """Everything `run_prepared_turn` needs to start a turn, resolved once."""
 
@@ -357,6 +396,8 @@ class Admission:
     # A choice was kept but can't run here, so this turn runs the agent's own
     # model and says so.
     model_fell_back: bool = False
+    # What `admit` was called with; a helper's turn is admitted on the same.
+    request: AdmitRequest | None = field(default=None, compare=False, repr=False)
 
     @property
     def is_admin(self) -> bool:
@@ -481,6 +522,7 @@ async def admit(
     spend_person: SpendPerson | None = None,
     surface: Surface | None = None,
     principal_platform: str | None = None,
+    helper: HelperCall | None = None,
 ) -> Admission:
     """Admit a turn, or raise the typed reason it is refused.
 
@@ -493,6 +535,7 @@ async def admit(
     `surface` overrides the DM-or-channel surface (the web chat), and
     `principal_platform` names the platform `external_user_id` belongs to when it
     is not the one the turn runs on (a web person linked to a platform account).
+    `helper` admits a helper's turn as its agent (`admit_helper`).
     """
     observation = current_outcome.get() or TurnObservation(
         deps.sessionmaker, tenant_id, platform, channel_id, thread_id
@@ -526,6 +569,7 @@ async def admit(
                 spend_person=spend_person,
                 surface=surface,
                 principal_platform=principal_platform,
+                helper=helper,
             )
     except BaseException as exc:
         observation.finish(error=exc)
@@ -558,7 +602,65 @@ async def admit(
                 None,
             ),
         )
-    return replace(result, observation=observation)
+    request = AdmitRequest(
+        tenant_id=tenant_id,
+        platform=platform,
+        external_user_id=external_user_id,
+        channel_id=channel_id,
+        thread_id=thread_id,
+        role=role,
+        role_ids=role_ids,
+        verified_membership=verified_membership,
+        is_dm=is_dm,
+        dm_source_channel_id=dm_source_channel_id,
+        category_id=category_id,
+        category_unresolved=category_unresolved,
+        requester_org=requester_org,
+        requester_home_id=requester_home_id,
+        channel_shared=channel_shared,
+        origin=origin,
+        attended=attended,
+        spend_person=spend_person,
+        surface=surface,
+        principal_platform=principal_platform,
+    )
+    return replace(result, observation=observation, request=request)
+
+
+async def admit_helper(
+    deps: TurnDeps, request: AdmitRequest, helper: HelperCall, *, now: datetime
+) -> Admission:
+    """Admit a helper's turn for the person whose turn asked it, as if they asked it.
+
+    Every gate runs again for the helper's agent: whether they may run it here,
+    their balance and caps, the channel's budget and its provider rules. It carries
+    the asking turn's origin, so it is a person's invocation exactly when that is.
+    """
+    return await admit(
+        deps,
+        tenant_id=request.tenant_id,
+        platform=request.platform,
+        external_user_id=request.external_user_id,
+        channel_id=request.channel_id,
+        now=now,
+        thread_id=request.thread_id,
+        role=request.role,
+        role_ids=request.role_ids,
+        verified_membership=request.verified_membership,
+        is_dm=request.is_dm,
+        dm_source_channel_id=request.dm_source_channel_id,
+        category_id=request.category_id,
+        category_unresolved=request.category_unresolved,
+        requester_org=request.requester_org,
+        requester_home_id=request.requester_home_id,
+        channel_shared=request.channel_shared,
+        origin=request.origin,
+        attended=request.attended,
+        spend_person=request.spend_person,
+        surface=request.surface,
+        principal_platform=request.principal_platform,
+        helper=helper,
+    )
 
 
 def backend_platform_skills(
@@ -598,6 +700,7 @@ async def admit_impl(
     spend_person: SpendPerson | None = None,
     surface: Surface | None = None,
     principal_platform: str | None = None,
+    helper: HelperCall | None = None,
 ) -> Admission:
     """Run the full pre-turn gate sequence; raise instead of returning bool.
 
@@ -633,6 +736,7 @@ async def admit_impl(
         spend_person=spend_person,
         surface=surface,
         principal_platform=principal_platform,
+        helper=helper,
     )
     followed: list[Slot] = []
     try:
@@ -670,6 +774,7 @@ async def _admit_gates(
     spend_person: SpendPerson | None = None,
     surface: Surface | None = None,
     principal_platform: str | None = None,
+    helper: HelperCall | None = None,
     followed: list[Slot] | None = None,
     follow_switch: bool = True,
 ) -> Admission:
@@ -681,6 +786,9 @@ async def _admit_gates(
     """
     started = last_stage = perf_counter()
     stage_ms: dict[str, float] = {}
+    # A helper's own conversation keys its session and provider slot; the place it
+    # runs in (rules, seals, holds) stays the asking turn's thread.
+    slot_thread_id = helper.thread_key if helper is not None else thread_id
 
     def mark(stage: str) -> None:
         nonlocal last_stage
@@ -730,11 +838,12 @@ async def _admit_gates(
         state_store = deps.state_store or mux_state.PostgresStateStore(deps.sessionmaker)
         own_slot = Slot(
             thread=ThreadRef(
-                channel=channel_ref(tenant_id, platform, channel_id), thread_id=thread_id or ""
+                channel=channel_ref(tenant_id, platform, channel_id),
+                thread_id=slot_thread_id or "",
             ),
             account_id=str(principal.account_id),
         )
-        if deps.backend_selection_enabled and thread_id is not None and not is_dm:
+        if deps.backend_selection_enabled and slot_thread_id is not None and not is_dm:
             released = await release_due(deps.sessionmaker, state_store, own_slot)
         if is_dm and client:
             # A client has no private conversation with Daimon.
@@ -818,6 +927,7 @@ async def _admit_gates(
             channel_id=channel_id,
             platform=platform,
             thread_id=thread_id,
+            helper=helper.target if helper is not None else None,
         )
         config = await resolve_config(session, context=scope, default=deps.deployment_default)
         if dm_agent_name is not None:
@@ -855,7 +965,7 @@ async def _admit_gates(
             follow_switch
             and selection_enabled
             and channel is not None
-            and thread_id is not None
+            and slot_thread_id is not None
             and not is_dm
             and config.thread_binding_kind != "setup"
             and not configured_channel
@@ -867,11 +977,11 @@ async def _admit_gates(
         if (
             selection_enabled
             and channel is not None
-            and thread_id is not None
+            and slot_thread_id is not None
             and not is_dm
             and config.thread_binding_kind != "setup"
         ):
-            thread = ThreadRef(channel=channel, thread_id=thread_id)
+            thread = ThreadRef(channel=channel, thread_id=slot_thread_id)
             slots = [Slot(thread=thread, account_id=str(principal.account_id))]
             if backend_ever_shared:
                 slots.insert(0, Slot(thread=thread))
@@ -925,7 +1035,7 @@ async def _admit_gates(
                     session,
                     tenant_id=tenant_id,
                     platform=platform,
-                    thread_id=thread_id,
+                    thread_id=slot_thread_id,
                     account_id=principal.account_id,
                     at=now,
                 )
@@ -1082,7 +1192,7 @@ async def _admit_gates(
         # answer as the built-in Daimon (`get_setup_responder` asserts that), while
         # a thread whose task was handed to another agent answers as that agent,
         # which is an ordinary tenant-and-archive-checked retrieve.
-        if config.thread_binding_kind in ("handoff", "owner", "web"):
+        if config.thread_binding_kind in ("handoff", "owner", "web", "helper"):
             agent = await get_setup_agent(deps.anthropic, tenant_id=tenant_id, ma_agent_id=agent_id)
         elif config.thread_binding_id is not None:
             agent = await get_setup_responder(
@@ -1252,7 +1362,7 @@ async def _admit_gates(
             tenant_id=tenant_id,
             platform=platform,
             external_user_id=external_user_id,
-            thread_id=thread_id or channel_id,
+            thread_id=slot_thread_id or channel_id,
             session_account_id=principal.account_id,
             reuse_existing=True,
             capabilities=DEFAULT_MA_CAPABILITIES,
