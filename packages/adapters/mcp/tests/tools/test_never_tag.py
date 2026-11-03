@@ -11,6 +11,7 @@ import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import _outbound, channels
+from daimon.adapters.mcp.tools import never_tag as never_tag_mod
 from daimon.adapters.mcp.tools._outbound import OutgoingPost, TurnScope, prepare_posts
 from daimon.adapters.mcp.tools.never_tag import (
     _set_never_tag_impl,  # pyright: ignore[reportPrivateUsage]
@@ -263,3 +264,20 @@ async def test_refuse_dm_to_opted_out_when_someone_else_asks_then_refused_but_se
     await _outbound.refuse_dm_to_opted_out(runtime, person, "7")
     with pytest.raises(ToolError, match="asked not to be tagged"):
         await _outbound.refuse_dm_to_opted_out(runtime, stranger, "7")
+
+
+async def test_set_never_tag_when_turn_is_unattended_then_refused_and_nothing_saved(
+    sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A timer, watch or relay turn speaks for nobody, even with a person's identity."""
+    auth = await _person(sessionmaker, "discord", "5")
+
+    async def unattended(*_args: object, **_kwargs: object) -> TurnScope:
+        return TurnScope(key="turn:x", kind="unattended", own_places=frozenset(), requester_id=None)
+
+    monkeypatch.setattr(never_tag_mod, "turn_scope", unattended)
+    with pytest.raises(ToolError, match="Only a person"):
+        await _set_never_tag_impl(_runtime(sessionmaker), auth, True)
+    async with sessionmaker() as session:
+        saved = await store.is_opted_out(session, account_id=auth.account_id)
+    assert not saved, "a refused call stores nothing"

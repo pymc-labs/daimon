@@ -14,6 +14,7 @@ from typing import Final
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._outbound import turn_scope
 from daimon.core.stores import tag_opt_outs as store
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -37,6 +38,9 @@ async def _set_never_tag_impl(
     runtime: McpRuntime, auth: AuthIdentity, never_tag: bool
 ) -> NeverTagStatus:
     if auth.platform not in _CHAT_PLATFORMS or not auth.platform_user_id or auth.routine_id:
+        raise ToolError(_PERSON_ONLY)
+    # A timer, watch or relay turn speaks for nobody, so it may not opt anyone out.
+    if (await turn_scope(runtime, auth)).kind == "unattended":
         raise ToolError(_PERSON_ONLY)
     async with runtime.session_factory.begin() as session:
         if never_tag:
