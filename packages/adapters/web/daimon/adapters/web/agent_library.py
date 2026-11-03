@@ -5,10 +5,20 @@ from __future__ import annotations
 from daimon.adapters.web.agent_access import Editor, actor_of, change_deps, edit_refusal
 from daimon.adapters.web.agent_audit import recorded
 from daimon.adapters.web.runtime import WebRuntime
-from daimon.core import environment_admin, skill_library
+from daimon.core import environment_admin, skill_library, skill_library_files
 from daimon.core.agent_editing import AgentEditError
+from daimon.core.agent_skill_files import SkillFilesDoc
 from daimon.core.environment_admin import EnvironmentDoc, EnvironmentInput, EnvironmentNeedsConfirm
-from daimon.core.skill_library import LibrarySkill, SkillVersionDoc, SyncedSkill
+from daimon.core.skill_library import (
+    CREATED_ACTION,
+    RESTORED_ACTION,
+    SAVED_ACTION,
+    LibrarySkill,
+    SkillDetail,
+    SkillVersionDoc,
+    SyncedSkill,
+)
+from daimon.core.skill_library_files import SkillRef
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -17,6 +27,21 @@ class SyncBody(BaseModel):
     url: str
     branch: str = "main"
     path: str = ""
+
+
+class NewSkillBody(BaseModel):
+    name: str
+    description: str
+
+
+class SaveFilesBody(BaseModel):
+    files: dict[str, str | None]
+    """A path with null content keeps its bytes from ``expected_version``."""
+    expected_version: str
+
+
+class RestoreBody(BaseModel):
+    version: str
 
 
 class EnvironmentBody(BaseModel):
@@ -40,7 +65,79 @@ def agent_library_router(runtime: WebRuntime) -> APIRouter:
     async def skills(caller: Editor) -> list[LibrarySkill]:  # pyright: ignore[reportUnusedFunction]
         try:
             return await skill_library.list_library(
-                change_deps(runtime).edit, actor=actor_of(caller)
+                change_deps(runtime).edit,
+                actor=actor_of(caller),
+                descriptions=runtime.skill_descriptions,
+            )
+        except AgentEditError as exc:
+            raise edit_refusal(exc) from exc
+
+    @router.post("/skills", status_code=201)
+    async def create_skill(caller: Editor, body: NewSkillBody) -> SkillRef:  # pyright: ignore[reportUnusedFunction]
+        try:
+            return await skill_library_files.create_library_skill(
+                change_deps(runtime).edit,
+                actor=actor_of(caller),
+                name=body.name,
+                description=body.description,
+                audited=recorded(runtime, caller, CREATED_ACTION),
+            )
+        except AgentEditError as exc:
+            raise edit_refusal(exc) from exc
+
+    @router.get("/skills/{skill_id}")
+    async def skill(caller: Editor, skill_id: str) -> SkillDetail:  # pyright: ignore[reportUnusedFunction]
+        try:
+            return await skill_library.get_library_skill(
+                change_deps(runtime).edit,
+                actor=actor_of(caller),
+                skill_id=skill_id,
+                descriptions=runtime.skill_descriptions,
+            )
+        except AgentEditError as exc:
+            raise edit_refusal(exc) from exc
+
+    @router.get("/skills/{skill_id}/files")
+    async def skill_files(  # pyright: ignore[reportUnusedFunction]
+        caller: Editor, skill_id: str, version: str | None = None
+    ) -> SkillFilesDoc:
+        try:
+            return await skill_library_files.read_library_files(
+                change_deps(runtime).edit,
+                actor=actor_of(caller),
+                skill_id=skill_id,
+                version=version,
+            )
+        except AgentEditError as exc:
+            raise edit_refusal(exc) from exc
+
+    @router.put("/skills/{skill_id}/files")
+    async def save_skill_files(  # pyright: ignore[reportUnusedFunction]
+        caller: Editor, skill_id: str, body: SaveFilesBody
+    ) -> SkillRef:
+        try:
+            return await skill_library_files.save_library_files(
+                change_deps(runtime).edit,
+                actor=actor_of(caller),
+                skill_id=skill_id,
+                files=body.files,
+                expected_version=body.expected_version,
+                audited=recorded(runtime, caller, SAVED_ACTION),
+            )
+        except AgentEditError as exc:
+            raise edit_refusal(exc) from exc
+
+    @router.post("/skills/{skill_id}/restore")
+    async def restore_skill(  # pyright: ignore[reportUnusedFunction]
+        caller: Editor, skill_id: str, body: RestoreBody
+    ) -> SkillRef:
+        try:
+            return await skill_library_files.restore_library_version(
+                change_deps(runtime).edit,
+                actor=actor_of(caller),
+                skill_id=skill_id,
+                version=body.version,
+                audited=recorded(runtime, caller, RESTORED_ACTION),
             )
         except AgentEditError as exc:
             raise edit_refusal(exc) from exc

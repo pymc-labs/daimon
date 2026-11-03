@@ -90,10 +90,14 @@ async def test_an_admin_sees_the_library_with_what_uses_each_skill(
         versions = await client.get("/api/agents/skills/skill_spare/versions")
         foreign = await client.get("/api/agents/skills/skill_theirs/versions")
     assert res.status_code == 200, res.text
-    assert [(s["name"], s["used_by"]) for s in res.json()] == [
-        ("notes", [{"kind": "agent", "name": "helper"}]),
-        ("spare", []),
-    ], "another workspace's skill is left out"
+    assert [(s["name"], s["title"], s["used_by"]) for s in res.json()] == [
+        (
+            "notes",
+            "Notes",
+            [{"kind": "agent", "id": "ag_w", "name": "helper", "version": None}],
+        ),
+        ("spare", "Spare", []),
+    ], "another workspace's skill is left out; a latest pin has no version"
     assert [v["version"] for v in versions.json()] == ["7"]
     assert foreign.status_code == 404
 
@@ -144,6 +148,43 @@ async def test_a_skill_in_use_is_not_deleted_and_a_spare_one_is(
     async with db_session_factory() as session:
         rows = await web_audit.list_recent(session, tenant_id=owner.tenant_id)
     assert [(r.action, r.target) for r in rows] == [("Deleted skill", "spare")]
+
+
+async def test_the_skill_routes_refuse_a_non_admin_and_a_stale_save(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    agents, owner, other = await agent_people(db_session)
+    _library(agents, str(owner.tenant_id))
+    token = await sign_in_token(db_session_factory, owner)
+    body = {"files": {"SKILL.md": "x"}, "expected_version": "7"}
+    async with agent_client(agents, owner.tenant_id, db_session_factory, token) as client:
+        plain = [
+            (await client.get("/api/agents/skills/skill_notes")).status_code,
+            (await client.get("/api/agents/skills/skill_notes/files")).status_code,
+            (
+                await client.put("/api/agents/skills/skill_notes/files", json=body, headers=OWN)
+            ).status_code,
+            (
+                await client.post(
+                    "/api/agents/skills/skill_notes/restore", json={"version": "7"}, headers=OWN
+                )
+            ).status_code,
+            (
+                await client.post(
+                    "/api/agents/skills", json={"name": "Plots", "description": "x"}, headers=OWN
+                )
+            ).status_code,
+        ]
+    assert plain == [403] * 5, "the skill page and its writes need an admin"
+    await make_admin(db_session_factory, other)
+    token = await sign_in_token(db_session_factory, other)
+    async with agent_client(agents, owner.tenant_id, db_session_factory, token) as client:
+        stale = await client.put(
+            "/api/agents/skills/skill_notes/files",
+            json={"files": {"SKILL.md": "x"}, "expected_version": "6"},
+            headers=OWN,
+        )
+    assert stale.status_code == 409, "a save against an older version is a conflict"
 
 
 def _environments(agents: Agents, tenant: Any, *envs: Any) -> list[dict[str, Any]]:
