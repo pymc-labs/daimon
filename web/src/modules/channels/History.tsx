@@ -47,9 +47,8 @@ export function History({ c }: { c: ChannelDetail }) {
                   {d.from.length > 0 && d.to.length > 0 && <ArrowRight className="size-3.5 shrink-0" aria-label="to" />}
                   {d.to.length > 0 && <Parts parts={d.to} refs={agents} />}
                 </div>
-                <div className="flex items-center gap-1 text-xs text-faint">
+                <div className="flex items-center gap-3 text-xs text-faint">
                   {e.actor && <PersonLink id={e.actor.id} name={e.actor.name} />}
-                  {e.actor && e.surface && <span>·</span>}
                   {e.surface && <span>{SURFACE[e.surface]}</span>}
                 </div>
               </li>

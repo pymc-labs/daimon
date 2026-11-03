@@ -15,8 +15,8 @@ export function RoutinesHere({ s }: { s: ChannelSettings }) {
             <li key={r.id} className="flex items-center gap-3 px-3 py-2">
               <span className="min-w-0 flex-1">
                 <span className="block truncate font-medium"><RoutineLink id={r.id} name={r.title} /></span>
-                <span className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
-                  <AgentLink id={who.id} name={who.name} avatar={who.avatar} /><span>·</span><span className="truncate">{cronWords(r.cron)}</span>
+                <span className="flex min-w-0 items-center gap-3 text-xs text-muted-foreground">
+                  <AgentLink id={who.id} name={who.name} avatar={who.avatar} /><span className="truncate">{cronWords(r.cron)}</span>
                 </span>
               </span>
               <span className="flex shrink-0 flex-wrap justify-end gap-1">
