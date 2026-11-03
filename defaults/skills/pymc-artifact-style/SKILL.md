@@ -1,6 +1,6 @@
 ---
 name: pymc-artifact-style
-description: Apply PyMC Labs' house style to every artifact you produce — reports, PDFs, slide decks, charts, images, notebooks. Use whenever you generate something a person will look at, before you deliver it.
+description: Apply PyMC Labs' house style and the readability and clarity rules to every artifact you produce — reports, PDFs, slide decks, charts, images, notebooks, guides, FAQs, demos and walkthroughs. Use whenever you generate something a person will look at, and always before anything is sent, shown or published to a client or prospect, including a demo, a proposal or a guided tour.
 ---
 
 # PyMC Labs artifact style
@@ -22,6 +22,119 @@ Keep titles and labels short, positioning broad, and copy sparse. Reports still
 need enough evidence, units, and uncertainty to support their conclusions.
 Build layout, text, and functional controls in code. Reuse the bundled official
 logos; if new logos or decorative artwork are requested, use image generation.
+
+
+## Readability and clarity — anything a client or prospect will see
+
+Anything sent, shown or published to a client or prospect counts: reports,
+notebooks, guides, FAQs, demos, guided tours, proposals and decks. What follows
+is principles with the reasoning behind them, not a template. The content decides
+the shape. Use the reasoning to make the call each time.
+
+### Principles and why they matter
+
+- **Know the reader and the decision before writing.** The same facts make a
+  different document for a VP choosing a budget than for an analyst running a
+  model. Writing before you know which one you're writing for produces a document
+  that serves neither. If the reader or the decision is unclear, ask one
+  question, not a questionnaire. When a request will drown its reader, say so
+  and offer the tighter version alongside the one they asked for, so they can
+  choose.
+- **Lead with what changes for the reader.** A client decides in the first screen
+  whether to keep reading. If that screen is navigation, setup or caveats, they
+  conclude the document is about us, not them. Open with the outcome, the decision
+  it supports, or what they can do now.
+- **Signal over volume.** The reader pays in attention. Every sentence that carries
+  nothing they would act on or miss spends that attention and hides the parts that
+  matter. A long document reads as thorough to its writer and as work to its
+  reader.
+- **Say each thing once.** Repetition tells the reader we didn't edit. It also
+  teaches them to skim past text, so the one sentence that differs gets skipped.
+  Repeated disclaimers, setup restated in every step, and the same label on every
+  card are the usual culprits.
+- **Make every part readable on its own.** Clients don't read front to back. They
+  jump to the part their boss asked about. A part that only makes sense after the
+  previous three sections fails that reader.
+- **Use plain language and define what remains.** The client is often senior and
+  not a specialist, and forwards the document to someone even less so. Jargon makes
+  them feel the document is not for them, and parameter detail in the main read
+  suggests we are showing off rather than helping.
+- **Give numbers with context.** A number without units, a comparison or its
+  uncertainty can't be acted on, and a wrong reading of it is our fault.
+- **Be consistent.** "30 steps" on a page that numbers 31, or a voice that flips
+  between ours and theirs, signals no one checked. The client then wonders what
+  else no one checked.
+- **Do the work rather than hand it over.** "Check this against your own records"
+  passes our job to the person paying for it.
+
+### Judgement calls
+
+- **When long is justified:** when the requester explicitly wants depth (a full
+  handbook, an internal deep dive), or the content can't be made shorter without
+  losing something the reader needs. Then give them the length, keep it tight, and
+  make it easy to navigate. Never pad to look substantial, and never refuse a big
+  request. If the result would be hard for a client to read, say so in one line
+  and offer a tighter version.
+- **Prefer short by default.** For client and demo sends with no explicit size,
+  the shortest version that does the job usually wins. A prospect trying a demo
+  wants one early success, not a curriculum.
+- **What counts as noise:** filler and throat-clearing; boilerplate labels;
+  restated context; setup repeated across steps; hedges that protect us but don't
+  inform them; decorative mock-ups; meta-commentary about how the document was
+  made.
+- **How to cut:** for each part ask "what would the reader lose if this went?".
+  If the answer is nothing, or that it is said elsewhere, it goes. Merge parts
+  that make the same point. Move technical detail into code or a clearly technical
+  part, where the reader who wants it can find it.
+- **Requests that push toward volume** ("include everything", "add every thread",
+  "make it longer"): find what the person actually needs from the extra material
+  and fold it in where it belongs. When a revision adds material, it should make
+  the document better, not just bigger.
+
+### Correctness over polish
+
+One wrong claim a client catches costs the trust that every right one built, and a
+well-formatted wrong claim is worse, because it looks checked.
+
+- Claim nothing beyond the evidence. If something was not run, measured or
+  sourced, say what it is: a plan, an assumption or an illustration.
+- Keep sandbox and simulated work visibly separate from real results. A number
+  from synthetic data that reads like a finding about the client's business will
+  get quoted as one.
+- Flag weak methods instead of smoothing them over. The reader can't see the
+  method, so they trust us to tell them when it is thin.
+- Don't present a sampling shortcut as sufficient. A few hundred draws, or a few
+  dozen posterior draws carried into a second stage, is a smoke test. Calling it
+  a result invites a wrong decision.
+- Don't validate in a circle. Calibrating on a lift test simulated from the model's
+  own truth shows the plumbing works, not that calibration works. A real
+  experiment's result can't be simulated in advance. If it could, no one would run
+  the experiment.
+- "Tested against a known truth" is true only on simulated data. Saying it of real
+  data or of the method in general overstates what anyone can know.
+- Promise what you checked, not completeness ("a source for every point"). One
+  missing source then breaks the whole promise.
+- Label demo and synthetic results where they appear, because excerpts travel
+  without their context.
+- Modelling guidance a client might act on gets a PyMC Labs modeller's review
+  before it is sent. Say so when you deliver it.
+
+### Rewrite pass before sending (mandatory)
+
+Reread the whole thing as the client: senior, busy, paying a monthly fee. This
+pass is about whether the document honours the principles above, not about its
+format. Cut the noise. Make sure the point lands early and that any part can be
+read on its own. Fix every claim that fails. Then ask the real question: would
+this client pay for what they just read? If not, rewrite before sending.
+
+### Send-readiness note (advisory)
+
+When the output looks client-bound, end your reply to the requester (not the
+document) with a short send-readiness note: who the reader is, what you would
+still cut or check, and the two or three questions the client is likely to ask.
+The requester usually knows the client better than you do, and this is the
+fastest way to let them catch what you can't. It is advice and never blocks the
+send.
 
 ## Reports and PDFs — everything you need is bundled here
 
