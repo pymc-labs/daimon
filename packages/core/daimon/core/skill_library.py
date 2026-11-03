@@ -29,7 +29,7 @@ from daimon.core.stores.channel_skills import list_tenant_channel_skills
 from daimon.core.stores.platform_names import get_channel_names, get_channel_statuses
 from daimon.core.stores.seeded_skills import list_seeded_skill_names
 from daimon.core.stores.user_skills import list_user_skills_for_tenant
-from daimon.core.stores.web_people import get_person_for_account
+from daimon.core.stores.web_people import get_people_for_accounts
 from mux.contracts.errors import ProviderError, ScopeViolation
 from pydantic import BaseModel
 
@@ -246,7 +246,7 @@ async def version_authors(
 
     The provider records no author, and a version saved elsewhere has none here.
     """
-    authors: dict[str, str] = {}
+    mine: list[tuple[str, uuid.UUID]] = []
     async with deps.session_factory() as session:
         for action in (SAVED_ACTION, RESTORED_ACTION, CREATED_ACTION):
             rows = await web_audit.list_recent(
@@ -254,13 +254,15 @@ async def version_authors(
             )
             for row in rows:
                 head, _, version = row.target.rpartition(" v")
-                if head != name or row.actor_account_id is None:
-                    continue
-                person = await get_person_for_account(
-                    session, tenant_id=tenant_id, account_id=row.actor_account_id
-                )
-                if person is not None:
-                    authors.setdefault(version, person.display_name)
+                if head == name and row.actor_account_id is not None:
+                    mine.append((version, row.actor_account_id))
+        people = await get_people_for_accounts(
+            session, tenant_id=tenant_id, account_ids={account for _, account in mine}
+        )
+    authors: dict[str, str] = {}
+    for version, account in mine:
+        if (person := people.get(account)) is not None:
+            authors.setdefault(version, person.display_name)
     return authors
 
 

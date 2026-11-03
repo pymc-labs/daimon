@@ -44,6 +44,20 @@ async def get_person_for_account(
     return None if orm is None else WebPersonRow.model_validate(orm)
 
 
+async def get_people_for_accounts(
+    session: AsyncSession, *, tenant_id: uuid.UUID, account_ids: Collection[uuid.UUID]
+) -> dict[uuid.UUID, WebPersonRow]:
+    """The workspace's person of each of these accounts, by account, in one query."""
+    if not account_ids:
+        return {}
+    orms = await session.scalars(
+        select(WebPerson).where(
+            WebPerson.tenant_id == tenant_id, WebPerson.account_id.in_(list(account_ids))
+        )
+    )
+    return {orm.account_id: WebPersonRow.model_validate(orm) for orm in orms}
+
+
 async def get_people(session: AsyncSession, *, person_ids: list[uuid.UUID]) -> list[WebPersonRow]:
     """The people with these ids, in no particular order; unknown ids are skipped."""
     rows = (await session.execute(select(WebPerson).where(WebPerson.id.in_(person_ids)))).scalars()
