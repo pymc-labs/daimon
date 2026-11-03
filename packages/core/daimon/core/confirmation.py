@@ -790,11 +790,8 @@ def prompt_for_tool_call(
 def _reach_prompt(
     data: Mapping[str, object], requester_platform_user_id: str, expires_at: datetime
 ) -> ConfirmationPrompt:
-    def count(key: str) -> int:
-        value = data.get(key)
-        return value if isinstance(value, int) and value >= 0 else 0
-
-    plan = ReachPlan(threads=count("threads"), places=count("places"), people=count("people"))
+    # The same validation approve_reach stores, so the card never understates it.
+    plan = ReachPlan.from_args(data)
     return ConfirmationPrompt(
         title=_one_line(
             card_title(plan, _one_line(str(data.get("where") or ""), limit=60)), limit=200

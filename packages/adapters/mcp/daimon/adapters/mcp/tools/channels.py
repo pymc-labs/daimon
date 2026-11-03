@@ -674,7 +674,7 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         show, post nothing and offer one thread with a checklist instead. One card
         a turn is enough, so plan everything before asking.
         """
-        plan = ReachPlan(threads=threads, places=places, people=people)
+        plan = ReachPlan.from_args({"threads": threads, "places": places, "people": people})
         return await approve_reach_impl(runtime, await _auth(ctx), plan)
 
     @mcp.tool(tags={"teams"})  # pyright: ignore[reportArgumentType]

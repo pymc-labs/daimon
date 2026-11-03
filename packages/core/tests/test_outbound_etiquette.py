@@ -170,3 +170,31 @@ def test_approve_reach_prompt_when_built_then_neutral_card_text():
     assert prompt.title == "Daimon wants to open 10 threads in #x and tag 3 people.", "title"
     assert prompt.consequence == "Approve to post them, or cancel.", "one line on what to do"
     assert prompt.action == "Approve", "button label"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {"threads": 10, "places": 2, "people": 3},
+        {"threads": "10", "places": "2", "people": "3"},
+        {"threads": 10.0, "places": 2.0, "people": 3.0},
+    ],
+    ids=["ints", "numeric_strings", "whole_floats"],
+)
+def test_approve_reach_prompt_when_args_coerce_then_card_shows_the_stored_plan(raw):
+    call = _reach_call().model_copy(update={"input": {**raw, "where": "#x"}})
+    prompt = prompt_for_tool_call(call, requester_platform_user_id="owner", now=datetime.now(UTC))
+    stored = ReachPlan.from_args(raw)
+    assert stored == ReachPlan(threads=10, places=2, people=3), "the tool stores the counts"
+    assert prompt.title == card_title(stored, "#x"), "the card shows exactly what is stored"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [{"threads": "lots", "places": 0, "people": 3}, {"threads": -1}, {"places": 1, "people": 1}],
+    ids=["word", "negative", "missing"],
+)
+def test_approve_reach_prompt_when_counts_invalid_then_no_card(raw):
+    call = _reach_call().model_copy(update={"input": {**raw, "where": "#x"}})
+    with pytest.raises(ValueError, match="validation error"):
+        prompt_for_tool_call(call, requester_platform_user_id="owner", now=datetime.now(UTC))

@@ -5,6 +5,7 @@ Pure rules; the MCP server keeps the per-turn tally and asks for approval.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -29,6 +30,14 @@ class ReachPlan(BaseModel):
     threads: int = Field(default=0, ge=0, le=1000)
     places: int = Field(default=0, ge=0, le=1000)
     people: int = Field(default=0, ge=0, le=10_000)
+
+    @classmethod
+    def from_args(cls, args: Mapping[str, object]) -> ReachPlan:
+        """The plan in a tool call's raw arguments, validated once for the card and the store.
+
+        A missing or malformed count raises, so a card never shows less than is approved.
+        """
+        return cls.model_validate({key: args.get(key) for key in ("threads", "places", "people")})
 
     def covers(self, other: ReachPlan) -> bool:
         return (

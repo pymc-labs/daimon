@@ -1,6 +1,7 @@
 """The outbound gate on every platform: render, count and refuse before anything posts."""
 
 import uuid
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -16,8 +17,11 @@ from daimon.adapters.mcp.tools._outbound import (
     render_edit,
 )
 from daimon.core.config import OutboundSettings
+from daimon.core.confirmation import prompt_for_tool_call
 from daimon.core.outbound.mentions import ping_users
-from daimon.core.outbound.reach import NO_CARD, SHORT_CAPTION, TOO_LONG, ReachPlan
+from daimon.core.outbound.reach import NO_CARD, SHORT_CAPTION, TOO_LONG, ReachPlan, card_title
+from daimon.core.stores.reach_tallies import lock_tally
+from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall
 from daimon.testing.factories import make_tenant
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -184,3 +188,18 @@ async def test_prepare_posts_when_discord_then_attribution_never_pings(sessionma
 async def test_render_edit_when_broadcast_then_neutralised_without_attribution(sessionmaker):
     runtime, auth = await _setup(sessionmaker, "slack")
     assert await render_edit(runtime, auth, "fixed <!here>") == "fixed @here", "edits too"
+
+
+async def test_approve_when_card_built_from_same_args_then_card_equals_stored_plan(sessionmaker):
+    runtime, auth = await _setup(sessionmaker, "discord")
+    scope = _scope()
+    raw = {"threads": "4", "places": 3.0, "people": 6, "where": "#x"}
+    call = ToolCall(
+        tool_use_id="reach", server_name=DAIMON_SERVER_NAME, tool_name="approve_reach", input=raw
+    )
+    card = prompt_for_tool_call(call, requester_platform_user_id="42", now=datetime.now(UTC))
+    await approve(runtime, auth, scope, ReachPlan.from_args(raw))
+    async with sessionmaker() as session, session.begin():
+        _, stored = await lock_tally(session, tenant_id=auth.tenant_id, turn_key=scope.key)
+    assert stored == ReachPlan(threads=4, places=3, people=6), "approve stores the validated plan"
+    assert card.title == card_title(stored, "#x"), "the card shows exactly what was stored"
