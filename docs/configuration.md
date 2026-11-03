@@ -53,6 +53,7 @@ typo is silent — check the spelling here.
 - [Support](#support)
 - [Turn](#turn)
 - [Thread Naming](#thread-naming)
+- [Outbound](#outbound)
 - [Turn Queue](#turn-queue)
 - [Watches](#watches)
 - [Private Channel Messages](#private-channel-messages)
@@ -1745,6 +1746,56 @@ here. Bounds the per-thread naming cost.
 Seconds to wait for the naming model before the thread opens under a title taken from
 the opening message. The thread is created only after this call, so this is the most a
 mention can wait before anything appears.
+
+## Outbound
+
+Read from `daimon.core.config.OutboundSettings`. Prefix `DAIMON_OUTBOUND__`.
+
+Etiquette for posts the agent makes through tools (``DAIMON_OUTBOUND__*``).
+
+Rules live in `daimon.core.outbound`; unattended turns skip the budget, length and
+caption limits but keep mentions and attribution.
+
+### `DAIMON_OUTBOUND__REACH_BUDGET_ENABLED`
+
+`bool` · optional · default `True`
+
+Ask the requester on an approval card before one interactive turn opens more threads,
+posts into more places or tags more people than the limits below. Where no card can be
+shown, the post is refused instead.
+
+### `DAIMON_OUTBOUND__MAX_THREADS`
+
+`int` · optional · default `2`
+
+New threads or forum posts one interactive turn opens without approval.
+
+### `DAIMON_OUTBOUND__MAX_PLACES`
+
+`int` · optional · default `2`
+
+Channels, threads and DM recipients outside the own conversation one interactive turn
+posts into without approval.
+
+### `DAIMON_OUTBOUND__MAX_PEOPLE`
+
+`int` · optional · default `5`
+
+Distinct people one interactive turn tags in tool posts without approval.
+
+### `DAIMON_OUTBOUND__MAX_LENGTH`
+
+`int` · optional · default `1500`
+
+Longest tool post, in characters, an interactive turn may send outside its own reply. 0
+turns the limit off.
+
+### `DAIMON_OUTBOUND__MIN_MEDIA_CAPTION`
+
+`int` · optional · default `60`
+
+Shortest caption, in characters without mentions and links, for a video or audio file an
+interactive turn posts. 0 turns the rule off.
 
 ## Turn Queue
 
