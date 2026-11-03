@@ -104,7 +104,7 @@ async def mint_panel_operator_token(
     )
     account = await get_account(session, principal.account_id)
     if account is None or account.role is not Role.ADMIN:
-        raise OperatorTokenError(
+        raise OperatorTokenNotAllowed(
             "Your platform admin role has not been recorded yet. "
             "Send Daimon a message in this server or workspace, then try minting again. "
             "No operator token was created"

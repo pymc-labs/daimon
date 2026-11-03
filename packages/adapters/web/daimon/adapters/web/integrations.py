@@ -31,6 +31,7 @@ from daimon.core.panel_operator_tokens import (
     LABEL_MAX_CHARS,
     PANEL_SCOPES,
     PANEL_TTL_DAYS,
+    OperatorTokenNotAllowed,
     list_panel_operator_tokens,
     mint_panel_operator_token,
     revoke_panel_operator_token,
@@ -493,6 +494,17 @@ def integrations_router(runtime: WebRuntime) -> APIRouter:
                     detail=f"{label or 'No label'}: {', '.join(sorted(minted.scopes))}",
                     at=now,
                 )
+        except OperatorTokenNotAllowed as exc:
+            async with runtime.sessionmaker() as db:
+                await record(
+                    caller,
+                    db,
+                    op="operator_token_mint",
+                    outcome="denied",
+                    reason="needs_admin",
+                    jti=None,
+                )
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         except OperatorTokenError as exc:
             async with runtime.sessionmaker() as db:
                 await record(

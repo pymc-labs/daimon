@@ -20,7 +20,9 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores import credential_requests, security_audit, tenants
 from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores import web_roles as roles_store
+from daimon.core.stores.accounts import set_role
 from daimon.core.stores.agent_mcp_credentials import upsert_credential
+from daimon.core.stores.domain import Role
 from daimon.core.stores.mcp_tokens import get_mcp_token
 from daimon.testing.factories import make_account
 from daimon.testing.turn_router import build_turn_router
@@ -76,7 +78,7 @@ class Rig:
 
     @asynccontextmanager
     async def open(
-        self, *, as_: str = "owner", mcp: bool = True
+        self, *, as_: str = "owner", mcp: bool = True, chat_admin: bool = True
     ) -> AsyncIterator[tuple[httpx.AsyncClient, Workspace]]:
         ws = await funded_workspace(self.factory)
         person = ws.person
@@ -89,6 +91,8 @@ class Rig:
                     role=as_,  # pyright: ignore[reportArgumentType]
                     granted_by_account_id=None,
                 )
+                if chat_admin:
+                    await set_role(db, person.account_id, Role.ADMIN)
         elif as_ == "visitor":
             person = await visitor_of(self.factory, ws)
         turns = build_turns(self.factory, build_turn_router(str(ws.tenant_id)), self.tmp_path)
@@ -328,6 +332,13 @@ async def test_without_a_signing_secret_nothing_is_minted(rig: Rig) -> None:
         res = await client.post("/api/integrations/tokens", json={"scopes": ["tenant:read"]})
     assert listing["configured"] is False
     assert res.status_code == 503
+
+
+async def test_an_admin_with_no_chat_admin_role_mints_nothing(rig: Rig) -> None:
+    async with rig.open(chat_admin=False) as (client, _):
+        res = await client.post("/api/integrations/tokens", json={"scopes": ["tenant:read"]})
+        listing = (await client.get("/api/integrations/tokens")).json()
+    assert res.status_code == 403 and listing["tokens"] == []
 
 
 async def test_another_workspace_cannot_revoke_a_token(rig: Rig) -> None:
