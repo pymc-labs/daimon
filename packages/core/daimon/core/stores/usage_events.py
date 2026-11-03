@@ -14,10 +14,11 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Collection, Sequence
-from datetime import date, datetime
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from typing import Any, cast
 
-from daimon.core._models import UsageEvent
+from daimon.core._models import TurnOutcome, UsageEvent
 from daimon.core.pricing import (
     LONG_CONTEXT_PROMPT_TOKENS,
     MODEL_PRICING,
@@ -32,7 +33,7 @@ from daimon.core.pricing import (
 from daimon.core.stores.domain import UsageEventRow
 from mux.contracts.usage import UsageObservation
 from mux.errors import ScopeViolation
-from sqlalchemy import ColumnElement, Date, Select, case, delete, func, select, update
+from sqlalchemy import ColumnElement, Date, Select, case, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -274,12 +275,12 @@ def _bucket_cost(model: str, day: date | None, usage: UsageTokens, *, long_promp
     return 0.0 if cost is None else float(cost)
 
 
-async def _costs_by(
+async def _costs_by_keys(
     session: AsyncSession,
-    key: InstrumentedAttribute[str | None] | None,
+    keys: Sequence[ColumnElement[Any] | InstrumentedAttribute[Any]],
     *where: ColumnElement[bool],
-) -> dict[str | None, float]:
-    """Spend of the matching rows by `key` (all under None without one).
+) -> dict[tuple[Any, ...], float]:
+    """Spend of the matching rows by the `keys` columns (one empty-tuple total without any).
 
     Priced per (model, long-prompt tier, tariff day) bucket: cost is linear in each
     token count within a bucket, so summing tokens in SQL and pricing each bucket once
@@ -292,9 +293,8 @@ async def _costs_by(
         UsageEvent.model,
         long_prompt,
         day,
+        *keys,
     ]
-    if key is not None:
-        groups.append(key)
     stmt = (
         select(
             *groups,
@@ -306,7 +306,7 @@ async def _costs_by(
         .where(*where)
         .group_by(*groups)
     )
-    costs: dict[str | None, float] = {}
+    costs: dict[tuple[Any, ...], float] = {}
     for row in (await session.execute(stmt)).all():
         usage = UsageTokens(
             input_tokens=int(row.in_tok or 0),
@@ -314,10 +314,20 @@ async def _costs_by(
             cache_creation_input_tokens=int(row.cw_tok or 0),
             cache_read_input_tokens=int(row.cr_tok or 0),
         )
-        name: str | None = row[3] if key is not None else None
+        name = tuple(row[3 : 3 + len(keys)])
         cost = _bucket_cost(row.model, row.tariff_day, usage, long_prompt=bool(row.long_prompt))
         costs[name] = costs.get(name, 0.0) + cost
     return costs
+
+
+async def _costs_by(
+    session: AsyncSession,
+    key: InstrumentedAttribute[str | None] | None,
+    *where: ColumnElement[bool],
+) -> dict[str | None, float]:
+    """Spend of the matching rows by `key` (all under None without one); see `_costs_by_keys`."""
+    costs = await _costs_by_keys(session, [] if key is None else [key], *where)
+    return {(name[0] if name else None): cost for name, cost in costs.items()}
 
 
 async def _cost_since(session: AsyncSession, *where: ColumnElement[bool]) -> float:
@@ -388,18 +398,16 @@ async def cost_for_tenant_since(
     *,
     tenant_id: uuid.UUID,
     since: datetime,
+    until: datetime | None = None,
 ) -> float:
-    """Total tenant spend since `since`, including rows with no person recorded.
+    """Total tenant spend since `since` (before `until`, when given), including rows
+    with no person recorded.
 
     Those rows were debited too (usage settled after its turn, calls made for no
     one), so the total matches the ledger and the agents add up to it; the
     per-person reads alone leave them out. Reprices in Python at read time.
     """
-    return await _cost_since(
-        session,
-        UsageEvent.tenant_id == tenant_id,
-        UsageEvent.occurred_at >= since,
-    )
+    return await _cost_since(session, UsageEvent.tenant_id == tenant_id, *_window(since, until))
 
 
 async def turn_count_for_tenant_since(
@@ -407,14 +415,14 @@ async def turn_count_for_tenant_since(
     *,
     tenant_id: uuid.UUID,
     since: datetime,
+    until: datetime | None = None,
 ) -> int:
     """Distinct managed_session count for the tenant since `since`.
 
     Counts rows with no person recorded, as `cost_for_tenant_since` does.
     """
     stmt = select(func.count(func.distinct(UsageEvent.managed_session_id))).where(
-        UsageEvent.tenant_id == tenant_id,
-        UsageEvent.occurred_at >= since,
+        UsageEvent.tenant_id == tenant_id, *_window(since, until)
     )
     return int((await session.execute(stmt)).scalar_one())
 
@@ -603,3 +611,191 @@ async def turns_by_agent_in_tenant_since(
 ) -> dict[str | None, int]:
     """A tenant's turn count since `since`, by agent, rows with no person included."""
     return await _turns_by_agent(session, UsageEvent.tenant_id == tenant_id, *_window(since, until))
+
+
+async def costs_by_user_with_unrecorded_in_tenant_since(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    since: datetime,
+    until: datetime | None = None,
+) -> dict[str | None, float]:
+    """A tenant's spend by user since `since` (before `until`); `None` keys spend no
+    person was recorded for, so the users add up to `cost_for_tenant_since`."""
+    return await _costs_by(
+        session,
+        UsageEvent.platform_user_id,
+        UsageEvent.tenant_id == tenant_id,
+        *_window(since, until),
+    )
+
+
+async def turns_by_user_with_unrecorded_in_tenant_since(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    since: datetime,
+    until: datetime | None = None,
+) -> dict[str | None, int]:
+    """Distinct sessions per user for a tenant, `None` for spend with no person recorded."""
+    stmt = (
+        select(
+            UsageEvent.platform_user_id,
+            func.count(func.distinct(UsageEvent.managed_session_id)).label("turns"),
+        )
+        .where(UsageEvent.tenant_id == tenant_id, *_window(since, until))
+        .group_by(UsageEvent.platform_user_id)
+    )
+    return {row.platform_user_id: int(row.turns) for row in (await session.execute(stmt)).all()}
+
+
+#: How long before a window a turn may have started and still spend inside it.
+_TURN_START_MARGIN = timedelta(days=1)
+
+
+def _origin(tenant_id: uuid.UUID, since: datetime) -> ColumnElement[str]:
+    """`routine` for rows spent in a session a routine run opened, else `chat`.
+
+    A routine run opens its own session, so the turn outcome that names it says which
+    rows are routine spend without a join on the usage refs.
+    """
+    routine_sessions = select(TurnOutcome.session_id).where(
+        TurnOutcome.tenant_id == tenant_id,
+        TurnOutcome.origin == "routine",
+        TurnOutcome.session_id.is_not(None),
+        TurnOutcome.started_at >= since - _TURN_START_MARGIN,
+    )
+    return case((UsageEvent.managed_session_id.in_(routine_sessions), "routine"), else_="chat")
+
+
+async def costs_by_channel_in_tenant_since(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    since: datetime,
+    until: datetime | None = None,
+) -> dict[tuple[str | None, str], float]:
+    """A tenant's spend by `(channel_id, origin)`, rows with no channel under `None`.
+
+    Counts every row, as `cost_for_tenant_since` does, so the channels add up to it.
+    """
+    costs = await _costs_by_keys(
+        session,
+        [UsageEvent.channel_id, _origin(tenant_id, since).label("origin")],
+        UsageEvent.tenant_id == tenant_id,
+        *_window(since, until),
+    )
+    return {(channel, origin): cost for (channel, origin), cost in costs.items()}
+
+
+async def channel_costs_by_day_agent_user(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    channel_ids: Sequence[str] = (),
+    channel_prefix: str | None = None,
+    since: datetime,
+) -> dict[tuple[date, str | None, str | None], float]:
+    """Spend on the channels (or ids under `channel_prefix`) by (UTC day, agent, person)."""
+    places: list[ColumnElement[bool]] = []
+    if channel_ids:
+        places.append(UsageEvent.channel_id.in_(channel_ids))
+    if channel_prefix is not None:
+        places.append(UsageEvent.channel_id.startswith(channel_prefix, autoescape=True))
+    if not places:
+        return {}
+    day = func.date(func.timezone("UTC", UsageEvent.occurred_at)).label("spend_day")
+    costs = await _costs_by_keys(
+        session,
+        [day, UsageEvent.agent_id, UsageEvent.platform_user_id],
+        UsageEvent.tenant_id == tenant_id,
+        or_(*places),
+        *_window(since, None),
+    )
+    return {(d, agent, user): cost for (d, agent, user), cost in costs.items()}
+
+
+@dataclass(frozen=True)
+class ChannelCostTotals:
+    """One channel's raw model cost since two points in time, and when it last spent."""
+
+    month_cost: float
+    days_cost: float
+    last_at: datetime
+
+
+async def channel_cost_totals(
+    session: AsyncSession, *, tenant_id: uuid.UUID, month_start: datetime, days_start: datetime
+) -> dict[str, ChannelCostTotals]:
+    """Every channel's cost since `month_start` and since `days_start`, from usage rows.
+
+    Only channels with usage since the earlier of the two are returned. Priced like every
+    other usage read, so it does not depend on the ledger having a debit.
+    """
+    since = min(month_start, days_start)
+    in_month = (UsageEvent.occurred_at >= month_start).label("in_month")
+    in_days = (UsageEvent.occurred_at >= days_start).label("in_days")
+    costs = await _costs_by_keys(
+        session,
+        [UsageEvent.channel_id, in_month, in_days],
+        UsageEvent.tenant_id == tenant_id,
+        UsageEvent.channel_id.is_not(None),
+        *_window(since, None),
+    )
+    month: dict[str, float] = {}
+    days: dict[str, float] = {}
+    for (channel_id, month_flag, days_flag), cost in costs.items():
+        month[channel_id] = month.get(channel_id, 0.0) + (cost if month_flag else 0.0)
+        days[channel_id] = days.get(channel_id, 0.0) + (cost if days_flag else 0.0)
+    latest = await session.execute(
+        select(UsageEvent.channel_id, func.max(UsageEvent.occurred_at))
+        .where(
+            UsageEvent.tenant_id == tenant_id,
+            UsageEvent.channel_id.is_not(None),
+            *_window(since, None),
+        )
+        .group_by(UsageEvent.channel_id)
+    )
+    return {
+        channel_id: ChannelCostTotals(month.get(channel_id, 0.0), days.get(channel_id, 0.0), last)
+        for channel_id, last in latest.tuples()
+        if channel_id is not None
+    }
+
+
+async def turns_by_channel_in_tenant_since(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    since: datetime,
+    until: datetime | None = None,
+) -> dict[tuple[str | None, str], int]:
+    """Distinct sessions per `(channel_id, origin)`; pairs with the cost read."""
+    origin = _origin(tenant_id, since).label("origin")
+    stmt = (
+        select(
+            UsageEvent.channel_id,
+            origin,
+            func.count(func.distinct(UsageEvent.managed_session_id)).label("turns"),
+        )
+        .where(UsageEvent.tenant_id == tenant_id, *_window(since, until))
+        .group_by(UsageEvent.channel_id, origin)
+    )
+    return {
+        (row.channel_id, row.origin): int(row.turns) for row in (await session.execute(stmt)).all()
+    }
+
+
+async def costs_by_day_in_tenant_since(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    since: datetime,
+    until: datetime | None = None,
+) -> dict[date, float]:
+    """A tenant's spend per UTC day (provider cost, before markup); days without use are absent."""
+    day = func.date(func.timezone("UTC", UsageEvent.occurred_at), type_=Date).label("day")
+    costs = await _costs_by_keys(
+        session, [day], UsageEvent.tenant_id == tenant_id, *_window(since, until)
+    )
+    return {key[0]: cost for key, cost in costs.items()}

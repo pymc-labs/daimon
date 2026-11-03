@@ -16,6 +16,7 @@ from typing import Literal
 
 import httpx
 import structlog
+from daimon.core.allowance_limits import monthly_limit
 from daimon.core.billing import month_start as month_start
 from daimon.core.channel_budget import (
     ChannelBudgetStatus,
@@ -27,7 +28,6 @@ from daimon.core.config import McpSettings
 from daimon.core.errors import DaimonError
 from daimon.core.mcp_auth import mint_panel_mcp_token, token_jti
 from daimon.core.promo_credit import ActiveTimedCredit, PromoRedeemed, get_active_timed_credit
-from daimon.core.stores import tenant_user_caps
 from daimon.core.stores.mcp_tokens import revoke_mcp_token
 from daimon.core.stores.platform_names import get_user_names
 from daimon.core.stores.promo_codes import has_redeemable_promo_code
@@ -155,8 +155,8 @@ async def load_billing_snapshot(
         caller_turns=await turn_count_for_user_in_tenant_since(
             session, platform_user_id=platform_user_id, tenant_id=tenant_id, since=since
         ),
-        caller_cap=await tenant_user_caps.get_effective_cap(
-            session, tenant_id=tenant_id, user_id=platform_user_id
+        caller_cap=await monthly_limit(
+            session, tenant_id=tenant_id, platform_user_id=platform_user_id, now=now
         ),
         guild_balance_usd=await get_balance(session, tenant_id=tenant_id),
         guild_spend=0.0,

@@ -1,4 +1,4 @@
-import { AgentAvatar, Avatar } from "@/components/common"
+import { AgentAvatar } from "@/components/common"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Field, Section, type Props } from "./parts"
@@ -23,15 +23,6 @@ export function AgentEditor({ agent, config, ro, update, changed }: Props) {
             <Label className="pt-1.5 font-normal text-muted-foreground">Avatar</Label>
             <AgentAvatar src={config.avatar} name={config.name} className="size-12 rounded-lg text-base" />
           </div>
-        </div>
-      </Section>
-      <Section title="People">
-        <div className="space-y-1">
-          {[{ ...agent.owner, role: "Owner" }, ...agent.co_owners.map((p) => ({ ...p, role: "Co-owner" }))].map((p) => (
-            <div key={p.id} className="flex h-8 items-center gap-2 text-sm">
-              <Avatar name={p.name} />{p.name}<span className="ml-auto text-xs text-muted-foreground">{p.role}</span>
-            </div>
-          ))}
         </div>
       </Section>
     </>

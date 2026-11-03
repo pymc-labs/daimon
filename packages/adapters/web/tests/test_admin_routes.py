@@ -6,6 +6,7 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +15,8 @@ import httpx
 import pytest
 from daimon.adapters.web import directory
 from daimon.core.access_policy import AgentRule, TenantAccessPolicy
-from daimon.core.stores import platform_names, web_audit
+from daimon.core.config import Settings, TurnSettings
+from daimon.core.stores import message_feedback, platform_names, security_audit, web_audit
 from daimon.core.stores import web_identities as identities_store
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores import web_roles as roles_store
@@ -23,14 +25,14 @@ from daimon.core.stores.domain import WebPersonRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.testing.turn_router import AGENT_ID, build_turn_router
 from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME
-from sqlalchemy import event
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from .chat_support import Workspace, build_turns, funded_workspace, shown_trail, signed_in
 from .conftest import PUBLIC_URL, WebClientFactory, web_settings
 
 _OWN = {"X-Daimon-Web": "1", "Origin": PUBLIC_URL}
-_COOKIE = "__Host-daimon_web"
+COOKIE = "__Host-daimon_web"
 _ROUTES: list[tuple[str, str, dict[str, Any] | None]] = [
     ("GET", "/api/admin/people", None),
     ("GET", "/api/admin/groups", None),
@@ -54,9 +56,19 @@ _ROUTES: list[tuple[str, str, dict[str, Any] | None]] = [
     ("GET", "/api/admin/agent-access", None),
     ("PATCH", f"/api/admin/agent-access/{AGENT_ID}", {"web": False}),
     ("GET", "/api/admin/audit", None),
+    ("GET", "/api/admin/feedback", None),
     ("GET", "/api/admin/settings", None),
     ("PATCH", "/api/admin/settings", {"modules": {"agents": False}}),
+    ("PATCH", "/api/admin/settings", {"plain_text_mentions": True}),
+    ("PATCH", "/api/admin/settings", {"providers": "default"}),
 ]
+
+
+_SETTINGS = Settings(
+    _env_file=None,  # pyright: ignore[reportCallIssue]
+    database={"url": "postgresql+asyncpg://u:p@h/db"},  # pyright: ignore[reportArgumentType]
+    turn=TurnSettings(path="mux", channel_backends=True),
+)
 
 
 @dataclass
@@ -67,7 +79,7 @@ class Admin:
     member_token: str
 
     def as_member(self) -> None:
-        self.client.cookies.set(_COOKIE, self.member_token, domain="web.example.com")
+        self.client.cookies.set(COOKIE, self.member_token, domain="web.example.com")
 
     async def trail(
         self, factory: async_sessionmaker[AsyncSession]
@@ -95,7 +107,7 @@ async def _member(
 
 
 @asynccontextmanager
-async def _admin(
+async def signed_in_admin(
     web_client: WebClientFactory, factory: async_sessionmaker[AsyncSession], tmp_path: Path
 ) -> AsyncIterator[Admin]:
     """Ada, the owner, signed in; Mia, a member, ready to sign in."""
@@ -112,9 +124,11 @@ async def _admin(
     owner_token = await signed_in(factory, ws.person)
     member_token = await signed_in(factory, member)
     turns = build_turns(factory, build_turn_router(str(ws.tenant_id)), tmp_path)
-    async with web_client(web_settings(), sessionmaker=factory, turns=turns) as client:
+    async with web_client(
+        web_settings(), sessionmaker=factory, turns=turns, settings=_SETTINGS
+    ) as client:
         client.headers.update(_OWN)
-        client.cookies.set(_COOKIE, owner_token, domain="web.example.com")
+        client.cookies.set(COOKIE, owner_token, domain="web.example.com")
         yield Admin(client, ws, member, member_token)
 
 
@@ -123,7 +137,7 @@ async def test_members_are_refused_every_admin_route(
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    async with _admin(web_client, db_session_factory, tmp_path) as admin:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
         admin.as_member()
         refused = {
             path: (
@@ -141,7 +155,7 @@ async def test_people_are_listed_and_role_and_status_changes_are_audited(
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    async with _admin(web_client, db_session_factory, tmp_path) as admin:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
         listed = (await admin.client.get("/api/admin/people")).json()
         url = f"/api/admin/people/{admin.member.id}"
         promoted = await admin.client.patch(url, json={"role": "admin"})
@@ -186,7 +200,7 @@ async def test_groups_and_people_fill_the_pickers(
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    async with _admin(web_client, db_session_factory, tmp_path) as admin:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
         async with db_session_factory.begin() as db:
             await identities_store.link_identity(
                 db,
@@ -215,7 +229,7 @@ async def test_a_suspended_owner_does_not_count_as_the_workspace_owner(
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    async with _admin(web_client, db_session_factory, tmp_path) as admin:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
         url = f"/api/admin/people/{admin.member.id}"
         await admin.client.patch(url, json={"role": "owner"})
         await admin.client.patch(url, json={"status": "suspended"})
@@ -243,7 +257,7 @@ async def test_invites_are_created_listed_and_revoked(
         "credit_usd": 10,
         "days": 7,
     }
-    async with _admin(web_client, db_session_factory, tmp_path) as admin:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
         made = await admin.client.post("/api/admin/invites", json=body)
         no_agent = await admin.client.post("/api/admin/invites", json={**body, "agents": []})
         listed = (await admin.client.get("/api/admin/invites")).json()
@@ -272,7 +286,7 @@ async def test_turning_web_chat_off_hides_the_agent_from_members(
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    async with _admin(web_client, db_session_factory, tmp_path) as admin:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
         [before] = (await admin.client.get("/api/admin/agent-access")).json()
         changed = await admin.client.patch(
             f"/api/admin/agent-access/{AGENT_ID}", json={"web": False}
@@ -300,7 +314,7 @@ async def test_an_agent_kept_to_a_channel_cannot_be_opened_on_the_web(
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    async with _admin(web_client, db_session_factory, tmp_path) as admin:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
         async with db_session_factory.begin() as db:
             await set_access_policy(
                 db,
@@ -331,7 +345,7 @@ async def test_settings_are_read_and_changed_with_an_audit_row(
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    async with _admin(web_client, db_session_factory, tmp_path) as admin:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
         before = (await admin.client.get("/api/admin/settings")).json()
         changed = await admin.client.patch(
             "/api/admin/settings", json={"modules": {"agents": False}}
@@ -339,12 +353,140 @@ async def test_settings_are_read_and_changed_with_an_audit_row(
         admin.as_member()
         me = (await admin.client.get("/api/me")).json()
 
-    assert set(before) == {"modules", "default_agent"}, before
-    assert before["modules"] == {"chat": True, "agents": True, "credits": True}
+    assert set(before) == {"modules", "default_agent", "access", "providers"}, before
+    assert before["modules"] == {
+        "chat": True,
+        "agents": True,
+        "channels": True,
+        "routines": True,
+        "credits": True,
+        "integrations": True,
+    }
     assert before["default_agent"] == AGENT_ID, "the workspace default is offered"
     assert changed.json()["modules"]["agents"] is False, changed.text
     assert "agents" not in me["modules"], "a module turned off is gone for the workspace"
     assert await admin.trail(db_session_factory) == [("Changed setting", "Modules", "Agents off")]
+
+
+async def test_access_settings_start_open_and_name_what_the_workspace_has(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
+        got = (await admin.client.get("/api/admin/settings")).json()
+
+    assert got["access"] == {
+        "people": None,
+        "others": 0,
+        "dm_enabled": False,
+        "dm_memory_read_only": False,
+        "plain_text_mentions": False,
+    }
+    assert "anthropic" in got["providers"]["allowed"]
+    assert {"id": "anthropic", "label": "Anthropic"} in got["providers"]["offered"]
+
+
+async def test_access_settings_change_one_by_one_and_leave_an_audit_row_each(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
+        url = "/api/admin/settings"
+        await admin.client.patch(url, json={"dm_enabled": True})
+        await admin.client.patch(url, json={"dm_memory_read_only": True})
+        await admin.client.patch(url, json={"plain_text_mentions": True})
+        limited = await admin.client.patch(
+            url, json={"invokers": {"people": [str(admin.member.id)]}}
+        )
+        opened = await admin.client.patch(url, json={"invokers": {"everyone": True}})
+
+    assert limited.json()["access"]["people"] == [{"id": str(admin.member.id), "name": "Mia"}]
+    assert opened.json()["access"] == {
+        "people": None,
+        "others": 0,
+        "dm_enabled": True,
+        "dm_memory_read_only": True,
+        "plain_text_mentions": True,
+    }
+    assert await admin.trail(db_session_factory) == [
+        ("Changed setting", "Direct messages", "On"),
+        ("Changed setting", "Read-only memory in direct messages", "On"),
+        ("Changed setting", "Typed mentions", "On"),
+        ("Changed setting", "Who can use the agents", "1 people"),
+        ("Changed setting", "Who can use the agents", "Everyone"),
+    ]
+
+
+async def test_a_bad_access_change_is_refused_whole(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
+        url = "/api/admin/settings"
+        nobody = await admin.client.patch(
+            url, json={"dm_enabled": True, "invokers": {"people": []}}
+        )
+        stranger = await admin.client.patch(url, json={"invokers": {"people": [str(uuid.uuid4())]}})
+        after = (await admin.client.get(url)).json()
+
+    assert (nobody.status_code, stranger.status_code) == (422, 422)
+    assert "at least one" in nobody.json()["detail"]
+    assert after["access"]["dm_enabled"] is False, "nothing in a refused change is kept"
+    assert await admin.trail(db_session_factory) == []
+
+
+async def test_settings_a_chat_platform_lacks_are_hidden_and_refused(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
+        async with db_session_factory.begin() as db:
+            await db.execute(
+                text("UPDATE tenants SET platform = 'teams' WHERE id = :id"),
+                {"id": admin.ws.tenant_id},
+            )
+        got = (await admin.client.get("/api/admin/settings")).json()["access"]
+        refused = await admin.client.patch("/api/admin/settings", json={"dm_enabled": True})
+
+    assert (got["dm_enabled"], got["dm_memory_read_only"]) == (None, None)
+    assert got["plain_text_mentions"] is False, "typed mentions work on Teams"
+    assert refused.status_code == 422
+
+
+async def test_providers_are_set_through_the_allowlist_service_and_audited_twice(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
+        url = "/api/admin/settings"
+        offered = [p["id"] for p in (await admin.client.get(url)).json()["providers"]["offered"]]
+        set_ = await admin.client.patch(url, json={"providers": ["anthropic", "gemini"]})
+        again = await admin.client.patch(url, json={"providers": ["anthropic", "gemini"]})
+        without = await admin.client.patch(url, json={"providers": ["gemini"]})
+        unknown = await admin.client.patch(url, json={"providers": ["anthropic", "nope"]})
+        followed = await admin.client.patch(url, json={"providers": "default"})
+
+    assert "anthropic" in offered
+    assert set_.json()["providers"]["allowed"] == ["anthropic", "gemini"]
+    assert set_.json()["providers"]["followed"] is False
+    assert again.status_code == 200
+    assert (without.status_code, unknown.status_code) == (422, 422)
+    assert "Anthropic" in without.json()["detail"]
+    assert followed.json()["providers"]["followed"] is True
+    assert await admin.trail(db_session_factory) == [
+        ("Changed setting", "Providers", "Anthropic, Google"),
+        ("Changed setting", "Providers", "Use the default providers"),
+    ]
+    async with db_session_factory() as db:
+        events = await security_audit.list_events(
+            db, tenant_id=admin.ws.tenant_id, tool_name="agent_backend"
+        )
+    assert [(e.operation, e.outcome) for e in events] == [("allowlist", "allowed")] * 2
 
 
 async def test_the_audit_log_names_who_acted(
@@ -352,14 +494,15 @@ async def test_the_audit_log_names_who_acted(
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    async with _admin(web_client, db_session_factory, tmp_path) as admin:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
         await admin.client.patch(
             f"/api/admin/people/{admin.member.id}", json={"status": "suspended"}
         )
         [entry] = (await admin.client.get("/api/admin/audit")).json()
 
     assert (entry["who"], entry["action"], entry["target"]) == ("Ada", "Suspended", "Mia")
-    assert set(entry) == {"id", "at", "who", "action", "target"}, "no detail, no key"
+    assert entry["source"] == "web"
+    assert set(entry) == {"id", "source", "at", "who", "action", "target"}, "no detail, no key"
 
 
 async def test_the_audit_log_shows_an_erased_person_by_a_generic_label(
@@ -367,7 +510,7 @@ async def test_the_audit_log_shows_an_erased_person_by_a_generic_label(
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    async with _admin(web_client, db_session_factory, tmp_path) as admin:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
         url = f"/api/admin/people/{admin.member.id}"
         await admin.client.patch(url, json={"status": "suspended"})
         await admin.client.post(
@@ -416,7 +559,7 @@ async def test_the_people_list_runs_the_same_queries_however_many_people_there_a
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    async with _admin(web_client, db_session_factory, tmp_path) as admin:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
         few = await _statements(db_engine, admin.client, "/api/admin/people")
         for name in ("Ben", "Cy", "Di", "Ed", "Flo"):
             await _member(db_session_factory, admin.ws.tenant_id, name)
@@ -433,7 +576,7 @@ async def test_lists_page_with_a_cursor_and_stay_plain_arrays(
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    async with _admin(web_client, db_session_factory, tmp_path) as admin:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
         for name in ("Ben", "Cy", "Di"):
             await _member(db_session_factory, admin.ws.tenant_id, name)
         for n in range(3):
@@ -475,7 +618,7 @@ async def test_the_audit_log_pages_newest_first(
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    async with _admin(web_client, db_session_factory, tmp_path) as admin:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
         url = f"/api/admin/people/{admin.member.id}"
         for status in ("suspended", "active", "suspended"):
             await admin.client.patch(url, json={"status": status})
@@ -490,12 +633,149 @@ async def test_the_audit_log_pages_newest_first(
     assert "X-Next-Cursor" not in second.headers, "the last page names no next one"
 
 
+async def _event(
+    admin: Admin,
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    tool: str,
+    at: datetime,
+    account: uuid.UUID | None,
+    agent_name: str | None = None,
+) -> None:
+    async with factory.begin() as db:
+        await security_audit.append_event(
+            db,
+            tenant_id=admin.ws.tenant_id,
+            account_id=account,
+            agent_id=None,
+            agent_name=agent_name,
+            platform="discord",
+            platform_user_id="1100000000000000001",
+            tool_name=tool,
+            operation="clear_pin",
+            outcome="denied",
+            reason="needs_admin",
+            token_kind="operator",
+            target_channel_id="1200000000000000009",
+            content_hmac="secret-hash",
+            occurred_at=at,
+        )
+
+
+async def test_the_audit_log_adds_chat_tool_calls_and_panel_writes_with_stored_fields_only(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
+        await admin.client.patch(
+            f"/api/admin/people/{admin.member.id}", json={"status": "suspended"}
+        )
+        at = datetime.now(UTC) + timedelta(minutes=1)
+        await _event(
+            admin,
+            db_session_factory,
+            tool="channel_backend",
+            at=at,
+            account=admin.member.account_id,
+        )
+        entries = (await admin.client.get("/api/admin/audit")).json()
+        only = (await admin.client.get("/api/admin/audit", params={"source": "security"})).json()
+
+    assert [e["source"] for e in entries] == ["security", "web"]
+    [event] = only
+    assert (event["who"], event["action"], event["detail"]) == (
+        "Mia",
+        "Channel backend: clear pin",
+        "Refused",
+    )
+    assert dict(event["facts"]) == {
+        "Where": "Chat tool",
+        "Tool": "Channel backend",
+        "Operation": "Clear pin",
+        "Outcome": "Refused",
+        "Reason": "needs_admin",
+        "Platform": "discord",
+        "Token": "operator",
+        "Channel": "1200000000000000009",
+    }, "only stored, readable fields; no hash, no chat user id"
+    assert "secret-hash" not in str(entries)
+
+
+async def test_the_audit_log_filters_by_source_actor_kind_and_date(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
+        await admin.client.patch(
+            f"/api/admin/people/{admin.member.id}", json={"status": "suspended"}
+        )
+        old = datetime(2026, 1, 5, 9, tzinfo=UTC)
+        await _event(
+            admin,
+            db_session_factory,
+            tool="panel:agent_backend",
+            at=old,
+            account=admin.member.account_id,
+        )
+        await _event(
+            admin,
+            db_session_factory,
+            tool="channel_backend",
+            at=old,
+            account=None,
+            agent_name="Helper",
+        )
+
+        async def get(**params: str) -> list[dict[str, Any]]:
+            return (await admin.client.get("/api/admin/audit", params=params)).json()
+
+        by_actor = await get(actor=str(admin.ws.person.id))
+        by_member = await get(actor=str(admin.member.id))
+        by_kind = await get(kind="panel:agent_backend")
+        by_day = await get(**{"from": "2026-01-05", "to": "2026-01-05"})
+        after = await get(**{"from": "2026-01-06"})
+        stranger = await get(actor=str(uuid.uuid4()))
+        kinds = (await admin.client.get("/api/admin/audit/kinds")).json()
+        bad_day = await admin.client.get("/api/admin/audit", params={"from": "soon"})
+        bad_source = await admin.client.get("/api/admin/audit", params={"source": "nope"})
+
+    assert [e["action"] for e in by_actor] == ["Suspended"]
+    assert [e["action"] for e in by_member] == ["Panel: agent backend"]
+    assert stranger == [], "a person who is not in this workspace has no rows"
+    assert [e["action"] for e in by_kind] == ["Panel: agent backend"]
+    assert sorted(e["who"] for e in by_day) == ["Helper", "Mia"]
+    assert [e["action"] for e in after] == ["Suspended"]
+    assert kinds == [
+        {"source": "web", "value": "Suspended", "label": "Suspended"},
+        {"source": "security", "value": "channel_backend", "label": "Channel backend"},
+        {"source": "security", "value": "panel:agent_backend", "label": "Panel: agent backend"},
+    ]
+    assert (bad_day.status_code, bad_source.status_code) == (422, 422)
+
+
+async def test_the_audit_log_and_its_kinds_stay_admin_only(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
+        admin.as_member()
+        refused = [
+            (await admin.client.get(path)).status_code
+            for path in ("/api/admin/audit", "/api/admin/audit/kinds")
+        ]
+
+    assert refused == [403, 403]
+
+
 async def test_an_id_in_the_path_that_is_no_uuid_is_not_found(
     web_client: WebClientFactory,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    async with _admin(web_client, db_session_factory, tmp_path) as admin:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
         refused = {
             (method, path): (await admin.client.request(method, path, json=body)).status_code
             for method, path, body in (
@@ -524,7 +804,7 @@ async def test_an_unreachable_model_provider_is_a_503_not_a_500(
         raise anthropic.APIConnectionError(request=httpx.Request("GET", "https://api.example.com"))
 
     monkeypatch.setattr(directory, "list_agents_by_tenant", down)
-    async with _admin(web_client, db_session_factory, tmp_path) as admin:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
         got = {
             path: await admin.client.get(path)
             for path in ("/api/admin/agent-access", "/api/admin/settings", "/api/admin/audit")
@@ -536,3 +816,68 @@ async def test_an_unreachable_model_provider_is_a_503_not_a_500(
     }, "a short refusal the page can show"
     assert got["/api/admin/settings"].status_code == 503, "so does the settings list of agents"
     assert got["/api/admin/audit"].status_code == 200, "the log reads no agents"
+
+
+async def test_feedback_counts_by_agent_and_shows_no_text_or_voter(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
+        async with db_session_factory.begin() as db:
+            result = await message_feedback.record_vote(
+                db,
+                tenant_id=admin.ws.tenant_id,
+                platform="discord",
+                message_id="m1",
+                channel_id="c",
+                platform_user_id="voter-secret",
+                account_id=None,
+                ma_session_id="s-unknown",
+                vote="down",
+            )
+            await message_feedback.attach_feedback_details(
+                db,
+                feedback_id=result.row.id,
+                platform_user_id="voter-secret",
+                feedback_text="private words",
+                feedback_reasons=["too_slow"],
+            )
+        res = await admin.client.get("/api/admin/feedback?days=7")
+
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["days"] == 7, f"the period comes back: {body}"
+    assert body["agents"][0]["down"] is None, f"one vote is withheld: {body}"
+    assert body["agents"][0]["reasons"] == [
+        {"code": "too_slow", "label": "Too slow", "count": None}
+    ]
+    assert "private words" not in res.text and "voter-secret" not in res.text, (
+        "neither the text nor the voter is shown"
+    )
+
+
+async def test_feedback_shows_a_count_once_three_votes_stand_behind_it(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
+        async with db_session_factory.begin() as db:
+            for n, vote in enumerate(("down", "down", "up", "up", "up")):
+                await message_feedback.record_vote(
+                    db,
+                    tenant_id=admin.ws.tenant_id,
+                    platform="discord",
+                    message_id=f"m{n}",
+                    channel_id="c",
+                    platform_user_id=f"voter-{n}",
+                    account_id=None,
+                    ma_session_id="s-unknown",
+                    vote=vote,  # pyright: ignore[reportArgumentType]
+                )
+        res = await admin.client.get("/api/admin/feedback?days=7")
+
+    assert res.status_code == 200, res.text
+    agent = res.json()["agents"][0]
+    assert (agent["up"], agent["down"]) == (3, None), f"three show, two are withheld: {agent}"

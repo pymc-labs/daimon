@@ -4,7 +4,7 @@ import {
   Background, BackgroundVariant, BaseEdge, type Edge, type EdgeProps, Handle, type Node, Position, ReactFlow, useEdgesState, useNodesState, useReactFlow,
   useStore,
 } from "@xyflow/react"
-import { Blocks, Cpu, Maximize, Minus, Plug, Plus, ScrollText, Sparkles, Users, Wrench } from "lucide-react"
+import { Blocks, Brain, Cpu, KeyRound, Maximize, Minus, Plug, Plus, ScrollText, Sparkles, SquareTerminal, Users, Wrench } from "lucide-react"
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react"
 
 import { AgentAvatar, Ago, Avatar, Money } from "@/components/common"
@@ -14,6 +14,7 @@ import { useTheme } from "@/lib/theme-context"
 import { cn } from "@/lib/utils"
 import { pressProps } from "@/lib/filters"
 import { useAgents, useConnectNode } from "./api"
+import { useAgentKeys, useCodingKeys, useKnowledge } from "./setup/api"
 import { Dot, Locked, Pill, PlaceIcon, RuleChip } from "./bits"
 import { layoutNarrow, layoutWide, type Dep, type Plan, type Pt, type Size } from "./layout"
 import { EFFORT_LABEL, placeName } from "./lib"
@@ -236,6 +237,59 @@ function ToolsNode() {
   )
 }
 
+function PeopleNode() {
+  const { agent } = useCanvas()
+  const people = [{ ...agent.owner, role: "Owner" }, ...agent.co_owners.map((p) => ({ ...p, role: "Co-owner" }))]
+  return (
+    <Card id="people" icon={<Users />} title="People" count={people.length}>
+      <div className="py-1">
+        {people.map((p) => (
+          <div key={p.id} className="flex h-8 items-center gap-2 px-3 text-[13px]">
+            <Avatar name={p.name} className="size-4 text-[8px]" /><span className="truncate">{p.name}</span>
+            <span className="ml-auto text-[11px] text-faint">{p.role}</span>
+          </div>
+        ))}
+      </div>
+    </Card>
+  )
+}
+
+function KeysNode() {
+  const { agent } = useCanvas()
+  const keys = useAgentKeys(agent.id, agent.can_view_details)
+  const names = keys.data?.map((k) => k.key) ?? []
+  return (
+    <Card id="keys" icon={<KeyRound />} title="Keys" count={keys.data ? names.length : undefined}>
+      <div className="flex flex-wrap gap-1 p-3">
+        {names.slice(0, 6).map((k) => <Pill key={k} className="font-mono text-foreground/80">{k}</Pill>)}
+        {names.length > 6 && <span className="text-xs text-faint">+{names.length - 6}</span>}
+        {keys.data && !names.length && <span className="text-xs text-faint">None</span>}
+      </div>
+    </Card>
+  )
+}
+
+function KnowledgeNode() {
+  const { agent } = useCanvas()
+  const k = useKnowledge(agent.id, agent.can_view_details)
+  const n = k.data ? Number(k.data.shared) + k.data.channels.length : undefined
+  return (
+    <Card id="knowledge" icon={<Brain />} title="Knowledge" count={n}>
+      <div className="p-3 text-xs text-faint">{k.data ? (n ? `${k.data.shared ? "Shared" : ""}${k.data.shared && k.data.channels.length ? ", " : ""}${k.data.channels.length ? `${k.data.channels.length} in channels` : ""}` : "Nothing yet") : ""}</div>
+    </Card>
+  )
+}
+
+function CodingNode() {
+  const { agent } = useCanvas()
+  const keys = useCodingKeys(agent.id, agent.can_view_details)
+  return (
+    <Card id="coding" icon={<SquareTerminal />} title="Coding tools" count={keys.data?.length}>
+      <div className="p-3 text-xs text-faint">{keys.data?.length ? "Keys in use" : keys.data ? "No keys" : ""}</div>
+    </Card>
+  )
+}
+
 function McpNode({ id }: { id: string }) {
   const { config } = useCanvas()
   const s = config.mcp_servers.find((x) => `mcp:${x.key}` === id)
@@ -311,7 +365,7 @@ function HubNode() {
 
 const NODE_TYPES = {
   agent: AgentNode, instructions: InstructionsNode, model: ModelNode, places: PlacesNode,
-  skills: SkillsNode, tools: ToolsNode, helpers: HelpersNode, mcp: ({ id }: { id: string }) => <McpNode id={id} />,
+  skills: SkillsNode, tools: ToolsNode, helpers: HelpersNode, people: PeopleNode, keys: KeysNode, coding: CodingNode, knowledge: KnowledgeNode, mcp: ({ id }: { id: string }) => <McpNode id={id} />,
   platform: ({ id }: { id: string }) => <PlatformNode id={id} />, hub: HubNode,
 }
 
@@ -345,8 +399,11 @@ const EDGE_TYPES = { line: LineEdge }
 
 // ---------- Graph and layout ----------
 
-const LEFT = ["instructions", "model", "places"]
-const RIGHT = ["skills", "tools", "helpers"]
+/** The two columns around the agent; keys and coding keys are setup, for those who see it. */
+const lanes = (agent: Agent) => ({
+  left: ["instructions", "model", "places", "people"],
+  right: ["skills", "tools", "helpers", ...(agent.can_view_details ? ["knowledge", "keys", "coding"] : [])],
+})
 const HUB = "connections"
 /** Below this canvas width the editor is one column. */
 const NARROW = 760
@@ -363,10 +420,11 @@ function connections(agent: Agent, config: AgentConfig): { id: string; type: "mc
 function graph(agent: Agent, config: AgentConfig, ro: boolean) {
   const conns = connections(agent, config)
   const hub = conns.length || !ro
+  const { left, right } = lanes(agent)
   const nodes: Node[] = [
-    ...LEFT.map((id) => ({ id, type: id })),
+    ...left.map((id) => ({ id, type: id })),
     { id: "agent", type: "agent" },
-    ...RIGHT.map((id) => ({ id, type: id })),
+    ...right.map((id) => ({ id, type: id })),
     ...(hub ? [{ id: HUB, type: "hub" }] : []),
     ...conns,
   ].map((n) => ({ ...n, position: { x: 0, y: 0 }, data: {}, draggable: false, selectable: false }))
@@ -389,7 +447,7 @@ type Props = Omit<Ctx, "ro"> & { ro: boolean }
 
 export function Canvas({ agent, config, catalog, changed, changedNodes, selected, select, ro }: Props) {
   const { resolved } = useTheme()
-  const structure = `${config.mcp_servers.map((s) => s.key).join(",")}|${agent.nodes.map((n) => `${n.kind}:${n.server}`).join(",")}|${ro}|${config.skills.map((s) => `${s.skill_id}:${(s.requires ?? []).join("+")}`).join(",")}`
+  const structure = `${agent.can_view_details}|${config.mcp_servers.map((s) => s.key).join(",")}|${agent.nodes.map((n) => `${n.kind}:${n.server}`).join(",")}|${ro}|${config.skills.map((s) => `${s.skill_id}:${(s.requires ?? []).join("+")}`).join(",")}`
   const built = useMemo(() => graph(agent, config, ro), [structure]) // eslint-disable-line react-hooks/exhaustive-deps
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([])
   const [edges, setEdges] = useEdgesState<Edge>([])
@@ -414,7 +472,7 @@ export function Canvas({ agent, config, catalog, changed, changedNodes, selected
     const known = Object.fromEntries(rf.getNodes().map((n) => [n.id, { w: n.measured?.width ?? 240, h: n.measured?.height ?? 80 }]))
     const size = (id: string): Size => known[id] ?? { w: 240, h: 80 }
     const deps: Dep[] = built.deps.map((d) => ({ key: `${d.skill}>${d.target}`, target: d.target, y: rowY(d.skill) }))
-    const plan: Plan = { left: LEFT, right: RIGHT, hub: built.hub, conns: built.conns, skills: "skills", deps }
+    const plan: Plan = { ...lanes(agent), hub: built.hub, conns: built.conns, skills: "skills", deps }
     const laid = (narrow ? layoutNarrow : layoutWide)("agent", plan, size)
     setNodes((ns) => ns.map((n) => ({ ...n, position: laid.pos[n.id] ?? n.position, style: { opacity: 1 } })))
     setEdges(Object.entries(laid.edges).map(([id, l]) => ({ id, source: l.source, target: l.target, type: "line", data: { points: l.points, dep: l.dep } })))

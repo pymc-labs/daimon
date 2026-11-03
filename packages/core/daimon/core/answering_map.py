@@ -92,6 +92,17 @@ class AnsweringMap(BaseModel):
     tenant_environment: str | None = None
     deployment_environment: str | None = None
 
+    def agent_in(self, channel_id: str | None) -> tuple[str | None, ConfigTier | None]:
+        """The agent that answers in `channel_id`, and the tier that chose it."""
+        own = next((row for row in self.channel_overrides if row.channel_id == channel_id), None)
+        if own is not None:
+            return own.agent_name, "channel"
+        if self.tenant_default is not None:
+            return self.tenant_default.agent_name, "tenant"
+        if self.deployment_default is not None:
+            return self.deployment_default, "deployment"
+        return None, None
+
     def environment_in(self, channel_id: str | None) -> tuple[str | None, ConfigTier | None]:
         """The environment a turn in `channel_id` runs in, and the tier that chose it."""
         own = next((row for row in self.channel_environments if row.channel_id == channel_id), None)

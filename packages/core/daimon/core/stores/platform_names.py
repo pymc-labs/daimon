@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 from daimon.core._models import PlatformChannelName, PlatformPrincipal, PlatformUserName
+from daimon.core.stores.domain import ChannelNameRow
 from sqlalchemy import CursorResult, delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -173,26 +174,55 @@ async def count_user_names_for_platform_user(
     return int((await session.execute(stmt)).scalar_one())
 
 
+@dataclasses.dataclass(frozen=True)
+class ChannelSighting:
+    """What an adapter knows of a channel it saw: its name and, where it has them, its
+    kind and its parent (a Discord category or a Teams team)."""
+
+    name: str
+    kind: str | None = None
+    parent_id: str | None = None
+    parent_name: str | None = None
+    archived: bool | None = None
+    """As the platform reports it; None when the sighting can't tell."""
+
+    @property
+    def label(self) -> str | None:
+        return _clean(self.name)
+
+
 async def upsert_channel_names(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
     platform: str,
-    names: Mapping[str, str],
+    names: Mapping[str, str | ChannelSighting],
 ) -> None:
-    """Store each channel's name; blank names are skipped."""
+    """Store each channel's name and when it was seen; blank names are skipped.
+
+    A part a sighting lacks (kind, parent) keeps the stored one.
+    """
     now = datetime.now(UTC)
-    values = [
-        {
-            "tenant_id": tenant_id,
-            "platform": platform,
-            "channel_id": channel_id,
-            "name": clean,
-            "updated_at": now,
-        }
-        for channel_id, name in sorted(names.items())
-        if channel_id and (clean := _clean(name)) is not None
-    ]
+    values: list[dict[str, object]] = []
+    for channel_id, given in sorted(names.items()):
+        sighting = given if isinstance(given, ChannelSighting) else ChannelSighting(given)
+        clean = sighting.label
+        if not channel_id or clean is None:
+            continue
+        values.append(
+            {
+                "tenant_id": tenant_id,
+                "platform": platform,
+                "channel_id": channel_id,
+                "name": clean,
+                "kind": _clean(sighting.kind),
+                "parent_id": _clean(sighting.parent_id),
+                "parent_name": _clean(sighting.parent_name),
+                "archived": sighting.archived,
+                "updated_at": now,
+                "last_seen_at": now,
+            }
+        )
     if not values:
         return
     stmt = pg_insert(PlatformChannelName).values(values)
@@ -202,10 +232,32 @@ async def upsert_channel_names(
             PlatformChannelName.platform,
             PlatformChannelName.channel_id,
         ],
-        set_={"name": stmt.excluded.name, "updated_at": now},
+        set_={
+            "name": stmt.excluded.name,
+            "updated_at": now,
+            "last_seen_at": now,
+            **{
+                column: func.coalesce(
+                    getattr(stmt.excluded, column), getattr(PlatformChannelName, column)
+                )
+                for column in ("kind", "parent_id", "parent_name", "archived")
+            },
+        },
     )
     await session.execute(stmt)
     await session.flush()
+
+
+async def list_channel_names(
+    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str
+) -> list[ChannelNameRow]:
+    """Every channel of the tenant on `platform` that an adapter has named."""
+    rows = await session.scalars(
+        select(PlatformChannelName).where(
+            PlatformChannelName.tenant_id == tenant_id, PlatformChannelName.platform == platform
+        )
+    )
+    return [ChannelNameRow.model_validate(row) for row in rows]
 
 
 async def get_channel_names(

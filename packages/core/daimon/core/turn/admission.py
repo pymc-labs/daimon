@@ -1514,12 +1514,11 @@ async def _admit_gates(
         agent_id=agent.id,
         person=spend_person,
     )
-    # One gate decides balance, cap, channel budget and allowance, in that order, on
+    # One gate decides balance, channel budget and allowance, in that order, on
     # one checked-out connection under READ COMMITTED.
     async with deps.sessionmaker() as billing_session:
         block = await spend_gate(
             billing_session,
-            billing_config=deps.billing_config,
             request=spend_request,
             markup=deps.markup,
             now=now,
@@ -1561,7 +1560,6 @@ async def _admit_gates(
         partial(
             spend_gate_in_new_session,
             deps.sessionmaker,
-            billing_config=deps.billing_config,
             request=spend_request,
             markup=deps.markup,
             checks=AFTER_QUEUE_CHECKS,
@@ -2063,7 +2061,6 @@ async def require_current_spend(
     async with deps.sessionmaker() as session:
         block = await spend_gate(
             session,
-            billing_config=deps.billing_config,
             request=SpendRequest(
                 tenant_id=tenant_id,
                 platform_user_id=external_user_id,

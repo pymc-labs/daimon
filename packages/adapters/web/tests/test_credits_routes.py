@@ -15,8 +15,16 @@ import httpx
 import pytest
 from daimon.core.billing import BillingConfig
 from daimon.core.config import Settings
+from daimon.core.promo_codes import build_promo_code_terms, hash_promo_code, normalize_promo_code
 from daimon.core.stores import accounts as accounts_store
-from daimon.core.stores import spend_allowances, tenant_ledger, usage_events, web_audit
+from daimon.core.stores import promo_codes as promo_store
+from daimon.core.stores import (
+    security_audit,
+    spend_allowances,
+    tenant_ledger,
+    usage_events,
+    web_audit,
+)
 from daimon.core.stores import tenants as tenants_store
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores import web_roles as roles_store
@@ -27,6 +35,7 @@ from daimon.testing.factories import make_platform_principal
 from daimon.testing.turn_router import AGENT_ID, build_turn_router
 from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME, ma_model_usage
 from pydantic import SecretStr
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .chat_support import (
@@ -56,6 +65,7 @@ _ADMIN_ROUTES = [
     ),
     ("DELETE", f"/api/credits/allowances/{uuid.uuid4()}", None),
     ("POST", "/api/credits/topup", {"amount_usd": 10}),
+    ("POST", "/api/credits/redeem", {"code": "ABCDEFGHJKMNPQRSTVWXYZ"}),
 ]
 
 
@@ -119,11 +129,13 @@ async def _spend(
     factory: async_sessionmaker[AsyncSession],
     tenant_id: uuid.UUID,
     *,
-    user: str,
+    user: str | None,
     agent: str | None = AGENT_ID,
     n: int,
+    channel: str | None = None,
+    days_ago: int = 0,
 ) -> None:
-    """One $5 Opus call (a million input tokens) for `user` on `agent`."""
+    """One $5 Opus call (a million input tokens) for `user` on `agent`, `days_ago` days back."""
     async with factory.begin() as session:
         await usage_events.record(
             session,
@@ -134,7 +146,13 @@ async def _spend(
             model_usage=ma_model_usage(input_tokens=1_000_000, output_tokens=0),
             event_id=f"evt-{n}",
             agent_id=agent,
+            channel_id=channel,
         )
+        if days_ago:
+            await session.execute(
+                text("update usage_events set occurred_at = :at where managed_session_id = :s"),
+                {"at": datetime.now(UTC) - timedelta(days=days_ago), "s": f"s-{tenant_id}-{n}"},
+            )
 
 
 class Rig:
@@ -245,12 +263,12 @@ async def test_overview_has_the_shape_the_app_reads(
             )
         body = (await client.get("/api/credits/overview")).json()
     assert set(body) == {
-        "balance_usd", "spent_month_usd", "projected_month_usd", "turns_month",
-        "daily", "ledger", "topup",
+        "balance_usd", "spent_usd", "turns", "spent_month_usd", "projected_month_usd",
+        "daily", "ledger", "topup", "funding",
     }  # fmt: skip
     assert body["balance_usd"] == 125.0, "the $100 welcome credit plus the $25 grant"
-    assert (body["spent_month_usd"], body["turns_month"]) == (10.0, 1), "billed, at the markup"
-    assert {"day", "usd"} == set(body["daily"][0]) and len(body["daily"]) >= 28
+    assert (body["spent_usd"], body["turns"]) == (10.0, 1), "billed, at the markup"
+    assert {"day", "usd"} == set(body["daily"][0]) and len(body["daily"]) == 30
     kinds = {(e["kind"], e["by"], e["note"], e["amount_usd"]) for e in body["ledger"]}
     assert kinds == {
         ("promo", "Daimon", "Welcome credit", 100.0),
@@ -258,6 +276,7 @@ async def test_overview_has_the_shape_the_app_reads(
     }, "a grant names who made it"
     assert set(body["ledger"][0]) == {"id", "at", "kind", "amount_usd", "by", "note"}
     assert body["topup"] is None, "no card checkout and no manual grants here"
+    assert body["funding"] == "prepaid"
 
 
 async def test_overview_names_how_credit_can_be_added(
@@ -285,6 +304,7 @@ async def test_spend_lists_billed_rows_by_person_agent_and_channel(
         await _spend(db_session_factory, ws.tenant_id, user=str(ws.person.id), n=1)
         await _spend(db_session_factory, ws.tenant_id, user=str(ws.person.id), n=2)
         await _spend(db_session_factory, ws.tenant_id, user=str(member.id), agent=None, n=3)
+        await _spend(db_session_factory, ws.tenant_id, user=None, channel="c1", n=4)
         people = (await client.get("/api/credits/spend?by=person")).json()
         agents = (await client.get("/api/credits/spend?by=agent&period=this")).json()
         channels = (await client.get("/api/credits/spend?by=channel")).json()
@@ -292,12 +312,18 @@ async def test_spend_lists_billed_rows_by_person_agent_and_channel(
     assert people == [
         {"id": str(ws.person.id), "name": "Ada", "turns": 2, "usd": 20.0},
         {"id": str(member.id), "name": "Mia", "turns": 1, "usd": 10.0},
-    ], "people are named from their web profile, biggest spender first"
+        {"id": "none", "name": "No person", "turns": 1, "usd": 10.0},
+    ], "people are named from their web profile, biggest spender first, then spend with none"
     assert agents == [
-        {"id": AGENT_ID, "name": DEFAULT_AGENT_NAME, "avatar": "", "turns": 2, "usd": 20.0},
+        {"id": AGENT_ID, "name": DEFAULT_AGENT_NAME, "avatar": "", "turns": 3, "usd": 30.0},
         {"id": "other", "name": "Other", "avatar": "", "turns": 1, "usd": 10.0},
     ], "spend with no agent recorded stays visible"
-    assert channels == [], "no turn has finished, so no channel has spend"
+    assert [(c["id"], c["name"], c["usd"]) for c in channels] == [
+        ("none", "No channel", 30.0),
+        ("discord:c1", "Unnamed channel", 10.0),
+    ], "channels read the same usage, with a row for spend that has no channel"
+    for rows in (people, agents, channels):
+        assert sum(r["usd"] for r in rows) == 40.0, "every breakdown adds up to the total"
     assert bad.status_code == 422, "an unknown grouping is refused"
 
 
@@ -313,6 +339,29 @@ async def test_spend_last_month_leaves_out_this_months_spend(
         this = (await client.get("/api/credits/spend?by=person&period=this")).json()
     assert last.json() == [], "what is spent now is not last month's"
     assert [(r["name"], r["usd"]) for r in this] == [("Ada", 5.0)], "it is this month's"
+
+
+async def test_last_thirty_days_is_the_default_and_reaches_back_past_the_month_start(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    rig = Rig(db_session_factory, tmp_path, web_client)
+    async with rig.open(settings=_settings("2")) as (client, ws, _):
+        user = str(ws.person.id)
+        await _spend(db_session_factory, ws.tenant_id, user=user, n=1, days_ago=10)
+        await _spend(db_session_factory, ws.tenant_id, user=user, n=2, days_ago=40)
+        default = (await client.get("/api/credits/spend?by=person")).json()
+        explicit = (await client.get("/api/credits/spend?by=person&period=30d")).json()
+        mine = (await client.get("/api/credits/mine")).json()
+        overview = (await client.get("/api/credits/overview")).json()
+    assert default == explicit and [r["usd"] for r in default] == [10.0], (
+        "the default window holds the call 10 days back and not the one 40 days back"
+    )
+    assert mine["spent_usd"] == 10.0, "my spend counts the same window"
+    assert overview["spent_usd"] == 10.0 and sum(d["usd"] for d in overview["daily"]) == 10.0, (
+        "the overview and its chart count the same days"
+    )
 
 
 async def test_allowances_are_added_listed_and_removed(
@@ -420,6 +469,47 @@ async def test_allowance_input_is_checked(
         assert await post(expires_at=past) == 422, "an allowance can't already be over"
         stranger = {"kind": "person", "id": str(uuid.uuid4()), "name": "?"}
         assert await post(subject=stranger) == 404, "a person outside the workspace is unknown"
+
+
+async def test_a_cap_is_listed_as_a_cap_and_limited_to_everyone_or_a_person(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    rig = Rig(db_session_factory, tmp_path, web_client)
+    everyone = {"kind": "group", "id": "everyone", "name": "Everyone"}
+    async with rig.open() as (client, ws, _):
+
+        async def post(**fields: Any) -> httpx.Response:
+            body = {"subject": everyone, "amount_usd": 30, "window": "month", "cap": True, **fields}
+            return await client.post("/api/credits/allowances", json=body)
+
+        staff = {"kind": "group", "id": "staff", "name": "staff"}
+        refused = [
+            (await post(subject=staff)).status_code,
+            (await post(window="total")).status_code,
+            (await post(agent={"id": AGENT_ID})).status_code,
+            (
+                await post(expires_at=(datetime.now(UTC) + timedelta(days=3)).isoformat())
+            ).status_code,
+        ]
+        made = await post()
+        twice = await post()
+        listed = (await client.get("/api/credits/allowances")).json()
+        removed = await client.delete(f"/api/credits/allowances/{made.json()['id']}")
+        async with db_session_factory() as db:
+            rows = await spend_allowances.list_for_tenant(db, tenant_id=ws.tenant_id)
+        trail = await shown_trail(db_session_factory, ws.tenant_id)
+
+    assert refused == [422] * 4, "a cap is monthly, for everyone or one person, for every agent"
+    assert made.status_code == 200 and made.json()["cap"] is True, made.text
+    assert twice.status_code == 409, "one cap per subject"
+    assert [(a["subject"]["id"], a["cap"]) for a in listed] == [("everyone", True)]
+    assert removed.status_code == 200 and rows == [], "the cap is removed like an allowance"
+    assert trail == [
+        ("Added cap", "Everyone", "$30.00 a month"),
+        ("Removed cap", "Everyone", "$30.00 a month"),
+    ], "caps are audited as caps"
 
 
 async def test_manual_topup_writes_a_ledger_row_naming_the_actor(
@@ -594,6 +684,89 @@ async def test_one_turn_is_the_same_charge_in_the_reply_the_meter_and_every_tota
     assert [m["cost_usd"] for m in saved] == [streamed["cost_usd"]], "and keeps it once saved"
     assert mine["turns"][0]["usd"] == 3.7, "recent turns show it to the cent"
     assert (mine["spent_usd"], mine["by_agent"][0]["usd"]) == (3.7, 3.7)
-    assert overview["spent_month_usd"] == 3.7, "the month total"
+    assert (overview["spent_usd"], overview["spent_month_usd"]) == (3.7, 3.7), "the totals"
     assert sum(d["usd"] for d in overview["daily"]) == 3.7, "the chart adds up to the total"
     assert meter["left_usd"] == pytest.approx(20 - 3.703701), "the meter counts the same turn"
+
+
+async def _promo(
+    factory: async_sessionmaker[AsyncSession], code: str, amount: str, **terms: Any
+) -> None:
+    terms.setdefault("timed", False)
+    async with factory.begin() as db:
+        await promo_store.insert_promo_code(
+            db,
+            code_hash=hash_promo_code(normalize_promo_code(code)),
+            terms=build_promo_code_terms(amount_usd=Decimal(amount), **terms),
+        )
+
+
+async def test_an_admin_redeems_a_promo_code_with_both_audit_trails(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    await _promo(db_session_factory, "SPRING-2026", "15")
+    rig = Rig(db_session_factory, tmp_path, web_client)
+    async with rig.open() as (client, ws, _):
+        res = await client.post("/api/credits/redeem", json={"code": "spring 2026"})
+        again = await client.post("/api/credits/redeem", json={"code": "SPRING-2026"})
+    assert res.json() == {"balance_usd": 115.0, "amount_usd": 15.0, "starts_at": None}
+    assert again.status_code == 422 and "already redeemed" in again.json()["detail"]
+    async with db_session_factory() as db:
+        trail = await web_audit.list_recent(db, tenant_id=ws.tenant_id)
+        events = await security_audit.list_events(
+            db, tenant_id=ws.tenant_id, tool_name="panel:promo_redeem"
+        )
+    assert [(a.action, a.target, a.detail) for a in trail] == [
+        ("Redeemed promo code", "Balance", "$15.00")
+    ], "only the redemption is audited for the web, and never the code"
+    assert [(e.outcome, e.reason) for e in events] == [
+        ("allowed", "completed"),
+        ("denied", "already_redeemed"),
+    ]
+
+
+async def test_redeeming_refuses_a_wrong_code_and_pauses_after_five(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    rig = Rig(db_session_factory, tmp_path, web_client)
+    async with rig.open() as (client, ws, _):
+        wrong = [
+            await client.post("/api/credits/redeem", json={"code": "NOT-A-CODE"}) for _ in range(6)
+        ]
+        balance = (await client.get("/api/credits/overview")).json()["balance_usd"]
+    assert [r.status_code for r in wrong] == [422] * 5 + [429], "the sixth try is paused"
+    assert "not valid" in wrong[0].json()["detail"]
+    assert balance == 100.0, "a refused code adds nothing"
+    async with db_session_factory() as db:
+        assert await web_audit.list_recent(db, tenant_id=ws.tenant_id) == []
+
+
+async def test_a_channel_code_is_not_redeemed_from_the_web(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    await _promo(db_session_factory, "CHANNEL-ONE", "5", channel_cap_usd=Decimal("20"))
+    rig = Rig(db_session_factory, tmp_path, web_client)
+    async with rig.open() as (client, _, _):
+        res = await client.post("/api/credits/redeem", json={"code": "CHANNEL-ONE"})
+    assert res.status_code == 422 and "in that channel" in res.json()["detail"]
+
+
+async def test_overview_states_the_funding_mode(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    rig = Rig(db_session_factory, tmp_path, web_client)
+    async with rig.open() as (client, ws, _):
+        async with db_session_factory.begin() as db:
+            await tenants_store.set_funding_mode(
+                db, tenant_id=ws.tenant_id, funding_mode="operator_funded"
+            )
+        funding = (await client.get("/api/credits/overview")).json()["funding"]
+    assert funding == "operator_funded"

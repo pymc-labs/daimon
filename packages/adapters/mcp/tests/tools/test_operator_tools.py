@@ -209,7 +209,7 @@ async def test_tenant_summary_marks_channels_kept_to_their_own_agents(
     )
 
 
-async def test_tenant_summary_omits_readers_and_writers_and_lists_timed_credit(
+async def test_tenant_summary_shows_readers_and_writers_and_lists_timed_credit(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant, auth = await _operator(committing_sessionmaker, "tenant:read")
@@ -253,7 +253,9 @@ async def test_tenant_summary_omits_readers_and_writers_and_lists_timed_credit(
         "environment_name",
         "own_agents_only",
         "budget",
-    }, "readers and writers are omitted, not sent as null, for a caller that can't read them"
+        "readers",
+        "writers",
+    }, "an admin's summary carries each channel's readers and writers"
     assert [(c.remaining_usd, c.ends_at) for c in summary.timed_credit] == [
         ("7.00", terms.credit_ends_at.isoformat() if terms.credit_ends_at else None)
     ], "the live timed credit and when it ends"

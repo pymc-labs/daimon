@@ -279,6 +279,7 @@ class RoutineRow(BaseModel):
     delivery_lease_expires_at: datetime | None = None
     delivered_at: datetime | None = None
     channel_id: str | None = None
+    made_in_channel_id: str | None = None
     source_provenance_known: bool = False
     source_channel_id: str | None = None
     source_thread_id: str | None = None
@@ -600,6 +601,60 @@ class ChannelBudgetRow(BaseModel):
     exhausted_notice_key: str | None = None
 
 
+ChangeSurface = Literal["web", "chat", "panel", "cli"]
+"""Where a channel change was made: the web app, a chat tool, a platform panel, the CLI."""
+ChannelSetting = Literal[
+    "default_agent",
+    "kept_agents",
+    "access",
+    "budget",
+    "participation",
+    "progress_plans",
+    "environment",
+    "skills",
+    "provider_pin",
+    "channel_copy",
+    "thread_participation",
+    "thread_progress_plans",
+    "thread_rule",
+    "thread_handoff",
+]
+"""What a change record names. The `thread_*` settings are a thread's own, recorded under
+its channel with the thread id in the values."""
+
+
+class ChannelChangeRow(BaseModel):
+    """One recorded change to a channel setting; `before` and `after` are JSON values."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: int
+    tenant_id: uuid.UUID
+    platform: str
+    channel_id: str
+    setting: ChannelSetting
+    before: JsonValue
+    after: JsonValue
+    actor_account_id: uuid.UUID | None
+    surface: ChangeSurface
+    at: datetime
+
+
+class ChannelNameRow(BaseModel):
+    """What a platform last called one channel, and where it sits."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    platform: str
+    channel_id: str
+    name: str
+    kind: str | None = None
+    parent_id: str | None = None
+    parent_name: str | None = None
+    last_seen_at: datetime | None = None
+    archived: bool | None = None
+
+
 AllowanceSubjectKind = Literal["person", "group", "invite"]
 AllowanceWindow = Literal["month", "total"]
 
@@ -620,18 +675,8 @@ class SpendAllowanceRow(BaseModel):
     expires_at: datetime | None
     created_by_account_id: uuid.UUID | None
     created_at: datetime
-
-
-class TenantUserCapRow(BaseModel):
-    """Per-(tenant, user) cap row. NULL platform_user_id = tenant default. BILL-01."""
-
-    model_config = ConfigDict(from_attributes=True, frozen=True)
-
-    id: uuid.UUID
-    tenant_id: uuid.UUID
-    platform_user_id: str | None
-    cap_usd: Decimal
-    updated_at: datetime
+    is_cap: bool = False
+    """A monthly ceiling that holds on top of the governing allowance (see `SpendAllowance`)."""
 
 
 class PaymentEventRow(BaseModel):
@@ -1005,6 +1050,16 @@ class McpOAuthFlowRow(BaseModel):
     expires_at: datetime
     used_at: datetime | None
     completed_at: datetime | None
+
+
+class McpSignInRow(BaseModel):
+    """One of a person's finished MCP sign-ins: the agent, the server and where it lives."""
+
+    model_config = ConfigDict(frozen=True)
+
+    agent_id: uuid.UUID
+    server_name: str
+    mcp_server_url: str
 
 
 class McpOAuthGrantRow(BaseModel):

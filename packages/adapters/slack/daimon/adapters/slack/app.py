@@ -87,6 +87,7 @@ from daimon.adapters.slack.boot_sweep import (
     snapshot_slack_card_intents,
 )
 from daimon.adapters.slack.budget_notice import with_budget_notifier
+from daimon.adapters.slack.channel_listing import list_all_once
 from daimon.adapters.slack.channel_reads import load_channel_read_policy
 from daimon.adapters.slack.context import (
     build_channel_context_xml,
@@ -225,6 +226,7 @@ from daimon.core.agent_identity import (
     resolve_agent_identity,
 )
 from daimon.core.anthropic_guard import guard_selfhosted_channel
+from daimon.core.channel_listing import run_channel_listing
 from daimon.core.continuity.continuation import (
     check_wake_responder,
     continuation_attended,
@@ -530,6 +532,18 @@ class SlackApp:
                 self.runtime.sessionmaker,
                 platform="slack",
                 deliver=self._send_connect_notice,
+                should_stop=lambda: self.draining,
+            )
+        )
+
+    def start_channel_listing(self) -> asyncio.Task[None]:
+        async def client_for(team_id: str) -> AsyncWebClient | None:
+            return await resolve_web_client(self.runtime, team_id=team_id)
+
+        return self._spawn(
+            run_channel_listing(
+                lambda: list_all_once(self.runtime.sessionmaker, client_for),
+                platform="slack",
                 should_stop=lambda: self.draining,
             )
         )
@@ -2669,6 +2683,9 @@ class SlackApp:
                     text={
                         "balance_depleted": admission_refusal_message(
                             "balance_depleted", self.runtime.settings, foreign=standing.foreign
+                        ),
+                        "cap_exceeded": admission_refusal_message(
+                            "cap_exceeded", self.runtime.settings, foreign=standing.foreign
                         ),
                         "allowance_exhausted": admission_refusal_message(
                             "allowance_exhausted", self.runtime.settings, foreign=standing.foreign

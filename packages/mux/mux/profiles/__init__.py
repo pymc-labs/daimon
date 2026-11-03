@@ -26,6 +26,14 @@ PROFILES: Mapping[str, Profile] = {
     for p in (MANAGED_AGENTS, PERSISTENT_WORKSPACE, CONVERSATION_ONLY, INLINE_REUSE, LOOP)
 }
 
+PROVIDER_LABELS: Mapping[Provider, str] = {
+    "anthropic": "Anthropic",
+    "openai": "OpenAI",
+    "gemini": "Google",
+    "selfhosted": "Self-hosted",
+}
+"""Each provider's name as a person reads it, in the order they are offered."""
+
 
 def get_profile(profile_id: str) -> Profile:
     try:
@@ -161,6 +169,7 @@ __all__ = [
     "LOOP",
     "PERSISTENT_WORKSPACE",
     "PROFILES",
+    "PROVIDER_LABELS",
     "get_profile",
     "meters_cache_writes_for",
     "emits_legacy_events_for",

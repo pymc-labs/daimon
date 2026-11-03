@@ -4,25 +4,31 @@ import { Ago, AgentAvatar } from "@/components/common"
 import { CreditMeter } from "@/components/CreditMeter"
 import { QueryState } from "@/components/QueryState"
 import { Table, TableBody, TableCell, TableRow } from "@/components/ui/table"
-import { api } from "@/lib/api"
+import { api, qs } from "@/lib/api"
 import { shortDate, usd } from "@/lib/format"
 import { useMe } from "@/lib/hooks"
 import { cn } from "@/lib/utils"
-import type { Mine } from "./types"
-import { Section } from "./shared"
+import type { Mine, Period } from "./types"
+import { usePeriod } from "./period"
+import { PeriodToggle, Section } from "./shared"
 
 export function MineTab() {
-  const q = useQuery({ queryKey: ["credits", "mine"], queryFn: () => api.get<Mine>("/api/credits/mine") })
-  return <QueryState query={q}>{(data) => <MineBody data={data} />}</QueryState>
+  const [period, setPeriod] = usePeriod()
+  const q = useQuery({
+    queryKey: ["credits", "mine", period], placeholderData: (p) => p,
+    queryFn: () => api.get<Mine>(`/api/credits/mine${qs({ period: period === "30d" ? undefined : period })}`),
+  })
+  return <QueryState query={q}>{(data) => <MineBody data={data} period={period} onPeriod={setPeriod} />}</QueryState>
 }
 
-function MineBody({ data }: { data: Mine }) {
+function MineBody({ data, period, onPeriod }: { data: Mine; period: Period; onPeriod: (p: Period) => void }) {
   const { data: me } = useMe()
   const meter = me?.credit
   if (!meter && !data.by_agent.length && !data.turns.length) return <div className="py-16 text-center text-sm text-muted-foreground">No spend yet</div>
   const max = Math.max(...data.by_agent.map((r) => r.usd), 1)
   return (
     <div className="mx-auto max-w-[1040px]">
+      <div className="mb-4"><PeriodToggle value={period} onChange={onPeriod} /></div>
       {meter && (
         <div className="rounded-lg border p-4">
           <CreditMeter meter={meter} />

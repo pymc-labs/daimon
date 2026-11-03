@@ -87,7 +87,7 @@ untrusted evidence.
 
 ## Completion and recovery
 
-The scheduler leases queued work, checks balance and monthly caps, and enforces
+The scheduler leases queued work, checks balance and spend allowances, and enforces
 running caps. Each job uses its owner's billing attribution, including live usage
 recording and catch-up settlement. The job dollar cap is checked on scheduler
 heartbeats; it is not an exact prepaid reservation.

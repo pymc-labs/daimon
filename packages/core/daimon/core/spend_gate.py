@@ -1,10 +1,11 @@
 """The one spend gate every surface asks before a person's request spends money.
 
 Chat turns, thread participation, routines, MCP tool calls and the web all stop on
-the same four checks, in this order: the workspace's prepaid balance, the person's
-monthly cap, the channel's budget, and the person's spend allowances. Each surface
-words its own refusal; this module only decides. Exceptions propagate: the gate
-fails closed.
+the same three checks, in this order: the workspace's prepaid balance, the channel's
+budget, and the person's spend allowances (which carry the per-member monthly limits).
+A refusal that comes from the monthly limit is reported as `cap_exceeded`, not as an
+allowance. Each surface words its own refusal; this module only decides. Exceptions
+propagate: the gate fails closed.
 
 A caller that must not re-run every check (a queued turn that was admitted moments
 ago) passes `checks` to run only some, so a surface's behaviour changes only where it
@@ -19,19 +20,27 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Literal, get_args
 
-from daimon.core.allowances import AllowanceVerdict, allowance_verdict, applicable, window_start
-from daimon.core.billing import BillingConfig, is_over_cap
+from daimon.core.allowances import (
+    AllowanceVerdict,
+    allowance_verdict,
+    applicable,
+    governing_cap,
+    window_start,
+)
 from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.stores import identity, spend_allowances, web_identities, web_people
 from daimon.core.tenant_balance import is_over_balance
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-SpendBlock = Literal["balance_depleted", "cap_exceeded", "budget_exceeded", "allowance_exhausted"]
+SpendCheck = Literal["balance_depleted", "budget_exceeded", "allowance_exhausted"]
+SpendBlock = SpendCheck | Literal["cap_exceeded"]
+"""What stopped a request. `cap_exceeded` comes out of the allowance check, so it is a
+result but never one of the `checks` a caller asks for."""
 
-ALL_CHECKS: frozenset[SpendBlock] = frozenset(get_args(SpendBlock))
-AFTER_QUEUE_CHECKS: frozenset[SpendBlock] = frozenset({"balance_depleted", "allowance_exhausted"})
+ALL_CHECKS: frozenset[SpendCheck] = frozenset(get_args(SpendCheck))
+AFTER_QUEUE_CHECKS: frozenset[SpendCheck] = frozenset({"balance_depleted", "allowance_exhausted"})
 """What a queued turn is checked against again once it holds its slot: the money that
-can run out while it waited. The cap and the channel budget were decided at admission."""
+can run out while it waited. The channel budget was decided at admission."""
 
 
 @dataclass(frozen=True)
@@ -40,7 +49,7 @@ class SpendPerson:
 
     Allowances name a person by any platform user id of their account (`identities`),
     a group the person is in, or the invite a visitor came in by. A visitor with no
-    allowance is blocked; a member with none is not limited.
+    allowance is blocked; a member with none is not limited. Caps hold either way.
     """
 
     groups: frozenset[str] = field(default_factory=frozenset[str])
@@ -110,7 +119,7 @@ class SpendRequest:
     """One request to spend: whose, on which agent, counted against which channel.
 
     `platform_user_id=None` is the trusted, unbilled path (operator tokens): only the
-    workspace balance and the channel budget apply to it, never a cap or an allowance.
+    workspace balance and the channel budget apply to it, never an allowance.
     `channel_id` is the channel whose budget the spend counts toward, None for none.
     `person=None` has the gate resolve who the user is from their account.
     """
@@ -154,6 +163,7 @@ async def person_verdict(
         now=now,
         is_visitor=person.is_visitor,
     )
+    cap = governing_cap(rows, person_ids=person.identities | {user_id}, now=now)
     used = {
         row.id: await spend_allowances.used_since(
             session,
@@ -163,37 +173,28 @@ async def person_verdict(
             since=window_start(row, now=now),
             markup=markup,
         )
-        for row in governing
+        for row in [*governing, *([cap] if cap else [])]
     }
-    return allowance_verdict(governing, used=used, now=now, is_visitor=person.is_visitor)
+    return allowance_verdict(governing, used=used, now=now, is_visitor=person.is_visitor, cap=cap)
 
 
 async def spend_gate(
     session: AsyncSession,
     *,
-    billing_config: BillingConfig | None,
     request: SpendRequest,
     markup: Decimal,
     now: datetime,
-    checks: frozenset[SpendBlock] = ALL_CHECKS,
+    checks: frozenset[SpendCheck] = ALL_CHECKS,
 ) -> SpendBlock | None:
-    """The first check that stops this request, or None when it may spend."""
+    """The first check that stops this request, or None when it may spend.
+
+    The allowance check also holds the member's monthly limit; when that limit, not an
+    allowance, has no room left the block is `cap_exceeded`.
+    """
     if "balance_depleted" in checks and await is_over_balance(
         tenant_id=request.tenant_id, session=session
     ):
         return "balance_depleted"
-    if (
-        "cap_exceeded" in checks
-        and request.platform_user_id is not None
-        and await is_over_cap(
-            billing_config=billing_config,
-            tenant_id=request.tenant_id,
-            user_id=request.platform_user_id,
-            now=now,
-            session=session,
-        )
-    ):
-        return "cap_exceeded"
     if "budget_exceeded" in checks and await is_over_channel_budget(
         tenant_id=request.tenant_id,
         platform=request.platform,
@@ -202,29 +203,25 @@ async def spend_gate(
         session=session,
     ):
         return "budget_exceeded"
-    if (
-        "allowance_exhausted" in checks
-        and request.platform_user_id is not None
-        and (await person_verdict(session, request=request, markup=markup, now=now)).blocked
-    ):
-        return "allowance_exhausted"
+    if "allowance_exhausted" in checks and request.platform_user_id is not None:
+        verdict = await person_verdict(session, request=request, markup=markup, now=now)
+        if verdict.blocked:
+            return "cap_exceeded" if verdict.capped else "allowance_exhausted"
     return None
 
 
 async def spend_gate_in_new_session(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
-    billing_config: BillingConfig | None,
     request: SpendRequest,
     markup: Decimal,
     now: datetime | None = None,
-    checks: frozenset[SpendBlock] = ALL_CHECKS,
+    checks: frozenset[SpendCheck] = ALL_CHECKS,
 ) -> SpendBlock | None:
     """`spend_gate` for a caller that holds no session; `now` defaults to the present."""
     async with sessionmaker() as session:
         return await spend_gate(
             session,
-            billing_config=billing_config,
             request=request,
             markup=markup,
             now=now or datetime.now(UTC),

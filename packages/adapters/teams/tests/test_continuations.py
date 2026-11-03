@@ -188,7 +188,14 @@ async def test_a_newer_message_supersedes_the_queued_work(
 
 
 @pytest.mark.parametrize(
-    "reason", ["balance_depleted", "cap_exceeded", "invoker_not_allowed", "runs_elsewhere"]
+    "reason",
+    [
+        "balance_depleted",
+        "allowance_exhausted",
+        "cap_exceeded",
+        "invoker_not_allowed",
+        "runs_elsewhere",
+    ],
 )
 async def test_a_refused_turn_tells_only_a_live_person_then_raises(
     db_session_factory: async_sessionmaker[AsyncSession], reason: AdmissionDenialReason

@@ -34,6 +34,7 @@ from daimon.core.channel_budget import (
     load_budget_status,
     parse_budget_spec,
 )
+from daimon.core.channel_changes import ChannelActor, clear_budget, set_budget
 from daimon.core.channel_ids import InvalidChannelId, normalize_channel_id
 from daimon.core.channel_rules import (
     READERS_LABELS,
@@ -252,23 +253,22 @@ async def budget_set(
         target = await _discord_budget_channel(
             rt, guild_id=workspace_id, channel_id=target, transport=discord_transport
         )
+    budget = await set_budget(
+        rt.sessionmaker, _operator(tenant_id), platform=platform, channel_id=target, spec=spec
+    )
     async with rt.sessionmaker() as session, session.begin():
-        budget = await channel_budgets.set_channel_budget(
-            session,
-            tenant_id=tenant_id,
-            platform=platform,
-            channel_id=target,
-            limit_usd=spec.limit_usd,
-            window=spec.window,
-            starts_at=spec.starts_at,
-            ends_at=spec.ends_at,
-            set_by_account_id=None,
-        )
         await _audit_budget_change(
             session, command="set", tenant_id=tenant_id, platform=platform, channel_id=target
         )
         status = await load_budget_status(session, budget, now=datetime.now(UTC))
     console.print(f"{platform}:{workspace_id} channel {target}: {describe_budget(status)}")
+
+
+def _operator(tenant_id: uuid.UUID) -> ChannelActor:
+    """The host operator: trusted as an admin, with no account behind it."""
+    return ChannelActor(
+        tenant_id=tenant_id, account_id=None, subject=Subject(is_admin=True), surface="cli"
+    )
 
 
 async def _audit_budget_change(
@@ -336,11 +336,11 @@ async def budget_clear(
             transport=discord_transport,
             missing_ok=True,
         )
-    async with rt.sessionmaker() as session, session.begin():
-        cleared = await channel_budgets.delete_channel_budget(
-            session, tenant_id=tenant_id, platform=platform, channel_id=target
-        )
-        if cleared:
+    cleared = await clear_budget(
+        rt.sessionmaker, _operator(tenant_id), platform=platform, channel_id=target
+    )
+    if cleared:
+        async with rt.sessionmaker() as session, session.begin():
             await _audit_budget_change(
                 session, command="clear", tenant_id=tenant_id, platform=platform, channel_id=target
             )
@@ -450,7 +450,6 @@ async def channels_list(
             tenant_id=tenant_id,
             default=rt.deployment_default,
             now=datetime.now(UTC),
-            with_access=True,
         )
     if as_json:
         console.print(json.dumps(asdict(summary)), soft_wrap=True, highlight=False, markup=False)
@@ -641,6 +640,7 @@ async def channels_skills_add(
             platform_skills=load_platform_skills(
                 rt.settings.defaults_root, features=rt.settings.configured_features
             ),
+            surface="cli",
         )
         if isinstance(added, str):
             raise DaimonError(CHANNEL_SKILL_REFUSALS[added])
@@ -697,6 +697,8 @@ async def channels_skills_remove(
                 platform=platform,
                 channel_id=channel,
                 skill_id=match.skill_id,
+                actor_account_id=None,
+                surface="cli",
             )
             await _audit_skill_change(
                 session,
@@ -951,6 +953,7 @@ async def channels_rule_set(
             readers=wanted_readers,
             writers=wanted_writers,
             subject=subject,
+            surface="cli",
             default=rt.deployment_default,
             copy=copy_from is not None,
             copy_from=copy_from,
@@ -1046,6 +1049,7 @@ async def agents_rule_set(
             runs_in=channels,
             # The CLI is the deployment operator.
             subject=Subject(is_admin=True),
+            surface="cli",
             default=rt.deployment_default,
         )
     except ChannelRuleRefused as exc:

@@ -143,7 +143,6 @@ from daimon.core.memory_resource import (
 )
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import agent_posts as agent_posts_store
-from daimon.core.stores import channel_admins as channel_admins_store
 from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores import direct_messages as direct_messages_store
 from daimon.core.stores import gemini_runtime_state as gemini_state_store
@@ -209,7 +208,6 @@ class PurgeReport(BaseModel):
     message_feedback: int = 0
     support_escalations: int = 0
     daimon_admins: int = 0
-    channel_admins: int = 0
     agent_post_requesters: int = 0
     platform_user_names: int = 0
     teams_messages: int = 0
@@ -255,7 +253,6 @@ class PurgeReport(BaseModel):
             message_feedback=self.message_feedback + other.message_feedback,
             support_escalations=self.support_escalations + other.support_escalations,
             daimon_admins=self.daimon_admins + other.daimon_admins,
-            channel_admins=self.channel_admins + other.channel_admins,
             agent_post_requesters=self.agent_post_requesters + other.agent_post_requesters,
             platform_user_names=self.platform_user_names + other.platform_user_names,
             teams_messages=self.teams_messages + other.teams_messages,
@@ -373,12 +370,6 @@ async def _purge_principal_in_session(
             platform=principal.platform,
             platform_user_id=principal.external_id,
         )
-        channel_admins_count = await channel_admins_store.remove_user_from_channel_admins(
-            session,
-            tenant_id=principal.tenant_id,
-            platform=principal.platform,
-            platform_user_id=principal.external_id,
-        )
         # A turn's posts and an auto-opened thread name who asked; the posts
         # are the agent's, so only the person's id leaves them.
         agent_post_requesters_count = await agent_posts_store.clear_requester(
@@ -419,7 +410,6 @@ async def _purge_principal_in_session(
         # same refusal to match on os_user, as message_feedback above.
         support_escalations_count = 0
         daimon_admins_count = 0
-        channel_admins_count = 0
 
     user_skills_count = await user_skills_store.delete_user_skills_for_principal(
         session, principal_id=principal.id
@@ -482,7 +472,6 @@ async def _purge_principal_in_session(
         message_feedback=message_feedback_count,
         support_escalations=support_escalations_count,
         daimon_admins=daimon_admins_count,
-        channel_admins=channel_admins_count,
         agent_post_requesters=agent_post_requesters_count,
         platform_user_names=platform_user_names_count,
         teams_messages=teams_messages_count,

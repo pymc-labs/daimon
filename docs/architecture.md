@@ -103,7 +103,7 @@ configuration, and no provider call happens before the cheap checks.
    note.
 5. Resolve the agent and environment to live provider ids, reconciling
    defaults if a tag no longer resolves.
-6. Check the tenant balance, the monthly cap and the channel budget. See
+6. Check the tenant balance, the spend allowance and the channel budget. See
    [billing](billing.md).
 
 Each refusal carries a reason that the adapter words in its platform's nouns.
@@ -291,11 +291,11 @@ These paths skip `admit()` and `bind_session()` but reuse the same session
 creation and driver.
 
 - **Scheduled routines** run through `core/headless_runner.py` under the same
-  ceiling. The scheduler runs the balance, cap and channel budget gates itself
+  ceiling. The scheduler runs the balance, allowance and channel budget gates itself
   before each fire. An owner-DM routine instead runs as a live DM turn. See
   [routines](routines.md).
 - **MCP agent-chat tools** drive a session directly. They re-run the balance
-  and cap gates.
+  and allowance gates.
 - **`daimon run`** is a single-turn subprocess entry that calls the driver
   directly, billing-exempt.
 - **Wakes** run a turn in an existing thread with nobody mentioning the bot:

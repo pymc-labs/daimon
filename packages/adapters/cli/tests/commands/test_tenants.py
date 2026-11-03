@@ -4,6 +4,7 @@ import asyncio
 import json
 import uuid
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from decimal import Decimal
 from io import StringIO
 from typing import cast
@@ -24,6 +25,7 @@ from daimon.adapters.cli.commands.tenants import (
     tenants_list,
     tenants_turn_cap,
 )
+from daimon.core import allowance_limits
 from daimon.core.access_policy import (
     OPEN_ACCESS_POLICY,
     AgentRule,
@@ -34,7 +36,7 @@ from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.errors import StoreError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import TenantScopeRef
-from daimon.core.stores import scoped_config_write, tenant_ledger, tenant_user_caps
+from daimon.core.stores import scoped_config_write, spend_allowances, tenant_ledger
 from daimon.core.stores.access_policy import (
     AccessPolicyUnreadable,
     load_access_policy,
@@ -133,7 +135,7 @@ async def test_credit_is_positive_and_idempotent(
 
 
 @pytest.mark.asyncio
-async def test_cap_sets_default_and_user_override(
+async def test_cap_sets_default_and_user_limit_as_caps(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     rt = build_cli_runtime(db_session_factory)
@@ -155,13 +157,27 @@ async def test_cap_sets_default_and_user_override(
         usd="5.00",
         user="U123",
     )
+    await tenants_cap(
+        rt=rt,
+        console=console,
+        platform="slack",
+        workspace_id="cap-team",
+        usd="7.00",
+        user=None,
+    )
+    now = datetime.now(UTC)
     async with db_session_factory() as s:
-        assert await tenant_user_caps.get_effective_cap(
-            s, tenant_id=result.tenant_id, user_id="other"
-        ) == Decimal("10.00")
-        assert await tenant_user_caps.get_effective_cap(
-            s, tenant_id=result.tenant_id, user_id="U123"
-        ) == Decimal("5.00")
+        rows = await spend_allowances.list_for_tenant(s, tenant_id=result.tenant_id)
+        assert sorted(
+            (r.subject_kind, r.subject_id, r.amount_usd, r.window, r.is_cap) for r in rows
+        ) == [
+            ("group", "everyone", Decimal("7.00"), "month", True),
+            ("person", "U123", Decimal("5.00"), "month", True),
+        ], "the default is one monthly cap for everyone, reset in place; U123 has their own"
+        for user, amount in (("other", "7.00"), ("U123", "5.00")):
+            assert await allowance_limits.monthly_limit(
+                s, tenant_id=result.tenant_id, platform_user_id=user, now=now
+            ) == Decimal(amount)
 
 
 @pytest.mark.asyncio

@@ -33,11 +33,7 @@ EVERYTHING: frozenset[OverviewFact] = frozenset({"own_agents", "rule", "budget",
     ("viewer", "channel_id", "shown"),
     [
         (ChannelViewer(reads_access_policy=True), ROOM, EVERYTHING),
-        (
-            ChannelViewer(is_server_admin=True),
-            ROOM,
-            frozenset({"own_agents", "budget", "environment"}),
-        ),
+        (ChannelViewer(is_server_admin=True), ROOM, EVERYTHING),
         (
             ChannelViewer(sees_channel=True, inside_channel_id=ROOM),
             ROOM,
@@ -50,7 +46,7 @@ EVERYTHING: frozenset[OverviewFact] = frozenset({"own_agents", "rule", "budget",
     ],
     ids=[
         "operator sees everything",
-        "server admin sees all but the rule itself",
+        "server admin sees everything too",
         "member inside sees the budget and environment",
         "member outside sees only the budget",
         "member inside sees no environment outside",
@@ -115,6 +111,8 @@ async def test_load_reads_one_channel_and_skips_what_the_viewer_cannot_see(
         channel_id=ROOM,
         environment_name="gpu",
         actor_account_id=None,
+        platform="discord",
+        surface="panel",
     )
     await set_channel_budget(
         db_session,
@@ -142,7 +140,7 @@ async def test_load_reads_one_channel_and_skips_what_the_viewer_cannot_see(
     admin = await load(ChannelViewer(is_server_admin=True))
     assert admin.own_agents_only is True and admin.environment_name == "gpu", "admin sees the room"
     assert admin.budget is not None and admin.budget.budget.limit_usd == Decimal("50"), "budget"
-    assert admin.readers is None and admin.writers is None, "the rule itself is the operator's"
+    assert (admin.readers, admin.writers) == ("own", "own"), "any admin reads the rule"
 
     member = await load(ChannelViewer(sees_channel=True))
     assert member.budget is not None, "anyone shown the channel reads its budget"

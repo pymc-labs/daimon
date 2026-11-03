@@ -339,6 +339,7 @@ class ResourceAdminBindings:
                     default=binding.default,
                     actor_account_id=uuid.UUID(binding.scope.account_id),
                     platform_skills=self.platform_skills,
+                    surface="web",
                 )
                 if isinstance(row, str):
                     return AdminReceipt(
@@ -363,6 +364,8 @@ class ResourceAdminBindings:
                         platform=binding.platform,
                         channel_id=channel,
                         skill_id=skill_id,
+                        actor_account_id=uuid.UUID(binding.scope.account_id),
+                        surface="web",
                     )
         async with binding.sessions() as session:
             rows = await list_channel_skills(

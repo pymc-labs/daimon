@@ -60,8 +60,9 @@ from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.session_snapshot import MaSkill
 from daimon.core.specs import SkillRef
 from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.channel_changes import record_change
 from daimon.core.stores.channel_skills import add_channel_skill, list_channel_skills
-from daimon.core.stores.domain import ChannelSkillRow
+from daimon.core.stores.domain import ChangeSurface, ChannelSkillRow
 from daimon.core.stores.neutral_catalog import PostgresNeutralCatalog
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.stores.tenants import get_tenant
@@ -69,6 +70,7 @@ from daimon.core.stores.user_skills import list_user_skills_for_tenant
 from mux.contracts.ids import Provider, Scope
 from mux.errors import ScopeViolation
 from mux.profiles import neutral_catalog_profile_for
+from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = structlog.get_logger(__name__)
@@ -358,6 +360,7 @@ async def add_skill_to_channel(
     default: DeploymentDefault,
     actor_account_id: uuid.UUID | None,
     platform_skills: Mapping[str, Sequence[SkillRef]],
+    surface: ChangeSurface,
 ) -> ChannelSkillRow | ChannelSkillRefusal:
     """Add `skill` to `channel_id` for whatever agent answers there now, or say why not.
 
@@ -390,7 +393,7 @@ async def add_skill_to_channel(
     )
     if isinstance(choice, str):
         return choice
-    return await add_channel_skill(
+    row = await add_channel_skill(
         session,
         tenant_id=tenant_id,
         platform=platform,
@@ -401,6 +404,19 @@ async def add_skill_to_channel(
         owner_agent_name=choice.owner_agent_name,
         actor_account_id=actor_account_id,
     )
+    before: list[JsonValue] = [r.name for r in current]
+    await record_change(
+        session,
+        tenant_id=tenant_id,
+        platform=platform,
+        channel_id=channel_id,
+        setting="skills",
+        before=list(before),
+        after=before if row.name in before else [*before, row.name],
+        actor_account_id=actor_account_id,
+        surface=surface,
+    )
+    return row
 
 
 def _log_once(event: str, key: tuple[str, ...], **fields: object) -> None:

@@ -31,8 +31,8 @@ field paths) picks what each new item reports. Projections accept `.`,
 
 A firing queues a turn that may only read and report. Shell, built-in tools,
 skills, management tools and writes are unavailable. Every model call,
-approval card and report rechecks the owner's access, balance, monthly cap and
-channel budget.
+approval card and report rechecks the owner's access, balance, spend allowance
+and channel budget.
 
 ## Where a watch reports
 

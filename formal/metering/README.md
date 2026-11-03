@@ -220,7 +220,7 @@ per-tenant concurrency cap). Nothing re-checks the balance after admission.
 
 | Model item | Implementation |
 | --- | --- |
-| `Admit` (new/reused chat) | [`admission.admit`](../../packages/core/daimon/core/turn/admission.py) (`is_over_balance` then `is_over_cap`); Slack [`app.py`](../../packages/adapters/slack/daimon/adapters/slack/app.py), Discord [`bot.py`](../../packages/adapters/discord/daimon/adapters/discord/bot.py) |
+| `Admit` (new/reused chat) | [`admission.admit`](../../packages/core/daimon/core/turn/admission.py) (`spend_gate`: balance, channel budget, allowance); Slack [`app.py`](../../packages/adapters/slack/daimon/adapters/slack/app.py), Discord [`bot.py`](../../packages/adapters/discord/daimon/adapters/discord/bot.py) |
 | `Admit` (headless) | [`tools/_ctx.py:_admit`](../../packages/adapters/mcp/daimon/adapters/mcp/tools/_ctx.py) before `start_turn` / `continue_turn` in [`agent_chat.py`](../../packages/adapters/mcp/daimon/adapters/mcp/tools/agent_chat.py) |
 | `Admit` / `Spend` (classifier) | Discord [`thread_participation.py`](../../packages/adapters/discord/daimon/adapters/discord/thread_participation.py), `record_classifier_usage` in [`usage_recording.py`](../../packages/core/daimon/core/usage_recording.py) |
 | `Balance` | [`tenant_ledger.get_balance`](../../packages/core/daimon/core/stores/tenant_ledger.py) via [`tenant_balance.is_over_balance`](../../packages/core/daimon/core/tenant_balance.py) |

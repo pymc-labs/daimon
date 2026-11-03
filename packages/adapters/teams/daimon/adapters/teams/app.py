@@ -1092,7 +1092,6 @@ class TeamsApp:
                 sessionmaker=self.runtime.sessionmaker,
                 anthropic=self.runtime.anthropic,
                 bot_display_name=inbound.bot_name or "daimon",
-                billing_config=self.runtime.billing_config,
                 markup=settings.billing.markup,
             )
             self._participation = TeamsParticipation(
@@ -1589,6 +1588,12 @@ class TeamsApp:
                             if inbound.is_foreign
                             else TEAMS_REFUSAL_NOUNS,
                         ),
+                        "cap_exceeded": admission_refusal_text(
+                            "cap_exceeded",
+                            TEAMS_FOREIGN_REFUSAL_NOUNS
+                            if inbound.is_foreign
+                            else TEAMS_REFUSAL_NOUNS,
+                        ),
                         "allowance_exhausted": admission_refusal_text(
                             "allowance_exhausted",
                             TEAMS_FOREIGN_REFUSAL_NOUNS
@@ -1603,7 +1608,7 @@ class TeamsApp:
                     if reraise:
                         # A continuation that never ran must not settle as
                         # delivered: tell its dispatcher.
-                        if slot in ("balance_depleted", "allowance_exhausted"):
+                        if slot in ("balance_depleted", "cap_exceeded", "allowance_exhausted"):
                             raise AdmissionDenied(reason=slot)
                         raise TurnNotStarted(slot)
                     return

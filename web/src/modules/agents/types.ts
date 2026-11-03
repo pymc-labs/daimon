@@ -76,6 +76,8 @@ export type Agent = AgentConfig & {
   id: string
   version: number
   owner: PersonRef
+  /** The owner on record; empty id when none, though `owner` shows the creator. */
+  recorded_owner: PersonRef
   co_owners: PersonRef[]
   updated_at: string
   updated_by: PersonRef
@@ -183,3 +185,54 @@ export type DataServerToolPut = { connection_id: string; tool_name?: string | nu
 
 /** A scope the signed-in person holds on the server: the only ones they may give. */
 export type DataServerScope = { id: string; kind: string; name: string }
+
+/** A stored key as the keys node lists it: its name only, never the value. */
+export type AgentKey = { key: string; updated_at: string }
+
+/** A coding key as listed: who made it and when it ends, never the token. */
+export type CodingKey = { id: string; creator: string; created_at: string; expires_at: string | null; mine: boolean }
+
+/** A coding key as made: `token` appears here once. */
+export type MintedCodingKey = { id: string; token: string; command: string; config: string; expires_at: string }
+
+export type SkillUse = { kind: "agent" | "channel"; name: string }
+export type LibrarySkill = {
+  id: string; name: string; source: "custom" | "anthropic"; version: string; created_at: string
+  /** A skill the server ships. */
+  default: boolean
+  used_by: SkillUse[]
+}
+export type SkillVersion = { version: string; created_at: string }
+export type SyncedSkill = { name: string; action: "created" | "updated" | "skipped" | "failed"; detail: string | null }
+
+export const ECOSYSTEMS = ["pip", "npm", "apt", "cargo", "gem", "go"] as const
+export type Ecosystem = (typeof ECOSYSTEMS)[number]
+export type EnvironmentDoc = {
+  id: string; name: string; description: string; created_at: string
+  /** The version loaded; a save sends it back and is refused when it moved on. */
+  updated_at: string
+  /** Read-only: a built-in agent runs in it. */
+  managed: boolean
+  cloud: boolean
+  network: "limited" | "unrestricted"
+  open_network: boolean
+  allowed_hosts: string[]
+  allow_package_managers: boolean
+  allow_mcp_servers: boolean
+  packages: Partial<Record<Ecosystem, string[]>>
+}
+export type EnvironmentInput = {
+  name: string; description: string; network: "limited" | "unrestricted"; allowed_hosts: string[]
+  allow_package_managers: boolean; allow_mcp_servers: boolean; packages: Partial<Record<Ecosystem, string[]>>
+}
+
+/** What an agent remembers: whether it has shared memory, and (admins) a store per channel. */
+export type MemoryPlace = { store: string; platform: string; name: string }
+export type KnowledgeStores = { shared: boolean; channels: MemoryPlace[] }
+
+/** An agent's own rule on one tool (`connection/tool`), for every channel; `revision` 0 is no rule yet. */
+export type AgentToolRule = { tool: string; rule: "allow" | "ask" | "deny" | null; scope: "chat" | "chat_and_routines"; revision: number }
+export type AgentToolRules = { active: boolean; rules: AgentToolRule[] }
+
+/** The Google Workspace identity bound to an agent by its operator; shown, never changed here. */
+export type GoogleBinding = { email: string; scopes: string[] }

@@ -54,7 +54,11 @@ from daimon.adapters.discord.lifecycle import (
 )
 from daimon.adapters.discord.member_sync import MemberSync
 from daimon.adapters.discord.membership import GatewayMembershipResolver, member_facts
-from daimon.adapters.discord.names import remember_guild_channels, remember_guild_user
+from daimon.adapters.discord.names import (
+    list_guilds_once,
+    remember_guild_channels,
+    remember_guild_user,
+)
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.output_delivery import Conversation, deliver_session_outputs
 from daimon.adapters.discord.permissions import check_missing_permissions
@@ -107,6 +111,7 @@ from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.billing_panel import fmt_usd
 from daimon.core.channel_budget_notice import drain_budget_notices
+from daimon.core.channel_listing import run_channel_listing
 from daimon.core.config import DirectMessagePolicy, Settings
 from daimon.core.continuity.continuation import (
     ContinuationDecision,
@@ -1150,6 +1155,16 @@ class DaimonBot(commands.Bot):
         """Arm orphan recovery and load command Cogs before on_ready syncs the tree."""
         self.start_orphan_recovery()
         if self.wake_poller_enabled:
+            self._spawn(
+                run_channel_listing(
+                    lambda: list_guilds_once(
+                        self.runtime.sessionmaker,
+                        [g for g in self.guilds if self._allows_guild(g.id)],
+                    ),
+                    platform="discord",
+                    should_stop=lambda: self.draining or self.is_closed(),
+                )
+            )
             self._spawn(
                 run_wake_poller(
                     self.runtime.sessionmaker,
@@ -2542,7 +2557,6 @@ class DaimonBot(commands.Bot):
                 bot_user_id=bot_user_id,
                 application_id=self.application_id,
                 bot_display_name=bot_display_name,
-                billing_config=self.runtime.billing_config,
                 markup=self.runtime.settings.billing.markup,
                 deployment_default=self.runtime.deployment_default,
             )
@@ -5535,6 +5549,7 @@ class DaimonBot(commands.Bot):
                 "balance_depleted": admission_refusal_message(
                     "balance_depleted", self.runtime.settings
                 ),
+                "cap_exceeded": admission_refusal_message("cap_exceeded", self.runtime.settings),
                 "allowance_exhausted": admission_refusal_message(
                     "allowance_exhausted", self.runtime.settings
                 ),

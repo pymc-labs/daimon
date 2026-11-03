@@ -15,7 +15,6 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import daimon.adapters.mcp.tools._channel_policy as channel_policy_mod
-import daimon.adapters.mcp.tools.routines as routines_mod
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
@@ -79,17 +78,19 @@ from daimon.adapters.mcp.tools.thread_participation import (
 from daimon.adapters.mcp.tools.timers import (
     _list_timers_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.core import routine_service
 from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.channel_environments import save_scope_environment
 from daimon.core.config import McpSettings
 from daimon.core.continuity.timers import schedule_timer
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.routine_service import RoutineCaller, RoutineEnv
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.specs import AgentSpec
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
-from daimon.core.stores.domain import Role
+from daimon.core.stores.domain import Role, RoutineDestinationKind
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.thread_agent_bindings import create_binding, update_lifecycle
@@ -350,11 +351,15 @@ async def test_routines_of_a_channel_kept_to_its_own_agents_deliver_inside_it(
     world, runtime = await _world(committing_sessionmaker)
 
     async def destination(
-        runtime: McpRuntime, auth: AuthIdentity, **kwargs: str | None
+        env: RoutineEnv,
+        caller: RoutineCaller,
+        *,
+        kind: RoutineDestinationKind | None,
+        destination_id: str | None,
     ) -> str | None:
-        return kwargs["destination_id"]
+        return destination_id
 
-    monkeypatch.setattr(routines_mod, "_check_destination", destination)
+    monkeypatch.setattr(routine_service, "check_destination", destination)
     inside = world.auth(admin=False, executing="agent_local")
     every_hour = {"cron_expr": "0 * * * *", "timezone": "UTC", "trigger_message": "hi"}
     for kind, target in ((None, None), ("channel", OTHER)):
@@ -628,11 +633,15 @@ async def test_the_setup_thread_is_held_to_its_channel(
         await require_channel_writable(runtime, builtin, channel_id=OTHER, origin=origin)
 
     async def destination(
-        runtime: McpRuntime, auth: AuthIdentity, **kwargs: str | None
+        env: RoutineEnv,
+        caller: RoutineCaller,
+        *,
+        kind: RoutineDestinationKind | None,
+        destination_id: str | None,
     ) -> str | None:
-        return kwargs["destination_id"]
+        return destination_id
 
-    monkeypatch.setattr(routines_mod, "_check_destination", destination)
+    monkeypatch.setattr(routine_service, "check_destination", destination)
     routine = await _create_routine_impl(
         runtime,
         builtin,
@@ -939,6 +948,8 @@ async def test_an_own_agents_channel_environment_name_shows_only_inside_it(
                 channel_id=channel,
                 environment_name=name,
                 actor_account_id=world.account_id,
+                platform="discord",
+                surface="panel",
             )
     environments = [
         ma_environment(id=f"env_{name}", name=name, tenant_id=world.tenant_id).model_dump(
@@ -1198,11 +1209,15 @@ async def test_an_own_agent_schedules_nothing_outside(
     world, runtime = await _world(committing_sessionmaker)
 
     async def destination(
-        runtime: McpRuntime, auth: AuthIdentity, **kwargs: str | None
+        env: RoutineEnv,
+        caller: RoutineCaller,
+        *,
+        kind: RoutineDestinationKind | None,
+        destination_id: str | None,
     ) -> str | None:
-        return kwargs["destination_id"]
+        return destination_id
 
-    monkeypatch.setattr(routines_mod, "_check_destination", destination)
+    monkeypatch.setattr(routine_service, "check_destination", destination)
     async with committing_sessionmaker.begin() as session:
         elsewhere = await routines_store.create_routine(
             session,

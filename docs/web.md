@@ -1,8 +1,8 @@
 # Web app
 
-The web app lets people chat with Daimon's agents in a browser. Admins also
-manage members, credit and settings there. Read this if you run the
-deployment.
+The web app lets people chat with Daimon's agents in a browser. Members also
+manage their own routines, and admins manage members, channels, credit, integrations and
+settings. Read this if you run the deployment.
 
 ## Before you start
 
@@ -69,6 +69,18 @@ its owner with a one-time link:
 
 From then on, invite people and grant roles under **Admin** > **People**.
 
+## Your profile
+
+Everyone signed in opens **Profile** from the user menu. It lists what each
+agent remembers about you, with **Forget**, and the accounts connected to you:
+sign-ins, Microsoft 365 and tool servers, each with a disconnect. Disconnecting
+deletes what Daimon holds; it does not revoke the grant at the other service.
+It also lists your coding keys, which you can revoke.
+
+**Delete my data** shows what is deleted and what stays, the same list as
+`/privacy`. Type your name to confirm. An admin can pause deletion with
+`DAIMON_PRIVACY__DELETE_ENABLED=false`.
+
 ## Connect agents to a data server
 
 A connection node lets agent editors link an agent to a server that keeps its
@@ -96,6 +108,44 @@ The subject token is a JWT signed with the identity key: `iss` is the entry's
 `issuer`, `aud` its `audience`, `sub` the Discord account and `ws` the
 workspace, such as `discord:123`. Only workspaces the entry serves get a token.
 A refused exchange is tried again after five minutes.
+
+## Agent setup beyond the config
+
+On an agent's canvas, its owners and admins also see:
+
+- **Keys** and **Coding tools**: stored key names (values never come back) and
+  coding keys, shown once when made. A coding key can only be made for people
+  who may run the agent.
+- **Knowledge**: the agent's shared memory to read. Admins also read each
+  channel's memory.
+- **People**: owners and co-owners. Admins change them.
+- **Tools**: admins set the agent's own tool rules, including for Daimon's own
+  tools and for routines. They need tool safety and `agent_rules` on. A
+  channel's rules are in that channel's settings.
+- **Google Workspace**: the identity an operator bound to the agent, read-only.
+
+Admins can archive or copy an agent from its menu, and manage the workspace's
+skills and sandbox environments under **Agents** > **Skills** and
+**Environments**. Syncing skills from GitHub reads public repositories only; a
+private one needs an agent's grant, made in chat. Copying an agent that runs on
+another provider than the default is refused.
+
+## Admin settings and audit
+
+Admins change the workspace's rules under **Admin** > **Settings**. The same
+checks apply as in chat, and each change is recorded.
+
+- **Access**: who may start turns, direct messages, read-only memory in DMs
+  and typed mentions. Direct messages show only on Discord and Slack.
+- **Providers**: which model providers the workspace may use.
+- **Web chat agent**: the agent a new web chat opens with. It is not the
+  workspace's default agent in chat.
+
+**Admin** > **Audit** lists changes made in the web app together with chat
+tool calls and panel writes. Filter by source, person, action and date.
+
+**Admin** > **Feedback** counts thumbs and the reasons people gave for each
+agent over 7, 30 or 90 days. It shows counts only, never a message or who voted.
 
 ## Troubleshooting
 

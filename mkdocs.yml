@@ -43,6 +43,7 @@ nav:
       - Admins: admins.md
       - Unattended turns: unattended.md
       - Billing: billing.md
+      - Allowances: allowances.md
       - Long jobs: long-jobs.md
       - Agent identity: agent-identity.md
       - Managed agents (mux): mux.md

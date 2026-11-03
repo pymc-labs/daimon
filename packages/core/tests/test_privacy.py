@@ -950,7 +950,6 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "message_feedback": "message_feedback",
         "support_escalations": "support_escalations",
         "daimon_admins": "daimon_admins",
-        "channel_admins": "channel_admins",
         "agent_post_requesters": "agent_post_requesters",
         "platform_user_names": "platform_user_names",
         "teams_messages": "teams_messages",
@@ -1023,7 +1022,6 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         "workspace_admins": "account_id FK -> accounts.id",
         # The person's user id leaves every grant; updated_by is SET NULL.
         "daimon_admins": "subject_id and granted_by are erased by platform principal",
-        "channel_admins": "user_ids + updated_by_account_id FK -> accounts.id",
         # Text account_id / principal_id with no FK: erased by `stores.mux_erasure`,
         # except operations against a shared slot, which are counted as retained.
         "operation": "text account_id and principal_id (mux erasure)",
@@ -1144,6 +1142,9 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # the workspace keeps its record of what changed. A person or invite it is
             # about is an id that clears when they go; the text names no one.
             "web_audit",
+            # Channel setting changes: the only accounts.id FK is the actor, ON DELETE
+            # SET NULL; the values name agents and amounts, never a person.
+            "channel_changes",
             # A workspace's invite links: the only accounts.id FK is the admin who made
             # one, ON DELETE SET NULL. An accepted invite cascades with its person.
             "web_invites",

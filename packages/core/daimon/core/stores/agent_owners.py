@@ -6,8 +6,8 @@ import uuid
 from collections.abc import Collection
 from typing import Literal
 
-from daimon.core._models import Account, AgentCoOwner, AgentOwner, PlatformPrincipal
-from sqlalchemy import delete, select
+from daimon.core._models import Account, AgentCoOwner, AgentOwner, PlatformPrincipal, WebPerson
+from sqlalchemy import delete, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,6 +16,10 @@ type OwnerSource = Literal["created", "admin_assigned"]
 
 class ForeignOwnerError(ValueError):
     """The account belongs to a person from another organisation, who can never own an agent."""
+
+
+class InactiveOwnerError(ValueError):
+    """The account's web person is not an active member, so it cannot be newly made owner."""
 
 
 async def owner_of(
@@ -285,6 +289,24 @@ async def owner_identities(
         )
     )
     return {agent_id: (account_id, external_id) for agent_id, account_id, external_id in rows.all()}
+
+
+async def has_inactive_web_person(
+    session: AsyncSession, tenant_id: uuid.UUID, account_id: uuid.UUID
+) -> bool:
+    """Whether the account's web person is a visitor or suspended."""
+    return (
+        await session.scalar(
+            select(WebPerson.id)
+            .where(
+                WebPerson.tenant_id == tenant_id,
+                WebPerson.account_id == account_id,
+                or_(WebPerson.kind != "member", WebPerson.status != "active"),
+            )
+            .limit(1)
+        )
+        is not None
+    )
 
 
 async def has_foreign_principal(

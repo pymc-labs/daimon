@@ -32,15 +32,17 @@ from daimon.adapters.web.chat_json import AgentRef, agent_ref
 from daimon.adapters.web.faces import avatars_of
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core import credit_views
-from daimon.core.allowances import window_start
+from daimon.core.allowances import EVERYONE, window_start
 from daimon.core.billing import (
     CheckoutAmountUnavailable,
     create_checkout_session,
     manual_credit,
-    month_start,
 )
 from daimon.core.ma_resolver import retrieve_agent_cached
+from daimon.core.panel_audit import record_panel_write
 from daimon.core.platform_names import UNNAMED_CHANNEL
+from daimon.core.promo_codes import describe_refusal
+from daimon.core.promo_credit import PromoRedeemed, PromoRedeemRefused, redeem_in_transaction
 from daimon.core.spend_gate import (
     SpendRequest,
     person_verdict,
@@ -48,6 +50,7 @@ from daimon.core.spend_gate import (
     spend_person_of_account,
 )
 from daimon.core.stores import spend_allowances, tenant_ledger, web_invites
+from daimon.core.stores import tenants as tenants_store
 from daimon.core.stores import web_identities as identities_store
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores.domain import SpendAllowanceRow, WebPersonRow
@@ -60,9 +63,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 #: Amounts, in whole dollars, a card checkout may buy.
 CHECKOUT_AMOUNTS = frozenset({10, 25, 50, 100})
 _LEDGER_LIMIT = 50
+#: Refusals worded for the web app, where there is no channel to redeem in.
+_REDEEM_WORDS = {
+    "needs_channel": "That code adds to a channel's budget. Redeem it in that channel.",
+}
 _RECENT_TURNS = 12
 _CENT = Decimal("0.01")
 _NO_AGENT = "other"
+_NO_PERSON = "none"
+_NO_CHANNEL = "none"
 
 
 def _omit_none(value: object) -> bool:
@@ -121,12 +130,16 @@ class DailySpend(BaseModel):
 
 class Overview(BaseModel):
     balance_usd: float
+    spent_usd: float
+    """The last 30 days."""
+    turns: int
     spent_month_usd: float
     projected_month_usd: float
-    turns_month: int
     daily: list[DailySpend]
     ledger: list[LedgerEntry]
     topup: Literal["checkout", "manual"] | None
+    funding: Literal["prepaid", "operator_funded"]
+    """Who pays for turns: the workspace's own credit, or the operator."""
 
 
 class Subject(BaseModel):
@@ -144,6 +157,8 @@ class Allowance(BaseModel):
     members: int | None = Field(default=None, exclude_if=_omit_none)
     window: Literal["month", "total"]
     expires_at: str | None
+    cap: bool
+    """A monthly ceiling on top of the allowance that governs, not an allowance."""
 
 
 class AgentChoice(BaseModel):
@@ -156,6 +171,20 @@ class NewAllowance(BaseModel):
     amount_usd: Decimal = Field(gt=0, le=1_000_000, decimal_places=2)
     window: Literal["month", "total"]
     expires_at: datetime | None = None
+    cap: bool = False
+    """A cap is monthly, for everyone or one person, for every agent, with no end date."""
+
+
+class Redeem(BaseModel):
+    code: str = Field(min_length=1, max_length=100)
+
+
+class Redeemed(BaseModel):
+    balance_usd: float
+    amount_usd: float
+    """The credit the code adds."""
+    starts_at: str | None
+    """When a code that has not started yet adds it."""
 
 
 class TopUp(BaseModel):
@@ -290,8 +319,11 @@ def credits_router(runtime: WebRuntime) -> APIRouter:
         return await credit_meter(runtime, caller)
 
     @router.get("/mine")
-    async def mine(caller: Member) -> Mine:  # pyright: ignore[reportUnusedFunction]
+    async def mine(  # pyright: ignore[reportUnusedFunction]
+        caller: Member, period: credit_views.Period = "30d"
+    ) -> Mine:
         now, tenant_id = runtime.now(), caller.person.tenant_id
+        since, until = credit_views.period_window(period, now=now)
         async with runtime.sessionmaker() as db:
             _, user_id = await linked_identity(db, caller.person)
             spend = await credit_views.spend_by_agent_for_user(
@@ -299,7 +331,8 @@ def credits_router(runtime: WebRuntime) -> APIRouter:
                 tenant_id=tenant_id,
                 platform_user_id=user_id,
                 markup=markup,
-                since=month_start(now),
+                since=since,
+                until=until,
             )
             charges = await credit_views.recent_turns(
                 db,
@@ -332,7 +365,7 @@ def credits_router(runtime: WebRuntime) -> APIRouter:
     async def overview(caller: Admin) -> Overview:  # pyright: ignore[reportUnusedFunction]
         now, tenant_id = runtime.now(), caller.person.tenant_id
         async with runtime.sessionmaker() as db:
-            month = await credit_views.month_overview(
+            recent = await credit_views.spend_overview(
                 db, tenant_id=tenant_id, now=now, markup=markup
             )
             lines = await credit_views.ledger_history(db, tenant_id=tenant_id, limit=_LEDGER_LIMIT)
@@ -341,6 +374,7 @@ def credits_router(runtime: WebRuntime) -> APIRouter:
                 tenant_id=tenant_id,
                 account_ids={x.actor_account_id for x in lines if x.actor_account_id},
             )
+            tenant = await tenants_store.get_tenant(db, tenant_id)
         ledger: list[LedgerEntry] = []
         for line in lines:
             actor = actors.get(line.actor_account_id) if line.actor_account_id else None
@@ -356,20 +390,22 @@ def credits_router(runtime: WebRuntime) -> APIRouter:
                 )
             )
         return Overview(
-            balance_usd=_usd(month.balance_usd),
-            spent_month_usd=_usd(month.spent_usd),
-            projected_month_usd=_usd(credit_views.projected_month(month.spent_usd, now=now)),
-            turns_month=month.turns,
-            daily=[DailySpend(day=d.day.isoformat(), usd=_usd(d.usd)) for d in month.daily],
+            balance_usd=_usd(recent.balance_usd),
+            spent_usd=_usd(recent.spent_usd),
+            turns=recent.turns,
+            spent_month_usd=_usd(recent.month_usd),
+            projected_month_usd=_usd(credit_views.projected_month(recent.month_usd, now=now)),
+            daily=[DailySpend(day=d.day.isoformat(), usd=_usd(d.usd)) for d in recent.daily],
             ledger=ledger,
             topup=topup_mode(),
+            funding=tenant.funding_mode if tenant else "prepaid",
         )
 
     @router.get("/spend")
     async def spend(  # pyright: ignore[reportUnusedFunction]
         caller: Admin,
         by: Literal["person", "agent", "channel"] = "person",
-        period: credit_views.Period = "this",
+        period: credit_views.Period = "30d",
     ) -> list[SpendRow]:
         tenant_id = caller.person.tenant_id
         since, until = credit_views.period_window(period, now=runtime.now())
@@ -397,10 +433,17 @@ def credits_router(runtime: WebRuntime) -> APIRouter:
                 db, tenant_id=tenant_id, markup=markup, since=since, until=until
             )
             labels = await credit_views.label_people(
-                db, tenant_id=tenant_id, user_ids=[p.user_id for p in people]
+                db, tenant_id=tenant_id, user_ids=[p.user_id for p in people if p.user_id]
             )
         rows: list[SpendRow] = []
         for person in people:
+            if person.user_id is None:
+                rows.append(
+                    SpendRow(
+                        id=_NO_PERSON, name="No person", turns=person.turns, usd=_usd(person.usd)
+                    )
+                )
+                continue
             label = labels.get(person.user_id)
             rows.append(
                 SpendRow(
@@ -483,6 +526,7 @@ def credits_router(runtime: WebRuntime) -> APIRouter:
             members=members,
             window=row.window,
             expires_at=row.expires_at.isoformat() if row.expires_at else None,
+            cap=row.is_cap,
         )
 
     async def allowances_for(
@@ -510,7 +554,15 @@ def credits_router(runtime: WebRuntime) -> APIRouter:
         if body.expires_at is not None and body.expires_at.astimezone(UTC) <= now:
             raise HTTPException(status_code=422, detail="Pick a date in the future.")
         async with runtime.sessionmaker.begin() as db:
+            if body.cap:
+                _check_cap(body)
             subject_id = await _subject_id(db, tenant_id, body.subject)
+            if body.cap and await spend_allowances.find_month_cap(
+                db, tenant_id=tenant_id, subject_kind=body.subject.kind, subject_id=subject_id
+            ):
+                raise HTTPException(
+                    status_code=409, detail="This already has a cap. Remove it to set another."
+                )
             row = await spend_allowances.create_allowance(
                 db,
                 tenant_id=tenant_id,
@@ -522,13 +574,14 @@ def credits_router(runtime: WebRuntime) -> APIRouter:
                 starts_at=now,
                 expires_at=body.expires_at.astimezone(UTC) if body.expires_at else None,
                 created_by_account_id=caller.person.account_id,
+                is_cap=body.cap,
             )
             [made] = await allowances_for(db, tenant_id, [row])
             await audit(
                 db,
                 tenant_id=tenant_id,
                 actor_account_id=caller.person.account_id,
-                action="Added allowance",
+                action="Added cap" if made.cap else "Added allowance",
                 target=await _audit_target(db, tenant_id, made.subject),
                 detail=_allowance_words(made),
                 at=now,
@@ -551,12 +604,65 @@ def credits_router(runtime: WebRuntime) -> APIRouter:
                 db,
                 tenant_id=tenant_id,
                 actor_account_id=caller.person.account_id,
-                action="Removed allowance",
+                action="Removed cap" if gone.cap else "Removed allowance",
                 target=await _audit_target(db, tenant_id, gone.subject),
                 detail=_allowance_words(gone),
                 at=runtime.now(),
             )
         return {"ok": True}
+
+    @router.post("/redeem")
+    async def redeem(body: Redeem, caller: Admin) -> Redeemed:  # pyright: ignore[reportUnusedFunction]
+        """Redeem a promo code for the workspace, as the chat panels do, and audit it."""
+        tenant_id, account_id, now = (
+            caller.person.tenant_id,
+            caller.person.account_id,
+            runtime.now(),
+        )
+        async with runtime.sessionmaker.begin() as db:
+            principal = await caller.principal(db)
+            result = await redeem_in_transaction(
+                db,
+                tenant_id=tenant_id,
+                account_id=account_id,
+                code=body.code,
+                now=now,
+                channel=None,
+                is_admin=True,
+            )
+            if isinstance(result, PromoRedeemed):
+                await audit(
+                    db,
+                    tenant_id=tenant_id,
+                    actor_account_id=account_id,
+                    action="Redeemed promo code",
+                    target="Balance",
+                    detail=usd(result.amount_usd),
+                    at=now,
+                )
+        await record_panel_write(
+            runtime.sessionmaker,
+            tenant_id=tenant_id,
+            platform=principal.platform,
+            platform_user_id=principal.external_id,
+            op="promo_redeem",
+            outcome="denied" if isinstance(result, PromoRedeemRefused) else "allowed",
+            reason=result.reason if isinstance(result, PromoRedeemRefused) else "completed",
+        )
+        if isinstance(result, PromoRedeemRefused):
+            raise HTTPException(
+                status_code=429 if result.reason == "throttled" else 422,
+                detail=_REDEEM_WORDS.get(result.reason) or describe_refusal(result.reason),
+            )
+        return Redeemed(
+            balance_usd=_usd(result.balance_usd),
+            amount_usd=_usd(result.amount_usd),
+            starts_at=(
+                None
+                if result.granted or result.credit_starts_at is None
+                else result.credit_starts_at.isoformat()
+            ),
+        )
 
     @router.post("/topup")
     async def topup(body: TopUp, caller: Admin) -> dict[str, str | float]:  # pyright: ignore[reportUnusedFunction]
@@ -633,6 +739,17 @@ async def _audit_target(db: AsyncSession, tenant_id: uuid.UUID, subject: Subject
     return invite_target(known.id) if known else AuditTarget(INVITE_LABEL)
 
 
+def _check_cap(body: NewAllowance) -> None:
+    """A cap is monthly, for everyone or one person, for every agent, with no end date."""
+    everyone = body.subject.kind == "group" and body.subject.id == EVERYONE
+    if not (everyone or body.subject.kind == "person"):
+        raise HTTPException(status_code=422, detail="A cap is for everyone or one person.")
+    if body.agent is not None or body.window != "month" or body.expires_at is not None:
+        raise HTTPException(
+            status_code=422, detail="A cap is monthly, for every agent, with no end date."
+        )
+
+
 def _allowance_words(allowance: Allowance) -> str:
     window = "a month" if allowance.window == "month" else "in total"
     words = f"{usd(allowance.amount_usd)} {window}"
@@ -644,6 +761,8 @@ def _channel_row(spend: credit_views.ChannelSpend, names: dict[tuple[str, str], 
         row_id, name, kind = "routines", "Routines", "routine"
     elif credit_views.is_web_spend(spend.platform, spend.channel_id):
         row_id, name, kind = "web", "Web", "web"
+    elif spend.channel_id is None:
+        row_id, name, kind = _NO_CHANNEL, "No channel", None
     else:
         row_id = f"{spend.platform}:{spend.channel_id}"
         name = names.get((spend.platform, spend.channel_id or ""), UNNAMED_CHANNEL)

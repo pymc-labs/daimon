@@ -34,7 +34,7 @@ class BillingPanelState:
     caller_user_id: str
     caller_spend: float
     caller_turns: int
-    caller_cap: Decimal | None  # None when no effective cap configured
+    caller_cap: Decimal | None  # the monthly allowance that governs them; None when unlimited
 
     # Guild-scoped balance (both views)
     guild_balance_usd: Decimal  # SUM(tenant_ledger.delta_usd); negative = depleted

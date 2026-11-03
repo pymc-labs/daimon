@@ -323,3 +323,40 @@ async def test_run_routines_create_when_bad_cron_creates_no_row_and_posts_error(
     assert any(
         "That schedule or time zone isn't valid.\n\nCheck both and try again." in t for t in texts
     )
+
+
+@pytest.mark.asyncio
+async def test_run_routines_create_goes_through_the_routine_service(
+    fake_slack_web_client: Any,
+    db_session_factory: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The panel holds no routine checks of its own: the service's refusal is what it shows."""
+    from daimon.core import routine_service
+
+    async def refuse(*_args: object, **_kwargs: object) -> object:
+        raise routine_service.RoutineRefused("service said no")
+
+    monkeypatch.setattr(routine_service, "create_routine", refuse)
+    _override_users_info_admin(fake_slack_web_client.mock)
+    runtime = _build_runtime(_agent_handler("unused"), db_session_factory)
+
+    await run_routines_create_submission(
+        runtime,
+        fake_slack_web_client.client,
+        team_id=_TEAM_ID,
+        user_id=_USER_ID,
+        channel_id=_CHANNEL_ID,
+        extra={
+            "agent_name": _AGENT_NAME,
+            "cron_expr": "0 18 * * *",
+            "timezone": "UTC",
+            "trigger_message": "daily standup",
+        },
+    )
+
+    ephemeral_key = ("POST", yarl.URL("https://slack.com/api/chat.postEphemeral"))
+    texts = [
+        shown_text(c.kwargs["json"]) for c in fake_slack_web_client.mock.requests[ephemeral_key]
+    ]
+    assert any("service said no" in t for t in texts)

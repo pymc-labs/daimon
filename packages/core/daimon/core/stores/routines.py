@@ -165,11 +165,13 @@ async def create_routine(
     destination_kind: RoutineDestinationKind | None = None,
     destination_id: str | None = None,
     channel_id: str | None = None,
+    made_in_channel_id: str | None = None,
     source_thread_id: str | None = None,
     source_channel_id: str | None = None,
     source_provenance_known: bool | None = None,
 ) -> RoutineRow:
-    """`channel_id` is the channel the routine's spend counts against (see `Routine`)."""
+    """`channel_id` is the channel the routine's spend counts against (see `Routine`);
+    `made_in_channel_id` the one it was created from."""
     if catch_up_policy not in ("skip", "run-once"):
         raise StoreError("catch_up_policy must be skip or run-once")
     destination_id = await _resolve_destination(
@@ -203,6 +205,7 @@ async def create_routine(
         destination_kind=destination_kind,
         destination_id=destination_id,
         channel_id=channel_id,
+        made_in_channel_id=made_in_channel_id,
         source_thread_id=source_thread_id,
         source_channel_id=source_channel_id,
         source_provenance_known=source_provenance_known,
@@ -249,6 +252,24 @@ async def list_routines_for_tenant(
         (await session.execute(select(Routine).where(Routine.tenant_id == tenant_id)))
         .scalars()
         .all()
+    )
+    return [RoutineRow.model_validate(r) for r in rows]
+
+
+async def list_routines_for_channel(
+    session: AsyncSession, *, tenant_id: _uuid.UUID, channel_id: str
+) -> list[RoutineRow]:
+    """Routines that post in `channel_id` (their destination's channel) or were made there."""
+    rows = await session.scalars(
+        select(Routine)
+        .where(
+            Routine.tenant_id == tenant_id,
+            or_(
+                and_(Routine.destination_kind.is_not(None), Routine.channel_id == channel_id),
+                Routine.made_in_channel_id == channel_id,
+            ),
+        )
+        .order_by(Routine.created_at, Routine.id)
     )
     return [RoutineRow.model_validate(r) for r in rows]
 
@@ -951,6 +972,33 @@ async def resume_routine(
         },
         expected_updated_at=expected_updated_at,
     )
+
+
+async def mark_due(
+    session: AsyncSession,
+    routine_id: _uuid.UUID,
+    *,
+    tenant_id: _uuid.UUID,
+    now: datetime,
+) -> RoutineRow | None:
+    """Make an enabled routine due at ``now``, so the next scheduler tick fires it.
+
+    The tick claims it like any slot and stamps the next cron slot, so the schedule
+    carries on. ``updated_at`` stays, so a run in flight is not treated as edited and
+    still skips this mark. Returns ``None`` for a missing, other-tenant or paused routine.
+    """
+    stmt = (
+        update(Routine)
+        .where(Routine.id == routine_id, Routine.tenant_id == tenant_id, Routine.enabled.is_(True))
+        .values(next_fire_at=now)
+        .returning(Routine)
+        .execution_options(synchronize_session=False)
+    )
+    orm = (await session.execute(stmt)).scalar_one_or_none()
+    if orm is None:
+        return None
+    await session.flush()
+    return RoutineRow.model_validate(orm)
 
 
 async def record_result(

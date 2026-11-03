@@ -538,13 +538,11 @@ def patched_admission() -> Iterator[None]:
         patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock) as agent,
         patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock) as env,
         patch("daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock) as balance,
-        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as cap,
         patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock) as create,
     ):
         agent.return_value = "agent_test_id"
         env.return_value = "env_test_id"
         balance.return_value = False
-        cap.return_value = False
         minted = itertools.count(1)
 
         async def mint_session(*_args: Any, **_kwargs: Any) -> Any:

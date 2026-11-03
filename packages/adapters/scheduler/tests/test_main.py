@@ -1,10 +1,7 @@
 """Tests for the scheduler entrypoint wiring.
 
-The scheduler-adapter cap-and-meter wiring replaces the
-``_StubCaps`` and ``_stub_usage_record`` placeholders with real
-calls into ``daimon.core.billing.is_over_cap`` and
-``daimon.core.usage_recording.record_turn_usage``. These tests exercise
-that wiring at the unit level — they do not boot the full ``run()``
+The scheduler adapter meters through ``daimon.core.usage_recording.record_turn_usage``.
+These tests exercise that wiring at the unit level — they do not boot the full ``run()``
 lifecycle (covered by ``tests/integration/test_routines_end_to_end.py``).
 """
 
@@ -30,7 +27,6 @@ from anthropic import AsyncAnthropic, NotFoundError
 from cryptography.fernet import Fernet
 from daimon.adapters.scheduler.main import (
     _build_fire,  # pyright: ignore[reportPrivateUsage]  # test seam for balance gate + debit binding
-    _CapsAdapter,  # pyright: ignore[reportPrivateUsage]  # named test seam for cap wiring
     _close_github_app_sessions,  # pyright: ignore[reportPrivateUsage]  # vault cleanup retry
     _refresh_github_app_sessions,  # pyright: ignore[reportPrivateUsage]  # MCP token renewal
     _run_loops,  # pyright: ignore[reportPrivateUsage]  # tick and usage-sweep loops
@@ -44,7 +40,6 @@ from daimon.adapters.scheduler.main import (
     _usage_sweep_once,  # pyright: ignore[reportPrivateUsage]  # --once usage pass
     _validate_mcp_settings,
 )
-from daimon.core.billing import BillingConfig
 from daimon.core.config import Settings
 from daimon.core.github_app_session import AppSessionAccess
 from daimon.core.github_credentials import build_multifernet
@@ -60,8 +55,6 @@ from daimon.core.stores import (
     github_issued_tokens,
     spend_allowances,
     tenant_ledger,
-    tenant_user_caps,
-    usage_events,
 )
 from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores.accounts import delete_account
@@ -78,8 +71,6 @@ from daimon.testing.factories import (
     make_ledger_entry,
     make_tenant,
 )
-from mux.testing.drivers.anthropic.ma_models import ma_model_usage
-from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -95,15 +86,6 @@ def db_session_factory(
     db_session triggers schema cleanup; these tests commit setup before dispatch.
     """
     return async_sessionmaker(bind=db_committing_engine, expire_on_commit=False)
-
-
-_TEST_BILLING = BillingConfig(
-    secret_key=SecretStr("sk_test"),
-    webhook_secret=SecretStr("whsec_test"),
-    prices={10: "p10", 25: "p25", 50: "p50", 100: "p100"},
-    success_url="http://test/success",
-    cancel_url="http://test/cancel",
-)
 
 
 async def test_privacy_sweep_boundary_retries_after_error(
@@ -1204,102 +1186,6 @@ async def test_close_sweep_rechecks_a_stale_unmapped_candidate(
     archive.assert_not_awaited()
 
 
-async def test_caps_adapter_returns_true_when_user_over_cap(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """_CapsAdapter delegates to billing.is_over_cap and reflects DB state."""
-    tenant = await make_tenant(db_session)
-    await tenant_user_caps.set_default(db_session, tenant_id=tenant.id, amount=Decimal("0.01"))
-    await usage_events.record(
-        db_session,
-        tenant_id=tenant.id,
-        platform_user_id="u1",
-        managed_session_id="prev_sess",
-        model="claude-opus-4-7",
-        model_usage=ma_model_usage(input_tokens=10_000_000, output_tokens=10_000_000),
-        event_id="prev_evt",
-    )
-    await db_session.commit()
-
-    adapter = _CapsAdapter(db_session_factory, billing_config=_TEST_BILLING)
-    over = await adapter.is_over_cap(tenant.id, "u1")
-    assert over is True, "user with usage above cap must be over_cap"
-
-    other = await adapter.is_over_cap(tenant.id, "u2")
-    assert other is False, "uncharged user under same cap must be under"
-
-
-async def test_caps_adapter_returns_false_when_no_cap_row(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    tenant = await make_tenant(db_session)
-    await db_session.commit()
-    adapter = _CapsAdapter(db_session_factory, billing_config=_TEST_BILLING)
-    over = await adapter.is_over_cap(tenant.id, "u1")
-    assert over is False, "no cap row -> uncapped"
-
-
-async def test_fire_skips_on_over_cap(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """End-to-end at run_one_tick level: real _CapsAdapter sees an over-cap
-    user; the routine is skipped and last_error is 'cap_exceeded'."""
-    now = datetime(2026, 5, 8, 12, 0, 0, tzinfo=UTC)
-
-    tenant = await make_tenant(db_session)
-    row = await create_routine(
-        db_session,
-        created_by_user_id="u1",
-        agent_id="agent_a",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
-        trigger_message="trigger",
-        next_fire_at=now - timedelta(minutes=1),
-        tenant_id=tenant.id,
-    )
-    await tenant_user_caps.set_default(db_session, tenant_id=tenant.id, amount=Decimal("0.01"))
-    await usage_events.record(
-        db_session,
-        tenant_id=tenant.id,
-        platform_user_id="u1",
-        managed_session_id="prev_sess",
-        model="claude-opus-4-7",
-        model_usage=ma_model_usage(input_tokens=10_000_000, output_tokens=10_000_000),
-        event_id="prev_evt",
-    )
-    await db_session.commit()
-
-    fired: list[uuid.UUID] = []
-
-    async def fake_fire(r: RoutineRow) -> None:
-        fired.append(r.id)
-
-    caps = _CapsAdapter(db_session_factory, billing_config=_TEST_BILLING)
-
-    await run_one_tick(
-        now=now,
-        sm=db_session_factory,
-        caps=caps,
-        fire=fake_fire,
-        max_age=timedelta(minutes=15),
-        max_concurrent_fires=10,
-        dispatch_timeout_s=5.0,
-        wait_for_completion=True,
-    )
-
-    assert fired == [], "over-cap routine must not fire"
-    async with db_session_factory() as s:
-        fetched = await get_routine(s, row.id, tenant_id=tenant.id)
-    assert fetched is not None
-    assert fetched.last_error == "cap_exceeded", (
-        f"over-cap routine must record 'cap_exceeded'; got {fetched.last_error!r}"
-    )
-
-
 async def test_run_one_tick_resolves_tenant_per_row(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -1339,12 +1225,9 @@ async def test_run_one_tick_resolves_tenant_per_row(
     async def recording_fire(r: RoutineRow) -> None:
         captured_tenant_ids.append(r.tenant_id)
 
-    caps = _CapsAdapter(db_session_factory, billing_config=None)
-
     await run_one_tick(
         now=now,
         sm=db_session_factory,
-        caps=caps,
         fire=recording_fire,
         max_age=timedelta(minutes=15),
         max_concurrent_fires=10,
@@ -1643,14 +1526,24 @@ async def test_fire_rejects_routine_when_tenant_balance_depleted(
     await fake_client.close()
 
 
-@pytest.mark.parametrize("amount", [Decimal("0"), Decimal("5")], ids=["exhausted", "room"])
+@pytest.mark.parametrize(
+    ("amount", "is_cap", "error"),
+    [
+        (Decimal("0"), False, "allowance_exhausted"),
+        (Decimal("0"), True, "cap_exceeded"),
+        (Decimal("5"), False, None),
+    ],
+    ids=["exhausted", "capped", "room"],
+)
 async def test_fire_is_stopped_by_the_creators_exhausted_allowance(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     amount: Decimal,
+    is_cap: bool,
+    error: str | None,
 ) -> None:
-    """The creator's spend allowance gates a fire after balance and channel budget."""
+    """The creator's allowance or monthly cap gates a fire after balance and channel budget."""
     now = datetime(2026, 5, 30, 12, 0, 0, tzinfo=UTC)
     tenant = await make_tenant(db_session)
     await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
@@ -1661,8 +1554,9 @@ async def test_fire_is_stopped_by_the_creators_exhausted_allowance(
         subject_id="u4",
         agent_id=None,
         amount_usd=amount,
-        window="total",
+        window="month" if is_cap else "total",
         starts_at=now - timedelta(days=1),
+        is_cap=is_cap,
     )
     row = await create_routine(
         db_session,
@@ -1707,9 +1601,9 @@ async def test_fire_is_stopped_by_the_creators_exhausted_allowance(
     async with db_session_factory() as s:
         fetched = await get_routine(s, row.id, tenant_id=tenant.id)
     assert fetched is not None
-    if amount == 0:
-        assert calls == [], "an exhausted allowance must refuse the fire"
-        assert fetched.last_error == "allowance_exhausted"
+    if error is not None:
+        assert calls == [], "an exhausted allowance or cap must refuse the fire"
+        assert fetched.last_error == error, "the failure names the cap apart from an allowance"
         return
     assert fetched.last_error is None, "an allowance with room lets the fire run"
     assert len(calls) == 1

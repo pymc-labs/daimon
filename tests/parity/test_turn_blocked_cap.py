@@ -1,10 +1,10 @@
-"""Scenario (c): over-cap turn blocked pre-spend.
+"""Scenario (c): a turn past the monthly limit per member is blocked pre-spend.
 
-A user who has already spent at-or-above their effective monthly cap is
-blocked BEFORE `create_session` / `run_turn` on both platforms, via the
-REAL platform entry point (D-02). Asserts the per-driver expected copy and
-that the blocked turn writes no NEW `usage_events` row or `tenant_ledger`
-debit (the pre-seeded usage_event establishing the cap breach is untouched).
+The limit is a monthly spend allowance. A user who has already spent at-or-above it is
+blocked BEFORE `create_session` / `run_turn` on every platform, via the REAL platform
+entry point (D-02). Asserts the per-driver expected copy and that the blocked turn
+writes no NEW `usage_events` row or `tenant_ledger` debit (the pre-seeded usage_event
+establishing the breach is untouched).
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from typing import cast
 from daimon.core.billing import BillingConfig
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.stores.domain import Platform
-from daimon.testing.factories import make_tenant, make_tenant_user_cap, make_usage_event
+from daimon.testing.factories import make_monthly_limit, make_tenant, make_usage_event
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -51,10 +51,10 @@ async def test_turn_blocked_when_over_cap_writes_no_new_usage_or_ledger_row(
         reason="trial",
         idempotency_key=f"trial:{tenant.id}",
     )
-    # Tenant-wide default cap of $5.
-    await make_tenant_user_cap(db_session, tenant=tenant, amount=Decimal("5"))
+    # Tenant-wide default monthly limit of $5.
+    await make_monthly_limit(db_session, tenant=tenant, amount=Decimal("5"))
     # 2,000,000 input tokens on claude-sonnet-4-6 ($3.00/1M input) = $6.00 spent
-    # this month -- already at/above the $5 cap before the turn even starts.
+    # this month -- already at/above the $5 limit before the turn even starts.
     await make_usage_event(
         db_session,
         tenant=tenant,
@@ -78,16 +78,16 @@ async def test_turn_blocked_when_over_cap_writes_no_new_usage_or_ledger_row(
     )
 
     expected = driver.expected_blocked_text("cap")
-    assert expected in posted, f"expected the over-cap copy {expected!r}, got: {posted}"
+    assert expected in posted, f"expected the over-limit copy {expected!r}, got: {posted}"
 
     usage_rows = await usage_events.list_for_tenant(db_session, tenant_id=tenant.id)
     assert len(usage_rows) == 1, (
-        "over-cap turn must write no NEW usage_events row (only the pre-seeded breach row)"
+        "over-limit turn must write no NEW usage_events row (only the pre-seeded breach row)"
     )
 
     ledger_rows = await tenant_ledger.list_for_tenant(db_session, tenant_id=tenant.id)
     debit_rows = [row for row in ledger_rows if row.delta_usd < 0]
-    assert debit_rows == [], "over-cap turn must write zero tenant_ledger debits"
+    assert debit_rows == [], "over-limit turn must write zero tenant_ledger debits"
     assert len(ledger_rows) == 1
     assert ledger_rows[0].delta_usd == Decimal("100.00")
     assert await tenant_ledger.get_balance(db_session, tenant_id=tenant.id) == Decimal("100.00")

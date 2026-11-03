@@ -21,12 +21,12 @@ from daimon.adapters.discord.billing_panel.state import (
     MemberRow,
 )
 from daimon.adapters.discord.checks import is_platform_admin as is_platform_admin
+from daimon.core.allowance_limits import monthly_limit
 from daimon.core.billing_panel import TOP_SPENDERS_SHOWN, stored_name_labels
 from daimon.core.channel_budget import get_channel_budget_status, list_channel_budget_statuses
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.platform_names import KnownName, remember_user_names, resolve_names
 from daimon.core.promo_credit import get_active_timed_credit
-from daimon.core.stores import tenant_user_caps
 from daimon.core.stores.promo_codes import has_redeemable_promo_code
 from daimon.core.stores.tenant_ledger import get_balance
 from daimon.core.stores.usage_events import (
@@ -193,10 +193,8 @@ async def load_billing_snapshot(
         tenant_id=tenant_id,
         since=since,
     )
-    caller_cap = await tenant_user_caps.get_effective_cap(
-        session,
-        tenant_id=tenant_id,
-        user_id=caller_user_id,
+    caller_cap = await monthly_limit(
+        session, tenant_id=tenant_id, platform_user_id=caller_user_id, now=now
     )
     guild_balance = await get_balance(session, tenant_id=tenant_id)
     timed_credit = tuple(await get_active_timed_credit(session, tenant_id=tenant_id, now=now))

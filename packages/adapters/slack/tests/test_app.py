@@ -37,6 +37,7 @@ from daimon.adapters.slack.admin import SlackRequester
 from daimon.adapters.slack.app import SlackApp
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core import allowance_limits
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import build_multifernet, encrypt_token
@@ -3671,13 +3672,13 @@ async def test_run_thread_turn_when_over_balance_blocks_before_session_create(
     assert rows == [], "over-balance turn must write zero usage_events rows"
 
 
-async def test_run_thread_turn_when_over_cap_blocks_before_session_create(
+async def test_run_thread_turn_when_over_monthly_limit_blocks_before_session_create(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
 ) -> None:
-    """Over-cap tenant/user: gate blocks BEFORE create_session, posts the exact
-    D-10 cap copy in-thread, and writes no usage_events row.
+    """A person past their monthly limit: the gate blocks BEFORE create_session,
+    posts the monthly-limit copy in-thread, and writes no usage_events row.
     """
     team_id = "T_ORCH_OVER_CAP"
     channel = "C_TEST"
@@ -3685,6 +3686,10 @@ async def test_run_thread_turn_when_over_cap_blocks_before_session_create(
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
 
     await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+    async with db_session_factory() as s, s.begin():
+        await allowance_limits.set_default_limit(
+            s, tenant_id=tenant_id, amount=Decimal(0), now=datetime.now(UTC)
+        )
 
     app, _ = make_orchestrate_app(db_session_factory)
 
@@ -3707,14 +3712,12 @@ async def test_run_thread_turn_when_over_cap_blocks_before_session_create(
         patch(
             "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock) as mock_create,
         patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as mock_run_turn,
     ):
         mock_resolve_agent.return_value = "agent_test_id"
         mock_resolve_env.return_value = "env_test_id"
         mock_over_balance.return_value = False
-        mock_over_cap.return_value = True
 
         await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
             event,
@@ -3725,12 +3728,6 @@ async def test_run_thread_turn_when_over_cap_blocks_before_session_create(
             tenant_id=tenant_id,
         )
 
-        mock_over_cap.assert_awaited_once()
-        cap_kwargs = mock_over_cap.call_args.kwargs
-        assert cap_kwargs["tenant_id"] == tenant_id, "cap check must be keyed on tenant_id"
-        assert cap_kwargs["user_id"] == "U_TEST_OVER_CAP", (
-            "gate should pass the Slack user id from the event"
-        )
         mock_create.assert_not_called()  # pyright: ignore[reportUnknownMemberType]
         mock_run_turn.assert_not_called()  # pyright: ignore[reportUnknownMemberType]
 
@@ -3747,12 +3744,10 @@ async def test_run_thread_turn_when_over_cap_blocks_before_session_create(
         if shown_text(b)
         == "You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
     ]
-    assert cap_msgs, (
-        f"expected the exact D-10 over-cap copy via chat.postMessage, got: {post_bodies}"
-    )
+    assert cap_msgs, f"expected the monthly-limit copy via chat.postMessage, got: {post_bodies}"
 
     rows = await usage_events.list_for_tenant(db_session, tenant_id=tenant_id)
-    assert rows == [], "over-cap turn must write zero usage_events rows"
+    assert rows == [], "a refused turn must write zero usage_events rows"
 
 
 async def test_run_thread_turn_when_over_channel_budget_blocks_before_session_create(
@@ -3780,14 +3775,12 @@ async def test_run_thread_turn_when_over_channel_budget_blocks_before_session_cr
         patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock) as agent,
         patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock) as env,
         patch("daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock) as balance,
-        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as cap,
         patch("daimon.core.spend_gate.is_over_channel_budget", new_callable=AsyncMock) as budget,
         patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock) as mock_create,
     ):
         agent.return_value = "agent_test_id"
         env.return_value = "env_test_id"
         balance.return_value = False
-        cap.return_value = False
         budget.return_value = True
 
         await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
@@ -3879,7 +3872,6 @@ async def test_run_thread_turn_when_unblocked_writes_usage_event_and_ledger_debi
         patch(
             "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch(
             "daimon.core.turn.prepare.create_session", new_callable=AsyncMock
         ) as mock_create_session,
@@ -3888,7 +3880,6 @@ async def test_run_thread_turn_when_unblocked_writes_usage_event_and_ledger_debi
         mock_resolve_agent.return_value = "agent_test_id"
         mock_resolve_env.return_value = "env_test_id"
         mock_over_balance.return_value = False
-        mock_over_cap.return_value = False
         mock_create_session.return_value = _fake_session
         mock_run_turn.side_effect = _fake_run_turn
 
@@ -4021,13 +4012,13 @@ async def test_run_thread_turn_reused_session_over_balance_blocks_and_skips_run_
     assert rows == [], "blocked reused-session turn must write zero usage_events rows"
 
 
-async def test_run_thread_turn_reused_session_over_cap_blocks_and_skips_run_turn(
+async def test_run_thread_turn_reused_session_over_monthly_limit_blocks_and_skips_run_turn(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
 ) -> None:
-    """A follow-up turn on an already-live thread is blocked by the
-    over-cap gate before run_turn, and writes no usage_events row.
+    """A follow-up turn on an already-live thread by a person past their monthly limit
+    is blocked by the gate before run_turn, and writes no usage_events row.
     """
     from daimon.core.stores.identity import get_or_create_platform_principal
 
@@ -4053,6 +4044,9 @@ async def test_run_thread_turn_reused_session_over_cap_blocks_and_skips_run_turn
             budget_channel_id=channel,
             watermark_message_id="9000000031.000000",
         )
+        await allowance_limits.set_default_limit(
+            s, tenant_id=tenant_id, amount=Decimal(0), now=datetime.now(UTC)
+        )
         await s.commit()
 
     app, _ = make_orchestrate_app(db_session_factory)
@@ -4077,14 +4071,12 @@ async def test_run_thread_turn_reused_session_over_cap_blocks_and_skips_run_turn
         patch(
             "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock) as mock_create,
         patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as mock_run_turn,
     ):
         mock_resolve_agent.return_value = "agent_test_id"
         mock_resolve_env.return_value = "env_test_id"
         mock_over_balance.return_value = False
-        mock_over_cap.return_value = True
 
         await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
             event,
@@ -4095,10 +4087,6 @@ async def test_run_thread_turn_reused_session_over_cap_blocks_and_skips_run_turn
             tenant_id=tenant_id,
         )
 
-        mock_over_cap.assert_awaited_once()
-        assert mock_over_cap.call_args.kwargs["user_id"] == "U_TEST_REUSED_CAP", (
-            "gate should pass the Slack user id from the event"
-        )
         mock_create.assert_not_called()  # pyright: ignore[reportUnknownMemberType]
         mock_run_turn.assert_not_called()  # pyright: ignore[reportUnknownMemberType]
 
@@ -4115,7 +4103,7 @@ async def test_run_thread_turn_reused_session_over_cap_blocks_and_skips_run_turn
         if shown_text(b)
         == "You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
     ]
-    assert cap_msgs, f"expected the exact over-cap copy via chat.postMessage, got: {post_bodies}"
+    assert cap_msgs, f"expected the monthly-limit copy via chat.postMessage, got: {post_bodies}"
 
     rows = await usage_events.list_for_tenant(db_session, tenant_id=tenant_id)
     assert rows == [], "blocked reused-session turn must write zero usage_events rows"
@@ -4206,14 +4194,12 @@ async def test_run_thread_turn_reused_session_unblocked_writes_usage_event_and_l
         patch(
             "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock) as mock_create,
         patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as mock_run_turn,
     ):
         mock_resolve_agent.return_value = "agent_test_id"
         mock_resolve_env.return_value = "env_test_id"
         mock_over_balance.return_value = False
-        mock_over_cap.return_value = False
         mock_run_turn.side_effect = _fake_run_turn
 
         await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
@@ -4315,7 +4301,6 @@ async def test_run_thread_turn_passes_one_shared_deadline_to_bind_and_run(
         patch(
             "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch(
             "daimon.core.turn.prepare.create_session", new_callable=AsyncMock
         ) as mock_create_session,
@@ -4330,7 +4315,6 @@ async def test_run_thread_turn_passes_one_shared_deadline_to_bind_and_run(
         mock_resolve_agent.return_value = "agent_test_id"
         mock_resolve_env.return_value = "env_test_id"
         mock_over_balance.return_value = False
-        mock_over_cap.return_value = False
         mock_create_session.return_value = _fake_session
         mock_run_turn.side_effect = _fake_run_turn
         mock_bind_session.side_effect = _bind_session_wrapper
@@ -4431,7 +4415,6 @@ async def test_run_thread_turn_bind_phase_ceiling_does_not_escape_handle_app_men
         patch(
             "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch(
             "daimon.adapters.slack.app.bind_session", new_callable=AsyncMock
         ) as mock_bind_session,
@@ -4439,7 +4422,6 @@ async def test_run_thread_turn_bind_phase_ceiling_does_not_escape_handle_app_men
         mock_resolve_agent.return_value = "agent_test_id"
         mock_resolve_env.return_value = "env_test_id"
         mock_over_balance.return_value = False
-        mock_over_cap.return_value = False
         mock_bind_session.side_effect = ceiling_error()
 
         await app._handle_app_mention(event, team_id=team_id)  # pyright: ignore[reportPrivateUsage]
@@ -4665,7 +4647,6 @@ async def test_bind_phase_failure_leaves_no_cancel_registry_entry(
         patch(
             "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch(
             "daimon.adapters.slack.app.bind_session", new_callable=AsyncMock
         ) as mock_bind_session,
@@ -4673,7 +4654,6 @@ async def test_bind_phase_failure_leaves_no_cancel_registry_entry(
         mock_resolve_agent.return_value = "agent_test_id"
         mock_resolve_env.return_value = "env_test_id"
         mock_over_balance.return_value = False
-        mock_over_cap.return_value = False
         mock_bind_session.side_effect = ceiling_error()
 
         await app._handle_app_mention(event, team_id=team_id)  # pyright: ignore[reportPrivateUsage]

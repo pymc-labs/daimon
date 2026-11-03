@@ -37,6 +37,7 @@ from daimon.core.scope import (
     TenantConfigRow,
     TenantScopeRef,
 )
+from daimon.core.stores.channel_changes import list_changes
 from daimon.core.stores.scoped_config_read import get_scope, resolve
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.testing.factories import make_account, make_tenant
@@ -59,6 +60,8 @@ async def test_save_scope_environment_sets_replaces_and_clears_a_channel(
         channel_id="c1",
         environment_name="science",
         actor_account_id=actor.id,
+        platform="discord",
+        surface="panel",
     )
     second = await save_scope_environment(
         db_session,
@@ -66,6 +69,8 @@ async def test_save_scope_environment_sets_replaces_and_clears_a_channel(
         channel_id="c1",
         environment_name="gpu",
         actor_account_id=actor.id,
+        platform="discord",
+        surface="panel",
     )
     resolved = await resolve(
         db_session,
@@ -86,11 +91,19 @@ async def test_save_scope_environment_sets_replaces_and_clears_a_channel(
         channel_id="c1",
         environment_name=None,
         actor_account_id=actor.id,
+        platform="discord",
+        surface="panel",
     )
     assert cleared == "gpu", "clearing reports what it removed"
     assert await get_scope(db_session, scope=scope) is None, (
         "a row left with no setting is removed, so the channel is back to no row at all"
     )
+    records = await list_changes(db_session, tenant_id=tenant.id, channel_id="c1")
+    assert [(r.before, r.after, r.surface) for r in records] == [
+        ("gpu", None, "panel"),
+        ("science", "gpu", "panel"),
+        (None, "science", "panel"),
+    ], "every panel write is recorded, newest first"
 
 
 async def test_clearing_a_channel_environment_keeps_its_agent(db_session: AsyncSession) -> None:
@@ -106,6 +119,8 @@ async def test_clearing_a_channel_environment_keeps_its_agent(db_session: AsyncS
         channel_id="c1",
         environment_name=None,
         actor_account_id=None,
+        platform="discord",
+        surface="panel",
     )
     row = await get_scope(db_session, scope=scope)
 
@@ -124,6 +139,8 @@ async def test_save_scope_environment_without_a_channel_writes_the_tenant_defaul
         channel_id=None,
         environment_name="shared",
         actor_account_id=None,
+        platform="discord",
+        surface="panel",
     )
     noop = await save_scope_environment(
         db_session,
@@ -131,6 +148,8 @@ async def test_save_scope_environment_without_a_channel_writes_the_tenant_defaul
         channel_id="c9",
         environment_name=None,
         actor_account_id=None,
+        platform="discord",
+        surface="panel",
     )
     row = await get_scope(db_session, scope=TenantScopeRef(tenant_id=tenant.id))
 

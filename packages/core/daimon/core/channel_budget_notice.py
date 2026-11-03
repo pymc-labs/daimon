@@ -1,4 +1,4 @@
-"""Tell a channel's admins, once per budget window, that its budget is used up.
+"""Tell the server admins, once per budget window, that its budget is used up.
 
 When chat admission refuses a turn for the channel budget, the first refusal
 of each window claims the budget notice and DMs the server admins. The claim

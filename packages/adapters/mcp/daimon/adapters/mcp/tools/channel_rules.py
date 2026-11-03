@@ -223,6 +223,8 @@ async def _set_agent_rule_impl(
             agent_name=agent_name.strip(),
             runs_in=channels,
             subject=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.CHANNEL_PERMISSIONS)),
+            actor_account_id=auth.account_id,
+            surface="chat",
             default=runtime.deployment_default,
         )
     except AccessPolicyUnreadable as exc:

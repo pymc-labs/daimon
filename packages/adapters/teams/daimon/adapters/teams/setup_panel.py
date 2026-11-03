@@ -81,6 +81,7 @@ from daimon.core.panel_audit import PanelOp, PanelOutcome, record_panel_write
 from daimon.core.panel_operator_tokens import (
     list_panel_operator_tokens,
     mint_panel_operator_token,
+    panel_admin,
     revoke_panel_operator_token,
 )
 from daimon.core.permissions import any_agent_rules
@@ -356,7 +357,11 @@ class SetupPanel:
                 return await self._operator_tokens(actor, "Pick a token to revoke.")
             async with self._runtime.sessionmaker.begin() as session:
                 revoked = await revoke_panel_operator_token(
-                    session, tenant_id=actor.tenant_id, jti=jti, now=now
+                    session,
+                    subject=panel_admin(actor.user_id),
+                    tenant_id=actor.tenant_id,
+                    jti=jti,
+                    now=now,
                 )
             await audit(
                 outcome="allowed" if revoked else "error",
@@ -374,10 +379,10 @@ class SetupPanel:
             async with self._runtime.sessionmaker.begin() as session:
                 minted = await mint_panel_operator_token(
                     session,
+                    subject=panel_admin(actor.user_id),
                     tenant_id=actor.tenant_id,
                     platform="teams",
                     platform_user_id=actor.user_id,
-                    is_platform_admin=actor.is_platform_admin,
                     scopes=scopes,
                     label=str(data.get("label") or ""),
                     secret=secret.get_secret_value().encode(),

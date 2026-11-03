@@ -360,7 +360,7 @@ function view(r: Rec, v: Viewer): Agent {
   const cur = current(r)
   const full = details(r, v)
   return {
-    id: r.id, version: cur.version, ...redact(cur.config, full), owner: ref(r.owner), co_owners: r.co_owners.map(ref),
+    id: r.id, version: cur.version, ...redact(cur.config, full), owner: ref(r.owner), recorded_owner: ref(r.owner), co_owners: r.co_owners.map(ref),
     updated_at: cur.at, updated_by: ref(cur.by), last_used_at: r.last_used_at, spend_usd: r.spend_usd,
     can_edit: full && v.edit, can_view_details: full, nodes: full ? [{ kind: "data_server", label: "Data server", server: attached.has(r.id) ? "data" : null }] : [],
   }
@@ -640,3 +640,20 @@ export const agentsHandlers = [
 
 /** Dev only: forget edits (`window.__resetAgents()`). */
 ;(globalThis as { __resetAgents?: () => void }).__resetAgents = () => { DB = seed(); save() }
+
+/** The roster and who is asking, for the setup handlers in `agent-setup.ts`. */
+export const roster = {
+  all: () => DB, find, viewer, details, save, library: () => SKILLS,
+  remove: (id: string) => { DB = DB.filter((r) => r.id !== id); save() },
+  copy: (r: Rec, name: string, by: string) => {
+    const last = r.versions.at(-1)!
+    const made: Rec = {
+      id: `ag_${name.toLowerCase().replace(/[^a-z0-9]+/g, "_")}_${Date.now().toString(36).slice(-4)}`,
+      owner: by, co_owners: [], last_used_at: null, spend_usd: 0, drafts: {},
+      versions: [{ version: 1, at: new Date().toISOString(), by, note: `Copied from ${last.config.name}`, config: { ...clone(last.config), name } }],
+    }
+    DB.push(made)
+    save()
+    return made
+  },
+}

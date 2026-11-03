@@ -28,7 +28,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_session_status_idle_event
 )
 from cryptography.fernet import Fernet
 from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
-from daimon.adapters.scheduler.main import _build_fire, _CapsAdapter
+from daimon.adapters.scheduler.main import _build_fire
 from daimon.core import direct_messages
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import DirectMessagePolicy, Settings
@@ -414,7 +414,6 @@ class Harness:
         await run_one_tick(
             now=datetime.now(UTC),
             sm=self.factory,
-            caps=_CapsAdapter(self.factory, billing_config=None),
             fire=fire,
             max_age=timedelta(minutes=5),
             max_concurrent_fires=2,

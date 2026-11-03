@@ -34,10 +34,10 @@ from daimon.testing.discord_surface import OfflineDiscordGateway
 from daimon.testing.factories import (
     make_channel_budget,
     make_ledger_entry,
+    make_monthly_limit,
     make_platform_principal,
     make_tenant,
     make_tenant_config,
-    make_tenant_user_cap,
 )
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.outcome_oracle import LogObservation, VisibleText
@@ -89,7 +89,7 @@ async def setup(
             policy=TenantAccessPolicy.model_validate({"protected_channel_ids": ("101",)}),
         )
     if gate == "cap_exceeded":
-        await make_tenant_user_cap(session, tenant=tenant, amount=Decimal("0"))
+        await make_monthly_limit(session, tenant=tenant, amount=Decimal("0"))
     if gate == "channel_budget_exceeded":
         # Controlled host fixture, NOT NEW15's first actual metered native turn.
         await make_channel_budget(session, tenant=tenant, channel_id="101", limit_usd=Decimal("0"))

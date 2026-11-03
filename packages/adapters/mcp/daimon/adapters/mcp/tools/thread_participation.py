@@ -21,12 +21,14 @@ before any read.
 
 from __future__ import annotations
 
-import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Final, Literal
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._authz_facts import chat_actor
 from daimon.adapters.mcp.tools._channel_policy import require_within_hold
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
@@ -35,20 +37,15 @@ from daimon.adapters.mcp.tools._ctx import (
 from daimon.adapters.mcp.tools.discord import verify_participation_scope
 from daimon.adapters.mcp.tools.teams._participation import verify_teams_participation_scope
 from daimon.core.admin_actions import DelegatedAction
-from daimon.core.scope_cascade import resolve_above
-from daimon.core.stores.thread_participation import (
-    clear_participation_mode,
-    get_participation_modes,
-    set_participation_mode,
-)
+from daimon.core.channel_changes import ChannelChangeRefused
+from daimon.core.channel_switches import SwitchTarget, set_switch, switch_refusal
+from daimon.core.stores.thread_participation import get_participation_modes
 from daimon.core.thread_participation import (
     ParticipationMode,
     ParticipationScope,
     build_participation_explanation,
     build_participation_note,
     resolve_participation,
-    scope_label,
-    tier_word,
 )
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -56,15 +53,6 @@ from fastmcp.exceptions import ToolError
 _PLATFORMS: Final = frozenset({"discord", "teams"})
 
 _WRONG_PLATFORM = "Following threads isn't available here yet, so there is nothing to turn on."
-_DEPLOYMENT_DISABLED = (
-    "Following is turned off for all of Daimon and cannot be turned on. "
-    "I only reply when @mentioned; the operator would have to change that."
-)
-_DISABLED_NEEDS_A_WIDER_SCOPE = (
-    "'disabled' is not a thread-level setting — use mode='off' to stop "
-    "following this thread. 'disabled' locks a whole channel or everything here and "
-    "is an admin action there."
-)
 
 
 @dataclass(frozen=True)
@@ -127,6 +115,17 @@ async def _verify_scope(
     return await verify_participation_scope(runtime, auth, scope, scope_id)
 
 
+@contextmanager
+def _refusals(auth: AuthIdentity) -> Iterator[None]:
+    """The service's refusal, as the tool error the caller reads."""
+    try:
+        yield
+    except ChannelChangeRefused as exc:
+        if exc.reason == "admin_required":
+            _require_admin(auth, action=DelegatedAction.CHANNEL_PERMISSIONS)
+        raise ToolError(str(exc)) from exc
+
+
 def _target_scope(
     thread_id: str | None, channel_id: str | None
 ) -> tuple[ParticipationScope, str | None]:
@@ -154,84 +153,44 @@ async def _set_thread_participation_impl(
     channel_id: str | None,
 ) -> ThreadParticipationResult:
     """Validate every refusal BEFORE any write: a refused call must leave no row behind."""
-    if auth.platform not in _PLATFORMS:
-        raise ToolError(_WRONG_PLATFORM)
-
     deployment = _deployment_mode(runtime, auth.platform)
-    if deployment is ParticipationMode.DISABLED:
-        raise ToolError(_DEPLOYMENT_DISABLED)
-
     scope, scope_id = _target_scope(thread_id, channel_id)
-    if scope is not ParticipationScope.THREAD:
-        _require_admin(auth, action=DelegatedAction.CHANNEL_PERMISSIONS)
-    if scope is ParticipationScope.THREAD and mode == "disabled":
-        raise ToolError(_DISABLED_NEEDS_A_WIDER_SCOPE)
-    parent_id = await _verify_scope(runtime, auth, scope, scope_id)
-    if parent_id is not None:
-        channel_id = parent_id
-
     requested = None if mode == "inherit" else ParticipationMode(mode)
-    tenant_id: uuid.UUID = auth.tenant_id
-
-    async with runtime.session_factory.begin() as session:
-        before = await get_participation_modes(
-            session,
-            tenant_id=tenant_id,
-            platform=auth.platform,
-            channel_id=channel_id,
-            thread_id=thread_id,
+    actor = chat_actor(auth, DelegatedAction.CHANNEL_PERMISSIONS)
+    platform = auth.platform or ""
+    with _refusals(auth):
+        refusal = switch_refusal(
+            "participation",
+            actor,
+            platform=platform,
+            deployment=deployment,
+            scope=scope,
+            mode=requested,
         )
-        above = resolve_above(scope, deployment, before)
-        if requested is ParticipationMode.ON and above.mode is ParticipationMode.DISABLED:
-            tier = tier_word(above.tier, auth.platform)
-            raise ToolError(
-                f"Participation is disabled at the {tier} level, so "
-                f"{scope_label(scope, scope_id, auth.platform)} cannot be turned on. "
-                f"An admin would have to change the {tier} setting first."
-            )
-
-        if requested is None:
-            await clear_participation_mode(
-                session,
-                tenant_id=tenant_id,
-                platform=auth.platform,
-                scope=scope,
-                scope_id=scope_id,
-            )
-        else:
-            await set_participation_mode(
-                session,
-                tenant_id=tenant_id,
-                platform=auth.platform,
-                scope=scope,
-                scope_id=scope_id,
-                mode=requested,
-            )
-
-        after = await get_participation_modes(
-            session,
-            tenant_id=tenant_id,
-            platform=auth.platform,
-            channel_id=channel_id,
-            thread_id=thread_id,
+        if refusal is not None:
+            raise refusal
+        parent_id = await _verify_scope(runtime, auth, scope, scope_id)
+        if parent_id is not None:
+            channel_id = parent_id
+        change = await set_switch(
+            runtime.session_factory,
+            actor,
+            "participation",
+            platform=platform,
+            deployment=deployment,
+            target=SwitchTarget(scope, scope_id, channel_id, thread_id),
+            mode=requested,
         )
-
-    effective = resolve_participation(
-        deployment=deployment,
-        workspace=after.workspace,
-        channel=after.channel,
-        thread=after.thread,
-    )
     return ThreadParticipationResult(
         scope=_scope_result_label(scope, scope_id),
         mode="inherit" if requested is None else requested.value,
-        effective_mode=effective.mode.value,
-        effective_tier=effective.tier,
+        effective_mode=change.effective.mode.value,
+        effective_tier=change.effective.tier,
         note=build_participation_note(
             scope=scope,
             scope_id=scope_id,
             requested=requested,
-            effective=effective,
+            effective=change.effective,
             platform=auth.platform,
         ),
     )

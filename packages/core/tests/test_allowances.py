@@ -9,6 +9,7 @@ from decimal import Decimal
 from daimon.core.allowances import (
     allowance_verdict,
     applicable,
+    governing_cap,
     window_end,
     window_start,
 )
@@ -31,6 +32,7 @@ def allowance(
     window: AllowanceWindow = "month",
     starts_at: datetime = NOW - timedelta(days=60),
     expires_at: datetime | None = None,
+    is_cap: bool = False,
 ) -> SpendAllowanceRow:
     return SpendAllowanceRow(
         id=uuid.uuid4(),
@@ -44,6 +46,7 @@ def allowance(
         expires_at=expires_at,
         created_by_account_id=None,
         created_at=starts_at,
+        is_cap=is_cap,
     )
 
 
@@ -203,3 +206,70 @@ def test_window_start_is_the_later_of_month_start_and_the_allowance_start() -> N
         "a total allowance counts from its start"
     )
     assert window_end(total, now=NOW) is None, "a total allowance has no renewal"
+
+
+def test_a_cap_set_mid_month_still_counts_the_whole_month() -> None:
+    cap = allowance(
+        kind="group",
+        subject="everyone",
+        amount="100",
+        is_cap=True,
+        starts_at=datetime(2026, 10, 14, tzinfo=UTC),
+    )
+    since = window_start(cap, now=NOW)
+    assert since == datetime(2026, 10, 1, tzinfo=UTC), "spend before the cap row counts"
+    verdict = allowance_verdict([], used={cap.id: Decimal(90)}, now=NOW, cap=cap)
+    assert verdict.left_usd == Decimal(10), "a $100 cap with $90 spent leaves $10"
+
+
+def test_a_cap_is_never_one_of_the_allowances_to_choose_among() -> None:
+    cap = allowance(kind="group", subject="everyone", amount="5", is_cap=True)
+    allowed = allowance(kind="group", subject="everyone", amount="50")
+    assert [r.id for r in covering([cap, allowed])] == [allowed.id], "the cap is not an allowance"
+    assert covering([cap]) == [], "a cap alone leaves a member with no allowance"
+
+
+def test_the_governing_cap_is_the_persons_own_else_everyones() -> None:
+    everyone = allowance(kind="group", subject="everyone", amount="5", is_cap=True)
+    own = allowance(subject="u1", amount="50", is_cap=True)
+    other = allowance(subject="u2", amount="1", is_cap=True)
+    ids = frozenset({"u1"})
+    held = governing_cap([everyone, own, other], person_ids=ids, now=NOW)
+    assert held is not None and held.id == own.id, (
+        "a person's cap replaces the default, even if higher"
+    )
+    held = governing_cap([everyone, other], person_ids=ids, now=NOW)
+    assert held is not None and held.id == everyone.id, "no cap of their own: the default holds"
+    assert governing_cap([other], person_ids=ids, now=NOW) is None, (
+        "another person's cap is not theirs"
+    )
+    lower = allowance(subject="u9", amount="2", is_cap=True)
+    held = governing_cap([own, lower], person_ids=frozenset({"u1", "u9"}), now=NOW)
+    assert held is not None and held.id == lower.id, "of several own caps the lowest holds"
+
+
+def test_a_cap_outside_its_dates_does_not_hold() -> None:
+    later = allowance(subject="u1", is_cap=True, starts_at=NOW + timedelta(days=1))
+    assert governing_cap([later], person_ids=frozenset({"u1"}), now=NOW) is None
+
+
+def test_verdict_cap_blocks_beside_a_generous_allowance_and_binds_the_smaller_room() -> None:
+    cap = allowance(kind="group", subject="everyone", amount="10", is_cap=True)
+    generous = allowance(kind="group", subject="staff", amount="100", window="total")
+    room = allowance_verdict([generous], used={cap.id: Decimal(4)}, now=NOW, cap=cap)
+    assert (room.blocked, room.left_usd, room.total_usd, room.window) == (
+        False,
+        Decimal(6),
+        Decimal(10),
+        "month",
+    ), "the cap's $6 is less than the allowance's room: the cap binds"
+    assert room.resets_at == window_end(cap, now=NOW), "the reset follows the cap"
+    spent = allowance_verdict([generous], used={cap.id: Decimal(10)}, now=NOW, cap=cap)
+    assert spent.blocked and spent.left_usd == 0, "a spent cap blocks though the allowance has room"
+    wide = allowance(kind="group", subject="staff", amount="7", window="total")
+    tight = allowance_verdict([wide], used={cap.id: Decimal(1)}, now=NOW, cap=cap)
+    assert (tight.left_usd, tight.window, tight.resets_at) == (Decimal(7), "total", None), (
+        "the allowance's room is smaller than the cap's: it binds"
+    )
+    alone = allowance_verdict([], used={cap.id: Decimal(3)}, now=NOW, cap=cap)
+    assert (alone.blocked, alone.left_usd) == (False, Decimal(7)), "a cap alone limits a member"

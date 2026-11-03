@@ -1,7 +1,6 @@
 """Concurrent scheduled turns reuse an owner even while enrollment is committing."""
 
 import asyncio
-import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import patch
@@ -20,11 +19,6 @@ from sqlalchemy.engine import Connection, ExecutionContext
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from .test_main import _make_test_settings  # pyright: ignore[reportPrivateUsage]
-
-
-class NoCaps:
-    async def is_over_cap(self, tenant_id: uuid.UUID, user_id: str) -> bool:
-        return False
 
 
 @pytest.mark.parametrize("enrollment_committed", [True, False], ids=["committed", "committing"])
@@ -124,7 +118,6 @@ async def test_concurrent_routines_reuse_existing_owner(
                 await run_one_tick(
                     now=now,
                     sm=sm,
-                    caps=NoCaps(),
                     fire=fire,
                     max_age=timedelta(minutes=15),
                     max_concurrent_fires=2,

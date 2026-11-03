@@ -10,6 +10,8 @@ No try/except — exceptions propagate (guideline:architecture).
 - list_mcp_tokens: operator listing, live tokens only unless asked.
 - list_coding_keys / revoke_coding_key: one agent's live "coding tools" keys, and
   revoking one of them only when it is that agent's.
+- list_account_coding_keys / revoke_account_coding_key: one person's own live coding keys
+  across every agent of a workspace.
 - lock_mcp_token / add_issued_usd: the per-token promo issuing ceiling.
 - update_mcp_token_scopes: replace a live operator token's scopes.
 
@@ -272,6 +274,51 @@ async def revoke_coding_key(
     )
     if account_id is not None:
         stmt = stmt.where(McpToken.account_id == account_id)
+    orm = (await session.execute(stmt)).scalar_one_or_none()
+    return None if orm is None else McpTokenRow.model_validate(orm)
+
+
+async def list_account_coding_keys(
+    session: AsyncSession, *, tenant_id: uuid.UUID, account_id: uuid.UUID, now: datetime
+) -> list[McpTokenRow]:
+    """The person's live coding keys on any agent of the workspace, newest first."""
+    stmt = (
+        select(McpToken)
+        .where(
+            McpToken.tenant_id == tenant_id,
+            McpToken.account_id == account_id,
+            McpToken.kind == "agent",
+            McpToken.purpose == "coding",
+            McpToken.revoked_at.is_(None),
+            or_(McpToken.expires_at.is_(None), McpToken.expires_at > now),
+        )
+        .order_by(McpToken.created_at.desc(), McpToken.jti)
+    )
+    return [McpTokenRow.model_validate(orm) for orm in (await session.scalars(stmt)).all()]
+
+
+async def revoke_account_coding_key(
+    session: AsyncSession,
+    *,
+    jti: uuid.UUID,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    now: datetime,
+) -> McpTokenRow | None:
+    """Revoke one of the person's own live coding keys; None when it is not theirs or not one."""
+    stmt = (
+        update(McpToken)
+        .where(
+            McpToken.jti == jti,
+            McpToken.tenant_id == tenant_id,
+            McpToken.account_id == account_id,
+            McpToken.kind == "agent",
+            McpToken.purpose == "coding",
+            McpToken.revoked_at.is_(None),
+        )
+        .values(revoked_at=now)
+        .returning(McpToken)
+    )
     orm = (await session.execute(stmt)).scalar_one_or_none()
     return None if orm is None else McpTokenRow.model_validate(orm)
 

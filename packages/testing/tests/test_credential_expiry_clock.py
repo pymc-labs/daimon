@@ -51,11 +51,6 @@ if TYPE_CHECKING:
 ANCHOR = datetime(2026, 10, 11, tzinfo=UTC)
 
 
-class NoCaps:
-    async def is_over_cap(self, tenant_id: uuid.UUID, user_id: str) -> bool:
-        raise RuntimeError("expiry must not execute routine admission")
-
-
 async def no_fire(row: RoutineRow) -> None:
     raise RuntimeError("expiry must not execute routine fire/native factory")
 
@@ -285,7 +280,6 @@ async def expiry(
     jobs = ClockedRoutineJobs(
         sessionmaker=sessions,
         clock=clock,
-        caps=NoCaps(),
         fire=no_fire,
         post=no_post,
         gateway=harness.gateway,
@@ -417,7 +411,6 @@ async def test_unset_binding_preserves_typed_refusal_without_time(expiry: Expiry
     unbound = ClockedRoutineJobs(
         sessionmaker=expiry.sessions,
         clock=expiry.clock,
-        caps=NoCaps(),
         fire=no_fire,
         post=no_post,
         gateway=expiry.harness.gateway,
@@ -465,7 +458,6 @@ async def test_callbacks_reconfiguring_secondary_bind_are_readmitted_before_next
     jobs = ClockedRoutineJobs(
         sessionmaker=expiry.sessions,
         clock=expiry.clock,
-        caps=NoCaps(),
         fire=no_fire,
         post=no_post,
         gateway=expiry.harness.gateway,
@@ -540,7 +532,6 @@ async def test_retry_cursor_progresses_past_failed_card_without_starving_next(
     jobs = ClockedRoutineJobs(
         sessionmaker=expiry.sessions,
         clock=expiry.clock,
-        caps=NoCaps(),
         fire=no_fire,
         post=no_post,
         gateway=expiry.harness.gateway,

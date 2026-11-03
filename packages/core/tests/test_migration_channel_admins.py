@@ -14,9 +14,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
-def _load_migration():
-    path = Path(__file__).parents[1] / "alembic/versions/0035_channel_admins.py"
-    spec = importlib.util.spec_from_file_location("migration_channel_admins", path)
+def _load_migration(name: str = "0035_channel_admins"):
+    path = Path(__file__).parents[1] / f"alembic/versions/{name}.py"
+    spec = importlib.util.spec_from_file_location(f"migration_{name}", path)
     assert spec and spec.loader, "the migration file loads"
     migration = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(migration)
@@ -29,11 +29,13 @@ async def test_channel_admins_migration_round_trips(db_session: AsyncSession) ->
     account = await make_account(db_session, tenant=tenant)
     migration = _load_migration()
     conn = await db_session.connection()
+    # The table is gone from the schema the fixtures build; 0174 reversed brings it back.
+    with_table = _load_migration("0174_drop_channel_admins")
 
-    def run(step: str):
+    def run(step: str, module=None):
         def inner(sync_conn):
             with Operations.context(MigrationContext.configure(sync_conn)):
-                getattr(migration, step)()
+                getattr(module or migration, step)()
 
         return inner
 
@@ -55,6 +57,9 @@ async def test_channel_admins_migration_round_trips(db_session: AsyncSession) ->
         )
         return found.first() is not None
 
+    assert not await table_exists(), "0174 dropped channel_admins from the fixture schema"
+    await conn.run_sync(run("downgrade", with_table))
+    assert await table_exists(), "0174 downgrade recreates channel_admins"
     await conn.run_sync(run("downgrade"))
     assert not await table_exists(), "downgrade drops channel_admins"
     assert not await waiting_index_exists(), "downgrade drops the waiting wakes index"

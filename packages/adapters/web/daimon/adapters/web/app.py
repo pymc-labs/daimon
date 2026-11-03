@@ -4,14 +4,26 @@ from __future__ import annotations
 
 import anthropic
 from daimon.adapters.web.admin import admin_router
+from daimon.adapters.web.agent_google import agent_google_router
+from daimon.adapters.web.agent_keys import agent_keys_router
+from daimon.adapters.web.agent_knowledge import agent_knowledge_router
+from daimon.adapters.web.agent_library import agent_library_router
+from daimon.adapters.web.agent_lifecycle import agent_lifecycle_router
+from daimon.adapters.web.agent_people import agent_people_router
+from daimon.adapters.web.agent_tool_rules import agent_tool_rules_router
 from daimon.adapters.web.agents import agents_router
 from daimon.adapters.web.auth import auth_router
 from daimon.adapters.web.avatars import avatars_router
+from daimon.adapters.web.channel_settings import channel_settings_router
+from daimon.adapters.web.channels import channels_router
 from daimon.adapters.web.chat import chat_router
 from daimon.adapters.web.credits import credits_router
+from daimon.adapters.web.integrations import integrations_router
 from daimon.adapters.web.invites import invites_router
 from daimon.adapters.web.me import me_router
 from daimon.adapters.web.nodes import nodes_router
+from daimon.adapters.web.profile import profile_router
+from daimon.adapters.web.routines import routines_router
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.adapters.web.security import SecurityMiddleware
 from daimon.adapters.web.static import spa_router
@@ -90,10 +102,22 @@ def create_app(runtime: WebRuntime) -> FastAPI:
     app.include_router(auth_router(runtime))
     app.include_router(avatars_router(runtime))
     app.include_router(me_router(runtime))
+    app.include_router(profile_router(runtime))
     app.include_router(nodes_router(runtime))
+    app.include_router(agent_google_router(runtime))
+    app.include_router(agent_keys_router(runtime))
+    app.include_router(agent_knowledge_router(runtime))
+    app.include_router(agent_people_router(runtime))
+    app.include_router(agent_tool_rules_router(runtime))
+    app.include_router(agent_lifecycle_router(runtime))
+    app.include_router(agent_library_router(runtime))
     app.include_router(agents_router(runtime))
+    app.include_router(channels_router(runtime))
+    app.include_router(channel_settings_router(runtime))
     app.include_router(chat_router(runtime))
+    app.include_router(routines_router(runtime))
     app.include_router(credits_router(runtime))
+    app.include_router(integrations_router(runtime))
     app.include_router(invites_router(runtime))
     app.include_router(admin_router(runtime))
     app.include_router(spa_router(runtime.web))

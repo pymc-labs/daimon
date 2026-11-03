@@ -9,12 +9,24 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
+from datetime import datetime
 from typing import Any, cast
 
-from daimon.core._models import MessageFeedback
+from daimon.core._models import MessageFeedback, ThreadSession
 from daimon.core.message_feedback import Vote
 from daimon.core.stores.domain import MessageFeedbackRow, RecordVoteResult
-from sqlalchemy import ColumnElement, CursorResult, delete, func, or_, select, tuple_, update
+from sqlalchemy import (
+    ColumnElement,
+    CursorResult,
+    Subquery,
+    and_,
+    delete,
+    func,
+    or_,
+    select,
+    tuple_,
+    update,
+)
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -247,3 +259,78 @@ async def count_message_feedback_for_account(
     )
     stmt = select(func.count()).select_from(MessageFeedback).where(predicate)
     return int((await session.execute(stmt)).scalar_one())
+
+
+def _agent_of_session() -> Subquery:
+    """Each session's agent, once: a session is named by the sessions table's row."""
+    return (
+        select(
+            ThreadSession.tenant_id,
+            ThreadSession.ma_session_id,
+            func.min(ThreadSession.ma_agent_id).label("ma_agent_id"),
+        )
+        .group_by(ThreadSession.tenant_id, ThreadSession.ma_session_id)
+        .subquery()
+    )
+
+
+async def count_votes_by_agent(
+    session: AsyncSession, *, tenant_id: uuid.UUID, since: datetime, until: datetime
+) -> list[tuple[str | None, str, int]]:
+    """`(ma_agent_id, vote, count)` for votes cast in `[since, until)`.
+
+    Counts only: no row, text or voter leaves this query. The agent is the one of the
+    session the vote hints at, None when that is unknown.
+    """
+    agent = _agent_of_session()
+    stmt = (
+        select(agent.c.ma_agent_id, MessageFeedback.vote, func.count())
+        .select_from(MessageFeedback)
+        .outerjoin(
+            agent,
+            and_(
+                agent.c.tenant_id == MessageFeedback.tenant_id,
+                agent.c.ma_session_id == MessageFeedback.ma_session_id,
+            ),
+        )
+        .where(
+            MessageFeedback.tenant_id == tenant_id,
+            MessageFeedback.created_at >= since,
+            MessageFeedback.created_at < until,
+        )
+        .group_by(agent.c.ma_agent_id, MessageFeedback.vote)
+    )
+    return [(a, v, int(n)) for a, v, n in (await session.execute(stmt)).all()]
+
+
+async def count_reasons_by_agent(
+    session: AsyncSession, *, tenant_id: uuid.UUID, since: datetime, until: datetime
+) -> list[tuple[str | None, str, int]]:
+    """`(ma_agent_id, reason_code, count)` for the reasons picked in `[since, until)`."""
+    agent = _agent_of_session()
+    picked = (
+        select(
+            MessageFeedback.tenant_id.label("tenant_id"),
+            MessageFeedback.ma_session_id.label("ma_session_id"),
+            func.unnest(MessageFeedback.feedback_reasons).label("reason"),
+        )
+        .where(
+            MessageFeedback.tenant_id == tenant_id,
+            MessageFeedback.created_at >= since,
+            MessageFeedback.created_at < until,
+        )
+        .subquery()
+    )
+    stmt = (
+        select(agent.c.ma_agent_id, picked.c.reason, func.count())
+        .select_from(picked)
+        .outerjoin(
+            agent,
+            and_(
+                agent.c.tenant_id == picked.c.tenant_id,
+                agent.c.ma_session_id == picked.c.ma_session_id,
+            ),
+        )
+        .group_by(agent.c.ma_agent_id, picked.c.reason)
+    )
+    return [(a, r, int(n)) for a, r, n in (await session.execute(stmt)).all()]

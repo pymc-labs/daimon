@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query"
-import { Plus } from "lucide-react"
+import { Plus, Ticket } from "lucide-react"
 import { Navigate, Route, Routes, useLocation } from "react-router"
 import { useParam } from "@/lib/filters"
 import { Page } from "@/components/shell/Page"
@@ -10,6 +10,7 @@ import type { Overview } from "./types"
 import { Allowances, NewAllowance } from "./Allowances"
 import { MineTab } from "./Mine"
 import { OverviewTab } from "./Overview"
+import { Redeem } from "./Redeem"
 import { SpendTab } from "./Spend"
 import { TopUp } from "./TopUp"
 
@@ -23,7 +24,12 @@ function AdminCredits() {
   const { pathname } = useLocation()
   const [dialog, setDialog] = useParam("dialog")
   const { data: overview } = useQuery({ queryKey: ["credits", "overview"], queryFn: () => api.get<Overview>("/api/credits/overview") })
-  const action = pathname === "/credits" ? overview?.topup && <Button size="sm" onClick={() => setDialog("topup")}><Plus />Top up</Button>
+  const action = pathname === "/credits" ? (
+    <>
+      <Button size="sm" variant="outline" onClick={() => setDialog("redeem")}><Ticket />Redeem code</Button>
+      {overview?.topup && <Button size="sm" onClick={() => setDialog("topup")}><Plus />Top up</Button>}
+    </>
+  )
     : pathname === "/credits/allowances" ? <Button size="sm" onClick={() => setDialog("allowance")}><Plus />New allowance</Button> : null
   const tab = { "/credits/spend": "Spend", "/credits/allowances": "Allowances", "/credits/usage": "My usage" }[pathname]
   return (
@@ -43,6 +49,7 @@ function AdminCredits() {
         <Route path="*" element={<Navigate to="/credits" replace />} />
       </Routes>
       {overview?.topup && <TopUp mode={overview.topup} open={dialog === "topup"} onOpenChange={(o) => setDialog(o ? "topup" : null)} />}
+      <Redeem open={dialog === "redeem"} onOpenChange={(o) => setDialog(o ? "redeem" : null)} />
       <NewAllowance open={dialog === "allowance"} onOpenChange={(o) => setDialog(o ? "allowance" : null)} />
     </Page>
   )

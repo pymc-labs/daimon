@@ -369,7 +369,6 @@ async def _turn_one(
     prompt: str,
 ) -> Result:
     from anthropic import APIStatusError
-    from daimon.core.billing import is_over_cap
     from daimon.core.config import load_turn_settings
     from daimon.core.headless_runner import run_turn
     from daimon.core.ma_identity import derive_agent_uuid
@@ -383,13 +382,7 @@ async def _turn_one(
     token = ACTIVE_TENANT.set(label)
     user_id = f"{name}-user"
     try:
-        if await is_over_balance(sessionmaker=sm, tenant_id=tenant_id) or await is_over_cap(
-            billing_config=None,
-            sessionmaker=sm,
-            tenant_id=tenant_id,
-            user_id=user_id,
-            now=datetime.now(UTC),
-        ):
+        if await is_over_balance(sessionmaker=sm, tenant_id=tenant_id):
             return Result(label, status="admission refused")
 
         def recorder(session_id: str, model_id: str) -> Callable[..., Awaitable[None]]:

@@ -5,15 +5,17 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from daimon.core._models import AgentCoOwner, PlatformPrincipal
+from daimon.core._models import AgentCoOwner, PlatformPrincipal, WebPerson
 from daimon.core.agent_ownership import (
     ForeignOwnerError,
+    InactiveOwnerError,
     add_agent_co_owner,
     agent_co_owners,
     agent_owner,
     clear_agent_owner,
     owns_agent,
     remove_agent_co_owner,
+    replace_agent_owners,
 )
 from daimon.core.agent_reach import load_target_facts
 from daimon.core.ma_identity import derive_agent_uuid
@@ -23,7 +25,12 @@ from daimon.core.purge import purge_account
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import agent_owners, security_audit
 from daimon.testing.db import DatabasePreflight, require_owned_sessionmaker
-from daimon.testing.factories import make_account, make_platform_principal, make_tenant
+from daimon.testing.factories import (
+    make_account,
+    make_platform_principal,
+    make_tenant,
+    make_web_person,
+)
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
@@ -185,6 +192,51 @@ async def test_a_person_from_another_organisation_is_refused_at_add_and_at_use(p
         )
     assert not await _owns(sessions, tenant, account=co_owner.id)
     assert not await _owns(sessions, tenant, user="U-CO")
+
+
+async def test_a_person_from_another_organisation_cannot_be_made_the_owner(people) -> None:
+    sessions, tenant, agent_id, admin, _, _, member, _ = people
+    async with sessions.begin() as session:
+        await session.execute(
+            update(PlatformPrincipal)
+            .where(PlatformPrincipal.account_id == member.id)
+            .values(foreign_home_id="other-org")
+        )
+    with pytest.raises(ForeignOwnerError):
+        async with sessions.begin() as session:
+            await replace_agent_owners(
+                session,
+                tenant_id=tenant.id,
+                agent_id=agent_id,
+                owner_account_id=member.id,
+                co_owner_account_ids=[],
+                by_account_id=admin.id,
+            )
+
+
+async def test_a_suspended_member_cannot_be_made_owner_but_may_stay_one(people) -> None:
+    sessions, tenant, agent_id, admin, primary, co_owner, member, _ = people
+    async with sessions.begin() as session:
+        for account in (primary, member):
+            person = await make_web_person(session, tenant=tenant, account=account)
+            await session.execute(
+                update(WebPerson).where(WebPerson.id == person.id).values(status="suspended")
+            )
+
+    async def replace(owner, co_owners) -> bool:
+        async with sessions.begin() as session:
+            return await replace_agent_owners(
+                session,
+                tenant_id=tenant.id,
+                agent_id=agent_id,
+                owner_account_id=owner.id,
+                co_owner_account_ids=[c.id for c in co_owners],
+                by_account_id=admin.id,
+            )
+
+    with pytest.raises(InactiveOwnerError):
+        await replace(member, [])
+    assert await replace(primary, [co_owner]), "a co-owner change goes through"
 
 
 async def test_owned_agents_list_includes_co_owned_ones(people) -> None:

@@ -34,12 +34,13 @@ from daimon.adapters.mcp.tools.promo_issuing import (
     _list_promo_codes_impl,
     _revoke_promo_code_impl,
 )
-from daimon.adapters.mcp.tools.routines import _require_routine_owner
+from daimon.adapters.mcp.tools.routines import _caller  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools.tenant_summary import _get_tenant_summary_impl
 from daimon.core.config import DiscordSettings
 from daimon.core.discord_membership import DiscordRestMembershipResolver
 from daimon.core.mcp_auth import mint_chat_mcp_token
 from daimon.core.membership import Membership
+from daimon.core.routine_service import _require_owner  # pyright: ignore[reportPrivateUsage]
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores.daimon_admins import change_grant, list_admins
 from daimon.testing.asgi import call_mcp_tool
@@ -137,7 +138,7 @@ async def test_routine_runs_as_editor_and_execution_never_has_human_money_author
         async with db_session_factory.begin() as db:
             row = await routines_store.get_routine(db, routine.id, tenant_id=tenant.id)
             assert row is not None
-            _require_routine_owner(auth, row)  # does not raise for a delegate
+            _require_owner(_caller(auth), row)  # does not raise for a delegate
             await routines_store.update_routine(
                 db,
                 routine.id,

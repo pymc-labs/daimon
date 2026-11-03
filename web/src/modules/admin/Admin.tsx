@@ -7,13 +7,14 @@ import { Page } from "@/components/shell/Page"
 import { Button } from "@/components/ui/button"
 import { AgentAccessView } from "./AgentAccess"
 import { Audit } from "./Audit"
+import { Feedback } from "./Feedback"
 import { Invites, NewInvite } from "./Invites"
 import { People } from "./People"
 import { Workspace } from "./Workspace"
 
 const TABS: { label: string; to: string; end?: boolean; cap: Capability }[] = [
   { label: "People", to: "/admin", end: true, cap: "people.manage" }, { label: "Invites", to: "/admin/invites", cap: "people.manage" },
-  { label: "Agent access", to: "/admin/agents", cap: "workspace.manage" }, { label: "Audit log", to: "/admin/audit", cap: "audit.view" },
+  { label: "Agent access", to: "/admin/agents", cap: "workspace.manage" }, { label: "Audit log", to: "/admin/audit", cap: "audit.view" }, { label: "Feedback", to: "/admin/feedback", cap: "audit.view" },
   { label: "Settings", to: "/admin/settings", cap: "workspace.manage" },
 ]
 
@@ -40,6 +41,7 @@ export function Admin() {
         {page("invites", "people.manage", <Invites />)}
         {page("agents", "workspace.manage", <AgentAccessView />)}
         {page("audit", "audit.view", <Audit />)}
+        {page("feedback", "audit.view", <Feedback />)}
         {page("settings", "workspace.manage", <Workspace />)}
         <Route path="*" element={<Navigate to={first ?? "/chat"} replace />} />
       </Routes>

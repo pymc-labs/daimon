@@ -20,7 +20,6 @@ from typing import Any, Literal
 import pytest
 from daimon.adapters.scheduler.main import (
     _build_fire,  # pyright: ignore[reportPrivateUsage]
-    _CapsAdapter,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.config import Settings
 from daimon.core.ma_resolver import new_resolver_cache
@@ -91,7 +90,6 @@ class Fleet:
         self.dispatcher = await run_one_tick(
             now=at,
             sm=sm,
-            caps=_CapsAdapter(sm, billing_config=None),
             fire=fire,
             dispatcher=self.dispatcher,
             **TICK,  # type: ignore[arg-type]

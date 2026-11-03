@@ -20,7 +20,6 @@ from typing import Final, Protocol
 
 import structlog
 from anthropic import AsyncAnthropic
-from daimon.core.billing import BillingConfig
 from daimon.core.channel_backend import effective_thread_backend
 from daimon.core.config import ThreadParticipationSettings
 from daimon.core.pricing import MODEL_PRICING
@@ -89,7 +88,6 @@ class ParticipationGates:
         sessionmaker: async_sessionmaker[AsyncSession],
         anthropic: AsyncAnthropic,
         bot_display_name: str,
-        billing_config: BillingConfig | None,
         markup: Decimal,
         deployment_default: DeploymentDefault | None = None,
     ) -> None:
@@ -98,7 +96,6 @@ class ParticipationGates:
         self._sessionmaker = sessionmaker
         self._anthropic = anthropic
         self._bot_display_name = bot_display_name
-        self._billing_config = billing_config
         self._markup = markup
         self._deployment_default = deployment_default
 
@@ -180,7 +177,6 @@ class ParticipationGates:
             return False
         block = await spend_gate_in_new_session(
             self._sessionmaker,
-            billing_config=self._billing_config,
             request=SpendRequest(
                 tenant_id=tenant_id,
                 platform_user_id=caller_id,

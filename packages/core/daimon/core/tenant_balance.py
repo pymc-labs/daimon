@@ -1,8 +1,7 @@
 """Per-tenant balance gate + debit math.
 
 Admission: prepaid balance > 0; operator-funded balances only alert.
-Composed with is_over_cap by the caller —
-final admit = balance_ok AND NOT over_cap. The balance gate is INDEPENDENT of
+Composed with the other spend checks by `daimon.core.spend_gate`. The balance gate is INDEPENDENT of
 Stripe config: a trial-credit-only guild with no
 STRIPE_* env must still turn. Gate on tenant_id presence + the ledger.
 

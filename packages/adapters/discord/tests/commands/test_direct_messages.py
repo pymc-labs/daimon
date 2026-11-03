@@ -43,7 +43,7 @@ async def test_dm_policy_replies_use_server_words(
 ) -> None:
     await provision_tenant(db_session_factory, platform="discord", workspace_id=str(_GUILD))
     save = AsyncMock()
-    monkeypatch.setattr(dm_module, "set_dm_enabled", save)
+    monkeypatch.setattr(dm_module, "set_dms", save)
     monkeypatch.setattr(dm_module, "is_member_daimon_admin", AsyncMock(return_value=True))
     member = MagicMock()
     member.guild_permissions.administrator = admin

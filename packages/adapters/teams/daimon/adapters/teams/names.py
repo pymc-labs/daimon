@@ -12,14 +12,14 @@ from __future__ import annotations
 import uuid
 
 from daimon.adapters.teams.identity import TeamsInbound
-from daimon.core.platform_names import remember_channel_names, remember_user_name
+from daimon.core.platform_names import ChannelSighting, remember_channel_names, remember_user_name
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 def remember_inbound(
     sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, inbound: TeamsInbound
 ) -> None:
-    """Store the sender's name and, for a channel message, the channel's."""
+    """Store the sender's name and, for a channel message, the channel's and its team."""
     remember_user_name(
         sessionmaker,
         tenant_id=tenant_id,
@@ -32,5 +32,12 @@ def remember_inbound(
             sessionmaker,
             tenant_id=tenant_id,
             platform="teams",
-            names={inbound.channel_id: inbound.channel_name},
+            names={
+                inbound.channel_id: ChannelSighting(
+                    inbound.channel_name,
+                    kind=inbound.channel_type,
+                    parent_id=inbound.team_id,
+                    parent_name=inbound.team_name,
+                )
+            },
         )

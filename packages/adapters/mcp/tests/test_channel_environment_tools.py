@@ -290,6 +290,8 @@ async def test_a_pick_on_a_channel_the_lookup_refuses_is_refused_but_can_be_clea
             channel_id=HIDDEN,
             environment_name="science",
             actor_account_id=account_id,
+            platform="discord",
+            surface="panel",
         )
 
     with pytest.raises(ToolError, match="not visible"):

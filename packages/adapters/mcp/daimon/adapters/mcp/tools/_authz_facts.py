@@ -9,7 +9,9 @@ MCP decision -- admission, configuration, sends, seals, fork -- at once.
 from __future__ import annotations
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Place, Subject, build_subject, build_turn_place
+from daimon.core.channel_changes import ChannelActor
 
 
 def mcp_subject(auth: AuthIdentity, *, is_admin: bool = False) -> Subject:
@@ -40,3 +42,15 @@ def mcp_place(auth: AuthIdentity) -> Place:
     if channel_id is None:
         return Place()
     return build_turn_place(channel_id=channel_id, thread_id=None)
+
+
+def chat_actor(auth: AuthIdentity, action: DelegatedAction | None = None) -> ChannelActor:
+    """The caller as a channel change from chat sees it (`daimon.core.channel_changes`).
+
+    An admin for `action` only; without one, only a platform admin."""
+    return ChannelActor(
+        tenant_id=auth.tenant_id,
+        account_id=auth.account_id,
+        subject=mcp_subject(auth, is_admin=auth.admin_for(action)),
+        surface="chat",
+    )

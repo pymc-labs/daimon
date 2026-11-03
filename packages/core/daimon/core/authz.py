@@ -93,8 +93,17 @@ class Action(StrEnum):
     SET_APPROVAL_GATE = "set_approval_gate"
     # Set one agent's rule.
     SET_AGENT_RULE = "set_agent_rule"
+    # Change a workspace-wide access setting: who may start turns, DMs, DM memory,
+    # typed @mentions (`daimon.core.workspace_settings`).
+    SET_WORKSPACE_SETTINGS = "set_workspace_settings"
+    # Read how the workspace's integrations stand (GitHub, MCP sign-ins) or manage its
+    # operator tokens: server admins only, never an agent key or a client.
+    MANAGE_INTEGRATIONS = "manage_integrations"
     # Archive the copy a channel kept to its own agents was given, as it opens.
     ARCHIVE_CHANNEL_COPY = "archive_channel_copy"
+    # Administer agents beyond their own setup: who owns one, archiving one, the
+    # skill library, the environments. Server admins only.
+    MANAGE_AGENTS = "manage_agents"
     # Set, clear or raise the budget of one channel (`Place.channel_id`).
     SET_CHANNEL_BUDGET = "set_channel_budget"
     # Add or remove the extra skills one channel's turns run with (`Place.channel_id`).
@@ -361,6 +370,9 @@ _CLIENT_REFUSED_ACTIONS = frozenset(
         Action.SET_CHANNEL_ENVIRONMENT,
         Action.SET_CHANNEL_RULE,
         Action.SET_AGENT_RULE,
+        Action.SET_WORKSPACE_SETTINGS,
+        Action.MANAGE_INTEGRATIONS,
+        Action.MANAGE_AGENTS,
         Action.SET_CHANNEL_BUDGET,
         Action.SET_CHANNEL_SKILLS,
         Action.SET_AGENT_TOOL_RULE,
@@ -661,6 +673,9 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         Action.SET_CHANNEL_RULE,
         Action.SET_APPROVAL_GATE,
         Action.SET_AGENT_RULE,
+        Action.SET_WORKSPACE_SETTINGS,
+        Action.MANAGE_INTEGRATIONS,
+        Action.MANAGE_AGENTS,
     ):
         # none, even on their own channel.
         if subject.is_admin and not subject.via_agent_key:

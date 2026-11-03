@@ -12,7 +12,7 @@ from daimon.adapters.web.access import (
 )
 from daimon.core.config import WebModuleKey
 
-ALL: tuple[WebModuleKey, ...] = ("chat", "agents", "credits", "admin")
+ALL: tuple[WebModuleKey, ...] = ("chat", "agents", "channels", "credits", "integrations", "admin")
 
 
 @pytest.mark.parametrize(
@@ -39,24 +39,39 @@ def test_role_is_the_highest_one_held(kwargs: dict[str, object], expected: Role)
 
 
 def test_modules_follow_the_role_and_the_deployment() -> None:
-    assert modules_for("owner", ALL) == ["chat", "agents", "credits", "admin"]
-    assert modules_for("member", ALL) == ["chat", "agents", "credits"]
+    assert modules_for("owner", ALL) == [
+        "chat",
+        "agents",
+        "channels",
+        "credits",
+        "integrations",
+        "admin",
+    ]
+    assert modules_for("member", ALL) == ["chat", "agents", "channels", "credits"]
     assert modules_for("visitor", ALL) == ["chat"]
     assert modules_for("owner", ("chat", "admin")) == ["chat", "admin"], "off means off"
 
 
 def test_capabilities_by_role() -> None:
-    member = capabilities_for("member", ["chat", "agents", "credits"])
+    member = capabilities_for("member", ["chat", "agents", "channels", "credits"])
     assert member == {
         "chat.use",
         "agents.view",
         "agents.edit",
         "agents.create",
+        "channels.view",
         "credits.view_own",
-    }
+    }, "a member reads channels but never changes them"
     assert capabilities_for("visitor", ["chat"]) == {"chat.use"}
-    assert capabilities_for("admin", ALL) >= member | {"people.manage", "credits.manage"}
-    assert len(capabilities_for("owner", ALL)) == 9
+    assert capabilities_for("admin", ALL) >= member | {
+        "people.manage",
+        "credits.manage",
+        "channels.manage",
+        "integrations.view",
+        "integrations.manage",
+    }
+    assert not {"integrations.view", "integrations.manage"} & capabilities_for("member", ALL)
+    assert len(capabilities_for("owner", ALL)) == 13
 
 
 def test_a_module_that_is_off_takes_its_capabilities_with_it() -> None:

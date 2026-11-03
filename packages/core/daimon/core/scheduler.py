@@ -6,7 +6,6 @@ import asyncio
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
 
 import structlog
 from daimon.core.ids import generate_request_id
@@ -24,10 +23,6 @@ from daimon.core.turn.termination import TerminationReason, termination_reason
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
-
-
-class CapsCheck(Protocol):
-    async def is_over_cap(self, tenant_id: uuid.UUID, user_id: str) -> bool: ...
 
 
 FireFn = Callable[[RoutineRow], Awaitable[None]]
@@ -108,7 +103,6 @@ async def run_one_tick(
     *,
     now: datetime,
     sm: async_sessionmaker[AsyncSession],
-    caps: CapsCheck,
     fire: FireFn,
     max_age: timedelta,
     max_concurrent_fires: int,
@@ -161,30 +155,7 @@ async def run_one_tick(
             await _record_fire_error(sm, row, "routine_configuration_check_failed", None)
         return dispatcher
 
-    # Sequential cap check (cheaper
-    # than checking inside the semaphore boundary; keeps the existing cap path).
-    fireable: list[RoutineRow] = []
-    for row in rows:
-        if row.created_by_user_id is None:
-            # No user to bill against — treat as uncapped (exemption applies
-            # symmetrically to routines without an attributable owner).
-            over = False
-        else:
-            try:
-                over = await caps.is_over_cap(row.tenant_id, row.created_by_user_id)
-            except Exception:
-                log.exception("caps.is_over_cap failed", routine_id=str(row.id))
-                await _record_fire_error(sm, row, "cap_check_failed", None)
-                continue
-        if over:
-            TurnObservation(
-                sm, row.tenant_id, "scheduler", origin="routine", agent_id=row.agent_id
-            ).finish(reason=TerminationReason.ADMISSION_CAP_EXCEEDED)
-            await _record_fire_error(
-                sm, row, "cap_exceeded", TerminationReason.ADMISSION_CAP_EXCEEDED
-            )
-            continue
-        fireable.append(row)
+    fireable: list[RoutineRow] = list(rows)
 
     # A persistent semaphore bounds fires across every tick.
     sem = dispatcher.semaphore

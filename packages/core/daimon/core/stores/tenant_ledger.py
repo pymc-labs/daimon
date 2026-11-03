@@ -11,14 +11,25 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, cast
 
 from daimon.core._models import Tenant, TenantLedger
 from daimon.core.stores import read_persisted_columns
 from daimon.core.stores.domain import LedgerEstimate, TenantLedgerRow
-from sqlalchemy import DateTime, Select, and_, func, or_, select
+from sqlalchemy import (
+    ColumnElement,
+    DateTime,
+    Select,
+    Text,
+    and_,
+    column,
+    func,
+    or_,
+    select,
+    values,
+)
 from sqlalchemy.dialects.postgresql import array as pg_array
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
@@ -133,6 +144,59 @@ async def ever_credited(session: AsyncSession, *, tenant_id: uuid.UUID) -> bool:
     return bool((await session.execute(stmt)).scalar_one())
 
 
+def _is_spend() -> ColumnElement[bool]:
+    """A debit, or an adjustment of one (which may be positive)."""
+    return or_(
+        TenantLedger.delta_usd < Decimal("0"),
+        and_(
+            TenantLedger.reason.in_(("turn_debit", "checkpoint_debit")),
+            TenantLedger.idempotency_key.like("adjust:%"),
+        ),
+    )
+
+
+_EARLIEST = datetime(1970, 1, 1, tzinfo=UTC)
+_LATEST = datetime(9999, 1, 1, tzinfo=UTC)
+
+
+async def list_window_spend(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    windows: Sequence[tuple[str, datetime | None, datetime | None]],
+) -> dict[str, Decimal]:
+    """Spend per channel within its own `[since, until)` window, in one read.
+
+    `windows` holds one (channel_id, since, until) per channel; an open end is unbounded.
+    """
+    if not windows:
+        return {}
+    bounds = values(
+        column("channel_id", Text),
+        column("since", DateTime(timezone=True)),
+        column("until", DateTime(timezone=True)),
+        name="windows",
+    ).data([(cid, since or _EARLIEST, until or _LATEST) for cid, since, until in windows])
+    stmt = (
+        select(bounds.c.channel_id, func.coalesce(-func.sum(TenantLedger.delta_usd), 0))
+        .select_from(bounds)
+        .outerjoin(
+            TenantLedger,
+            and_(
+                TenantLedger.tenant_id == tenant_id,
+                TenantLedger.channel_id == bounds.c.channel_id,
+                TenantLedger.occurred_at >= bounds.c.since,
+                TenantLedger.occurred_at < bounds.c.until,
+                _is_spend(),
+            ),
+        )
+        .group_by(bounds.c.channel_id)
+    )
+    return {
+        channel_id: Decimal(spent) for channel_id, spent in (await session.execute(stmt)).tuples()
+    }
+
+
 async def get_channel_spend(
     session: AsyncSession,
     *,
@@ -150,13 +214,7 @@ async def get_channel_spend(
     stmt = select(func.coalesce(-func.sum(TenantLedger.delta_usd), Decimal("0"))).where(
         TenantLedger.tenant_id == tenant_id,
         TenantLedger.channel_id == channel_id,
-        or_(
-            TenantLedger.delta_usd < Decimal("0"),
-            and_(
-                TenantLedger.reason.in_(("turn_debit", "checkpoint_debit")),
-                TenantLedger.idempotency_key.like("adjust:%"),
-            ),
-        ),
+        _is_spend(),
     )
     if since is not None:
         stmt = stmt.where(TenantLedger.occurred_at >= since)

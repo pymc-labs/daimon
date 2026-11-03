@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -59,10 +59,11 @@ from daimon.testing.factories import (  # isort: skip
     make_platform_principal,
     make_tenant,
     make_tenant_config,
-    make_tenant_user_cap,
+    make_monthly_limit,
 )
 
 _NOW = datetime(2026, 7, 28, tzinfo=UTC)
+_MONTH = timedelta(days=40)
 
 
 def _archived_agent_router(*, tenant_id: uuid.UUID, dead_agent: BetaManagedAgentsAgent) -> MARouter:
@@ -182,7 +183,7 @@ async def test_admit_over_balance_tenant_raises_admission_denied_balance_deplete
 
 @pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
 @pytest.mark.parametrize("funding_mode", ["prepaid", "operator_funded"])
-async def test_admit_over_cap_user_raises_admission_denied_cap_exceeded(
+async def test_admit_over_limit_user_raises_admission_denied_cap_exceeded(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -197,7 +198,7 @@ async def test_admit_over_cap_user_raises_admission_denied_cap_exceeded(
         await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
     else:
         await set_funding_mode(db_session, tenant_id=tenant.id, funding_mode=funding_mode)
-    await make_tenant_user_cap(db_session, tenant=tenant, amount=Decimal("0"))
+    await make_monthly_limit(db_session, tenant=tenant, amount=Decimal("0"), now=_NOW - _MONTH)
     await db_session.commit()
 
     router = resolved_agent_env_router(
@@ -224,7 +225,7 @@ async def test_admit_over_cap_user_raises_admission_denied_cap_exceeded(
         )
 
     assert exc_info.value.reason == "cap_exceeded", (
-        "an over-cap user must raise AdmissionDenied(reason='cap_exceeded')"
+        "a user past their monthly limit must raise AdmissionDenied(reason='cap_exceeded')"
     )
 
     from daimon.core.stores.turn_outcomes import list_for_tenant
@@ -411,13 +412,13 @@ async def test_admit_attributes_the_channel_and_a_dm_to_its_source(
     assert exc_info.value.reason == "channel_budget_exceeded", "and is gated by its budget"
 
 
-async def test_admit_gate_order_cap_wins_over_channel_budget(
+async def test_admit_gate_order_channel_budget_wins_over_allowance(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
     tenant = await _funded_tenant_with_spent_channel(db_session)
-    await make_tenant_user_cap(db_session, tenant=tenant, amount=Decimal("0"))
+    await make_monthly_limit(db_session, tenant=tenant, amount=Decimal("0"), now=_NOW - _MONTH)
     await make_channel_budget(db_session, tenant=tenant, limit_usd=Decimal("0"))
     await db_session.commit()
     deps = _deps(
@@ -438,7 +439,7 @@ async def test_admit_gate_order_cap_wins_over_channel_budget(
             channel_id="chan-1",
             now=_NOW,
         )
-    assert exc_info.value.reason == "cap_exceeded"
+    assert exc_info.value.reason == "channel_budget_exceeded"
 
 
 async def test_admit_missing_agent_only_raises_missing_turn_config_error(

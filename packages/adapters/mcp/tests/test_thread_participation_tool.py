@@ -101,7 +101,7 @@ def _runtime(
 
 def _auth(*, tenant_id: uuid.UUID, admin: bool, platform: str | None = "discord") -> AuthIdentity:
     return AuthIdentity(
-        account_id=uuid.uuid4(),
+        account_id=_actor_id(tenant_id),
         tenant_id=tenant_id,
         role=Role.ADMIN if admin else Role.USER,
         platform=platform,
@@ -109,10 +109,15 @@ def _auth(*, tenant_id: uuid.UUID, admin: bool, platform: str | None = "discord"
     )
 
 
+def _actor_id(tenant_id: uuid.UUID) -> uuid.UUID:
+    """The caller's account, made with the tenant: a change records who made it."""
+    return uuid.uuid5(tenant_id, "actor")
+
+
 async def _seed(sessionmaker: async_sessionmaker[AsyncSession]) -> uuid.UUID:
     async with sessionmaker.begin() as session:
         tenant = await make_tenant(session)
-        await make_account(session, tenant=tenant)
+        await make_account(session, tenant=tenant, id=_actor_id(tenant.id))
         return tenant.id
 
 
@@ -547,7 +552,7 @@ def _teams_runtime(
 
 def _teams_auth(tenant_id: uuid.UUID, *, admin: bool = False) -> AuthIdentity:
     return AuthIdentity(
-        account_id=uuid.uuid4(),
+        account_id=_actor_id(tenant_id),
         tenant_id=tenant_id,
         role=Role.ADMIN if admin else Role.USER,
         platform="teams",

@@ -18,16 +18,15 @@ from typing import Final
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._owner import caller_owns_agent
 from daimon.adapters.mcp.tools._words import admin_noun
 from daimon.core.admin_actions import DelegatedAction
-from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL, agent_pin_names
-from daimon.core.authz import Action, AgentRef, Place, authorize
+from daimon.core.agent_pins import agent_pin_names
+from daimon.core.authz import Action
+from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.native_admins import AdminCaller
 from daimon.core.operation_policy import OperationKind, TargetFacts
 from daimon.core.security_audit import record_authz_denial
-from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from fastmcp.exceptions import ToolError
 
 REACHABILITY_GATED_FIELDS: Final[frozenset[str]] = frozenset(
@@ -74,58 +73,37 @@ async def require_admin(runtime: McpRuntime, auth: AuthIdentity, *, channel_id: 
     )
 
 
-def _target_names(agent_name: str, agent: BetaManagedAgentsAgent | None) -> tuple[str | None, ...]:
-    """The name asked for plus, once resolved, every name the agent itself carries."""
-    if agent is None:
-        return (agent_name,)
-    return (agent_name, *agent_pin_names(agent.name, agent.metadata))
+def target_names(agent_name: str, agent: BetaManagedAgentsAgent | None) -> tuple[str, ...]:
+    """The agent's name plus every name a pin on it may be keyed by."""
+    names = (agent_name, *(agent_pin_names(agent.name, agent.metadata) if agent else ()))
+    return tuple(dict.fromkeys(name for name in names if name))
 
 
-async def require_bindable_as_channel_default(
-    runtime: McpRuntime,
-    auth: AuthIdentity,
-    *,
-    channel_id: str,
-    agent_name: str,
-    agent: BetaManagedAgentsAgent | None,
-    is_daimon_managed: bool,
-) -> None:
-    """Raise ``ToolError`` when the caller cannot bind this agent here."""
-    names = tuple(name for name in _target_names(agent_name, agent) if name)
-    async with runtime.session_factory() as session:
-        try:
-            policy = await load_access_policy(session, tenant_id=auth.tenant_id)
-        except AccessPolicyUnreadable as exc:
-            raise ToolError(POLICY_UNREADABLE_REFUSAL) from exc
-        # Nobody, server admins included: the agent would refuse every turn here.
-        decision = authorize(
-            policy,
-            subject=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.CHANNEL_PERMISSIONS)),
-            action=Action.BIND_CHANNEL_DEFAULT,
-            agent=AgentRef.of(*names),
-            place=Place(channel_id=channel_id),
+def channel_default_refusal(
+    auth: AuthIdentity, exc: ChannelChangeRefused, *, agent_name: str | None
+) -> ToolError:
+    """How the chat tools word a refused channel default."""
+    if exc.reason == "not_own_agent":
+        record_authz_denial(Action.BIND_CHANNEL_DEFAULT, "own_agents_only")
+        return ToolError(
+            "This channel is kept to its own agents (whose rule runs them here alone), so "
+            f"only they can be its default, and '{agent_name}' is not one. Nothing was "
+            "changed. Pick one of its own agents, or ask "
+            f"{admin_noun(auth.platform)}. Do not retry."
         )
-        if not decision:
-            record_authz_denial(Action.BIND_CHANNEL_DEFAULT, decision.reason)
-        if decision.reason == "own_agents_only":
-            raise ToolError(
-                "This channel is kept to its own agents (whose rule runs them here alone), so "
-                f"only they can be its default, and '{agent_name}' is not one. Nothing was "
-                "changed. Pick one of its own agents, or ask "
-                f"{admin_noun(auth.platform)}. Do not retry."
-            )
-        if decision.reason == "runs_elsewhere":
-            raise ToolError(
-                f"'{agent_name}'s rule runs it only in other channels, so it would refuse "
-                "every request here and cannot be this channel's default. Nothing was changed. "
-                "Pick another agent, or ask an admin to change its rule. Do not retry."
-            )
-        if auth.admin_for(DelegatedAction.CHANNEL_PERMISSIONS) and auth.agent_id is None:
-            return
-    raise ToolError(
-        f"Only {admin_noun(auth.platform)} can make this the channel's default. "
-        "Nothing was changed. Do not retry."
-    )
+    if exc.reason in ("agent_has_home", "agent_runs_elsewhere"):
+        record_authz_denial(Action.BIND_CHANNEL_DEFAULT, "runs_elsewhere")
+        return ToolError(
+            f"'{agent_name}'s rule runs it only in other channels, so it would refuse "
+            "every request here and cannot be this channel's default. Nothing was changed. "
+            "Pick another agent, or ask an admin to change its rule. Do not retry."
+        )
+    if exc.kind == "forbidden":
+        return ToolError(
+            f"Only {admin_noun(auth.platform)} can change the channel's default. "
+            "Nothing was changed. Do not retry."
+        )
+    return ToolError(f"{exc} Nothing was changed. Do not retry.")
 
 
 async def require_admin_for_reachable_agent(

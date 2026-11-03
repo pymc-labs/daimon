@@ -119,10 +119,6 @@ def _will_happen(preview: PurgePreview) -> list[str]:
     if preview.direct_message_conversations.count:
         n = amount(preview.direct_message_conversations.count, "private conversation")
         lines.append(f"💬 Delete Daimon's saved data for {n}")
-    if preview.channel_admins.count:
-        lines.append(
-            f"Remove you from {amount(preview.channel_admins.count, 'channel admin list')}"
-        )
     if preview.account.count > 0:
         lines.append("🪪 Remove your account")
     return lines or ["Nothing to delete."]

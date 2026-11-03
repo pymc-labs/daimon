@@ -35,13 +35,19 @@ from enum import StrEnum
 from typing import Literal
 
 import structlog
-from daimon.core.stores.platform_names import KnownName, upsert_channel_names, upsert_user_names
+from daimon.core.stores.platform_names import (
+    ChannelSighting,
+    KnownName,
+    upsert_channel_names,
+    upsert_user_names,
+)
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = [
     "BATCH_SIZE",
     "MAX_PENDING",
+    "ChannelSighting",
     "KnownName",
     "LiveLookup",
     "UserKey",
@@ -79,9 +85,10 @@ UserKey = tuple[uuid.UUID, str, str]
 """(tenant id, platform, platform user id): whose name a privacy deletion forgets."""
 Sessionmaker = async_sessionmaker[AsyncSession]
 
-_memo: OrderedDict[_Key, KnownName] = OrderedDict()
+_Seen = KnownName | ChannelSighting
+_memo: OrderedDict[_Key, _Seen] = OrderedDict()
 # Latest unwritten value per key, oldest first, with the sessionmaker to write it with.
-_pending: OrderedDict[_Key, tuple[Sessionmaker, KnownName]] = OrderedDict()
+_pending: OrderedDict[_Key, tuple[Sessionmaker, _Seen]] = OrderedDict()
 _consumer: asyncio.Task[None] | None = None
 # Tests hold writes for `settle` rather than start the consumer; see `defer_writes`.
 _held = False
@@ -94,10 +101,32 @@ def _clean(value: object) -> str | None:
     return text or None
 
 
-def _merge(new: KnownName, old: KnownName | None) -> KnownName:
-    if old is None:
+def _merge(new: _Seen, old: _Seen | None) -> _Seen:
+    if isinstance(new, ChannelSighting):
+        if not isinstance(old, ChannelSighting):
+            return new
+        return ChannelSighting(
+            new.name,
+            new.kind or old.kind,
+            new.parent_id or old.parent_id,
+            new.parent_name or old.parent_name,
+            new.archived if new.archived is not None else old.archived,
+        )
+    if not isinstance(old, KnownName):
         return new
     return KnownName(new.display_name or old.display_name, new.handle or old.handle)
+
+
+def _cleaned(name: _Seen) -> _Seen:
+    if isinstance(name, ChannelSighting):
+        return ChannelSighting(
+            _clean(name.name) or "",
+            _clean(name.kind),
+            _clean(name.parent_id),
+            _clean(name.parent_name),
+            name.archived,
+        )
+    return KnownName(_clean(name.display_name), _clean(name.handle))
 
 
 def _enqueue(
@@ -105,12 +134,12 @@ def _enqueue(
     tenant_id: uuid.UUID,
     platform: str,
     kind: Kind,
-    names: Mapping[str, KnownName],
+    names: Mapping[str, _Seen],
 ) -> None:
     global _dropped
     added = False
     for item_id, name in names.items():
-        given = KnownName(_clean(name.display_name), _clean(name.handle))
+        given = _cleaned(name)
         if not item_id or given.label is None:
             continue
         key: _Key = (tenant_id, platform, kind, item_id)
@@ -157,10 +186,10 @@ async def _write_next_batch() -> None:
         log.exception("platform_names.writer_crashed")
 
 
-def _take_batch() -> tuple[Sessionmaker, dict[_Key, KnownName]]:
+def _take_batch() -> tuple[Sessionmaker, dict[_Key, _Seen]]:
     first = next(iter(_pending))
     sessionmaker = _pending[first][0]
-    batch: dict[_Key, KnownName] = {}
+    batch: dict[_Key, _Seen] = {}
     for key in list(_pending):
         if len(batch) == BATCH_SIZE:
             break
@@ -173,7 +202,7 @@ def _take_batch() -> tuple[Sessionmaker, dict[_Key, KnownName]]:
 
 async def _write_batch() -> None:
     sessionmaker, batch = _take_batch()
-    groups: dict[tuple[uuid.UUID, str, Kind], dict[str, KnownName]] = {}
+    groups: dict[tuple[uuid.UUID, str, Kind], dict[str, _Seen]] = {}
     for (tenant_id, platform, kind, item_id), name in batch.items():
         groups.setdefault((tenant_id, platform, kind), {})[item_id] = name
     # A person with no principal yet (their first message, before admission
@@ -184,8 +213,9 @@ async def _write_batch() -> None:
         async with sessionmaker() as session, session.begin():
             for (tenant_id, platform, kind), names in groups.items():
                 if kind == "user":
+                    people = {uid: n for uid, n in names.items() if isinstance(n, KnownName)}
                     stored = await upsert_user_names(
-                        session, tenant_id=tenant_id, platform=platform, names=names
+                        session, tenant_id=tenant_id, platform=platform, names=people
                     )
                     skipped.update(
                         (tenant_id, platform, kind, user_id)
@@ -193,9 +223,11 @@ async def _write_batch() -> None:
                         if user_id not in stored
                     )
                 else:
-                    labels = {cid: n.label for cid, n in names.items() if n.label is not None}
+                    channels = {
+                        cid: n for cid, n in names.items() if isinstance(n, ChannelSighting)
+                    }
                     await upsert_channel_names(
-                        session, tenant_id=tenant_id, platform=platform, names=labels
+                        session, tenant_id=tenant_id, platform=platform, names=channels
                     )
     except _WRITE_ERRORS as exc:
         # Not remembered as written: the next sighting queues it again.
@@ -206,7 +238,7 @@ async def _write_batch() -> None:
             _note(key, name)
 
 
-def _note(key: _Key, name: KnownName) -> None:
+def _note(key: _Key, name: _Seen) -> None:
     _memo[key] = name
     _memo.move_to_end(key)
     while len(_memo) > _MEMO_SIZE:
@@ -263,15 +295,19 @@ def remember_channel_names(
     *,
     tenant_id: uuid.UUID,
     platform: str,
-    names: Mapping[str, str],
+    names: Mapping[str, str | ChannelSighting],
 ) -> None:
-    """Queue these channels' names to be stored, as `remember_user_names` does."""
+    """Queue these channels' names, and what else the adapter knows of them, to be
+    stored, as `remember_user_names` does."""
     _enqueue(
         sessionmaker,
         tenant_id,
         platform,
         "channel",
-        {cid: KnownName(name) for cid, name in names.items()},
+        {
+            cid: name if isinstance(name, ChannelSighting) else ChannelSighting(name)
+            for cid, name in names.items()
+        },
     )
 
 

@@ -7,8 +7,10 @@ row type the code under test sees (not ORM), backed by the real store helper.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from decimal import Decimal
 
+from daimon.core.allowance_limits import monthly_limit
 from daimon.core.stores import mcp_tokens
 from daimon.core.stores.agent_memory_stores import get_memory_store_id
 from daimon.core.stores.domain import (
@@ -17,25 +19,23 @@ from daimon.core.stores.domain import (
     RoutineRow,
     SlackUserTokenRow,
     TenantLedgerRow,
-    TenantUserCapRow,
     ThreadSessionRow,
     UsageEventRow,
 )
 from daimon.core.stores.routines import get_routine
 from daimon.core.stores.slack_user_tokens import get_slack_user_token
 from daimon.core.stores.tenant_ledger import get_balance
-from daimon.core.stores.tenant_user_caps import get_effective_cap
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.testing.factories import (
     make_account,
     make_agent_memory_store,
     make_ledger_entry,
     make_mcp_token,
+    make_monthly_limit,
     make_routine,
     make_slack_user_token,
     make_tenant,
     make_tenant_config,
-    make_tenant_user_cap,
     make_thread_session,
     make_usage_event,
 )
@@ -112,24 +112,23 @@ async def test_make_slack_user_token_persists_and_returns_slack_user_token_row(
     assert persisted is not None, "make_slack_user_token's row should be queryable back"
 
 
-async def test_make_tenant_user_cap_default_and_override(db_session: AsyncSession) -> None:
+async def test_make_monthly_limit_default_and_person(db_session: AsyncSession) -> None:
     tenant = await make_tenant(db_session)
 
-    default_cap = await make_tenant_user_cap(db_session, tenant=tenant, amount=Decimal("20"))
-    assert isinstance(default_cap, TenantUserCapRow), (
-        "make_tenant_user_cap should return a Pydantic row"
-    )
-    assert default_cap.platform_user_id is None, "user_id=None should create the tenant default"
-
-    override_cap = await make_tenant_user_cap(
-        db_session, tenant=tenant, user_id="U1", amount=Decimal("5")
-    )
-    assert override_cap.platform_user_id == "U1", (
-        "passing user_id should create a per-user override"
+    default = await make_monthly_limit(db_session, tenant=tenant, amount=Decimal("20"))
+    assert (default.subject_kind, default.subject_id) == ("group", "everyone"), (
+        "user_id=None should create the workspace default"
     )
 
-    effective = await get_effective_cap(db_session, tenant_id=tenant.id, user_id="U1")
-    assert effective == Decimal("5"), "override should take priority over the tenant default"
+    own = await make_monthly_limit(db_session, tenant=tenant, user_id="U1", amount=Decimal("5"))
+    assert (own.subject_kind, own.subject_id) == ("person", "U1"), (
+        "passing user_id should create that person's own limit"
+    )
+
+    limit = await monthly_limit(
+        db_session, tenant_id=tenant.id, platform_user_id="U1", now=datetime.now(UTC)
+    )
+    assert limit == Decimal("5"), "a person's own limit takes priority over the default"
 
 
 async def test_make_agent_memory_store_persists_and_returns_row(db_session: AsyncSession) -> None:

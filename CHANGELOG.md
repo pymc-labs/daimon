@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- In the web app, a Discord routine can post to its owner by direct message, and a routine shows when sandbox tools are on. Changing a routine there needs a linked chat account, because the routine then runs as you.
+
 - After **Hand over**, the new agent's first reply goes straight to the person's request. Before, it opened by naming the work in progress and the files that came across. It still says when a file it needs is missing or when something could not be carried over.
 - The seeded `pymc-artifact-style` skill has a new readability and clarity section for anything sent to a client or prospect. It sets out principles with the reasoning behind each: know the reader and the decision, lead with what changes for them, keep signal high and noise low, say things once, prefer short unless depth is asked for, and keep claims within the evidence. It also asks for a rewrite pass before sending and an advisory send-readiness note. It is guidance, not a template: there are no length caps or required sections.
 - The seeded `pymc-artifact-style` skill now produces a plain look by default: one column at full width, Inter with one accent color, 18-19px body text, headings that state the point and rules-only tables, with a small wordmark. A new page builder turns Markdown into a single-file HTML guide, report or one-pager in that style, and a new plain Typst class is the default for PDFs. The notebook and dashboard templates no longer draw dark header bands, pills, cards or callout boxes; existing notebooks still build. A new pre-publish lint (`lint/publish_lint.py`), which the skill makes mandatory before any HTML is published, blocks accordions, sidebars, sticky nav, hero art, pills and badges, icon-card grids, gradients, shadows, emoji, callout boxes boilerplate labels and stock phrasing such as "not just X but Y", and names the first match for each finding. The older margin-note report layout is kept for explicit requests.
@@ -213,6 +215,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Alternatively, restore a policy backup from before overrides were saved.
   Disabling the deployment flag does not remove the stored fields.
 
+- **Settings, redeeming and audit in the web app.** Admin > Settings gains an Access group
+  (who may start turns, shown by person, plus direct messages, read-only DM memory and typed
+  mentions) and a Providers group (which providers the workspace may use). The old "Default
+  agent" setting is now "Web chat agent". Credits can redeem a promo code and shows how the
+  workspace is funded. Admin > Audit adds chat tool calls and panel writes next to the web
+  changes, with filters for source, person, action and date. A routine's panel has **Run
+  now** for its owner or an admin.
+- **Monthly limits per member are allowances.** The per-member cap and the web Credits
+  allowances were two limits on the same spend. Migration 0159 converts each cap into a
+  monthly allowance (the default for everyone, or one for a person), keeping the stricter
+  limit where an allowance already existed, and the turn gate no longer has a separate cap
+  step. `daimon tenants cap` now writes the allowance. Allowances count billed dollars, so a
+  markup above 1 makes a converted limit stricter than the cap was.
+- **Routines in the web app.** A Routines page lists scheduled prompts with their schedule in
+  words, destination, next run and last result. Members work with their own routines, admins
+  with all, and a person needs a linked chat account on the workspace's platform to add one.
+  Chat, the Slack and Teams panels and the web app share one routine service, so the same
+  checks apply everywhere. The Credits pages open on the last 30 days, so early in a month
+  they no longer read $0.
 - **Helpers.** An agent can ask other agents, on any model provider, for help inside its
   turn (`list_helpers`, `ask_helper`, `wait_for_helpers`). Pick each agent's helpers on its
   canvas in the web app. A helper runs for the same person in the same thread, with that

@@ -80,6 +80,7 @@ async def change_rule(
             writers=writers,
             # Only a workspace admin reaches the permissions controls.
             subject=build_subject(is_admin=True, platform_user_id=user_id),
+            surface="panel",
             default=runtime.deployment_default,
             actor_account_id=actor.account_id,
             copy=copy,

@@ -434,7 +434,7 @@ async def test_a_copy_whose_rule_write_fails_is_archived(
     async def broken_write(*args: Any, **kwargs: Any) -> None:
         raise RuntimeError("write failed")
 
-    monkeypatch.setattr(channel_rules, "set_fields", broken_write)
+    monkeypatch.setattr(channel_rules, "write_channel_default", broken_write)
     with pytest.raises(RuntimeError, match="write failed"):
         await _set_rule(client, db_session_factory, tenant.id, "c1", copy=True)
 
@@ -532,7 +532,7 @@ async def test_a_failed_archive_never_hides_the_write_error(
     async def broken_write(*args: Any, **kwargs: Any) -> None:
         raise RuntimeError("write failed")
 
-    monkeypatch.setattr(channel_rules, "set_fields", broken_write)
+    monkeypatch.setattr(channel_rules, "write_channel_default", broken_write)
     with (
         structlog.testing.capture_logs() as logs,
         pytest.raises(RuntimeError, match="write failed"),

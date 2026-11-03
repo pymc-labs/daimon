@@ -7,6 +7,7 @@ from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import httpx
+import pytest
 from daimon.core.config import ThreadParticipationSettings
 from daimon.core.participation_gates import ParticipationGates
 from daimon.core.stores import spend_allowances
@@ -20,8 +21,11 @@ from mux.testing.isolated_sdk import build_async_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
+@pytest.mark.parametrize("is_cap", [False, True], ids=["allowance", "monthly_cap"])
 async def test_an_exhausted_allowance_skips_the_classifier(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    is_cap: bool,
 ) -> None:
     tenant = await make_tenant(db_session)
     await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
@@ -32,8 +36,9 @@ async def test_an_exhausted_allowance_skips_the_classifier(
         subject_id="caller",
         agent_id=None,
         amount_usd=Decimal(0),
-        window="total",
+        window="month" if is_cap else "total",
         starts_at=datetime.now(UTC) - timedelta(days=1),
+        is_cap=is_cap,
     )
     await db_session.commit()
     requests: list[httpx.Request] = []
@@ -52,7 +57,6 @@ async def test_an_exhausted_allowance_skips_the_classifier(
         sessionmaker=db_session_factory,
         anthropic=client,
         bot_display_name="Daimon",
-        billing_config=None,
         markup=Decimal(1),
     )
     try:

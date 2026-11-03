@@ -1,8 +1,7 @@
 # Routines
 
 How to create a routine, how the scheduler runs it, where its result goes and
-what happens when a run fails. Read it if you schedule agents or run the
-scheduler service.
+what happens when a run fails.
 
 A routine is a recurring [unattended](unattended.md) turn: a cron expression,
 a timezone, an agent and one prompt. The scheduler fires it, the agent runs
@@ -31,12 +30,15 @@ Five MCP tools manage routines: `create_routine`, `list_routines`,
 `update_routine(enabled=False)`. The last run is in the `last_*` fields that
 `get_routine` returns.
 
-Chat is the simplest way: ask the agent ("every weekday at 9am, post the sales
+Chat is simplest: ask the agent ("every weekday at 9am, post the sales
 numbers"). Each platform also has a panel:
 
 - **Slack** `/routines` and **Teams** `routines` (in a 1:1 chat): workspace
   admins create and delete. The form's schedule field takes cron, such as
   `0 9 * * 1-5`, and the panel shows schedules in words.
+- **Web app** Routines page: members manage their own, admins all. Creating or
+  changing one needs a linked chat account. **Run now** makes an active routine
+  due at once.
 - **Discord** `/routines` needs Manage Server. **New** creates a routine for
   an agent, schedule, timezone and message. The creator or an admin can pause,
   resume or delete one.
@@ -86,10 +88,9 @@ Set `catch_up_policy` on `create_routine` or `update_routine`:
 
 Slots that pass while the same routine is still running are skipped under both
 policies. `get_routine` and `list_routines` show the latest skipped range and
-reason (`stale` or `in_flight`). It is a latest-range record, not a history.
+reason (`stale` or `in_flight`), not a history.
 
-A routine whose channel selects the self-hosted backend does not run. It stops
-with `last_error=selfhosted_routines_unsupported`, because headless routines
+A routine whose channel selects the self-hosted backend stops with `last_error=selfhosted_routines_unsupported`, because headless routines
 need Anthropic Managed Agents. A thread destination with an unknown parent
 channel stops with `routine_destination_parent_unknown`. Set the destination
 again to record the parent.
@@ -106,16 +107,16 @@ Each tick, 30 seconds apart by default, the scheduler:
 1. Rolls forward stale slots and slots that came due while the routine ran.
 2. Claims at most 20 due routines, stamping the run and computing the next
    slot in the same transaction.
-3. Checks the monthly cap, then starts each run as an independent task.
+3. Checks the spend allowance, then starts each run as an independent task.
 4. Runs housekeeping, such as [promo credit](billing.md#promo-codes)
    settlement, then sleeps.
 
 The scheduler also runs [long jobs](long-jobs.md) and cleans up
 [Fly compute sessions](compute.md), each on its own loop.
 
-The tick does not wait for the runs. A dispatcher bounds concurrency across
-ticks, so a slow routine cannot hold up later ticks or overlap itself. A crash
-after a claim can lose that run.
+The tick does not wait for the runs. A dispatcher bounds concurrency, so a slow
+routine cannot hold up later ticks or overlap itself. A crash after a claim can
+lose that run.
 
 The usage sweep runs on its own loop
 ([billing.md](billing.md#recover-unbilled-usage)). On shutdown the scheduler
@@ -191,8 +192,7 @@ Delivery is at most once, and it checks before it sends:
   literal on Slack. On Teams, a post also sends the creator one activity feed
   notice.
 
-A claim whose lease expires is not posted again, because the poster may have
-posted before it died. A poster that raises is not retried, though a platform
+An expired claim is not posted again, as the poster may have posted already. A poster that raises is not retried, though a platform
 SDK may retry a single send itself. An empty result is skipped. With [agent identity](agent-identity.md) on, Slack and Discord post as
 the agent. On Discord a reply to any delivered message starts a turn.
 
@@ -231,6 +231,7 @@ below the ceiling. Settings are in [configuration.md](configuration.md#scheduler
 | list and read last output | admin or the creator | `Manage Server`, the command's invoker only | admin or the creator |
 | pause and resume | admin or the creator | admin or the creator | admin or the creator |
 | delete | admin or the creator | admin or the creator, after a confirmation | admin or the creator |
+| run now | admin or the creator, web app only | not offered | not offered |
 
 Ownerless routines are admin-only, and a refusal reads as "not found".
 Non-admins see only their own routines, since output often holds business
@@ -270,7 +271,7 @@ fire. The process will not boot without `DAIMON_MCP__JWT_SECRET` and
 [public URL](configuration.md#daimon_mcp__public_url)).
 
 Four gates apply to every run: the invoker allowlist against the creator, the
-credit balance, the per-person monthly cap and, for a routine with a channel,
+credit balance, the owner's spend [allowance](allowances.md) and, for a routine with a channel,
 that channel's budget, checked last after the agent's rule
 ([billing.md](billing.md#channel-budgets)). A refused run records the reason and
 fires again at its next slot. On Discord each fire, and each delivery,

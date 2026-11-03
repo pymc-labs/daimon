@@ -1458,16 +1458,60 @@ async def test_outside_cancel_during_stop_drain_preserves_decider_cleanup(
     ]
 
 
-@pytest.mark.parametrize("cap", ["balance", "member_cap", "channel_budget"])
+async def test_watch_send_reports_a_spent_monthly_cap_as_the_cap(db_session_factory):
+    from decimal import Decimal
+
+    from daimon.core.stores import spend_allowances, tenant_ledger
+    from daimon.core.turn.admission import require_current_spend
+    from daimon.core.turn.errors import AdmissionDenied
+    from daimon.testing.factories import make_tenant
+    from daimon.testing.turn_fakes import deps_for
+
+    now = datetime.now(UTC)
+    async with db_session_factory.begin() as db:
+        tenant = await make_tenant(db)
+        await tenant_ledger.insert_entry(
+            db,
+            tenant_id=tenant.id,
+            delta_usd=Decimal(100),
+            reason="trial",
+            idempotency_key=f"initial:{tenant.id}",
+        )
+        await spend_allowances.create_allowance(
+            db,
+            tenant_id=tenant.id,
+            subject_kind="group",
+            subject_id="everyone",
+            agent_id=None,
+            amount_usd=Decimal(0),
+            window="month",
+            starts_at=now - timedelta(days=40),
+            is_cap=True,
+        )
+    with pytest.raises(AdmissionDenied) as denied:
+        await require_current_spend(
+            deps_for(sm=db_session_factory),
+            tenant_id=tenant.id,
+            platform=tenant.platform,
+            external_user_id="owner",
+            budget_channel_id="budget-channel",
+            agent_id="agent-watch",
+            now=now,
+        )
+    assert denied.value.reason == "cap_exceeded", "a spent cap is not reported as an allowance"
+
+
+@pytest.mark.parametrize("cap", ["balance", "allowance", "channel_budget"])
 async def test_watch_confirmation_send_rechecks_each_spend_gate(db_session_factory, cap):
     from decimal import Decimal
 
+    from daimon.core.allowance_limits import set_person_limit
     from daimon.core.stores import tenant_ledger
     from daimon.core.turn.admission import require_current_spend
     from daimon.core.turn.driver import unattended_sends
     from daimon.core.turn.errors import AdmissionDenied
     from daimon.core.turn.posture import ToolConfirmationResult
-    from daimon.testing.factories import make_channel_budget, make_tenant, make_tenant_user_cap
+    from daimon.testing.factories import make_channel_budget, make_tenant
     from daimon.testing.turn_fakes import deps_for
 
     async with db_session_factory.begin() as db:
@@ -1498,8 +1542,14 @@ async def test_watch_confirmation_send_rechecks_each_spend_gate(db_session_facto
                     reason="usage",
                     idempotency_key=f"drain:{tenant.id}",
                 )
-            elif cap == "member_cap":
-                await make_tenant_user_cap(db, tenant=tenant, user_id="owner", amount=Decimal(0))
+            elif cap == "allowance":
+                await set_person_limit(
+                    db,
+                    tenant_id=tenant.id,
+                    platform_user_id="owner",
+                    amount=Decimal(0),
+                    now=datetime.now(UTC),
+                )
             else:
                 await make_channel_budget(
                     db, tenant=tenant, channel_id="budget-channel", limit_usd=Decimal(0)

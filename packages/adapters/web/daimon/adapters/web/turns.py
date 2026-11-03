@@ -335,7 +335,7 @@ class WebTurns:
             )
             if slot == "cancelled":
                 await lifecycle.finish("stopped")
-            elif slot in ("balance_depleted", "allowance_exhausted"):
+            elif slot in ("balance_depleted", "cap_exceeded", "allowance_exhausted"):
                 await lifecycle.finish("done", card=refusal_for(AdmissionDenied(reason=slot)))
             elif slot != "started":
                 record_refusal(

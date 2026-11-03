@@ -24,6 +24,7 @@ from daimon.core.stores import (
     identity,
     platform_names,
     tenant_ledger,
+    tenants,
     turn_usage,
     usage_events,
     web_chat,
@@ -33,9 +34,10 @@ from daimon.core.stores.domain import TenantLedgerRow, WebPersonRow
 from daimon.core.usage_recording import SPEND_LEDGER_REASONS
 from sqlalchemy.ext.asyncio import AsyncSession
 
-Period = Literal["this", "last"]
+Period = Literal["30d", "this", "last"]
 LedgerKind = Literal["topup", "promo", "adjustment"]
 
+RECENT_DAYS = 30
 _MICRO = Decimal("0.000001")
 _CHAT_PLATFORMS = ("discord", "slack", "teams")
 _WEB_THREAD_PREFIX = WEB_PLACE_PREFIX
@@ -60,8 +62,17 @@ def next_month_start(now: datetime) -> datetime:
     return datetime(year, month, 1, tzinfo=UTC)
 
 
+def recent_start(now: datetime) -> datetime:
+    """Midnight (UTC) of the first of the last 30 days, today being the last."""
+    midnight = now.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    return midnight - timedelta(days=RECENT_DAYS - 1)
+
+
 def period_window(period: Period, *, now: datetime) -> tuple[datetime, datetime | None]:
-    """The calendar month `period` names as `(start, end)`; this month has no end yet."""
+    """The window `period` names as `(start, end)`: the last 30 days (today included) or a
+    calendar month. The last 30 days and this month have no end yet."""
+    if period == "30d":
+        return recent_start(now), None
     this = month_start(now)
     if period == "this":
         return this, None
@@ -69,9 +80,9 @@ def period_window(period: Period, *, now: datetime) -> tuple[datetime, datetime 
 
 
 def day_bounds(now: datetime) -> list[datetime]:
-    """Midnight of each day of `now`'s month, then the first moment of the next month."""
-    start, end = month_start(now), next_month_start(now)
-    return [start + timedelta(days=n) for n in range((end - start).days)] + [end]
+    """Midnight of each of the last 30 days, then the first moment after today."""
+    start = recent_start(now)
+    return [start + timedelta(days=n) for n in range(RECENT_DAYS + 1)]
 
 
 def projected_month(spent: Decimal, *, now: datetime) -> Decimal:
@@ -108,8 +119,8 @@ class AgentSpend:
 
 @dataclass(frozen=True)
 class PersonSpend:
-    user_id: str
-    """The platform user id the spend was recorded under."""
+    user_id: str | None
+    """The platform user id the spend was recorded under; None is spend with no person."""
     usd: Decimal
     turns: int
 
@@ -143,11 +154,16 @@ class DailySpend:
 
 
 @dataclass(frozen=True)
-class MonthOverview:
+class SpendOverview:
     balance_usd: Decimal
     spent_usd: Decimal
+    """The last 30 days."""
     turns: int
+    """Turns in the last 30 days."""
+    month_usd: Decimal
+    """This calendar month so far."""
     daily: list[DailySpend]
+    """One entry per day of the last 30 days, days without use at zero."""
 
 
 @dataclass(frozen=True)
@@ -227,18 +243,21 @@ async def spend_by_person(
     since: datetime,
     until: datetime | None = None,
 ) -> list[PersonSpend]:
-    """The workspace's billed spend by recorded user, biggest first."""
-    costs = await usage_events.costs_by_user_in_tenant_since(
+    """The workspace's billed spend by recorded user, biggest first.
+
+    Spend recorded with no person is its own row, so the people add up to the tenant total.
+    """
+    costs = await usage_events.costs_by_user_with_unrecorded_in_tenant_since(
         session, tenant_id=tenant_id, since=since, until=until
     )
-    turns = await usage_events.turns_by_user_in_tenant_since(
+    turns = await usage_events.turns_by_user_with_unrecorded_in_tenant_since(
         session, tenant_id=tenant_id, since=since, until=until
     )
     rows = [
         PersonSpend(user, billed(costs.get(user), markup), turns.get(user, 0))
         for user in costs.keys() | turns.keys()
     ]
-    return sorted(rows, key=lambda r: (-r.usd, r.user_id))
+    return sorted(rows, key=lambda r: (-r.usd, r.user_id or ""))
 
 
 async def spend_by_channel(
@@ -251,15 +270,30 @@ async def spend_by_channel(
 ) -> list[ChannelSpend]:
     """The workspace's billed spend by channel and turn origin, biggest first.
 
-    A turn whose cost could not be priced counts as its known part, as the channel
-    usage report does.
+    Read from the usage rows, priced as the tenant total is, so the channels add up to
+    it; spend with no channel recorded is its own row. A routine run's own session marks
+    its rows as routine spend. A row records no platform: it is the workspace's, or
+    `web` for a web chat's place.
     """
-    rows = await turn_usage.usage_by_channel(session, tenant_id=tenant_id, since=since, until=until)
+    tenant = await tenants.get_tenant(session, tenant_id)
+    platform = tenant.platform if tenant is not None else "discord"
+    costs = await usage_events.costs_by_channel_in_tenant_since(
+        session, tenant_id=tenant_id, since=since, until=until
+    )
+    turns = await usage_events.turns_by_channel_in_tenant_since(
+        session, tenant_id=tenant_id, since=since, until=until
+    )
     spend = [
-        ChannelSpend(r.platform, r.channel_id, r.origin, billed(r.known_cost_usd, markup), r.turns)
-        for r in rows
+        ChannelSpend(
+            "web" if is_web_spend(platform, channel_id) else platform,
+            channel_id,
+            origin,
+            billed(costs.get((channel_id, origin)), markup),
+            turns.get((channel_id, origin), 0),
+        )
+        for channel_id, origin in costs.keys() | turns.keys()
     ]
-    return sorted(spend, key=lambda r: (-r.usd, r.platform, r.channel_id or ""))
+    return sorted(spend, key=lambda r: (-r.usd, r.platform, r.channel_id or "", r.origin))
 
 
 async def channel_names(
@@ -337,28 +371,39 @@ async def recent_turns(
     return charges
 
 
-async def month_overview(
+async def spend_overview(
     session: AsyncSession, *, tenant_id: uuid.UUID, now: datetime, markup: Decimal
-) -> MonthOverview:
-    """The workspace's balance and this month's spend, turns and daily spend."""
+) -> SpendOverview:
+    """The balance, the last 30 days' spend, turns and daily spend, and this month's spend.
+
+    Daily spend is priced from the usage rows, like every breakdown, not read from ledger
+    debits, so it shows in every funding mode: a workspace that pays by invoice or runs
+    on its own keys has no debits.
+    """
     balance = await tenant_ledger.get_prepaid_balance(session, tenant_id=tenant_id)
     if balance is None:
         balance = await tenant_ledger.get_balance(session, tenant_id=tenant_id)
-    since = month_start(now)
+    since = recent_start(now)
     cost = await usage_events.cost_for_tenant_since(session, tenant_id=tenant_id, since=since)
     turns = await usage_events.turn_count_for_tenant_since(
         session, tenant_id=tenant_id, since=since
     )
-    bounds = day_bounds(now)
-    # Ledger debits already carry the markup.
-    per_day = await tenant_ledger.get_spend_by_interval(
-        session, tenant_id=tenant_id, bounds=bounds, reasons=SPEND_LEDGER_REASONS
+    month = await usage_events.cost_for_tenant_since(
+        session, tenant_id=tenant_id, since=month_start(now)
     )
-    return MonthOverview(
+    per_day = await usage_events.costs_by_day_in_tenant_since(
+        session, tenant_id=tenant_id, since=since
+    )
+    days = [d.date() for d in day_bounds(now)[:-1]]
+    return SpendOverview(
         balance_usd=balance,
         spent_usd=billed(cost, markup),
         turns=turns,
-        daily=[DailySpend(day, usd) for day, usd in zip(bounds, per_day, strict=False)],
+        month_usd=billed(month, markup),
+        daily=[
+            DailySpend(datetime(d.year, d.month, d.day, tzinfo=UTC), billed(per_day.get(d), markup))
+            for d in days
+        ],
     )
 
 

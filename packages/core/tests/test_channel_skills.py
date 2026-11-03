@@ -35,6 +35,7 @@ from daimon.core.ma_resolver import ResolverCache
 from daimon.core.session_snapshot import MaSkill
 from daimon.core.specs import SkillRef
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.channel_changes import list_changes
 from daimon.core.stores.channel_skills import (
     add_channel_skill,
     list_channel_skills,
@@ -275,13 +276,27 @@ async def test_a_turn_reads_the_channels_rows_and_drops_a_clash_with_the_agent(
     assert await turn("C1") == ["skill_a"]
     assert await turn("C2") == []
     assert await remove_channel_skill(
-        db_session, tenant_id=tenant.id, platform="slack", channel_id="C1", skill_id="skill_a"
+        db_session,
+        tenant_id=tenant.id,
+        platform="slack",
+        channel_id="C1",
+        skill_id="skill_a",
+        actor_account_id=None,
+        surface="cli",
     )
     assert not await remove_channel_skill(
-        db_session, tenant_id=tenant.id, platform="slack", channel_id="C1", skill_id="skill_a"
+        db_session,
+        tenant_id=tenant.id,
+        platform="slack",
+        channel_id="C1",
+        skill_id="skill_a",
+        actor_account_id=None,
+        surface="cli",
     )
     rows = await list_channel_skills(db_session, tenant_id=tenant.id, platform="slack")
     assert [row.skill_id for row in rows] == ["skill_b"]
+    [record] = await list_changes(db_session, tenant_id=tenant.id, channel_id="C1")
+    assert (record.setting, record.surface) == ("skills", "cli"), "only the real removal records"
 
 
 async def test_a_shared_listing_missing_a_skill_the_agent_now_holds_is_read_again(

@@ -398,29 +398,6 @@ async def test_a_refused_turn_records_which_gate_refused_it(
     assert [row.reason for row in rows] == [expected], "the refusal is recorded under its gate"
 
 
-async def test_admit_over_the_cap_says_the_cap_is_the_callers_and_an_operator_raises_it(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role=Role.USER, platform_user_id="u1"
-    )
-    with (
-        _BALANCE_OK,
-        patch("daimon.core.spend_gate.is_over_cap", new=AsyncMock(return_value=True)),
-        pytest.raises(ToolError) as refused,
-    ):
-        await _admit(
-            auth,
-            sessionmaker=db_session_factory,
-            billing_config=None,
-            markup=Decimal(1),
-            tool_name="ask",
-        )
-    assert str(refused.value) == (
-        "TERMINAL ERROR: You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
-    ), "the MCP refusal uses the shared cap wording"
-
-
 async def test_mcp_role_gate_uses_resolver_without_gateway_facts(db_session, db_session_factory):  # type: ignore[no-untyped-def]
     from daimon.core.membership import CachedMembershipResolver, Membership
 
@@ -602,6 +579,35 @@ async def test_ungated_hub_admin_keeps_lookup_exemption(
             is auth
         )
     names.assert_not_awaited()
+
+
+async def test_admit_with_a_spent_monthly_cap_refuses_in_the_limit_words(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    auth = await _member(db_session, policy=None)
+    await spend_allowances.create_allowance(
+        db_session,
+        tenant_id=auth.tenant_id,
+        subject_kind="person",
+        subject_id="u1",
+        agent_id=None,
+        amount_usd=Decimal(0),
+        window="month",
+        starts_at=datetime.now(UTC) - timedelta(days=1),
+        is_cap=True,
+    )
+    await db_session.commit()
+    with _BALANCE_OK, pytest.raises(ToolError) as refused:
+        await _admit(
+            auth,
+            sessionmaker=db_session_factory,
+            billing_config=None,
+            markup=Decimal(1),
+            tool_name="ask",
+        )
+    assert str(refused.value) == (
+        "TERMINAL ERROR: You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
+    ), "a spent cap keeps its own wording, not the allowance's"
 
 
 async def test_admit_with_an_exhausted_allowance_refuses_in_the_shared_words(

@@ -11,13 +11,12 @@ from decimal import Decimal
 from typing import Protocol
 
 import structlog
-from daimon.core.billing import is_over_cap
 from daimon.core.config import LongJobsSettings
 from daimon.core.errors import StoreError
 from daimon.core.long_job_models import LongJob, LongJobManifest, LongJobState
+from daimon.core.spend_gate import SpendBlock, SpendCheck, SpendRequest, spend_gate
 from daimon.core.stores import long_jobs as store
 from daimon.core.stores.tenants import list_tenants_by_platform
-from daimon.core.tenant_balance import is_over_balance
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -48,19 +47,38 @@ class WorkerPort(Protocol):
 
 
 async def require_admission(
-    sm: async_sessionmaker[AsyncSession], job: LongJob, *, session: AsyncSession | None = None
+    sm: async_sessionmaker[AsyncSession],
+    job: LongJob,
+    *,
+    session: AsyncSession | None = None,
+    markup: Decimal = Decimal("1"),
 ) -> None:
-    if await is_over_balance(sessionmaker=sm, tenant_id=job.tenant_id, session=session):
-        raise StoreError("Long job refused: tenant balance depleted")
-    if await is_over_cap(
-        billing_config=None,
-        sessionmaker=sm,
+    """The owner's workspace balance and spend allowance, as for any turn they start."""
+    request = SpendRequest(
         tenant_id=job.tenant_id,
-        user_id=job.owner_external_user_id,
-        now=datetime.now(UTC),
-        session=session,
-    ):
+        platform_user_id=job.owner_external_user_id,
+        platform=job.platform,
+        channel_id=None,
+        agent_id=job.agent_id,
+    )
+    checks: frozenset[SpendCheck] = frozenset({"balance_depleted", "allowance_exhausted"})
+
+    async def gate(db: AsyncSession) -> SpendBlock | None:
+        return await spend_gate(
+            db, request=request, markup=markup, now=datetime.now(UTC), checks=checks
+        )
+
+    if session is not None:
+        blocked = await gate(session)
+    else:
+        async with sm() as db:
+            blocked = await gate(db)
+    if blocked == "balance_depleted":
+        raise StoreError("Long job refused: tenant balance depleted")
+    if blocked == "cap_exceeded":
         raise StoreError("Long job refused: owner monthly cap exceeded")
+    if blocked == "allowance_exhausted":
+        raise StoreError("Long job refused: owner spend allowance used up")
 
 
 class LongJobExecutor:
@@ -74,8 +92,10 @@ class LongJobExecutor:
         *,
         clock: Callable[[], datetime] | None = None,
         heartbeat_s: float = 20,
+        markup: Decimal = Decimal("1"),
     ) -> None:
         self.sm, self.port, self.ceilings = sm, port, ceilings
+        self.markup = markup
         self.clock = clock or (lambda: datetime.now(UTC))
         self.heartbeat_s = heartbeat_s
         self.owner = str(uuid.uuid4())
@@ -127,7 +147,7 @@ class LongJobExecutor:
                 outcome = "timed_out"
             if outcome is None and current.worker_session_id is None:
                 try:
-                    await require_admission(self.sm, current)
+                    await require_admission(self.sm, current, markup=self.markup)
                     async with self.sm.begin() as db:
                         policy = await store.get_policy(
                             db,

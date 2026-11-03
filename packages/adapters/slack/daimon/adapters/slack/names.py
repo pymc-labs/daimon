@@ -13,7 +13,7 @@ import time
 from typing import TYPE_CHECKING, Any, cast
 
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.platform_names import remember_channel_names, remember_user_name
+from daimon.core.platform_names import ChannelSighting, remember_channel_names, remember_user_name
 from slack_sdk.errors import SlackApiError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -105,11 +105,13 @@ async def remember_event_channel(runtime: SlackRuntime, payload: dict[str, Any])
         info = await client.conversations_info(channel=channel_id)  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
     except SlackApiError:
         return
-    name = _text(_dict(info.get("channel")).get("name"))  # pyright: ignore[reportUnknownMemberType,reportUnknownArgumentType]
+    channel = _dict(info.get("channel"))  # pyright: ignore[reportUnknownMemberType,reportUnknownArgumentType]
+    name = _text(channel.get("name"))
     if name:
+        kind = "private" if channel.get("is_private") is True else "public"
         remember_channel_names(
             runtime.sessionmaker,
             tenant_id=derive_tenant_uuid(platform="slack", workspace_id=team_id),
             platform="slack",
-            names={channel_id: name},
+            names={channel_id: ChannelSighting(name, kind=kind)},
         )

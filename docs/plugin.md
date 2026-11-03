@@ -34,7 +34,7 @@ your workspaces, or the deployment may have no mount for that platform.
 - **Log in per server.** Installing authenticates nothing. Run `/mcp` and
   authenticate each platform you want.
 - **Expect normal billing checks.** A turn started through the hub runs the same
-  balance and cap checks as any MCP turn, so a workspace out of credit refuses it
+  balance and allowance checks as any MCP turn, so a workspace out of credit refuses it
   up front. Its cost is debited when a later read or the scheduler's usage
   sweep settles the session, as for any MCP turn. See [billing](billing.md).
 - **Install from a checkout.** Run `claude --plugin-dir ./plugin`. The plugin is

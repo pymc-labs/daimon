@@ -60,8 +60,8 @@ from daimon.core.rule_views import binding_refusal, clear_refusal, render_bindin
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.specs import AgentSpec, merge_default_agent_toolset
 from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.channel_changes import write_channel_default
 from daimon.core.stores.scoped_config_read import get_scope
-from daimon.core.stores.scoped_config_write import set_fields, unset_fields
 from daimon.core.stores.tenants import get_tenant
 from mux.contracts.errors import ScopeViolation
 from mux.contracts.ids import Scope
@@ -790,27 +790,36 @@ async def set_places(
                 runs_in=target,
                 subject=actor.subject,
                 default=deps.deployment_default,
+                actor_account_id=actor.account_id,
+                surface="web",
             )
     except ChannelRuleRefused as exc:
         raise AgentEditError(str(exc), kind="invalid") from exc
     turn_on, turn_off = default_changes(before, after)
     async with deps.session_factory.begin() as session:
         for channel_id in turn_on:
-            await set_fields(
+            await write_channel_default(
                 session,
-                scope=ChannelScopeRef(tenant_id=actor.tenant_id, channel_id=channel_id),
                 tenant_id=actor.tenant_id,
+                platform=tenant.platform,
+                channel_id=channel_id,
                 agent_name=name,
-                mode="agent",
                 actor_account_id=actor.account_id,
+                surface="web",
                 set_by_admin=True,
             )
         for channel_id in turn_off:
             scope = ChannelScopeRef(tenant_id=actor.tenant_id, channel_id=channel_id)
             row = await get_scope(session, scope=scope)
             if row is not None and row.agent_name in names:
-                await unset_fields(
-                    session, scope=scope, fields=["agent_name"], actor_account_id=actor.account_id
+                await write_channel_default(
+                    session,
+                    tenant_id=actor.tenant_id,
+                    platform=tenant.platform,
+                    channel_id=channel_id,
+                    agent_name=None,
+                    actor_account_id=actor.account_id,
+                    surface="web",
                 )
 
 

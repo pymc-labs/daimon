@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal, cast
 
 from daimon.core.routine_delivery import RoutinePoster, delivery_target, poll_deliveries_once
-from daimon.core.scheduler import CapsCheck, FireFn, RoutineDispatcher, run_one_tick
+from daimon.core.scheduler import FireFn, RoutineDispatcher, run_one_tick
 from daimon.core.stores.domain import CredentialRequestRow, RoutineRow
 from daimon.core.stores.routines import get_routine
 from daimon.testing.db import require_owned_sessionmaker
@@ -121,7 +121,7 @@ class RoutineWaitReceipt:
 class ClockedRoutineJobs:
     """Public long-wait hook: bounded chronological ticks, actual DB jobs/posts.
 
-    `fire`, `caps` and `post` are the existing product scheduler/adapter edges,
+    `fire` and `post` are the existing product scheduler/adapter edges,
     supplied by the owner/runner. A synthetic fire used by a unit test proves
     scheduling only, never native scheduled-session conformance. `bindings`
     join independently created durable rows; they do not seed or mutate rows.
@@ -134,7 +134,6 @@ class ClockedRoutineJobs:
         *,
         sessionmaker: async_sessionmaker[AsyncSession],
         clock: RoutineJobClock,
-        caps: CapsCheck,
         fire: FireFn,
         post: RoutinePoster,
         gateway: OfflineDiscordGateway,
@@ -151,7 +150,6 @@ class ClockedRoutineJobs:
             raise ValueError("independent, unique durable routine bindings are required")
         self._sm = sessionmaker
         self.clock = clock
-        self._caps = caps
         self._fire = fire
         self._post = post
         self._gateway = gateway
@@ -214,7 +212,6 @@ class ClockedRoutineJobs:
                     await run_one_tick(
                         now=now,
                         sm=self._sm,
-                        caps=self._caps,
                         fire=self._fire,
                         max_age=timedelta(minutes=15),
                         max_concurrent_fires=1,

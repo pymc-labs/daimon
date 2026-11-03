@@ -1,11 +1,14 @@
 import type { Capability, Me } from "@/lib/types"
 import { admin } from "./admin"
 import { agents } from "./agents"
+import { channels } from "./channels"
 import { chat } from "./chat"
 import { credits } from "./credits"
+import { integrations } from "./integrations"
+import { routines } from "./routines"
 import type { ModuleDef, NavItem } from "./types"
 
-export const MODULES: ModuleDef[] = [chat, agents, credits, admin]
+export const MODULES: ModuleDef[] = [chat, agents, channels, routines, credits, integrations, admin]
 
 const allowed = (me: Me, cap?: Capability) => !cap || me.capabilities.includes(cap)
 const usable = (me: Me, n: NavItem) => allowed(me, n.cap) && (n.show?.(me) ?? true)

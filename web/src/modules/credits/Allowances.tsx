@@ -19,6 +19,7 @@ import { api } from "@/lib/api"
 import { shortDate, usd } from "@/lib/format"
 import { useChatAgents, useGroups, usePeopleSearch } from "@/lib/hooks"
 import type { Allowance, Subject, Window } from "./types"
+import { Tag } from "@/modules/admin/shared"
 import { Field } from "./shared"
 
 const KIND_ICON = { person: UserRound, group: Users, invite: Ticket }
@@ -61,6 +62,7 @@ function AllowanceTable({ data }: { data: Allowance[] }) {
                     <span className="flex size-6 items-center justify-center rounded-full bg-accent"><Icon className="size-3.5 text-muted-foreground" /></span>
                     <span className="truncate font-medium">{a.subject.name}</span>
                     <span className="text-xs text-muted-foreground">{KIND_LABEL[a.subject.kind]}</span>
+                    {a.cap && <Tag>Cap</Tag>}
                   </span>
                 </TableCell>
                 <TableCell className="max-md:hidden">
@@ -92,7 +94,7 @@ function AllowanceTable({ data }: { data: Allowance[] }) {
                 <span className="flex size-10 items-center justify-center rounded-full bg-accent"><Icon className="size-4 text-muted-foreground" /></span>
                 <div className="min-w-0">
                   <div className="truncate text-base font-semibold">{a.subject.name}</div>
-                  <div className="text-sm text-muted-foreground">{KIND_LABEL[a.subject.kind]}</div>
+                  <div className="flex items-center gap-1.5 text-sm text-muted-foreground">{KIND_LABEL[a.subject.kind]}{a.cap && <Tag>Cap</Tag>}</div>
                 </div>
               </div>
               <section className="border-t px-5 py-4">
@@ -121,7 +123,7 @@ function AllowanceTable({ data }: { data: Allowance[] }) {
 }
 
 /** A group or a person, found by name; the choice is what the allowance is for. */
-function SubjectPicker({ value, onChange }: { value: Subject | null; onChange: (s: Subject) => void }) {
+function SubjectPicker({ value, onChange, everyoneOnly }: { value: Subject | null; onChange: (s: Subject) => void; everyoneOnly?: boolean }) {
   const [open, setOpen] = useState(false)
   const [text, setText] = useState("")
   const [term, setTerm] = useState("")
@@ -131,7 +133,7 @@ function SubjectPicker({ value, onChange }: { value: Subject | null; onChange: (
   }, [text])
   const groups = useGroups()
   const people = usePeopleSearch(term)
-  const shown = (groups.data ?? []).filter((g) => g.name.toLowerCase().includes(text.trim().toLowerCase()))
+  const shown = (groups.data ?? []).filter((g) => (!everyoneOnly || g.id === "everyone") && g.name.toLowerCase().includes(text.trim().toLowerCase()))
   const pick = (s: Subject) => { onChange(s); setOpen(false) }
   const Icon = value ? KIND_ICON[value.kind] : null
   return (
@@ -175,6 +177,7 @@ function SubjectPicker({ value, onChange }: { value: Subject | null; onChange: (
 
 export function NewAllowance({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
   const { data: agents } = useChatAgents()
+  const [cap, setCap] = useState(false)
   const [subject, setSubject] = useState<Subject | null>(null)
   const [agent, setAgent] = useState("any")
   const [amount, setAmount] = useState("50")
@@ -183,47 +186,62 @@ export function NewAllowance({ open, onOpenChange }: { open: boolean; onOpenChan
   const qc = useQueryClient()
   const save = useMutation({
     mutationFn: () => api.post("/api/credits/allowances", {
-      subject, agent: agents?.find((a) => a.id === agent) ?? null,
-      amount_usd: Number(amount), window, expires_at: expires ? new Date(expires).toISOString() : null,
+      subject, agent: cap ? null : agents?.find((a) => a.id === agent) ?? null,
+      amount_usd: Number(amount), window: cap ? "month" : window, expires_at: !cap && expires ? new Date(expires).toISOString() : null, cap,
     }),
-    onSuccess: () => { changed(qc); onOpenChange(false); toast("Allowance added") },
+    onSuccess: () => { changed(qc); onOpenChange(false); toast(cap ? "Cap added" : "Allowance added") },
   })
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
-        <DialogHeader><DialogTitle>New allowance</DialogTitle></DialogHeader>
+        <DialogHeader><DialogTitle>{cap ? "New cap" : "New allowance"}</DialogTitle></DialogHeader>
         <div className="space-y-4">
-          <Field label="For"><SubjectPicker value={subject} onChange={setSubject} /></Field>
-          <Field label="Agent">
-            <Select value={agent} onValueChange={setAgent}>
+          <Field label="Type">
+            <Select value={cap ? "cap" : "allowance"} onValueChange={(v) => { setCap(v === "cap"); setSubject(null) }}>
               <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
               <SelectContent>
-                <SelectItem value="any">Any agent</SelectItem>
-                {agents?.map((a) => <SelectItem key={a.id} value={a.id}><AgentAvatar src={a.avatar} name={a.name} className="size-4 rounded" />{a.name}</SelectItem>)}
+                <SelectItem value="allowance">Allowance</SelectItem>
+                <SelectItem value="cap">Cap</SelectItem>
               </SelectContent>
             </Select>
           </Field>
+          <Field label="For"><SubjectPicker value={subject} onChange={setSubject} everyoneOnly={cap} /></Field>
+          {!cap && (
+            <Field label="Agent">
+              <Select value={agent} onValueChange={setAgent}>
+                <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="any">Any agent</SelectItem>
+                  {agents?.map((a) => <SelectItem key={a.id} value={a.id}><AgentAvatar src={a.avatar} name={a.name} className="size-4 rounded" />{a.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </Field>
+          )}
           <div className="grid grid-cols-2 gap-3">
             <Field label="Amount">
               <Input inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value.replace(/[^\d.]/g, ""))} />
             </Field>
-            <Field label="Resets">
-              <Select value={window} onValueChange={(v) => setWindow(v as Window)}>
-                <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="month">Every month</SelectItem>
-                  <SelectItem value="total">Never</SelectItem>
-                </SelectContent>
-              </Select>
-            </Field>
+            {!cap && (
+              <Field label="Resets">
+                <Select value={window} onValueChange={(v) => setWindow(v as Window)}>
+                  <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="month">Every month</SelectItem>
+                    <SelectItem value="total">Never</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+            )}
           </div>
-          <Field label="Expires">
-            <Input type="date" value={expires} onChange={(e) => setExpires(e.target.value)} />
-          </Field>
+          {!cap && (
+            <Field label="Expires">
+              <Input type="date" value={expires} onChange={(e) => setExpires(e.target.value)} />
+            </Field>
+          )}
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button onClick={() => save.mutate()} disabled={!subject || !Number(amount) || save.isPending}>Add allowance</Button>
+          <Button onClick={() => save.mutate()} disabled={!subject || !Number(amount) || save.isPending}>{cap ? "Add cap" : "Add allowance"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

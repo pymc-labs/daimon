@@ -8,17 +8,19 @@ import { QueryState } from "@/components/QueryState"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { api, qs } from "@/lib/api"
-import { monthName, usd } from "@/lib/format"
+import { usd } from "@/lib/format"
+import { usePeriod } from "./period"
+import { PeriodToggle } from "./shared"
 import type { SpendBy, SpendRow } from "./types"
 
 const PLATFORM_ICON: Record<string, string> = { discord: "discord", web: "web", slack: "slack", teams: "teams" }
 
 export function SpendTab() {
   const [by, setBy] = useParam("by")
-  const [period, setPeriod] = useParam("period")
+  const [period, setPeriod] = usePeriod()
   const b = (by ?? "person") as SpendBy
   const q = useQuery({
-    queryKey: ["credits", "spend", b, period], queryFn: () => api.get<SpendRow[]>(`/api/credits/spend${qs({ by: b, period })}`),
+    queryKey: ["credits", "spend", b, period], queryFn: () => api.get<SpendRow[]>(`/api/credits/spend${qs({ by: b, period: period === "30d" ? undefined : period })}`),
     placeholderData: (p) => p,
   })
   const { data } = q
@@ -32,10 +34,7 @@ export function SpendTab() {
           <ToggleGroupItem value="agent" className="px-3 text-xs">Agents</ToggleGroupItem>
           <ToggleGroupItem value="channel" className="px-3 text-xs">Channels</ToggleGroupItem>
         </ToggleGroup>
-        <ToggleGroup type="single" value={period ?? "month"} onValueChange={(v) => v && setPeriod(v === "month" ? null : v)} variant="segmented" size="sm">
-          <ToggleGroupItem value="month" className="px-3 text-xs">{monthName()}</ToggleGroupItem>
-          <ToggleGroupItem value="last" className="px-3 text-xs">{monthName(1)}</ToggleGroupItem>
-        </ToggleGroup>
+        <PeriodToggle value={period} onChange={setPeriod} />
         <span className="ml-auto text-xs text-muted-foreground tabular">{usd(total)} total</span>
       </FilterBar>
       <QueryState query={q} empty="No spend yet">{(rows) => (

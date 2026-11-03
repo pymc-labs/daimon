@@ -28,6 +28,7 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.server import create_mcp_app
+from daimon.core import routine_service
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
@@ -53,7 +54,6 @@ _delete_routine_impl = _routines_mod._delete_routine_impl  # pyright: ignore[rep
 _get_routine_impl = _routines_mod._get_routine_impl  # pyright: ignore[reportPrivateUsage]
 _list_routines_impl = _routines_mod._list_routines_impl  # pyright: ignore[reportPrivateUsage]
 _update_routine_impl = _routines_mod._update_routine_impl  # pyright: ignore[reportPrivateUsage]
-_require_platform_user_id = _routines_mod._require_platform_user_id  # pyright: ignore[reportPrivateUsage]
 
 
 def _ma_agent(*, agent_id: str, name: str, tenant_id: uuid.UUID) -> dict[str, object]:
@@ -526,10 +526,18 @@ async def test_create_routine_stamps_created_by_user_id_from_auth_platform_user_
     )
 
 
-async def test_require_platform_user_id_raises_with_exact_error_string_when_missing() -> None:
-    auth = _auth_identity(platform_user_id=None)
+async def test_create_routine_without_a_platform_user_is_refused(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
     with pytest.raises(ToolError) as exc_info:
-        _require_platform_user_id(auth)
+        await _create_routine_impl(
+            _runtime(committing_sessionmaker),
+            _auth_identity(platform_user_id=None),
+            agent_name="daimon",
+            cron_expr="* * * * *",
+            timezone="UTC",
+            trigger_message="hi",
+        )
     assert str(exc_info.value) == _EXPECTED_PLATFORM_USER_ID_ERROR, (
         "missing platform_user_id (e.g. CLI session) must be rejected at create_routine "
         "so the scheduler never sees an unfireable row"
@@ -1770,7 +1778,7 @@ async def test_required_destination_refuses_before_database_and_agent_lookup(
 ) -> None:
     factory = MagicMock(side_effect=AssertionError("must not open a database session"))
     lookup = AsyncMock(side_effect=AssertionError("must not look up an agent"))
-    monkeypatch.setattr(_routines_mod, "find_agent_by_daimon_tag", lookup)
+    monkeypatch.setattr(routine_service, "find_agent_by_daimon_tag", lookup)
     runtime = _runtime(factory, require_destination=True)
 
     with pytest.raises(ToolError) as refused:
@@ -1838,7 +1846,7 @@ async def test_required_destination_on_authenticated_public_mcp_surface(
     )
     await db_session.commit()
     lookup = AsyncMock(side_effect=AssertionError("must not look up an agent"))
-    monkeypatch.setattr(_routines_mod, "find_agent_by_daimon_tag", lookup)
+    monkeypatch.setattr(routine_service, "find_agent_by_daimon_tag", lookup)
     requests: list[httpx.Request] = []
 
     def unexpected_native(request: httpx.Request) -> httpx.Response:
@@ -1911,6 +1919,30 @@ async def test_required_destination_on_authenticated_public_mcp_surface(
         assert await list_routines_for_tenant(session, tenant_id=tenant.id) == []
 
 
+async def test_routine_tools_go_through_the_routine_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The chat tools hold no checks of their own: a service refusal reaches the caller as is."""
+
+    async def refuse(*_args: object, **_kwargs: object) -> RoutineRow:
+        raise routine_service.RoutineRefused("service said no")
+
+    monkeypatch.setattr(routine_service, "create_routine", refuse)
+    monkeypatch.setattr(routine_service, "get_routine", refuse)
+    runtime = _runtime(MagicMock())
+    with pytest.raises(ToolError, match="service said no"):
+        await _create_routine_impl(
+            runtime,
+            _auth_identity(),
+            agent_name="daimon",
+            cron_expr="* * * * *",
+            timezone="UTC",
+            trigger_message="hi",
+        )
+    with pytest.raises(ToolError, match="service said no"):
+        await _get_routine_impl(runtime, _auth_identity(), routine_id=uuid.uuid4())
+
+
 async def test_owner_dm_resolves_recipient_without_channel_lookup(
     committing_sessionmaker, db_session, monkeypatch
 ):
@@ -1968,9 +2000,12 @@ async def test_owner_dm_resolves_recipient_without_channel_lookup(
 @pytest.mark.parametrize("platform", ["slack", "teams"])
 async def test_dm_writes_rejected_on_unsupported_platform(platform):
     auth = _auth_identity(platform=platform, platform_user_id="123")
-    with pytest.raises(ToolError, match="not supported here"):
-        await _routines_mod._check_destination(  # pyright: ignore[reportPrivateUsage]
-            MagicMock(), auth, kind="dm", destination_id=None
+    with pytest.raises(routine_service.RoutineRefused, match="not supported here"):
+        await routine_service.check_destination(
+            MagicMock(),
+            _routines_mod._caller(auth),  # pyright: ignore[reportPrivateUsage]
+            kind="dm",
+            destination_id=None,
         )
 
 
@@ -1980,7 +2015,6 @@ async def test_mcp_thread_to_dm_checks_and_retains_original_thread(
 ):
     from daimon.core.access_policy import ChannelRule
     from daimon.core.discord_membership import verify_discord_source
-    from daimon.core.errors import StoreError
 
     tenant = await make_tenant(db_session, platform="discord", workspace_id="424242")
     row = await create_routine(
@@ -2031,7 +2065,7 @@ async def test_mcp_thread_to_dm_checks_and_retains_original_thread(
     auth = _auth_identity(tenant_id=tenant.id, platform_user_id="123", external_id="424242")
     try:
         if restricted:
-            with pytest.raises(StoreError, match="restricted source"):
+            with pytest.raises(ToolError, match="restricted source"):
                 await _update_routine_impl(runtime, auth, routine_id=row.id, destination_kind="dm")
         else:
             converted = await _update_routine_impl(
@@ -2044,7 +2078,7 @@ async def test_mcp_thread_to_dm_checks_and_retains_original_thread(
                     tenant_id=tenant.id,
                     policy=TenantAccessPolicy(channel_rules={"789": ChannelRule(readers="inside")}),
                 )
-            with pytest.raises(StoreError, match="restricted source"):
+            with pytest.raises(ToolError, match="restricted source"):
                 await _update_routine_impl(
                     runtime, auth, routine_id=row.id, trigger_message="edited"
                 )
@@ -2734,7 +2768,7 @@ async def test_concurrent_public_edit_cannot_expose_private_metadata(
     )
     open_view = CallerView(TenantAccessPolicy())
 
-    async def view(_runtime, auth):
+    async def view(_runtime, auth, **_kwargs):
         return only_b if auth.platform_user_id == "123" else open_view
 
     monkeypatch.setattr(_routines_mod, "load_isolation_view", view)
@@ -2806,7 +2840,6 @@ async def test_concurrent_public_edit_cannot_expose_private_metadata(
 async def test_update_rejects_a_revision_changed_after_mcp_authorization(
     committing_sessionmaker, monkeypatch
 ):
-    from daimon.core.errors import StoreError
     from daimon.core.stores import routines
 
     async with committing_sessionmaker.begin() as db:
@@ -2835,7 +2868,7 @@ async def test_update_rejects_a_revision_changed_after_mcp_authorization(
             return await original_update(db, routine_id, **kwargs)
 
         monkeypatch.setattr(routines, "update_routine", intervening_edit)
-        with pytest.raises(StoreError, match="changed while being edited"):
+        with pytest.raises(ToolError, match="changed while being edited"):
             await _update_routine_impl(runtime, auth, routine_id=row.id, trigger_message="stale")
         async with committing_sessionmaker() as db:
             current = await get_routine(db, row.id, tenant_id=tenant.id)

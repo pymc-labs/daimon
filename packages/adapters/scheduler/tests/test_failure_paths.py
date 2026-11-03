@@ -1,7 +1,6 @@
 """Scheduler failure boundaries preserve completed replies and record failures."""
 
 import unittest.mock
-import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -99,10 +98,6 @@ async def test_routine_failure_paths_preserve_the_finished_reply_or_error(
             text="Finished reply", session_id="ses_completed", producing_agent_id="old_agent"
         )
 
-    class NoCaps:
-        async def is_over_cap(self, tenant_id: uuid.UUID, user_id: str) -> bool:
-            return False
-
     async with AsyncAnthropic(api_key="offline") as client:
         fire = await _build_fire(
             client=client,
@@ -139,7 +134,6 @@ async def test_routine_failure_paths_preserve_the_finished_reply_or_error(
             await run_one_tick(
                 now=now,
                 sm=db_session_factory,
-                caps=NoCaps(),
                 fire=fire,
                 max_age=timedelta(minutes=15),
                 max_concurrent_fires=1,

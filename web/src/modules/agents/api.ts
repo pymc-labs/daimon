@@ -9,7 +9,7 @@ import type {
 } from "./types"
 
 export const useAgents = () => useQuery({ queryKey: ["agents"], queryFn: () => api.get<AgentSummary[]>("/api/agents") })
-export const useAgent = (id: string) => useQuery({ queryKey: ["agents", id], queryFn: () => api.get<Agent>(`/api/agents/${id}`) })
+export const useAgent = (id: string) => useQuery({ queryKey: ["agents", id], queryFn: () => api.get<Agent>(`/api/agents/${id}`), enabled: !!id })
 export const useDraft = (id: string, enabled = true) =>
   useQuery({ queryKey: ["agents", id, "draft"], queryFn: () => api.get<Draft | null>(`/api/agents/${id}/draft`), enabled })
 export const useVersions = (id: string, enabled = true) =>

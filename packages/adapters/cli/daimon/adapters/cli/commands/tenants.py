@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import json
-import re
 import uuid
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Annotated, Literal
@@ -16,7 +16,7 @@ from daimon.adapters.cli.flags import JSON_OPTION, YES_OPTION
 from daimon.adapters.cli.output import emit_rows, render_json
 from daimon.adapters.cli.prompt import confirm_or_abort
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
-from daimon.core import channel_backend
+from daimon.core import allowance_limits, channel_backend
 from daimon.core.access_policy import (
     OPEN_ACCESS_POLICY,
     TenantAccessPolicy,
@@ -33,7 +33,7 @@ from daimon.core.permissions import (
     ChannelWriters,
     agent_permissions,
 )
-from daimon.core.stores import tenant_ledger, tenant_user_caps
+from daimon.core.stores import tenant_ledger
 from daimon.core.stores.access_policy import (
     AccessPolicyUnreadable,
     clear_access_policy,
@@ -52,6 +52,7 @@ from daimon.core.stores.tenants import (
     set_funding_mode,
     set_turn_cap,
 )
+from daimon.core.workspace_settings import SettingRefused, parse_invokers
 from mux.contracts.ids import Provider
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 from rich.console import Console
@@ -238,7 +239,6 @@ async def tenants_backend_policy(
 
 
 _VALID_PLATFORMS = ("discord", "cli", "slack", "teams")
-_ENTRA_OBJECT_ID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 # A Teams channel thread is its channel id plus ";messageid=<root post>".
 _TEAMS_CHANNEL_ID = r"19:[^\s;]+@thread\.[a-z0-9]+(?:;messageid=[0-9]+)?"
 # What a pin or isolation names: a whole team channel, never a thread or group chat.
@@ -519,6 +519,10 @@ def tenants_cap_command(
     usd: str,
     user: Annotated[str | None, typer.Option("--user", help="Platform user id override.")] = None,
 ) -> None:
+    """Set the monthly limit per member, or one person's own with --user.
+
+    It is stored as a cap in the allowance table, so it appears under Credits.
+    """
     settings = load_settings()
     console = Console(highlight=False)
 
@@ -549,14 +553,20 @@ async def tenants_cap(
     tenant_id = await _existing_tenant_id(rt, platform=platform, external_id=workspace_id)
     if user == "":
         raise typer.BadParameter("user must not be empty")
+    now = datetime.now(UTC)
     async with rt.sessionmaker() as session, session.begin():
         if user is None:
-            await tenant_user_caps.set_default(session, tenant_id=tenant_id, amount=amount)
-        else:
-            await tenant_user_caps.set_override(
-                session, tenant_id=tenant_id, user_id=user, amount=amount
+            await allowance_limits.set_default_limit(
+                session, tenant_id=tenant_id, amount=amount, now=now
             )
-    console.print(f"{platform}:{workspace_id} monthly cap for {user or 'default'}: ${amount:.2f}")
+        else:
+            await allowance_limits.set_person_limit(
+                session, tenant_id=tenant_id, platform_user_id=user, amount=amount, now=now
+            )
+    console.print(
+        f"{platform}:{workspace_id} monthly limit for {user or 'default'}: ${amount:.2f} "
+        "(a cap, also shown in the web app under Credits)"
+    )
 
 
 def _print_policy(
@@ -820,18 +830,10 @@ def tenants_access_policy_set_command(
 def _parse_invokers(values: list[str], *, platform: str) -> tuple[str, ...]:
     if not values:
         raise typer.BadParameter("invoker_user_ids: pass at least one non-empty id")
-    pattern = (
-        r"[0-9]{15,21}"
-        if platform == "discord"
-        else _ENTRA_OBJECT_ID
-        if platform == "teams"
-        else r"[UW][A-Z0-9]+"
-    )
-    for value in values:
-        cleaned = value.strip()
-        if not cleaned or (platform != "cli" and re.fullmatch(pattern, cleaned) is None):
-            raise typer.BadParameter(f"invoker_user_ids: invalid {platform} id {value!r}")
-    return tuple(dict.fromkeys(value.strip() for value in values))
+    try:
+        return parse_invokers(values, platform=platform)
+    except SettingRefused as exc:
+        raise typer.BadParameter(f"invoker_user_ids: {exc}") from exc
 
 
 async def tenants_access_policy_set(

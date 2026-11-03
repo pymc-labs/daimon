@@ -27,7 +27,6 @@ import functools
 import signal
 import sys
 import time
-import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -51,7 +50,7 @@ from daimon.core.authz import (
     build_agent_ref,
     build_subject,
 )
-from daimon.core.billing import BillingConfig, is_over_cap, load_billing_config
+from daimon.core.billing import BillingConfig, load_billing_config
 from daimon.core.channel_backend import effective_thread_backend, is_selfhosted_channel
 from daimon.core.compute_fly import FlyComputeProvider
 from daimon.core.compute_sessions import ComputeSessions
@@ -129,7 +128,12 @@ from daimon.core.session_ports_compat import retrieve_session_record, session_sc
 from daimon.core.skill_sync.resync_queue import drain_github_push_resync_queue
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from daimon.core.slack_event_dedup_sweep import sweep_expired_slack_event_dedup
-from daimon.core.spend_gate import SpendBlock, SpendRequest, spend_gate_in_new_session
+from daimon.core.spend_gate import (
+    SpendBlock,
+    SpendCheck,
+    SpendRequest,
+    spend_gate_in_new_session,
+)
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.direct_messages import dm_enabled
@@ -232,33 +236,6 @@ async def _acquire_advisory_lock(engine: AsyncEngine, key: int) -> AsyncConnecti
     return conn
 
 
-class _CapsAdapter:
-    """Wraps the free ``is_over_cap`` function in a ``CapsCheck``-shaped object.
-
-    The core scheduler ``CapsCheck`` Protocol expects an object with
-    ``is_over_cap(tenant_id, user_id) -> bool``; we wrap the free function so
-    the existing ``run_one_tick`` contract holds without leaking sessionmaker
-    into ``run_one_tick``'s signature.
-    """
-
-    def __init__(
-        self,
-        sessionmaker: async_sessionmaker[AsyncSession],
-        billing_config: BillingConfig | None,
-    ) -> None:
-        self._sm = sessionmaker
-        self._billing_config = billing_config
-
-    async def is_over_cap(self, tenant_id: uuid.UUID, user_id: str) -> bool:
-        return await is_over_cap(
-            billing_config=self._billing_config,
-            sessionmaker=self._sm,
-            tenant_id=tenant_id,
-            user_id=user_id,
-            now=datetime.now(UTC),
-        )
-
-
 def _routine_sandbox(
     sm: async_sessionmaker[AsyncSession], row: RoutineRow
 ) -> RoutineSandbox | None:
@@ -282,32 +259,44 @@ def _routine_sandbox(
     return RoutineSandbox(pin=pin, on_drift=on_drift)
 
 
+async def _spend_block(
+    sm: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    row: RoutineRow,
+    *,
+    platform: str,
+    check: SpendCheck,
+    agent_id: str | None = None,
+) -> SpendBlock | None:
+    """What one check of the spend gate stops this routine's fire with, if anything.
+
+    The allowance check answers `cap_exceeded` when the creator's monthly limit is what
+    has no room.
+    """
+    return await spend_gate_in_new_session(
+        sm,
+        request=SpendRequest(
+            tenant_id=row.tenant_id,
+            platform_user_id=row.created_by_user_id,
+            platform=platform,
+            channel_id=row.channel_id,
+            agent_id=agent_id,
+        ),
+        markup=settings.billing.markup,
+        checks=frozenset({check}),
+    )
+
+
 async def _blocked(
     sm: async_sessionmaker[AsyncSession],
     settings: Settings,
     row: RoutineRow,
     *,
     platform: str,
-    check: SpendBlock,
-    agent_id: str | None = None,
+    check: SpendCheck,
 ) -> bool:
     """Whether one check of the spend gate stops this routine's fire."""
-    return (
-        await spend_gate_in_new_session(
-            sm,
-            billing_config=None,
-            request=SpendRequest(
-                tenant_id=row.tenant_id,
-                platform_user_id=row.created_by_user_id,
-                platform=platform,
-                channel_id=row.channel_id,
-                agent_id=agent_id,
-            ),
-            markup=settings.billing.markup,
-            checks=frozenset({check}),
-        )
-        == check
-    )
+    return await _spend_block(sm, settings, row, platform=platform, check=check) is not None
 
 
 async def _build_fire(
@@ -669,7 +658,7 @@ async def _build_fire(
             fire_hold = await routine_hold(hold_s, row, platform=platform)
 
         # Admission gate: per-tenant balance — independent of Stripe config.
-        # Keys on row.tenant_id (NOT NULL). Mirror run_one_tick's cap_exceeded skip.
+        # Keys on row.tenant_id (NOT NULL).
         if await _blocked(sm, settings, row, platform=platform, check="balance_depleted"):
             if (observation := current_outcome.get()) is not None:
                 observation.finish(reason=TerminationReason.ADMISSION_BALANCE_DEPLETED)
@@ -783,29 +772,33 @@ async def _build_fire(
         # billed to (the destination's parent, else where the routine was made).
         if await _refused_over_channel_budget(row, platform=platform):
             return
-        # The creator's spend allowance, last, on the agent the fire resolved.
-        if await _blocked(
+        # The creator's spend allowance and monthly limit, last, on the agent the fire
+        # resolved. A spent monthly limit is `cap_exceeded`, as it was before the limit
+        # joined the allowances.
+        spend_block = await _spend_block(
             sm,
             settings,
             row,
             platform=platform,
             check="allowance_exhausted",
             agent_id=resolved_agent_id,
-        ):
+        )
+        if spend_block is not None:
+            capped = spend_block == "cap_exceeded"
+            reason = (
+                TerminationReason.ADMISSION_CAP_EXCEEDED
+                if capped
+                else TerminationReason.ADMISSION_DENIED
+            )
             if (observation := current_outcome.get()) is not None:
-                observation.finish(reason=TerminationReason.ADMISSION_DENIED)
+                observation.finish(reason=reason)
             log.info(
-                "routine.skipped.allowance_exhausted",
+                "routine.skipped.cap_exceeded" if capped else "routine.skipped.allowance_exhausted",
                 routine_id=str(row.id),
                 tenant_id=str(row.tenant_id),
             )
             async with sm() as s, s.begin():
-                await record_routine_failure(
-                    s,
-                    row,
-                    error="allowance_exhausted",
-                    reason=TerminationReason.ADMISSION_DENIED,
-                )
+                await record_routine_failure(s, row, error=spend_block, reason=reason)
             return
         if resolved_agent_id != row.agent_id:
             async with sm() as heal_s, heal_s.begin():
@@ -1803,9 +1796,8 @@ async def run(
     health_server = await start_liveness_responder(scheduler_settings.health_port)
 
     deployment_default = parse_deployment_default(settings.defaults_root)
-    billing_config = load_billing_config()
-    caps = _CapsAdapter(sm, billing_config=billing_config)
     resolver_cache = new_resolver_cache()
+    billing_config = load_billing_config()
     dm_turn_deps = build_turn_deps(
         settings,
         client,
@@ -1826,7 +1818,12 @@ async def run(
 
     dispatcher = RoutineDispatcher(scheduler_settings.max_concurrent_fires)
     compute = ComputeSessions(sm, settings.compute, FlyComputeProvider(settings.compute))
-    long_jobs = LongJobExecutor(sm, ManagedLongJobPort(client, sm, settings), settings.long_jobs)
+    long_jobs = LongJobExecutor(
+        sm,
+        ManagedLongJobPort(client, sm, settings),
+        settings.long_jobs,
+        markup=settings.billing.markup,
+    )
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
 
@@ -1849,7 +1846,6 @@ async def run(
             await run_one_tick(
                 now=datetime.now(UTC),
                 sm=sm,
-                caps=caps,
                 fire=fire,
                 max_age=timedelta(seconds=scheduler_settings.max_age_s),
                 max_concurrent_fires=scheduler_settings.max_concurrent_fires,
@@ -1895,7 +1891,6 @@ async def run(
             await run_one_tick(
                 now=datetime.now(UTC),
                 sm=sm,
-                caps=caps,
                 fire=fire,
                 max_age=timedelta(seconds=scheduler_settings.max_age_s),
                 max_concurrent_fires=scheduler_settings.max_concurrent_fires,

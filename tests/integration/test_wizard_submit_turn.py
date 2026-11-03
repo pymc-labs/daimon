@@ -156,7 +156,7 @@ def _make_runtime(
         anthropic=anthropic,
         sessionmaker=sessionmaker,
         notebook_rate_limiter=RateLimiter(max_requests=999),
-        billing_config=None,  # billing disabled -> is_over_cap always False
+        billing_config=None,
         deployment_default=deployment_default,
         resolver_cache=resolver_cache,
         turn_deps=build_turn_deps(

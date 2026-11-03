@@ -238,6 +238,19 @@ async def list_platform_principals_for_account(
     return [PlatformPrincipalRow.model_validate(r) for r in rows]
 
 
+async def list_platform_principals_for_accounts(
+    session: AsyncSession, *, tenant_id: uuid.UUID, account_ids: Collection[uuid.UUID]
+) -> list[PlatformPrincipalRow]:
+    """The tenant's platform principals of any of `account_ids`."""
+    if not account_ids:
+        return []
+    stmt = select(PlatformPrincipal).where(
+        PlatformPrincipal.tenant_id == tenant_id,
+        PlatformPrincipal.account_id.in_(list(account_ids)),
+    )
+    return [PlatformPrincipalRow.model_validate(r) for r in (await session.execute(stmt)).scalars()]
+
+
 async def list_principals_by_external_ids(
     session: AsyncSession, *, tenant_id: uuid.UUID, external_ids: Collection[str]
 ) -> list[PlatformPrincipalRow]:

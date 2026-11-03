@@ -274,10 +274,6 @@ async def test_a_routine_fire_that_returns_without_finishing_logs_nothing(
     async def skipped(fired_row: RoutineRow) -> None:
         fired.append(fired_row.id)
 
-    class NoCaps:
-        async def is_over_cap(self, tenant_id: uuid.UUID, user_id: str) -> bool:
-            return False
-
     monkeypatch.setattr(scheduler, "advance_stale", nothing)
     monkeypatch.setattr(scheduler, "claim_due_fireable", claim)
     monkeypatch.setattr(scheduler, "skip_slots_during_fire", nothing)
@@ -286,7 +282,6 @@ async def test_a_routine_fire_that_returns_without_finishing_logs_nothing(
         await run_one_tick(
             now=datetime(2026, 1, 1, tzinfo=UTC),
             sm=sessionmaker,
-            caps=NoCaps(),
             fire=skipped,
             max_age=timedelta(hours=1),
             max_concurrent_fires=1,

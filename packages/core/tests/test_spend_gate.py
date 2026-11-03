@@ -1,4 +1,4 @@
-"""The one spend gate: check order, subsets, allowances and the unchanged no-allowance path."""
+"""The one spend gate: check order, subsets and allowances."""
 
 from __future__ import annotations
 
@@ -9,10 +9,10 @@ from decimal import Decimal
 import pytest
 from daimon.core import spend_gate as spend_gate_module
 from daimon.core.allowances import AllowanceVerdict
-from daimon.core.billing import BillingConfig
 from daimon.core.spend_gate import (
     AFTER_QUEUE_CHECKS,
     SpendBlock,
+    SpendCheck,
     SpendPerson,
     SpendRequest,
     person_verdict,
@@ -22,7 +22,6 @@ from daimon.core.spend_gate import (
 from daimon.core.stores import (
     spend_allowances,
     tenant_ledger,
-    tenant_user_caps,
     usage_events,
     web_identities,
 )
@@ -34,16 +33,8 @@ from daimon.testing.factories import (
     make_web_person,
 )
 from mux.testing.drivers.anthropic.ma_models import ma_model_usage
-from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession
 
-BILLING = BillingConfig(
-    secret_key=SecretStr("sk_test"),
-    webhook_secret=SecretStr("whsec_test"),
-    prices={10: "p10"},
-    success_url="http://test/success",
-    cancel_url="http://test/cancel",
-)
 MARKUP = Decimal("1.2")
 NOW = datetime.now(UTC)
 
@@ -80,6 +71,8 @@ async def _allow(
     subject: str = "everyone",
     amount: str = "5",
     agent: str | None = None,
+    window: AllowanceWindow = "month",
+    is_cap: bool = False,
 ) -> None:
     await spend_allowances.create_allowance(
         session,
@@ -88,8 +81,9 @@ async def _allow(
         subject_id=subject,
         agent_id=agent,
         amount_usd=Decimal(amount),
-        window="month",
+        window=window,
         starts_at=NOW - timedelta(days=40),
+        is_cap=is_cap,
     )
 
 
@@ -100,7 +94,7 @@ async def _gate(
     user: str | None = "u1",
     agent: str | None = "a1",
     person: SpendPerson | None = None,
-    checks: frozenset[SpendBlock] | None = None,
+    checks: frozenset[SpendCheck] | None = None,
 ) -> SpendBlock | None:
     request = SpendRequest(
         tenant_id=tenant_id,
@@ -111,12 +105,8 @@ async def _gate(
         person=person,
     )
     if checks is None:
-        return await spend_gate(
-            session, billing_config=BILLING, request=request, markup=MARKUP, now=NOW
-        )
-    return await spend_gate(
-        session, billing_config=BILLING, request=request, markup=MARKUP, now=NOW, checks=checks
-    )
+        return await spend_gate(session, request=request, markup=MARKUP, now=NOW)
+    return await spend_gate(session, request=request, markup=MARKUP, now=NOW, checks=checks)
 
 
 async def test_a_funded_person_with_no_allowance_is_unlimited(db_session: AsyncSession) -> None:
@@ -132,17 +122,6 @@ async def test_balance_is_checked_first(db_session: AsyncSession) -> None:
     await _allow(db_session, tenant.id, amount="1")
     assert await _gate(db_session, tenant.id) == "balance_depleted", (
         "an unfunded workspace is refused on its balance before any allowance"
-    )
-
-
-async def test_cap_comes_before_allowance(db_session: AsyncSession) -> None:
-    tenant = await make_tenant(db_session)
-    await _fund(db_session, tenant.id)
-    await _spend(db_session, tenant.id, "u1", "a1")
-    await tenant_user_caps.set_default(db_session, tenant_id=tenant.id, amount=Decimal("5"))
-    await _allow(db_session, tenant.id, amount="1")
-    assert await _gate(db_session, tenant.id) == "cap_exceeded", (
-        "a person over the cap and over an allowance is refused on the cap"
     )
 
 
@@ -315,17 +294,43 @@ async def test_the_trusted_path_skips_the_person_checks(db_session: AsyncSession
     )
 
 
-async def test_after_queue_checks_leave_out_the_cap(db_session: AsyncSession) -> None:
+async def test_after_queue_checks_leave_out_the_channel_budget(db_session: AsyncSession) -> None:
     tenant = await make_tenant(db_session)
     await _fund(db_session, tenant.id)
     await _spend(db_session, tenant.id, "u1", "a1")
-    await tenant_user_caps.set_default(db_session, tenant_id=tenant.id, amount=Decimal("1"))
     assert await _gate(db_session, tenant.id, checks=AFTER_QUEUE_CHECKS) is None, (
-        "a queued turn is not stopped again by the cap it passed at admission"
+        "a person with no allowance is not stopped while a queued turn waits"
     )
     await _allow(db_session, tenant.id, amount="1")
     assert await _gate(db_session, tenant.id, checks=AFTER_QUEUE_CHECKS) == "allowance_exhausted", (
-        "but an allowance used up while it waited does stop it"
+        "an allowance used up while it waited does stop it"
+    )
+
+
+async def test_a_spent_cap_is_its_own_block_and_an_allowance_under_it_is_not(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await _fund(db_session, tenant.id)
+    await _spend(db_session, tenant.id, "u1", "a1")  # $6 billed
+    await _allow(db_session, tenant.id, amount="5.50", kind="person", subject="u1")
+    await _allow(db_session, tenant.id, amount="500", is_cap=True)
+    assert await _gate(db_session, tenant.id) == "allowance_exhausted", (
+        "the person's $5.50 is spent while the $500 cap has room"
+    )
+    await _allow(db_session, tenant.id, amount="5.50", is_cap=True, kind="person", subject="u1")
+    assert await _gate(db_session, tenant.id) == "cap_exceeded", (
+        "a spent monthly cap reads as the cap, not as an allowance"
+    )
+
+
+async def test_the_cap_still_stops_a_queued_turn(db_session: AsyncSession) -> None:
+    tenant = await make_tenant(db_session)
+    await _fund(db_session, tenant.id)
+    await _spend(db_session, tenant.id, "u1", "a1")
+    await _allow(db_session, tenant.id, amount="1", is_cap=True)
+    assert await _gate(db_session, tenant.id, checks=AFTER_QUEUE_CHECKS) == "cap_exceeded", (
+        "a cap used up while the turn waited is reported as the cap"
     )
 
 
@@ -382,3 +387,80 @@ async def test_a_person_allowance_on_the_web_id_governs_and_counts_their_chat_id
     assert await _gate(db_session, tenant.id, user="chat-id", person=None) == (
         "allowance_exhausted"
     ), "spend under the web id uses up the allowance for the chat id too"
+
+
+async def test_a_generous_group_allowance_does_not_lift_the_default_cap(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await _fund(db_session, tenant.id)
+    await _allow(db_session, tenant.id, amount="5.50", is_cap=True)
+    await _allow(db_session, tenant.id, kind="group", subject="staff", amount="500")
+    await _spend(db_session, tenant.id, "u1", "a1")  # $6 billed
+    staff = SpendPerson(groups=frozenset({"staff"}))
+    assert await _gate(db_session, tenant.id, person=staff) == "cap_exceeded", (
+        "the staff group's $500 has room but the everyone cap of $5.50 is spent"
+    )
+    assert await _gate(db_session, tenant.id, user="u2", person=staff) is None, (
+        "someone who spent nothing is under both"
+    )
+
+
+async def test_the_default_cap_holds_a_visitor_whose_invite_allows_more(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await _fund(db_session, tenant.id)
+    await _allow(db_session, tenant.id, amount="5.50", is_cap=True)
+    await _allow(db_session, tenant.id, kind="invite", subject="inv1", amount="100", window="total")
+    visitor = SpendPerson(is_visitor=True, invite_id="inv1")
+    assert await _gate(db_session, tenant.id, user="v1", person=visitor) is None, "nothing spent"
+    await _spend(db_session, tenant.id, "v1", "a1")  # $6 billed
+    assert await _gate(db_session, tenant.id, user="v1", person=visitor) == "cap_exceeded", (
+        "the everyone cap covers visitors, as the old default cap did"
+    )
+
+
+async def test_a_lifetime_allowance_beside_a_cap_leaves_both_bounds(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await _fund(db_session, tenant.id)
+    await _allow(db_session, tenant.id, amount="20", is_cap=True)
+    await _allow(db_session, tenant.id, amount="6.50", window="total")
+    request = SpendRequest(
+        tenant_id=tenant.id,
+        platform_user_id="u1",
+        platform="discord",
+        channel_id=None,
+        agent_id=None,
+    )
+    fresh = await person_verdict(db_session, request=request, markup=MARKUP, now=NOW)
+    assert (fresh.left_usd, fresh.window) == (Decimal("6.50"), "total"), (
+        "the lifetime $6.50 is the smaller room and binds, with no reset"
+    )
+    await _spend(db_session, tenant.id, "u1", "a1")  # $6 billed
+    assert await _gate(db_session, tenant.id, agent=None) is None, "$0.50 of the lifetime is left"
+    await _spend(db_session, tenant.id, "u1", "a2")  # $12 billed, over the lifetime $6.50
+    assert await _gate(db_session, tenant.id, agent=None) == "allowance_exhausted", (
+        "the lifetime bound is not lost to the cap's room"
+    )
+
+
+async def test_a_person_cap_replaces_the_default_cap_inside_a_group(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await _fund(db_session, tenant.id)
+    await _allow(db_session, tenant.id, amount="5", is_cap=True)
+    await _allow(db_session, tenant.id, kind="person", subject="u1", amount="50", is_cap=True)
+    await _allow(db_session, tenant.id, kind="group", subject="staff", amount="500")
+    await _spend(db_session, tenant.id, "u1", "a1")  # $6 billed, over the default $5
+    await _spend(db_session, tenant.id, "u2", "a1")
+    staff = SpendPerson(groups=frozenset({"staff"}))
+    assert await _gate(db_session, tenant.id, person=staff) is None, (
+        "u1's own cap of $50 governs, not the default $5, though staff has $500"
+    )
+    assert await _gate(db_session, tenant.id, user="u2", person=staff) == "cap_exceeded", (
+        "u2 has no cap of their own, so the default $5 holds"
+    )

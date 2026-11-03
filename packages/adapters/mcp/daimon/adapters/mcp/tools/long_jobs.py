@@ -178,7 +178,12 @@ def register_long_job_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             async with runtime.session_factory.begin() as db:
                 registered = await store.register(db, job, ceilings=runtime.settings.long_jobs)
                 if registered.id == job.id:
-                    await require_admission(runtime.session_factory, job, session=db)
+                    await require_admission(
+                        runtime.session_factory,
+                        job,
+                        session=db,
+                        markup=runtime.settings.billing.markup,
+                    )
                 return registered
         except StoreError as exc:
             raise ToolError(str(exc)) from exc

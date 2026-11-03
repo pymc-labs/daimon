@@ -1,11 +1,6 @@
-"""Billing config + admission decision. Pure module + DB read.
+"""Billing config, the month window and the Stripe checkout helpers.
 
-Per `guideline:architecture` — `is_over_cap` is the single source of truth
-for admission. Adapter wrappers call it before `anthropic.beta.sessions.create`
-No-cap-row short-circuits to False. Otherwise: True iff
-sum(usage_events.cost since calendar-month-UTC) >= effective_cap.
-
-Exceptions propagate (fail-closed admission).
+Admission is decided by `daimon.core.spend_gate`. Exceptions propagate.
 """
 
 from __future__ import annotations
@@ -19,9 +14,9 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 import structlog
-from daimon.core.stores import tenant_ledger, tenant_user_caps, usage_events
+from daimon.core.stores import tenant_ledger
 from pydantic import SecretStr
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 
 if TYPE_CHECKING:
     from stripe import StripeClient
@@ -87,43 +82,6 @@ def load_billing_config() -> BillingConfig | None:
 def month_start(now: datetime) -> datetime:
     """First day of the calendar month at 00:00 UTC: the cap period the panels report."""
     return datetime(now.year, now.month, 1, tzinfo=UTC)
-
-
-async def is_over_cap(
-    *,
-    billing_config: BillingConfig | None,
-    sessionmaker: async_sessionmaker[AsyncSession] | None = None,
-    tenant_id: uuid.UUID,
-    user_id: str,
-    now: datetime,
-    session: AsyncSession | None = None,
-) -> bool:
-    """Adapter-edge admission decision.
-
-    Returns True iff the user has spent at-or-above their effective cap
-    in the calendar-month UTC window containing ``now``. Caps apply even when
-    Stripe is not configured. Exceptions propagate.
-
-    ``now`` is injected by the caller (the adapter edge) rather than read from
-    the clock here, per guideline:architecture — keeps the decision pure and
-    testable without monkeypatching.
-    """
-
-    async def check(s: AsyncSession) -> bool:
-        cap = await tenant_user_caps.get_effective_cap(s, tenant_id=tenant_id, user_id=user_id)
-        if cap is None:
-            return False
-        spent = await usage_events.cost_for_user_in_tenant_since(
-            s, tenant_id=tenant_id, platform_user_id=user_id, since=month_start(now)
-        )
-        return Decimal(str(spent)) >= cap
-
-    if session is not None:
-        return await check(session)
-    if sessionmaker is None:
-        raise ValueError("is_over_cap needs a session or a sessionmaker")
-    async with sessionmaker() as opened:
-        return await check(opened)
 
 
 class CheckoutAmountUnavailable(ValueError):

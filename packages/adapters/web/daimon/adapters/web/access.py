@@ -15,8 +15,14 @@ Capability = Literal[
     "agents.view",
     "agents.edit",
     "agents.create",
+    "channels.view",
+    "channels.manage",
+    "routines.view",
+    "routines.manage",
     "credits.view_own",
     "credits.manage",
+    "integrations.view",
+    "integrations.manage",
     "people.manage",
     "audit.view",
     "workspace.manage",
@@ -27,8 +33,14 @@ _ALL: tuple[Capability, ...] = (
     "agents.view",
     "agents.edit",
     "agents.create",
+    "channels.view",
+    "channels.manage",
+    "routines.view",
+    "routines.manage",
     "credits.view_own",
     "credits.manage",
+    "integrations.view",
+    "integrations.manage",
     "people.manage",
     "audit.view",
     "workspace.manage",
@@ -37,7 +49,16 @@ _BY_ROLE: dict[Role, frozenset[Capability]] = {
     "owner": frozenset(_ALL),
     "admin": frozenset(_ALL),
     "member": frozenset(
-        {"chat.use", "agents.view", "agents.edit", "agents.create", "credits.view_own"}
+        {
+            "chat.use",
+            "agents.view",
+            "agents.edit",
+            "agents.create",
+            "channels.view",
+            "routines.view",
+            "routines.manage",
+            "credits.view_own",
+        }
     ),
     "visitor": frozenset({"chat.use", "credits.view_own"}),
 }
@@ -47,19 +68,37 @@ _MODULE_OF: dict[Capability, WebModuleKey] = {
     "agents.view": "agents",
     "agents.edit": "agents",
     "agents.create": "agents",
+    "channels.view": "channels",
+    "channels.manage": "channels",
+    "routines.view": "routines",
+    "routines.manage": "routines",
     "credits.view_own": "credits",
     "credits.manage": "credits",
+    "integrations.view": "integrations",
+    "integrations.manage": "integrations",
     "people.manage": "admin",
     "audit.view": "admin",
     "workspace.manage": "admin",
 }
 _MODULES_BY_ROLE: dict[Role, frozenset[WebModuleKey]] = {
-    "owner": frozenset({"chat", "agents", "credits", "admin"}),
-    "admin": frozenset({"chat", "agents", "credits", "admin"}),
-    "member": frozenset({"chat", "agents", "credits"}),
+    "owner": frozenset(
+        {"chat", "agents", "channels", "routines", "credits", "integrations", "admin"}
+    ),
+    "admin": frozenset(
+        {"chat", "agents", "channels", "routines", "credits", "integrations", "admin"}
+    ),
+    "member": frozenset({"chat", "agents", "channels", "routines", "credits"}),
     "visitor": frozenset({"chat"}),
 }
-_MODULE_ORDER: tuple[WebModuleKey, ...] = ("chat", "agents", "credits", "admin")
+_MODULE_ORDER: tuple[WebModuleKey, ...] = (
+    "chat",
+    "agents",
+    "channels",
+    "routines",
+    "credits",
+    "integrations",
+    "admin",
+)
 
 
 def role_for(

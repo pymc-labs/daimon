@@ -6,8 +6,7 @@ never reported as false:
 
 - whether only its own agents run there: server admins, operator tokens
   reading the tenant (`get_tenant_summary`), and the deployment operator;
-- its readers and writers: the deployment operator, who reads the whole
-  access policy (`daimon channels list`);
+- its readers and writers: the same viewers, since any admin may change them;
 - budget: those, and anyone the platform shows the channel to
   (`get_channel_budget`);
 - environment: those, and anyone on the channel's side of every isolation
@@ -69,9 +68,7 @@ def shown_facts(
     wide = viewer.is_server_admin or viewer.reads_access_policy
     facts: set[OverviewFact] = set()
     if wide:
-        facts |= {"own_agents", "budget", "environment"}
-    if viewer.reads_access_policy:
-        facts.add("rule")
+        facts |= {"own_agents", "rule", "budget", "environment"}
     if viewer.sees_channel:
         facts.add("budget")
     if home_of(policy, channel_id) == viewer.inside_channel_id:

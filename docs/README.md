@@ -35,6 +35,7 @@ server](https://daimon.decision.ai/) instead.
   [Admins](admins.md): who can see and do what.
 - [Unattended turns](unattended.md): what runs with nobody watching.
 - [Billing](billing.md): how model calls are metered and gated.
+- [Allowances](allowances.md): per-person spend limits.
 - [Long jobs](long-jobs.md): approved work that runs on its own worker.
 - [Agent identity](agent-identity.md) and
   [Managed agents](mux.md): how agents appear and run.

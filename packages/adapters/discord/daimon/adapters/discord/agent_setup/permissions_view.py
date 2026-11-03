@@ -210,6 +210,7 @@ class PermissionsView(PanelViewBase):
                 writers=writers,
                 # `refuse_if_not_admin` above checked the live role.
                 subject=build_subject(is_admin=True, platform_user_id=str(interaction.user.id)),
+                surface="panel",
                 default=self.runtime.deployment_default,
                 actor_account_id=state.account_id,
                 copy=copy,

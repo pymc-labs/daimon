@@ -46,7 +46,13 @@ __all__ = [
 log = structlog.get_logger(__name__)
 
 SlotResult = Literal[
-    "started", "cancelled", "timed_out", "balance_depleted", "allowance_exhausted", "queue_full"
+    "started",
+    "cancelled",
+    "timed_out",
+    "balance_depleted",
+    "cap_exceeded",
+    "allowance_exhausted",
+    "queue_full",
 ]
 
 type SpendRecheck = Callable[[], Awaitable[SpendBlock | None]]
@@ -55,6 +61,7 @@ _REASONS = {
     "cancelled": TerminationReason.INTERRUPTED,
     "timed_out": TerminationReason.ADMISSION_CONCURRENCY_SHED,
     "balance_depleted": TerminationReason.ADMISSION_BALANCE_DEPLETED,
+    "cap_exceeded": TerminationReason.ADMISSION_CAP_EXCEEDED,
     "allowance_exhausted": TerminationReason.ADMISSION_DENIED,
     "queue_full": TerminationReason.ADMISSION_CONCURRENCY_SHED,
 }
@@ -128,12 +135,13 @@ async def wait_for_slot(
     (paths that claim no slot). A follow-up takes a fresh ticket; when the
     queue is full that is "queue_full". The adapter ends the card as Stopped
     on "cancelled", with `QUEUE_TIMED_OUT_TEXT` on "timed_out", and with its
-    balance or capacity refusal on "balance_depleted" or "queue_full". Each
-    records the turn's outcome. Adapters pass their configured `default_cap`
-    so a follow-up reads the current tenant override (or its cleared default)
-    before taking a new ticket. `on_queued` is called once, synchronously, when
-    a live wait begins (`TurnTicket.wait`), so the adapter can start showing
-    its queued marker; it must not block, and the wait never awaits it.
+    balance, monthly-limit, allowance or capacity refusal on "balance_depleted",
+    "cap_exceeded", "allowance_exhausted" or "queue_full". Each records the turn's
+    outcome. Adapters pass their configured `default_cap` so a follow-up reads the
+    current tenant override (or its cleared default) before taking a new ticket.
+    `on_queued` is called once, synchronously, when a live wait begins
+    (`TurnTicket.wait`), so the adapter can start showing its queued marker; it
+    must not block, and the wait never awaits it.
     """
     holder = _current_holder.get()
     if holder is None:
@@ -192,7 +200,10 @@ async def wait_for_ticket(
             block = None
         if block is not None:
             log.info("turn.queue.spend_blocked", tenant_id=str(tenant_id), block=block)
-            result = "allowance_exhausted" if block == "allowance_exhausted" else "balance_depleted"
+            if block in ("cap_exceeded", "allowance_exhausted"):
+                result = block
+            else:
+                result = "balance_depleted"
     if result != "started" and (observation := current_outcome.get()) is not None:
         observation.finish(reason=_REASONS[result])
     return result

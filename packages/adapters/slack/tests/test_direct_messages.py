@@ -41,7 +41,7 @@ async def test_dm_policy_replies_use_workspace_words(
     monkeypatch.setattr(dm_module, "resolve_web_client", AsyncMock(return_value=client))
     monkeypatch.setattr(dm_module, "_live_role", AsyncMock(return_value=role))
     save = AsyncMock()
-    monkeypatch.setattr(dm_module, "set_dm_enabled", save)
+    monkeypatch.setattr(dm_module, "set_dms", save)
     runtime = MagicMock()
     await dm_module.handle_dm_command(
         runtime,

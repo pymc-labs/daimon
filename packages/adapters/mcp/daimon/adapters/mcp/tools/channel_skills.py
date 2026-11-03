@@ -138,6 +138,7 @@ async def _add(
                     runtime.settings.defaults_root,
                     features=runtime.settings.configured_features,
                 ),
+                surface="chat",
             )
         except SkillsListTruncatedError as exc:
             raise ToolError("The skills here could not all be read. Nothing changed.") from exc
@@ -170,6 +171,8 @@ async def _remove(
             platform=platform,
             channel_id=target,
             skill_id=match.skill_id,
+            actor_account_id=auth.account_id,
+            surface="chat",
         )
     return await _shown(runtime, auth, target, [r for r in rows if r.skill_id != match.skill_id])
 

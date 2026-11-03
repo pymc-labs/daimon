@@ -428,43 +428,6 @@ class DaimonAdmin(Base):
     granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-class ChannelAdmin(Base):
-    """Legacy channel grants retained only for privacy erasure."""
-
-    __tablename__ = "channel_admins"
-    __table_args__ = (
-        PrimaryKeyConstraint("tenant_id", "platform", "channel_id", name="pk_channel_admins"),
-        ForeignKeyConstraint(
-            ["tenant_id"], ["tenants.id"], ondelete="CASCADE", name="fk_channel_admins_tenants"
-        ),
-        ForeignKeyConstraint(
-            ["updated_by_account_id"],
-            ["accounts.id"],
-            ondelete="SET NULL",
-            name="fk_channel_admins_updated_by_account_id",
-        ),
-        CheckConstraint(
-            "platform IN ('discord', 'slack', 'teams')", name="ck_channel_admins_platform"
-        ),
-    )
-
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
-    platform: Mapped[str] = mapped_column(Text)
-    channel_id: Mapped[str] = mapped_column(Text)
-    role_ids: Mapped[list[str]] = mapped_column(
-        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
-    )
-    user_ids: Mapped[list[str]] = mapped_column(
-        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
-    )
-    updated_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-
-
 class Routine(Base):
     __tablename__ = "routines"
     __table_args__ = (
@@ -564,6 +527,8 @@ class Routine(Base):
     # Channel the routine's spend is attributed to and budget-gated by: its
     # destination's parent channel, resolved when the destination is set.
     channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The channel the routine was created from; None from the web or the CLI.
+    made_in_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Immutable creation-time provenance, independent of mutable delivery/budget placement.
     source_provenance_known: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
@@ -1017,7 +982,10 @@ class UsageEvent(Base):
 
 
 class TenantUserCap(Base):
-    """Per-(tenant, user) cap. NULL platform_user_id row = tenant-wide default.
+    """Legacy per-(tenant, user) monthly cap, folded into `SpendAllowance` rows.
+
+    Nothing reads it now; the rows record what was converted. NULL platform_user_id
+    row = tenant-wide default.
 
     NULLS NOT DISTINCT on the UNIQUE means the default row collides with itself
     on upsert (one default per tenant). Postgres 15+.
@@ -1232,7 +1200,9 @@ class SpendAllowance(Base):
     (a group name; `everyone` is built in) or an `invite` (a visitor's invite id).
     `agent_id` narrows it to one agent, else it covers every agent. The amount is each
     person's own limit, counted in billed dollars inside the window: `month` is the
-    current UTC calendar month, `total` everything since `starts_at`.
+    current UTC calendar month, `total` everything since `starts_at`. A row with `is_cap`
+    is a monthly ceiling for every agent, for `everyone` or one person, that holds on top
+    of whichever allowance governs; it is never one of the allowances to choose among.
     """
 
     __tablename__ = "spend_allowances"
@@ -1266,6 +1236,7 @@ class SpendAllowance(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    is_cap: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
 
 
 class ChannelBudget(Base):
@@ -2563,6 +2534,13 @@ class ThreadParticipationScope(Base):
         CheckConstraint(
             "mode IN ('on', 'off', 'disabled')", name="ck_thread_participation_scopes_mode"
         ),
+        Index(
+            "ix_thread_participation_scopes_parent",
+            "tenant_id",
+            "platform",
+            "parent_id",
+            postgresql_where=text("parent_id IS NOT NULL"),
+        ),
     )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
@@ -2572,6 +2550,8 @@ class ThreadParticipationScope(Base):
     scope: Mapped[str] = mapped_column(Text)
     scope_id: Mapped[str] = mapped_column(Text)
     mode: Mapped[str] = mapped_column(Text, nullable=False)
+    # The channel a thread row sits under; None for other scopes and old Discord rows.
+    parent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -2618,6 +2598,13 @@ class ProgressPlanScope(Base):
             "scope IN ('workspace', 'channel', 'thread')", name="ck_progress_plan_scopes_scope"
         ),
         CheckConstraint("mode IN ('on', 'off', 'disabled')", name="ck_progress_plan_scopes_mode"),
+        Index(
+            "ix_progress_plan_scopes_parent",
+            "tenant_id",
+            "platform",
+            "parent_id",
+            postgresql_where=text("parent_id IS NOT NULL"),
+        ),
     )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
@@ -2627,6 +2614,8 @@ class ProgressPlanScope(Base):
     scope: Mapped[str] = mapped_column(Text)
     scope_id: Mapped[str] = mapped_column(Text)
     mode: Mapped[str] = mapped_column(Text, nullable=False)
+    # The channel a thread row sits under; None for other scopes and old Discord rows.
+    parent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -3799,6 +3788,46 @@ class PlatformChannelName(Base):
     channel_id: Mapped[str] = mapped_column(Text)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    # What the adapter that saw the channel also knew: its kind (text, forum,
+    # private, shared...) and its Discord category or Teams team.
+    kind: Mapped[str | None] = mapped_column(Text, nullable=True)
+    parent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    parent_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    archived: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+
+
+class ChannelChange(Base):
+    """One change to a channel setting, from any surface, with its before and after values.
+
+    Keeps its rows when the actor's account is erased: the actor is a SET NULL reference
+    and the values name agents and amounts, never a person.
+    """
+
+    __tablename__ = "channel_changes"
+    __table_args__ = (
+        Index("ix_channel_changes_tenant_channel_at", "tenant_id", "channel_id", "at"),
+        CheckConstraint(
+            "surface IN ('web', 'chat', 'panel', 'cli')", name="ck_channel_changes_surface"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    setting: Mapped[str] = mapped_column(Text, nullable=False)
+    before: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    after: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    actor_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    surface: Mapped[str] = mapped_column(Text, nullable=False)
+    at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 

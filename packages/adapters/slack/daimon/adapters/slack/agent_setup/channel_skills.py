@@ -98,6 +98,9 @@ async def run_channel_skills_submission(
         await refuse(CHANNEL_SKILLS_NEED_ADMIN_MESSAGE)
         return
     async with runtime.sessionmaker.begin() as session:
+        remover = await get_or_create_platform_principal(
+            session, platform="slack", external_id=user_id, tenant_id=tenant_id
+        )
         for skill_id in submission.remove:
             await remove_channel_skill(
                 session,
@@ -105,6 +108,8 @@ async def run_channel_skills_submission(
                 platform="slack",
                 channel_id=meta.channel_id,
                 skill_id=skill_id,
+                actor_account_id=remover.account_id,
+                surface="panel",
             )
     if submission.remove:
         await audit(outcome="allowed", reason="completed")
@@ -125,6 +130,7 @@ async def run_channel_skills_submission(
                     default=runtime.deployment_default,
                     actor_account_id=actor.account_id,
                     platform_skills=runtime.turn_deps.platform_skills,
+                    surface="panel",
                 )
         except (SkillsListTruncatedError, anthropic.APIError):
             await audit(outcome="error", reason="skills_unreadable")

@@ -7,11 +7,13 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch"
 import { api } from "@/lib/api"
 import { useChatAgents } from "@/lib/hooks"
-import type { WorkspaceSettings } from "./types"
+import { Access, Providers } from "./Access"
+import type { SettingsPatch, WorkspaceSettings } from "./types"
+import { Block, Row } from "./shared"
 
 // Workspace
 
-const MODULE_LABEL = { chat: "Chat", agents: "Agents", credits: "Credits" }
+const MODULE_LABEL = { chat: "Chat", agents: "Agents", channels: "Channels", routines: "Routines", credits: "Credits", integrations: "Integrations" }
 
 export function Workspace() {
   const q = useQuery({ queryKey: KEY, queryFn: () => api.get<WorkspaceSettings>("/api/admin/settings") })
@@ -19,16 +21,25 @@ export function Workspace() {
 }
 
 const KEY = ["admin", "settings"]
-type Patch = Partial<WorkspaceSettings>
 
 /** What a patch changes in the cached settings, so a switch moves before the server answers. */
-const applied = (s: WorkspaceSettings, b: Patch): WorkspaceSettings => ({ ...s, ...b })
+const applied = (s: WorkspaceSettings, b: SettingsPatch): WorkspaceSettings => ({
+  ...s,
+  modules: b.modules ?? s.modules,
+  default_agent: b.default_agent ?? s.default_agent,
+  access: {
+    ...s.access,
+    ...(b.dm_enabled !== undefined && { dm_enabled: b.dm_enabled }),
+    ...(b.dm_memory_read_only !== undefined && { dm_memory_read_only: b.dm_memory_read_only }),
+    ...(b.plain_text_mentions !== undefined && { plain_text_mentions: b.plain_text_mentions }),
+  },
+})
 
 function Settings({ s }: { s: WorkspaceSettings }) {
   const { data: agents } = useChatAgents()
   const qc = useQueryClient()
   const save = useMutation({
-    mutationFn: (b: Patch) => api.patch<WorkspaceSettings>("/api/admin/settings", b),
+    mutationFn: (b: SettingsPatch) => api.patch<WorkspaceSettings>("/api/admin/settings", b),
     onMutate: async (b) => {
       await qc.cancelQueries({ queryKey: KEY })
       const before = qc.getQueryData<WorkspaceSettings>(KEY)
@@ -52,8 +63,8 @@ function Settings({ s }: { s: WorkspaceSettings }) {
         ))}
         <Row label="Admin"><Lock className="size-4 text-faint" aria-label="Always on" /></Row>
       </Block>
-      <Block title="Default agent">
-        <Row label="New threads start with">
+      <Block title="Web chat">
+        <Row label="Web chat agent">
           <Select value={s.default_agent} onValueChange={(v) => save.mutate({ default_agent: v })}>
             <SelectTrigger size="sm" className="w-48"><SelectValue /></SelectTrigger>
             <SelectContent>
@@ -62,19 +73,8 @@ function Settings({ s }: { s: WorkspaceSettings }) {
           </Select>
         </Row>
       </Block>
+      <Access access={s.access} save={save.mutate} />
+      {s.providers && <Providers providers={s.providers} save={save.mutate} />}
     </div>
-  )
-}
-
-function Row({ children, label }: { children: React.ReactNode; label: string }) {
-  return <div className="flex h-11 items-center gap-2.5 px-4 text-sm"><span className="flex-1">{label}</span>{children}</div>
-}
-
-function Block({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <section>
-      <h2 className="mb-2 text-sm font-semibold">{title}</h2>
-      <div className="divide-y rounded-lg border">{children}</div>
-    </section>
   )
 }

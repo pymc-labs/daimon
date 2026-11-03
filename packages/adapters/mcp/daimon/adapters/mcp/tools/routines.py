@@ -13,10 +13,10 @@ leaked.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from typing import cast
 from uuid import UUID
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import discord
 import httpx
@@ -25,7 +25,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._channel_policy import get_verified_origin, turn_origin_place
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
-from daimon.adapters.mcp.tools._rule_view import CallerView, load_isolation_view
+from daimon.adapters.mcp.tools._rule_view import load_isolation_view
 from daimon.adapters.mcp.tools._words import admin_noun
 from daimon.adapters.mcp.tools.channel_budgets import origin_budget_channel
 from daimon.adapters.mcp.tools.discord._client import (
@@ -53,41 +53,40 @@ from daimon.adapters.mcp.tools.teams._directory import (
     require_client,
     split_thread,
 )
-from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
+from daimon.core import routine_service
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.admin_actions import DelegatedAction
-from daimon.core.authz import (
-    Action,
-    AgentRef,
-    Place,
-    Subject,
-    Surface,
-    authorize,
-    build_agent_ref,
-    build_subject,
-)
-from daimon.core.cron import next_slot_at_or_after
-from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
+from daimon.core.authz import Action, Subject, authorize, build_subject
 from daimon.core.discord_membership import verify_discord_source
 from daimon.core.errors import StoreError
-from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.membership_subject import resolve_subject
-from daimon.core.permissions import (
-    any_agent_rules,
-    any_own_readers,
-    dm_source_limited,
-    home_of,
-    limiting_ids_at,
-)
-from daimon.core.routine_delivery import destination_shape_error
+from daimon.core.permissions import dm_source_limited
 from daimon.core.routine_sandbox import SandboxPinUnavailable, current_pin
+from daimon.core.routine_service import (
+    CallView,
+    ChannelAgentName,
+    DestinationResolver,
+    NewRoutine,
+    Placement,
+    RoutineCaller,
+    RoutineChange,
+    RoutineEnv,
+    RoutineRefused,
+    RoutineSource,
+    SourceResolver,
+)
 from daimon.core.routines import routine_for_reader
-from daimon.core.rule_views import routine_destination_channel
 from daimon.core.scope import ScopeContext
 from daimon.core.security_audit import record_authz_denial, record_policy_decision
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.direct_messages import DM_SCOPE_PREFIX, get_conversation_by_scope
-from daimon.core.stores.domain import CatchUpPolicy, RoutineDestinationKind, RoutineRow
+from daimon.core.stores.domain import (
+    CatchUpPolicy,
+    RoutineDestinationKind,
+    RoutineRow,
+    TurnOriginRow,
+)
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.teams_graph import GraphUnavailable
 from fastmcp import Context, FastMCP
@@ -100,96 +99,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 class DeleteResult(BaseModel):
     deleted: bool
     routine_id: str
-
-
-def _routine_for_reader(auth: AuthIdentity, row: RoutineRow) -> RoutineRow:
-    """Admins can manage metadata without reading a personal-memory result."""
-    return routine_for_reader(row, user_id=auth.platform_user_id)
-
-
-def _require_routines_allowed(auth: AuthIdentity) -> None:
-    """A held credential or a client saves, changes and reads no routine.
-
-    Decided before any policy lookup, so no rule or empty policy relaxes it
-    (`authorize(SAVE_ROUTINE)`).
-    """
-    decision = authorize(
-        OPEN_ACCESS_POLICY,
-        subject=mcp_subject(auth),
-        action=Action.SAVE_ROUTINE,
-        surface=Surface.ROUTINE,
-        hold=auth.hold,
-    )
-    if not decision and decision.reason in ("outside_hold", "client_requester"):
-        record_authz_denial(Action.SAVE_ROUTINE, decision.reason)
-        raise ToolError(
-            "this conversation is held to the channel it runs in, so it can't use routines. "
-            "Tell the caller. Do not retry."
-        )
-
-
-def _require_platform_user_id(auth: AuthIdentity) -> str:
-    """Return auth.platform_user_id or raise ToolError if missing.
-
-    Required for create_routine because the scheduler later needs an external_id
-    to build a principal for the fired turn (scheduler/main.py:139). CLI sessions
-    have no platform_user_id and therefore cannot create schedulable routines.
-    """
-    if auth.platform_user_id is None:
-        raise ToolError("creating a routine requires a platform user identity")
-    return auth.platform_user_id
-
-
-def _require_routine_owner(auth: AuthIdentity, row: RoutineRow) -> None:
-    """Owner-or-admin gate for routine mutation. Reads use the same rule (``_may_read``).
-
-    Raises the same ``"routine not found"`` text an unknown id produces, so a
-    non-owner probe cannot distinguish "forbidden" from "does not exist".
-
-    Both sides of the comparison are nullable and neither null identifies an
-    owner: a caller with no platform user id (a CLI-minted token, or an account
-    with no principal for its tenant's platform) is nobody's creator, and a
-    routine with no recorded creator has no owner to match. Comparing them
-    directly would let ``None == None`` through, so both fail closed — only an
-    admin may mutate an ownerless routine. Note that a non-admin caller without
-    a platform user id therefore cannot mutate any routine.
-    """
-    if auth.admin_for(DelegatedAction.ROUTINES):
-        return
-    if auth.platform_user_id is None or row.created_by_user_id is None:
-        raise ToolError("routine not found")
-    if auth.platform_user_id != row.created_by_user_id:
-        raise ToolError("routine not found")
-
-
-def _may_read(auth: AuthIdentity, row: RoutineRow) -> bool:
-    """Owner-or-admin gate for routine reads.
-
-    A routine's trigger and the tail of its last result are what its agent
-    was asked and answered, which for a client project agent is that
-    client's work. Other members see neither, nor that the routine exists.
-    """
-    if auth.admin_for(DelegatedAction.ROUTINES):
-        return True
-    return auth.platform_user_id is not None and auth.platform_user_id == row.created_by_user_id
-
-
-def _compute_next_fire_at(cron_expr: str, tz: str) -> datetime:
-    """Validate cron + timezone and return the next fire datetime (UTC).
-
-    This is the ONE legitimate ``except Exception`` site in this module — it
-    sits at the MCP boundary and immediately re-raises as ToolError (per
-    guideline:architecture named-boundary rule). Croniter raises a mix of
-    ValueError / KeyError on bad expressions; catching all is intentional here.
-    """
-    try:
-        ZoneInfo(tz)
-    except ZoneInfoNotFoundError as e:
-        raise ToolError(f"unknown timezone: {tz!r}") from e
-    try:
-        return next_slot_at_or_after(cron_expr, tz, datetime.now(UTC))
-    except Exception as e:  # croniter raises mixed exception types; named boundary
-        raise ToolError(f"invalid cron expression: {cron_expr!r}") from e
 
 
 async def _resolve_discord_destination(
@@ -315,234 +224,212 @@ async def _resolve_teams_destination(
     return ref.channel_id
 
 
-async def _check_destination(
+def _caller(auth: AuthIdentity) -> RoutineCaller:
+    return RoutineCaller(
+        tenant_id=auth.tenant_id,
+        subject=mcp_subject(auth),
+        platform=auth.platform or "",
+        is_admin=auth.admin_for(DelegatedAction.ROUTINES),
+        hold=auth.hold,
+        own_agent_ids=frozenset(i for i in (auth.agent_id or auth.chat_agent_id,) if i is not None),
+        admin_noun=admin_noun(auth.platform),
+    )
+
+
+def _destination_resolver(runtime: McpRuntime, auth: AuthIdentity) -> DestinationResolver:
+    """Looks a destination up on the caller's platform as the caller (see the resolvers above)."""
+    platform = auth.platform or ""
+
+    async def resolve(kind: RoutineDestinationKind, destination_id: str) -> Placement:
+        if platform == "discord":
+            parent_id, category_id = await _resolve_discord_destination(
+                runtime, auth, kind=kind, destination_id=destination_id
+            )
+            return Placement(
+                channel_id=destination_id, parent_channel_id=parent_id, category_id=category_id
+            )
+        if platform == "teams":
+            # Teams has no categories; a thread is checked as itself under its channel.
+            channel_id = await _resolve_teams_destination(
+                runtime, auth, destination_id=destination_id
+            )
+            return Placement(
+                channel_id=destination_id,
+                parent_channel_id=None if kind == "channel" else channel_id,
+            )
+        parent_id, category_id = await _resolve_slack_destination(
+            runtime, auth, kind=kind, destination_id=destination_id
+        )
+        return Placement(
+            channel_id=destination_id.partition(":")[0],
+            parent_channel_id=parent_id,
+            category_id=category_id,
+        )
+
+    return resolve
+
+
+def _channel_agent_name(runtime: McpRuntime, auth: AuthIdentity) -> ChannelAgentName:
+    async def name(channel_id: str) -> str | None:
+        async with runtime.session_factory() as session:
+            config = await resolve(
+                session,
+                context=ScopeContext(tenant_id=auth.tenant_id, channel_id=channel_id),
+                default=runtime.deployment_default,
+            )
+        return config.agent_name
+
+    return name
+
+
+_UNSOURCED = "The private conversation's source could not be established."
+
+
+def _source_resolver(
     runtime: McpRuntime,
     auth: AuthIdentity,
-    *,
-    kind: RoutineDestinationKind | None,
-    destination_id: str | None,
-) -> str | None:
-    """Refuse a destination that could never be posted to, before it is saved.
+    origin_context_id: str | None,
+    verified: Callable[[], Awaitable[TurnOriginRow | None]],
+) -> SourceResolver:
+    """Where a chat-made routine comes from: the channel and thread of the turn it names.
 
-    Returns the channel the destination sits in (a thread's parent), or None
-    when there is no destination.
-
-    The pair must come together; the id must have the platform's shape; the
-    channel (and thread) must exist in the caller's own server or workspace
-    with daimon able to post; and the tenant access policy must not protect
-    it, checked with the parent channel and category resolved here. The
-    adapter re-checks all of it at post time, so a channel protected or
-    removed later is still honoured.
-
-    Returns the channel the routine's spend is budgeted against: the
-    destination's parent channel, or None without a destination.
+    A routine made in a private conversation comes from the channel that conversation
+    was moved from. On Discord, a DM routine's source, and any source not read from a
+    verified turn, is checked against the server.
     """
-    if kind == "dm":
-        if auth.platform != "discord":
-            raise ToolError("DM routines are not supported here")
-        owner = _require_platform_user_id(auth)
-        if destination_id is not None and destination_id != owner:
-            raise ToolError("a DM routine can deliver only to its authenticated owner")
-        return None
-    if (kind is None) != (destination_id is None):
-        raise ToolError("destination_kind and destination_id must be given together")
-    if kind is None or destination_id is None:
-        return None
-    platform = auth.platform or ""
-    shape_error = destination_shape_error(platform, kind, destination_id)
-    if shape_error is not None:
-        raise ToolError(f"invalid destination_id: {shape_error}. Nothing was saved.")
-    if platform == "discord":
-        parent_channel_id, category_id = await _resolve_discord_destination(
-            runtime, auth, kind=kind, destination_id=destination_id
+
+    async def resolve(
+        kind: RoutineDestinationKind | None, destination_id: str | None, budget: str | None
+    ) -> RoutineSource:
+        origin = await verified()
+        if origin_context_id is not None and origin is None:
+            raise ToolError("The routine's source origin could not be verified.")
+        channel_id = budget
+        thread_id = destination_id if kind == "thread" else None
+        source_id: str | None = None
+        private = (
+            auth.platform == "discord"
+            and origin is not None
+            and origin.thread_id.startswith(DM_SCOPE_PREFIX)
         )
-        channel_id = destination_id
-    elif platform == "teams":
-        # Teams has no categories; a thread is checked as itself under its channel.
-        category_id = None
-        parent_channel_id = await _resolve_teams_destination(
-            runtime, auth, destination_id=destination_id
-        )
-        channel_id = destination_id
-        if kind == "channel":
-            parent_channel_id = None
-    else:
-        parent_channel_id, category_id = await _resolve_slack_destination(
-            runtime, auth, kind=kind, destination_id=destination_id
-        )
-        channel_id = destination_id.partition(":")[0]
-    async with runtime.session_factory() as session:
-        try:
-            policy = await load_access_policy(session, tenant_id=auth.tenant_id)
-        except AccessPolicyUnreadable as err:
-            raise ToolError(
-                "the access settings here could not be read; no destination was saved"
-            ) from err
-    if not authorize(
-        policy,
-        subject=mcp_subject(auth),
-        action=Action.POST,
-        surface=Surface.ROUTINE,
-        hold=auth.hold,
-        place=Place(
-            channel_id=channel_id, parent_channel_id=parent_channel_id, category_id=category_id
-        ),
-    ):
-        raise ToolError(
-            f"{channel_id}'s rule lets nobody write there, so a routine "
-            "cannot deliver to it. Pick another channel. Nothing was saved."
-        )
-    return parent_channel_id or channel_id
+        if private and origin is not None:
+            user_id = auth.platform_user_id
+            async with runtime.session_factory() as session:
+                conversation = await get_conversation_by_scope(
+                    session,
+                    tenant_id=auth.tenant_id,
+                    account_id=auth.account_id,
+                    scope_id=origin.thread_id,
+                )
+                policy = await _policy(session, auth)
+            if (
+                conversation is None
+                or conversation.external_user_id != user_id
+                or conversation.platform != "discord"
+                or conversation.workspace_id != _require_guild_id(auth)
+            ):
+                raise ToolError(_UNSOURCED)
+            if conversation.source_channel_id is None:
+                if (
+                    not conversation.is_cold
+                    or conversation.source_thread_id is not None
+                    or conversation.source_thread_keys
+                ):
+                    raise ToolError(_UNSOURCED)
+                channel_id, thread_id = None, None
+            else:
+                source_id = conversation.source_thread_id or conversation.source_channel_id
+                channel_id = conversation.source_channel_id
+                thread_id = conversation.source_thread_id
+                if kind == "dm" and dm_source_limited(
+                    policy,
+                    source_channel_id=channel_id,
+                    source_thread_id=thread_id,
+                    source_thread_keys=conversation.source_thread_keys or (),
+                ):
+                    raise ToolError("A routine from a restricted source cannot deliver by DM.")
+        elif origin is not None and not origin.thread_id.startswith(DM_SCOPE_PREFIX):
+            channel_id = origin.parent_channel_id
+            thread_id = origin.thread_id if origin.thread_id != origin.parent_channel_id else None
+            source_id = thread_id or channel_id
+        elif kind in (None, "dm"):
+            source_id = channel_id
+        if source_id is not None and (
+            kind == "dm" or private or (origin is None and auth.platform == "discord")
+        ):
+            try:
+                verified_channel, thread_id = await verify_discord_source(
+                    _require_bot_token(runtime),
+                    guild_id=_require_guild_id(auth),
+                    channel_id=source_id,
+                )
+            except StoreError as exc:
+                raise ToolError(str(exc)) from exc
+            if private and verified_channel != channel_id:
+                raise ToolError("The private conversation's source parent could not be verified.")
+            channel_id = verified_channel
+        return RoutineSource(channel_id=channel_id, thread_id=thread_id)
+
+    return resolve
 
 
-def _sees_routine(caller: CallerView, row: RoutineRow) -> bool:
-    """Routines of a channel kept to its own agents, and of those agents, show only inside it."""
-    place = caller.home_place(row.channel_id)
-    return caller.sees(row.agent_name) and place in (None, caller.inside_channel_id)
-
-
-async def _load_policy_for_save(session: AsyncSession, *, tenant_id: UUID) -> TenantAccessPolicy:
+async def _policy(session: AsyncSession, auth: AuthIdentity) -> TenantAccessPolicy:
     try:
-        return await load_access_policy(session, tenant_id=tenant_id)
+        return await load_access_policy(session, tenant_id=auth.tenant_id)
     except AccessPolicyUnreadable as err:
         raise ToolError("the access settings here could not be read; nothing was saved") from err
 
 
-def _check_agent_pin(
-    policy: TenantAccessPolicy,
-    *,
-    auth: AuthIdentity,
-    platform: str,
-    agent_name: str,
-    agent: AgentRef,
-    kind: RoutineDestinationKind | None,
-    destination_id: str | None,
-    destination_channel_id: str | None,
-    origin: Place | None = None,
-) -> None:
-    """Refuse a routine that would run a pinned agent outside its channels, or
-    another agent into an isolated channel (`authorize(SAVE_ROUTINE)`). One
-    saved from a verified ``origin`` inside an isolated channel stays in it.
-
-    A pinned agent's routine must post straight into one of its pinned
-    channels: the scheduler can't resolve a Discord thread's parent at fire
-    time, so a thread destination is refused here rather than skipped later.
-    The scheduler re-checks at every fire, so a pin added later still holds.
-    `destination_channel_id` is the channel the destination posts into.
-
-    ``agent`` is built by `daimon.core.authz.build_agent_ref` from the
-    resolved agent and the supplied name, so a pin on any name it answers to
-    holds (and a fact added to `AgentRef` reaches this check too).
-    """
-    source_channel = (origin.parent_channel_id or origin.channel_id) if origin else None
-    if (
-        kind == "dm"
-        and origin is not None
-        and source_channel is not None
-        and limiting_ids_at(
-            policy,
-            channel_id=source_channel,
-            thread_id=origin.channel_id if origin.parent_channel_id else None,
-        )
-    ):
-        raise ToolError("A routine from a restricted source cannot deliver by DM.")
-    target_channel_id: str | None = None
-    if kind is not None and destination_id is not None:
-        if kind == "channel":
-            target_channel_id = destination_id
-        elif platform == "slack":
-            target_channel_id = destination_id.partition(":")[0]
-        elif platform == "teams":
-            target_channel_id = split_thread(destination_id)[0]
-    decision = authorize(
-        policy,
-        subject=mcp_subject(auth),
-        action=Action.SAVE_ROUTINE,
-        surface=Surface.ROUTINE,
-        agent=agent,
-        place=Place(channel_id=target_channel_id, parent_channel_id=destination_channel_id),
-        origin=origin,
-        hold=auth.hold,
-    )
-    if not decision:
-        record_authz_denial(Action.SAVE_ROUTINE, decision.reason)
-    if decision.reason == "invoker_not_allowed":
-        raise ToolError(
-            "This agent requires a human invocation, so it cannot run routines. Nothing was saved."
-        )
-    if decision.reason == "own_agents_only":
-        if origin is not None and home_of(policy, origin.channel_id, origin.parent_channel_id):
-            raise ToolError(
-                "This conversation is in a channel kept to its own agents, so its routines "
-                "post only into that channel. Nothing was saved."
-            )
-        raise ToolError(
-            "That channel is kept to its own agents, so only they post there. Nothing was saved."
-        )
-    if not decision:
-        raise ToolError(
-            f"{agent_name}'s rule runs it only in certain channels, so its routines "
-            "must post straight into one of them (a channel destination, not a thread "
-            "or none). Nothing was saved."
-        )
-
-
-def _saved_destination_channel(auth: AuthIdentity, row: RoutineRow) -> str | None:
-    """The channel a saved destination sits in, where that is known without a lookup.
-
-    A Discord thread's parent needs the Discord API, so it reads as unknown:
-    the scope check then falls back to the agent the caller is talking to.
-    """
-    if row.destination_kind in (None, "dm") or row.destination_id is None:
-        return None
-    if row.destination_kind == "channel":
-        return row.destination_id
-    if auth.platform == "slack":
-        return row.destination_id.partition(":")[0]
-    if auth.platform == "teams":
-        return split_thread(row.destination_id)[0]
-    return None
-
-
-async def _require_agent_in_scope(
+def _env(
     runtime: McpRuntime,
     auth: AuthIdentity,
     *,
-    agent_name: str,
-    ma_agent_id: str,
-    destination_channel_id: str | None,
-) -> None:
-    """Refuse a non-admin scheduling an agent that isn't theirs to drive here.
+    origin_context_id: str | None = None,
+    verified_origin: bool = False,
+) -> RoutineEnv:
+    """The service's view of this call. `verified_origin` reads the turn the call names."""
+    origins: list[TurnOriginRow | None] = []
 
-    A fired routine runs as its agent, with that agent's repo, keys,
-    connectors and memory, so naming any agent in the workspace would let a
-    member of one client's channel drive another client's agent. A member may
-    schedule the agent they are talking to (the one this call executes as),
-    or the agent the destination channel itself answers with. Anything else
-    is an admin's call.
-    """
-    if auth.admin_for(DelegatedAction.ROUTINES):
-        return
-    executing = auth.agent_id or auth.chat_agent_id
-    if executing is not None and executing == derive_agent_uuid(
-        tenant_id=auth.tenant_id, ma_agent_id=ma_agent_id
-    ):
-        return
-    if destination_channel_id is not None:
-        async with runtime.session_factory() as session:
-            config = await resolve(
-                session,
-                context=ScopeContext(tenant_id=auth.tenant_id, channel_id=destination_channel_id),
-                default=runtime.deployment_default,
-            )
-        if config.agent_name == agent_name:
-            return
-    raise ToolError(
-        f"{agent_name} is neither the agent you are talking to nor the one the destination "
-        "channel answers with, and a routine runs with its agent's repository, keys and "
-        f"connectors, so only {admin_noun(auth.platform)} can schedule it. Tell the caller "
-        "who can. Nothing was saved."
+    async def verified() -> TurnOriginRow | None:
+        if not origins:
+            origins.append(await get_verified_origin(runtime, auth, origin_context_id))
+        return origins[0]
+
+    async def load_view() -> CallView:
+        origin = await verified() if verified_origin else None
+        viewer = await load_isolation_view(
+            runtime,
+            auth,
+            location_channel_id=origin_channel_id(origin) if verified_origin else None,
+        )
+        return CallView(
+            viewer=viewer, origin=turn_origin_place(origin) if origin is not None else None
+        )
+
+    async def origin_budget() -> str | None:
+        return await origin_budget_channel(runtime.session_factory, auth, origin_context_id)
+
+    return RoutineEnv(
+        sessionmaker=runtime.session_factory,
+        anthropic=runtime.client,
+        resolve_destination=_destination_resolver(runtime, auth),
+        channel_agent_name=_channel_agent_name(runtime, auth),
+        load_view=load_view,
+        origin_budget_channel=origin_budget,
+        resolve_source=_source_resolver(runtime, auth, origin_context_id, verified)
+        if verified_origin
+        else None,
+        require_destination=runtime.settings.mcp.require_routine_destination,
     )
+
+
+@contextmanager
+def _tool_errors() -> Iterator[None]:
+    """The service's plain-text refusals, as the tool error the caller reads."""
+    try:
+        yield
+    except RoutineRefused as err:
+        raise ToolError(str(err)) from err
 
 
 async def _create_routine_impl(
@@ -559,149 +446,20 @@ async def _create_routine_impl(
     destination_id: str | None = None,
     origin_context_id: str | None = None,
 ) -> RoutineRow:
-    _require_routines_allowed(auth)
-    tenant_id = auth.tenant_id
-    platform_user_id = _require_platform_user_id(auth)
-    next_fire_at = _compute_next_fire_at(cron_expr, timezone)
-    if destination_kind == "dm":
-        if destination_id is not None and destination_id != platform_user_id:
-            raise ToolError("a DM routine can deliver only to its authenticated owner")
-        destination_id = platform_user_id
-    destination_channel_id = await _check_destination(
-        runtime, auth, kind=destination_kind, destination_id=destination_id
-    )
-    if runtime.settings.mcp.require_routine_destination and destination_kind is None:
-        raise ToolError(
-            "No destination was supplied. This routine won't post, so nothing was created. "
-            "Where should results be delivered?"
-        )
-    async with runtime.session_factory() as session:
-        policy = await _load_policy_for_save(session, tenant_id=tenant_id)
-    budget_channel_id = destination_channel_id
-    if destination_kind in (None, "dm"):
-        budget_channel_id = await origin_budget_channel(
-            runtime.session_factory, auth, origin_context_id
-        )
-
-    origin = await get_verified_origin(runtime, auth, origin_context_id)
-    if origin_context_id is not None and origin is None:
-        raise ToolError("The routine's source origin could not be verified.")
-    source_thread_id = destination_id if destination_kind == "thread" else None
-    source_channel_id = budget_channel_id
-    source_id = None
-    private_origin = (
-        auth.platform == "discord"
-        and origin is not None
-        and origin.thread_id.startswith(DM_SCOPE_PREFIX)
-    )
-    if private_origin and origin is not None:
-        async with runtime.session_factory() as session:
-            conversation = await get_conversation_by_scope(
-                session,
-                tenant_id=tenant_id,
-                account_id=auth.account_id,
-                scope_id=origin.thread_id,
-            )
-        if (
-            conversation is None
-            or conversation.external_user_id != platform_user_id
-            or conversation.platform != "discord"
-            or conversation.workspace_id != _require_guild_id(auth)
-        ):
-            raise ToolError("The private conversation's source could not be established.")
-        if conversation.source_channel_id is None:
-            if (
-                not conversation.is_cold
-                or conversation.source_thread_id is not None
-                or conversation.source_thread_keys
-            ):
-                raise ToolError("The private conversation's source could not be established.")
-            source_channel_id = None
-            source_thread_id = None
-        else:
-            source_id = conversation.source_thread_id or conversation.source_channel_id
-            source_channel_id = conversation.source_channel_id
-            source_thread_id = conversation.source_thread_id
-            if destination_kind == "dm" and dm_source_limited(
-                policy,
-                source_channel_id=source_channel_id,
-                source_thread_id=source_thread_id,
-                source_thread_keys=conversation.source_thread_keys or (),
-            ):
-                raise ToolError("A routine from a restricted source cannot deliver by DM.")
-    elif origin is not None and not origin.thread_id.startswith(DM_SCOPE_PREFIX):
-        source_channel_id = origin.parent_channel_id
-        source_thread_id = (
-            origin.thread_id if origin.thread_id != origin.parent_channel_id else None
-        )
-        source_id = source_thread_id or source_channel_id
-    elif destination_kind in (None, "dm"):
-        source_id = source_channel_id
-    if source_id is not None and (
-        destination_kind == "dm"
-        or private_origin
-        or (origin is None and auth.platform == "discord")
-    ):
-        try:
-            verified_channel, source_thread_id = await verify_discord_source(
-                _require_bot_token(runtime),
-                guild_id=_require_guild_id(auth),
-                channel_id=source_id,
-            )
-            if private_origin and verified_channel != source_channel_id:
-                raise ToolError("The private conversation's source parent could not be verified.")
-            source_channel_id = verified_channel
-        except StoreError as exc:
-            raise ToolError(str(exc)) from exc
-    if destination_kind in (None, "dm"):
-        budget_channel_id = source_channel_id
-    caller = await load_isolation_view(runtime, auth, location_channel_id=origin_channel_id(origin))
-    match = await find_agent_by_daimon_tag(
-        runtime.client,
-        tenant_id=tenant_id,
-        name=agent_name,
-    )
-    if match is None or not caller.sees_agent(match):
-        raise ToolError(f"no agent named {agent_name!r} found here")
-    _check_agent_pin(
-        policy,
-        auth=auth,
-        platform=auth.platform or "",
-        agent_name=agent_name,
-        agent=build_agent_ref(match.name, match.metadata, agent_name),
-        kind=destination_kind,
-        destination_id=destination_id,
-        destination_channel_id=destination_channel_id,
-        origin=turn_origin_place(origin) if origin is not None else None,
-    )
-    agent_id = match.id
-    await _require_agent_in_scope(
-        runtime,
-        auth,
-        agent_name=agent_name,
-        ma_agent_id=agent_id,
-        destination_channel_id=destination_channel_id,
-    )
-
-    async with runtime.session_factory() as session, session.begin():
-        return await routines_store.create_routine(
-            session,
-            tenant_id=tenant_id,
-            created_by_user_id=platform_user_id,
-            agent_id=agent_id,
-            agent_name=agent_name,
-            cron_expr=cron_expr,
-            timezone_=timezone,
-            trigger_message=trigger_message,
-            enabled=enabled,
-            catch_up_policy=catch_up_policy,
-            next_fire_at=next_fire_at,
-            destination_kind=destination_kind,
-            destination_id=destination_id,
-            channel_id=budget_channel_id,
-            source_thread_id=source_thread_id,
-            source_channel_id=source_channel_id,
-            source_provenance_known=True,
+    with _tool_errors():
+        return await routine_service.create_routine(
+            _env(runtime, auth, origin_context_id=origin_context_id, verified_origin=True),
+            _caller(auth),
+            NewRoutine(
+                agent_name=agent_name,
+                cron_expr=cron_expr,
+                timezone=timezone,
+                trigger_message=trigger_message,
+                enabled=enabled,
+                catch_up_policy=catch_up_policy,
+                destination_kind=destination_kind,
+                destination_id=destination_id,
+            ),
         )
 
 
@@ -709,16 +467,8 @@ async def _list_routines_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
 ) -> list[RoutineRow]:
-    _require_routines_allowed(auth)
-    tenant_id = auth.tenant_id
-    caller = await load_isolation_view(runtime, auth)
-    async with runtime.session_factory() as session:
-        rows = await routines_store.list_routines_for_tenant(session, tenant_id=tenant_id)
-    return [
-        _routine_for_reader(auth, row)
-        for row in rows
-        if _may_read(auth, row) and _sees_routine(caller, row)
-    ]
+    with _tool_errors():
+        return await routine_service.list_routines(_env(runtime, auth), _caller(auth))
 
 
 async def _get_routine_impl(
@@ -727,17 +477,8 @@ async def _get_routine_impl(
     *,
     routine_id: UUID,
 ) -> RoutineRow:
-    _require_routines_allowed(auth)
-    tenant_id = auth.tenant_id
-    async with runtime.session_factory() as session:
-        row = await routines_store.get_routine(session, routine_id, tenant_id=tenant_id)
-    if (
-        row is None
-        or not _may_read(auth, row)
-        or not _sees_routine(await load_isolation_view(runtime, auth), row)
-    ):
-        raise ToolError("routine not found")
-    return _routine_for_reader(auth, row)
+    with _tool_errors():
+        return await routine_service.get_routine(_env(runtime, auth), _caller(auth), routine_id)
 
 
 async def _update_routine_impl(
@@ -755,127 +496,23 @@ async def _update_routine_impl(
     destination_id: str | None = None,
     clear_destination: bool = False,
 ) -> RoutineRow:
-    _require_routines_allowed(auth)
-    tenant_id = auth.tenant_id
-    if clear_destination and (destination_kind is not None or destination_id is not None):
-        raise ToolError("clear_destination cannot be combined with a new destination")
-    new_destination_channel_id = await _check_destination(
-        runtime, auth, kind=destination_kind, destination_id=destination_id
-    )
-    caller = await load_isolation_view(runtime, auth)
-    async with runtime.session_factory() as session, session.begin():
-        row = await routines_store.get_routine(session, routine_id, tenant_id=tenant_id)
-        if row is None or not _sees_routine(caller, row):
-            raise ToolError("routine not found")
-        _require_routine_owner(auth, row)
-        if (
-            row.destination_kind == "dm"
-            and (clear_destination or destination_kind is not None)
-            and row.created_by_user_id != auth.platform_user_id
-        ):
-            raise ToolError("only the authenticated owner can change private delivery")
-        if destination_kind == "dm":
-            if row.created_by_user_id != auth.platform_user_id or row.created_by_user_id is None:
-                raise ToolError("only the authenticated owner can select DM delivery")
-            destination_id = row.created_by_user_id
-        if clear_destination:
-            destination_channel_id = None
-        elif destination_id is not None:
-            destination_channel_id = new_destination_channel_id
-        else:
-            destination_channel_id = routine_destination_channel(row)
-        if not caller.sees(agent_name or row.agent_name):
-            raise ToolError(f"no agent named {agent_name or row.agent_name!r} found here")
-        if clear_destination:
-            effective_kind, effective_id = None, None
-        elif destination_kind is not None:
-            effective_kind, effective_id = destination_kind, destination_id
-        else:
-            effective_kind, effective_id = row.destination_kind, row.destination_id
-        update_policy = await _load_policy_for_save(session, tenant_id=tenant_id)
-
-        # Recompute next_fire_at only when cron or timezone is being changed.
-        next_fire_at: datetime | None = None
-        if cron_expr is not None or timezone is not None:
-            effective_cron = cron_expr if cron_expr is not None else row.cron_expr
-            effective_tz = timezone if timezone is not None else row.timezone
-            next_fire_at = _compute_next_fire_at(effective_cron, effective_tz)
-
-        # rename support via daimon-tag resolution at tool boundary.
-        # If a new agent_name is provided and differs from the current one, look up
-        # the live MA agent id and persist both fields. Unknown name -> ToolError.
-        new_agent_id: str | None = None
-        if agent_name is not None and agent_name != row.agent_name:
-            match = await find_agent_by_daimon_tag(
-                runtime.client,
-                tenant_id=tenant_id,
-                name=agent_name,
-            )
-            if match is None:
-                raise ToolError(f"no agent named {agent_name!r} found here")
-            new_agent_id = match.id
-        if any_agent_rules(update_policy) or any_own_readers(update_policy):
-            # Check the agent the routine will run, by all its names.
-            effective_id_ma = new_agent_id or row.agent_id
-            effective_agent = next(
-                (
-                    agent
-                    for agent in await list_agents_by_tenant(runtime.client, tenant_id=tenant_id)
-                    if agent.id == effective_id_ma
-                ),
-                None,
-            )
-            if effective_agent is None:
-                raise ToolError("the routine's agent no longer exists. Nothing was saved.")
-            effective_name = agent_name if new_agent_id is not None else row.agent_name
-            _check_agent_pin(
-                update_policy,
-                auth=auth,
-                platform=auth.platform or "",
-                agent_name=effective_name or effective_agent.name,
-                agent=build_agent_ref(
-                    effective_agent.name, effective_agent.metadata, effective_name
-                ),
-                kind=effective_kind,
-                destination_id=effective_id,
-                destination_channel_id=destination_channel_id,
-            )
-        if clear_destination:
-            effective_channel_id = None
-        elif destination_kind is not None:
-            effective_channel_id = new_destination_channel_id
-        else:
-            effective_channel_id = _saved_destination_channel(auth, row)
-        await _require_agent_in_scope(
-            runtime,
-            auth,
-            agent_name=agent_name if agent_name is not None and new_agent_id else row.agent_name,
-            ma_agent_id=new_agent_id if new_agent_id is not None else row.agent_id,
-            destination_channel_id=effective_channel_id,
-        )
-
-        updated = await routines_store.update_routine(
-            session,
+    with _tool_errors():
+        return await routine_service.update_routine(
+            _env(runtime, auth),
+            _caller(auth),
             routine_id,
-            tenant_id=tenant_id,
-            expected_updated_at=row.updated_at,
-            cron_expr=cron_expr,
-            timezone_=timezone,
-            trigger_message=trigger_message,
-            enabled=enabled,
-            catch_up_policy=catch_up_policy,
-            agent_id=new_agent_id,
-            agent_name=agent_name if new_agent_id is not None else None,
-            next_fire_at=next_fire_at,
-            destination_kind=destination_kind,
-            destination_id=destination_id,
-            clear_destination=clear_destination,
-            channel_id=new_destination_channel_id,
-            edited_by=auth.platform_user_id or "unknown",
+            RoutineChange(
+                agent_name=agent_name,
+                cron_expr=cron_expr,
+                timezone=timezone,
+                trigger_message=trigger_message,
+                enabled=enabled,
+                catch_up_policy=catch_up_policy,
+                destination_kind=destination_kind,
+                destination_id=destination_id,
+                clear_destination=clear_destination,
+            ),
         )
-        if updated is None:
-            raise ToolError("routine not found")
-        return _routine_for_reader(auth, updated)
 
 
 async def _delete_routine_impl(
@@ -884,17 +521,8 @@ async def _delete_routine_impl(
     *,
     routine_id: UUID,
 ) -> DeleteResult:
-    _require_routines_allowed(auth)
-    tenant_id = auth.tenant_id
-    caller = await load_isolation_view(runtime, auth)
-    async with runtime.session_factory() as session, session.begin():
-        row = await routines_store.get_routine(session, routine_id, tenant_id=tenant_id)
-        if row is None or not _sees_routine(caller, row):
-            raise ToolError("routine not found")
-        _require_routine_owner(auth, row)
-        deleted = await routines_store.delete_routine(session, routine_id, tenant_id=tenant_id)
-        if not deleted:
-            raise ToolError("routine not found")
+    with _tool_errors():
+        await routine_service.delete_routine(_env(runtime, auth), _caller(auth), routine_id)
     return DeleteResult(deleted=True, routine_id=str(routine_id))
 
 
@@ -964,11 +592,11 @@ async def _set_routine_sandbox_tools_impl(
     enabled: bool,
 ) -> RoutineRow:
     actor = await _sandbox_admin(runtime, auth)
-    caller = await load_isolation_view(runtime, auth)
+    viewer = await load_isolation_view(runtime, auth)
     async with runtime.session_factory() as session:
         row = await routines_store.get_routine(session, routine_id, tenant_id=auth.tenant_id)
-    if row is None or not _sees_routine(caller, row):
-        raise ToolError("routine not found")
+    if row is None or not routine_service.sees_routine(viewer, row):
+        raise ToolError(routine_service.NOT_FOUND)
     # The opt-in covers the agent version and environment the routine would
     # run with now; the scheduler keeps built-ins off once either changes.
     pin = None
@@ -994,8 +622,8 @@ async def _set_routine_sandbox_tools_impl(
         except StoreError as exc:
             raise ToolError(str(exc)) from exc
     if result is None:
-        raise ToolError("routine not found")
-    return _routine_for_reader(auth, result[0])
+        raise ToolError(routine_service.NOT_FOUND)
+    return routine_for_reader(result[0], user_id=auth.platform_user_id)
 
 
 def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:

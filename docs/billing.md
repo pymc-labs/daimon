@@ -5,8 +5,7 @@ for deployments that serve several servers or workspaces on one provider key.
 
 Every model call is priced in USD and debited from the tenant that caused it.
 By default a turn cannot start unless that tenant has credit left. Metering and
-the balance gate work with no configuration. Stripe top-ups and the per-person
-cap need setup (see [Turn it on](#turn-it-on)). Channel budgets stay off until
+the balance gate work with no configuration. Stripe top-ups need setup (see [Turn it on](#turn-it-on)). Channel budgets stay off until
 an admin sets one.
 
 ## Choose a funding mode
@@ -20,7 +19,7 @@ daimon tenants funding-mode slack <team-id> prepaid
 daimon tenants list --json
 ```
 
-Usage, debits, markup and caps still apply, so the balance can go negative as a
+Usage, debits, markup and allowances still apply, so the balance can go negative as a
 spend signal. Each admission at a depleted balance logs the warning
 `billing.operator_funded_balance_alert` with `tenant_id` and `balance_usd`.
 Route it to your log alerting. Switching
@@ -63,17 +62,16 @@ the ledger and to a finished turn's summary line. Usage panels and
 
 ## The gates
 
-Three gates run before a turn starts, always in this order: balance, cap,
-channel budget.
+Three gates run before a turn starts, always in this order: balance, channel
+budget, allowance.
 
 1. **Balance.** A prepaid tenant needs a strictly positive balance. This holds
    even with no Stripe setup, so a spent trial credit blocks the tenant.
-2. **Cap.** A person's spend in the current UTC calendar month must be under
-   their cap. Caps are per person with a tenant-wide default. There is no
-   tenant total, per-session cap or other window. [Long jobs](#long-jobs) add
-   a separate per-job limit.
-3. **Channel budget.** The channel's spend in its window must be under its
+2. **Channel budget.** The channel's spend in its window must be under its
    [budget](#channel-budgets).
+3. **Allowance.** A person's spend must be under the [allowance](allowances.md)
+   that governs them, if one does. [Long jobs](#long-jobs) add a separate
+   per-job limit.
 
 A denial aborts the turn with a plain notice, such as "Your team's Daimon
 credit has run out." The turn never falls back to a cheaper model. MCP tools that start a turn,
@@ -107,7 +105,7 @@ a read or the sweep settles it, and they have no concurrency cap.
 ### Exempt usage
 
 A caller with no platform user, such as an operator, the CLI or an internal
-token, runs with no balance check, no cap check and no debit. The operator
+token, runs with no balance check, no allowance check and no debit. The operator
 absorbs that spend. The session is stamped billing-exempt when created, so its
 creator's posture covers every turn on it. An exempt caller on a billed
 session, such as `daimon run --session` on a chat thread, is debited to the
@@ -134,8 +132,8 @@ A Teams 1:1 chat has none.
   or `fixed` (from `starts_at` to `ends_at`).
 - **The gate** trips once spend reaches the limit, so a limit of 0 stops the
   channel. A turn in progress finishes past it.
-- **The notice.** The first chat turn refused in a window DMs the channel's
-  admins, or the server admins if it has none. Raising the budget re-arms it.
+- **The notice.** The first chat turn refused in a window DMs the server
+  admins. Raising the budget re-arms it.
   `DAIMON_BUDGET_NOTICES` turns it off per tenant
   ([configuration.md](configuration.md#daimon_budget_notices)).
 
@@ -167,7 +165,7 @@ original credit.
 A credit that conflicts with an existing one for the same payment fails and
 stays retryable. Inspect the Stripe event before replaying it.
 
-Without Stripe, operators credit a tenant directly and set caps:
+Without Stripe, operators credit a tenant directly and set monthly limits:
 
 ```sh
 daimon tenants credit discord <guild-id> 25.00 --note "hackathon grant" --id grant-1
@@ -176,8 +174,9 @@ daimon tenants cap discord <guild-id> 5.00 --user <platform-user-id>
 ```
 
 Credit prints the new balance. Repeating the same arguments with the same
-`--id` adds nothing, and omitting `--id` generates a new one. The cap without
-`--user` is the default for everyone, and a zero cap blocks all turns.
+`--id` adds nothing, and omitting `--id` generates a new one. `cap` sets a
+monthly [cap](allowances.md#caps): without `--user` it is the default for
+everyone, and a zero amount blocks all turns.
 
 ## Promo codes
 
@@ -229,7 +228,7 @@ directly, never a chat turn, routine, agent key or operator token. See
 `/billing` on Discord and Slack, and `billing` on Teams, shows the current
 calendar month.
 
-- **Members** see their own use against their cap and the credit left.
+- **Members** see their own use against their monthly allowance and the credit left.
 - **Admins** also see the month's spend, the top five spenders, the five most
   used channel budgets, **Add credit**, **Redeem code** and a **Look up a
   person** picker.
@@ -251,7 +250,7 @@ telemetry, not an accounting source. The ledger is authoritative for charges.
 
 ## Long jobs
 
-A [long job](long-jobs.md) bills its owner and passes the balance and cap
+A [long job](long-jobs.md) bills its owner and passes the balance and allowance
 gates. Its own dollar limit is checked on every heartbeat against provider
 cost before markup, and a breach stops it as `over_budget`.
 
@@ -263,7 +262,7 @@ flat variables in [their own block](configuration.md#billing-stripe).
 
 Stripe billing needs all the Stripe variables together. If any is missing,
 Daimon logs that Stripe billing is disabled and mounts no checkout or webhook
-routes. Metering, the balance gate, caps and the signup credit still work.
+routes. Metering, the balance gate, allowances and the signup credit still work.
 
 Self-service top-ups also need `DAIMON_MCP__PUBLIC_URL` and
 `DAIMON_MCP__JWT_SECRET` for the hop from the chat adapter to the MCP server
