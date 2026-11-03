@@ -112,6 +112,6 @@ async def test_the_gate_stops_a_person_at_their_limit_and_renews_it_next_month(
     await spend_allowances.set_amount(
         db_session, tenant_id=tenant.id, allowance_id=limit.id, amount_usd=Decimal("5")
     )
-    assert await gate(NOW) == "allowance_exhausted", "spending exactly the limit is over it"
+    assert await gate(NOW) == "cap_exceeded", "spending exactly the limit is over it"
     next_month = datetime(NOW.year + (NOW.month == 12), NOW.month % 12 + 1, 1, 1, tzinfo=UTC)
     assert await gate(next_month) is None, "a new month starts with nothing used"
