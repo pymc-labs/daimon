@@ -16,7 +16,7 @@ import pytest
 from daimon.adapters.web import directory
 from daimon.core.access_policy import AgentRule, TenantAccessPolicy
 from daimon.core.config import Settings, TurnSettings
-from daimon.core.stores import platform_names, security_audit, web_audit
+from daimon.core.stores import message_feedback, platform_names, security_audit, web_audit
 from daimon.core.stores import web_identities as identities_store
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores import web_roles as roles_store
@@ -56,6 +56,7 @@ _ROUTES: list[tuple[str, str, dict[str, Any] | None]] = [
     ("GET", "/api/admin/agent-access", None),
     ("PATCH", f"/api/admin/agent-access/{AGENT_ID}", {"web": False}),
     ("GET", "/api/admin/audit", None),
+    ("GET", "/api/admin/feedback", None),
     ("GET", "/api/admin/settings", None),
     ("PATCH", "/api/admin/settings", {"modules": {"agents": False}}),
     ("PATCH", "/api/admin/settings", {"plain_text_mentions": True}),
@@ -815,3 +816,40 @@ async def test_an_unreachable_model_provider_is_a_503_not_a_500(
     }, "a short refusal the page can show"
     assert got["/api/admin/settings"].status_code == 503, "so does the settings list of agents"
     assert got["/api/admin/audit"].status_code == 200, "the log reads no agents"
+
+
+async def test_feedback_counts_by_agent_and_shows_no_text_or_voter(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
+        async with db_session_factory.begin() as db:
+            result = await message_feedback.record_vote(
+                db,
+                tenant_id=admin.ws.tenant_id,
+                platform="discord",
+                message_id="m1",
+                channel_id="c",
+                platform_user_id="voter-secret",
+                account_id=None,
+                ma_session_id="s-unknown",
+                vote="down",
+            )
+            await message_feedback.attach_feedback_details(
+                db,
+                feedback_id=result.row.id,
+                platform_user_id="voter-secret",
+                feedback_text="private words",
+                feedback_reasons=["too_slow"],
+            )
+        res = await admin.client.get("/api/admin/feedback?days=7")
+
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["days"] == 7, f"the period comes back: {body}"
+    assert body["agents"][0]["down"] == 1, f"the vote counts: {body}"
+    assert body["agents"][0]["reasons"] == [{"code": "too_slow", "label": "Too slow", "count": 1}]
+    assert "private words" not in res.text and "voter-secret" not in res.text, (
+        "neither the text nor the voter is shown"
+    )

@@ -1,4 +1,4 @@
-"""`/api/admin/*`: people, invites, agent web access, the audit log and settings.
+"""`/api/admin/*`: people, invites, agent web access, the audit log, feedback and settings.
 
 One module per concern; every change is audited in the transaction that makes it.
 """
@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from daimon.adapters.web.admin_access import access_router
 from daimon.adapters.web.admin_audit import audit_router
+from daimon.adapters.web.admin_feedback import feedback_router
 from daimon.adapters.web.admin_invites import invites_admin_router
 from daimon.adapters.web.admin_people import people_router
 from daimon.adapters.web.admin_settings import settings_router
@@ -21,6 +22,7 @@ def admin_router(runtime: WebRuntime) -> APIRouter:
         invites_admin_router,
         access_router,
         audit_router,
+        feedback_router,
         settings_router,
     ):
         router.include_router(build(runtime))
