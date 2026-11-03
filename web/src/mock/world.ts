@@ -55,7 +55,7 @@ export const SESSIONS: Record<string, ChatSession[]> = {
 
 const ALL: Capability[] = [
   "chat.use", "agents.view", "agents.edit", "agents.create", "channels.view", "channels.manage", "routines.view", "routines.manage",
-  "credits.view_own", "credits.manage", "people.manage", "audit.view", "workspace.manage",
+  "credits.view_own", "credits.manage", "integrations.view", "integrations.manage", "people.manage", "audit.view", "workspace.manage",
 ]
 const CAPS: Record<Role, Capability[]> = {
   owner: ALL, admin: ALL,
@@ -63,8 +63,8 @@ const CAPS: Record<Role, Capability[]> = {
   visitor: ["chat.use", "credits.view_own"],
 }
 const MODULES: Record<Role, ModuleKey[]> = {
-  owner: ["chat", "agents", "channels", "routines", "credits", "admin"],
-  admin: ["chat", "agents", "channels", "routines", "credits", "admin"],
+  owner: ["chat", "agents", "channels", "routines", "credits", "integrations", "admin"],
+  admin: ["chat", "agents", "channels", "routines", "credits", "integrations", "admin"],
   member: ["chat", "agents", "channels", "routines", "credits"], visitor: ["chat"],
 }
 const CREDIT: Record<Role, Me["credit"]> = {

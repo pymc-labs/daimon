@@ -13,7 +13,7 @@ import { Block, Row } from "./shared"
 
 // Workspace
 
-const MODULE_LABEL = { chat: "Chat", agents: "Agents", channels: "Channels", routines: "Routines", credits: "Credits" }
+const MODULE_LABEL = { chat: "Chat", agents: "Agents", channels: "Channels", routines: "Routines", credits: "Credits", integrations: "Integrations" }
 
 export function Workspace() {
   const q = useQuery({ queryKey: KEY, queryFn: () => api.get<WorkspaceSettings>("/api/admin/settings") })

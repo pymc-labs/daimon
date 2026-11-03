@@ -60,7 +60,7 @@ export type Providers = {
 }
 
 export type WorkspaceSettings = {
-  modules: Record<"chat" | "agents" | "channels" | "routines" | "credits", boolean>
+  modules: Record<"chat" | "agents" | "channels" | "routines" | "credits" | "integrations", boolean>
   default_agent: string
   access: Access
   /** Null where choosing providers is switched off. */

@@ -49,7 +49,8 @@ async function send(method: string, path: string, body: unknown, retry: boolean)
 }
 
 async function request<T>(method: string, path: string, body?: unknown, retry = method === "GET"): Promise<T> {
-  return (await send(method, path, body, retry)).json() as Promise<T>
+  const res = await send(method, path, body, retry)
+  return (res.status === 204 ? undefined : res.json()) as Promise<T>
 }
 
 /** One page of a list: its rows, and the cursor of the next page when more exist. */
