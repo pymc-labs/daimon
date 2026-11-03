@@ -40,6 +40,7 @@ from daimon.core.message_split import split_fenced
 from daimon.core.native_footer_cost import native_footer_text
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_alerts import alert_ops
+from daimon.core.outbound.opt_out import tag_opt_outs
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
 from daimon.core.teams_markdown import has_math
 from daimon.core.tenant_balance import debit_amount
@@ -179,6 +180,7 @@ class TeamsTurnLifecycle(OutputGate):
         unprompted: bool = False,
         completion_ping: bool = False,
         requester: Account | None = None,
+        requester_user_id: str | None = None,
         agent_name_prefix: str | None = None,
         ask_human: bool = False,
         direct_chat: bool = False,
@@ -217,6 +219,9 @@ class TeamsTurnLifecycle(OutputGate):
         self._on_initial_progress = on_initial_progress
         self._ping = completion_ping and not unprompted
         self._requester = requester if self._ping else None
+        self._requester_user_id = requester_user_id
+        # The asker said never to tag them: the answer posts without a ping.
+        self._muted = False
         self._agent_name_prefix = agent_name_prefix
         self._direct_chat = direct_chat
         # The asker is from another organisation: no 1:1 chat to send them to.
@@ -527,6 +532,18 @@ class TeamsTurnLifecycle(OutputGate):
             parts.append(final)
         return "\n\n".join(parts)
 
+    async def _requester_opted_out(self) -> bool:
+        """Whether the asker asked never to be tagged or pinged."""
+        if self._tenant_id is None or self._requester_user_id is None:
+            return False
+        skip = await tag_opt_outs(
+            self._sessionmaker,
+            tenant_id=self._tenant_id,
+            platform="teams",
+            user_ids=[self._requester_user_id],
+        )
+        return bool(skip)
+
     async def on_terminal_success(self, state: TurnState) -> None:
         """Replace the card with the answer; overflow follows as new messages.
 
@@ -562,7 +579,10 @@ class TeamsTurnLifecycle(OutputGate):
                 answer = f"**{self._agent_name_prefix}**\n\n{answer}"
             chunks = split_fenced(answer, card.TEAMS_LIMIT)
             # A ping posts the answer fresh, so Teams notifies; the card is retired after.
-            fresh = self._ping and self._message_id is not None
+            if self._ping and await self._requester_opted_out():
+                self._muted = True
+                self._requester = None
+            fresh = self._ping and not self._muted and self._message_id is not None
             current = self._message_id
             for index, chunk in enumerate(chunks):
                 mention = self._requester if index == 0 else None

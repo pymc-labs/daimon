@@ -1530,6 +1530,7 @@ class TeamsApp:
                 unprompted=inbound.unprompted,
                 completion_ping=self.runtime.settings.completion_pings.get(tenant_id) is True,
                 requester=requester,
+                requester_user_id=inbound.user_id,
                 agent_name_prefix=_agent_name_prefix(
                     enabled=identity_enabled_for(
                         self.runtime.settings, "teams", inbound.entra_tenant_id
