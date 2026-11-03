@@ -13,6 +13,7 @@ from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
 from daimon.adapters.mcp.tools.wizard import (
     _post_wizard_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.core.config import OutboundSettings
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
 from daimon.core.stores.wizard_session import get_wizard_session
@@ -65,7 +66,8 @@ def _runtime(fake: _Fake, sessionmaker: async_sessionmaker[AsyncSession]) -> Mcp
     return McpRuntime(
         session_factory=sessionmaker,
         client=MagicMock(),  # type: ignore[arg-type]  # unused by the Teams impls
-        settings=MagicMock(),  # type: ignore[arg-type]  # unused by the Teams impls
+        # Only the outbound limits are read, by the reach gate every form passes.
+        settings=MagicMock(outbound=OutboundSettings()),  # type: ignore[arg-type]
         deployment_default=DeploymentDefault(),
         teams_client=client,
     )

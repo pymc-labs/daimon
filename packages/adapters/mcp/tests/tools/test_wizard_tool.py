@@ -32,6 +32,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.wizard import _STOP_SIGNAL, _post_wizard_impl
 from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
 from daimon.core.media.filenames import display_filename_for
+from daimon.core.outbound.reach import ReachPlan
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
 from daimon.core.stores.file_uploads import create_upload, store_upload_content
@@ -607,3 +608,40 @@ async def test_post_wizard_refuses_on_slack(
             steps=[_one_choice_step()],
             channel_id="222",
         )
+
+
+async def test_post_wizard_names_its_requester_and_counts_toward_reach(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A form is a post like any other: it says who asked, and a plan too small is refused."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    auth = _auth_identity(tenant_id=tenant.id, account_id=account.id)
+    posted: dict[str, Any] = {}
+    patch_discord_http(monkeypatch, _happy_path_handler(posted, message_id="9303"))
+    runtime = _runtime(committing_sessionmaker)
+
+    await _post_wizard_impl(
+        runtime,
+        auth,
+        prompt="Configure <@7>'s pipeline",
+        steps=[_one_choice_step()],
+        channel_id="222",
+        plan=ReachPlan(threads=0, places=1, people=1),
+    )
+    row = await get_wizard_session(db_session, short_id=_short_id_from_posted(posted))
+    with pytest.raises(ToolError, match="plan"):
+        await _post_wizard_impl(
+            runtime,
+            auth,
+            prompt="Again <@8>",
+            steps=[_one_choice_step()],
+            channel_id="333",
+            plan=ReachPlan(threads=0, places=0, people=0),
+        )
+
+    assert row is not None, "the first form posted"
+    assert row.spec["prompt"].endswith("\n-# requested by <@42>"), "the form credits its asker"
