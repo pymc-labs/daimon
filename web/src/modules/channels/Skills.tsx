@@ -1,26 +1,29 @@
 import { X } from "lucide-react"
-import { useId, useState } from "react"
+import { useState } from "react"
 
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { PanelSection } from "@/modules/admin/shared"
 import { useCatalog } from "@/modules/agents/api"
 import { useSave, type Outcome } from "./api"
 import { Notice } from "./shared"
 import type { ChannelDetail, ChannelSettings } from "./types"
 
-function AddSkill({ onAdd, busy }: { onAdd: (skill: string) => Promise<boolean>; busy: boolean }) {
+function AddSkill({ onAdd, busy, attached }: { onAdd: (skill: string) => Promise<boolean>; busy: boolean; attached: string[] }) {
   const { data } = useCatalog()
-  const list = useId()
   const [name, setName] = useState("")
+  const have = new Set(attached)
+  const choices = [...new Set((data?.skills ?? []).map((s) => s.title))].filter((t) => !have.has(t))
   return (
     <form
       className="flex items-center gap-2"
-      onSubmit={(e) => { e.preventDefault(); if (name.trim()) void onAdd(name.trim()).then((ok) => ok && setName("")) }}
+      onSubmit={(e) => { e.preventDefault(); if (name) void onAdd(name).then((ok) => ok && setName("")) }}
     >
-      <Input list={list} value={name} onChange={(e) => setName(e.target.value)} placeholder="Skill name" aria-label="Skill name" className="h-8 w-full max-w-52" />
-      <datalist id={list}>{(data?.skills ?? []).map((s) => <option key={s.skill_id} value={s.title} />)}</datalist>
-      <Button size="sm" type="submit" disabled={busy || !name.trim()}>Add</Button>
+      <Select value={name} onValueChange={setName}>
+        <SelectTrigger size="sm" className="h-8 w-full max-w-52" aria-label="Skill"><SelectValue placeholder="Choose a skill" /></SelectTrigger>
+        <SelectContent>{choices.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}</SelectContent>
+      </Select>
+      <Button size="sm" type="submit" disabled={busy || !name}>Add</Button>
     </form>
   )
 }
@@ -55,7 +58,7 @@ export function Skills({ c, s }: { c: ChannelDetail; s: ChannelSettings }) {
             ))}
           </div>
         )}
-        {edit && <AddSkill onAdd={(n) => change("add", n)} busy={save.pending} />}
+        {edit && <AddSkill onAdd={(n) => change("add", n)} busy={save.pending} attached={s.skills.map((k) => k.name)} />}
       </div>
       <Notice out={out} />
     </PanelSection>

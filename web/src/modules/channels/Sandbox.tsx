@@ -1,10 +1,10 @@
-import { useId, useState } from "react"
+import { useState } from "react"
 
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { useConfirm } from "@/lib/confirm"
 import { PanelSection, Tag } from "@/modules/admin/shared"
-import { useSandboxNames, useSave, type Outcome } from "./api"
+import { useSandboxChoices, useSave, type Outcome } from "./api"
 import { SOURCE_LABELS } from "./lib"
 import { Line, Notice } from "./shared"
 import type { ChannelDetail } from "./types"
@@ -12,8 +12,7 @@ import type { ChannelDetail } from "./types"
 export function Sandbox({ c }: { c: ChannelDetail }) {
   const save = useSave(c.id)
   const confirm = useConfirm()
-  const names = useSandboxNames()
-  const list = useId()
+  const names = useSandboxChoices()
   const own = c.environment.source === "channel" ? c.environment.value : null
   const [draft, setDraft] = useState(own ?? "")
   const [out, setOut] = useState<Outcome | null>(null)
@@ -32,8 +31,10 @@ export function Sandbox({ c }: { c: ChannelDetail }) {
         {edit ? (
           <Line label="Set here">
             <form className="flex flex-wrap items-center gap-2" onSubmit={(e) => { e.preventDefault(); if (draft.trim()) void run(draft.trim()) }}>
-              <Input list={list} value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="Workspace default" aria-label="Sandbox" className="h-8 w-full max-w-52" />
-              <datalist id={list}>{names.map((n) => <option key={n} value={n} />)}</datalist>
+              <Select value={draft} onValueChange={setDraft}>
+                <SelectTrigger size="sm" className="h-8 w-full max-w-52" aria-label="Sandbox"><SelectValue placeholder="Workspace default" /></SelectTrigger>
+                <SelectContent>{[...new Set([...names, ...(own ? [own] : [])])].map((n) => <SelectItem key={n} value={n}>{n}</SelectItem>)}</SelectContent>
+              </Select>
               <Button size="sm" type="submit" disabled={save.pending || !draft.trim() || draft.trim() === own}>Save</Button>
               {own && <Button size="sm" type="button" variant="outline" disabled={save.pending} onClick={() => void run(null)}>Use default</Button>}
             </form>

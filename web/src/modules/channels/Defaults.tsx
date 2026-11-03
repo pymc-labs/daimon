@@ -1,13 +1,10 @@
-import { X } from "lucide-react"
-import { useId, useState } from "react"
+import { useState } from "react"
 
 import { useConfirm } from "@/lib/confirm"
-import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { useMe } from "@/lib/hooks"
-import { cn } from "@/lib/utils"
 import { useAgents } from "@/modules/agents/api"
-import { useChannelDefaults, useDefaultsSave, useSandboxNames, type DefaultsKey, type Outcome } from "./api"
+import { useChannelDefaults, useDefaultsSave, useSandboxChoices, type DefaultsKey, type Outcome } from "./api"
 import { defaultSource, SWITCH_VALUE, switchChange, unavailableText } from "./lib"
 import { Notice } from "./shared"
 import type { ChannelDefaults, ChannelSwitch } from "./types"
@@ -47,32 +44,21 @@ function AgentField({ d, edit, run, busy }: { d: ChannelDefaults; edit: boolean;
 }
 
 function SandboxField({ d, edit, run, busy }: { d: ChannelDefaults; edit: boolean; run: (k: DefaultsKey, b: unknown) => void; busy: boolean }) {
-  const names = useSandboxNames()
-  const list = useId()
+  const names = useSandboxChoices()
   const own = d.environment.source === "workspace" ? d.environment.value : null
-  const [draft, setDraft] = useState(d.environment.value ?? "")
-  const commit = () => {
-    const v = draft.trim()
-    if (v && v !== d.environment.value) run("environment", { environment: v, expected: own })
-    else setDraft(d.environment.value ?? "")
-  }
   return (
     <Field label="Sandbox" source={defaultSource(d.environment)}>
       {edit ? (
-        <div className="relative w-full">
-          <Input
-            list={list} value={draft} disabled={busy} aria-label="Sandbox" className={cn("h-8", own && "pr-8")}
-            onChange={(e) => setDraft(e.target.value)} onBlur={commit} onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
-          />
-          <datalist id={list}>{names.map((n) => <option key={n} value={n} />)}</datalist>
-          {own && (
-            <button
-              type="button" aria-label="Use built-in default" disabled={busy}
-              className="absolute top-1/2 right-1.5 -translate-y-1/2 rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
-              onClick={() => { setDraft(""); run("environment", { environment: null, expected: own }) }}
-            ><X className="size-3.5" /></button>
-          )}
-        </div>
+        <Select value={d.environment.value ?? ""} disabled={busy} onValueChange={(v) => {
+          if (v === CLEAR) run("environment", { environment: null, expected: own })
+          else if (v !== d.environment.value) run("environment", { environment: v, expected: own })
+        }}>
+          <SelectTrigger size="sm" className="w-full" aria-label="Sandbox"><SelectValue placeholder="None" /></SelectTrigger>
+          <SelectContent>
+            {[...new Set([...names, ...(d.environment.value ? [d.environment.value] : [])])].map((n) => <SelectItem key={n} value={n}>{n}</SelectItem>)}
+            {own && <SelectItem value={CLEAR}>Built-in default</SelectItem>}
+          </SelectContent>
+        </Select>
       ) : <span className="truncate">{d.environment.value ?? "None"}</span>}
     </Field>
   )

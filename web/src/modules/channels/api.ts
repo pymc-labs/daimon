@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 
 import { ApiError, api } from "@/lib/api"
+import { useEnvironments } from "@/modules/agents/library/api"
 import type {
   ChannelChangeResult, ChannelDefaults, ChannelDetail, ChannelHistoryEntry, ChannelList, ChannelSettings,
 } from "./types"
@@ -18,6 +19,13 @@ export const useChannelDefaults = () =>
 export function useSandboxNames() {
   const { data } = useChannels()
   return [...new Set([data?.default_environment.value, ...(data?.channels ?? []).map((c) => c.environment.value)].filter((v): v is string => !!v))].sort()
+}
+
+/** Sandboxes to pick from: the workspace's own list where the reader may see it, else the ones already in use. */
+export function useSandboxChoices() {
+  const used = useSandboxNames()
+  const listed = useEnvironments()
+  return listed.data ? listed.data.map((e) => e.name) : used
 }
 
 export type Outcome = { notes: string[]; error: string | null }
