@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- An OpenAI or Gemini agent whose switch was confirmed before Daimon changed which of its own tools need a confirmation answers again. Every turn had been refused with a request to confirm the switch again. A switch now stays confirmed while the agent loses exactly what its owner accepted, not counting Daimon tools that need a confirmation or no longer exist. A change to the agent, its model or its losses still asks again, and so does a tool it gains. A switch to the provider's default model also asks again if a release changes that default.
+- **A switched OpenAI or Gemini agent answers again after Daimon gates more of its own
+  tools.** An agent whose switch was confirmed before such a release had every turn refused
+  with a request to confirm the switch again. A switch now stays confirmed while the agent
+  loses exactly what its owner accepted, not counting Daimon tools that need a confirmation
+  or no longer exist. A change to the agent, its model or its losses still asks again, and
+  so does a tool it gains. A switch to the provider's default model also asks again if a
+  release changes that default.
 
 - Remove client-specific references and use neutral self-hosting examples.
 
