@@ -40,7 +40,7 @@ async def test_pages_are_followed_and_unseen_private_channels_left_out() -> None
     assert client.conversations_list.await_args_list[1].kwargs["cursor"] == "next"
 
 
-async def test_info_lookup_tells_a_name_a_direct_message_and_a_gone_channel() -> None:
+async def test_info_lookup_tells_a_name_and_a_direct_message_never_a_gone_channel() -> None:
     def answer(channel: dict[str, Any]) -> MagicMock:
         resp = MagicMock()
         resp.data = {"channel": channel}
@@ -60,4 +60,6 @@ async def test_info_lookup_tells_a_name_a_direct_message_and_a_gone_channel() ->
     )
     lookup = info_lookup(cast(AsyncWebClient, client))
     found = [await lookup("T1", cid) for cid in ("C1", "D1", "C2", "C3")]
-    assert found == ["pricing", ChannelStatus.DIRECT, ChannelStatus.GONE, None]
+    assert found == ["pricing", ChannelStatus.DIRECT, None, None]
+    assert [await lookup("T1", cid) for cid in ("web", "web:abc")] == [None, None]
+    assert client.conversations_info.await_count == 4

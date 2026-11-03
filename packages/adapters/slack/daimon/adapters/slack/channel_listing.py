@@ -7,6 +7,7 @@ are spaced out; a round runs every few hours (`daimon.core.channel_listing`).
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
@@ -22,6 +23,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 PAGE_GAP_S = 3.5
 #: Seconds between `conversations.info` calls (tier 3, about 50 a minute).
 INFO_GAP_S = 1.5
+#: A Slack channel, group or direct message id: `C`, `G` or `D` and capitals or digits.
+_SLACK_ID = re.compile(r"[CGD][A-Z0-9]+")
 
 
 async def list_workspace(
@@ -54,18 +57,21 @@ async def list_workspace(
 
 
 def info_lookup(client: AsyncWebClient) -> ChannelLookup:
-    """Ask Slack what one channel id is: its name, `GONE` (`channel_not_found`) or `DIRECT`.
+    """Ask Slack what one channel id is: its name or `DIRECT`.
 
-    A private channel the bot left answers `channel_not_found` too, so it reads as gone.
-    Any other error is no answer.
+    Never `GONE`: a private channel the bot is not in answers `channel_not_found` too, so
+    that error is no answer. Deletion is marked from `channel_deleted` events instead
+    (`setup_conversations.handle_setup_lifecycle`). Ids that are not Slack's (web chat, a
+    routine's destination) are not asked about.
     """
 
     async def lookup(_workspace_id: str, channel_id: str) -> str | ChannelStatus | None:
+        if not _SLACK_ID.fullmatch(channel_id):
+            return None
         try:
             resp = await client.conversations_info(channel=channel_id)  # pyright: ignore[reportUnknownMemberType]
-        except SlackApiError as exc:
-            error = cast("dict[str, Any]", exc.response.data).get("error")  # pyright: ignore[reportUnknownMemberType]
-            return ChannelStatus.GONE if error == "channel_not_found" else None
+        except SlackApiError:
+            return None
         data = cast("dict[str, Any]", resp.data)  # pyright: ignore[reportUnknownMemberType]
         channel = cast("dict[str, Any]", data.get("channel") or {})
         if channel.get("is_im") or channel.get("is_mpim"):

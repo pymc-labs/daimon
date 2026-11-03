@@ -30,6 +30,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.setup_conversations import build_setup_opener, setup_thread_name
+from daimon.core.stores.platform_names import list_channel_names
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.thread_agent_bindings import get_binding
 from daimon.core.turn.deps import build_turn_deps
@@ -408,3 +409,13 @@ async def test_setup_root_routes_daimon_and_retains_target_through_archive_and_d
             assert (binding.archived, binding.deleted) == (archived, deleted), (
                 "lifecycle should track channel and root events"
             )
+        await handle_setup_lifecycle(
+            runtime, {"type": "channel_deleted", "channel": "C_PARENT"}, team_id="T_SETUP"
+        )
+        async with db_session_factory() as session:
+            names = await list_channel_names(
+                session, tenant_id=tenant.id, platform="slack", unnamed=True
+            )
+        assert [(n.channel_id, n.status) for n in names] == [("C_PARENT", "gone")], (
+            "a deleted channel is marked gone from the event, the one definitive signal"
+        )
