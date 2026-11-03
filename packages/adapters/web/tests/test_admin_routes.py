@@ -500,9 +500,13 @@ async def test_the_audit_log_names_who_acted(
         )
         [entry] = (await admin.client.get("/api/admin/audit")).json()
 
-    assert (entry["who"], entry["action"], entry["target"]) == ("Ada", "Suspended", "Mia")
+    assert (entry["who"], entry["action"]) == ("Ada", "Suspended")
+    assert entry["target"] == {"kind": "person", "id": str(admin.member.id), "name": "Mia"}
+    assert entry["actor_id"] == str(admin.ws.person.id), "the actor links to their person"
     assert entry["source"] == "web"
-    assert set(entry) == {"id", "source", "at", "who", "action", "target"}, "no detail, no key"
+    assert set(entry) == {"id", "source", "at", "who", "actor_id", "action", "target"}, (
+        "no detail, no key"
+    )
 
 
 async def test_the_audit_log_shows_an_erased_person_by_a_generic_label(
@@ -522,11 +526,11 @@ async def test_the_audit_log_shows_an_erased_person_by_a_generic_label(
             await people_store.delete_for_account(db, account_id=admin.member.account_id)
         after = (await admin.client.get("/api/admin/audit")).json()
 
-    assert {e["action"]: e["target"] for e in before} == {
+    assert {e["action"]: e["target"]["name"] for e in before} == {
         "Suspended": "Mia",
         "Created invite": "guest@example.com",
     }, "while they exist, a person and an invite are shown by name and address"
-    assert {e["action"]: e["target"] for e in after} == {
+    assert {e["action"]: e["target"]["name"] for e in after} == {
         "Suspended": "A person",
         "Created invite": "guest@example.com",
     }, "an erased person is a generic label; an invite nobody accepted is still its own"
