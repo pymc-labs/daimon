@@ -71,6 +71,8 @@ export type Agent = AgentConfig & {
   id: string
   version: number
   owner: PersonRef
+  /** The owner on record; empty id when none, though `owner` shows the creator. */
+  recorded_owner: PersonRef
   co_owners: PersonRef[]
   updated_at: string
   updated_by: PersonRef

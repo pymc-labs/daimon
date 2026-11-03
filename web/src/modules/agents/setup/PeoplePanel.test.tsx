@@ -12,7 +12,7 @@ import { PeoplePanel } from "./PeoplePanel"
 vi.mock("@/lib/api", () => ({ api: { get: vi.fn(), put: vi.fn() } }))
 
 const agent = {
-  id: "ag_w", owner: { id: "p1", name: "Maya" }, co_owners: [{ id: "p2", name: "Jonas" }],
+  id: "ag_w", owner: { id: "p1", name: "Maya" }, recorded_owner: { id: "p1", name: "Maya" }, co_owners: [{ id: "p2", name: "Jonas" }],
 } as Agent
 const props = { node: "people", agent, config: agent, ro: false, changed: new Set<string>(), update: () => {}, select: () => {} }
 
@@ -30,6 +30,19 @@ beforeEach(() => {
 })
 
 describe("PeoplePanel", () => {
+  it("starts at no owner when none is recorded, so a save never records the creator", async () => {
+    vi.mocked(api.put).mockResolvedValue(undefined as never)
+    vi.mocked(api.get).mockImplementation(async (path: string) =>
+      (path === "/api/me" ? { role: "admin", capabilities: [] } : [{ id: "p1", name: "Maya" }, { id: "p2", name: "Jonas" }]) as never)
+    const unowned = { ...agent, recorded_owner: { id: "", name: "" } } as Agent
+    render(<QueryClientProvider client={new QueryClient()}><TooltipProvider><ConfirmProvider><PeoplePanel {...props} agent={unowned} /></ConfirmProvider></TooltipProvider></QueryClientProvider>)
+    expect(await screen.findByRole("combobox", { name: "Owner" })).toHaveTextContent("No owner")
+    await userEvent.click(screen.getByRole("button", { name: "Remove Jonas" }))
+    await userEvent.click(screen.getByRole("button", { name: "Save" }))
+    await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Change" }))
+    await waitFor(() => expect(api.put).toHaveBeenCalledWith("/api/agents/ag_w/owners", { owner: null, co_owners: [] }))
+  })
+
   it("lets a member read the owners and nothing more", async () => {
     view("member")
     expect(await screen.findByText("Maya")).toBeInTheDocument()

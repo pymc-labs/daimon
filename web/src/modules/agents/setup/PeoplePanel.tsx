@@ -29,18 +29,18 @@ export function PeoplePanel({ agent }: Props) {
       </Section>
     )
   }
-  return <OwnersForm key={`${agent.owner.id}|${agent.co_owners.map((p) => p.id).join(",")}`} {...{ agent }} />
+  return <OwnersForm key={`${agent.recorded_owner.id}|${agent.co_owners.map((p) => p.id).join(",")}`} {...{ agent }} />
 }
 
 function OwnersForm({ agent }: { agent: Props["agent"] }) {
   const confirm = useConfirm()
   const options = useOwnerOptions(agent.id, true)
   const save = useSetOwners(agent.id)
-  const [owner, setOwner] = useState<string>(agent.owner.id || NONE)
+  const [owner, setOwner] = useState<string>(agent.recorded_owner.id || NONE)
   const [co, setCo] = useState<string[]>(agent.co_owners.map((p) => p.id))
   const known = new Map<string, PersonRef>([...(options.data ?? []), agent.owner, ...agent.co_owners].filter((p) => p.id).map((p) => [p.id, p]))
   const name = (id: string) => known.get(id)?.name ?? "A member"
-  const same = owner === (agent.owner.id || NONE) && co.length === agent.co_owners.length && co.every((id, i) => id === agent.co_owners[i]?.id)
+  const same = owner === (agent.recorded_owner.id || NONE) && co.length === agent.co_owners.length && co.every((id, i) => id === agent.co_owners[i]?.id)
   const free = (options.data ?? []).filter((p) => p.id !== owner && !co.includes(p.id))
 
   const apply = async () => {

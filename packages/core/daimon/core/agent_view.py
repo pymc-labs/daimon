@@ -189,6 +189,7 @@ class AgentView(AgentConfigDoc):
     id: str
     version: int
     owner: PersonRef
+    recorded_owner: PersonRef
     co_owners: list[PersonRef]
     updated_at: datetime
     updated_by: PersonRef
@@ -415,6 +416,7 @@ def build_agent_view(facts: AgentFacts, viewer: AgentViewer) -> AgentView:
         id=facts.agent.id,
         version=facts.agent.version,
         owner=owner,
+        recorded_owner=_person(facts, facts.owner_account_id),
         co_owners=[_person(facts, account) for account in facts.co_owner_account_ids],
         updated_at=facts.agent.updated_at,
         updated_by=_person(facts, facts.updated_by_account_id or shown_owner),

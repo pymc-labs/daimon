@@ -69,6 +69,17 @@ def test_member_gets_no_prompt_places_or_server_urls() -> None:
     assert view.purpose == "Answers questions", "the purpose is public"
 
 
+def test_the_creator_shows_as_owner_but_is_not_the_recorded_owner() -> None:
+    creator = uuid.uuid4()
+    facts = AgentFacts(agent=_facts().agent, creator_account_id=creator)
+    viewer = AgentViewer(account_id=uuid.uuid4(), is_admin=True, may_edit=True)
+    view = agent_view.build_agent_view(facts, viewer)
+    assert view.owner.id == str(creator), "the creator shows where no owner is recorded"
+    assert view.recorded_owner.id == "", "but no owner is recorded"
+    recorded = agent_view.build_agent_view(_facts(), viewer)
+    assert recorded.recorded_owner.id == str(_OWNER), "a recorded owner shows as it is"
+
+
 def test_member_still_sees_daimons_own_server_without_its_url() -> None:
     server = {"name": "daimon-mcp", "type": "url", "url": "https://daimon.example.com/mcp"}
     facts = AgentFacts(
