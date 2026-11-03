@@ -71,7 +71,7 @@ function DailyChart({ data }: { data: Overview["daily"] }) {
               </div>
             ) : null}
           />
-          <Bar dataKey="usd" fill="var(--chart-1)" radius={[4, 4, 0, 0]} />
+          <Bar dataKey="usd" fill="var(--chart-1)" radius={[4, 4, 0, 0]} isAnimationActive={false} />
         </BarChart>
       </ResponsiveContainer>
     </div>

@@ -14,10 +14,13 @@ const midnight = (back: number) => {
 }
 const ago = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString()
 
-// Deterministic daily spend for the last 30 days, today last.
-const DAILY = Array.from({ length: 30 }, (_, i) => ({
-  day: midnight(29 - i), usd: Math.round((9 + 7 * Math.sin(i * 1.7) + (i % 7 < 5 ? 6 : -4) + i * 0.25) * 100) / 100,
-}))
+// Deterministic daily spend for the last 30 days, today last: a weekday rhythm with a slow rise.
+const DAILY = Array.from({ length: 30 }, (_, i) => {
+  const weekday = new Date(midnight(29 - i)).getUTCDay()
+  const rhythm = weekday === 0 || weekday === 6 ? 0.35 : 1
+  const wobble = 1 + 0.25 * Math.sin(i * 1.7) + 0.1 * Math.cos(i * 0.6)
+  return { day: midnight(29 - i), usd: Math.round((13 + i * 0.3) * rhythm * wobble * 100) / 100 }
+})
 
 let balance = 1240.5
 const ledger: LedgerEntry[] = [
