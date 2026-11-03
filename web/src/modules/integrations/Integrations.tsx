@@ -1,4 +1,4 @@
-import { Navigate, Route, Routes, useLocation } from "react-router"
+import { Navigate, Route, Routes } from "react-router"
 import { Page } from "@/components/shell/Page"
 import { Github } from "./Github"
 import { Mcp } from "./Mcp"
@@ -11,10 +11,8 @@ const TABS = [
 ]
 
 export function Integrations() {
-  const { pathname } = useLocation()
-  const tab = TABS.find((t) => t.to === pathname.replace(/\/$/, "") && !t.end)
   return (
-    <Page crumbs={[{ label: "Integrations", to: "/integrations" }, ...(tab ? [{ label: tab.label }] : [])]} tabs={TABS}>
+    <Page crumbs={[{ label: "Integrations", to: "/integrations" }]} tabs={TABS}>
       <div className="mx-auto max-w-[1040px]">
         <Routes>
           <Route index element={<WorkspacesTab />} />
