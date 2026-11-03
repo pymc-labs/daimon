@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 
+from anthropic.types.beta.sessions import BetaManagedAgentsAgentMCPToolUseEvent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.resource_ports import mcp_scope, retrieve_session
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -20,7 +21,7 @@ from daimon.core.errors import StoreError
 from daimon.core.session_seal import origin_stamp
 from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.stores.thread_sessions import get_live_thread_session
-from daimon.core.tool_safety import DAIMON_SERVER_NAME
+from daimon.core.tool_safety import DAIMON_SERVER_NAME, PROXY_TOOL_NAME
 from daimon.core.turn.io import LegacyTurnIO
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -56,6 +57,19 @@ async def _caller(
         external_user_id=auth.platform_user_id,
         admin=await fresh_admin(runtime, auth) if stop else False,
     )
+
+
+def _tool_input(event: BetaManagedAgentsAgentMCPToolUseEvent, tool: str) -> object:
+    """The input of a daimon `tool` use, made directly or through the `call_tool` proxy.
+
+    Tools that are not on `always_ask` are reached through the search proxy, so
+    the session records `call_tool(name=tool, arguments=...)` rather than `tool`.
+    """
+    if event.name == tool:
+        return event.input
+    if event.name == PROXY_TOOL_NAME and event.input.get("name") == tool:
+        return event.input.get("arguments") or {}
+    return None
 
 
 async def _approved(
@@ -96,8 +110,8 @@ async def _approved(
         for e in events
         if e.type == "agent.mcp_tool_use"
         and e.mcp_server_name == DAIMON_SERVER_NAME
-        and e.name == tool
-        and {**defaults, **e.input} == arguments
+        and isinstance(used := _tool_input(e, tool), dict)
+        and {**defaults, **used} == arguments
         and (e.id in approvals or not approval)
     ]
     if not matches:

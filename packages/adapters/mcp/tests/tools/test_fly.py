@@ -170,7 +170,9 @@ async def test_exact_approval_arguments_and_session_key(monkeypatch, mode):
             )
 
 
-@pytest.mark.parametrize("mode", ["same", "changed", "foreign_tool", "none"])
+@pytest.mark.parametrize(
+    "mode", ["same", "proxied", "proxied_other_tool", "changed", "foreign_tool", "none"]
+)
 async def test_background_command_key_is_the_provider_tool_use(monkeypatch, mode):
     from contextlib import asynccontextmanager
 
@@ -242,10 +244,23 @@ async def test_background_command_key_is_the_provider_tool_use(monkeypatch, mode
     ]
     if mode == "none":
         events = []
+    if mode.startswith("proxied"):
+        # The agent reaches fly_run_bash through the search interface's proxy.
+        inner = "fly_read_file" if mode == "proxied_other_tool" else "fly_run_bash"
+        events = [
+            SimpleNamespace(
+                type=e.type,
+                name="call_tool",
+                mcp_server_name=e.mcp_server_name,
+                input={"name": inner, "arguments": e.input},
+                id=e.id,
+            )
+            for e in events
+        ]
     monkeypatch.setattr(
         fly, "LegacyTurnIO", lambda *a, **k: SimpleNamespace(replay=AsyncMock(return_value=events))
     )
-    if mode == "same":
+    if mode in {"same", "proxied"}:
         key, _ = await fly._approved(
             runtime, auth, origin, "fly_run_bash", args, defaults, approval=False
         )
