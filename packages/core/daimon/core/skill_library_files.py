@@ -8,9 +8,11 @@ account, which is where a version's author comes from: the provider records none
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import uuid
+import weakref
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -56,6 +58,9 @@ def slug_of(text: str) -> str:
     return _NAME.sub("-", text.strip().lower()).strip("-")
 
 
+_LOCKS: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+
+
 @asynccontextmanager
 async def _skill_lock(
     deps: AgentEditDeps, *, tenant_id: uuid.UUID, skill_id: str
@@ -65,10 +70,13 @@ async def _skill_lock(
     The version check and the publish are separate provider calls; held across both, a
     second save sees the first's version and is refused as stale rather than overwriting it.
     """
-    async with deps.session_factory() as session, session.begin():
+    key = f"library_skill:{tenant_id}:{skill_id}"
+    # Advisory locks are held per connection, so two saves that share one connection both
+    # pass; the process lock orders them first, the advisory lock orders other processes.
+    local = _LOCKS.get(key) or _LOCKS.setdefault(key, asyncio.Lock())
+    async with local, deps.session_factory() as session, session.begin():
         await session.execute(
-            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
-            {"key": f"library_skill:{tenant_id}:{skill_id}"},
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"), {"key": key}
         )
         yield
 
