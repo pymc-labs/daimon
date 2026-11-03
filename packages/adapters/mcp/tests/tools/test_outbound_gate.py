@@ -1,7 +1,8 @@
 """The outbound gate on every platform: render, count and refuse before anything posts."""
 
+import dataclasses
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -18,11 +19,14 @@ from daimon.adapters.mcp.tools._outbound import (
 )
 from daimon.core.config import OutboundSettings
 from daimon.core.confirmation import prompt_for_tool_call
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.outbound.mentions import ping_users
 from daimon.core.outbound.reach import NO_CARD, SHORT_CAPTION, TOO_LONG, ReachPlan, card_title
+from daimon.core.stores.domain import Role, TurnOriginRow
 from daimon.core.stores.reach_tallies import lock_tally
+from daimon.core.stores.turn_origins import create_origin
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_account, make_tenant
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -50,7 +54,7 @@ async def _setup(
 def _scope(*, card: bool = True, interactive: bool = True) -> TurnScope:
     return TurnScope(
         key=f"turn:{uuid.uuid4()}",
-        interactive=interactive,
+        kind=("live" if card else "outside") if interactive else "unattended",
         own_places=frozenset({"home"}),
         requester_id="42",
         origin=cast(Any, object()) if card else None,
@@ -203,3 +207,100 @@ async def test_approve_when_card_built_from_same_args_then_card_equals_stored_pl
         _, stored = await lock_tally(session, tenant_id=auth.tenant_id, turn_key=scope.key)
     assert stored == ReachPlan(threads=4, places=3, people=6), "approve stores the validated plan"
     assert card.title == card_title(stored, "#x"), "the card shows exactly what was stored"
+
+
+async def _session_turn(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    attended: bool = True,
+    turns: int = 1,
+    session_id: str | None = "chat-1",
+) -> tuple[McpRuntime, AuthIdentity, list[TurnOriginRow]]:
+    """A caller in a chat session with `turns` running origins of its own agent."""
+    now = datetime.now(UTC)
+    async with sessionmaker.begin() as session:
+        tenant = await make_tenant(session, platform="discord")
+        account = await make_account(session, tenant=tenant)
+        origins = [
+            await create_origin(
+                session,
+                tenant_id=tenant.id,
+                account_id=account.id,
+                platform="discord",
+                parent_channel_id="C1",
+                thread_id=f"T{i}",
+                responder_ma_agent_id="agent_x",
+                responder_name="daimon",
+                configuration_target_ma_agent_id=None,
+                configuration_target_name=None,
+                role=Role.USER,
+                sender_foreign=False,
+                shared_channel=False,
+                expires_at=now + timedelta(minutes=10),
+                now=now + timedelta(seconds=i),
+                attended=attended,
+                chat_session_id=session_id,
+            )
+            for i in range(turns)
+        ]
+    runtime = SimpleNamespace(session_factory=sessionmaker)
+    auth = AuthIdentity(
+        account_id=account.id,
+        tenant_id=tenant.id,
+        role=cast(Any, "member"),
+        platform="discord",
+        chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_x"),
+        chat_session_id="chat-1",
+        token_jti="jti-1",
+    )
+    return cast(McpRuntime, runtime), auth, origins
+
+
+async def test_turn_scope_when_attended_origin_then_live_with_card(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime, auth, [origin] = await _session_turn(sessionmaker)
+
+    scope = await _outbound.turn_scope(runtime, auth)
+
+    assert scope.kind == "live", "a person's running turn can show a card"
+    assert scope.origin is not None and scope.origin.id == origin.id, "the turn's own origin"
+    assert scope.key == f"turn:{origin.id}", "the tally is the turn's"
+
+
+async def test_turn_scope_when_server_started_origin_then_unattended(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime, auth, _ = await _session_turn(sessionmaker, attended=False)
+
+    scope = await _outbound.turn_scope(runtime, auth)
+
+    assert scope.kind == "unattended", "a watch, timer or relay origin is the server's own turn"
+    assert not scope.interactive, "nobody is there to answer"
+
+
+async def test_turn_scope_when_routine_then_unattended(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime, auth, _ = await _session_turn(sessionmaker, turns=0)
+    auth = dataclasses.replace(auth, routine_id=uuid.uuid4(), execution_id=uuid.uuid4())
+
+    scope = await _outbound.turn_scope(runtime, auth)
+
+    assert scope.kind == "unattended", "a routine run is the server's own turn"
+    assert scope.key == f"routine:{auth.execution_id}", "one tally per run"
+
+
+@pytest.mark.parametrize("session_id", ["chat-1", None], ids=["no-origin", "no-session"])
+async def test_turn_scope_when_no_running_origin_then_outside_client(
+    sessionmaker: async_sessionmaker[AsyncSession], session_id: str | None
+) -> None:
+    runtime, auth, _ = await _session_turn(sessionmaker, turns=0)
+    auth = dataclasses.replace(auth, chat_session_id=session_id)
+
+    scope = await _outbound.turn_scope(runtime, auth)
+
+    assert scope.kind == "outside", "nothing proves the server started it, so it is a client"
+    assert scope.interactive, "outside clients get the length and caption rules"
+    assert scope.origin is None, "and no card, so over budget fails closed"
+    assert scope.key.startswith("client:jti-1"), "tallied per credential"

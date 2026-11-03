@@ -9,7 +9,7 @@ from __future__ import annotations
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import aiohttp
 import httpx
@@ -64,16 +64,28 @@ class OutgoingPost:
     attribute: bool = True
 
 
+TurnKind = Literal["live", "unattended", "outside"]
+
+
 @dataclass(frozen=True)
 class TurnScope:
-    """What the gate knows about the calling turn."""
+    """What the gate knows about the calling turn.
+
+    ``live``: a person started the turn and can answer a card. ``unattended``: the
+    server itself started it (a routine, timer, watch or relay). ``outside``:
+    everything else, an outside client with no card, so it fails closed.
+    """
 
     key: str
-    interactive: bool
+    kind: TurnKind
     own_places: frozenset[str]
     requester_id: str | None
     routine_name: str | None = None
     origin: TurnOriginRow | None = None
+
+    @property
+    def interactive(self) -> bool:
+        return self.kind != "unattended"
 
 
 def is_media(filename: str) -> bool:
@@ -87,14 +99,14 @@ def _platform(auth: AuthIdentity) -> Platform:
 
 
 async def turn_scope(runtime: McpRuntime, auth: AuthIdentity) -> TurnScope:
-    """Routines are unattended; chat turns are interactive while someone is there;
-    a call from an outside client is interactive and has no card."""
+    """Unattended only when the server proves it started the turn; anything not a
+    live turn with a card is an outside client."""
     if auth.routine_id is not None:
         async with runtime.session_factory() as session:
             routine = await get_routine(session, auth.routine_id, tenant_id=auth.tenant_id)
         return TurnScope(
             key=f"routine:{auth.execution_id or auth.routine_id}",
-            interactive=False,
+            kind="unattended",
             own_places=frozenset(),
             requester_id=routine.created_by_user_id if routine else None,
             routine_name=(routine.name or routine.agent_name) if routine else None,
@@ -103,23 +115,19 @@ async def turn_scope(runtime: McpRuntime, auth: AuthIdentity) -> TurnScope:
         running = await list_running_origins(runtime, auth)
         origin = max(running, key=lambda o: o.created_at) if running else None
         if origin is not None:
-            own = {origin.thread_id, origin.platform_channel_id or origin.thread_id}
+            # Only the server records origins, and it marks the ones nobody attends.
             return TurnScope(
                 key=f"turn:{origin.id}",
-                interactive=origin.attended,
-                own_places=frozenset(own),
+                kind="live" if origin.attended else "unattended",
+                own_places=frozenset(
+                    {origin.thread_id, origin.platform_channel_id or origin.thread_id}
+                ),
                 requester_id=auth.platform_user_id,
                 origin=origin,
             )
-        return TurnScope(
-            key=f"session:{auth.chat_session_id}",
-            interactive=False,
-            own_places=frozenset(),
-            requester_id=auth.platform_user_id,
-        )
     return TurnScope(
         key=f"client:{auth.token_jti or auth.account_id}",
-        interactive=True,
+        kind="outside",
         own_places=frozenset(),
         requester_id=auth.platform_user_id,
     )
@@ -278,7 +286,7 @@ def _gate(
     if verdict == "plan_too_small":
         raise ToolError(plan_too_small(so_far.plus(call).counts()))
     log.info("reach.over_budget", key=scope.key, has_card=scope.origin is not None)
-    if scope.origin is None or auth.no_confirmation_surface:
+    if scope.kind != "live" or auth.no_confirmation_surface:
         # No card can be shown (an outside client, or a backend without one): fail closed.
         raise ToolError(NO_CARD)
     raise ToolError(needs_approval(plan.widest(so_far.plus(call).counts()), limits))
@@ -328,7 +336,7 @@ async def approve_reach_impl(
 ) -> ReachApproved:
     """Record the approved plan once the card's Approve is proven; refuse where no card can show."""
     scope = await turn_scope(runtime, auth)
-    if scope.origin is None or not scope.interactive or auth.no_confirmation_surface:
+    if scope.kind != "live" or scope.origin is None or auth.no_confirmation_surface:
         record_denial("reach_no_card")
         raise ToolError(NO_CARD)
     gap = await session_card_gap(runtime, auth, scope.origin, tool_name="approve_reach")

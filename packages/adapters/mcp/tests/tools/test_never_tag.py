@@ -119,7 +119,7 @@ async def test_prepare_posts_when_person_opted_out_then_plain_name_never_pinged_
     other = TAG[platform].format(1)
     mine = TAG[platform].format(2)
     scope = TurnScope(
-        key=f"turn:{uuid.uuid4()}", interactive=False, own_places=frozenset(), requester_id="9"
+        key=f"turn:{uuid.uuid4()}", kind="unattended", own_places=frozenset(), requester_id="9"
     )
 
     [post] = await prepare_posts(
@@ -152,7 +152,7 @@ async def test_prepare_posts_when_discord_requester_opted_out_then_credited_by_n
             names={"42": names_store.KnownName(display_name="Ann")},
         )
     scope = TurnScope(
-        key=f"turn:{uuid.uuid4()}", interactive=False, own_places=frozenset(), requester_id="42"
+        key=f"turn:{uuid.uuid4()}", kind="unattended", own_places=frozenset(), requester_id="42"
     )
 
     [post] = await prepare_posts(
