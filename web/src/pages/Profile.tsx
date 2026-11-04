@@ -14,6 +14,7 @@ import { Label } from "@/components/ui/label"
 import { api } from "@/lib/api"
 import { useConfirm } from "@/lib/confirm"
 import { plural, shortDate } from "@/lib/format"
+import { useMe } from "@/lib/hooks"
 import { Pill } from "@/modules/agents/bits"
 
 type AgentRef = { id: string; name: string }
@@ -64,6 +65,12 @@ function Body({ d }: { d: Profile }) {
     mutationFn: (c: Profile["connections"][number]) => api.post("/api/profile/connections/disconnect", { kind: c.kind, agent_id: c.agent?.id, key: c.key }),
     onSuccess: () => done("Disconnected"),
   })
+  const me = useMe()
+  const accounts = me.data?.accounts ?? []
+  const detach = useMutation({
+    mutationFn: (id: string) => api.del(`/api/me/accounts/${id}`),
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: ["me"] }); done("Disconnected") },
+  })
   const unlink = useMutation({ mutationFn: (id: string) => api.del(`/api/profile/sign-ins/${id}`), onSuccess: () => done("Sign-in removed") })
   const revoke = useMutation({ mutationFn: (id: string) => api.del(`/api/profile/keys/${id}`), onSuccess: () => done("Key revoked") })
   const [deleting, setDeleting] = useState(false)
@@ -84,6 +91,18 @@ function Body({ d }: { d: Profile }) {
       </Section>
 
       <Section title="Connected accounts">
+        {accounts.map((a) => (
+          <Row key={a.id}>
+            <BrandIcon brand={a.provider} />
+            <span className="min-w-0 flex-1 truncate">{a.provider_label}{a.label && <span className="text-muted-foreground"> {a.label}</span>}</span>
+            <span className="text-xs text-muted-foreground">{a.current ? "Signed in" : <>Used <Ago iso={a.last_used} /></>}</span>
+            {!a.current && (
+              <Button variant="ghost" size="sm" disabled={detach.isPending} aria-label={`Disconnect ${a.provider_label} ${a.label}`} onClick={async () => {
+                if (await confirm({ title: `Disconnect ${a.provider_label}?`, action: "Disconnect", destructive: true })) detach.mutate(a.id)
+              }}>Disconnect</Button>
+            )}
+          </Row>
+        ))}
         {d.chat_accounts.map((a) => (
           <Row key={a.platform}>
             <BrandIcon brand={a.platform} />
@@ -108,7 +127,7 @@ function Body({ d }: { d: Profile }) {
             }}>Disconnect</Button>
           </Row>
         ))}
-        {!d.chat_accounts.length && !d.sign_ins.length && !d.connections.length && <Empty>Nothing is connected</Empty>}
+        {!accounts.length && !d.chat_accounts.length && !d.sign_ins.length && !d.connections.length && <Empty>Nothing is connected</Empty>}
       </Section>
 
       <Section title="Coding keys">

@@ -1,5 +1,5 @@
 // The fictional org every mock handler draws from. Invented names.
-import type { AgentRef, Capability, ChatSession, Me, ModuleKey, Person, Role, Workspace } from "@/lib/types"
+import type { AgentRef, Capability, ChatSession, ConnectedAccount, Me, ModuleKey, Person, Role, Workspace } from "@/lib/types"
 import { face } from "./face"
 
 export const DOMAIN = "fernhill.example"
@@ -18,7 +18,13 @@ export const PEOPLE: (Person & { identities: Me["identities"] })[] = [
 export const WORKSPACES: Workspace[] = [
   { id: "ws_fernhill", name: "Fernhill Labs", platform: "discord", role: "owner", members: 16 },
   { id: "ws_northwind", name: "Northwind Retail", platform: "slack", role: "member", members: 42 },
+  { id: "ws_cobalt", name: "Cobalt Studio", platform: "teams", role: "member", members: 9 },
 ]
+const PROVIDER_OF: Record<string, { label: string; account: string }> = {
+  slack: { label: "Slack", account: "maya@northwind" },
+  microsoft: { label: "Microsoft", account: "maya.lindqvist@cobalt.example" },
+}
+const PLATFORM_PROVIDER = { slack: "slack", teams: "microsoft" } as const
 
 
 /** Agents reachable on the web. Northwind Support is fixed to a confidential channel, so it is absent here. */
@@ -88,6 +94,26 @@ export const session = {
   setWorkspace: (id: string) => localStorage.setItem(K_WS, id),
 }
 
+// Accounts connected to the sign-in. The one that signed in is always first; Slack starts connected.
+const K_ACCOUNTS = "daimon:mock:accounts"
+const connected = (): string[] => {
+  try { return JSON.parse(localStorage.getItem(K_ACCOUNTS) ?? '["slack"]') as string[] } catch { return ["slack"] }
+}
+export const connectAccount = (provider: string) => {
+  if (!connected().includes(provider)) localStorage.setItem(K_ACCOUNTS, JSON.stringify([...connected(), provider]))
+}
+export const disconnectAccount = (provider: string) => localStorage.setItem(K_ACCOUNTS, JSON.stringify(connected().filter((p) => p !== provider)))
+export function accounts(): ConnectedAccount[] {
+  const p = session.user()
+  if (!p || p.role === "visitor") return []
+  const own = p.identities[0]!
+  const rest = connected().filter((c) => c in PROVIDER_OF).map((c, n) => ({
+    id: `acc_${c}`, provider: c, provider_label: PROVIDER_OF[c]!.label, label: PROVIDER_OF[c]!.account,
+    last_used: new Date(Date.now() - (n + 1) * 2 * 86_400_000).toISOString(), current: false,
+  }))
+  return [{ id: `acc_${own.provider}`, provider: own.provider, provider_label: own.provider_label, label: own.label, last_used: new Date().toISOString(), current: true }, ...rest]
+}
+
 // Credit spent by turns in this tab. `?credit=out` (or `?credit=0.5`) at load sets everyone's left amount; `?credit=none` leaves nobody governed.
 const K_CREDIT = "daimon:mock:credit"
 try {
@@ -106,14 +132,14 @@ function live(pid: string, c: Me["credit"]): Me["credit"] {
 export function me(): Me | null {
   const p = session.user()
   if (!p) return null
-  const wss = p.role === "visitor" ? [{ ...WORKSPACES[0]!, role: "visitor" as Role }] : WORKSPACES.map((w) => (
+  const wss = p.role === "visitor" ? [{ ...WORKSPACES[0]!, role: "visitor" as Role }] : WORKSPACES.filter((w) => w.platform === "discord" || connected().includes(PLATFORM_PROVIDER[w.platform as "slack" | "teams"])).map((w) => (
     w.id === "ws_fernhill" ? { ...w, role: p.role } : w
   ))
   const ws = wss.find((w) => w.id === session.workspace()) ?? wss[0]!
   const role = ws.role
   return {
     id: p.id, name: p.name, email: p.email, workspace: ws, workspaces: wss, role,
-    modules: MODULES[role], capabilities: role === "visitor" && visitorFiles[p.id] ? [...CAPS.visitor, "files.attach"] : CAPS[role], identities: p.identities, credit: live(p.id, CREDIT[role]),
+    modules: MODULES[role], capabilities: role === "visitor" && visitorFiles[p.id] ? [...CAPS.visitor, "files.attach"] : CAPS[role], identities: p.identities, accounts: accounts(), credit: live(p.id, CREDIT[role]),
     invited_by: role === "visitor" ? "Maya Lindqvist" : undefined,
   }
 }
