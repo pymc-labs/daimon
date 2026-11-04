@@ -62,6 +62,8 @@ from daimon.adapters.mcp.tools.admins import register_admin_tools
 from daimon.adapters.mcp.tools.agent_coding_keys import register_agent_coding_key_tools
 from daimon.adapters.mcp.tools.agent_removal import register_agent_removal_tools
 from daimon.adapters.mcp.tools.agent_tool_rules import register_agent_tool_rule_tools
+from daimon.adapters.mcp.tools.allowances import register_allowance_tools
+from daimon.adapters.mcp.tools.audit_log import register_audit_log_tools
 from daimon.adapters.mcp.tools.channel_budgets import register_channel_budget_tools
 from daimon.adapters.mcp.tools.channel_copies import register_channel_copy_tools
 from daimon.adapters.mcp.tools.channel_environments import register_channel_environment_tools
@@ -103,6 +105,11 @@ from daimon.adapters.mcp.tools.thread_overrides import register_thread_override_
 from daimon.adapters.mcp.tools.thread_participation import register_thread_participation_tools
 from daimon.adapters.mcp.tools.tidy import register_tidy_tools
 from daimon.adapters.mcp.tools.timers import register_timer_tools
+from daimon.adapters.mcp.tools.web_invites import register_web_invite_tools
+from daimon.adapters.mcp.tools.web_people import register_web_people_tools
+from daimon.adapters.mcp.tools.web_workspace_settings import (
+    register_web_workspace_settings_tool,
+)
 from daimon.adapters.mcp.tools.wizard import register_wizard_tools
 from daimon.adapters.mcp.uploads import build_upload_route
 from daimon.adapters.mcp.web_shell import CSS_SHA256, STATIC_DIR, configure_environment_label
@@ -554,6 +561,11 @@ def create_mcp_app(
     register_my_data_tools(mcp, runtime)
     register_routine_run_tool(mcp, runtime)
     register_thread_override_tools(mcp, runtime)
+    register_web_invite_tools(mcp, runtime)  # web invites and visitor links, links by DM
+    register_web_people_tools(mcp, runtime)  # web people, groups, agent access
+    register_web_workspace_settings_tool(mcp, runtime)
+    register_allowance_tools(mcp, runtime)
+    register_audit_log_tools(mcp, runtime)
     register_cost_footer_tools(mcp, runtime)  # the line under each finished answer
     register_channel_budget_tools(mcp, runtime)  # per-channel spend budgets
     register_channel_skill_tools(mcp, runtime)  # per-channel extra skills

@@ -10,7 +10,7 @@ import asyncio
 import dataclasses
 import uuid
 from collections.abc import Collection
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Annotated, Literal
 
@@ -18,10 +18,7 @@ from anthropic import APIStatusError
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.web.access import Role
 from daimon.adapters.web.audit import (
-    AuditTarget,
     audit,
-    invite_target,
-    person_target,
     usd,
 )
 from daimon.adapters.web.caller import WebCaller, current_caller, groups_of, requires
@@ -29,8 +26,8 @@ from daimon.adapters.web.channel_names import named_spend_channels
 from daimon.adapters.web.chat_json import AgentRef, agent_ref
 from daimon.adapters.web.faces import avatars_of
 from daimon.adapters.web.runtime import WebRuntime
-from daimon.core import credit_views
-from daimon.core.allowances import EVERYONE, window_start
+from daimon.core import credit_views, web_allowances
+from daimon.core.allowances import window_start
 from daimon.core.billing import (
     CheckoutAmountUnavailable,
     create_checkout_session,
@@ -47,12 +44,12 @@ from daimon.core.spend_gate import (
     resolve_spend_person,
     spend_person_of_account,
 )
-from daimon.core.stores import spend_allowances, tenant_ledger, web_invites
+from daimon.core.stores import spend_allowances, tenant_ledger
 from daimon.core.stores import tenants as tenants_store
 from daimon.core.stores import web_identities as identities_store
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores.domain import SpendAllowanceRow, WebPersonRow
-from daimon.core.stores.web_audit import INVITE_LABEL, PERSON_LABEL
+from daimon.core.web_admin import WebAdmin, WebAdminError
 from daimon.core.web_identity import linked_identity, principal_of, with_spend_person
 from fastapi import APIRouter, Depends, HTTPException
 from mux.errors import ScopeViolation
@@ -551,90 +548,93 @@ def credits_router(runtime: WebRuntime) -> APIRouter:
             rows = await spend_allowances.list_for_tenant(db, tenant_id=tenant_id)
             return list(reversed(await allowances_for(db, tenant_id, rows)))
 
+    def admin_of(caller: WebCaller) -> WebAdmin:
+        return WebAdmin(
+            tenant_id=caller.person.tenant_id,
+            account_id=caller.person.account_id,
+            role=caller.role,
+        )
+
+    async def agent_names_of(tenant_id: uuid.UUID, agent_ids: Collection[str]) -> dict[str, str]:
+        return {i: ref.name for i, ref in (await agents_by_id(tenant_id, agent_ids)).items()}
+
     @router.post("/allowances")
     async def add_allowance(body: NewAllowance, caller: Admin) -> Allowance:  # pyright: ignore[reportUnusedFunction]
-        tenant_id, now = caller.person.tenant_id, runtime.now()
-        if body.expires_at is not None and body.expires_at.astimezone(UTC) <= now:
-            raise HTTPException(status_code=422, detail="Pick a date in the future.")
-        async with runtime.sessionmaker.begin() as db:
-            if body.cap:
-                _check_cap(body)
-            subject_id = await _subject_id(db, tenant_id, body.subject)
-            if body.cap and await spend_allowances.find_month_cap(
-                db, tenant_id=tenant_id, subject_kind=body.subject.kind, subject_id=subject_id
-            ):
-                raise HTTPException(
-                    status_code=409, detail="This already has a cap. Remove it to set another."
+        tenant_id = caller.person.tenant_id
+        agent_id = body.agent.id if body.agent else None
+        names = await agent_names_of(tenant_id, [agent_id] if agent_id else [])
+        try:
+            async with runtime.sessionmaker.begin() as db:
+                row = await web_allowances.create_allowance(
+                    db,
+                    admin_of(caller),
+                    runtime.now(),
+                    subject_kind=body.subject.kind,
+                    subject_id=body.subject.id,
+                    agent_id=agent_id,
+                    agent_names=names,
+                    amount_usd=body.amount_usd,
+                    window=body.window,
+                    expires_at=body.expires_at,
+                    cap=body.cap,
                 )
-            row = await spend_allowances.create_allowance(
-                db,
-                tenant_id=tenant_id,
-                subject_kind=body.subject.kind,
-                subject_id=subject_id,
-                agent_id=body.agent.id if body.agent else None,
-                amount_usd=body.amount_usd,
-                window=body.window,
-                starts_at=now,
-                expires_at=body.expires_at.astimezone(UTC) if body.expires_at else None,
-                created_by_account_id=caller.person.account_id,
-                is_cap=body.cap,
-            )
-            [made] = await allowances_for(db, tenant_id, [row])
-            await audit(
-                db,
-                tenant_id=tenant_id,
-                actor_account_id=caller.person.account_id,
-                action="Added cap" if made.cap else "Added allowance",
-                target=await _audit_target(db, tenant_id, made.subject),
-                detail=_allowance_words(made),
-                at=now,
-            )
-            return made
+                [made] = await allowances_for(db, tenant_id, [row])
+                return made
+        except WebAdminError as error:
+            raise HTTPException(status_code=error.status, detail=str(error)) from error
 
     @router.patch("/allowances/{allowance_id}")
     async def edit_allowance(  # pyright: ignore[reportUnusedFunction]
         allowance_id: uuid.UUID, body: EditAllowance, caller: Admin
     ) -> Allowance:
         tenant_id = caller.person.tenant_id
-        async with runtime.sessionmaker.begin() as db:
-            row = await spend_allowances.set_amount(
-                db, tenant_id=tenant_id, allowance_id=allowance_id, amount_usd=body.amount_usd
-            )
-            if row is None:
-                raise HTTPException(status_code=404, detail="This allowance no longer exists.")
-            [made] = await allowances_for(db, tenant_id, [row])
-            await audit(
-                db,
-                tenant_id=tenant_id,
-                actor_account_id=caller.person.account_id,
-                action="Changed cap" if made.cap else "Changed allowance",
-                target=await _audit_target(db, tenant_id, made.subject),
-                detail=_allowance_words(made),
-                at=runtime.now(),
-            )
-            return made
+        try:
+            async with runtime.sessionmaker.begin() as db:
+                current = next(
+                    (
+                        r
+                        for r in await spend_allowances.list_for_tenant(db, tenant_id=tenant_id)
+                        if r.id == allowance_id
+                    ),
+                    None,
+                )
+                names = await agent_names_of(
+                    tenant_id, [current.agent_id] if current and current.agent_id else []
+                )
+                row = await web_allowances.set_allowance_amount(
+                    db,
+                    admin_of(caller),
+                    runtime.now(),
+                    allowance_id,
+                    amount_usd=body.amount_usd,
+                    agent_names=names,
+                )
+                [made] = await allowances_for(db, tenant_id, [row])
+                return made
+        except WebAdminError as error:
+            raise HTTPException(status_code=error.status, detail=str(error)) from error
 
     @router.delete("/allowances/{allowance_id}")
     async def remove_allowance(allowance_id: uuid.UUID, caller: Admin) -> dict[str, bool]:  # pyright: ignore[reportUnusedFunction]
-        target = allowance_id
         tenant_id = caller.person.tenant_id
-        async with runtime.sessionmaker.begin() as db:
-            rows = await spend_allowances.list_for_tenant(db, tenant_id=tenant_id)
-            row = next((r for r in rows if r.id == target), None)
-            if row is None or not await spend_allowances.delete_allowance(
-                db, tenant_id=tenant_id, allowance_id=target
-            ):
-                raise HTTPException(status_code=404, detail="This allowance no longer exists.")
-            [gone] = await allowances_for(db, tenant_id, [row])
-            await audit(
-                db,
-                tenant_id=tenant_id,
-                actor_account_id=caller.person.account_id,
-                action="Removed cap" if gone.cap else "Removed allowance",
-                target=await _audit_target(db, tenant_id, gone.subject),
-                detail=_allowance_words(gone),
-                at=runtime.now(),
-            )
+        try:
+            async with runtime.sessionmaker.begin() as db:
+                current = next(
+                    (
+                        r
+                        for r in await spend_allowances.list_for_tenant(db, tenant_id=tenant_id)
+                        if r.id == allowance_id
+                    ),
+                    None,
+                )
+                names = await agent_names_of(
+                    tenant_id, [current.agent_id] if current and current.agent_id else []
+                )
+                await web_allowances.delete_allowance(
+                    db, admin_of(caller), runtime.now(), allowance_id, agent_names=names
+                )
+        except WebAdminError as error:
+            raise HTTPException(status_code=error.status, detail=str(error)) from error
         return {"ok": True}
 
     @router.post("/redeem")
@@ -744,44 +744,6 @@ def credits_router(runtime: WebRuntime) -> APIRouter:
     return router
 
 
-async def _audit_target(db: AsyncSession, tenant_id: uuid.UUID, subject: Subject) -> AuditTarget:
-    """A group by name; a person or invite by id, which the audit log shows by name while
-    they exist. An id that matches no one (a chat-only person) stays a generic label."""
-    if subject.kind == "group":
-        label = "Everyone" if subject.id == "everyone" else f"{subject.name or 'Deleted'} group"
-        return AuditTarget(label)
-    try:
-        subject_id = uuid.UUID(subject.id)
-    except ValueError:
-        subject_id = None
-    if subject.kind == "person":
-        known = subject_id and await people_store.get_person(
-            db, tenant_id=tenant_id, person_id=subject_id
-        )
-        return person_target(known.id) if known else AuditTarget(PERSON_LABEL)
-    known = subject_id and await web_invites.get_invite(
-        db, tenant_id=tenant_id, invite_id=subject_id
-    )
-    return invite_target(known.id) if known else AuditTarget(INVITE_LABEL)
-
-
-def _check_cap(body: NewAllowance) -> None:
-    """A cap is monthly, for everyone or one person, for every agent, with no end date."""
-    everyone = body.subject.kind == "group" and body.subject.id == EVERYONE
-    if not (everyone or body.subject.kind == "person"):
-        raise HTTPException(status_code=422, detail="A cap is for everyone or one person.")
-    if body.agent is not None or body.window != "month" or body.expires_at is not None:
-        raise HTTPException(
-            status_code=422, detail="A cap is monthly, for every agent, with no end date."
-        )
-
-
-def _allowance_words(allowance: Allowance) -> str:
-    window = "a month" if allowance.window == "month" else "in total"
-    words = f"{usd(allowance.amount_usd)} {window}"
-    return f"{words}, {allowance.agent.name}" if allowance.agent else words
-
-
 def _channel_row(spend: credit_views.ChannelSpend, names: dict[tuple[str, str], str]) -> SpendRow:
     if spend.origin == "routine":
         row_id, name, kind = "routines", "Routines", "routine"
@@ -807,17 +769,3 @@ async def _invited(db: AsyncSession, row: SpendAllowanceRow) -> list[WebPersonRo
         for p in await people_store.list_people(db, tenant_id=row.tenant_id)
         if p.invite_id == invite_id
     ]
-
-
-async def _subject_id(db: AsyncSession, tenant_id: uuid.UUID, subject: Subject) -> str:
-    """What the gate matches the subject on. A person is the id their turns run as."""
-    if subject.kind != "person":
-        return subject.id
-    try:
-        person_id = uuid.UUID(subject.id)
-    except ValueError:
-        raise HTTPException(status_code=404, detail="This person isn't in the workspace.") from None
-    person = await people_store.get_person(db, tenant_id=tenant_id, person_id=person_id)
-    if person is None:
-        raise HTTPException(status_code=404, detail="This person isn't in the workspace.")
-    return (await linked_identity(db, person))[1]
