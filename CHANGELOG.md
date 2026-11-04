@@ -16,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other files apply at once. A skill the server stops offering keeps its last version and
   shows as unavailable. **Fork** makes an editable copy under a name you choose.
 
+- **The agent editor in the web app has a GitHub panel.** It lists the agent's repos with
+  their access, status and which one is the working repo, and where each attached skill
+  comes from: a repo (with branch and path), the library, elsewhere or Anthropic. It shows
+  whether the latest push sync failed, and the release an outside pipeline stamped in the
+  agent's `source_release`, `source_release_at` and `source_release_url` metadata. The
+  agent's owner or a server admin can connect GitHub, pick or clear the working repo, take a repo
+  off the agent and resync its repo skills now. Each change is audited like the chat tools.
+
 - **The web app signs in with Slack and Microsoft again, besides Discord.** Each shows on the sign-in page once its login app is set (`DAIMON_HUB__SLACK_*`, `DAIMON_MICROSOFT_ACCOUNTS__*`); register `<web public url>/auth/slack/callback` and `/auth/microsoft/callback` on it. A signed-in member connects the other two from the account menu (see below).
 
 - **The web app remembers connected accounts.** A member signs in with one chat account, connects others from the account menu, and the workspace switcher lists the workspaces of all of them. A later sign-in with any connected account, on any device, shows them all while each was proven within 30 days; an older one returns when it signs in again. Profile lists the connected accounts and disconnects one (not the one signed in with). Guests cannot connect.

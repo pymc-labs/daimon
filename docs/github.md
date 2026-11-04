@@ -121,12 +121,19 @@ and branch coalesce into one row, and a push during a running sync schedules
 one more pass. Each scheduler tick processes up to three rows. Transient
 failures and GitHub rate limits retry with backoff, and honour `retry-after`
 and rate-limit reset headers. Permanent failures, such as a lost permission, a
-missing repo or an oversized skill, end the job. They stay visible in the
-binding's `last_sync_error`.
+missing repo or an oversized skill, end the job and are logged. A retryable
+failure keeps the row pending with its last error until a later pass succeeds.
 
 If several active agents in a tenant share one Daimon name, the sync refuses
-and `last_sync_error` asks you to archive the duplicates. A new push on the
-default branch then starts another pass.
+and logs it until you archive the duplicates. A new push on the default branch
+then starts another pass.
+
+The GitHub panel in the agent editor shows the agent's repos, where each skill
+comes from and whether the latest sync failed. Its **Resync** button syncs the
+repo skills now, unless a sync is already running. A pipeline that publishes
+the agent can set three metadata keys for the panel to show: `source_release`
+(the release name), `source_release_at` (ISO 8601 with an offset) and
+`source_release_url` (an https page). Daimon ignores a bad time or URL.
 
 Delivery is at least once. A process death mid-sync can repeat a step. Repeated
 passes fetch the branch's current contents and converge. Delivery receipts

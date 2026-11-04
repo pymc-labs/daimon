@@ -29,6 +29,7 @@ __all__ = [
     "SyncTroubleRow",
     "SharedCredentialRow",
     "installations_in_use",
+    "get_installation_states",
     "list_granted_repos",
     "list_shared_credentials",
     "list_sync_trouble",
@@ -125,6 +126,27 @@ async def installations_in_use(
             )
         )
     return sorted(rows, key=lambda r: r.account_login.casefold())
+
+
+async def get_installation_states(
+    session: AsyncSession, *, installation_ids: Collection[int]
+) -> dict[int, Literal["active", "suspended", "removed"]]:
+    """Each known installation's state; an unknown id is left out."""
+    if not installation_ids:
+        return {}
+    rows = await session.scalars(
+        select(GitHubAppInstallation).where(
+            GitHubAppInstallation.installation_id.in_(list(installation_ids))
+        )
+    )
+    return {
+        row.installation_id: "removed"
+        if row.github_removed_at is not None
+        else "suspended"
+        if row.suspended_at is not None
+        else "active"
+        for row in rows
+    }
 
 
 async def list_granted_repos(

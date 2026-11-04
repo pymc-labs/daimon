@@ -7,6 +7,7 @@ import {
 import { Blocks, Brain, Cpu, KeyRound, Maximize, Minus, Plug, Plus, ScrollText, Sparkles, SquareTerminal, Users, Wrench } from "lucide-react"
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react"
 
+import { BrandIcon } from "@/components/brand"
 import { AgentAvatar, Ago, Avatar, Money } from "@/components/common"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { modelLabel } from "@/lib/format"
@@ -15,6 +16,7 @@ import { cn } from "@/lib/utils"
 import { pressProps } from "@/lib/filters"
 import { useAgents } from "./api"
 import { useAgentKeys, useCodingKeys, useKnowledge } from "./setup/api"
+import { GithubFacts } from "./setup/GithubPanel"
 import { Dot, Locked, Pill, PlaceIcon, RuleChip } from "./bits"
 import { layoutNarrow, layoutWide, type Dep, type Plan, type Pt, type Size } from "./layout"
 import { EFFORT_LABEL, placeName } from "./lib"
@@ -290,6 +292,11 @@ function CodingNode() {
   )
 }
 
+function GithubNode() {
+  const { agent } = useCanvas()
+  return <Card id="github" icon={<BrandIcon brand="github" />} title="GitHub"><GithubFacts agent={agent} /></Card>
+}
+
 function McpNode({ id }: { id: string }) {
   const { config } = useCanvas()
   const s = config.mcp_servers.find((x) => `mcp:${x.key}` === id)
@@ -328,7 +335,7 @@ function PlatformNode({ id }: { id: string }) {
 
 const NODE_TYPES = {
   agent: AgentNode, instructions: InstructionsNode, model: ModelNode, places: PlacesNode,
-  skills: SkillsNode, tools: ToolsNode, helpers: HelpersNode, people: PeopleNode, keys: KeysNode, coding: CodingNode, knowledge: KnowledgeNode, mcp: ({ id }: { id: string }) => <McpNode id={id} />,
+  skills: SkillsNode, tools: ToolsNode, helpers: HelpersNode, people: PeopleNode, keys: KeysNode, coding: CodingNode, knowledge: KnowledgeNode, github: GithubNode, mcp: ({ id }: { id: string }) => <McpNode id={id} />,
   platform: ({ id }: { id: string }) => <PlatformNode id={id} />,
 }
 
@@ -365,7 +372,7 @@ const EDGE_TYPES = { line: LineEdge }
 /** The two columns around the agent; keys and coding keys are setup, for those who see it. */
 const lanes = (agent: Agent) => ({
   left: ["instructions", "model", "places", "people"],
-  right: ["skills", "tools", "helpers", ...(agent.can_view_details ? ["knowledge", "keys", "coding"] : [])],
+  right: ["skills", "tools", "helpers", ...(agent.can_view_details ? ["knowledge", "keys", "coding", "github"] : [])],
 })
 /** Below this canvas width the editor is one column. */
 const NARROW = 760
