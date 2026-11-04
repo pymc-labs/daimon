@@ -2,6 +2,7 @@ import { useMutation } from "@tanstack/react-query"
 import { Check, ChevronRight, CircleAlert, Download, FileSpreadsheet, FileText, Loader2, Paperclip, ThumbsDown, ThumbsUp } from "lucide-react"
 import { useState } from "react"
 import ReactMarkdown from "react-markdown"
+import { Link } from "react-router"
 import remarkGfm from "remark-gfm"
 
 import { AgentAvatar, CopyButton } from "@/components/common"
@@ -11,7 +12,7 @@ import type { AgentRef } from "@/lib/types"
 import { usd } from "@/lib/format"
 import { cn } from "@/lib/utils"
 import { CardView } from "./Cards"
-import { bytes, secs } from "./format"
+import { bytes, inAppPath, secs } from "./format"
 import type { Card, CardAnswer, FileOut, Msg, Step } from "./types"
 
 export function UserMessage({ m }: { m: Msg }) {
@@ -44,7 +45,11 @@ function Markdown({ text }: { text: string }) {
         remarkPlugins={[remarkGfm]}
         urlTransform={(u) => u}
         components={{
-          a: ({ href, children }) => <a href={href} target="_blank" rel="noreferrer">{children}</a>,
+          // A link to a page of this app stays in it, so the `/w/` link switches workspace in place.
+          a: ({ href, children }) => {
+            const to = inAppPath(href, window.location.origin)
+            return to ? <Link to={to}>{children}</Link> : <a href={href} target="_blank" rel="noreferrer">{children}</a>
+          },
           // An image in a reply is a request to its host from the reader's browser: show a link instead.
           img: ({ src, alt }) => /^https?:\/\//i.test(src ?? "")
             ? <a href={src} target="_blank" rel="noreferrer">{alt || src}</a>

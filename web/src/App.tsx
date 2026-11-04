@@ -10,6 +10,7 @@ import { InviteLanding } from "@/pages/Invite"
 import { ProfilePage } from "@/pages/Profile"
 import { SignIn } from "@/pages/SignIn"
 import { NotFound, SignedOut } from "@/pages/Status"
+import { WorkspaceLink } from "@/pages/WorkspaceLink"
 import { Workspaces } from "@/pages/Workspaces"
 
 function RequireAuth() {
@@ -37,6 +38,7 @@ export default function App() {
       <Route path="/invite/:token" element={<InviteLanding />} />
       <Route element={<RequireAuth />}>
         <Route path="/workspaces" element={<Workspaces />} />
+        <Route path="/w/:workspace/*" element={<WorkspaceLink />} />
         <Route element={<AppShell />}>
           <Route index element={<Navigate to="/chat" replace />} />
           <Route path="/profile" element={<ProfilePage />} />
