@@ -350,6 +350,25 @@ async def test_prepare_posts_when_opt_out_lookup_fails_then_tagged_thread_in_own
     assert ping_users.get() == frozenset(), f"{platform}: refused or not, nobody is pinged"
 
 
+@pytest.mark.parametrize("platform", ("discord", "slack"))
+async def test_prepare_posts_when_reach_post_tags_requester_then_only_others_counted(
+    sessionmaker, platform
+):
+    """The requester asked for the post; tagging them reaches no one else."""
+    runtime, auth = await _setup(sessionmaker, platform)
+    scope = dataclasses.replace(_scope(), requester_id=("U42" if platform == "slack" else "42"))
+    text = f"{TAG[platform].format(42)} {TAG[platform].format(7)} look"
+    await prepare_posts(
+        runtime,
+        auth,
+        [OutgoingPost(text=text, place="C1")],
+        plan=ReachPlan(threads=0, places=1, people=1),
+        scope=scope,
+    )
+    tagged = {"discord": "7", "slack": "U7"}[platform]
+    assert (await _tally(runtime, auth, scope)).people == {tagged}, f"{platform}: not the asker"
+
+
 @pytest.mark.parametrize("platform", PLATFORMS)
 async def test_prepare_posts_when_routine_posts_then_line_only_outside_creator_dm(
     sessionmaker, platform

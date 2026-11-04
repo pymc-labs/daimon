@@ -301,7 +301,7 @@ async def prepare_posts(
         mentioned.add(scope.requester_id)
     skip, names, checked = await _opt_outs(runtime, auth, platform, mentioned)
     # Unchecked, nobody is known to have opted out: tags count even though none ping.
-    counted_skip = skip if checked else frozenset()
+    counted_skip: frozenset[str] = skip if checked else frozenset[str]()
     reach = [_reaches(post, scope, platform, counted_skip if pings else None) for post in posts]
     credited = [p.place for p, r in zip(posts, reach, strict=True) if p.attribute and r]
     line = await _attribution(runtime, auth, scope, credited[0], skip) if credited else None
@@ -341,8 +341,7 @@ async def prepare_posts(
         threads=sum(p.new_thread for p in reaching),
         places=frozenset(p.place for p in reaching if not p.new_thread),
         people=(
-            frozenset(uid for p in reaching for uid in mentioned_user_ids(p.text, platform))
-            - counted_skip
+            frozenset(uid for p in reaching for uid in _tagged(p, scope, platform, counted_skip))
             if pings
             else frozenset()
         ),
@@ -393,8 +392,18 @@ def _reaches(
         return True
     if skip is None:
         return False
-    tagged = set(mentioned_user_ids(post.text, platform)) - skip - {scope.requester_id}
-    return bool(tagged)
+    return bool(_tagged(post, scope, platform, skip))
+
+
+def _tagged(
+    post: OutgoingPost, scope: TurnScope, platform: Platform, skip: frozenset[str]
+) -> frozenset[str]:
+    """The people a post tags besides the requester, who asked for it and is not reached."""
+    return frozenset(
+        uid
+        for uid in mentioned_user_ids(post.text, platform)
+        if uid not in skip and uid != scope.requester_id
+    )
 
 
 def _outside(post: OutgoingPost, scope: TurnScope) -> bool:
