@@ -9,6 +9,7 @@ provider ever keeps its own pins, add its target here rather than deleting this 
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import cast
 
 import httpx
@@ -33,5 +34,6 @@ async def test_server_skill_updates_publish_to_the_managed_agents_record_only() 
             fernet=build_multifernet((Fernet.generate_key().decode(),)),
             anthropic=build_fake_anthropic(MARouter().dispatch),
         )
-        deps = sync_deps(runtime, cast(DataServerNode, None))
+        node = SimpleNamespace(server=SimpleNamespace(name="data"))
+        deps = sync_deps(runtime, cast(DataServerNode, node))
     assert [type(t) for t in deps.targets] == [ManagedAgentsTarget]
