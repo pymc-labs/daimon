@@ -67,6 +67,9 @@ function Body({ d }: { d: Profile }) {
   })
   const me = useMe()
   const accounts = me.data?.accounts ?? []
+  const platforms = new Set(accounts.map((a) => (a.provider === "microsoft" ? "teams" : a.provider)))
+  const chatAccounts = d.chat_accounts.filter((a) => !platforms.has(a.platform))
+  const signIns = d.sign_ins.filter((s) => !accounts.some((a) => a.provider === s.provider && a.label === s.label))
   const detach = useMutation({
     mutationFn: (id: string) => api.del(`/api/me/accounts/${id}`),
     onSuccess: () => { void qc.invalidateQueries({ queryKey: ["me"] }); done("Disconnected") },
@@ -95,7 +98,7 @@ function Body({ d }: { d: Profile }) {
           <Row key={a.id}>
             <BrandIcon brand={a.provider} />
             <span className="min-w-0 flex-1 truncate">{a.provider_label}{a.label && <span className="text-muted-foreground"> {a.label}</span>}</span>
-            <span className="text-xs text-muted-foreground">{a.current ? "Signed in" : <>Used <Ago iso={a.last_used} /></>}</span>
+            <span className={`text-xs text-muted-foreground ${a.current ? "" : "hidden sm:inline"}`}>{a.current ? "Signed in" : <>Used <Ago iso={a.last_used} /></>}</span>
             {!a.current && (
               <Button variant="ghost" size="sm" disabled={detach.isPending} aria-label={`Disconnect ${a.provider_label} ${a.label}`} onClick={async () => {
                 if (await confirm({ title: `Disconnect ${a.provider_label}?`, action: "Disconnect", destructive: true })) detach.mutate(a.id)
@@ -103,13 +106,13 @@ function Body({ d }: { d: Profile }) {
             )}
           </Row>
         ))}
-        {d.chat_accounts.map((a) => (
+        {chatAccounts.map((a) => (
           <Row key={a.platform}>
             <BrandIcon brand={a.platform} />
             <span className="min-w-0 flex-1 truncate">{a.platform[0]!.toUpperCase() + a.platform.slice(1)}{a.name && <span className="text-muted-foreground"> {a.name}</span>}</span>
           </Row>
         ))}
-        {d.sign_ins.map((s) => (
+        {signIns.map((s) => (
           <Row key={s.id}>
             <BrandIcon brand={s.provider} />
             <span className="min-w-0 flex-1 truncate">{s.label || s.provider}</span>
@@ -127,7 +130,7 @@ function Body({ d }: { d: Profile }) {
             }}>Disconnect</Button>
           </Row>
         ))}
-        {!accounts.length && !d.chat_accounts.length && !d.sign_ins.length && !d.connections.length && <Empty>Nothing is connected</Empty>}
+        {!accounts.length && !chatAccounts.length && !signIns.length && !d.connections.length && <Empty>Nothing is connected</Empty>}
       </Section>
 
       <Section title="Coding keys">

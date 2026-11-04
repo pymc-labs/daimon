@@ -17,7 +17,7 @@ const data: Profile = {
   name: "Maya Lindqvist",
   memory: [{ agent: daimon, files: ["/style.md"] }],
   connections: [{ kind: "mcp", label: "Linear", agent: daimon, key: "https://mcp.linear.app/sse" }],
-  sign_ins: [{ id: "i1", provider: "discord", label: "maya.l" }],
+  sign_ins: [{ id: "i1", provider: "microsoft", label: "maya@fernhill.example" }],
   chat_accounts: [],
   keys: [{ id: "k1", agent: daimon, created_at: "2026-11-01T00:00:00Z", expires_at: null, bound: false }],
 }
@@ -61,7 +61,7 @@ describe("Profile", () => {
 
   it("keeps the only sign-in", async () => {
     view()
-    expect(await screen.findByRole("button", { name: "Remove maya.l" })).toBeDisabled()
+    expect(await screen.findByRole("button", { name: "Remove maya@fernhill.example" })).toBeDisabled()
   })
 
   it("deletes only once the name is typed", async () => {
