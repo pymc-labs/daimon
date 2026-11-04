@@ -4,27 +4,27 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
-from datetime import timedelta
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.web.admin_common import (
-    ROLE_WORDS,
     PeopleAdmin,
+    admin_of,
     invite_status,
     listed_agents,
     names_by_account,
+    refused,
 )
-from daimon.adapters.web.audit import audit, invite_target, usd
 from daimon.adapters.web.chat_json import agent_ref
 from daimon.adapters.web.faces import avatars_of
-from daimon.adapters.web.invites import issue_link, link_url
 from daimon.adapters.web.paging import PageRequest, cut, page_of
 from daimon.adapters.web.runtime import WebRuntime
+from daimon.core import web_admin
 from daimon.core.stores import web_invites
 from daimon.core.stores.domain import WebInviteRow
-from fastapi import APIRouter, Depends, HTTPException, Response
+from daimon.core.web_admin import WebAdminError, link_url
+from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel, EmailStr, Field
 
 
@@ -94,45 +94,23 @@ def invites_admin_router(runtime: WebRuntime) -> APIRouter:
     async def create_invite(body: NewInvite, caller: PeopleAdmin) -> dict[str, Any]:  # pyright: ignore[reportUnusedFunction]
         tenant_id, now = caller.person.tenant_id, runtime.now()
         agents = await listed_agents(runtime, tenant_id)
-        known = {a.id for a in agents}
-        picked = list(dict.fromkeys(body.agents))
-        if any(a not in known for a in picked):
-            raise HTTPException(status_code=422, detail="Pick agents from this workspace.")
-        if body.role == "visitor" and not picked:
-            raise HTTPException(status_code=422, detail="Pick at least one agent.")
-        async with runtime.sessionmaker.begin() as db:
-            invite, token = await issue_link(
-                db,
-                tenant_id=tenant_id,
-                kind="invite",
-                expires_at=now + timedelta(days=body.days),
-                email=str(body.email),
-                role=body.role,
-                credit_usd=body.credit_usd,
-                allow_files=body.allow_files,
-                agent_ids=picked,
-                created_by_account_id=caller.person.account_id,
-            )
-            names = [
-                agent_ref(next((x for x in agents if x.id == a), None), a).name for a in picked
-            ]
-            await audit(
-                db,
-                tenant_id=tenant_id,
-                actor_account_id=caller.person.account_id,
-                action="Created invite",
-                target=invite_target(invite.id),
-                detail=", ".join(
-                    [
-                        ROLE_WORDS[body.role],
-                        *names,
-                        usd(body.credit_usd),
-                        *(["Files on"] if invite.allow_files else []),
-                    ]
-                ),
-                at=now,
-            )
-            people_names = await names_by_account(db, tenant_id)
+        try:
+            async with runtime.sessionmaker.begin() as db:
+                invite, token = await web_admin.create_invite(
+                    db,
+                    admin_of(caller),
+                    now,
+                    email=str(body.email),
+                    role=body.role,
+                    agent_ids=body.agents,
+                    agents={a.id: agent_ref(a, a.id).name for a in agents},
+                    credit_usd=body.credit_usd,
+                    days=body.days,
+                    allow_files=body.allow_files,
+                )
+                people_names = await names_by_account(db, tenant_id)
+        except WebAdminError as error:
+            raise refused(error) from error
         return invite_json(
             invite,
             agents,
@@ -146,48 +124,25 @@ def invites_admin_router(runtime: WebRuntime) -> APIRouter:
         invite_id: uuid.UUID, body: InviteChange, caller: PeopleAdmin
     ) -> dict[str, Any]:
         """Turn files on or off for a visitor invite, whether or not it was accepted."""
-        now, tenant_id = runtime.now(), caller.person.tenant_id
-        async with runtime.sessionmaker.begin() as db:
-            before = await web_invites.get_invite(db, tenant_id=tenant_id, invite_id=invite_id)
-            invite = await web_invites.set_allow_files(
-                db, tenant_id=tenant_id, invite_id=invite_id, allow=body.allow_files
-            )
-            if invite is None:
-                raise HTTPException(status_code=404, detail="This invite no longer exists.")
-            if before is not None and before.allow_files != invite.allow_files:
-                await audit(
-                    db,
-                    tenant_id=tenant_id,
-                    actor_account_id=caller.person.account_id,
-                    action="Turned files on" if invite.allow_files else "Turned files off",
-                    target=invite_target(invite.id),
-                    at=now,
+        tenant_id = caller.person.tenant_id
+        try:
+            async with runtime.sessionmaker.begin() as db:
+                invite = await web_admin.set_invite_files(
+                    db, admin_of(caller), runtime.now(), invite_id, allow=body.allow_files
                 )
-            names = await names_by_account(db, tenant_id)
+                names = await names_by_account(db, tenant_id)
+        except WebAdminError as error:
+            raise refused(error) from error
         agents = await listed_agents(runtime, tenant_id)
         return invite_json(invite, agents, names, await avatars_of(runtime, tenant_id, agents))
 
     @router.delete("/invites/{invite_id}")
     async def revoke_invite(invite_id: uuid.UUID, caller: PeopleAdmin) -> dict[str, bool]:  # pyright: ignore[reportUnusedFunction]
-        gone = HTTPException(status_code=404, detail="This invite no longer exists.")
-        now = runtime.now()
-        async with runtime.sessionmaker.begin() as db:
-            invite = await web_invites.revoke_invite(
-                db,
-                tenant_id=caller.person.tenant_id,
-                invite_id=invite_id,
-                now=now,
-            )
-            if invite is None:
-                raise gone
-            await audit(
-                db,
-                tenant_id=invite.tenant_id,
-                actor_account_id=caller.person.account_id,
-                action="Revoked invite",
-                target=invite_target(invite.id),
-                at=now,
-            )
+        try:
+            async with runtime.sessionmaker.begin() as db:
+                await web_admin.revoke_invite(db, admin_of(caller), runtime.now(), invite_id)
+        except WebAdminError as error:
+            raise refused(error) from error
         return {"ok": True}
 
     return router

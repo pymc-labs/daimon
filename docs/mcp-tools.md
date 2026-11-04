@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 178 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 206 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -65,6 +65,16 @@ Agent-chat primitives plus bounded ``ask`` and completed-chart delivery.
 | `list_my_sessions` | agent tokens only | List the sessions you started with this agent (id, status, title, timestamps). |
 | `start_turn` | agent tokens only | Start a new conversation turn with the agent and return a handle. |
 
+## `agent_coding_keys`
+
+List and revoke an agent's coding keys: all for an admin, the caller's own for its
+owner.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `list_agent_coding_keys` | all callers | List an agent's live coding keys, never their tokens: all for an admin, the caller's own for the agent's owner. |
+| `revoke_agent_coding_key` | all callers | Revoke an agent coding key: any for an admin, the caller's own for its owner. |
+
 ## `agent_removal`
 
 Agent removal tools: detach_mcp_server, remove_skill, remove_agent_key, list_agent_keys.
@@ -102,6 +112,28 @@ Agent tools: list / get / create / update / fork / archive.
 | `set_agent_backend` | all callers | Set an enabled model provider, or clear the agent setting with backend=null. |
 | `set_agent_builtin_tool` | all callers | Turn one of an agent's built-in tools on or off, e.g. "turn off its web search". |
 | `update_agent` | all callers | Change an agent's system prompt or switch its model; add existing skills such as build-models. |
+
+## `allowances`
+
+Spend allowances and caps, from chat: who may spend how much, per person, group or
+invite.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `create_allowance` | admin only | Give a person (web person id), a group (name, or ``everyone``) or an invite (id) a spend allowance in billed dollars, monthly or in total, for every agent or one. |
+| `delete_allowance` | admin only | Remove an allowance or cap. |
+| `list_allowances` | admin only | List the workspace's spend allowances and caps, newest first. |
+| `set_allowance_amount` | admin only | Change the dollar amount of an existing allowance or cap. |
+
+## `audit_log`
+
+The workspace's audit log, from chat: what admins changed in the web app and the chat
+tool calls and panel writes, newest first.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `list_audit_kinds` | admin only | List the kinds of audit entry the workspace has recorded, for the log's ``kind`` filter. |
+| `list_audit_log` | admin only | List the workspace's audit log, newest first: ``web`` for admin changes in the web app, ``security`` for chat tool calls and panel writes. |
 
 ## `channel_budgets`
 
@@ -342,6 +374,17 @@ Register connect_microsoft and the Microsoft Graph tools (Teams only).
 | --- | --- | --- |
 | `list_models` | all callers | List the models an agent here can run on: plain name, id, provider and list price. |
 
+## `my_data`
+
+The caller's own data: what Daimon holds for them, and letting it go.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `disconnect_my_account` | all callers | Disconnect one of the caller's accounts: saved Microsoft 365 or Slack access, or an MCP sign-in (``agent_id`` and ``key`` as listed by list_my_data). |
+| `forget_my_memory` | all callers | Delete the caller's personal memory with one agent, by the agent_id from list_my_data. |
+| `list_my_data` | all callers | List what is held for the caller: connected accounts and sign-ins, personal memory per agent, and their coding keys. |
+| `revoke_my_coding_key` | all callers | Revoke one of the caller's own coding keys, by the key_id from list_my_data. |
+
 ## `notebook`
 
 Notebook MCP tools.
@@ -429,6 +472,14 @@ Repository-scoped persistent memory, authorized by the executing turn.
 | `repo_memory_list` | all callers | List repository memories: shared entries and your own personal directives. |
 | `repo_memory_save` | all callers | Remember information for the bound working repository across sessions. |
 | `repo_memory_view` | all callers | Read a repository memory's full body by its listed slug. |
+
+## `routine_run`
+
+Run a routine now, ahead of its schedule.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `run_routine` | all callers | Run a routine now, ahead of its schedule; its own schedule continues after. |
 
 ## `routines`
 
@@ -518,6 +569,15 @@ harder").
 | --- | --- | --- |
 | `set_thread_model` | all callers | Run this conversation on another model when the person asks in words: "use opus here", "think harder". |
 
+## `thread_overrides`
+
+Thread settings that differ from their channel, and clearing one.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `clear_thread_override` | admin only, operator tokens with channels:write | Drop one thread's own setting so it follows its channel again. |
+| `list_thread_overrides` | admin only, operator tokens with tenant:read | List the threads of a channel that keep their own participation, progress plan, access rule or handoff. |
+
 ## `thread_participation`
 
 Thread-participation tools: follow a thread (or a channel, or the workspace).
@@ -580,6 +640,41 @@ Owner-bound watch management.
 | `rotate_watch_key` | Discord callers | Rotate a page signing key, revoke the old key and cancel queued wakes. |
 | `show_watch` | Discord callers | Show your watch's immutable destination, source, status and expiry. |
 | `update_watch` | Discord callers | Change your watch in place, after `preview_watch_edit`, with the same changes. |
+
+## `web_invites`
+
+Web invites and visitor sign-in links, from chat.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `create_web_invite` | admin only | Invite someone to the web app by email as a member, or as a visitor of the given agents. |
+| `issue_visitor_link` | admin only | Issue a one-time sign-in link for a web visitor. |
+| `list_web_invites` | admin only | List the web app's invites: open, accepted or expired, newest first. |
+| `revoke_visitor_link` | admin only | Revoke a person's open sign-in links, as when one went to the wrong place. |
+| `revoke_web_invite` | admin only | Revoke a web invite so its link stops working. |
+| `set_web_invite_files` | admin only | Turn file attachments on or off for a visitor invite, accepted or not. |
+
+## `web_people`
+
+The web app's people, groups and agent access, from chat.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `get_web_person` | admin only | Show one web person: role, status, groups, sign-ins and, for a visitor, their invite. |
+| `list_agent_web_access` | admin only | List each agent's web chat access: on or off, who may use it and the channel it is kept to, if any. |
+| `list_web_groups` | admin only | List everyone and each group the web sign-ins carry, with head counts. |
+| `list_web_people` | admin only | List the web app's people, oldest first, with role, status and groups. |
+| `set_agent_web_access` | admin only | Turn web chat on or off for an agent and choose who may use it there: everyone, the given groups or invitees. |
+| `update_web_person` | admin only | Change a web person's role (admin or member) or suspend or restore them. |
+
+## `web_workspace_settings`
+
+The web app's workspace settings, from chat: modules, who may start turns and direct
+messages.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `change_workspace_settings` | admin only | Change the workspace's web modules (chat, agents, channels, routines, credits, integrations), its web chat agent, who may start turns (everyone, or exactly the web people in ``invoker_people``) and the direct-message rules. |
 
 ## `wizard`
 

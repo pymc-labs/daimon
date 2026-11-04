@@ -6,10 +6,11 @@ import uuid
 from typing import Any, Final, Literal
 
 from daimon.adapters.web.access import is_admin
-from daimon.adapters.web.admin_common import WorkspaceAdmin, listed_agents
+from daimon.adapters.web.admin_common import WorkspaceAdmin, admin_of, listed_agents, refused
 from daimon.adapters.web.audit import audit
 from daimon.adapters.web.caller import WebCaller
 from daimon.adapters.web.runtime import WebRuntime
+from daimon.core import web_admin
 from daimon.core import workspace_settings as access_settings
 from daimon.core.agent_configuration import configuration_refusal
 from daimon.core.authz import Subject
@@ -23,7 +24,7 @@ from daimon.core.provider_keys import default_enabled_backends
 from daimon.core.stores import tenants
 from daimon.core.stores import web_workspace_settings as workspace_settings
 from daimon.core.stores.access_policy import PolicyBusyError
-from daimon.core.workspace_settings import SettingRefused
+from daimon.core.web_admin import WebAdminError
 from fastapi import APIRouter, HTTPException
 from mux.contracts.ids import Provider
 from mux.profiles import PROVIDER_LABELS
@@ -62,10 +63,6 @@ class SettingsChange(BaseModel):
     dm_memory_read_only: bool | None = None
     plain_text_mentions: bool | None = None
     providers: list[Provider] | Literal["default"] | None = None
-
-
-def _on(value: bool) -> str:
-    return "On" if value else "Off"
 
 
 def settings_router(runtime: WebRuntime) -> APIRouter:
@@ -129,93 +126,28 @@ def settings_router(runtime: WebRuntime) -> APIRouter:
 
     @router.patch("/settings")
     async def change_settings(body: SettingsChange, caller: WorkspaceAdmin) -> dict[str, Any]:  # pyright: ignore[reportUnusedFunction]
-        tenant_id, now = caller.person.tenant_id, runtime.now()
-        account_id = caller.person.account_id
-        subject = Subject(is_admin=is_admin(caller.role), platform_user_id=str(account_id))
+        tenant_id = caller.person.tenant_id
+        subject = Subject(
+            is_admin=is_admin(caller.role), platform_user_id=str(caller.person.account_id)
+        )
+        agents = {a.id: a.name for a in await listed_agents(runtime, tenant_id)}
+        invokers = body.invokers
         try:
-            async with runtime.sessionmaker.begin() as db:
-                chosen = await workspace_settings.get_settings(db, tenant_id=tenant_id)
-                modules_off = set(chosen.modules_off)
-                changes: list[tuple[str, str]] = []
-                for module, on in (body.modules or {}).items():
-                    if on == (module in modules_off):
-                        (modules_off.discard if on else modules_off.add)(module)
-                        changes.append(("Modules", f"{module.title()} {'on' if on else 'off'}"))
-                default = chosen.default_agent
-                if body.default_agent is not None and body.default_agent != default:
-                    agent = next(
-                        (
-                            a
-                            for a in await listed_agents(runtime, tenant_id)
-                            if a.id == body.default_agent
-                        ),
-                        None,
-                    )
-                    if agent is None:
-                        raise HTTPException(
-                            status_code=422, detail="Pick an agent from this workspace."
-                        )
-                    default = agent.id
-                    changes.append(("Web chat agent", agent.name))
-                await workspace_settings.save_settings(
-                    db,
-                    tenant_id=tenant_id,
-                    modules_off=sorted(modules_off),
-                    default_agent=default,
-                    now=now,
-                )
-                tenant = await tenants.get_tenant(db, tenant_id)
-                platform = tenant.platform if tenant else ""
-                if body.invokers is not None:
-                    people = None if body.invokers.everyone else body.invokers.people
-                    named = await access_settings.set_invoker_people(
-                        db, tenant_id=tenant_id, subject=subject, person_ids=people
-                    )
-                    changes.append(
-                        (
-                            "Who can use the agents",
-                            f"{len(named.people)} people" if named.limited else "Everyone",
-                        )
-                    )
-                if body.dm_enabled is not None:
-                    await access_settings.set_dms(
-                        db,
-                        tenant_id=tenant_id,
-                        subject=subject,
-                        platform=platform,
-                        enabled=body.dm_enabled,
-                    )
-                    changes.append(("Direct messages", _on(body.dm_enabled)))
-                if body.dm_memory_read_only is not None:
-                    await access_settings.set_dm_memory_read_only(
-                        db, tenant_id=tenant_id, subject=subject, enabled=body.dm_memory_read_only
-                    )
-                    changes.append(
-                        ("Read-only memory in direct messages", _on(body.dm_memory_read_only))
-                    )
-                if body.plain_text_mentions is not None:
-                    await access_settings.set_plain_text_mentions(
-                        db,
-                        tenant_id=tenant_id,
-                        subject=subject,
-                        platform=platform,
-                        enabled=body.plain_text_mentions,
-                    )
-                    changes.append(("Typed mentions", _on(body.plain_text_mentions)))
-                for target, detail in changes:
-                    await audit(
-                        db,
-                        tenant_id=tenant_id,
-                        actor_account_id=account_id,
-                        action="Changed setting",
-                        target=target,
-                        detail=detail,
-                        at=now,
-                    )
-        except SettingRefused as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        except PolicyBusyError as exc:
-            raise HTTPException(status_code=409, detail=_BUSY) from exc
+            await web_admin.change_settings(
+                runtime.sessionmaker,
+                admin_of(caller),
+                runtime.now(),
+                agents=agents,
+                modules=body.modules,
+                default_agent=body.default_agent,
+                everyone_invokes=None if invokers is None else invokers.everyone,
+                invoker_people=[] if invokers is None else invokers.people,
+                dm_enabled=body.dm_enabled,
+                dm_memory_read_only=body.dm_memory_read_only,
+                plain_text_mentions=body.plain_text_mentions,
+            )
+        except WebAdminError as error:
+            raise refused(error) from error
         if body.providers is not None:
             await set_providers(caller, subject, body.providers)
         return await settings_json(caller)
