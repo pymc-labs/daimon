@@ -18,14 +18,13 @@ from typing import Literal
 import httpx
 import structlog
 from cryptography.fernet import InvalidToken
-from daimon.adapters.web.caller import WebCaller
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.config import SignedIdentityServer
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import decrypt_token, encrypt_token
 from daimon.core.stores import tenants as tenants_store
 from daimon.core.stores import web_node_tokens as tokens_store
-from daimon.core.stores.domain import CHAT_PLATFORMS, TenantRow
+from daimon.core.stores.domain import CHAT_PLATFORMS, TenantRow, WebPersonRow
 from daimon.core.token_exchange import (
     ExchangeClient,
     TokenExchangeError,
@@ -125,15 +124,15 @@ def _hold(
 
 async def node_token(
     runtime: WebRuntime,
-    caller: WebCaller,
+    person: WebPersonRow,
     http: httpx.AsyncClient,
     *,
     kind: str,
     server: SignedIdentityServer,
     client: ExchangeClient,
 ) -> str:
-    """The caller's access token at `server`, exchanged when missing or nearly spent."""
-    person, now, key = caller.person, runtime.now(), runtime.identity_key
+    """The person's access token at `server`, exchanged when missing or nearly spent."""
+    now, key = runtime.now(), runtime.identity_key
     if key is None:
         raise NodeAccessError("unconfigured")
     held_key = (person.id, kind)
@@ -194,10 +193,10 @@ async def node_token(
 
 
 async def forget_node_token(
-    runtime: WebRuntime, caller: WebCaller, server: SignedIdentityServer
+    runtime: WebRuntime, person: WebPersonRow, server: SignedIdentityServer
 ) -> None:
     """Drop a token the server stopped taking, so the next call exchanges again."""
     async with runtime.sessionmaker.begin() as db:
         await tokens_store.delete_node_token(
-            db, person_id=caller.person.id, token_key=node_token_key(server)
+            db, person_id=person.id, token_key=node_token_key(server)
         )

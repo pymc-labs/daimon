@@ -17,6 +17,7 @@ from daimon.adapters.web.boot_sweep import (
 from daimon.adapters.web.nodes import NodeConfigError, build_nodes
 from daimon.adapters.web.owner_link import owner_link
 from daimon.adapters.web.runtime import build_runtime
+from daimon.adapters.web.server_skills import server_skills_node, sync_server_skills_forever
 from daimon.adapters.web.single_process import WebProcessAlreadyRunning
 from daimon.adapters.web.turns import WebTurns
 from daimon.core.config import Settings, WebSettings, load_settings
@@ -105,6 +106,9 @@ async def _serve(settings: Settings, web: WebSettings) -> None:
             asyncio.create_task(sweep_expired_web_sessions_forever(runtime.sessionmaker)),
             asyncio.create_task(sweep_stale_web_uploads_forever(runtime.sessionmaker)),
         ]
+        node = server_skills_node(runtime)
+        if node is not None:
+            sweepers.append(asyncio.create_task(sync_server_skills_forever(runtime, node)))
         try:
             await server.serve()
         finally:

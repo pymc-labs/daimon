@@ -154,7 +154,7 @@ class DataServerNode:
     def offered(self, workspace: str | None) -> bool:
         return self.relay is not None and serves(self.server, workspace)
 
-    def _client(self) -> ExchangeClient:
+    def exchange_client(self) -> ExchangeClient:
         return ExchangeClient(
             token_url=f"{server_base(self.server)}/oauth/token",
             client_id=self.client_id,
@@ -162,7 +162,7 @@ class DataServerNode:
             scope=self.scope,
         )
 
-    def _access_refusal(self, err: NodeAccessError) -> HTTPException:
+    def access_refusal(self, err: NodeAccessError) -> HTTPException:
         status, detail = _ACCESS[err.problem]
         return HTTPException(status_code=status, detail=detail.format(label=self.label))
 
@@ -180,10 +180,15 @@ class DataServerNode:
         async with node_http(runtime, self.server) as http:
             try:
                 token = await node_token(
-                    runtime, caller, http, kind=self.kind, server=self.server, client=self._client()
+                    runtime,
+                    caller.person,
+                    http,
+                    kind=self.kind,
+                    server=self.server,
+                    client=self.exchange_client(),
                 )
             except NodeAccessError as err:
-                raise self._access_refusal(err) from err
+                raise self.access_refusal(err) from err
             try:
                 response = await http.request(
                     method,
@@ -201,7 +206,7 @@ class DataServerNode:
         status = response.status_code
         if status == 401:
             # Never a web 401, which signs the person out of the web app.
-            await forget_node_token(runtime, caller, self.server)
+            await forget_node_token(runtime, caller.person, self.server)
             raise HTTPException(status_code=403, detail=f"{self.label} didn't accept your sign-in.")
         if status == 403:
             raise HTTPException(status_code=403, detail=f"{self.label} doesn't allow this.")
