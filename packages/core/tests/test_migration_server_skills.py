@@ -1,12 +1,13 @@
 """The server skills migration creates its tables and drops them on downgrade."""
 
 import importlib.util
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
-from sqlalchemy import text
+from sqlalchemy import Connection, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 _TABLES = ("server_skills", "server_skill_deployments", "agent_skill_follows")
@@ -41,8 +42,8 @@ async def test_server_skills_migration_round_trips(db_session: AsyncSession) -> 
     migration = _load_migration()
     conn = await db_session.connection()
 
-    def run(step: str):
-        def inner(sync_conn):
+    def run(step: str) -> Callable[[Connection], None]:
+        def inner(sync_conn: Connection) -> None:
             with Operations.context(MigrationContext.configure(sync_conn)):
                 getattr(migration, step)()
 
