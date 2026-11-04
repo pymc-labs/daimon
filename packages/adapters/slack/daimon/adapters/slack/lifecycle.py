@@ -81,7 +81,11 @@ from daimon.core.cost_footer import cost_footer_shown
 from daimon.core.native_footer_cost import native_footer_text
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_alerts import alert_ops
+from daimon.core.outbound.mentions import mentioned_user_ids, untag
+from daimon.core.outbound.opt_out import opt_out_names, tag_opt_outs
+from daimon.core.outbound.reach import DEFAULT_MAX_PEOPLE, turn_tally_key
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
+from daimon.core.stores.reach_tallies import approved_people
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.card_state import CardState as State
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
@@ -96,6 +100,7 @@ from daimon.core.turn.state import (
     extract_sealed_responses,
 )
 from daimon.core.turn.termination import TerminationReason, termination_reason
+from daimon.core.turn_origin import current_origin_id
 from daimon.core.usage_totals import ProviderUsageTotals
 from mux.contracts.events import Event
 from mux.profiles import emits_legacy_events_for
@@ -200,7 +205,11 @@ class SlackTurnLifecycle(OutputGate):
         ask_human: bool = False,
         identity: AgentIdentity | None = None,
         ma_agent_id: str | None = None,
+        reply_people_cap: int | None = DEFAULT_MAX_PEOPLE,
     ) -> None:
+        # Other people the answer may ping, besides the author (`DAIMON_OUTBOUND__MAX_PEOPLE`);
+        # None for unattended turns or with the budget off.
+        self._reply_people_cap = reply_people_cap
         self._trigger_ts = trigger_ts
         # Whether the final answer offers Ask a human beside the vote buttons
         # (`support_escalation.slack_support_enabled`).
@@ -259,6 +268,10 @@ class SlackTurnLifecycle(OutputGate):
         self._status_ts: str | None = adopt_status_ts
         self._last_flush: float = 0.0
         self._terminal: bool = False
+        # Opt-out answers per mentioned person, so a streamed card asks once per
+        # new mention rather than on every flush.
+        self._opted_out: dict[str, bool] = {}
+        self._opt_out_names: dict[str, str] = {}
         self.final_ts: str | None = None
 
     async def on_acknowledgment(self, phase: Acknowledgment) -> None:
@@ -410,8 +423,8 @@ class SlackTurnLifecycle(OutputGate):
             cancel_key = self._cancel_key
         else:
             cancel_key = self._status_ts
-        blocks = to_blocks(self._state, now=now, cancel_key=cancel_key)
-        text = to_fallback_text(self._state, now=now)
+        blocks = await self._untag_blocks(to_blocks(self._state, now=now, cancel_key=cancel_key))
+        text = await self._untag(to_fallback_text(self._state, now=now))
         rendered_json = (
             json.dumps({"blocks": blocks, "text": text})
             if initial and self._on_initial_progress is not None
@@ -552,6 +565,103 @@ class SlackTurnLifecycle(OutputGate):
             except Exception:
                 log.warning("turn.balance_footer_failed", exc_info=True)
 
+    async def _author_opted_out(self) -> bool:
+        """A person who asked never to be tagged gets the answer without the ping."""
+        if self._tenant_id is None:
+            return False
+        try:
+            skip = await tag_opt_outs(
+                self._sessionmaker,
+                tenant_id=self._tenant_id,
+                platform="slack",
+                user_ids=[self._author_id],
+            )
+        except Exception:  # named boundary: the answer still lands, just without a ping
+            log.warning("turn.opt_out_lookup_failed", exc_info=True)
+            return True
+        return bool(skip)
+
+    async def _untag(self, text: str) -> str:
+        """``text`` with every opted-out person's mention as a plain name."""
+        if self._tenant_id is None:
+            return text
+        new = [uid for uid in mentioned_user_ids(text, "slack") if uid not in self._opted_out]
+        unknown: frozenset[str] = frozenset()
+        if new:
+            try:
+                skip = await tag_opt_outs(
+                    self._sessionmaker, tenant_id=self._tenant_id, platform="slack", user_ids=new
+                )
+                self._opted_out.update({uid: uid in skip for uid in new})
+                self._opt_out_names.update(
+                    await opt_out_names(
+                        self._sessionmaker,
+                        tenant_id=self._tenant_id,
+                        platform="slack",
+                        user_ids=skip,
+                    )
+                )
+            except Exception:  # named boundary: unchecked people are named, not pinged
+                log.warning("turn.opt_out_lookup_failed", exc_info=True)
+                unknown = frozenset(new)
+        skip = unknown | {uid for uid, out in self._opted_out.items() if out}
+        return untag(text, "slack", skip, self._opt_out_names)
+
+    async def _cap_pings(self, text: str) -> str:
+        """``text`` with mentions past the people limit as plain names.
+
+        The author does not count. The limit is the configured one, or the people the
+        author approved on the turn's card if that is higher.
+        """
+        others = [u for u in mentioned_user_ids(text, "slack") if u != self._author_id]
+        cap = self._reply_people_cap
+        if cap is None or len(others) <= cap:
+            return text
+        origin_id = current_origin_id.get()
+        names: dict[str, str] = {}
+        if self._tenant_id is not None and self._sessionmaker is not None:
+            try:
+                if origin_id is not None:
+                    async with self._sessionmaker() as session:
+                        approved = await approved_people(
+                            session, tenant_id=self._tenant_id, turn_key=turn_tally_key(origin_id)
+                        )
+                    cap = max(cap, approved)
+                names = await opt_out_names(
+                    self._sessionmaker,
+                    tenant_id=self._tenant_id,
+                    platform="slack",
+                    user_ids=others[cap:],
+                )
+            except Exception:  # named boundary: the answer lands, extras named without a lookup
+                log.warning("turn.reply_people_lookup_failed", exc_info=True)
+        return untag(text, "slack", frozenset(others[cap:]), names)
+
+    async def _untag_blocks(self, blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """The card with opted-out mentions as plain names in every text it carries."""
+        # One lookup over the whole card fills the cache; the walk then reuses it.
+        if self._tenant_id is None:
+            return blocks
+        raw = json.dumps(blocks)
+        await self._untag(raw)
+        # A person the lookup could not check is treated as opted out, as in _untag.
+        skip = frozenset(
+            uid for uid in mentioned_user_ids(raw, "slack") if self._opted_out.get(uid, True)
+        )
+        if not skip:
+            return blocks
+
+        def walk(value: object) -> object:
+            if isinstance(value, str):
+                return untag(value, "slack", skip, self._opt_out_names)
+            if isinstance(value, list):
+                return [walk(item) for item in cast("list[object]", value)]
+            if isinstance(value, dict):
+                return {k: walk(v) for k, v in cast("dict[str, object]", value).items()}
+            return value
+
+        return cast("list[dict[str, Any]]", walk(blocks))
+
     async def _flush_terminal(
         self,
         fallback_text: str | None = None,
@@ -570,11 +680,13 @@ class SlackTurnLifecycle(OutputGate):
         whose product is this card: a tool-only turn has no answer to carry them.
         """
         self._terminal = True
-        blocks = to_blocks(
-            self._state,
-            now=self._clock(),
-            cancel_key=self._cancel_key,
-            answer_visible=answer_visible,
+        blocks = await self._untag_blocks(
+            to_blocks(
+                self._state,
+                now=self._clock(),
+                cancel_key=self._cancel_key,
+                answer_visible=answer_visible,
+            )
         )
         if feedback:
             blocks.append(self._feedback_block())
@@ -679,8 +791,10 @@ class SlackTurnLifecycle(OutputGate):
             final_response = extract_final_response(state.content)
             if final_response:
                 answer_parts.append(final_response)
-            final_text = "\n\n".join(answer_parts)
-            notify_on_completion = self._notify_on_completion and not cancelled
+            final_text = await self._cap_pings(await self._untag("\n\n".join(answer_parts)))
+            notify_on_completion = (
+                self._notify_on_completion and not cancelled and not await self._author_opted_out()
+            )
             if cancelled and not final_text:
                 await self._flush_cancelled()
                 self.final_ts = self._status_ts

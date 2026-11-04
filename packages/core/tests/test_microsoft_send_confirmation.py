@@ -58,6 +58,7 @@ def _deps(*, configured: bool, tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY)
 def test_turns_select_microsoft_send_only_when_configured() -> None:
     on = confirmed_tools_for_turn(_deps(configured=True))
     assert on - {
+        "approve_reach",
         "create_watch",
         "resume_watch",
         "rotate_watch_key",
@@ -70,6 +71,7 @@ def test_turns_select_microsoft_send_only_when_configured() -> None:
         _deps(configured=True, tool_safety=ToolSafetyPolicy(enabled=True))
     )
     assert safe - {
+        "approve_reach",
         "create_watch",
         "resume_watch",
         "rotate_watch_key",
@@ -83,6 +85,7 @@ def test_turns_select_microsoft_send_only_when_configured() -> None:
     }, "tool safety on: writes ask too"
     off = _deps(configured=False, tool_safety=ToolSafetyPolicy(enabled=True))
     assert confirmed_tools_for_turn(off) == {
+        "approve_reach",
         "create_watch",
         "resume_watch",
         "rotate_watch_key",

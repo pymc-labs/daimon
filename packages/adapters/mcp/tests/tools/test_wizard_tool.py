@@ -29,12 +29,15 @@ import pytest
 from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._outbound import turn_scope
 from daimon.adapters.mcp.tools.wizard import _STOP_SIGNAL, _post_wizard_impl
 from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
 from daimon.core.media.filenames import display_filename_for
+from daimon.core.outbound.reach import ReachPlan
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
 from daimon.core.stores.file_uploads import create_upload, store_upload_content
+from daimon.core.stores.reach_tallies import lock_tally
 from daimon.core.stores.wizard_session import (
     count_wizard_sessions_for_platform_user,
     get_wizard_session,
@@ -61,6 +64,8 @@ _VIEW_CHANNEL = 1 << 10
 _SEND_MESSAGES = 1 << 11
 
 _SHORT_ID_RE = re.compile(r"wz:([A-Za-z0-9]{8}):")
+
+_ONE_PLACE = ReachPlan(threads=0, places=1, people=0)
 
 
 def _runtime(
@@ -277,6 +282,7 @@ async def test_post_wizard_returns_the_stop_signal(
         prompt="Configure the pipeline",
         steps=[_one_choice_step()],
         channel_id="222",
+        plan=_ONE_PLACE,
     )
     assert result == _STOP_SIGNAL, "the tool must return exactly the module's stop-signal constant"
     assert "end your reply" in result.lower(), (
@@ -307,6 +313,7 @@ async def test_post_wizard_stores_the_form_with_its_message_id(
         prompt="Configure the pipeline",
         steps=[_one_choice_step()],
         channel_id="222",
+        plan=_ONE_PLACE,
     )
 
     short_id = _short_id_from_posted(posted)
@@ -389,6 +396,7 @@ async def test_post_wizard_persists_a_content_address_for_every_step_image(
             _one_choice_step(key="region", image_handle=handle2_id),
         ],
         channel_id="222",
+        plan=_ONE_PLACE,
     )
 
     short_id = _short_id_from_posted(posted)
@@ -444,6 +452,7 @@ async def test_post_wizard_expiry_follows_the_image_signature(
         prompt="Configure the pipeline",
         steps=[_one_choice_step(image_handle=handle_id)],
         channel_id="222",
+        plan=_ONE_PLACE,
     )
 
     short_id = _short_id_from_posted(posted)
@@ -472,6 +481,7 @@ async def test_post_wizard_expiry_defaults_with_no_images(
         prompt="Configure the pipeline",
         steps=[_one_choice_step()],
         channel_id="222",
+        plan=_ONE_PLACE,
     )
 
     short_id = _short_id_from_posted(posted)
@@ -504,6 +514,7 @@ async def test_post_wizard_strips_a_caller_supplied_image_url(
         prompt="Configure the pipeline",
         steps=[_one_choice_step(image_url="https://evil.example.com/x.png")],
         channel_id="222",
+        plan=_ONE_PLACE,
     )
 
     short_id = _short_id_from_posted(posted)
@@ -538,6 +549,7 @@ async def test_post_wizard_rejects_an_over_ceiling_form(
             prompt="Configure the pipeline",
             steps=[step],
             channel_id="222",
+            plan=_ONE_PLACE,
         )
     assert "too_many" in str(excinfo.value), "the error must name the offending step's key"
 
@@ -580,6 +592,7 @@ async def test_post_wizard_writes_no_row_when_the_post_fails(
             prompt="Configure the pipeline",
             steps=[_one_choice_step()],
             channel_id="222",
+            plan=_ONE_PLACE,
         )
 
     assert (
@@ -606,4 +619,113 @@ async def test_post_wizard_refuses_on_slack(
             prompt="Configure the pipeline",
             steps=[_one_choice_step()],
             channel_id="222",
+            plan=_ONE_PLACE,
         )
+
+
+async def test_post_wizard_names_its_requester_and_counts_toward_reach(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A form is a post like any other: it says who asked, and past the limit it is refused."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    auth = _auth_identity(tenant_id=tenant.id, account_id=account.id)
+    posted: dict[str, Any] = {}
+    patch_discord_http(monkeypatch, _happy_path_handler(posted, message_id="9303"))
+    runtime = _runtime(committing_sessionmaker)
+
+    await _post_wizard_impl(
+        runtime,
+        auth,
+        prompt="Configure <@7>'s pipeline",
+        steps=[_one_choice_step()],
+        channel_id="222",
+        plan=ReachPlan(threads=0, places=1, people=1),
+    )
+    row = await get_wizard_session(db_session, short_id=_short_id_from_posted(posted))
+    for channel_id in ("333", "444"):
+        posted.clear()
+        try:
+            await _post_wizard_impl(
+                runtime,
+                auth,
+                prompt="Again <@8>",
+                steps=[_one_choice_step()],
+                channel_id=channel_id,
+                plan=ReachPlan(threads=0, places=0, people=0),
+            )
+        except ToolError as refused:
+            assert channel_id == "444", f"only the third place is past the limit: {refused}"
+        else:
+            assert channel_id == "333", "a third place must be refused"
+
+    assert row is not None, "the first form posted"
+    assert row.spec["prompt"].endswith("\n-# requested by <@42>"), "the form credits its asker"
+
+
+async def test_post_wizard_when_attributed_prompt_too_long_then_refused_and_counts_nothing(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The attribution line can push a form elsewhere over its limit; that refusal counts
+    no reach. The requester's own DM carries no line, so the same form posts there."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    auth = _auth_identity(tenant_id=tenant.id, account_id=account.id)
+    patch_discord_http(monkeypatch, _happy_path_handler({}, message_id="9304"))
+    runtime = _runtime(committing_sessionmaker)
+
+    # Fits on its own, not once "requested by" is appended.
+    prompt = "<@7> " + "x" * 3950
+    with pytest.raises(ToolError, match="head text"):
+        await _post_wizard_impl(
+            runtime,
+            auth,
+            prompt=prompt,
+            steps=[_one_choice_step()],
+            channel_id="222",
+            plan=ReachPlan(threads=0, places=1, people=1),
+        )
+
+    scope = await turn_scope(runtime, auth)
+    async with committing_sessionmaker.begin() as session:
+        tally, _ = await lock_tally(session, tenant_id=tenant.id, turn_key=scope.key)
+    assert tally.people == frozenset(), "a refused form tags nobody"
+    assert tally.threads == 0 and not tally.places, "and reaches nowhere"
+    await _post_wizard_impl(
+        runtime, auth, prompt=prompt, steps=[_one_choice_step()], channel_id="42"
+    )
+
+
+async def test_post_wizard_when_prompt_tags_someone_then_no_people_counted(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A form goes out with mentions suppressed, so a tag in it reaches no one."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    auth = _auth_identity(tenant_id=tenant.id, account_id=account.id)
+    patch_discord_http(monkeypatch, _happy_path_handler({}, message_id="9305"))
+    runtime = _runtime(committing_sessionmaker)
+
+    await _post_wizard_impl(
+        runtime,
+        auth,
+        prompt="Configure <@7>'s pipeline",
+        steps=[_one_choice_step()],
+        channel_id="222",
+        plan=ReachPlan(threads=0, places=1, people=0),
+    )
+
+    scope = await turn_scope(runtime, auth)
+    async with committing_sessionmaker.begin() as session:
+        tally, _ = await lock_tally(session, tenant_id=tenant.id, turn_key=scope.key)
+    assert tally.people == frozenset(), "nobody was pinged, so nobody is counted"
+    assert tally.places == frozenset({"222"}), "the place still counts"

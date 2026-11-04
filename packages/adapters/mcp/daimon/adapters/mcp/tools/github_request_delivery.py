@@ -9,6 +9,8 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.discord._client import rest_client
 from daimon.adapters.mcp.tools.slack._client import slack_web_client
 from daimon.core.github_request_cards import RequestCard, slack_mrkdwn_escape
+from daimon.core.outbound.mentions import untag
+from daimon.core.outbound.opt_out import opt_out_names, tag_opt_outs
 from daimon.core.stores.github_access_requests import (
     get_delivery,
     lock_delivery_slot,
@@ -90,12 +92,35 @@ async def deliver_shared_admin_card(
             and await shared_card_mention_allowed(session, request=request)
         )
         title = f"{request.agent_name} needs GitHub access to continue."
+        # Admins who asked never to be tagged are named, not pinged.
+        skip = (
+            await tag_opt_outs(
+                runtime.session_factory,
+                tenant_id=tenant_id,
+                platform=platform,
+                user_ids=admin_user_ids,
+            )
+            if mention
+            else frozenset[str]()
+        )
+        names = await opt_out_names(
+            runtime.session_factory, tenant_id=tenant_id, platform=platform, user_ids=skip
+        )
         try:
             if platform == "discord":
                 if runtime.settings.discord is None:
                     return False
-                ids = [int(user_id) for user_id in admin_user_ids] if mention else []
-                content = " ".join(f"<@{user_id}>" for user_id in ids) if mention else None
+                ids = [int(user_id) for user_id in admin_user_ids if user_id not in skip]
+                content = (
+                    untag(
+                        " ".join(f"<@{user_id}>" for user_id in admin_user_ids),
+                        "discord",
+                        skip,
+                        names,
+                    )
+                    if mention
+                    else None
+                )
                 view = discord.ui.View(timeout=None)
                 view.add_item(
                     discord.ui.Button(
@@ -133,7 +158,14 @@ async def deliver_shared_admin_card(
             elif platform == "slack":
                 client = await slack_web_client(runtime, team_id=workspace_id)
                 mentions = (
-                    " ".join(f"<@{user_id}>" for user_id in admin_user_ids) if mention else ""
+                    untag(
+                        " ".join(f"<@{user_id}>" for user_id in admin_user_ids),
+                        "slack",
+                        skip,
+                        names,
+                    )
+                    if mention
+                    else ""
                 )
                 text = f"{slack_mrkdwn_escape(title)} {mentions}".strip()
                 blocks = [

@@ -362,7 +362,7 @@ def adapter(client, script: Script, replay: Replay | None = None) -> DefaultCapa
                     ("agent", "ag_f1"),
                     ("session", "sess_f1"),
                     ("environment", "env_f1"),
-                    *(("skill", f"skill_f1_{i}") for i in range(11)),
+                    *(("skill", f"skill_f1_{i}") for i in range(12)),
                 }
             ),
         ),
@@ -422,7 +422,7 @@ async def test_scripted_default_agent_turn_and_repeatable_normalized_replay(tmp_
                 path, expected, partial(adapter, client, script)
             )
         assert result.status == "pass", result.evidence
-        assert len(script.requests) == 25  # 11 uploads/readbacks + agent create/get + session.
+        assert len(script.requests) == 27  # 12 uploads/readbacks + agent create/get + session.
         script.assert_consumed()
 
 

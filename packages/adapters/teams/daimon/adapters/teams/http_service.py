@@ -65,6 +65,7 @@ from daimon.adapters.teams.wizard import TeamsWizards
 from daimon.core.config import TeamsSettings
 from daimon.core.logging_setup import mark_shutting_down
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.outbound.opt_out import tag_opt_outs
 from daimon.core.posted_controls.teams_card import CREDENTIAL_DIALOG
 from daimon.core.stores.domain import TeamsChannelSubscriptionRow, TeamsInstallationRow
 from daimon.core.stores.teams_channel_subscriptions import get_teams_channel_subscription
@@ -362,7 +363,17 @@ def create_teams_http_service(
     homes = ChannelHomes(
         installed_teams, billing_panel.sdk_team_channels(teams_app), stored_group=stored_group
     )
-    feed = ActivityFeed(graph, homes, entra_tenant_id=settings.tenant_id, spawn=spawn)
+
+    async def never_tag(user_id: str) -> bool:
+        return bool(
+            await tag_opt_outs(
+                runtime.sessionmaker, tenant_id=teams_tenant, platform="teams", user_ids=[user_id]
+            )
+        )
+
+    feed = ActivityFeed(
+        graph, homes, entra_tenant_id=settings.tenant_id, spawn=spawn, opted_out=never_tag
+    )
 
     async def catch_up_messages(source: GraphSource, messages: list[GraphMessage]) -> None:
         await turns.catch_up_graph_messages(source, messages)  # Built below.

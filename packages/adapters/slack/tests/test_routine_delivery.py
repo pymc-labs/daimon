@@ -15,6 +15,8 @@ from daimon.core.agent_identity import AgentIdentity
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import RoutineRow
+from daimon.core.stores.identity import get_or_create_platform_principal
+from daimon.core.stores.platform_names import KnownName, upsert_user_names
 from daimon.core.stores.routines import create_routine
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.testing.factories import make_tenant
@@ -417,7 +419,11 @@ async def test_long_routine_delivers_every_word_to_thread_or_creator(
     assert outcome.status == "delivered"
     calls = client.chat_postMessage.await_args_list
     assert len(calls) > 1 and all(len(call.kwargs["text"]) <= 11800 for call in calls)
-    assert "".join(call.kwargs["text"] for call in calls).split("\n\n")[-1] == result
+    assert (
+        "".join(call.kwargs["text"] for call in calls).split("\n\n")[-1]
+        # The creator's own DM needs no line naming who asked.
+        == (result if fallback else f'{result}\nfrom the routine "daimon"')
+    )
     expected_channel = "D_CREATOR" if fallback else "C1"
     assert all(call.kwargs["channel"] == expected_channel for call in calls)
     if not fallback:
@@ -638,3 +644,28 @@ async def test_a_shared_channels_routine_never_leaves_it_by_dm(
 
     assert (outcome.status, outcome.note) == ("skipped", "destination_unavailable")
     client.conversations_open.assert_not_awaited()
+
+
+async def test_routine_post_names_its_creator_by_stored_name(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Slack tag would ping, so the creator is credited by the name Daimon stored."""
+    row = await _routine(db_session, kind="thread", destination_id="C1:1717.5")
+    await get_or_create_platform_principal(
+        db_session, tenant_id=row.tenant_id, platform="slack", external_id="U1"
+    )
+    await upsert_user_names(
+        db_session,
+        tenant_id=row.tenant_id,
+        platform="slack",
+        names={"U1": KnownName(display_name="Ann")},
+    )
+    await db_session.commit()
+    post, client = _poster(db_session_factory, monkeypatch)
+
+    await post(row)
+
+    (call,) = client.chat_postMessage.await_args_list
+    assert call.kwargs["text"].endswith("\nrequested by Ann"), "credited by name, never tagged"

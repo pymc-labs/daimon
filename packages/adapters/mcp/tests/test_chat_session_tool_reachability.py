@@ -45,7 +45,11 @@ from daimon.core.config import (
     TurnSettings,
 )
 from daimon.core.mcp_auth import mint_chat_mcp_token, mint_jwt
-from daimon.core.tool_safety import backend_switch_tools, microsoft_send_tools
+from daimon.core.tool_safety import (
+    REACH_APPROVAL_TOOLS,
+    backend_switch_tools,
+    microsoft_send_tools,
+)
 from daimon.testing.asgi import mcp_session
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from daimon.testing.ma_models import ma_agent
@@ -367,5 +371,7 @@ async def test_chat_execution_identity_preserves_exact_tools_list(
             - backend_switch_tools(enabled=True)
             - microsoft_send_tools(enabled=True, tool_safety_on=True)
             - {"set_routine_sandbox_tools"}
+            # Posting tools are for platform-bound callers; this token has none.
+            - REACH_APPROVAL_TOOLS
         ),
     }

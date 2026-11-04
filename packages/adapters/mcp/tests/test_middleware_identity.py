@@ -1426,6 +1426,7 @@ async def test_selfhosted_mcp_dispatch_blocks_legacy_helpers_and_preserves_neutr
             http.get(  # pyright: ignore[reportUnknownMemberType]
                 re.compile(r"https://slack\.com/api/users\.info.*"),
                 payload={"ok": True, "user": {"id": "U_CALLER", "is_restricted": False}},
+                repeat=True,  # the access check and the attribution name both look it up
             )
             http.post(  # pyright: ignore[reportUnknownMemberType]
                 "https://slack.com/api/chat.postMessage",
@@ -1444,7 +1445,12 @@ async def test_selfhosted_mcp_dispatch_blocks_legacy_helpers_and_preserves_neutr
                 re.compile(r"https://slack\.com/api/files\.completeUploadExternal.*"),
                 payload={"ok": True, "files": [{"id": "F_REPORT"}]},
             )
-            arguments = {"channel_id": "C1", "content": "requested report", "file_handles": handles}
+            arguments = {
+                "channel_id": "C1",
+                "content": "requested report",
+                "file_handles": handles,
+                "plan": {"threads": 0, "places": 1, "people": 0},
+            }
             if rule == "denied":
                 with pytest.raises(ToolError, match="only in certain channels"):
                     await client.call_tool("send_message", arguments)
@@ -1453,7 +1459,9 @@ async def test_selfhosted_mcp_dispatch_blocks_legacy_helpers_and_preserves_neutr
                 result = await client.call_tool("send_message", arguments)
                 assert "1700000001.000100" in str(result.data)
                 post = http.requests[("POST", URL("https://slack.com/api/chat.postMessage"))][0]
-                assert post.kwargs["json"]["text"] == "requested report"  # pyright: ignore[reportUnknownMemberType]
+                assert post.kwargs["json"]["text"] == "requested report\nrequested by someone", (  # pyright: ignore[reportUnknownMemberType]
+                    "a post outside the requester's conversation says who asked"
+                )
                 assert "username" not in post.kwargs["json"]  # pyright: ignore[reportUnknownMemberType]
                 if with_file:
                     uploaded = http.requests[("POST", URL("https://files.slack.com/upload/test"))][

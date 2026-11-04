@@ -15,6 +15,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   agent's owner or a server admin can connect GitHub, pick or clear the working repo, take a repo
   off the agent and resync its repo skills now. Each change is audited like the chat tools.
 
+- **The agent posts for other people more carefully, and anyone can ask never to be tagged.**
+  Mentions of everyone, here, roles and groups no longer go out live on any platform, and
+  posts made for someone say who asked for them. One request that opens several threads,
+  posts in several places or tags many people now shows the requester an approval card
+  first, with limits an operator can change (`DAIMON_OUTBOUND__*`). `send_message` takes a
+  batch, so a request can go out in one call. A person can ask the agent to never tag them
+  with the new `set_never_tag` tool: their mentions turn into plain names in replies,
+  routines, tool posts, direct messages, cards and completion pings, they count toward no
+  limit, and the setting follows them through privacy export and erasure. The seeded agent
+  gains a short prompt block and a `team-etiquette` skill covering threads, routines and
+  shared media. Slack posts resolve names through a cache, so mentions cost fewer calls.
+
 - **The web app signs in with Slack and Microsoft again, besides Discord.** Each shows on the sign-in page once its login app is set (`DAIMON_HUB__SLACK_*`, `DAIMON_MICROSOFT_ACCOUNTS__*`); register `<web public url>/auth/slack/callback` and `/auth/microsoft/callback` on it. A signed-in member connects the other two from the account menu (see below).
 
 - **The web app remembers connected accounts.** A member signs in with one chat account, connects others from the account menu, and the workspace switcher lists the workspaces of all of them. A later sign-in with any connected account, on any device, shows them all while each was proven within 30 days; an older one returns when it signs in again. Profile lists the connected accounts and disconnects one (not the one signed in with). Guests cannot connect.

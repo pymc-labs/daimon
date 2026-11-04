@@ -499,7 +499,7 @@ async def test_full_default_public_switch_real_factory_and_authenticated_session
 ):
     request, plan, canonical, wire, token, *_ = full_openai
     assert canonical.target_spec.declared_drops == ("memory",)
-    assert len(canonical.target_spec.skills) == 11
+    assert len(canonical.target_spec.skills) == 12
     assert tuple(tool.name for tool in canonical.target_spec.tools) == ("bash",)
     assert any(len(body) > 2_000_000 for body in wire.skills.values())
     runtime = build_openai_runtime(canonical)
@@ -537,7 +537,7 @@ async def test_full_default_public_switch_real_factory_and_authenticated_session
         assert outcome.state.error is None and not outcome.recovered
     assert len(wire.posts) == 1
     body = wire.posts[0]
-    assert len(body["environment"]["skills"]) == 11
+    assert len(body["environment"]["skills"]) == 12
     mcp = body["agent"]["tools"][0]
     import jwt
 
@@ -657,7 +657,7 @@ async def test_confirmation_gated_mcp_tool_is_declared_without_losing_siblings(f
     target = canonical.target_spec
     assert target.declared_drops == ("mcp_tool:daimon-mcp:add_skill", "memory")
     assert "mcp_tool:daimon-mcp:add_skill" in target.system
-    assert len(target.skills) == 11
+    assert len(target.skills) == 12
     assert target.mcp_servers[0].tool_policy["allowed_tools"] == ["search_tools", "call_tool"]
     assert wire.agent["tools"][-1]["allowed_tools"] == ["search_tools", "call_tool"]
     # Exact captured evidence alone cannot waive this loss: explicit consent
@@ -752,7 +752,7 @@ async def test_live_native_defaults_drop_gated_tools_and_preserve_siblings(full_
     request, _, canonical, wire, *_ = full_openai
     target = canonical.target_spec
     assert {tool.name for tool in target.tools} == {"bash", "web_search"}
-    assert len(target.skills) == 11
+    assert len(target.skills) == 12
     assert target.declared_drops == (
         "builtin_tool:web_fetch",
         "mcp_tool:daimon-mcp:add_skill",
@@ -1023,7 +1023,7 @@ async def test_live_native_defaults_declare_only_fetch_loss_and_preserve_sibling
     request, _, canonical, wire, *_ = full_openai
     target = canonical.target_spec
     assert {tool.name for tool in target.tools} == {"bash", "web_search"}
-    assert len(target.skills) == 11
+    assert len(target.skills) == 12
     assert target.declared_drops == (
         "builtin_tool:web_fetch",
         "mcp_tool:daimon-mcp:add_skill",

@@ -171,10 +171,9 @@ skipped as `agent_posted`. Otherwise the chat adapter for the tenant's platform
 posts it, in chunks that keep code fences intact. The post reads `Result from
 <agent>'s daily routine at 09:00 UTC:` followed by the result.
 
-Delivery is at most once, and it checks before it sends:
+Delivery is at most once and checks first:
 
-- **Newest only.** A new run replaces a result still queued, so a backlog never
-  posts stale results.
+- **Newest only.** A new run replaces a queued result, so no backlog posts.
 - **Creator first.** If the access policy cannot be read, or the creator may no
   longer invoke the agent (admins pass unless the admin bypass is off),
   nothing is sent anywhere.
@@ -191,9 +190,10 @@ Delivery is at most once, and it checks before it sends:
 - **No broadcasts.** Mentions are disabled on Discord, and `<!channel>` stays
   literal on Slack. On Teams, a post also sends the creator one activity feed
   notice.
+- **Never tag me.** Someone who opted out shows as a plain name and gets no
+  Teams notice.
 
-An expired claim is not posted again, as the poster may have posted already. A poster that raises is not retried, though a platform
-SDK may retry a single send itself. An empty result is skipped. With [agent identity](agent-identity.md) on, Slack and Discord post as
+An expired claim is not posted again, as the poster may have posted already. A raising poster is not retried. An empty result is skipped. With [agent identity](agent-identity.md) on, Slack and Discord post as
 the agent. On Discord a reply to any delivered message starts a turn.
 
 ### Generated files

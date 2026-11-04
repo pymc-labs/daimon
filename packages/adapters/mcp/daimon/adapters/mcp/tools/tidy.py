@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._outbound import render_edit
 from daimon.adapters.mcp.tools._tidy import TidyResult
 from daimon.adapters.mcp.tools.discord._tidy import (
     _archive_thread_impl,  # pyright: ignore[reportPrivateUsage]
@@ -56,7 +57,9 @@ def register_tidy_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         escalation channel.
         """
         auth = await _auth(ctx)
-        content = scrub_other_platforms(content, auth.platform)
+        content = await render_edit(
+            runtime, auth, scrub_other_platforms(content, auth.platform), place=channel_id
+        )
         if auth.platform == "teams":
             return await _teams_edit_message_impl(
                 runtime,

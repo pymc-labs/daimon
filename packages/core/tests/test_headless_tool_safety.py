@@ -410,6 +410,7 @@ async def test_a_session_for_an_agent_with_daimon_rules_asks_on_call_tool_and_th
     # Enrollment requires a person's card independently of agent-specific rules.
     assert asked == [
         "add_skill",
+        "approve_reach",
         "call_tool",
         "create_watch",
         "fly_extend_session",
@@ -433,6 +434,7 @@ async def test_a_session_for_an_agent_without_daimon_rules_is_exactly_as_before(
     (daimon,) = [t for t in without["tools"] if t.get("mcp_server_name") == "daimon-mcp"]
     assert [c["name"] for c in daimon["configs"]] == [
         "add_skill",
+        "approve_reach",
         "create_watch",
         "fly_extend_session",
         "fly_launch_session",

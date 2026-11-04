@@ -82,6 +82,7 @@ from daimon.adapters.mcp.tools.media import register_media_tools, register_uploa
 from daimon.adapters.mcp.tools.microsoft._access import MicrosoftGraph
 from daimon.adapters.mcp.tools.microsoft.register import register_microsoft_tools
 from daimon.adapters.mcp.tools.models import register_model_tools
+from daimon.adapters.mcp.tools.never_tag import register_never_tag_tools
 from daimon.adapters.mcp.tools.notebook import register_notebook_tools
 from daimon.adapters.mcp.tools.plain_text_mentions import register_plain_text_mentions_tools
 from daimon.adapters.mcp.tools.progress_plans import register_progress_plan_tools
@@ -547,6 +548,7 @@ def create_mcp_app(
     register_progress_plan_tools(mcp, runtime)  # the plan on the progress card, and its switch
     register_plain_text_mentions_tools(mcp, runtime)  # typed "@<name>" starts a turn
     register_cost_footer_tools(mcp, runtime)  # the line under each finished answer
+    register_never_tag_tools(mcp, runtime)  # a person opts out of being tagged
     register_channel_budget_tools(mcp, runtime)  # per-channel spend budgets
     register_channel_skill_tools(mcp, runtime)  # per-channel extra skills
     register_agent_tool_rule_tools(mcp, runtime)

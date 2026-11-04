@@ -296,6 +296,7 @@ source_modules = [
     "daimon.core.operation_policy",
     "daimon.core.operator_tokens",
     "daimon.core.security_audit",
+    "daimon.core.outbound",
     "daimon.core.output_delivery",
     "daimon.core.outsiders",
     "daimon.core.panel_audit",

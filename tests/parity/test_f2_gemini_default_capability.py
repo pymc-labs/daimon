@@ -329,9 +329,9 @@ async def test_f2_gemini_default_capabilities_through_real_loopback(
                     1 if mode == "valid" else 0
                 )
                 sources = object_value(body["environment"])["sources"]
-                assert isinstance(sources, list) and len(sources) == 11
+                assert isinstance(sources, list) and len(sources) == 12
                 pins = evidence.deployed_agent.skills
-                assert pins is not None and len(pins) == 11
+                assert pins is not None and len(pins) == 12
                 for mounted, named, pin in zip(sources, authored.skills, pins, strict=True):
                     source = object_value(mounted)
                     uri = source["source"]
@@ -421,7 +421,7 @@ async def test_f2_gemini_default_capabilities_through_real_loopback(
                     )
                     assert result.status == ("pass" if mode == "valid" else "fail"), result.evidence
                     assert evidence.skill_uploads == tuple(s.upload for s in authored.skills)
-                    assert len(evidence.deployed_agent.skills or ()) == 11
+                    assert len(evidence.deployed_agent.skills or ()) == 12
                     if mode == "valid":
                         assert gate_statuses == [200, 200, 200]
                         assert len(resolutions) == 2  # port admission + exact SDK dispatch

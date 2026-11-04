@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 178 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 180 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -156,6 +156,7 @@ Shared channel MCP tools with per-platform dispatch.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
+| `approve_reach` | Discord callers, Slack callers, Teams callers | Ask the person on a card before posting more widely than the turn's limit. |
 | `create_thread` | Discord callers, Slack callers, Teams callers | Create a new thread and post content as its first message. |
 | `get_message` | Discord callers, Slack callers, Teams callers | Fetch a single message by channel and message id. |
 | `list_channels` | Discord callers, Slack callers, Teams callers | List the channels here that you can view. |
@@ -341,6 +342,14 @@ Register connect_microsoft and the Microsoft Graph tools (Teams only).
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `list_models` | all callers | List the models an agent here can run on: plain name, id, provider and list price. |
+
+## `never_tag`
+
+Never-tag tool: a person asks that Daimon never pings them, on any platform.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `set_never_tag` | Discord callers, Slack callers, Teams callers | Stop or resume Daimon tagging the person who is asking, only for themselves. |
 
 ## `notebook`
 
