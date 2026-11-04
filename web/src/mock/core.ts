@@ -11,8 +11,12 @@ export const coreHandlers = [
     return m ? HttpResponse.json(m) : unauthorized()
   }),
   http.get("/auth/providers", () => HttpResponse.json([
-    { id: "discord", label: "Discord", kind: "dev" },
+    { id: "discord", label: "Discord", kind: "redirect" },
+    { id: "slack", label: "Slack", kind: "redirect" },
+    { id: "microsoft", label: "Microsoft", kind: "redirect" },
   ])),
+  // A link has no upstream to visit in the demo: come straight back.
+  http.post("/auth/:provider/link", () => HttpResponse.json({ url: "/chat" })),
   // Every provider signs in the same demo admin; the dev panel passes `email` to switch people.
   http.post("/auth/mock", async ({ request }) => {
     const { email } = (await request.json()) as { email?: string }

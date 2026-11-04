@@ -10,6 +10,8 @@ import type { Me, Provider } from "@/lib/types"
 import { safeNext } from "@/lib/safe-next"
 import { Card } from "./Card"
 
+const MOCK = import.meta.env.MODE === "mock"
+
 /** After sign-in: pick a workspace when there is more than one. */
 async function landing(next: string) {
   const me = await api.get<Me>("/api/me")
@@ -28,7 +30,7 @@ export function SignIn() {
     meta: { inline: true },
   })
   const go = (p: Provider) => {
-    if (p.kind === "dev") dev.mutate(p.id)
+    if (p.kind === "dev" || MOCK) dev.mutate(p.id)
     else window.location.assign(`/auth/${p.id}/start?next=${encodeURIComponent(next)}`)
   }
   const error = params.get("error") ?? (dev.error instanceof ApiError ? dev.error.message : null)
