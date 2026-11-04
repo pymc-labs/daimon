@@ -98,9 +98,7 @@ def agent_github_router(runtime: WebRuntime) -> APIRouter:
                     app_private_key=settings.github_app.private_key,
                     max_tarball_bytes=settings.github.max_tarball_bytes,
                     max_tarball_decompressed_bytes=settings.github.max_tarball_decompressed_bytes,
-                    now=runtime.now(),
                 ),
-                in_flight=runtime.github_resyncs,
                 audited=recorded(runtime, caller, "Resynced repo skills"),
             )
         except AgentEditError as exc:

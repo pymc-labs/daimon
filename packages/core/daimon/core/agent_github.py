@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Collection, Mapping, MutableSet, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
@@ -36,6 +36,7 @@ from daimon.core.ma_resolver import list_skills_lenient_cached
 from daimon.core.mux_compat import list_skill_versions
 from daimon.core.skill_library import SyncedSkill, github_url_of
 from daimon.core.skill_sync.orchestrator import SyncReport, sync_agent_skills
+from daimon.core.skill_sync.resync_lock import hold_resync_locks
 from daimon.core.specs import SkillRepo
 from daimon.core.stores.domain import GitHubPushResyncRow, UserSkillRow
 from daimon.core.stores.github_access import (
@@ -154,7 +155,6 @@ class SkillResyncDeps:
     app_private_key: SecretStr | None
     max_tarball_bytes: int
     max_tarball_decompressed_bytes: int
-    now: datetime
 
 
 # ---- pure assembly -------------------------------------------------------------
@@ -665,25 +665,19 @@ async def remove_repo(
     return await _panel(deps, actor, target, configured=configured)
 
 
-async def _running(session: AsyncSession, sources: Collection[RepoSource], now: datetime) -> bool:
-    row = await get_latest_for_repo_refs(
-        session,
-        repo_refs={(s.repo, f"refs/heads/{s.branch}") for s in sources},
-        states=("running",),
-    )
-    return row is not None and row.lease_expires_at is not None and row.lease_expires_at > now
-
-
 async def resync(
     deps: AgentEditDeps,
     *,
     actor: AgentActor,
     ma_agent_id: str,
     sync: SkillResyncDeps,
-    in_flight: MutableSet[uuid.UUID],
     audited: ChangeRecorder | None = None,
 ) -> ResyncResults:
-    """Sync the agent's repo skills now from their recorded sources; a no-op change is skipped."""
+    """Sync the agent's repo skills now from their recorded sources; a no-op change is skipped.
+
+    Holds each source's push-queue lock throughout, so a push sync or another
+    manual one of the same branch, in any process, gets a conflict instead.
+    """
     target = await _managed_target(deps, actor, ma_agent_id)
     app_id, app_key = sync.app_id, sync.app_private_key
     if app_id is None or app_key is None:
@@ -694,20 +688,17 @@ async def resync(
             session, tenant_id=actor.tenant_id, agent_name=agent_name
         )
         sources = repo_sources(target.agent, rows, target.agent_id)
-        busy = await _running(session, sources, sync.now)
-    if busy or target.agent_id in in_flight:
-        raise AgentEditError("A sync is running. Try again when it ends.", kind="conflict")
-    in_flight.add(target.agent_id)
     results: list[SyncedSkill] = []
-    try:
+    refs = {(s.repo, f"refs/heads/{s.branch}") for s in sources}
+    async with hold_resync_locks(deps.session_factory, refs) as free:
+        if not free:
+            raise AgentEditError("A sync is running. Try again when it ends.", kind="conflict")
         for source in sources:
             results.extend(
                 await _resync_one(
                     deps, actor, target, source, sync, agent_name, app=(app_id, app_key)
                 )
             )
-    finally:
-        in_flight.discard(target.agent_id)
     async with deps.session_factory() as session, session.begin():
         await _audit(
             session,

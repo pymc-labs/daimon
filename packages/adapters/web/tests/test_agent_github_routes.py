@@ -4,20 +4,20 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import timedelta
 from typing import Any
 
 import httpx
 from cryptography.fernet import Fernet
 from daimon.core.config import Settings
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.stores import github_access, github_push_resync, security_audit
+from daimon.core.skill_sync.resync_lock import resync_lock_key
+from daimon.core.stores import github_access, security_audit
 from daimon.core.stores.user_skills import upsert_user_skill
 from daimon.testing.factories import make_github_app_installation, make_tenant_github_repo
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from .agent_support import (
-    NOW,
     OWN,
     agent_client,
     agent_people,
@@ -83,8 +83,10 @@ async def _repos(
             )
 
 
-async def _repo_skill(factory: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID) -> None:
-    """Record the attached skill as synced from acme/skills on main."""
+async def _repo_skill(
+    factory: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, *, url: str = URL
+) -> None:
+    """Record the attached skill as synced from `url` (acme/skills) on main."""
     async with factory.begin() as db:
         await upsert_user_skill(
             db,
@@ -92,7 +94,7 @@ async def _repo_skill(factory: async_sessionmaker[AsyncSession], tenant_id: uuid
             principal_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_w"),
             agent_name="helper",
             name="deploy",
-            source_repo_url=URL,
+            source_repo_url=url,
             source_repo_branch="main",
             source_path="skills",
             content_hash="h1",
@@ -261,10 +263,10 @@ async def test_actions_when_not_manager_then_403(
     assert [r.status_code for r in replies] == [403, 403, 403], [r.text for r in replies]
 
 
-async def test_resync_when_unconfigured_running_or_no_grant_then_refuses_or_skips(
+async def test_resync_when_unconfigured_or_no_grant_then_refuses_or_skips(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    """Resync needs the App, refuses while a push sync runs and skips a repo without a grant."""
+    """Resync needs the App and skips a repo the agent has no grant for."""
     agents, owner, _other = await agent_people(db_session, skills=[SKILL])
     token = await sign_in_token(db_session_factory, owner)
     async with agent_client(agents, owner.tenant_id, db_session_factory, token) as client:
@@ -278,19 +280,6 @@ async def test_resync_when_unconfigured_running_or_no_grant_then_refuses_or_skip
         agents, owner.tenant_id, db_session_factory, token, settings=_configured()
     ) as client:
         skipped = await client.post("/api/agents/ag_w/github/resync", headers=OWN)
-    async with db_session_factory.begin() as db:
-        await github_push_resync.enqueue(
-            db, repo_full_name="acme/skills", ref="refs/heads/main", delivery_id="d1"
-        )
-        claimed = await github_push_resync.claim_due(
-            db, lease_owner=uuid.uuid4(), lease_for=timedelta(minutes=5), now=NOW
-        )
-    assert claimed is not None, "the push job should be claimed"
-    async with agent_client(
-        agents, owner.tenant_id, db_session_factory, token, settings=_configured()
-    ) as client:
-        busy = await client.post("/api/agents/ag_w/github/resync", headers=OWN)
-        panel = await client.get("/api/agents/ag_w/github")
     assert unconfigured.status_code == 409, unconfigured.text
     assert empty.json() == {"results": []}, "no repo skills means nothing to sync"
     assert skipped.json()["results"] == [
@@ -300,6 +289,36 @@ async def test_resync_when_unconfigured_running_or_no_grant_then_refuses_or_skip
             "detail": "This agent has no access to the repo.",
         }
     ], skipped.text
-    assert busy.status_code == 409, "a running push sync blocks a manual one"
-    assert panel.json()["sync"]["state"] == "running", "the panel shows the running sync"
     assert "github_resync" in await _tools(db_session_factory, owner.tenant_id), "audited"
+
+
+async def test_resync_when_source_lock_held_elsewhere_then_409(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    db_engine: AsyncEngine,
+) -> None:
+    """A push job or another worker holding the source's lock turns a resync away."""
+    agents, owner, _other = await agent_people(db_session, skills=[SKILL])
+    # A repo name of this test's own: advisory locks span the whole database.
+    repo = f"acme/held-{uuid.uuid4().hex[:8]}"
+    await _repo_skill(db_session_factory, owner.tenant_id, url=f"https://github.com/{repo}")
+    token = await sign_in_token(db_session_factory, owner)
+    key = resync_lock_key(repo.upper(), "refs/heads/main")
+    async with db_engine.connect() as holder:
+        await holder.execute(text("SELECT pg_advisory_lock(hashtextextended(:k, 0))"), {"k": key})
+        await holder.commit()
+        try:
+            async with agent_client(
+                agents, owner.tenant_id, db_session_factory, token, settings=_configured()
+            ) as client:
+                busy = await client.post("/api/agents/ag_w/github/resync", headers=OWN)
+        finally:
+            await holder.execute(
+                text("SELECT pg_advisory_unlock(hashtextextended(:k, 0))"), {"k": key}
+            )
+            await holder.commit()
+    assert busy.status_code == 409, busy.text
+    assert "A sync is running" in busy.text, "the refusal says why"
+    assert "github_resync" not in await _tools(db_session_factory, owner.tenant_id), (
+        "a refused resync changes nothing"
+    )

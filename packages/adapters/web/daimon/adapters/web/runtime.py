@@ -87,8 +87,6 @@ class WebRuntime:
     exchange_held: dict[tuple[uuid.UUID, str], tuple[datetime, NodeAccessProblem]] = field(
         default_factory=_no_holds
     )
-    # Agents whose repo skills this process is resyncing now; a second request waits its turn.
-    github_resyncs: set[uuid.UUID] = field(default_factory=set[uuid.UUID])
 
 
 def identity_key_of(settings: Settings) -> Ed25519PrivateKey | None:
