@@ -1,159 +1,28 @@
-"""Roles, modules and capabilities: pure rules, no I/O."""
+"""Roles, modules and capabilities; the rules live in core, shared with the chat tools."""
 
 from __future__ import annotations
 
-from collections.abc import Collection, Iterable
-from typing import Literal
-
-from daimon.core.config import WebModuleKey
-from daimon.core.stores.domain import WebPersonKind, WebRoleGrant
-from daimon.core.web_identity import WebRoleName
-
-Role = WebRoleName
-Capability = Literal[
-    "chat.use",
-    "files.attach",
-    "agents.view",
-    "agents.edit",
-    "agents.create",
-    "channels.view",
-    "channels.manage",
-    "routines.view",
-    "routines.manage",
-    "credits.view_own",
-    "credits.manage",
-    "integrations.view",
-    "integrations.manage",
-    "people.manage",
-    "audit.view",
-    "workspace.manage",
-]
-
-_ALL: tuple[Capability, ...] = (
-    "chat.use",
-    "files.attach",
-    "agents.view",
-    "agents.edit",
-    "agents.create",
-    "channels.view",
-    "channels.manage",
-    "routines.view",
-    "routines.manage",
-    "credits.view_own",
-    "credits.manage",
-    "integrations.view",
-    "integrations.manage",
-    "people.manage",
-    "audit.view",
-    "workspace.manage",
+from daimon.core.web_roles_rules import (
+    ROLE_WORDS as ROLE_WORDS,
 )
-_BY_ROLE: dict[Role, frozenset[Capability]] = {
-    "owner": frozenset(_ALL),
-    "admin": frozenset(_ALL),
-    "member": frozenset(
-        {
-            "chat.use",
-            "files.attach",
-            "agents.view",
-            "agents.edit",
-            "agents.create",
-            "channels.view",
-            "routines.view",
-            "routines.manage",
-            "credits.view_own",
-        }
-    ),
-    "visitor": frozenset({"chat.use", "credits.view_own"}),
-}
-# Each capability lives in one module; turning the module off removes it.
-_MODULE_OF: dict[Capability, WebModuleKey] = {
-    "chat.use": "chat",
-    "files.attach": "chat",
-    "agents.view": "agents",
-    "agents.edit": "agents",
-    "agents.create": "agents",
-    "channels.view": "channels",
-    "channels.manage": "channels",
-    "routines.view": "routines",
-    "routines.manage": "routines",
-    "credits.view_own": "credits",
-    "credits.manage": "credits",
-    "integrations.view": "integrations",
-    "integrations.manage": "integrations",
-    "people.manage": "admin",
-    "audit.view": "admin",
-    "workspace.manage": "admin",
-}
-_MODULES_BY_ROLE: dict[Role, frozenset[WebModuleKey]] = {
-    "owner": frozenset(
-        {"chat", "agents", "channels", "routines", "credits", "integrations", "admin"}
-    ),
-    "admin": frozenset(
-        {"chat", "agents", "channels", "routines", "credits", "integrations", "admin"}
-    ),
-    "member": frozenset({"chat", "agents", "channels", "routines", "credits"}),
-    "visitor": frozenset({"chat"}),
-}
-_MODULE_ORDER: tuple[WebModuleKey, ...] = (
-    "chat",
-    "agents",
-    "channels",
-    "routines",
-    "credits",
-    "integrations",
-    "admin",
+from daimon.core.web_roles_rules import (
+    Capability as Capability,
 )
-
-
-def role_for(
-    *,
-    kind: WebPersonKind,
-    workspace_grant: WebRoleGrant | None,
-    platform_admin: bool,
-    chat_admin: bool = False,
-) -> Role:
-    """The highest role the person holds. A visitor never rises above visitor.
-
-    A visitor reaches only the agents they were invited to, so no grant or platform admin
-    lifts them: promoting one is an admin turning them into a member.
-    `chat_admin` is an admin of the chat workspace itself, as its member list says.
-    """
-    if kind == "visitor":
-        return "visitor"
-    if workspace_grant == "owner":
-        return "owner"
-    if workspace_grant == "admin" or platform_admin or chat_admin:
-        return "admin"
-    return "member"
-
-
-def is_admin(role: Role) -> bool:
-    """Whether the role is the workspace's owner or an admin."""
-    return role in ("owner", "admin")
-
-
-_RANK: dict[Role, int] = {"visitor": 0, "member": 1, "admin": 2, "owner": 3}
-
-
-def at_or_above(role: Role, other: Role) -> bool:
-    """Whether `role` ranks the same as `other` or higher."""
-    return _RANK[role] >= _RANK[other]
-
-
-def modules_for(role: Role, enabled: Iterable[WebModuleKey]) -> list[WebModuleKey]:
-    """The sections this role sees, among those the deployment turned on."""
-    allowed = _MODULES_BY_ROLE[role] & set(enabled)
-    return [m for m in _MODULE_ORDER if m in allowed]
-
-
-def capabilities_for(
-    role: Role, modules: Collection[WebModuleKey], *, files: bool = False
-) -> frozenset[Capability]:
-    """What the role may do, limited to the modules that are on.
-
-    A visitor's role never carries files; `files` adds it when their invite allows it.
-    """
-    caps = set(_BY_ROLE[role])
-    if files:
-        caps.add("files.attach")
-    return frozenset(c for c in caps if _MODULE_OF[c] in modules)
+from daimon.core.web_roles_rules import (
+    Role as Role,
+)
+from daimon.core.web_roles_rules import (
+    at_or_above as at_or_above,
+)
+from daimon.core.web_roles_rules import (
+    capabilities_for as capabilities_for,
+)
+from daimon.core.web_roles_rules import (
+    is_admin as is_admin,
+)
+from daimon.core.web_roles_rules import (
+    modules_for as modules_for,
+)
+from daimon.core.web_roles_rules import (
+    role_for as role_for,
+)

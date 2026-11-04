@@ -7,12 +7,14 @@ from datetime import datetime
 from typing import Annotated, Literal
 
 from anthropic.types.beta import BetaManagedAgentsAgent
+from daimon.adapters.web.access import ROLE_WORDS as ROLE_WORDS
 from daimon.adapters.web.access import Capability, Role
 from daimon.adapters.web.caller import NOT_ALLOWED, WebCaller, current_caller, requires
 from daimon.adapters.web.me import Identity
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores.domain import WebInviteRow, WebPersonRow, WebPersonStatus
+from daimon.core.web_admin import WebAdmin, WebAdminError
 from fastapi import Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,13 +35,6 @@ async def _picker(caller: Annotated[WebCaller, Depends(current_caller)]) -> WebC
 # Whoever fills a people or group picker: the credits, agent access and people pages each
 # do, and each may be the only admin page the workspace left on.
 Pickers = Annotated[WebCaller, Depends(_picker)]
-
-ROLE_WORDS: dict[Role, str] = {
-    "owner": "Owner",
-    "admin": "Admin",
-    "member": "Member",
-    "visitor": "Visitor",
-}
 
 
 class Credit(BaseModel):
@@ -63,6 +58,15 @@ class AdminPersonDetail(AdminPerson):
     # A visitor's invite and whether it lets them attach files; null for everyone else.
     invite_id: str | None = None
     allow_files: bool | None = None
+
+
+def admin_of(caller: WebCaller) -> WebAdmin:
+    """The signed-in admin as the shared admin changes see them."""
+    return WebAdmin(caller.person.tenant_id, caller.person.account_id, caller.role)
+
+
+def refused(error: WebAdminError) -> HTTPException:
+    return HTTPException(status_code=error.status, detail=str(error))
 
 
 def no_person() -> HTTPException:

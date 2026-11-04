@@ -3,34 +3,35 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
 from functools import cache
 from typing import Annotated
 
-from daimon.adapters.web.access import (
-    Capability,
-    Role,
-    capabilities_for,
-    modules_for,
-    role_for,
-)
 from daimon.adapters.web.cookies import session_token, token_sha256
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.config import WebModuleKey
-from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import tenants as tenants_store
 from daimon.core.stores import web_identities as identities_store
 from daimon.core.stores import web_invites as invites_store
 from daimon.core.stores import web_people as people_store
-from daimon.core.stores import web_roles as roles_store
 from daimon.core.stores import web_sessions as sessions_store
 from daimon.core.stores import web_workspace_settings as workspace_settings
-from daimon.core.stores import workspace_members as members_store
-from daimon.core.stores.domain import ChatStandingRow, WebIdentityRow, WebPersonRow, WebSessionRow
-from daimon.core.stores.domain import Role as AccountRole
+from daimon.core.stores.domain import WebIdentityRow, WebPersonRow, WebSessionRow
 from daimon.core.web_identity import WebPrincipal, principal_of
+from daimon.core.web_roles_rules import (
+    Capability,
+    Role,
+    capabilities_for,
+    chat_standings,
+    has_left,
+    modules_for,
+    roles_of,
+)
+from daimon.core.web_roles_rules import (
+    role_of as role_of,
+)
 from fastapi import Depends, HTTPException, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -76,63 +77,6 @@ def groups_of(caller: WebCaller) -> frozenset[str]:
 
 def ttl_of(runtime: WebRuntime) -> timedelta:
     return timedelta(days=runtime.web.session_ttl_days)
-
-
-async def chat_standings(
-    session: AsyncSession, people: Sequence[WebPersonRow]
-) -> dict[uuid.UUID, ChatStandingRow]:
-    """Each chat-backed person's account against their workspace's member list, in one read.
-
-    Visitors never run as a chat account, so they have no standing to check.
-    """
-    members = [p for p in people if p.kind != "visitor"]
-    found = await members_store.list_chat_standings(
-        session, people={(p.tenant_id, p.account_id) for p in members}
-    )
-    return {
-        p.id: standing
-        for p in members
-        if (standing := found.get((p.tenant_id, p.account_id))) is not None
-    }
-
-
-def has_left(standings: Mapping[uuid.UUID, ChatStandingRow], person: WebPersonRow) -> bool:
-    """Whether the person's chat account is gone from their workspace's member list."""
-    standing = standings.get(person.id)
-    return standing is not None and not standing.admitted
-
-
-async def roles_of(
-    session: AsyncSession,
-    people: Sequence[WebPersonRow],
-    standings: Mapping[uuid.UUID, ChatStandingRow] | None = None,
-) -> dict[uuid.UUID, Role]:
-    """The role each person holds in their workspace, from grants held now rather than at
-    sign-in. A few reads however many people, so a listing never costs a query per person."""
-    if standings is None:
-        standings = await chat_standings(session, people)
-    accounts = await accounts_store.list_roles(session, {p.account_id for p in people})
-    by_tenant: dict[uuid.UUID, list[WebPersonRow]] = {}
-    for person in people:
-        by_tenant.setdefault(person.tenant_id, []).append(person)
-    roles: dict[uuid.UUID, Role] = {}
-    for tenant_id, members in by_tenant.items():
-        grants = await roles_store.list_workspace_roles(session, tenant_id=tenant_id)
-        for person in members:
-            roles[person.id] = role_for(
-                kind=person.kind,
-                workspace_grant=grants.get(person.account_id),
-                platform_admin=accounts.get(person.account_id) == AccountRole.ADMIN,
-                chat_admin=(standing := standings.get(person.id)) is not None
-                and standing.admitted
-                and standing.is_admin,
-            )
-    return roles
-
-
-async def role_of(session: AsyncSession, person: WebPersonRow) -> Role:
-    """The person's role in their workspace."""
-    return (await roles_of(session, [person]))[person.id]
 
 
 async def may_attach(session: AsyncSession, person: WebPersonRow, role: Role) -> bool:
