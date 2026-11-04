@@ -1,10 +1,10 @@
 {
  "routes": {
   "DELETE /api/admin/invites/{invite_id}": {
-   "gap": "revoke an invite; core: web_invites.revoke_invite"
+   "tool": "revoke_web_invite"
   },
   "DELETE /api/admin/people/{person_id}/link": {
-   "gap": "revoke a visitor sign-in link; core: web_invites.revoke_open_links"
+   "tool": "revoke_visitor_link"
   },
   "DELETE /api/agents/environments/{environment_id}": {
    "tool": "archive_environment"
@@ -35,7 +35,7 @@
    "exempt": "web chat"
   },
   "DELETE /api/credits/allowances/{allowance_id}": {
-   "gap": "spend allowances; core: spend_allowances.delete_allowance"
+   "tool": "delete_allowance"
   },
   "DELETE /api/integrations/tokens/{jti}": {
    "panel": {
@@ -60,16 +60,16 @@
    "exempt": "serves the web app's own pages"
   },
   "PATCH /api/admin/agent-access/{agent_id}": {
-   "gap": "who may use or edit an agent on the web; core: web_agent_grants.set_grant"
+   "tool": "set_agent_web_access"
   },
   "PATCH /api/admin/invites/{invite_id}": {
-   "gap": "change an invite; core: web_invites.set_allow_files"
+   "tool": "set_web_invite_files"
   },
   "PATCH /api/admin/people/{person_id}": {
-   "gap": "change a person's web role or access; core: web_people.update_person, roles.set_workspace_role"
+   "tool": "update_web_person"
   },
   "PATCH /api/admin/settings": {
-   "gap": "composite: invokers (access_settings.set_invoker_people), dm_memory_read_only (set_dm_memory_read_only) and dm_enabled on Teams (set_dms) have no chat path; plain_text_mentions, default_agent and providers have tools; modules are web page toggles"
+   "tool": "change_workspace_settings"
   },
   "PATCH /api/agents/{agent_id}/draft": {
    "tool": "update_agent"
@@ -81,7 +81,7 @@
    "exempt": "web chat"
   },
   "PATCH /api/credits/allowances/{allowance_id}": {
-   "gap": "spend allowances; core: spend_allowances.set_amount"
+   "tool": "set_allowance_amount"
   },
   "PATCH /api/routines/{routine_id}": {
    "tool": "update_routine"
@@ -90,10 +90,10 @@
    "exempt": "serves the web app's own pages"
   },
   "POST /api/admin/invites": {
-   "gap": "invite people to the workspace; core: web_invites.create + invites.issue_link, audit"
+   "tool": "create_web_invite"
   },
   "POST /api/admin/people/{person_id}/link": {
-   "gap": "visitor sign-in link; core: invites.issue_link"
+   "tool": "issue_visitor_link"
   },
   "POST /api/agents": {
    "tool": "create_agent"
@@ -172,7 +172,7 @@
    "exempt": "web chat"
   },
   "POST /api/credits/allowances": {
-   "gap": "spend allowances; core: allowance_limits / spend_allowances.create_allowance"
+   "tool": "create_allowance"
   },
   "POST /api/credits/redeem": {
    "tool": "redeem_promo_code"
@@ -306,15 +306,7 @@
   }
  },
  "read_gaps": {
-  "GET /api/admin/agent-access": "agent access list; pairs with agent-access write",
-  "GET /api/admin/audit": "audit log; core: web_audit store",
-  "GET /api/admin/audit/kinds": "audit log filter kinds",
   "GET /api/admin/feedback": "message feedback review",
-  "GET /api/admin/groups": "people groups",
-  "GET /api/admin/invites": "invite list; pairs with invite writes",
-  "GET /api/admin/people": "people list",
-  "GET /api/admin/people/{person_id}": "person detail",
-  "GET /api/credits/allowances": "spend allowances list",
   "GET /api/credits/mine": "own spend detail; core: credit_views.spend_by_agent_for_user, recent_turns",
   "GET /api/credits/overview": "workspace spend overview and ledger; core: credit_views.spend_overview, ledger_history",
   "GET /api/credits/spend": "spend by agent, channel and person; core: credit_views.spend_by_*"

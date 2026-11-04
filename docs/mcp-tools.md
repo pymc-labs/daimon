@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 187 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 206 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -112,6 +112,28 @@ Agent tools: list / get / create / update / fork / archive.
 | `set_agent_backend` | all callers | Set an enabled model provider, or clear the agent setting with backend=null. |
 | `set_agent_builtin_tool` | all callers | Turn one of an agent's built-in tools on or off, e.g. "turn off its web search". |
 | `update_agent` | all callers | Change an agent's system prompt or switch its model; add existing skills such as build-models. |
+
+## `allowances`
+
+Spend allowances and caps, from chat: who may spend how much, per person, group or
+invite.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `create_allowance` | admin only | Give a person (web person id), a group (name, or ``everyone``) or an invite (id) a spend allowance in billed dollars, monthly or in total, for every agent or one. |
+| `delete_allowance` | admin only | Remove an allowance or cap. |
+| `list_allowances` | admin only | List the workspace's spend allowances and caps, newest first. |
+| `set_allowance_amount` | admin only | Change the dollar amount of an existing allowance or cap. |
+
+## `audit_log`
+
+The workspace's audit log, from chat: what admins changed in the web app and the chat
+tool calls and panel writes, newest first.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `list_audit_kinds` | admin only | List the kinds of audit entry the workspace has recorded, for the log's ``kind`` filter. |
+| `list_audit_log` | admin only | List the workspace's audit log, newest first: ``web`` for admin changes in the web app, ``security`` for chat tool calls and panel writes. |
 
 ## `channel_budgets`
 
@@ -618,6 +640,41 @@ Owner-bound watch management.
 | `rotate_watch_key` | Discord callers | Rotate a page signing key, revoke the old key and cancel queued wakes. |
 | `show_watch` | Discord callers | Show your watch's immutable destination, source, status and expiry. |
 | `update_watch` | Discord callers | Change your watch in place, after `preview_watch_edit`, with the same changes. |
+
+## `web_invites`
+
+Web invites and visitor sign-in links, from chat.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `create_web_invite` | admin only | Invite someone to the web app by email as a member, or as a visitor of the given agents. |
+| `issue_visitor_link` | admin only | Issue a one-time sign-in link for a web visitor. |
+| `list_web_invites` | admin only | List the web app's invites: open, accepted or expired, newest first. |
+| `revoke_visitor_link` | admin only | Revoke a person's open sign-in links, as when one went to the wrong place. |
+| `revoke_web_invite` | admin only | Revoke a web invite so its link stops working. |
+| `set_web_invite_files` | admin only | Turn file attachments on or off for a visitor invite, accepted or not. |
+
+## `web_people`
+
+The web app's people, groups and agent access, from chat.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `get_web_person` | admin only | Show one web person: role, status, groups, sign-ins and, for a visitor, their invite. |
+| `list_agent_web_access` | admin only | List each agent's web chat access: on or off, who may use it and the channel it is kept to, if any. |
+| `list_web_groups` | admin only | List everyone and each group the web sign-ins carry, with head counts. |
+| `list_web_people` | admin only | List the web app's people, oldest first, with role, status and groups. |
+| `set_agent_web_access` | admin only | Turn web chat on or off for an agent and choose who may use it there: everyone, the given groups or invitees. |
+| `update_web_person` | admin only | Change a web person's role (admin or member) or suspend or restore them. |
+
+## `web_workspace_settings`
+
+The web app's workspace settings, from chat: modules, who may start turns and direct
+messages.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `change_workspace_settings` | admin only | Change the workspace's web modules (chat, agents, channels, routines, credits, integrations), its web chat agent, who may start turns (everyone, or exactly the web people in ``invoker_people``) and the direct-message rules. |
 
 ## `wizard`
 

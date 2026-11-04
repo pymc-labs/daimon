@@ -39,8 +39,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 ROOT = Path(__file__).resolve().parents[2]
 TABLE = Path(__file__).with_name("web_chat_parity.json")
 # Only these may go down: fill a gap, then lower the literal.
-MAX_GAPS = 21
-MAX_READ_GAPS = 12
+MAX_GAPS = 10
+MAX_READ_GAPS = 4
 
 PLATFORMS = frozenset({"discord", "slack", "teams"})
 WRITE = frozenset({"POST", "PUT", "PATCH", "DELETE"})
