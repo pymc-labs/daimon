@@ -26,6 +26,7 @@ from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._channel_policy import get_verified_origin, turn_origin_place
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._rule_view import load_isolation_view
+from daimon.adapters.mcp.tools._web_url import WebUrl, tenant_links
 from daimon.adapters.mcp.tools._words import admin_noun
 from daimon.adapters.mcp.tools.channel_budgets import origin_budget_channel
 from daimon.adapters.mcp.tools.discord._client import (
@@ -626,6 +627,19 @@ async def _set_routine_sandbox_tools_impl(
     return routine_for_reader(result[0], user_id=auth.platform_user_id)
 
 
+class RoutineView(RoutineRow):
+    """A routine as the tools return it, with its page on the web when there is one."""
+
+    web_url: WebUrl = None
+
+
+def _viewed(runtime: McpRuntime, auth: AuthIdentity, row: RoutineRow) -> RoutineView:
+    """`row` with its drawer on the web, when the workspace has one for this caller."""
+    links = tenant_links(runtime, auth)
+    view = RoutineView.model_validate(row, from_attributes=True)
+    return view if links is None else view.model_copy(update={"web_url": links.routine(row.id)})
+
+
 def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool
     async def create_routine(  # pyright: ignore[reportUnusedFunction]
@@ -639,7 +653,7 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         destination_kind: RoutineDestinationKind | None = None,
         destination_id: str | None = None,
         origin_context_id: str | None = None,
-    ) -> RoutineRow:
+    ) -> RoutineView:
         """Create a recurring routine; owner DMs run as unattended live-DM turns.
 
         Owner-DM routines are scheduled live-DM turns, using the owner's normal
@@ -695,9 +709,10 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ``create_routine(agent_name="daimon", cron_expr="*/5 * * * *",
         timezone="UTC", trigger_message="ping")``.
         """
-        return await _create_routine_impl(
+        auth = await _auth(ctx)
+        row = await _create_routine_impl(
             runtime,
-            await _auth(ctx),
+            auth,
             agent_name=agent_name,
             cron_expr=cron_expr,
             timezone=timezone,
@@ -708,17 +723,20 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             destination_id=destination_id,
             origin_context_id=origin_context_id,
         )
+        return _viewed(runtime, auth, row)
 
     @mcp.tool
-    async def list_routines(ctx: Context) -> list[RoutineRow]:  # pyright: ignore[reportUnusedFunction]
+    async def list_routines(ctx: Context) -> list[RoutineView]:  # pyright: ignore[reportUnusedFunction]
         """List the routines you created (an admin sees every routine in the workspace)."""
-        return await _list_routines_impl(runtime, await _auth(ctx))
+        auth = await _auth(ctx)
+        return [_viewed(runtime, auth, row) for row in await _list_routines_impl(runtime, auth)]
 
     @mcp.tool
-    async def get_routine(ctx: Context, routine_id: UUID) -> RoutineRow:  # pyright: ignore[reportUnusedFunction]
+    async def get_routine(ctx: Context, routine_id: UUID) -> RoutineView:  # pyright: ignore[reportUnusedFunction]
         """Get a routine by id. Raises if not found, cross-tenant, or someone else's and you
         are not an admin."""
-        return await _get_routine_impl(runtime, await _auth(ctx), routine_id=routine_id)
+        auth = await _auth(ctx)
+        return _viewed(runtime, auth, await _get_routine_impl(runtime, auth, routine_id=routine_id))
 
     @mcp.tool
     async def update_routine(  # pyright: ignore[reportUnusedFunction]
@@ -733,7 +751,7 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         destination_kind: RoutineDestinationKind | None = None,
         destination_id: str | None = None,
         clear_destination: bool = False,
-    ) -> RoutineRow:
+    ) -> RoutineView:
         """PATCH-update a routine, including owner-only DM delivery where supported.
 
         Only provided fields are changed.
@@ -750,9 +768,10 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ``agent_name`` reassigns the routine to a different daimon-tagged agent;
         the tool resolves it to a live MA agent id at the call boundary.
         """
-        return await _update_routine_impl(
+        auth = await _auth(ctx)
+        row = await _update_routine_impl(
             runtime,
-            await _auth(ctx),
+            auth,
             routine_id=routine_id,
             agent_name=agent_name,
             cron_expr=cron_expr,
@@ -764,6 +783,7 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             destination_id=destination_id,
             clear_destination=clear_destination,
         )
+        return _viewed(runtime, auth, row)
 
     @mcp.tool
     async def delete_routine(ctx: Context, routine_id: UUID) -> DeleteResult:  # pyright: ignore[reportUnusedFunction]

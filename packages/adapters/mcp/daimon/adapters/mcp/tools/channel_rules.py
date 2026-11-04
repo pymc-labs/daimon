@@ -9,7 +9,7 @@ absent: only native /here controls may change them.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import cast
 
 import discord
@@ -20,6 +20,7 @@ from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._channel_target import parse_channel_target
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
+from daimon.adapters.mcp.tools._web_url import WebUrl, tenant_links
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     _require_guild_id,  # pyright: ignore[reportPrivateUsage]
@@ -62,6 +63,9 @@ class SetChannelRuleResult:
     released_agents: list[str]
     changed: bool
     note: str
+    web_url: WebUrl = None
+    """The channel's settings on the web, when the workspace has a web app and the caller
+    may open it."""
 
 
 @dataclass(frozen=True)
@@ -295,15 +299,19 @@ def register_channel_rule_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Rules are per channel: ``channel_id`` names a channel, never a thread. Pass
         the parent channel's id from turn_controls (``parent_channel_id``).
         """
-        return await _set_channel_rule_impl(
+        auth = await _auth(ctx)
+        result = await _set_channel_rule_impl(
             runtime,
-            await _auth(ctx),
+            auth,
             channel_id=channel_id,
             readers=readers,
             writers=writers,
             copy_from=copy_from,
             release_agents=release_agents,
         )
+        links = tenant_links(runtime, auth)
+        url = None if links is None else links.channel(result.channel_id)
+        return result if url is None else replace(result, web_url=url)
 
     @mcp.tool(tags={"admin", *scope_tags("channels:write")})
     async def set_agent_rule(  # pyright: ignore[reportUnusedFunction]

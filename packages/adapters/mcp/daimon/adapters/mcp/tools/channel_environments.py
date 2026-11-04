@@ -12,7 +12,7 @@ default.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -24,6 +24,7 @@ from daimon.adapters.mcp.tools._ctx import (
 )
 from daimon.adapters.mcp.tools._rule_view import load_caller_hidden_environments
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
+from daimon.adapters.mcp.tools._web_url import WebUrl, tenant_links
 from daimon.adapters.mcp.tools._words import admin_noun, space_noun
 from daimon.adapters.mcp.tools.environments import CONFIRM_OPEN_NETWORK_ASK
 from daimon.core.admin_actions import DelegatedAction
@@ -59,6 +60,8 @@ class ChannelEnvironmentResult:
     changed: bool
     note: str
     """What changed and from when, to report back as is."""
+    web_url: WebUrl = None
+    """Set for a channel scope: the channel's settings on the web, when there is one."""
 
 
 async def _channel_name(
@@ -249,6 +252,18 @@ async def _clear_channel_environment_impl(
     )
 
 
+def _with_channel_link(
+    runtime: McpRuntime, auth: AuthIdentity, result: ChannelEnvironmentResult
+) -> ChannelEnvironmentResult:
+    """`result` with the channel's page on the web, for a channel scope when there is one."""
+    channel_id = (
+        result.scope.removeprefix("channel:") if result.scope.startswith("channel:") else None
+    )
+    links = tenant_links(runtime, auth)
+    url = None if links is None or channel_id is None else links.channel(channel_id)
+    return result if url is None else replace(result, web_url=url)
+
+
 def register_channel_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool(tags={"admin", *scope_tags("channels:write")})
     async def set_channel_environment(  # pyright: ignore[reportUnusedFunction]
@@ -272,13 +287,15 @@ def register_channel_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> Non
         Pass the parent channel's id: ``parent_channel_id`` from turn_controls; a
         thread id resolves to its parent. The caller must be able to see the channel.
         """
-        return await _set_channel_environment_impl(
+        auth = await _auth(ctx)
+        result = await _set_channel_environment_impl(
             runtime,
-            await _auth(ctx),
+            auth,
             environment_name=environment_name,
             channel_id=channel_id,
             confirm_open_network=confirm_open_network,
         )
+        return _with_channel_link(runtime, auth, result)
 
     @mcp.tool(tags={"admin", *scope_tags("channels:write")})
     async def clear_channel_environment(  # pyright: ignore[reportUnusedFunction]
@@ -297,9 +314,11 @@ def register_channel_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> Non
         leaves sealed channels on such a default. A thread id resolves to its parent
         channel.
         """
-        return await _clear_channel_environment_impl(
+        auth = await _auth(ctx)
+        result = await _clear_channel_environment_impl(
             runtime,
-            await _auth(ctx),
+            auth,
             channel_id=channel_id,
             confirm_open_network=confirm_open_network,
         )
+        return _with_channel_link(runtime, auth, result)
