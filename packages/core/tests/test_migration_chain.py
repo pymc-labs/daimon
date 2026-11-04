@@ -400,11 +400,13 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
         ):
             return False
         # Added by the web logins migration (0178), the head.
-        if (
-            expected != HEAD
-            and kind == "column"
-            and name == "login_id"
-            and getattr(getattr(obj, "table", None), "name", None) == "web_sessions"
+        if expected != HEAD and (
+            (kind == "index" and name in {"ix_web_sessions_login", "ix_web_sessions_account"})
+            or (
+                kind == "column"
+                and name == "login_id"
+                and getattr(getattr(obj, "table", None), "name", None) == "web_sessions"
+            )
         ):
             return False
         # Added by the invite files migration (0177).
