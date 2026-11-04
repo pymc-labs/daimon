@@ -31,6 +31,7 @@ people in one request shows the requester an approval card first.
 - For posts outside this conversation, fill the `plan` field (`threads`,
   `places`, `people`) honestly with the totals for the whole request, this call
   included. Posts here need no plan. Declaring less only moves the card later.
+- A few new threads here with nobody tagged need no card; many do.
 - When a tool refuses with the limit, call `approve_reach` once with the whole
   request's counts and the channels. Post only after Approve.
 - If the requester cancels, offer the cheaper shape in one line. Do not retry piece by piece.

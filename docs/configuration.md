@@ -1772,6 +1772,13 @@ shown, the post is refused instead.
 New threads or forum posts outside the own channel, or tagging someone else, one
 interactive turn opens without approval.
 
+### `DAIMON_OUTBOUND__MAX_OWN_THREADS`
+
+`int` · optional · default `5`
+
+New threads without tagging anyone that one interactive turn opens in the own channel
+without approval.
+
 ### `DAIMON_OUTBOUND__MAX_PLACES`
 
 `int` · optional · default `2`
@@ -1783,7 +1790,7 @@ posts into without approval.
 
 `int` · optional · default `5`
 
-Distinct people one interactive turn tags in tool posts outside the own conversation
+Distinct people one interactive turn tags in tool posts, the own conversation included,
 without approval.
 
 ### `DAIMON_OUTBOUND__MAX_LENGTH`

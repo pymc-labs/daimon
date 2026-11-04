@@ -3701,6 +3701,7 @@ class ReachTally(Base):
     )
     turn_key: Mapped[str] = mapped_column(Text, primary_key=True)
     threads: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    own_threads: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     places: Mapped[list[str]] = mapped_column(
         ARRAY(Text), nullable=False, server_default=text("'{}'")
     )

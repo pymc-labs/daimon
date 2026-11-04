@@ -38,7 +38,7 @@ from daimon.core.agent_configuration import (
     provider_preview_digest,
 )
 from daimon.core.microsoft_write_paths import write_kind
-from daimon.core.outbound.reach import ReachPlan, card_title
+from daimon.core.outbound.reach import ReachPlan, card_consequence, card_title
 from daimon.core.tool_safety import (
     DAIMON_SERVER_NAME,
     PUBLISH_TOOLS,
@@ -796,7 +796,7 @@ def _reach_prompt(
         title=_one_line(
             card_title(plan, _one_line(str(data.get("where") or ""), limit=60)), limit=200
         ),
-        consequence="Approve to post them, or cancel.",
+        consequence=card_consequence(plan),
         action="Approve",
         denied_action="Nothing posted",
         requester_platform_user_id=requester_platform_user_id,

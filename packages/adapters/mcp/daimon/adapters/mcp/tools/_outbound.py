@@ -37,6 +37,7 @@ from daimon.core.outbound.reach import (
     check_reach,
     client_tally_key,
     needs_approval,
+    needs_own_approval,
 )
 from daimon.core.security_audit import record_denial
 from daimon.core.stores.direct_messages import DM_SCOPE_PREFIX
@@ -339,16 +340,19 @@ async def prepare_posts(
     reaching = [p for p, r in zip(posts, reach, strict=True) if r]
     call = ReachTally(
         threads=sum(p.new_thread for p in reaching),
+        # A new thread that does not reach is untagged and in the own channel: capped alone.
+        own_threads=sum(p.new_thread and not r for p, r in zip(posts, reach, strict=True)),
         places=frozenset(p.place for p in reaching if not p.new_thread),
+        # Tags count wherever they are, the own conversation included.
         people=(
-            frozenset(uid for p in reaching for uid in _tagged(p, scope, platform, counted_skip))
+            frozenset(uid for p in posts for uid in _tagged(p, scope, platform, counted_skip))
             if pings
             else frozenset()
         ),
     )
-    if not reaching:
+    if not (reaching or call.people or call.own_threads):
         return rendered
-    if plan is None and settings.reach_budget_enabled:
+    if plan is None and reaching and settings.reach_budget_enabled:
         # The own conversation never needs a plan; reaching others does, so the card shows it all.
         record_denial("reach_no_plan")
         raise ToolError(NO_PLAN)
@@ -425,13 +429,17 @@ def _gate(
         threads=settings.max_threads, places=settings.max_places, people=settings.max_people
     )
     verdict = check_reach(plan=plan, so_far=so_far, call=call, limits=limits, approved=approved)
-    if verdict == "ok":
+    own_total = so_far.own_threads + call.own_threads
+    own_over = approved is None and own_total > settings.max_own_threads
+    if verdict == "ok" and not own_over:
         return
-    record_denial(f"reach_{verdict}")
+    record_denial(f"reach_{verdict}" if verdict != "ok" else "reach_own_threads")
     log.info("reach.over_budget", key=scope.key, has_card=scope.origin is not None)
     if scope.kind != "live" or auth.no_confirmation_surface:
         # No card can be shown (an outside client, or a backend without one): fail closed.
         raise ToolError(NO_CARD)
+    if verdict == "ok":
+        raise ToolError(needs_own_approval(own_total, settings.max_own_threads))
     raise ToolError(needs_approval(plan.widest(so_far.plus(call).counts()), limits))
 
 

@@ -64,12 +64,15 @@ class ReachTally(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     threads: int = 0
+    # Untagged new threads in the own channel: capped on their own, not part of ``counts``.
+    own_threads: int = 0
     places: frozenset[str] = frozenset()
     people: frozenset[str] = frozenset()
 
     def plus(self, other: ReachTally) -> ReachTally:
         return ReachTally(
             threads=self.threads + other.threads,
+            own_threads=self.own_threads + other.own_threads,
             places=self.places | other.places,
             people=self.people | other.people,
         )
@@ -104,6 +107,14 @@ def needs_approval(plan: ReachPlan, limits: ReachPlan) -> str:
     )
 
 
+def needs_own_approval(total: int, limit: int) -> str:
+    return (
+        f"Not posted: {total} new threads in this channel is more than Daimon opens "
+        f"without approval ({limit}). Call approve_reach with threads={total} and the "
+        f"channel, then post. Or post less: {CHEAPER_SHAPE}"
+    )
+
+
 def describe(plan: ReachPlan) -> str:
     return f"{plan.threads} threads, {plan.places} places, {plan.people} people"
 
@@ -119,6 +130,11 @@ def card_title(plan: ReachPlan, where: str) -> str:
     what = " and ".join(parts) or "post"
     tags = f" and tag {_count(plan.people, 'person', 'people')}" if plan.people else ""
     return f"Daimon wants to {what}{place}{tags}."
+
+
+def card_consequence(plan: ReachPlan) -> str:
+    only_threads = plan.threads and not plan.places and not plan.people
+    return "Approve to open them, or cancel." if only_threads else "Approve to post them, or cancel."
 
 
 def _count(n: int, one: str, many: str | None = None) -> str:

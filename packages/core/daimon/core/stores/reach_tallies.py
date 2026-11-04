@@ -35,7 +35,10 @@ async def lock_tally(
         )
     ).scalar_one()
     tally = ReachTally(
-        threads=row.threads, places=frozenset(row.places), people=frozenset(row.people)
+        threads=row.threads,
+        own_threads=row.own_threads,
+        places=frozenset(row.places),
+        people=frozenset(row.people),
     )
     approved = (
         None
@@ -63,6 +66,7 @@ async def save_tally(
         return
     if tally is not None:
         row.threads = tally.threads
+        row.own_threads = tally.own_threads
         row.places = sorted(tally.places)
         row.people = sorted(tally.people)
     if approved is not None:

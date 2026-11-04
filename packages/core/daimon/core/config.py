@@ -2089,6 +2089,15 @@ class OutboundSettings(BaseModel):
             "one interactive turn opens without approval."
         ),
     )
+    max_own_threads: int = Field(
+        default=5,
+        ge=0,
+        le=100,
+        description=(
+            "New threads without tagging anyone that one interactive turn opens in the "
+            "own channel without approval."
+        ),
+    )
     max_places: int = Field(
         default=2,
         ge=0,
@@ -2103,8 +2112,8 @@ class OutboundSettings(BaseModel):
         ge=0,
         le=200,
         description=(
-            "Distinct people one interactive turn tags in tool posts outside the own "
-            "conversation without approval."
+            "Distinct people one interactive turn tags in tool posts, the own "
+            "conversation included, without approval."
         ),
     )
     max_length: int = Field(

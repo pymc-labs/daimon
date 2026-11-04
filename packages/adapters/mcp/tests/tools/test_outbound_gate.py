@@ -202,13 +202,61 @@ async def test_prepare_posts_when_long_or_bare_media_in_own_conversation_then_po
 async def test_prepare_posts_when_untagged_threads_in_own_channel_then_no_card(
     sessionmaker, platform
 ):
-    """Threads for oneself in the own channel are personal use, not reach."""
+    """A few threads for oneself in the own channel are personal use, not reach."""
     runtime, auth = await _setup(sessionmaker, platform)
     scope = _scope()
     posts = [OutgoingPost(text=f"note {i}", place="own", new_thread=True) for i in range(3)]
     rendered = await prepare_posts(runtime, auth, posts, plan=None, scope=scope)
     assert [r.text for r in rendered] == [p.text for p in posts], f"{platform}: no line"
-    assert await _tally(runtime, auth, scope) == ReachTally(), f"{platform}: no thread count"
+    assert await _tally(runtime, auth, scope) == ReachTally(own_threads=3), (
+        f"{platform}: counted apart from the reach threads"
+    )
+
+
+def _own(n: int) -> list[OutgoingPost]:
+    return [OutgoingPost(text=f"note {i}", place="own", new_thread=True) for i in range(n)]
+
+
+@pytest.mark.parametrize("platform", PLATFORMS)
+async def test_prepare_posts_when_untagged_own_threads_pass_the_cap_then_card_with_batch_whole(
+    sessionmaker, platform
+):
+    runtime, auth = await _setup(sessionmaker, platform)
+    scope = _scope()
+    await prepare_posts(runtime, auth, _own(5), plan=None, scope=scope)
+    with pytest.raises(ToolError, match="approve_reach"):
+        await prepare_posts(runtime, auth, _own(1), plan=None, scope=scope)
+    assert (await _tally(runtime, auth, scope)).own_threads == 5, f"{platform}: refused counts none"
+    fresh = _scope()
+    with pytest.raises(ToolError, match="8 new threads"):
+        await prepare_posts(runtime, auth, _own(8), plan=None, scope=fresh)
+    assert await _tally(runtime, auth, fresh) == ReachTally(), f"{platform}: batch counted whole"
+
+
+@pytest.mark.parametrize("platform", PLATFORMS)
+async def test_prepare_posts_when_own_thread_cap_is_approved_then_rest_of_turn_posts(
+    sessionmaker, platform
+):
+    runtime, auth = await _setup(sessionmaker, platform)
+    scope = _scope()
+    await approve(runtime, auth, scope, ReachPlan(threads=8, places=0, people=0))
+    await prepare_posts(runtime, auth, _own(8), plan=None, scope=scope)
+    await prepare_posts(runtime, auth, _own(2), plan=None, scope=scope)
+    assert (await _tally(runtime, auth, scope)).own_threads == 10, f"{platform}: approval holds"
+
+
+@pytest.mark.parametrize("platform", PLATFORMS)
+async def test_prepare_posts_when_own_threads_pass_the_cap_then_outside_closed_unattended_free(
+    sessionmaker, platform
+):
+    runtime, auth = await _setup(sessionmaker, platform)
+    with pytest.raises(ToolError) as refused:
+        await prepare_posts(runtime, auth, _own(6), plan=None, scope=_scope(card=False))
+    assert str(refused.value) == NO_CARD, f"{platform}: an outside client fails closed"
+    rendered = await prepare_posts(
+        runtime, auth, _own(6), plan=None, scope=_scope(interactive=False)
+    )
+    assert len(rendered) == 6, f"{platform}: unattended turns are exempt"
 
 
 @pytest.mark.parametrize("platform", ("discord", "slack"))
@@ -230,19 +278,39 @@ async def test_prepare_posts_when_tagged_threads_in_own_channel_then_card_before
 
 @pytest.mark.parametrize("platform", ("discord", "slack"))
 @pytest.mark.parametrize("requester", ["42", "43"], ids=["requester", "second_collaborator"])
-async def test_prepare_posts_when_collaborators_tagged_in_own_thread_then_no_card(
+async def test_prepare_posts_when_collaborators_tagged_in_own_thread_then_counted_to_the_budget(
     sessionmaker, platform, requester
 ):
-    """Crediting or looping in six people here is collaboration, whoever in the thread asked."""
+    """Crediting five people here is collaboration, whoever in the thread asked: no plan, no
+    line, no card. A sixth asks, since tags are capped everywhere."""
     runtime, auth = await _setup(sessionmaker, platform)
     scope = dataclasses.replace(_scope(), requester_id=requester)
-    text = " ".join(TAG[platform].format(n) for n in range(1, 7)) + " thanks"
+    five = " ".join(TAG[platform].format(n) for n in range(1, 6)) + " thanks"
     [post] = await prepare_posts(
-        runtime, auth, [OutgoingPost(text=text, place="home")], plan=None, scope=scope
+        runtime, auth, [OutgoingPost(text=five, place="home")], plan=None, scope=scope
     )
-    assert len(post.user_ids) == 6, f"{platform}: all six are tagged"
+    assert len(post.user_ids) == 5, f"{platform}: all five are tagged"
     assert "requested by" not in post.text, f"{platform}: no line in the own thread"
-    assert await _tally(runtime, auth, scope) == ReachTally(), f"{platform}: nobody counted"
+    assert len((await _tally(runtime, auth, scope)).people) == 5, f"{platform}: counted"
+    six = " ".join(TAG[platform].format(n) for n in range(1, 7)) + " thanks"
+    with pytest.raises(ToolError, match="approve_reach"):
+        await prepare_posts(
+            runtime, auth, [OutgoingPost(text=six, place="home")], plan=None, scope=scope
+        )
+    with pytest.raises(ToolError) as closed:
+        await prepare_posts(
+            runtime,
+            auth,
+            [OutgoingPost(text=six, place="home")],
+            plan=None,
+            scope=dataclasses.replace(scope, kind="outside", origin=None),
+        )
+    assert str(closed.value) == NO_CARD, f"{platform}: an outside client fails closed"
+    free = dataclasses.replace(scope, kind="unattended")
+    [exempt] = await prepare_posts(
+        runtime, auth, [OutgoingPost(text=six, place="home")], plan=None, scope=free
+    )
+    assert len(exempt.user_ids) == 6, f"{platform}: unattended turns are exempt"
 
 
 @pytest.mark.parametrize("platform", ("discord", "slack"))
