@@ -293,6 +293,7 @@ async def prepare_posts(
     refuse the call. Nothing has posted when this raises, and a refused call
     counts nothing; on success the call's reach is counted. ``pings=False`` is for a
     post sent without mentions: its people are not counted, since nobody is reached.
+    A failed opt-out lookup only switches pings off: the people a post tags still count.
     """
     platform = _platform(auth)
     scope = scope or await turn_scope(runtime, auth)
@@ -300,8 +301,9 @@ async def prepare_posts(
     if scope.requester_id:
         mentioned.add(scope.requester_id)
     skip, names, checked = await _opt_outs(runtime, auth, platform, mentioned)
-    pings = pings and checked
-    reach = [_reaches(post, scope, platform, skip if pings else None) for post in posts]
+    # Unchecked, nobody is known to have opted out: tags count even though none ping.
+    counted_skip = skip if checked else frozenset()
+    reach = [_reaches(post, scope, platform, counted_skip if pings else None) for post in posts]
     credited = [p.place for p, r in zip(posts, reach, strict=True) if p.attribute and r]
     line = await _attribution(runtime, auth, scope, credited[0], skip) if credited else None
     # Only a post that reaches other people says who asked; the own conversation is theirs.
@@ -315,7 +317,9 @@ async def prepare_posts(
         )
         for post, r in zip(posts, reach, strict=True)
     ]
-    ping_users.set(frozenset(uid for r in rendered for uid in r.user_ids) if pings else frozenset())
+    ping_users.set(
+        frozenset(uid for r in rendered for uid in r.user_ids) if pings and checked else frozenset()
+    )
     if validate is not None:
         validate(rendered)
     if not scope.interactive:
@@ -333,13 +337,16 @@ async def prepare_posts(
         ):
             record_denial("outbound_short_caption")
             raise ToolError(SHORT_CAPTION)
-    reaching = [(p, out) for p, out, r in zip(posts, rendered, reach, strict=True) if r]
+    reaching = [p for p, r in zip(posts, reach, strict=True) if r]
     call = ReachTally(
-        threads=sum(p.new_thread for p, _ in reaching),
-        places=frozenset(p.place for p, _ in reaching if not p.new_thread),
-        people=frozenset(uid for _, out in reaching for uid in out.user_ids) - skip
-        if pings
-        else frozenset(),
+        threads=sum(p.new_thread for p in reaching),
+        places=frozenset(p.place for p in reaching if not p.new_thread),
+        people=(
+            frozenset(uid for p in reaching for uid in mentioned_user_ids(p.text, platform))
+            - counted_skip
+            if pings
+            else frozenset()
+        ),
     )
     if not reaching:
         return rendered

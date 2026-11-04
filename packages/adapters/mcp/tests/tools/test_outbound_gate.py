@@ -301,10 +301,10 @@ async def test_prepare_posts_when_web_or_agent_chat_then_plain_attribution(sessi
 
 
 @pytest.mark.parametrize("platform", ("discord", "slack"))
-async def test_prepare_posts_when_opt_out_lookup_fails_then_reach_post_sends_uncounted(
+async def test_prepare_posts_when_opt_out_lookup_fails_then_reach_post_counts_tags_without_pings(
     sessionmaker, platform, monkeypatch
 ):
-    """A broken lookup never loses a post elsewhere; it just pings and counts nobody."""
+    """A broken lookup never loses a post elsewhere; it pings nobody but still counts who it tags."""
 
     async def broken(*_: object, **__: object) -> frozenset[str]:
         raise RuntimeError("lookup down")
@@ -322,9 +322,32 @@ async def test_prepare_posts_when_opt_out_lookup_fails_then_reach_post_sends_unc
     )
     assert post.text.startswith(text if platform == "discord" else "@someone look"), platform
     assert ping_users.get() == frozenset(), f"{platform}: nobody unchecked is pinged"
-    assert (await _tally(runtime, auth, scope)).people == frozenset(), "nobody counted"
+    tagged = {"discord": "7", "slack": "U7"}[platform]
+    assert (await _tally(runtime, auth, scope)).people == {tagged}, f"{platform}: the tag counts"
     with pytest.raises(ToolError, match="could not check"):
         await _outbound.refuse_dm_to_opted_out(runtime, auth, "7")
+
+
+@pytest.mark.parametrize("platform", ("discord", "slack"))
+async def test_prepare_posts_when_opt_out_lookup_fails_then_tagged_thread_in_own_channel_reaches(
+    sessionmaker, platform, monkeypatch
+):
+    """A thread tagging someone is reach whether or not the lookup could say who opted out."""
+
+    async def broken(*_: object, **__: object) -> frozenset[str]:
+        raise RuntimeError("lookup down")
+
+    runtime, auth = await _setup(sessionmaker, platform)
+    monkeypatch.setattr(_outbound, "tag_opt_outs", broken)
+    posts = [
+        OutgoingPost(text=f"{TAG[platform].format(7)} item {i}", place="own", new_thread=True)
+        for i in range(10)
+    ]
+    with pytest.raises(ToolError, match="approve_reach"):
+        await prepare_posts(
+            runtime, auth, posts, plan=ReachPlan(threads=10, places=0, people=1), scope=_scope()
+        )
+    assert ping_users.get() == frozenset(), f"{platform}: refused or not, nobody is pinged"
 
 
 @pytest.mark.parametrize("platform", PLATFORMS)
