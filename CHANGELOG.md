@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The web app signs in with Slack and Microsoft again, besides Discord.** Each shows on the sign-in page once its login app is set (`DAIMON_HUB__SLACK_*`, `DAIMON_MICROSOFT_ACCOUNTS__*`); register `<web public url>/auth/slack/callback` and `/auth/microsoft/callback` on it. A signed-in member links the other two from the account menu and switches between all their workspaces; guests cannot link.
+
 - **A switched OpenAI or Gemini agent answers again after Daimon gates more of its own
   tools.** An agent whose switch was confirmed before such a release had every turn refused
   with a request to confirm the switch again. A switch now stays confirmed while the agent

@@ -14,7 +14,8 @@ You need:
 - **Encryption keys** in
   [`DAIMON_CRYPTO__KEYS`](configuration.md#daimon_crypto__keys). Sign-in tokens
   and saved keys are stored encrypted.
-- **Discord sign-in:** the Discord login app the deployment already has.
+- **At least one sign-in method:** the Discord, Slack or Microsoft login apps the
+  deployment already has.
 
 ## Turn it on
 
@@ -40,16 +41,28 @@ for their own workspace under **Admin** > **Settings**.
 
 ## Set up sign-in
 
-People sign in with Discord. The web app reuses the login app in
-[`DAIMON_HUB__DISCORD_CLIENT_ID`](configuration.md#daimon_hub__discord_client_id),
-so there is nothing new to create. Add this redirect URI to it:
-`https://daimon.example.com/auth/discord/callback`.
+The web app reuses the login apps the deployment already has, so there is
+nothing new to create. A method shows on the sign-in page once its app is set.
+Add each redirect URI to the app you offer:
 
-People reach every workspace with Daimon installed where their Discord account
-is a member. Their spend and memory are the same as in chat. Someone who leaves
-a Discord server loses it in the web app at once. This needs the bot's Server
-Members intent. Until the member list loads, or while the intent is off, the
-sign-in itself decides.
+| Method | App | Redirect URI |
+| --- | --- | --- |
+| Discord | [`DAIMON_HUB__DISCORD_CLIENT_ID`](configuration.md#daimon_hub__discord_client_id) | `https://daimon.example.com/auth/discord/callback` |
+| Slack | [`DAIMON_HUB__SLACK_CLIENT_ID`](configuration.md#daimon_hub__slack_client_id) | `https://daimon.example.com/auth/slack/callback` |
+| Microsoft | [`DAIMON_MICROSOFT_ACCOUNTS__CLIENT_ID`](configuration.md#daimon_microsoft_accounts__client_id) | `https://daimon.example.com/auth/microsoft/callback` |
+
+People reach every workspace with Daimon installed where their account is a
+member: a Discord server, the Slack workspace they signed in to, or the Teams
+directory of the Microsoft app. Microsoft sign-in takes only accounts of
+`DAIMON_MICROSOFT_ACCOUNTS__TENANT_ID`. Their spend and memory are the same as
+in chat. Someone who leaves a Discord server or Slack workspace loses it in the
+web app at once. This needs the bot's member list, which Discord shares only
+with the Server Members intent. Until the list loads, or while the intent is
+off, the sign-in itself decides.
+
+A signed-in member links the other methods from the account menu, then switches
+between all their workspaces. An account already linked to another person is
+refused, and guests cannot link.
 
 ## Become the owner
 
@@ -151,7 +164,7 @@ agent over 7, 30 or 90 days. It shows counts only, never a message or who voted.
 
 | Symptom | Fix |
 | --- | --- |
-| The sign-in button is missing | Set `DAIMON_HUB__DISCORD_CLIENT_ID` and `DAIMON_HUB__DISCORD_CLIENT_SECRET`. |
-| Discord reports a redirect URI mismatch | Register the exact URI above. |
+| A sign-in button is missing | Set that method's app: `DAIMON_HUB__DISCORD_*`, `DAIMON_HUB__SLACK_*` or `DAIMON_MICROSOFT_ACCOUNTS__*` (client id, secret and, for Microsoft, tenant id). |
+| A provider reports a redirect URI mismatch | Register the exact URI above. |
 | Sign-in works but writes fail with "Cross-site request refused." | `DAIMON_WEB__PUBLIC_URL` must match the address in the browser exactly. |
 | A data server says it didn't accept your sign-in | Check the node's client and that the server trusts the identity key. Retries wait five minutes. |
