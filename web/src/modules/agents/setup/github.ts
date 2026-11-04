@@ -46,7 +46,7 @@ export function useGithubWrites(id: string) {
   return {
     connect: useMutation({
       mutationFn: () => api.post<{ url: string }>(`${base(id)}/connect`),
-      onSuccess: ({ url }) => { window.open(url, "_blank", "noopener,noreferrer") },
+      onSuccess: ({ url }) => location.assign(url),
       onError: fail,
     }),
     setWorking: useMutation({ mutationFn: (repo: string) => api.put<AgentGithub>(`${base(id)}/working`, { repo }), onSuccess: set, onError: fail }),

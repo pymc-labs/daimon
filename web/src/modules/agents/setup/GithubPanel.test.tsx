@@ -37,6 +37,7 @@ const serve = (g: AgentGithub) => vi.mocked(api.get).mockResolvedValue(g as neve
 
 beforeEach(() => {
   vi.clearAllMocks()
+  vi.unstubAllGlobals()
   vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} })
 })
 
@@ -123,12 +124,13 @@ describe("GithubPanel", () => {
     expect(screen.getByText("Failed, No SKILL.md")).toBeInTheDocument()
   })
 
-  it("opens the connect link in a new tab", async () => {
+  it("goes to the connect link in this tab", async () => {
     serve(full)
     vi.mocked(api.post).mockResolvedValue({ url: "https://github.com/apps/acme/installations/new" } as never)
-    const open = vi.spyOn(window, "open").mockReturnValue(null)
+    const assign = vi.fn()
+    vi.stubGlobal("location", { ...window.location, assign })
     view()
     await userEvent.click(await screen.findByRole("button", { name: "Connect" }))
-    await waitFor(() => expect(open).toHaveBeenCalledWith("https://github.com/apps/acme/installations/new", "_blank", "noopener,noreferrer"))
+    await waitFor(() => expect(assign).toHaveBeenCalledWith("https://github.com/apps/acme/installations/new"))
   })
 })
