@@ -327,6 +327,30 @@ async def test_prepare_posts_when_opt_out_lookup_fails_then_reach_post_sends_unc
         await _outbound.refuse_dm_to_opted_out(runtime, auth, "7")
 
 
+@pytest.mark.parametrize("platform", PLATFORMS)
+async def test_prepare_posts_when_routine_posts_then_line_only_outside_creator_dm(
+    sessionmaker, platform
+):
+    """A routine's delivery to its creator's DM needs no credit; a channel post keeps it."""
+    runtime, auth = await _setup(sessionmaker, platform)
+    scope = TurnScope(
+        key=f"routine:{uuid.uuid4()}",
+        kind="unattended",
+        own_places=frozenset(),
+        requester_id="42",
+        routine_name="digest",
+    )
+    dm, channel = await prepare_posts(
+        runtime,
+        auth,
+        [OutgoingPost(text="done", place="42"), OutgoingPost(text="done", place="C1")],
+        plan=None,
+        scope=scope,
+    )
+    assert dm.text == "done", f"{platform}: no line in the creator's DM"
+    assert "requested by" in channel.text, f"{platform}: a channel post still says who asked"
+
+
 async def test_render_edit_when_broadcast_then_neutralised_without_attribution(sessionmaker):
     runtime, auth = await _setup(sessionmaker, "slack")
     assert await render_edit(runtime, auth, "fixed <!here>", place="C1") == "fixed @here", (

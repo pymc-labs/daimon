@@ -735,6 +735,7 @@ async def test_routine_dm_does_not_replace_an_active_private_conversation(
     dms = _Dms()
     outcome = await _poster(db_session_factory, {}, dms=dms)(routine)
     assert outcome.status == "delivered" and dms.sent
+    assert all("requested by" not in text for *_, text in dms.sent), "the creator asked"
     async with db_session_factory() as session:
         after = await get_conversation(
             session, platform="discord", route_key="physical-dm", external_user_id="1"
