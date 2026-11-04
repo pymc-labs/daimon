@@ -75,7 +75,7 @@ class SwitchBody(BaseModel):
     id: str
 
 
-_PROVIDER_LABELS = {"discord": "Discord"}
+_PROVIDER_LABELS = {"discord": "Discord", "slack": "Slack", "microsoft": "Microsoft"}
 
 
 def identity_json(row: WebIdentityRow) -> Identity:
