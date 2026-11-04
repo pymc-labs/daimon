@@ -13,7 +13,7 @@ _TABLES = ("server_skills", "server_skill_deployments", "agent_skill_follows")
 
 
 def _load_migration():
-    path = Path(__file__).parents[1] / "alembic/versions/0178_server_skills.py"
+    path = Path(__file__).parents[1] / "alembic/versions/0179_server_skills.py"
     spec = importlib.util.spec_from_file_location("migration_server_skills", path)
     assert spec and spec.loader
     migration = importlib.util.module_from_spec(spec)

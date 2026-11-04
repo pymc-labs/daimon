@@ -77,6 +77,11 @@ describe("agents", () => {
     const choices = agentChoices(roster, ["clv", "old"], refs)
     expect(choices.map((c) => [c.key, c.name])).toEqual([["old", "Deleted agent"], ["clv", "Customer value"], ["Daimon", "Daimon"]])
   })
+  it("never lists two choices under one key", () => {
+    const roster = [{ name: "Daimon", avatar: null }, { name: "Daimon", avatar: "x.png" }, { name: "Daimon Reader", avatar: null }]
+    const keys = agentChoices(roster, ["daimon", "daimon"], { daimon: { id: "a1", name: "Daimon Reader" } }).map((c) => c.key)
+    expect(new Set(keys).size).toBe(keys.length)
+  })
 })
 
 describe("filterChannels", () => {

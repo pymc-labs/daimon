@@ -28,7 +28,8 @@ function SlackMark({ className }: { className?: string }) {
   )
 }
 
-function TeamsMark({ className }: { className?: string }) {
+/** The Microsoft square, which Teams shares. */
+function MicrosoftMark({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 24 24" className={cn("size-4 shrink-0", className)} aria-hidden>
       <rect x="2" y="2" width="9.5" height="9.5" fill="#F25022" />
@@ -39,7 +40,7 @@ function TeamsMark({ className }: { className?: string }) {
   )
 }
 
-type Brand = "discord" | "slack" | "teams" | "google" | "github" | "email" | "web"
+type Brand = "discord" | "slack" | "microsoft" | "teams" | "google" | "github" | "email" | "web"
 
 /** A platform's mark. */
 export function BrandIcon({ brand, className, mono }: { brand: Brand | string; className?: string; mono?: boolean }) {
@@ -48,7 +49,8 @@ export function BrandIcon({ brand, className, mono }: { brand: Brand | string; c
     case "google": return <Si path={siGoogle.path} color={mono ? undefined : "#4285F4"} className={className} />
     case "github": return <Si path={siGithub.path} className={className} />
     case "slack": return <SlackMark className={className} />
-    case "teams": return <TeamsMark className={className} />
+    case "teams":
+    case "microsoft": return <MicrosoftMark className={className} />
     case "email": return <Mail className={cn("size-4 shrink-0", className)} />
     default: return <Globe className={cn("size-4 shrink-0", className)} />
   }

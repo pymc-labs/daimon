@@ -6,7 +6,9 @@ the app moves them on from it.
 
 from __future__ import annotations
 
+import hashlib
 import uuid
+from datetime import datetime
 from typing import Annotated, Literal
 
 from daimon.adapters.web.access import Capability, Role
@@ -25,9 +27,18 @@ from daimon.adapters.web.credits import CreditMeter, credit_meter
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.config import WebModuleKey
 from daimon.core.stores import tenants as tenants_store
+from daimon.core.stores import web_logins as logins_store
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores import web_sessions as sessions_store
-from daimon.core.stores.domain import CHAT_PLATFORMS, Platform, WebIdentityRow, WebPersonRow
+from daimon.core.stores.domain import (
+    CHAT_PLATFORMS,
+    Platform,
+    WebIdentityRow,
+    WebLoginAccountRow,
+    WebPersonRow,
+)
+from daimon.core.web_identity import WebSignInRefused
+from daimon.core.web_login import ConnectedAccountNotFound, disconnect_account
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
@@ -54,6 +65,17 @@ class Identity(BaseModel):
     icon: str | None = Field(default=None, exclude_if=_omit_none)
 
 
+class ConnectedAccount(BaseModel):
+    """A chat account signed in on this login; `id` is opaque and only names it for removal."""
+
+    id: str
+    provider: str
+    provider_label: str
+    label: str
+    last_used: datetime
+    current: bool
+
+
 class Me(BaseModel):
     """The shape the single-page app reads (`web/src/lib/types.ts`)."""
 
@@ -66,6 +88,7 @@ class Me(BaseModel):
     modules: list[WebModuleKey]
     capabilities: list[Capability]
     identities: list[Identity]
+    accounts: list[ConnectedAccount]
     credit: CreditMeter | None = None
     invited_by: str | None = Field(default=None, exclude_if=_omit_none)
     dev: bool
@@ -75,7 +98,7 @@ class SwitchBody(BaseModel):
     id: str
 
 
-_PROVIDER_LABELS = {"discord": "Discord"}
+_PROVIDER_LABELS = {"discord": "Discord", "slack": "Slack", "microsoft": "Microsoft"}
 
 
 def identity_json(row: WebIdentityRow) -> Identity:
@@ -85,6 +108,35 @@ def identity_json(row: WebIdentityRow) -> Identity:
         )
     label = _PROVIDER_LABELS.get(row.provider, row.provider.title())
     return Identity(provider=row.provider, provider_label=label, label=row.label)
+
+
+def account_key(provider: str, subject: str) -> str:
+    """An opaque name for a connected account, so the subject never leaves the server."""
+    return hashlib.sha256(f"{provider}\0{subject}".encode()).hexdigest()[:24]
+
+
+async def _login_accounts(runtime: WebRuntime, caller: WebCaller) -> list[WebLoginAccountRow]:
+    """The accounts on this sign-in's login, most recently proven first."""
+    login_id = caller.session.login_id
+    if login_id is None:
+        return []
+    async with runtime.sessionmaker() as db:
+        return await logins_store.list_accounts(db, login_id=login_id)
+
+
+async def _accounts(runtime: WebRuntime, caller: WebCaller) -> list[ConnectedAccount]:
+    return [
+        ConnectedAccount(
+            id=account_key(row.provider, row.subject),
+            provider=row.provider,
+            provider_label=_PROVIDER_LABELS.get(row.provider, row.provider.title()),
+            label=row.display_name,
+            last_used=row.last_proven_at,
+            current=(row.provider, row.subject)
+            == (caller.session.provider, caller.session.subject),
+        )
+        for row in await _login_accounts(runtime, caller)
+    ]
 
 
 def _shown_platform(platform: Platform | None) -> ShownPlatform:
@@ -171,10 +223,41 @@ def me_router(runtime: WebRuntime) -> APIRouter:
             modules=list(caller.modules),
             capabilities=sorted(caller.capabilities),
             identities=[identity_json(row) for row in caller.identities],
+            accounts=await _accounts(runtime, caller),
             credit=await credit_meter(runtime, caller),
             invited_by=await _invited_by(runtime, caller.person),
             dev=runtime.web.dev,
         )
+
+    @router.delete("/api/me/accounts/{key}")
+    async def disconnect(  # pyright: ignore[reportUnusedFunction]
+        key: str, caller: Annotated[WebCaller, Depends(current_caller)]
+    ) -> dict[str, bool]:
+        """Disconnect an account from this sign-in, and its workspaces with it."""
+        account = next(
+            (
+                a
+                for a in await _login_accounts(runtime, caller)
+                if account_key(a.provider, a.subject) == key
+            ),
+            None,
+        )
+        if account is None:
+            raise HTTPException(status_code=404, detail="This account isn't connected.")
+        try:
+            await disconnect_account(
+                runtime.sessionmaker,
+                web_session=caller.session,
+                person=caller.person,
+                provider=account.provider,
+                subject=account.subject,
+                now=runtime.now(),
+            )
+        except ConnectedAccountNotFound as missing:
+            raise HTTPException(status_code=404, detail=str(missing)) from None
+        except WebSignInRefused as refused:
+            raise HTTPException(status_code=409, detail=str(refused)) from None
+        return {"ok": True}
 
     @router.post("/api/workspaces/switch")
     async def switch(  # pyright: ignore[reportUnusedFunction]

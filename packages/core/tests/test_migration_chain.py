@@ -1,9 +1,9 @@
 """Exercise the canonical migration chain through real Alembic and PostgreSQL.
 
 Main's branch (0132..0158) and the preview branch (0134..0167) both descend from
-0131_usage_obs_tenant_idx; 0168 joins them and the last of the linear tail 0169..0178 is the single head. The ORM
-describes the head, so below the merge the preview branch is compared without
-the objects main's branch changes.
+0131_usage_obs_tenant_idx; 0168 joins them and the last of the linear tail 0169..0179 is the
+single head. The ORM describes the head, so below the merge the preview branch is compared
+without the objects main's branch changes.
 """
 
 from __future__ import annotations
@@ -139,7 +139,8 @@ TAIL = (
     "0175_channel_name_status",
     "0176_routine_names",
     "0177_invite_files",
-    "0178_server_skills",
+    "0178_web_logins",
+    "0179_server_skills",
 )
 HEAD = TAIL[-1]
 
@@ -289,6 +290,9 @@ TABLES = {
     "long_job_policy",
     "long_job_policy_history",
     "long_job_cancel_audit",
+    # Added by the web logins migration (0178).
+    "web_logins",
+    "web_login_accounts",
 }
 
 
@@ -322,6 +326,8 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
         )
         else {name for name in TABLES if not name.startswith("lead_")}
     )
+    if expected != HEAD:
+        compared_tables = compared_tables - {"web_logins", "web_login_accounts"}
     if expected not in (LONG_JOBS_HEAD, ADMINS_HEAD, *TOP):
         compared_tables = {name for name in compared_tables if not name.startswith("long_job")}
     if expected not in TOP:
@@ -394,19 +400,29 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             and getattr(getattr(obj, "table", None), "name", None) == "routines"
         ):
             return False
+        # Added by the server skills migration (0179), the head.
+        if (
+            expected != HEAD
+            and kind == "table"
+            and name in {"server_skills", "server_skill_deployments", "agent_skill_follows"}
+        ):
+            return False
+        # Added by the web logins migration (0178).
+        if expected != HEAD and (
+            (kind == "index" and name in {"ix_web_sessions_login", "ix_web_sessions_account"})
+            or (
+                kind == "column"
+                and name == "login_id"
+                and getattr(getattr(obj, "table", None), "name", None) == "web_sessions"
+            )
+        ):
+            return False
         # Added by the invite files migration (0177).
         if (
             expected != HEAD
             and kind == "column"
             and name == "allow_files"
             and getattr(getattr(obj, "table", None), "name", None) == "web_invites"
-        ):
-            return False
-        # Added by the server skills migration (0178), the head.
-        if (
-            expected != HEAD
-            and kind == "table"
-            and name in {"server_skills", "server_skill_deployments", "agent_skill_follows"}
         ):
             return False
         if (

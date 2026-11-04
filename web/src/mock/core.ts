@@ -1,7 +1,7 @@
 // Identity, workspaces and dev switching. Module handlers live beside this file.
 import { http, HttpResponse } from "msw"
 
-import { agent, AGENTS, me, PEOPLE, session, SESSIONS } from "./world"
+import { accounts, agent, AGENTS, connectAccount, disconnectAccount, me, PEOPLE, session, SESSIONS } from "./world"
 import { forbidden, notFound, paged, unauthorized, wait } from "./util"
 
 export const coreHandlers = [
@@ -11,7 +11,9 @@ export const coreHandlers = [
     return m ? HttpResponse.json(m) : unauthorized()
   }),
   http.get("/auth/providers", () => HttpResponse.json([
-    { id: "discord", label: "Discord", kind: "dev" },
+    { id: "discord", label: "Discord", kind: "redirect" },
+    { id: "slack", label: "Slack", kind: "redirect" },
+    { id: "microsoft", label: "Microsoft", kind: "redirect" },
   ])),
   // Every provider signs in the same demo admin; the dev panel passes `email` to switch people.
   http.post("/auth/mock", async ({ request }) => {
@@ -34,11 +36,20 @@ export const coreHandlers = [
     session.setWorkspace("ws_fernhill")
     return HttpResponse.json({ ok: true })
   }),
-  http.post("/auth/:provider/link", ({ params }) => {
+  // A connect has no upstream to visit in the demo: the account joins at once and the page reloads.
+  http.post("/auth/:provider/connect", ({ params }) => {
     const user = session.user()
     if (!user) return unauthorized()
-    if (user.role === "visitor") return forbidden("A visitor can't link a chat account.")
-    return HttpResponse.json({ url: `/chat?linked=${params.provider}` })
+    if (user.role === "visitor") return forbidden("Guests can't connect an account.")
+    connectAccount(String(params.provider))
+    return HttpResponse.json({ url: "/chat" })
+  }),
+  http.delete("/api/me/accounts/:id", ({ params }) => {
+    const hit = accounts().find((a) => a.id === params.id)
+    if (!hit) return notFound()
+    if (hit.current) return HttpResponse.json({ detail: "This is the account you signed in with." }, { status: 409 })
+    disconnectAccount(hit.provider)
+    return HttpResponse.json({ ok: true })
   }),
   http.post("/auth/logout", () => {
     session.signOut()

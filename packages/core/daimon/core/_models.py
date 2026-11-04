@@ -5285,6 +5285,40 @@ class WebIdentity(Base):
     )
 
 
+class WebLogin(Base):
+    """The accounts one member connected, across platforms (`WebLoginAccount`)."""
+
+    __tablename__ = "web_logins"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class WebLoginAccount(Base):
+    """A sign-in account in one login; each (provider, subject) belongs to one login.
+
+    `last_proven_at` is when the provider last vouched for it; the account's workspaces
+    join a session only while it is recent.
+    """
+
+    __tablename__ = "web_login_accounts"
+    __table_args__ = (Index("ix_web_login_accounts_login", "login_id"),)
+
+    login_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("web_logins.id", ondelete="CASCADE"), nullable=False
+    )
+    provider: Mapped[str] = mapped_column(Text, primary_key=True)
+    subject: Mapped[str] = mapped_column(Text, primary_key=True)
+    display_name: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    last_proven_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class WebSession(Base):
     """A browser sign-in. Only the SHA-256 of the cookie token is stored.
 
@@ -5293,7 +5327,12 @@ class WebSession(Base):
     """
 
     __tablename__ = "web_sessions"
-    __table_args__ = (Index("ix_web_sessions_expires_at", "expires_at"),)
+    __table_args__ = (
+        Index("ix_web_sessions_expires_at", "expires_at"),
+        Index("ix_web_sessions_login", "login_id"),
+        # The account a sign-in came with: disconnecting it ends every session of it.
+        Index("ix_web_sessions_account", "provider", "subject"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
@@ -5317,6 +5356,9 @@ class WebSession(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     roles_checked_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    login_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("web_logins.id", ondelete="SET NULL"), nullable=True
     )
 
 

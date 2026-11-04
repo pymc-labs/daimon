@@ -81,7 +81,7 @@ async def test_me_has_the_shape_the_app_reads(
     me = res.json()
     assert set(me) == {
         "id", "name", "email", "workspace", "workspaces", "role", "modules",
-        "capabilities", "identities", "credit", "dev",
+        "capabilities", "identities", "accounts", "credit", "dev",
     }  # fmt: skip
     assert (me["id"], me["name"], me["email"]) == (str(person.id), "Test Person", "ada@example.com")
     assert me["workspace"] == {

@@ -57,10 +57,14 @@ async def main() -> None:
     if not settings.crypto.keys:
         log.error("web adapter requires DAIMON_CRYPTO__KEYS for token encryption")
         sys.exit(1)
-    if not web.dev and not settings.hub.discord_configured:
+    if not web.dev and not (
+        settings.hub.discord_configured
+        or settings.hub.slack_configured
+        or settings.microsoft_accounts.configured
+    ):
         log.error(
             "web.signin.unconfigured",
-            hint="set DAIMON_HUB__DISCORD_CLIENT_ID and DAIMON_HUB__DISCORD_CLIENT_SECRET",
+            hint="set the Discord or Slack app of DAIMON_HUB__*, or DAIMON_MICROSOFT_ACCOUNTS__*",
         )
         sys.exit(1)
     try:

@@ -1561,6 +1561,29 @@ class WebSessionRow(BaseModel):
     last_seen_at: datetime
     expires_at: datetime
     roles_checked_at: datetime
+    login_id: uuid.UUID | None = None
+
+
+class WebLoginSessionPersonRow(BaseModel):
+    """A person one session of a login reaches, and the person that session is working as."""
+
+    model_config = ConfigDict(frozen=True)
+
+    session_id: uuid.UUID
+    current_person_id: uuid.UUID
+    person_id: uuid.UUID
+
+
+class WebLoginAccountRow(BaseModel):
+    """A sign-in account in a login, and when its provider last vouched for it."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    login_id: uuid.UUID
+    provider: str
+    subject: str
+    display_name: str
+    last_proven_at: datetime
 
 
 class ChatStandingRow(BaseModel):

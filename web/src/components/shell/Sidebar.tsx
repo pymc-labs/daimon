@@ -6,7 +6,7 @@ import { useMemo, useState } from "react"
 import { Link, NavLink, useMatch, useNavigate } from "react-router"
 import { toast } from "sonner"
 
-import { BrandIcon, Logo } from "@/components/brand"
+import { BrandIcon } from "@/components/brand"
 import { AgentAvatar, Avatar, Kbd } from "@/components/common"
 import { useConfirm } from "@/lib/confirm"
 import { CreditMeter } from "@/components/CreditMeter"
@@ -86,7 +86,7 @@ function WorkspaceSwitcher({ me }: { me: Me }) {
   const pick = (id: string) => { if (id !== me.workspace.id) switchTo.mutate(id) }
   const label = (
     <>
-      <Logo className="size-6" />
+      <BrandIcon brand={me.workspace.platform} className="size-6" />
       <span className="truncate text-sm font-semibold">{me.workspace.name}</span>
     </>
   )
@@ -208,14 +208,14 @@ const ROLE: Record<string, string> = { owner: "Owner", admin: "Admin", member: "
 /** Local switching between seeded people exists only in the mock build. */
 const MOCK = import.meta.env.MODE === "mock"
 
-function UserMenu() {
+export function UserMenu() {
   const { data: me } = useMe()
   const { theme, setTheme } = useTheme()
   const qc = useQueryClient()
   const [users, setUsers] = useState<Person[] | null>(null)
   const providers = useProviders()
   const link = useMutation({
-    mutationFn: (provider: string) => api.post<{ url: string }>(`/auth/${provider}/link`, { next: "/chat" }),
+    mutationFn: (provider: string) => api.post<{ url: string }>(`/auth/${provider}/connect`, { next: "/chat" }),
     onSuccess: ({ url }) => location.assign(url),
   })
   if (!me) return <div className="h-14 border-t" />
@@ -224,8 +224,8 @@ function UserMenu() {
     qc.clear()
     location.assign("/chat")
   }
-  const linked = new Set(me.identities.map((i) => i.provider))
-  const linkable = me.role === "visitor" ? [] : (providers.data ?? []).filter((p) => p.kind === "redirect")
+  const connected = new Set(me.accounts.map((a) => a.provider))
+  const connectable = me.role === "visitor" ? [] : (providers.data ?? []).filter((p) => p.kind === "redirect" && !connected.has(p.id))
   return (
     <ShellCtx.Consumer>
       {({ openShortcuts }) => (
@@ -270,14 +270,13 @@ function UserMenu() {
                 </DropdownMenuSubContent>
               </DropdownMenuSub>
             )}
-            {linkable.length > 0 && (
+            {connectable.length > 0 && (
               <DropdownMenuSub>
-                <DropdownMenuSubTrigger><Link2 />Link chat account</DropdownMenuSubTrigger>
+                <DropdownMenuSubTrigger><Link2 />Connect account</DropdownMenuSubTrigger>
                 <DropdownMenuSubContent>
-                  {linkable.map((p) => (
-                    <DropdownMenuItem key={p.id} disabled={linked.has(p.id) || link.isPending} onSelect={() => link.mutate(p.id)}>
+                  {connectable.map((p) => (
+                    <DropdownMenuItem key={p.id} disabled={link.isPending} onSelect={() => link.mutate(p.id)}>
                       <BrandIcon brand={p.id} />{p.label}
-                      {linked.has(p.id) && <Check className="ml-auto" />}
                     </DropdownMenuItem>
                   ))}
                 </DropdownMenuSubContent>

@@ -20,7 +20,14 @@ from daimon.core.config import Settings
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
-from daimon.core.stores import web_audit, web_identities, web_invites, web_people, web_sessions
+from daimon.core.stores import (
+    web_audit,
+    web_identities,
+    web_invites,
+    web_logins,
+    web_people,
+    web_sessions,
+)
 from daimon.core.stores import web_chat as chat_store
 from daimon.core.stores.domain import WebMessageBlocks, WebMessageRow, WebPersonRow, WebThreadRow
 from daimon.core.stores.identity import get_or_create_platform_principal
@@ -155,20 +162,32 @@ async def new_thread(
     return thread, message
 
 
-async def signed_in(factory: async_sessionmaker[AsyncSession], person: WebPersonRow) -> str:
-    """A live sign-in for `person`; its session cookie value."""
+async def signed_in(
+    factory: async_sessionmaker[AsyncSession], person: WebPersonRow, *, identity: bool = True
+) -> str:
+    """A live sign-in for `person`; its session cookie value. Like a real one, it sits on
+    a login that holds the account it signed in with. `identity=False` leaves the person
+    without a Discord identity, for tests that link one."""
     token = new_session_token()
     async with factory.begin() as db:
-        await web_identities.link_identity(
+        login = await web_logins.prove_account(
             db,
-            tenant_id=person.tenant_id,
-            person_id=person.id,
             provider="discord",
-            issuer="",
             subject=str(person.id),
-            label=person.email or "",
-            groups=(),
+            display_name=person.display_name,
+            now=datetime.now(UTC),
         )
+        if identity:
+            await web_identities.link_identity(
+                db,
+                tenant_id=person.tenant_id,
+                person_id=person.id,
+                provider="discord",
+                issuer="",
+                subject=str(person.id),
+                label=person.email or "",
+                groups=(),
+            )
         await web_sessions.create_session(
             db,
             token_sha256=token_sha256(token),
@@ -178,6 +197,7 @@ async def signed_in(factory: async_sessionmaker[AsyncSession], person: WebPerson
             people=[person],
             ttl=timedelta(days=1),
             now=datetime.now(UTC),
+            login_id=login.login_id,
         )
     return token
 
