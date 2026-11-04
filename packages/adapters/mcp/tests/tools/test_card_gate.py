@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 from daimon.adapters.mcp.tools import _card
+from daimon.adapters.mcp.tools import agent_coding_keys as coding_key_tool
 from daimon.adapters.mcp.tools import allowances as allowance_tool
 from daimon.adapters.mcp.tools import my_data as my_data_tool
 from daimon.adapters.mcp.tools import web_invites as invite_tool
@@ -23,11 +24,8 @@ from fastmcp.exceptions import ToolError
 from .parity_fakes import fake_runtime, make_auth
 
 _TOOLS = {
-    "forget_my_memory",
-    "disconnect_my_account",
-    "revoke_my_coding_key",
-    "revoke_web_invite",
-    "revoke_visitor_link",
+    "remove_my_data",
+    "revoke_web_link",
     "delete_allowance",
     "update_web_person",
     "set_agent_web_access",
@@ -117,7 +115,8 @@ async def test_destructive_tools_when_no_card_then_refused_before_any_change() -
         my_data_tool._disconnect_impl(  # pyright: ignore[reportPrivateUsage]
             runtime, auth, kind="slack", agent_id=None, key=None
         ),
-        my_data_tool._revoke_key_impl(runtime, auth, str(uuid.uuid4())),  # pyright: ignore[reportPrivateUsage]
+        coding_key_tool.revoke_coding_key(runtime, auth, str(uuid.uuid4()), None, "ctx"),
+        coding_key_tool.revoke_coding_key(runtime, auth, str(uuid.uuid4()), "agent-1", "ctx"),
     ]
     for call in calls:
         with pytest.raises(ToolError, match="Nothing changed"):
@@ -132,8 +131,8 @@ async def test_web_admin_tools_when_no_card_then_refused(monkeypatch: pytest.Mon
     monkeypatch.setattr(web_people_store, "get_person_for_account", no_grant)
     runtime, auth = fake_runtime(), make_auth()
     calls = [
-        invite_tool._revoke_impl(runtime, auth, str(uuid.uuid4())),  # pyright: ignore[reportPrivateUsage]
-        invite_tool._revoke_link_impl(runtime, auth, str(uuid.uuid4())),  # pyright: ignore[reportPrivateUsage]
+        invite_tool._revoke_impl(runtime, auth, "invite", str(uuid.uuid4()), "ctx"),  # pyright: ignore[reportPrivateUsage]
+        invite_tool._revoke_impl(runtime, auth, "visitor_link", str(uuid.uuid4()), "ctx"),  # pyright: ignore[reportPrivateUsage]
         allowance_tool._delete_impl(runtime, auth, str(uuid.uuid4())),  # pyright: ignore[reportPrivateUsage]
         people_tool._update_impl(runtime, auth, str(uuid.uuid4()), "admin", None),  # pyright: ignore[reportPrivateUsage]
         people_tool._access_set_impl(runtime, auth, "a1", True, None, None),  # pyright: ignore[reportPrivateUsage]

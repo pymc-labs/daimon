@@ -15,6 +15,11 @@ def _deps(monkeypatch):
     monkeypatch.setattr(tool, "_edit_deps", lambda _runtime: object())
     monkeypatch.setattr(tool, "_edit_actor", lambda _auth: object())
 
+    async def card(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(tool, "require_card", card)
+
 
 async def test_revoke_when_allowed_then_names_the_key(monkeypatch):
     seen = {}
@@ -24,8 +29,8 @@ async def test_revoke_when_allowed_then_names_the_key(monkeypatch):
 
     monkeypatch.setattr(tool.coding_keys, "revoke_agent_coding_key", fake)
     key = uuid.uuid4()
-    out = await tool._revoke_impl(fake_runtime(), make_auth(), "agent-1", key)
-    assert (out.agent_id, out.key_id) == ("agent-1", str(key)), "the result names what was revoked"
+    out = await tool.revoke_coding_key(fake_runtime(), make_auth(), str(key), "agent-1", "ctx")
+    assert out.key_id == str(key), "the result names what was revoked"
     assert seen["jti"] == key and seen["ma_agent_id"] == "agent-1", "core gets the same key"
 
 
@@ -35,7 +40,9 @@ async def test_revoke_when_core_refuses_then_tool_error(monkeypatch):
 
     monkeypatch.setattr(tool.coding_keys, "revoke_agent_coding_key", refuse)
     with pytest.raises(ToolError):
-        await tool._revoke_impl(fake_runtime(), make_auth(admin=False), "agent-1", uuid.uuid4())
+        await tool.revoke_coding_key(
+            fake_runtime(), make_auth(admin=False), str(uuid.uuid4()), "agent-1", "ctx"
+        )
 
 
 async def test_list_when_core_refuses_then_tool_error(monkeypatch):
@@ -45,3 +52,17 @@ async def test_list_when_core_refuses_then_tool_error(monkeypatch):
     monkeypatch.setattr(tool.coding_keys, "list_agent_coding_keys", refuse)
     with pytest.raises(ToolError):
         await tool._list_impl(fake_runtime(), make_auth(admin=False), "agent-1")
+
+
+async def test_revoke_own_key_when_not_the_callers_then_tool_error(monkeypatch):
+    async def no(*_a, **_k):
+        return False
+
+    monkeypatch.setattr(tool.coding_keys, "revoke_my_coding_key", no)
+    with pytest.raises(ToolError):
+        await tool.revoke_coding_key(fake_runtime(), make_auth(), str(uuid.uuid4()), None, "ctx")
+
+
+async def test_revoke_own_key_when_malformed_then_same_tool_error():
+    with pytest.raises(ToolError, match="No such key"):
+        await tool.revoke_coding_key(fake_runtime(), make_auth(), "not-a-uuid", None, "ctx")

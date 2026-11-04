@@ -1,10 +1,10 @@
 {
  "routes": {
   "DELETE /api/admin/invites/{invite_id}": {
-   "tool": "revoke_web_invite"
+   "tool": "revoke_web_link"
   },
   "DELETE /api/admin/people/{person_id}/link": {
-   "tool": "revoke_visitor_link"
+   "tool": "revoke_web_link"
   },
   "DELETE /api/agents/environments/{environment_id}": {
    "tool": "archive_environment"
@@ -17,7 +17,7 @@
     "discord": "daimon.adapters.discord.agent_setup.coding_keys_view",
     "slack": "daimon.adapters.slack.agent_setup.coding_keys"
    },
-   "tool": "revoke_agent_coding_key"
+   "tool": "remove_my_data"
   },
   "DELETE /api/agents/{agent_id}/draft": {
    "tool": "update_agent"
@@ -48,7 +48,7 @@
    "exempt": "web sign-in and session (linked account)"
   },
   "DELETE /api/profile/keys/{key_id}": {
-   "tool": "revoke_my_coding_key"
+   "tool": "remove_my_data"
   },
   "DELETE /api/profile/sign-ins/{identity_id}": {
    "exempt": "web sign-in and session (profile sign-ins)"
@@ -195,7 +195,7 @@
    "exempt": "web sign-in and session (invite accept)"
   },
   "POST /api/profile/connections/disconnect": {
-   "tool": "disconnect_my_account"
+   "tool": "remove_my_data"
   },
   "POST /api/profile/delete": {
    "panel": {
@@ -205,7 +205,7 @@
    }
   },
   "POST /api/profile/memory/{agent_id}/forget": {
-   "tool": "forget_my_memory"
+   "tool": "remove_my_data"
   },
   "POST /api/routines": {
    "tool": "create_routine"

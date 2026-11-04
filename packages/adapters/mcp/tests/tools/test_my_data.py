@@ -76,17 +76,3 @@ async def test_disconnect_when_connected_then_counts(monkeypatch):
         fake_runtime(), make_auth(), kind="microsoft", agent_id=None, key=None
     )
     assert (out.action, out.removed) == ("disconnected", 1), "a disconnect reports what went"
-
-
-async def test_revoke_key_when_not_the_callers_then_tool_error(monkeypatch):
-    async def no(*_a, **_k):
-        return False
-
-    monkeypatch.setattr(tool.coding_keys, "revoke_my_coding_key", no)
-    with pytest.raises(ToolError):
-        await tool._revoke_key_impl(fake_runtime(), make_auth(), str(uuid.uuid4()))
-
-
-async def test_revoke_key_when_malformed_then_same_tool_error():
-    with pytest.raises(ToolError, match="Nothing like that"):
-        await tool._revoke_key_impl(fake_runtime(), make_auth(), "not-a-uuid")

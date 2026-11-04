@@ -11,8 +11,9 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._card import require_card
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._pagination import capped
 from daimon.adapters.mcp.tools._web_admin import agent_names, now, refused, web_admin_of
-from daimon.adapters.mcp.tools._web_url import WebUrl, tenant_links
+from daimon.adapters.mcp.tools._web_url import WebUrl, admin_links
 from daimon.core import credit_views, web_allowances
 from daimon.core.allowances import EVERYONE
 from daimon.core.stores import spend_allowances
@@ -42,6 +43,8 @@ class AllowanceLine:
 @dataclass(frozen=True)
 class Allowances:
     allowances: list[AllowanceLine]
+    total: int
+    more: bool
     web_url: WebUrl = None
 
 
@@ -107,9 +110,12 @@ async def _list_impl(runtime: McpRuntime, auth: AuthIdentity) -> Allowances:
     actor = await web_admin_of(runtime, auth)
     async with runtime.session_factory() as db:
         rows = await spend_allowances.list_for_tenant(db, tenant_id=actor.tenant_id)
-    links = await tenant_links(runtime, auth)
+    links = admin_links(runtime, actor)
+    shown, total, more = capped(list(reversed(rows)))
     return Allowances(
-        list(reversed(await _lines(runtime, actor.tenant_id, rows))),
+        await _lines(runtime, actor.tenant_id, shown),
+        total,
+        more,
         links.allowance() if links else None,
     )
 
@@ -148,7 +154,7 @@ async def _create_impl(
     except WebAdminError as err:
         raise refused(err) from err
     [line] = await _lines(runtime, actor.tenant_id, [row])
-    links = await tenant_links(runtime, auth)
+    links = admin_links(runtime, actor)
     return AllowanceChanged(line, links.allowance(line.allowance_id) if links else None)
 
 
@@ -170,7 +176,7 @@ async def _set_impl(
     except WebAdminError as err:
         raise refused(err) from err
     [line] = await _lines(runtime, actor.tenant_id, [row])
-    links = await tenant_links(runtime, auth)
+    links = admin_links(runtime, actor)
     return AllowanceChanged(line, links.allowance(line.allowance_id) if links else None)
 
 
@@ -209,9 +215,9 @@ def register_allowance_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         expires_at: datetime | None = None,
         cap: bool = False,
     ) -> AllowanceChanged:
-        """Give a person (web person id), a group (name, or ``everyone``) or an invite (id) a
-        spend allowance in billed dollars, monthly or in total, for every agent or one. A cap is
-        monthly, for everyone or one person, with no agent or end date. Admin-only."""
+        """Set a spending limit (allowance) for a person (web person id), a group (name, or
+        ``everyone``) or an invite (id), in billed dollars, monthly or in total, for every agent
+        or one. A cap is monthly, for everyone or one person, with no agent or end date."""
         return await _create_impl(
             runtime,
             await _auth(ctx),
@@ -233,10 +239,9 @@ def register_allowance_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool(name="delete_allowance", tags={"admin"})
     async def delete_allowance(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, allowance_id: str, origin_context_id: str | None = None
+        ctx: Context, allowance_id: str, origin_context_id: str
     ) -> AllowanceDeleted:
-        """Remove an allowance or cap. Admin-only.
-        Runs on the person's Confirm card in chat; pass this active turn's origin_context_id."""
+        """Remove an allowance or cap."""
         return await _delete_impl(runtime, await _auth(ctx), allowance_id, origin_context_id)
 
 

@@ -11,6 +11,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools._pagination import capped
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.channel_settings import (
@@ -34,6 +35,8 @@ class ThreadOverrideEntry:
 class ThreadOverrides:
     channel_id: str
     overrides: list[ThreadOverrideEntry]
+    total: int
+    more: bool
 
 
 @dataclass(frozen=True)
@@ -51,9 +54,12 @@ async def _list_impl(runtime: McpRuntime, auth: AuthIdentity, channel_id: str) -
         found = await list_thread_overrides(
             session, tenant_id=auth.tenant_id, platform=auth.platform or "", channel_id=channel_id
         )
+    shown, total, more = capped(found)
     return ThreadOverrides(
         channel_id=channel_id,
-        overrides=[ThreadOverrideEntry(o.thread_id, o.kind, o.value) for o in found],
+        overrides=[ThreadOverrideEntry(o.thread_id, o.kind, o.value) for o in shown],
+        total=total,
+        more=more,
     )
 
 

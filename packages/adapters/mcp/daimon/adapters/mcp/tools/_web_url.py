@@ -6,6 +6,7 @@ from typing import Annotated
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.core.web_admin import WebAdmin
 from daimon.core.web_links import TenantLinks, WebLinks
 from daimon.core.web_roles_rules import is_admin, role_of_account
 from pydantic import Field
@@ -25,3 +26,10 @@ async def tenant_links(runtime: McpRuntime, auth: AuthIdentity) -> TenantLinks |
             db, tenant_id=auth.tenant_id, account_id=auth.account_id, chat_admin=auth.is_admin
         )
     return None if role is None else links.for_tenant(auth.tenant_id, admin=is_admin(role))
+
+
+def admin_links(runtime: McpRuntime, actor: WebAdmin) -> TenantLinks | None:
+    """The workspace links for a chat admin `web_admin_of` already resolved: no web app,
+    none; otherwise the admin pages, with no second role lookup."""
+    links = WebLinks.from_settings(runtime.settings.web)
+    return None if links is None else links.for_tenant(actor.tenant_id, admin=is_admin(actor.role))

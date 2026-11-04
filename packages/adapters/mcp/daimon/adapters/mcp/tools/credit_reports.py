@@ -13,6 +13,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._pagination import capped
 from daimon.adapters.mcp.tools._web_admin import (
     PrivateDetails,
     agent_names,
@@ -20,7 +21,7 @@ from daimon.adapters.mcp.tools._web_admin import (
     private_details,
     web_admin_of,
 )
-from daimon.adapters.mcp.tools._web_url import WebUrl, tenant_links
+from daimon.adapters.mcp.tools._web_url import WebUrl, admin_links, tenant_links
 from daimon.core import credit_report, credit_views
 from daimon.core.credit_report import AgentLabel, DailyEntry, LedgerEntry, SpendBy, TurnEntry
 from daimon.core.feedback_summary import (
@@ -33,6 +34,7 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
 _REMOVED = "Removed agent"
+OVERVIEW_LEDGER = 20
 
 
 @dataclass(frozen=True)
@@ -71,6 +73,8 @@ class CreditsOverview:
 class CreditsSpend:
     by: SpendBy
     rows: list[SpendLine]
+    total: int
+    more: bool
     private_details: PrivateDetails
     """By person, names show only when `shown`; otherwise rows read `Person 1`, `Person 2`."""
     web_url: WebUrl = None
@@ -134,8 +138,9 @@ async def _overview_impl(runtime: McpRuntime, auth: AuthIdentity) -> CreditsOver
         tenant_id=actor.tenant_id,
         now=now(),
         markup=runtime.settings.billing.markup,
+        ledger_limit=OVERVIEW_LEDGER,
     )
-    links = await tenant_links(runtime, auth)
+    links = admin_links(runtime, actor)
     return CreditsOverview(
         balance_usd=report.balance_usd,
         spent_usd=report.spent_usd,
@@ -168,7 +173,7 @@ async def _spend_impl(
         agent_labels=_labels(runtime, actor.tenant_id),
         channel_names=_stored_names,
     )
-    links = await tenant_links(runtime, auth)
+    links = admin_links(runtime, actor)
     lines = [_line(e) for e in rows]
     if by == "person" and details != "shown":
         # Person names default to the email local part, which is private.
@@ -176,8 +181,14 @@ async def _spend_impl(
             line if line.id == credit_report.NO_PERSON else replace(line, name=f"Person {n}")
             for n, line in enumerate(lines, 1)
         ]
+    shown, total, more = capped(lines)
     return CreditsSpend(
-        by=by, rows=lines, private_details=details, web_url=links.spend() if links else None
+        by=by,
+        rows=shown,
+        total=total,
+        more=more,
+        private_details=details,
+        web_url=links.spend() if links else None,
     )
 
 
@@ -198,7 +209,7 @@ async def _feedback_impl(runtime: McpRuntime, auth: AuthIdentity, days: int) -> 
             )
     except FeedbackNotAllowed as err:
         raise ToolError(str(err)) from err
-    links = await tenant_links(runtime, auth)
+    links = admin_links(runtime, actor)
     return FeedbackSummary(
         report=feedback_report(found, names=names, days=days),
         web_url=links.feedback() if links else None,

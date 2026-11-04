@@ -378,7 +378,7 @@ def _without_carded(tools: list[Any]) -> list[Any]:
 
 @pytest.mark.parametrize(
     ("tool_name", "proven"),
-    [("add_skill", True), ("publish_report", True), ("forget_my_memory", False)],
+    [("add_skill", True), ("publish_report", True), ("remove_my_data", False)],
 )
 async def test_a_session_bound_before_the_carded_tools_proves_other_cards_never_a_carded_one(
     monkeypatch: pytest.MonkeyPatch, tool_name: str, proven: bool

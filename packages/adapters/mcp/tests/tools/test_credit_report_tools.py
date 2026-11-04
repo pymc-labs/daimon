@@ -120,3 +120,28 @@ async def test_spend_by_person_when_not_a_dm_then_names_withheld(
     out = await tool._spend_impl(runtime, make_auth(), "person", "30d", "ctx")
     assert [r.name for r in out.rows] == names, "names shown only in a direct message"
     assert out.private_details == details, "the field says what was left out"
+
+
+async def test_spend_when_over_25_rows_then_first_25_with_total_and_more(runtime, monkeypatch):
+    """A long breakdown shows 25 rows, the full count and a flag."""
+
+    async def fake_spend(_sessions, **_kw: Any):
+        return [credit_report.SpendEntry(f"a{n}", f"Agent {n}", 1, 1.0) for n in range(40)]
+
+    monkeypatch.setattr(tool.credit_report, "spend_breakdown", fake_spend)
+    out = await tool._spend_impl(runtime, make_auth(), "agent", "30d")
+    assert (len(out.rows), out.total, out.more) == (25, 40, True), "cut at 25 of 40"
+
+
+async def test_overview_asks_core_for_twenty_ledger_rows(runtime, monkeypatch):
+    """The overview tool reads 20 credit-history rows, not the web page's 50."""
+    seen: dict[str, Any] = {}
+
+    async def fake_overview(_sessions, **kw: Any):
+        seen.update(kw)
+        raise ToolError("stop")
+
+    monkeypatch.setattr(tool.credit_report, "overview_report", fake_overview)
+    with pytest.raises(ToolError):
+        await tool._overview_impl(runtime, make_auth())
+    assert seen["ledger_limit"] == 20, "the tool's ledger is 20 rows"

@@ -22,7 +22,7 @@ from daimon.adapters.mcp.tools._web_admin import (
     send_privately,
     web_admin_of,
 )
-from daimon.adapters.mcp.tools._web_url import WebUrl, tenant_links
+from daimon.adapters.mcp.tools._web_url import WebUrl, admin_links
 from daimon.core import web_admin
 from daimon.core.stores import web_invites
 from daimon.core.stores.domain import WebInviteRow
@@ -32,6 +32,7 @@ from fastmcp.exceptions import ToolError
 from pydantic import EmailStr, TypeAdapter, ValidationError
 
 InviteRole = Literal["visitor", "member"]
+RevokedKind = Literal["invite", "visitor_link"]
 _LIMIT = 100
 _EMAIL: TypeAdapter[str] = TypeAdapter(EmailStr)
 
@@ -73,8 +74,9 @@ class WebInviteChanged:
 
 
 @dataclass(frozen=True)
-class WebInviteRevoked:
-    invite_id: str
+class WebLinkRevoked:
+    kind: RevokedKind
+    id: str
 
 
 @dataclass(frozen=True)
@@ -82,11 +84,6 @@ class VisitorLinkSent:
     person_id: str
     delivered: Literal["direct_message"]
     web_url: WebUrl = None
-
-
-@dataclass(frozen=True)
-class VisitorLinkRevoked:
-    person_id: str
 
 
 def _shown(invite: WebInviteRow, at: datetime, details: PrivateDetails) -> WebInvite:
@@ -131,7 +128,7 @@ async def _list_impl(
     async with runtime.session_factory() as db:
         found = await web_invites.list_invites(db, tenant_id=actor.tenant_id, limit=_LIMIT)
     at = now()
-    links = await tenant_links(runtime, auth)
+    links = admin_links(runtime, actor)
     return WebInvites(
         [_shown(i, at, details) for i in found], details, links.invites() if links else None
     )
@@ -182,7 +179,7 @@ async def _create_impl(
             raise
         why = str(err) if isinstance(err, ToolError) else "The link could not be sent."
         raise ToolError(f"{why} The invite was revoked.") from err
-    links = await tenant_links(runtime, auth)
+    links = admin_links(runtime, actor)
     url = links.invites(str(invite.id)) if links else None
     return WebInviteSent(_shown(invite, at, details), "direct_message", details, url)
 
@@ -204,24 +201,9 @@ async def _files_impl(
             )
     except WebAdminError as err:
         raise refused(err) from err
-    links = await tenant_links(runtime, auth)
+    links = admin_links(runtime, actor)
     url = links.invites(str(invite.id)) if links else None
     return WebInviteChanged(_shown(invite, at, details), details, url)
-
-
-async def _revoke_impl(
-    runtime: McpRuntime, auth: AuthIdentity, invite_id: str, origin_context_id: str | None = None
-) -> WebInviteRevoked:
-    actor = await web_admin_of(runtime, auth)
-    await require_card(
-        runtime, auth, tool_name="revoke_web_invite", origin_context_id=origin_context_id
-    )
-    try:
-        async with runtime.session_factory.begin() as db:
-            await web_admin.revoke_invite(db, actor, now(), _uuid(invite_id, "invite_id"))
-    except WebAdminError as err:
-        raise refused(err) from err
-    return WebInviteRevoked(invite_id)
 
 
 async def _issue_link_impl(
@@ -243,23 +225,30 @@ async def _issue_link_impl(
             raise
         why = str(err) if isinstance(err, ToolError) else "The link could not be sent."
         raise ToolError(f"{why} The link was revoked.") from err
-    links = await tenant_links(runtime, auth)
+    links = admin_links(runtime, actor)
     return VisitorLinkSent(person_id, "direct_message", links.person(person_id) if links else None)
 
 
-async def _revoke_link_impl(
-    runtime: McpRuntime, auth: AuthIdentity, person_id: str, origin_context_id: str | None = None
-) -> VisitorLinkRevoked:
+async def _revoke_impl(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    kind: RevokedKind,
+    target_id: str,
+    origin_context_id: str,
+) -> WebLinkRevoked:
     actor = await web_admin_of(runtime, auth)
     await require_card(
-        runtime, auth, tool_name="revoke_visitor_link", origin_context_id=origin_context_id
+        runtime, auth, tool_name="revoke_web_link", origin_context_id=origin_context_id
     )
     try:
         async with runtime.session_factory.begin() as db:
-            await web_admin.revoke_sign_in_link(db, actor, now(), _uuid(person_id, "person_id"))
+            if kind == "invite":
+                await web_admin.revoke_invite(db, actor, now(), _uuid(target_id, "id"))
+            else:
+                await web_admin.revoke_sign_in_link(db, actor, now(), _uuid(target_id, "id"))
     except WebAdminError as err:
         raise refused(err) from err
-    return VisitorLinkRevoked(person_id)
+    return WebLinkRevoked(kind, target_id)
 
 
 def register_web_invite_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
@@ -307,14 +296,6 @@ def register_web_invite_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         active turn's origin_context_id. Admin-only."""
         return await _files_impl(runtime, await _auth(ctx), invite_id, allow, origin_context_id)
 
-    @mcp.tool(name="revoke_web_invite", tags={"admin"})
-    async def revoke_invite(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, invite_id: str, origin_context_id: str | None = None
-    ) -> WebInviteRevoked:
-        """Revoke a web invite so its link stops working. Admin-only.
-        Runs on the person's Confirm card in chat; pass this active turn's origin_context_id."""
-        return await _revoke_impl(runtime, await _auth(ctx), invite_id, origin_context_id)
-
     @mcp.tool(name="issue_visitor_link", tags={"admin"})
     async def issue_link(ctx: Context, person_id: str) -> VisitorLinkSent:  # pyright: ignore[reportUnusedFunction]
         """Issue a one-time sign-in link for a web visitor. The link is sent to the caller by
@@ -322,14 +303,12 @@ def register_web_invite_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         caller's role."""
         return await _issue_link_impl(runtime, await _auth(ctx), person_id)
 
-    @mcp.tool(name="revoke_visitor_link", tags={"admin"})
+    @mcp.tool(name="revoke_web_link", tags={"admin"})
     async def revoke_link(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, person_id: str, origin_context_id: str | None = None
-    ) -> VisitorLinkRevoked:
-        """Revoke a person's open sign-in links, as when one went to the wrong place.
-        Admin-only.
-        Runs on the person's Confirm card in chat; pass this active turn's origin_context_id."""
-        return await _revoke_link_impl(runtime, await _auth(ctx), person_id, origin_context_id)
+        ctx: Context, kind: RevokedKind, id: str, origin_context_id: str
+    ) -> WebLinkRevoked:
+        """Revoke a web invite (id) or a person's sign-in links (id is the person)."""
+        return await _revoke_impl(runtime, await _auth(ctx), kind, id, origin_context_id)
 
 
 __all__ = ["register_web_invite_tools"]

@@ -247,11 +247,12 @@ async def overview_report(
     tenant_id: uuid.UUID,
     now: datetime,
     markup: Decimal,
+    ledger_limit: int = LEDGER_LIMIT,
 ) -> OverviewReport:
     """The workspace's balance, recent spend, projection and credit history."""
     async with sessions() as db:
         recent = await credit_views.spend_overview(db, tenant_id=tenant_id, now=now, markup=markup)
-        lines = await credit_views.ledger_history(db, tenant_id=tenant_id, limit=LEDGER_LIMIT)
+        lines = await credit_views.ledger_history(db, tenant_id=tenant_id, limit=ledger_limit)
         actors = await credit_views.web_people_by_account(
             db,
             tenant_id=tenant_id,

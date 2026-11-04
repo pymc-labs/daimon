@@ -174,11 +174,8 @@ SERVER_SEPARATOR: Final[str] = "/"
 #: the person's card in chat, keyed to the input field every call carries.
 #: Each is a write whatever it is given, so every call asks.
 CARDED_TOOLS: Final[Mapping[str, str]] = {
-    "forget_my_memory": "agent_id",
-    "disconnect_my_account": "kind",
-    "revoke_my_coding_key": "key_id",
-    "revoke_web_invite": "invite_id",
-    "revoke_visitor_link": "person_id",
+    "remove_my_data": "kind",
+    "revoke_web_link": "kind",
     "delete_allowance": "allowance_id",
     "update_web_person": "person_id",
     "set_agent_web_access": "agent_id",

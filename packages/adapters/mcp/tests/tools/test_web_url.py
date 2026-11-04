@@ -9,7 +9,7 @@ from typing import Any, cast
 
 import pytest
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools._web_url import tenant_links
+from daimon.adapters.mcp.tools._web_url import admin_links, tenant_links
 from daimon.adapters.mcp.tools.agents import (  # pyright: ignore[reportPrivateUsage]
     AgentInfo,
     _with_web_url,
@@ -25,6 +25,7 @@ from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores import web_roles as roles_store
 from daimon.core.stores.domain import Role, RoutineRow
+from daimon.core.web_admin import WebAdmin
 from pydantic import TypeAdapter
 
 from ..harness import make_identity
@@ -163,21 +164,18 @@ async def test_a_member_gets_links_only_to_pages_a_member_may_open() -> None:
     assert links.person("u1") is None, "people are for admins"
 
 
-async def test_set_agent_rule_links_to_the_agents_page(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The result carries the page of the agent the rule is about, found by name."""
-    from daimon.adapters.mcp.tools import channel_rules
+async def test_set_agent_rule_links_to_the_agents_page() -> None:
+    """The result carries the page of the agent the rule is about, from the id core returned."""
     from daimon.adapters.mcp.tools.channel_rules import SetAgentRuleResult, _with_agent_link
 
-    async def find(_client: object, *, tenant_id: uuid.UUID, name: str) -> object:
-        return SimpleNamespace(id="agent_1")
-
-    monkeypatch.setattr(channel_rules, "find_agent_by_daimon_tag", find)
     result = SetAgentRuleResult(agent_name="stats", runs_in=None, changed=True, note="")
-
-    linked = await _with_agent_link(_runtime(_WEB), make_identity(tenant_id=_TENANT), result)
+    auth = make_identity(tenant_id=_TENANT)
+    linked = await _with_agent_link(_runtime(_WEB), auth, result, "agent_1")
     assert linked.web_url == f"{_BASE}/agents/agent_1", "the agent's own page"
-    plain = await _with_agent_link(_runtime(None), make_identity(tenant_id=_TENANT), result)
+    plain = await _with_agent_link(_runtime(None), auth, result, "agent_1")
     assert plain == result, "no web app, the result is what it was"
+    gone = await _with_agent_link(_runtime(_WEB), auth, result, None)
+    assert gone == result, "no live agent, no page and no lookup"
 
 
 async def test_links_when_web_role_is_admin_without_chat_admin_then_admin_pages(
@@ -208,3 +206,11 @@ async def test_links_when_web_person_is_suspended_then_none(web_role: dict[str, 
     links = await tenant_links(_runtime(_WEB), make_identity(tenant_id=_TENANT))
 
     assert links is None, "a suspended person can open nothing, so no link is offered"
+
+
+def test_admin_links_when_web_app_set_then_admin_pages_without_a_lookup() -> None:
+    """A resolved admin gets the admin pages straight from `WebAdmin`, with no database."""
+    actor = WebAdmin(tenant_id=_TENANT, account_id=uuid.uuid4(), role="admin", person_id=None)
+    links = admin_links(_runtime(_WEB), actor)
+    assert links is not None and links.audit() == f"{_BASE}/admin/audit", "the audit page"
+    assert admin_links(_runtime(None), actor) is None, "no web app, no link"

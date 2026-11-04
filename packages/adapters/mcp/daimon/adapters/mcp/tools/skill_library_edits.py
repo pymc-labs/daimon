@@ -100,10 +100,9 @@ def register_skill_library_edit_tools(mcp: FastMCP, runtime: McpRuntime) -> None
 
     @mcp.tool(tags={"admin"})
     async def restore_library_skill_version(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, skill_id: str, version: str, origin_context_id: str | None = None
+        ctx: Context, skill_id: str, version: str, origin_context_id: str
     ) -> LibrarySkillVersion:
-        """Publish an older version of a library skill again as its next version. Admin-only.
-        Runs on the person's Confirm card in chat; pass this active turn's origin_context_id."""
+        """Republish an older library skill version as the next one."""
         return await _restore_impl(runtime, await _auth(ctx), skill_id, version, origin_context_id)
 
 

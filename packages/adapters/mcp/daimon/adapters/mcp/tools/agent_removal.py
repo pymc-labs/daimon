@@ -437,7 +437,7 @@ def register_agent_removal_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         expected_ma_agent_id: str | None = None,
         origin_context_id: str | None = None,
     ) -> RemoveEnvCredentialResult:
-        """Remove an old API key or token, such as a Toggl key, from an agent's stored keys.
+        """Revoke or remove an agent's stored API key or token, such as a Toggl key.
 
         Use ``request_agent_key`` to add a key privately and ``list_agent_keys`` to
         inspect stored names. Removing a missing key also succeeds; ``removed`` says

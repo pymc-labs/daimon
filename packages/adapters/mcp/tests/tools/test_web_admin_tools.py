@@ -111,9 +111,9 @@ async def test_every_admin_tool_when_member_then_refused(runtime):
             allow_files=False,
         ),
         invite_tool._files_impl(runtime, member, str(uuid.uuid4()), True),
-        invite_tool._revoke_impl(runtime, member, str(uuid.uuid4())),
+        invite_tool._revoke_impl(runtime, member, "invite", str(uuid.uuid4()), "ctx"),
         invite_tool._issue_link_impl(runtime, member, str(uuid.uuid4())),
-        invite_tool._revoke_link_impl(runtime, member, str(uuid.uuid4())),
+        invite_tool._revoke_impl(runtime, member, "visitor_link", str(uuid.uuid4()), "ctx"),
         people_tool._people_impl(runtime, member, None, 10),
         people_tool._person_impl(runtime, member, str(uuid.uuid4())),
         people_tool._groups_impl(runtime, member),
@@ -614,3 +614,41 @@ async def test_change_settings_tool_requires_origin_context_id() -> None:
     register_web_workspace_settings_tool(mcp, fake_runtime())
     tool = await mcp.get_tool("change_workspace_settings")
     assert "origin_context_id" in tool.parameters["required"], "required in the tool signature"
+
+
+async def test_list_people_when_more_than_a_page_then_cursor_round_trips(runtime, monkeypatch):
+    """A full page returns `next_page`, and `after` reaches the store as the same cursor."""
+    people = [
+        SimpleNamespace(
+            id=uuid.uuid4(),
+            display_name=f"P{n}",
+            email=None,
+            status="active",
+            last_seen_at=NOW,
+            created_at=NOW,
+        )
+        for n in range(3)
+    ]
+    seen: list[dict[str, Any]] = []
+
+    async def rows(*_a: Any, **kw: Any):
+        seen.append(kw)
+        return people
+
+    async def idents(*_a: Any, **_k: Any):
+        return {p.id: [] for p in people}
+
+    async def roles(*_a: Any, **_k: Any):
+        return {p.id: "member" for p in people}
+
+    monkeypatch.setattr(people_tool.people_store, "list_people", rows)
+    monkeypatch.setattr(people_tool.identities_store, "list_for_people", idents)
+    monkeypatch.setattr(people_tool, "roles_of", roles)
+    _origin_is(monkeypatch, _origin())
+    out = await people_tool._people_impl(runtime, make_auth(), None, 2)
+    assert len(out.people) == 2 and out.next_page is not None, "two people and a cursor"
+    assert seen[0]["limit"] == 3, "one extra row tells whether another page exists"
+    await people_tool._people_impl(runtime, make_auth(), None, 2, None, out.next_page)
+    assert seen[1]["after"] == (NOW, people[1].id), "the cursor is the last person shown"
+    with pytest.raises(ToolError, match="after"):
+        await people_tool._people_impl(runtime, make_auth(), None, 2, None, "junk")

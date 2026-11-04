@@ -18,7 +18,12 @@ from anthropic._models import construct_type  # pyright: ignore[reportPrivateImp
 from anthropic.types.beta import BetaManagedAgentsSession
 from anthropic.types.beta.beta_managed_agents_model_config import BetaManagedAgentsModelConfig
 from daimon.core.mux_backend import platform_scope
-from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
+from daimon.core.tool_safety import (
+    CARDED_TOOLS,
+    ToolCall,
+    ToolSafetyPolicy,
+    has_confirmation_gate,
+)
 from daimon.core.turn import unattended_capabilities as caps
 from daimon.core.turn.approvals import chat_tool_confirmation
 from daimon.core.turn.driver import run_turn, unattended_sends
@@ -1014,6 +1019,32 @@ async def test_every_retained_mcp_call_pauses_for_the_decider(
     )
     assert daimon.allow
     assert foreign.allow is not enabled
+
+
+@pytest.mark.parametrize("enabled", [True, False], ids=["safety_on", "safety_off"])
+@pytest.mark.parametrize("entry_point", [None, *ENTRY_POINTS])
+async def test_carded_tools_are_not_offered_to_an_unattended_session(
+    entry_point: UnattendedEntryPoint | None, enabled: bool
+) -> None:
+    """No card can be shown unattended, so Daimon's carded tools are disabled, yet still asking."""
+    public_url = "https://daimon.example/mcp"
+    snapshot = _daimon_and_foreign(public_url)
+    provider, result = await _drive(
+        snapshot, entry_point, policy=ToolSafetyPolicy(enabled=enabled), public_url=public_url
+    )
+
+    assert result.error is None
+    [agent] = provider.at_send
+    [daimon] = [t for t in agent["tools"] if t.get("mcp_server_name") == "daimon-mcp"]
+    configs = {c["name"]: c for c in daimon["configs"]}
+    assert set(CARDED_TOOLS) <= set(configs), "every carded tool is named, so none is offered"
+    for name in CARDED_TOOLS:
+        assert configs[name]["enabled"] is False, f"{name} is not listed to the model"
+        assert configs[name]["permission_policy"] == {"type": "always_ask"}, f"{name} still asks"
+        assert has_confirmation_gate(agent["tools"], tool_name=name), (
+            f"{name} still proves the session's gate"
+        )
+    assert configs["list_agents"].get("enabled", True) is True, "an ordinary tool stays listed"
 
 
 @pytest.mark.parametrize("effort", ["medium", {"type": "medium"}])

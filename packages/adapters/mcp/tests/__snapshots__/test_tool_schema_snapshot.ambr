@@ -791,25 +791,15 @@
     }),
     'change_workspace_settings': dict({
       'description': '''
-        Change the workspace's web modules (chat, agents, channels, routines, credits,
-        integrations), its web chat agent, who may start turns (everyone, or exactly the
-        web people in ``invoker_people``) and the direct-message rules. Admin-only.
-        Runs on the person's Confirm card in chat; every call needs this active turn's
-        origin_context_id.
+        Change the web modules, web chat agent, who may start turns (everyone or exactly
+        ``invoker_people``) and the direct-message rules.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
           'default_agent': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
+            'default': '',
+            'type': 'string',
           }),
           'dm_enabled': dict({
             'anyOf': list([
@@ -1694,9 +1684,9 @@
     }),
     'create_allowance': dict({
       'description': '''
-        Give a person (web person id), a group (name, or ``everyone``) or an invite (id) a
-        spend allowance in billed dollars, monthly or in total, for every agent or one. A cap is
-        monthly, for everyone or one person, with no agent or end date. Admin-only.
+        Set a spending limit (allowance) for a person (web person id), a group (name, or
+        ``everyone``) or an invite (id), in billed dollars, monthly or in total, for every agent
+        or one. A cap is monthly, for everyone or one person, with no agent or end date.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -2778,10 +2768,7 @@
       }),
     }),
     'delete_allowance': dict({
-      'description': '''
-        Remove an allowance or cap. Admin-only.
-        Runs on the person's Confirm card in chat; pass this active turn's origin_context_id.
-      ''',
+      'description': 'Remove an allowance or cap.',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -2789,19 +2776,12 @@
             'type': 'string',
           }),
           'origin_context_id': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
+            'type': 'string',
           }),
         }),
         'required': list([
           'allowance_id',
+          'origin_context_id',
         ]),
         'type': 'object',
       }),
@@ -3069,63 +3049,6 @@
         'required': list([
           'agent_name',
           'server_name',
-        ]),
-        'type': 'object',
-      }),
-    }),
-    'disconnect_my_account': dict({
-      'description': '''
-        Disconnect one of the caller's accounts: saved Microsoft 365 access, saved workspace
-        access, or an MCP sign-in (``agent_id`` and ``key`` as listed by list_my_data). Runs on
-        the person's Confirm card in chat; pass this active turn's origin_context_id.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-          'agent_id': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-          }),
-          'key': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-          }),
-          'kind': dict({
-            'enum': list([
-              'microsoft',
-              'slack',
-              'mcp',
-            ]),
-            'type': 'string',
-          }),
-          'origin_context_id': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-          }),
-        }),
-        'required': list([
-          'kind',
         ]),
         'type': 'object',
       }),
@@ -3628,37 +3551,6 @@
           'path',
           'content',
           'origin_context_id',
-        ]),
-        'type': 'object',
-      }),
-    }),
-    'forget_my_memory': dict({
-      'description': '''
-        Delete the caller's personal memory with one agent, by the agent_id from list_my_data.
-        <blank line>
-        Only the caller's own memory; ``removed`` counts the files that went. Runs on the
-        person's Confirm card in chat; pass this active turn's origin_context_id.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-          'agent_id': dict({
-            'type': 'string',
-          }),
-          'origin_context_id': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-          }),
-        }),
-        'required': list([
-          'agent_id',
         ]),
         'type': 'object',
       }),
@@ -4441,12 +4333,11 @@
     }),
     'grant_admin': dict({
       'description': '''
-        Granted admins can change what agents do, including agents platform admins use.
+        Make a user or role a Daimon admin, not a web app role (see update_web_person).
         <blank line>
-        Grant Daimon admin to a user or a supported role (platform admins only).
-        Only live platform admins using a personal CLI credential may grant.
-        Chat, routines and all agent-run credentials are refused. Delegates cannot delegate.
-        Configuration changes only; billing and spend caps remain platform-only.
+        Platform admins only, via a personal CLI credential; chat, routines and agent
+        credentials are refused. Delegates cannot delegate. Billing and spend caps stay
+        platform-only.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -5015,24 +4906,6 @@
         'type': 'object',
       }),
     }),
-    'list_agent_coding_keys': dict({
-      'description': '''
-        List an agent's live coding keys, never their tokens: all for an admin, the caller's
-        own for the agent's owner.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-          'agent_id': dict({
-            'type': 'string',
-          }),
-        }),
-        'required': list([
-          'agent_id',
-        ]),
-        'type': 'object',
-      }),
-    }),
     'list_agent_keys': dict({
       'description': '''
         What keys does an agent have? List its stored API key names, never values.
@@ -5314,6 +5187,29 @@
         'type': 'object',
       }),
     }),
+    'list_coding_keys': dict({
+      'description': '''
+        List live coding keys, never tokens. With agent_id: that agent's (all for an admin,
+        else your own). Without: yours on any agent.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'agent_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'type': 'object',
+      }),
+    }),
     'list_credentials': dict({
       'description': "List credentials in the caller's MCP vault (safe projection — no secrets).",
       'parameters': dict({
@@ -5500,8 +5396,8 @@
     }),
     'list_my_data': dict({
       'description': '''
-        List what is held for the caller: connected accounts and sign-ins, personal memory
-        per agent, and their coding keys. Ids here feed the other my-data tools.
+        List what is held for you: connected accounts and sign-ins, and personal memory per
+        agent. Ids feed remove_my_data.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -5822,11 +5718,22 @@
         List the web app's people, oldest first, with role, status and groups. ``query``
         keeps those whose name or email contains it. Emails show only in a direct message with
         the admin; elsewhere ``private_details`` is ``direct_message`` and they are null. Pass
-        this active turn's origin_context_id. Admin-only.
+        this active turn's origin_context_id. ``next_page`` goes back as ``after``.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
+          'after': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
           'limit': dict({
             'default': 50,
             'type': 'integer',
@@ -6791,7 +6698,7 @@
     }),
     'remove_agent_key': dict({
       'description': '''
-        Remove an old API key or token, such as a Toggl key, from an agent's stored keys.
+        Revoke or remove an agent's stored API key or token, such as a Toggl key.
         <blank line>
         Use ``request_agent_key`` to add a key privately and ``list_agent_keys`` to
         inspect stored names. Removing a missing key also succeeds; ``removed`` says
@@ -6857,6 +6764,44 @@
         'required': list([
           'channel_id',
           'skill',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'remove_my_data': dict({
+      'description': '''
+        Remove your own, by ids from list_my_data or list_coding_keys: memory (agent_id), a
+        microsoft or slack sign-in, an mcp sign-in (agent_id, key) or a coding_key (key; an
+        admin adds agent_id for another person's).
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'agent_id': dict({
+            'default': '',
+            'type': 'string',
+          }),
+          'key': dict({
+            'default': '',
+            'type': 'string',
+          }),
+          'kind': dict({
+            'enum': list([
+              'memory',
+              'microsoft',
+              'slack',
+              'mcp',
+              'coding_key',
+            ]),
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'kind',
+          'origin_context_id',
         ]),
         'type': 'object',
       }),
@@ -7807,23 +7752,12 @@
       }),
     }),
     'restore_library_skill_version': dict({
-      'description': '''
-        Publish an older version of a library skill again as its next version. Admin-only.
-        Runs on the person's Confirm card in chat; pass this active turn's origin_context_id.
-      ''',
+      'description': 'Republish an older library skill version as the next one.',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
           'origin_context_id': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
+            'type': 'string',
           }),
           'skill_id': dict({
             'type': 'string',
@@ -7835,6 +7769,7 @@
         'required': list([
           'skill_id',
           'version',
+          'origin_context_id',
         ]),
         'type': 'object',
       }),
@@ -7866,9 +7801,8 @@
     }),
     'revert_agent': dict({
       'description': '''
-        Write a recorded version of an agent's setup as its next version; its name, avatar,
-        places and sign-ins stay as they are. For the agent's owner or an admin.
-        Runs on the person's Confirm card in chat; pass this active turn's origin_context_id.
+        Restore a recorded version of an agent's setup as its next version; name, avatar,
+        places and sign-ins stay.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -7877,15 +7811,7 @@
             'type': 'string',
           }),
           'origin_context_id': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
+            'type': 'string',
           }),
           'version': dict({
             'type': 'integer',
@@ -7894,6 +7820,7 @@
         'required': list([
           'agent_id',
           'version',
+          'origin_context_id',
         ]),
         'type': 'object',
       }),
@@ -7927,55 +7854,6 @@
         'type': 'object',
       }),
     }),
-    'revoke_agent_coding_key': dict({
-      'description': "Revoke an agent coding key: any for an admin, the caller's own for its owner.",
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-          'agent_id': dict({
-            'type': 'string',
-          }),
-          'key_id': dict({
-            'format': 'uuid',
-            'type': 'string',
-          }),
-        }),
-        'required': list([
-          'agent_id',
-          'key_id',
-        ]),
-        'type': 'object',
-      }),
-    }),
-    'revoke_my_coding_key': dict({
-      'description': '''
-        Revoke one of the caller's own coding keys, by the key_id from list_my_data. Runs on
-        the person's Confirm card in chat; pass this active turn's origin_context_id.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-          'key_id': dict({
-            'type': 'string',
-          }),
-          'origin_context_id': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-          }),
-        }),
-        'required': list([
-          'key_id',
-        ]),
-        'type': 'object',
-      }),
-    }),
     'revoke_promo_code': dict({
       'description': '''
         Unavailable over MCP: revoke deployment-wide promos with the human operator CLI.
@@ -7995,61 +7873,29 @@
         'type': 'object',
       }),
     }),
-    'revoke_visitor_link': dict({
-      'description': '''
-        Revoke a person's open sign-in links, as when one went to the wrong place.
-        Admin-only.
-        Runs on the person's Confirm card in chat; pass this active turn's origin_context_id.
-      ''',
+    'revoke_web_link': dict({
+      'description': "Revoke a web invite (id) or a person's sign-in links (id is the person).",
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
-          'origin_context_id': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
+          'id': dict({
+            'type': 'string',
           }),
-          'person_id': dict({
+          'kind': dict({
+            'enum': list([
+              'invite',
+              'visitor_link',
+            ]),
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
             'type': 'string',
           }),
         }),
         'required': list([
-          'person_id',
-        ]),
-        'type': 'object',
-      }),
-    }),
-    'revoke_web_invite': dict({
-      'description': '''
-        Revoke a web invite so its link stops working. Admin-only.
-        Runs on the person's Confirm card in chat; pass this active turn's origin_context_id.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-          'invite_id': dict({
-            'type': 'string',
-          }),
-          'origin_context_id': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-          }),
-        }),
-        'required': list([
-          'invite_id',
+          'kind',
+          'id',
+          'origin_context_id',
         ]),
         'type': 'object',
       }),
@@ -8100,10 +7946,9 @@
     }),
     'save_agent_skill_files': dict({
       'description': '''
-        Publish text files as a new version of one of an agent's skills, or as a new skill
-        when ``skill_id`` is left out, and pin it on the agent. A file whose content is null
-        keeps its bytes from ``version`` (the one you read). For the agent's owner or an
-        admin.
+        Edit an agent's skill file: publish text files as a new version of one of its skills,
+        or a new skill when ``skill_id`` is left out, and pin it. A null file keeps its bytes
+        from ``version`` (the one you read).
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -8703,11 +8548,7 @@
       }),
     }),
     'set_agent_owners': dict({
-      'description': '''
-        Make an agent's owner and co-owners exactly these people, each a web person id or
-        an account id. Admin-only.
-        Runs on the person's Confirm card in chat; pass this active turn's origin_context_id.
-      ''',
+      'description': "Set an agent's owner and co-owners to exactly these web person or account ids.",
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -8729,15 +8570,7 @@
             'default': None,
           }),
           'origin_context_id': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
+            'type': 'string',
           }),
           'owner': dict({
             'anyOf': list([
@@ -8753,6 +8586,7 @@
         'required': list([
           'agent_id',
           'owner',
+          'origin_context_id',
         ]),
         'type': 'object',
       }),
@@ -8845,9 +8679,8 @@
     }),
     'set_agent_web_access': dict({
       'description': '''
-        Turn web chat on or off for an agent and choose who may use it there: everyone,
-        the given groups or invitees (at most 100). Admin-only.
-        Runs on the person's Confirm card in chat; pass this active turn's origin_context_id.
+        Turn an agent's web chat on or off and set who may use it: everyone or up to 100
+        groups or invitees.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -8870,15 +8703,7 @@
             'default': None,
           }),
           'origin_context_id': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
+            'type': 'string',
           }),
           'web': dict({
             'anyOf': list([
@@ -8910,6 +8735,7 @@
         }),
         'required': list([
           'agent_id',
+          'origin_context_id',
         ]),
         'type': 'object',
       }),
@@ -9746,7 +9572,7 @@
     }),
     'update_agent': dict({
       'description': '''
-        Change an agent's system prompt or switch its model; add existing skills such as
+        Change an agent's instructions (system prompt), model or skills, such as
         build-models. Scalar ``model``, ``description`` and ``system`` fields replace.
         <blank line>
         Prefer current-generation ``claude-sonnet-5-5`` for Sonnet,
@@ -10955,23 +10781,14 @@
     }),
     'update_web_person': dict({
       'description': '''
-        Change a web person's role (admin or member) or suspend or restore them. Only an
-        owner changes an owner. Admin-only.
-        Runs on the person's Confirm card in chat; pass this active turn's origin_context_id.
+        Set a web person's role (web app admin or member, not Daimon admin) or suspend or
+        restore them.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
           'origin_context_id': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
+            'type': 'string',
           }),
           'person_id': dict({
             'type': 'string',
@@ -11009,6 +10826,7 @@
         }),
         'required': list([
           'person_id',
+          'origin_context_id',
         ]),
         'type': 'object',
       }),

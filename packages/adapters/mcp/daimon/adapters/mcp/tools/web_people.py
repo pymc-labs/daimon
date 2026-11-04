@@ -12,6 +12,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._card import require_card
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._pagination import capped
 from daimon.adapters.mcp.tools._web_admin import (
     PrivateDetails,
     now,
@@ -19,9 +20,10 @@ from daimon.adapters.mcp.tools._web_admin import (
     refused,
     web_admin_of,
 )
-from daimon.adapters.mcp.tools._web_url import WebUrl, tenant_links
+from daimon.adapters.mcp.tools._web_url import WebUrl, admin_links
 from daimon.core import web_admin
 from daimon.core.allowances import EVERYONE
+from daimon.core.cursor import decode_cursor, encode_cursor
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.stores import web_identities as identities_store
 from daimon.core.stores import web_invites
@@ -53,6 +55,8 @@ class WebPerson:
 class WebPeople:
     people: list[WebPerson]
     private_details: PrivateDetails
+    next_page: str | None = None
+    """Pass as `after` for the next people; null on the last page."""
     web_url: WebUrl = None
 
 
@@ -93,6 +97,8 @@ class AgentWebAccess:
 @dataclass(frozen=True)
 class AgentWebAccessList:
     agents: list[AgentWebAccess]
+    total: int
+    more: bool
 
 
 def _person(
@@ -137,22 +143,36 @@ async def _people_impl(
     query: str | None,
     limit: int,
     origin_context_id: str | None = None,
+    after: str | None = None,
 ) -> WebPeople:
     actor = await web_admin_of(runtime, auth)
     details = await private_details(runtime, auth, origin_context_id)
+    size = max(1, min(limit, _LIMIT))
+    try:
+        cursor = decode_cursor(after) if after else None
+    except ValueError as err:
+        raise ToolError("after must be the next_page of an earlier list.") from err
     async with runtime.session_factory() as db:
         rows = await people_store.list_people(
             db,
             tenant_id=actor.tenant_id,
-            limit=max(1, min(limit, _LIMIT)),
+            limit=size + 1,
+            after=cursor,
             search=query.strip() if query else None,
         )
+        next_page = (
+            encode_cursor((rows[size - 1].created_at, rows[size - 1].id))
+            if len(rows) > size
+            else None
+        )
+        rows = rows[:size]
         identities = await identities_store.list_for_people(db, person_ids=[p.id for p in rows])
         roles = await roles_of(db, rows)
-    links = await tenant_links(runtime, auth)
+    links = admin_links(runtime, actor)
     return WebPeople(
         [_person(p, roles[p.id], _groups(identities[p.id]), details) for p in rows],
         details,
+        next_page,
         links.person_list() if links else None,
     )
 
@@ -175,7 +195,7 @@ async def _person_impl(
             else None
         )
     open_invite = invite if invite is not None and invite.revoked_at is None else None
-    links = await tenant_links(runtime, auth)
+    links = admin_links(runtime, actor)
     return WebPersonDetail(
         person=_person(person, role, _groups(identities), details),
         identities=[f"{i.provider}:{i.label}" for i in identities] if details == "shown" else [],
@@ -222,7 +242,7 @@ async def _update_impl(
             shown = await role_of(db, changed)
     except WebAdminError as err:
         raise refused(err) from err
-    links = await tenant_links(runtime, auth)
+    links = admin_links(runtime, actor)
     return replace(
         _person(changed, shown, _groups(identities), details),
         web_url=links.person(str(changed.id)) if links else None,
@@ -234,7 +254,8 @@ async def _access_list_impl(runtime: McpRuntime, auth: AuthIdentity) -> AgentWeb
     agents = await list_agents_by_tenant(runtime.client, tenant_id=actor.tenant_id)
     async with runtime.session_factory() as db:
         rows = await web_admin.agent_access_rows(db, actor.tenant_id, agents)
-    return AgentWebAccessList([_access(r) for r in rows])
+    shown, total, more = capped(rows)
+    return AgentWebAccessList([_access(r) for r in shown], total, more)
 
 
 async def _access_set_impl(
@@ -275,12 +296,13 @@ def register_web_people_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         query: str | None = None,
         limit: int = 50,
         origin_context_id: str | None = None,
+        after: str | None = None,
     ) -> WebPeople:
         """List the web app's people, oldest first, with role, status and groups. ``query``
         keeps those whose name or email contains it. Emails show only in a direct message with
         the admin; elsewhere ``private_details`` is ``direct_message`` and they are null. Pass
-        this active turn's origin_context_id. Admin-only."""
-        return await _people_impl(runtime, await _auth(ctx), query, limit, origin_context_id)
+        this active turn's origin_context_id. ``next_page`` goes back as ``after``."""
+        return await _people_impl(runtime, await _auth(ctx), query, limit, origin_context_id, after)
 
     @mcp.tool(name="get_web_person", tags={"admin"})
     async def get_person(  # pyright: ignore[reportUnusedFunction]
@@ -303,11 +325,11 @@ def register_web_people_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         person_id: str,
         role: PersonRole | None = None,
         status: WebPersonStatus | None = None,
-        origin_context_id: str | None = None,
+        *,
+        origin_context_id: str,
     ) -> WebPerson:
-        """Change a web person's role (admin or member) or suspend or restore them. Only an
-        owner changes an owner. Admin-only.
-        Runs on the person's Confirm card in chat; pass this active turn's origin_context_id."""
+        """Set a web person's role (web app admin or member, not Daimon admin) or suspend or
+        restore them."""
         return await _update_impl(
             runtime, await _auth(ctx), person_id, role, status, origin_context_id
         )
@@ -325,11 +347,11 @@ def register_web_people_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         web: bool | None = None,
         who: WebAgentWho | None = None,
         groups: list[str] | None = None,
-        origin_context_id: str | None = None,
+        *,
+        origin_context_id: str,
     ) -> AgentWebAccess:
-        """Turn web chat on or off for an agent and choose who may use it there: everyone,
-        the given groups or invitees (at most 100). Admin-only.
-        Runs on the person's Confirm card in chat; pass this active turn's origin_context_id."""
+        """Turn an agent's web chat on or off and set who may use it: everyone or up to 100
+        groups or invitees."""
         return await _access_set_impl(
             runtime, await _auth(ctx), agent_id, web, who, groups, origin_context_id
         )

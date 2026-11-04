@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 215 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 211 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -43,7 +43,7 @@ Tenant-wide Daimon admin delegation, with fresh platform-only mutation gates.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `grant_admin` | admin only | Granted admins can change what agents do, including agents platform admins use. |
+| `grant_admin` | admin only | Make a user or role a Daimon admin, not a web app role (see update_web_person). |
 | `list_admins` | operator tokens with tenant:read | List this tenant's explicit Daimon admin grants (any member). |
 | `revoke_admin` | admin only | Revoke an explicit Daimon admin grant immediately (platform admins only). |
 
@@ -67,13 +67,12 @@ Agent-chat primitives plus bounded ``ask`` and completed-chart delivery.
 
 ## `agent_coding_keys`
 
-List and revoke an agent's coding keys: all for an admin, the caller's own for its
-owner.
+List coding keys: an agent's (all for an admin, the caller's own for its owner) or, with
+no agent, the caller's own on any agent.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `list_agent_coding_keys` | all callers | List an agent's live coding keys, never their tokens: all for an admin, the caller's own for the agent's owner. |
-| `revoke_agent_coding_key` | all callers | Revoke an agent coding key: any for an admin, the caller's own for its owner. |
+| `list_coding_keys` | all callers | List live coding keys, never tokens. |
 
 ## `agent_edits`
 
@@ -82,9 +81,9 @@ owners and save a skill's files.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `revert_agent` | all callers | Write a recorded version of an agent's setup as its next version; its name, avatar, places and sign-ins stay as they are. |
-| `save_agent_skill_files` | all callers | Publish text files as a new version of one of an agent's skills, or as a new skill when ``skill_id`` is left out, and pin it on the agent. |
-| `set_agent_owners` | admin only | Make an agent's owner and co-owners exactly these people, each a web person id or an account id. |
+| `revert_agent` | all callers | Restore a recorded version of an agent's setup as its next version; name, avatar, places and sign-ins stay. |
+| `save_agent_skill_files` | all callers | Edit an agent's skill file: publish text files as a new version of one of its skills, or a new skill when ``skill_id`` is left out, and pin it. |
+| `set_agent_owners` | admin only | Set an agent's owner and co-owners to exactly these web person or account ids. |
 
 ## `agent_removal`
 
@@ -94,7 +93,7 @@ Agent removal tools: detach_mcp_server, remove_skill, remove_agent_key, list_age
 | --- | --- | --- |
 | `detach_mcp_server` | all callers | Disconnect an MCP server such as Linear or Notion from an agent. |
 | `list_agent_keys` | all callers | What keys does an agent have? List its stored API key names, never values. |
-| `remove_agent_key` | all callers | Remove an old API key or token, such as a Toggl key, from an agent's stored keys. |
+| `remove_agent_key` | all callers | Revoke or remove an agent's stored API key or token, such as a Toggl key. |
 | `remove_skill` | all callers | Stop an agent using an attached skill, such as eda. |
 
 ## `agent_tool_rules`
@@ -122,7 +121,7 @@ Agent tools: list / get / create / update / fork / archive.
 | `request_agent_backend_switch` | all callers | Preview a requested agent backend switch, then Confirm in this chat. |
 | `set_agent_backend` | all callers | Set an enabled model provider, or clear the agent setting with backend=null. |
 | `set_agent_builtin_tool` | all callers | Turn one of an agent's built-in tools on or off, e.g. "turn off its web search". |
-| `update_agent` | all callers | Change an agent's system prompt or switch its model; add existing skills such as build-models. |
+| `update_agent` | all callers | Change an agent's instructions (system prompt), model or skills, such as build-models. |
 
 ## `allowances`
 
@@ -131,7 +130,7 @@ invite.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `create_allowance` | admin only | Give a person (web person id), a group (name, or ``everyone``) or an invite (id) a spend allowance in billed dollars, monthly or in total, for every agent or one. |
+| `create_allowance` | admin only | Set a spending limit (allowance) for a person (web person id), a group (name, or ``everyone``) or an invite (id), in billed dollars, monthly or in total, for every agent or one. |
 | `delete_allowance` | admin only | Remove an allowance or cap. |
 | `list_allowances` | admin only | List the workspace's spend allowances and caps, newest first. |
 | `set_allowance_amount` | admin only | Change the dollar amount of an existing allowance or cap. |
@@ -403,10 +402,8 @@ The caller's own data: what Daimon holds for them, and letting it go.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `disconnect_my_account` | all callers | Disconnect one of the caller's accounts: saved Microsoft 365 access, saved workspace access, or an MCP sign-in (``agent_id`` and ``key`` as listed by list_my_data). |
-| `forget_my_memory` | all callers | Delete the caller's personal memory with one agent, by the agent_id from list_my_data. |
-| `list_my_data` | all callers | List what is held for the caller: connected accounts and sign-ins, personal memory per agent, and their coding keys. |
-| `revoke_my_coding_key` | all callers | Revoke one of the caller's own coding keys, by the key_id from list_my_data. |
+| `list_my_data` | all callers | List what is held for you: connected accounts and sign-ins, and personal memory per agent. |
+| `remove_my_data` | all callers | Remove your own, by ids from list_my_data or list_coding_keys: memory (agent_id), a microsoft or slack sign-in, an mcp sign-in (agent_id, key) or a coding_key (key; an admin adds agent_id for another person's). |
 
 ## `notebook`
 
@@ -553,7 +550,7 @@ version and restore an older one.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `restore_library_skill_version` | admin only | Publish an older version of a library skill again as its next version. |
+| `restore_library_skill_version` | admin only | Republish an older library skill version as the next one. |
 | `save_library_skill_files` | admin only | Publish text files as a library skill's next version. |
 
 ## `skill_uploads`
@@ -683,8 +680,7 @@ Web invites and visitor sign-in links, from chat.
 | `create_web_invite` | admin only | Invite someone to the web app by email as a member, or as a visitor of the given agents (at most 50). |
 | `issue_visitor_link` | admin only | Issue a one-time sign-in link for a web visitor. |
 | `list_web_invites` | admin only | List the web app's invites: open, accepted or expired, newest first. |
-| `revoke_visitor_link` | admin only | Revoke a person's open sign-in links, as when one went to the wrong place. |
-| `revoke_web_invite` | admin only | Revoke a web invite so its link stops working. |
+| `revoke_web_link` | admin only | Revoke a web invite (id) or a person's sign-in links (id is the person). |
 | `set_web_invite_files` | admin only | Turn file attachments on or off for a visitor invite, accepted or not. |
 
 ## `web_people`
@@ -697,8 +693,8 @@ The web app's people, groups and agent access, from chat.
 | `list_agent_web_access` | admin only | List each agent's web chat access: on or off, who may use it and the channel it is kept to, if any. |
 | `list_web_groups` | admin only | List everyone and each group the web sign-ins carry, with head counts. |
 | `list_web_people` | admin only | List the web app's people, oldest first, with role, status and groups. |
-| `set_agent_web_access` | admin only | Turn web chat on or off for an agent and choose who may use it there: everyone, the given groups or invitees (at most 100). |
-| `update_web_person` | admin only | Change a web person's role (admin or member) or suspend or restore them. |
+| `set_agent_web_access` | admin only | Turn an agent's web chat on or off and set who may use it: everyone or up to 100 groups or invitees. |
+| `update_web_person` | admin only | Set a web person's role (web app admin or member, not Daimon admin) or suspend or restore them. |
 
 ## `web_workspace_settings`
 
@@ -707,7 +703,7 @@ messages.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `change_workspace_settings` | admin only | Change the workspace's web modules (chat, agents, channels, routines, credits, integrations), its web chat agent, who may start turns (everyone, or exactly the web people in ``invoker_people``) and the direct-message rules. |
+| `change_workspace_settings` | admin only | Change the web modules, web chat agent, who may start turns (everyone or exactly ``invoker_people``) and the direct-message rules. |
 
 ## `wizard`
 

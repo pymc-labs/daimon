@@ -244,25 +244,23 @@ async def _set_agent_rule_impl(
         and await _has_repos(runtime, tenant_id=auth.tenant_id, agent_name=change.agent_name)
     ):
         notes.append(repos_come_too_line(change.agent_name))
-    return SetAgentRuleResult(
+    result = SetAgentRuleResult(
         agent_name=change.agent_name,
         runs_in=list(change.runs_in) if change.runs_in is not None else None,
         changed=change.changed,
         note=" ".join(notes),
     )
+    return await _with_agent_link(runtime, auth, result, change.agent_id)
 
 
 async def _with_agent_link(
-    runtime: McpRuntime, auth: AuthIdentity, result: SetAgentRuleResult
+    runtime: McpRuntime, auth: AuthIdentity, result: SetAgentRuleResult, agent_id: str | None
 ) -> SetAgentRuleResult:
     """`result` with the agent's page on the web, when there is one for this caller."""
-    links = await tenant_links(runtime, auth)
-    if links is None:
+    if agent_id is None:
         return result
-    agent = await find_agent_by_daimon_tag(
-        runtime.client, tenant_id=auth.tenant_id, name=result.agent_name
-    )
-    url = None if agent is None else links.agent(agent.id)
+    links = await tenant_links(runtime, auth)
+    url = None if links is None else links.agent(agent_id)
     return result if url is None else replace(result, web_url=url)
 
 
@@ -344,5 +342,4 @@ def register_channel_rule_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         that channel alone.
         """
         auth = await _auth(ctx)
-        result = await _set_agent_rule_impl(runtime, auth, agent_name=agent_name, runs_in=runs_in)
-        return await _with_agent_link(runtime, auth, result)
+        return await _set_agent_rule_impl(runtime, auth, agent_name=agent_name, runs_in=runs_in)

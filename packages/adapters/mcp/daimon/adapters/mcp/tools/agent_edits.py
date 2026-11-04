@@ -185,11 +185,10 @@ async def _save_skill_impl(
 def register_agent_edit_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool
     async def revert_agent(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, agent_id: str, version: int, origin_context_id: str | None = None
+        ctx: Context, agent_id: str, version: int, origin_context_id: str
     ) -> AgentReverted:
-        """Write a recorded version of an agent's setup as its next version; its name, avatar,
-        places and sign-ins stay as they are. For the agent's owner or an admin.
-        Runs on the person's Confirm card in chat; pass this active turn's origin_context_id."""
+        """Restore a recorded version of an agent's setup as its next version; name, avatar,
+        places and sign-ins stay."""
         return await _revert_impl(runtime, await _auth(ctx), agent_id, version, origin_context_id)
 
     @mcp.tool(tags={"admin"})
@@ -198,11 +197,10 @@ def register_agent_edit_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         agent_id: str,
         owner: str | None,
         co_owners: list[str] | None = None,
-        origin_context_id: str | None = None,
+        *,
+        origin_context_id: str,
     ) -> AgentOwnersSet:
-        """Make an agent's owner and co-owners exactly these people, each a web person id or
-        an account id. Admin-only.
-        Runs on the person's Confirm card in chat; pass this active turn's origin_context_id."""
+        """Set an agent's owner and co-owners to exactly these web person or account ids."""
         return await _owners_impl(
             runtime, await _auth(ctx), agent_id, owner, co_owners or [], origin_context_id
         )
@@ -215,10 +213,9 @@ def register_agent_edit_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         skill_id: str | None = None,
         version: str | None = None,
     ) -> AgentSkillSaved:
-        """Publish text files as a new version of one of an agent's skills, or as a new skill
-        when ``skill_id`` is left out, and pin it on the agent. A file whose content is null
-        keeps its bytes from ``version`` (the one you read). For the agent's owner or an
-        admin."""
+        """Edit an agent's skill file: publish text files as a new version of one of its skills,
+        or a new skill when ``skill_id`` is left out, and pin it. A null file keeps its bytes
+        from ``version`` (the one you read)."""
         return await _save_skill_impl(runtime, await _auth(ctx), agent_id, skill_id, version, files)
 
 

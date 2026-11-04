@@ -2459,7 +2459,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         expected_ma_agent_id: str | None = None,
         origin_context_id: str | None = None,
     ) -> AgentInfo:
-        """Change an agent's system prompt or switch its model; add existing skills such as
+        """Change an agent's instructions (system prompt), model or skills, such as
         build-models. Scalar ``model``, ``description`` and ``system`` fields replace.
 
         Prefer current-generation ``claude-sonnet-5-5`` for Sonnet,

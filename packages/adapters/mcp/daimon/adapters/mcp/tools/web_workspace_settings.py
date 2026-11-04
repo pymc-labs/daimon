@@ -73,22 +73,19 @@ def register_web_workspace_settings_tool(mcp: FastMCP, runtime: McpRuntime) -> N
         ctx: Context,
         origin_context_id: str,
         modules: dict[ModuleName, bool] | None = None,
-        default_agent: str | None = None,
+        default_agent: str = "",
         everyone_invokes: bool | None = None,
         invoker_people: list[str] | None = None,
         dm_enabled: bool | None = None,
         dm_memory_read_only: bool | None = None,
     ) -> WorkspaceSettingsChanged:
-        """Change the workspace's web modules (chat, agents, channels, routines, credits,
-        integrations), its web chat agent, who may start turns (everyone, or exactly the
-        web people in ``invoker_people``) and the direct-message rules. Admin-only.
-        Runs on the person's Confirm card in chat; every call needs this active turn's
-        origin_context_id."""
+        """Change the web modules, web chat agent, who may start turns (everyone or exactly
+        ``invoker_people``) and the direct-message rules."""
         return await _change_impl(
             runtime,
             await _auth(ctx),
             modules=modules,
-            default_agent=default_agent,
+            default_agent=default_agent or None,
             everyone_invokes=everyone_invokes,
             invoker_people=invoker_people or [],
             dm_enabled=dm_enabled,

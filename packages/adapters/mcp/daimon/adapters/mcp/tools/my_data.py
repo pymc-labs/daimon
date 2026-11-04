@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Literal
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
@@ -16,7 +15,8 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._card import require_card
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
-from daimon.core import coding_keys, profile
+from daimon.adapters.mcp.tools.agent_coding_keys import revoke_coding_key
+from daimon.core import profile
 from daimon.core.errors import DaimonError
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -39,23 +39,14 @@ class MyMemory:
 
 
 @dataclass(frozen=True)
-class MyCodingKey:
-    key_id: str
-    agent_id: str | None
-    created_at: datetime
-    expires_at: datetime | None
-
-
-@dataclass(frozen=True)
 class MyData:
     connections: list[MyConnection]
     memory: list[MyMemory]
-    coding_keys: list[MyCodingKey]
 
 
 @dataclass(frozen=True)
 class MyDataChange:
-    action: Literal["forgot_memory", "disconnected", "revoked_coding_key"]
+    action: Literal["forgot_memory", "disconnected", "revoked_key"]
     removed: int
 
 
@@ -86,12 +77,6 @@ async def _list_impl(runtime: McpRuntime, auth: AuthIdentity) -> MyData:
                 tenant_id=auth.tenant_id,
                 account_id=auth.account_id,
             )
-            keys = await coding_keys.list_my_coding_keys(
-                session,
-                tenant_id=auth.tenant_id,
-                account_id=auth.account_id,
-                now=datetime.now(UTC),
-            )
     except DaimonError as err:
         raise ToolError(str(err)) from err
     return MyData(
@@ -100,7 +85,6 @@ async def _list_impl(runtime: McpRuntime, auth: AuthIdentity) -> MyData:
             for c in connections
         ],
         memory=[MyMemory(str(m.agent_id), list(m.paths)) for m in memory],
-        coding_keys=[MyCodingKey(str(k.jti), k.agent_id, k.created_at, k.expires_at) for k in keys],
     )
 
 
@@ -109,7 +93,7 @@ async def _forget_impl(
 ) -> MyDataChange:
     _own(auth)
     await require_card(
-        runtime, auth, tool_name="forget_my_memory", origin_context_id=origin_context_id
+        runtime, auth, tool_name="remove_my_data", origin_context_id=origin_context_id
     )
     try:
         async with runtime.session_factory.begin() as session:
@@ -137,7 +121,7 @@ async def _disconnect_impl(
 ) -> MyDataChange:
     _own(auth)
     await require_card(
-        runtime, auth, tool_name="disconnect_my_account", origin_context_id=origin_context_id
+        runtime, auth, tool_name="remove_my_data", origin_context_id=origin_context_id
     )
     subject = mcp_subject(auth)
     try:
@@ -170,71 +154,42 @@ async def _disconnect_impl(
     return MyDataChange("disconnected", count)
 
 
-async def _revoke_key_impl(
-    runtime: McpRuntime, auth: AuthIdentity, key_id: str, origin_context_id: str | None = None
-) -> MyDataChange:
-    _own(auth)
-    await require_card(
-        runtime, auth, tool_name="revoke_my_coding_key", origin_context_id=origin_context_id
-    )
-    async with runtime.session_factory.begin() as session:
-        done = await coding_keys.revoke_my_coding_key(
-            session,
-            jti=_uuid(key_id),
-            tenant_id=auth.tenant_id,
-            account_id=auth.account_id,
-            now=datetime.now(UTC),
-        )
-    if not done:
-        raise ToolError(_GONE)
-    return MyDataChange("revoked_coding_key", 1)
-
-
 def register_my_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool
     async def list_my_data(ctx: Context) -> MyData:  # pyright: ignore[reportUnusedFunction]
-        """List what is held for the caller: connected accounts and sign-ins, personal memory
-        per agent, and their coding keys. Ids here feed the other my-data tools."""
+        """List what is held for you: connected accounts and sign-ins, and personal memory per
+        agent. Ids feed remove_my_data."""
         return await _list_impl(runtime, await _auth(ctx))
 
     @mcp.tool
-    async def forget_my_memory(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, agent_id: str, origin_context_id: str | None = None
-    ) -> MyDataChange:
-        """Delete the caller's personal memory with one agent, by the agent_id from list_my_data.
-
-        Only the caller's own memory; ``removed`` counts the files that went. Runs on the
-        person's Confirm card in chat; pass this active turn's origin_context_id.
-        """
-        return await _forget_impl(runtime, await _auth(ctx), agent_id, origin_context_id)
-
-    @mcp.tool
-    async def disconnect_my_account(  # pyright: ignore[reportUnusedFunction]
+    async def remove_my_data(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
-        kind: Literal["microsoft", "slack", "mcp"],
-        agent_id: str | None = None,
-        key: str | None = None,
-        origin_context_id: str | None = None,
+        kind: Literal["memory", "microsoft", "slack", "mcp", "coding_key"],
+        origin_context_id: str,
+        agent_id: str = "",
+        key: str = "",
     ) -> MyDataChange:
-        """Disconnect one of the caller's accounts: saved Microsoft 365 access, saved workspace
-        access, or an MCP sign-in (``agent_id`` and ``key`` as listed by list_my_data). Runs on
-        the person's Confirm card in chat; pass this active turn's origin_context_id."""
+        """Remove your own, by ids from list_my_data or list_coding_keys: memory (agent_id), a
+        microsoft or slack sign-in, an mcp sign-in (agent_id, key) or a coding_key (key; an
+        admin adds agent_id for another person's)."""
+        auth = await _auth(ctx)
+        if kind == "memory":
+            if not agent_id:
+                raise ToolError("agent_id is needed.")
+            return await _forget_impl(runtime, auth, agent_id, origin_context_id)
+        if kind == "coding_key":
+            if not key:
+                raise ToolError("key is needed.")
+            await revoke_coding_key(runtime, auth, key, agent_id or None, origin_context_id)
+            return MyDataChange("revoked_key", 1)
         return await _disconnect_impl(
             runtime,
-            await _auth(ctx),
+            auth,
             kind=kind,
-            agent_id=agent_id,
-            key=key,
+            agent_id=agent_id or None,
+            key=key or None,
             origin_context_id=origin_context_id,
         )
-
-    @mcp.tool
-    async def revoke_my_coding_key(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, key_id: str, origin_context_id: str | None = None
-    ) -> MyDataChange:
-        """Revoke one of the caller's own coding keys, by the key_id from list_my_data. Runs on
-        the person's Confirm card in chat; pass this active turn's origin_context_id."""
-        return await _revoke_key_impl(runtime, await _auth(ctx), key_id, origin_context_id)
 
 
 __all__ = ["register_my_data_tools"]
