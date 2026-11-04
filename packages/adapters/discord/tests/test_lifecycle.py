@@ -2698,6 +2698,14 @@ class TestDegradedTurnReply:
         )
 
 
+async def test_completion_ping_when_answer_tags_many_then_only_the_requester_pings():
+    lifecycle, sends, _ = _make_lifecycle(notify_on_completion=True)
+    await lifecycle.post_initial()
+    tags = " ".join(f"<@{900 + i}>" for i in range(8))
+    await lifecycle.on_terminal_success(_make_success_state(f"{tags} done"))
+    assert sends[-1]["allowed_mentions"].to_dict()["users"] == [123], "the answer's tags stay text"
+
+
 async def test_completion_ping_posts_fresh_answer_and_limits_mentions():
     lifecycle, sends, edits = _make_lifecycle(notify_on_completion=True)
     await lifecycle.post_initial()

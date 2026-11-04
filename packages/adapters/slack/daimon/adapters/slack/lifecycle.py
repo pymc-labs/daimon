@@ -83,7 +83,9 @@ from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.outbound.mentions import mentioned_user_ids, untag
 from daimon.core.outbound.opt_out import opt_out_names, tag_opt_outs
+from daimon.core.outbound.reach import DEFAULT_MAX_PEOPLE, turn_tally_key
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
+from daimon.core.stores.reach_tallies import approved_people
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.card_state import CardState as State
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
@@ -98,6 +100,7 @@ from daimon.core.turn.state import (
     extract_sealed_responses,
 )
 from daimon.core.turn.termination import TerminationReason, termination_reason
+from daimon.core.turn_origin import current_origin_id
 from daimon.core.usage_totals import ProviderUsageTotals
 from mux.contracts.events import Event
 from mux.profiles import emits_legacy_events_for
@@ -202,7 +205,11 @@ class SlackTurnLifecycle(OutputGate):
         ask_human: bool = False,
         identity: AgentIdentity | None = None,
         ma_agent_id: str | None = None,
+        reply_people_cap: int | None = DEFAULT_MAX_PEOPLE,
     ) -> None:
+        # Other people the answer may ping, besides the author (`DAIMON_OUTBOUND__MAX_PEOPLE`);
+        # None for unattended turns or with the budget off.
+        self._reply_people_cap = reply_people_cap
         self._trigger_ts = trigger_ts
         # Whether the final answer offers Ask a human beside the vote buttons
         # (`support_escalation.slack_support_enabled`).
@@ -600,6 +607,36 @@ class SlackTurnLifecycle(OutputGate):
         skip = unknown | {uid for uid, out in self._opted_out.items() if out}
         return untag(text, "slack", skip, self._opt_out_names)
 
+    async def _cap_pings(self, text: str) -> str:
+        """``text`` with mentions past the people limit as plain names.
+
+        The author does not count. The limit is the configured one, or the people the
+        author approved on the turn's card if that is higher.
+        """
+        others = [u for u in mentioned_user_ids(text, "slack") if u != self._author_id]
+        cap = self._reply_people_cap
+        if cap is None or len(others) <= cap:
+            return text
+        origin_id = current_origin_id.get()
+        names: dict[str, str] = {}
+        if self._tenant_id is not None and self._sessionmaker is not None:
+            try:
+                if origin_id is not None:
+                    async with self._sessionmaker() as session:
+                        approved = await approved_people(
+                            session, tenant_id=self._tenant_id, turn_key=turn_tally_key(origin_id)
+                        )
+                    cap = max(cap, approved)
+                names = await opt_out_names(
+                    self._sessionmaker,
+                    tenant_id=self._tenant_id,
+                    platform="slack",
+                    user_ids=others[cap:],
+                )
+            except Exception:  # named boundary: the answer lands, extras named without a lookup
+                log.warning("turn.reply_people_lookup_failed", exc_info=True)
+        return untag(text, "slack", frozenset(others[cap:]), names)
+
     async def _untag_blocks(self, blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """The card with opted-out mentions as plain names in every text it carries."""
         # One lookup over the whole card fills the cache; the walk then reuses it.
@@ -754,7 +791,7 @@ class SlackTurnLifecycle(OutputGate):
             final_response = extract_final_response(state.content)
             if final_response:
                 answer_parts.append(final_response)
-            final_text = await self._untag("\n\n".join(answer_parts))
+            final_text = await self._cap_pings(await self._untag("\n\n".join(answer_parts)))
             notify_on_completion = (
                 self._notify_on_completion and not cancelled and not await self._author_opted_out()
             )

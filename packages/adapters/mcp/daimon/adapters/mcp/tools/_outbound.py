@@ -38,6 +38,7 @@ from daimon.core.outbound.reach import (
     client_tally_key,
     needs_approval,
     needs_own_approval,
+    turn_tally_key,
 )
 from daimon.core.security_audit import record_denial
 from daimon.core.stores.direct_messages import DM_SCOPE_PREFIX
@@ -175,7 +176,7 @@ async def turn_scope(runtime: McpRuntime, auth: AuthIdentity) -> TurnScope:
         if origin is not None:
             # Only the server records origins, and it marks the ones nobody attends.
             return TurnScope(
-                key=f"turn:{origin.id}",
+                key=turn_tally_key(origin.id),
                 kind="live" if origin.attended else "unattended",
                 own_places=_own_places(origin),
                 requester_id=auth.platform_user_id,

@@ -15,6 +15,8 @@ ReachVerdict = Literal["ok", "needs_approval"]
 
 # An outside client's budget renews each window, so it limits bursts, not a lifetime.
 CLIENT_WINDOW = timedelta(hours=2)
+# People one turn tags without approval; the Slack automatic reply is held to the same count.
+DEFAULT_MAX_PEOPLE = 5
 CHEAPER_SHAPE = "Offer one thread with a checklist instead, each owner tagged once."
 DECLINED = f"Not posted: the person did not approve. {CHEAPER_SHAPE}"
 NO_CARD = (
@@ -134,11 +136,18 @@ def card_title(plan: ReachPlan, where: str) -> str:
 
 def card_consequence(plan: ReachPlan) -> str:
     only_threads = plan.threads and not plan.places and not plan.people
-    return "Approve to open them, or cancel." if only_threads else "Approve to post them, or cancel."
+    return (
+        "Approve to open them, or cancel." if only_threads else "Approve to post them, or cancel."
+    )
 
 
 def _count(n: int, one: str, many: str | None = None) -> str:
     return f"{n} {one if n == 1 else (many or one + 's')}"
+
+
+def turn_tally_key(origin_id: object) -> str:
+    """The tally of the turn running under ``origin_id``."""
+    return f"turn:{origin_id}"
 
 
 def client_tally_key(client: str, now: datetime) -> str:

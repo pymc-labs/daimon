@@ -8,11 +8,16 @@
   Teams group pings become plain words.
 - A turn's own conversation is its thread and its direct chat; the parent channel is
   other people's on every platform, so a top-level post there is counted.
+- Tags are capped everywhere, the own conversation included, and untagged new threads
+  in the own channel have a cap of their own. A model's automatic reply pings the
+  asker on Discord and Teams, and on Slack at most the people limit besides the asker
+  (the extra mentions turn into plain names).
 - When the never-tag lookup fails, the post still goes out: Discord keeps the
   mention text and pings nobody; Slack names everyone unchecked, as its replies
   do; Teams posts tag no one either way.
 """
 
+import dataclasses
 import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -130,16 +135,20 @@ _ON_FAILURE = {"discord": "<@7> look", "slack": "@someone look", "teams": "@Ann 
 
 
 @pytest.mark.parametrize("platform", PLATFORMS)
-async def test_opt_out_lookup_when_it_fails_then_post_sends_without_pings(platform, monkeypatch):
+async def test_opt_out_lookup_when_it_fails_then_post_sends_without_pings(
+    platform, monkeypatch, db_session, db_session_factory
+):
     async def broken(*_: object, **__: object) -> frozenset[str]:
         raise RuntimeError("lookup down")
 
     monkeypatch.setattr(_outbound, "tag_opt_outs", broken)
     runtime = SimpleNamespace(
-        session_factory=None, settings=SimpleNamespace(outbound=OutboundSettings())
+        session_factory=db_session_factory, settings=SimpleNamespace(outbound=OutboundSettings())
     )
+    tenant = await make_tenant(db_session, platform=platform, workspace_id="W_NT_3")
+    await db_session.commit()
     auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role=cast(Any, "member"), platform=platform
+        account_id=uuid.uuid4(), tenant_id=tenant.id, role=cast(Any, "member"), platform=platform
     )
     scope = TurnScope(key="turn:x", kind="live", own_places=frozenset({"home"}), requester_id="42")
     [post] = await prepare_posts(
@@ -220,3 +229,43 @@ async def test_thread_turn_when_posting_top_level_then_reach_on_every_platform(
             plan=None,
             scope=scope,
         )
+
+
+@pytest.mark.parametrize("platform", PLATFORMS)
+async def test_own_conversation_when_tagging_past_the_limit_then_card_or_nobody_counted(
+    platform, db_session, db_session_factory
+):
+    """Six tags in the own thread ask on Discord and Slack; Teams posts tag nobody. Six
+    untagged threads in the own channel ask on every platform."""
+    tenant = await make_tenant(db_session, platform=platform, workspace_id="W_NT_3")
+    await db_session.commit()
+    scope = TurnScope(
+        key=f"turn:{uuid.uuid4()}",
+        kind="live",
+        own_places=frozenset({"home"}),
+        requester_id="42",
+        origin=cast(Any, object()),
+        own_channels=frozenset({"home"}),
+    )
+    runtime = SimpleNamespace(
+        session_factory=db_session_factory,
+        settings=SimpleNamespace(outbound=OutboundSettings()),
+        teams_client=None,
+    )
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=tenant.id, role=cast(Any, "member"), platform=platform
+    )
+    own = [OutgoingPost(text=f"n{i}", place="own", new_thread=True) for i in range(6)]
+    own_scope = dataclasses.replace(
+        scope, key=f"turn:{uuid.uuid4()}", own_channels=frozenset({"home", "own"})
+    )
+    with pytest.raises(ToolError, match="approve_reach"):
+        await prepare_posts(cast(Any, runtime), auth, own, plan=None, scope=own_scope)
+    tag = {"discord": "<@{}>", "slack": "<@U{}>", "teams": "<at>P{}</at>"}[platform]
+    post = OutgoingPost(text=" ".join(tag.format(n) for n in range(1, 7)), place="home")
+    if platform == "teams":
+        [sent] = await prepare_posts(cast(Any, runtime), auth, [post], plan=None, scope=scope)
+        assert sent.user_ids == (), "Teams: nobody is tagged, so nothing counts"
+        return
+    with pytest.raises(ToolError, match="approve_reach"):
+        await prepare_posts(cast(Any, runtime), auth, [post], plan=None, scope=scope)

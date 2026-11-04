@@ -693,6 +693,18 @@ async def test_a_completion_ping_posts_the_answer_mentioning_the_asker_then_clos
     assert edited.text.startswith("<at>Ada</at>\n\nThe posterior mean is 3."), "edits keep the ping"
 
 
+async def test_an_answer_tagging_many_people_pings_only_the_asker() -> None:
+    sender = FakeSender()
+    asker = Account(id="aad-1", name="Ada")
+    lifecycle = await _posted(sender, completion_ping=True, requester=asker)
+    tags = " ".join(f"<at>P{i}</at>" for i in range(8))
+    await lifecycle.on_terminal_success(_answer(f"{tags} done"))
+
+    answer = sender.activities[1]
+    pinged = [e.mentioned.id for e in answer.entities or [] if isinstance(e, MentionEntity)]
+    assert pinged == ["aad-1"], "an answer's own tags carry no mention entity, so they ping nobody"
+
+
 async def test_without_a_requester_a_ping_still_posts_fresh() -> None:
     sender = FakeSender()
     lifecycle = await _posted(sender, completion_ping=True)

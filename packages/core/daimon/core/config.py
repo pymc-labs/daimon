@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 from uuid import UUID
 
 from daimon.core.mcp_server_url import ascii_mcp_url, canonical_mcp_url
+from daimon.core.outbound.reach import DEFAULT_MAX_PEOPLE
 from daimon.core.scope_cascade import CascadeMode
 from daimon.core.thread_participation import ParticipationMode
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolSafetyPolicy
@@ -2108,7 +2109,7 @@ class OutboundSettings(BaseModel):
         ),
     )
     max_people: int = Field(
-        default=5,
+        default=DEFAULT_MAX_PEOPLE,
         ge=0,
         le=200,
         description=(

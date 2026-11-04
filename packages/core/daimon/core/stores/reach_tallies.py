@@ -52,6 +52,12 @@ async def lock_tally(
     return tally, approved
 
 
+async def approved_people(session: AsyncSession, *, tenant_id: uuid.UUID, turn_key: str) -> int:
+    """People the turn's requester approved tagging, or 0 where nothing was approved."""
+    row = await session.get(ReachTallyModel, (tenant_id, turn_key))
+    return (row.approved_people or 0) if row is not None else 0
+
+
 async def save_tally(
     session: AsyncSession,
     *,

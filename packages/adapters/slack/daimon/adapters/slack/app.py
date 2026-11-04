@@ -2599,6 +2599,7 @@ class SlackApp:
         cancel_event = asyncio.Event()
         lifecycle = SlackTurnLifecycle(
             sessionmaker=self.runtime.sessionmaker,
+            reply_people_cap=self._reply_people_cap(),
             alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
             ask_human=slack_support_enabled(self.runtime.settings.support),
             tenant_id=tenant_id,
@@ -3058,6 +3059,7 @@ class SlackApp:
             def _recovery_lifecycle(cancel: asyncio.Event) -> TurnLifecycle:
                 new_lifecycle = SlackTurnLifecycle(
                     sessionmaker=self.runtime.sessionmaker,
+                    reply_people_cap=self._reply_people_cap(),
                     alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                     ask_human=slack_support_enabled(self.runtime.settings.support),
                     tenant_id=tenant_id,
@@ -3317,6 +3319,11 @@ class SlackApp:
                         await clear_active_turn(_clear_session, id=_marker_id)
                         await _clear_session.commit()
 
+    def _reply_people_cap(self, attended: bool = True) -> int | None:
+        """People an automatic reply may ping besides its author; None leaves it uncapped."""
+        outbound = self.runtime.settings.outbound
+        return outbound.max_people if attended and outbound.reach_budget_enabled else None
+
     async def _run_continuation_turn(
         self,
         row: TaskContinuationRow,
@@ -3505,6 +3512,9 @@ class SlackApp:
             log.warning("slack.agent_identity_lookup_failed", error_type=type(exc).__name__)
         follow_lifecycle = SlackTurnLifecycle(
             sessionmaker=self.runtime.sessionmaker,
+            reply_people_cap=self._reply_people_cap(
+                attended=row.reason != "watch_fired" and continuation_attended(row)
+            ),
             alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
             ask_human=slack_support_enabled(self.runtime.settings.support),
             tenant_id=tenant_id,
@@ -3603,6 +3613,9 @@ class SlackApp:
         def _follow_up_recovery_lifecycle(cancel: asyncio.Event) -> TurnLifecycle:
             new_lifecycle = SlackTurnLifecycle(
                 sessionmaker=self.runtime.sessionmaker,
+                reply_people_cap=self._reply_people_cap(
+                    attended=row.reason != "watch_fired" and continuation_attended(row)
+                ),
                 alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                 ask_human=slack_support_enabled(self.runtime.settings.support),
                 tenant_id=tenant_id,

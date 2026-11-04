@@ -81,6 +81,7 @@ from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
+    OutboundSettings,
     Settings,
     SlackSettings,
 )
@@ -346,6 +347,7 @@ class SlackDriver:
         billing_config: object | None = None,
     ) -> SlackRuntime:
         settings = MagicMock()
+        settings.outbound = OutboundSettings()
         settings.crypto.keys = (SecretStr(fernet_key),)
         settings.turn = turn_leg()  # the selected leg, a real TurnSettings
         settings.slack = SlackSettings(
@@ -572,6 +574,7 @@ class SlackDriver:
         and a turn needs neither of them.
         """
         settings = MagicMock()
+        settings.outbound = OutboundSettings()
         settings.crypto.keys = (SecretStr(self._fernet_key),)
         settings.slack = SlackSettings(
             signing_secret=SecretStr("parity-signing-secret"),
@@ -861,6 +864,7 @@ class SlackDriver:
         deployment does not have.
         """
         settings = MagicMock()
+        settings.outbound = OutboundSettings()
         settings.crypto.keys = (SecretStr(self._fernet_key),)
         settings.slack = SlackSettings(
             signing_secret=SecretStr("parity-signing-secret"),
