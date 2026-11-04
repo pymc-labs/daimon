@@ -536,12 +536,16 @@ class TeamsTurnLifecycle(OutputGate):
         """Whether the asker asked never to be tagged or pinged."""
         if self._tenant_id is None or self._requester_user_id is None:
             return False
-        skip = await tag_opt_outs(
-            self._sessionmaker,
-            tenant_id=self._tenant_id,
-            platform="teams",
-            user_ids=[self._requester_user_id],
-        )
+        try:
+            skip = await tag_opt_outs(
+                self._sessionmaker,
+                tenant_id=self._tenant_id,
+                platform="teams",
+                user_ids=[self._requester_user_id],
+            )
+        except Exception:  # named boundary: the answer still lands, just without a tag
+            log.warning("turn.opt_out_lookup_failed", exc_info=True)
+            return True
         return bool(skip)
 
     async def on_terminal_success(self, state: TurnState) -> None:

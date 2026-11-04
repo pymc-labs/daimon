@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 from daimon.core.stores import tag_opt_outs as store
 from daimon.core.turn.state import TextBlock, TurnState
@@ -65,6 +66,19 @@ async def test_completion_when_asker_opted_out_then_answer_edits_the_card_withou
         "the answer edits the card in place instead of posting fresh"
     )
     assert lifecycle.final_message_id == "m-1"
+
+
+async def test_completion_when_opt_out_lookup_fails_then_answer_lands_without_a_mention(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    with patch(
+        "daimon.adapters.teams.lifecycle.tag_opt_outs", AsyncMock(side_effect=OSError("db"))
+    ):
+        sender, lifecycle = await _answer_activity(db_session, db_session_factory, opted_out=False)
+
+    assert _mentions(sender) == [], "an unchecked asker is not tagged"
+    assert any("Done." in (a.text or "") for a in sender.activities), "the answer is delivered"
+    assert lifecycle.final_message_id is not None, "the turn settled on the answer"
 
 
 async def test_completion_when_asker_not_opted_out_then_answer_still_mentions(
