@@ -161,3 +161,18 @@ class ConsentKeeper:
             raise NeedsReconfirm(f"its source can't be read ({type(err).__name__})") from err
         if renewed is None:
             raise NeedsReconfirm("its source or its drops changed since the check")
+
+    async def covers(self, mirror: ServerSkillRow, agent_id: str) -> bool:
+        """Whether the agent's current consent already vouches for its source as it is."""
+        renewer = await self.renewer(mirror)
+        if renewer is None:
+            return False
+        agent = await self.load(mirror, agent_id)
+        revision = await renewer.backends.current(agent)
+        if revision is None or revision.drop_consent is None:
+            return False
+        try:
+            kept = await renewer.backends.source_keeping_drops(agent, revision, lambda c: c)
+        except (AgentBackendRefused, UnsupportedCapability):
+            return False
+        return kept is not None

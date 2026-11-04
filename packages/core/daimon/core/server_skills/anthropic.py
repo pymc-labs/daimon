@@ -160,16 +160,33 @@ class ManagedAgentsTarget:
                 return
             try:
                 await self.consents.renew(mirror, agent_id, consented)
-            except NeedsReconfirm:
-                await self._roll_back(mirror, agent_id, previous)
-                raise
+            # Whatever failed, the pin must not outlive the consent it was checked against.
+            except Exception as err:
+                if await self._covered(mirror, agent_id):
+                    return
+                restored = await self._roll_back(mirror, agent_id, previous)
+                if isinstance(err, NeedsReconfirm):
+                    raise
+                if not restored:
+                    raise NeedsReconfirm("its repin could not be undone") from err
+                raise TargetError(f"consent renewal failed ({type(err).__name__})") from err
         except _FAILURES as err:
             raise TargetError(f"repin refused ({type(err).__name__})") from err
 
-    async def _roll_back(self, mirror: ServerSkillRow, agent_id: str, previous: str | None) -> None:
+    async def _covered(self, mirror: ServerSkillRow, agent_id: str) -> bool:
+        """Whether the owner already confirmed the source as it is pinned now."""
+        if self.consents is None:
+            return False
+        try:
+            return await self.consents.covers(mirror, agent_id)
+        # Unknown counts as not covered, so the repin is rolled back.
+        except Exception:
+            return False
+
+    async def _roll_back(self, mirror: ServerSkillRow, agent_id: str, previous: str | None) -> bool:
         """Return a repin its consent no longer covers to the version the owner consented to."""
         if previous is None:
-            return
+            return True
         try:
             await self._pin(mirror, agent_id, previous)
         except (*_FAILURES, TargetError) as err:
@@ -180,3 +197,5 @@ class ManagedAgentsTarget:
                 agent_id=agent_id,
                 err_type=type(err).__name__,
             )
+            return False
+        return True
