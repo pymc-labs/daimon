@@ -38,6 +38,7 @@ from daimon.core.config import (
     RepoMemorySettings,
     Settings,
     TurnSettings,
+    WebSettings,
     get_repo_memory_settings,
     load_turn_settings,
 )
@@ -57,6 +58,7 @@ from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.core.turn.mcp_context import TurnContextFetch, build_turn_context_fetch
 from daimon.core.turn.running import RunningTurns
 from daimon.core.turn.runtimes import RuntimeFactory, build_channel_runtime
+from daimon.core.web_links import WebLinks
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.state.store import StateStore
@@ -92,6 +94,8 @@ class TurnDeps:
     github_app_id: str | None
     github_app_private_key: str | None
     public_url: str | None
+    # The web app's links, from `settings.web`; None when there is no web app.
+    web_links: WebLinks | None = None
     membership_resolver: MembershipResolver | None = None
     direct_message_policies: Mapping[uuid.UUID, DirectMessagePolicy] = field(
         default_factory=dict[uuid.UUID, DirectMessagePolicy]
@@ -208,6 +212,7 @@ def build_turn_deps(
     crypto_keys = tuple(secret.get_secret_value() for secret in settings.crypto.keys)
     fernet = build_multifernet(crypto_keys) if crypto_keys else None
     context = cast(object, settings.mcp_context)
+    web = cast(object, settings.web)
     return TurnDeps(
         membership_resolver=(
             DiscordRestMembershipResolver(settings.discord.bot_token.get_secret_value())
@@ -242,6 +247,7 @@ def build_turn_deps(
         github_app_private_key=_reveal(settings.github_app.private_key),
         agent_github_app=settings.github_app,
         public_url=str(settings.mcp.public_url) if settings.mcp.public_url is not None else None,
+        web_links=WebLinks.from_settings(web if isinstance(web, WebSettings) else None),
         tool_safety=settings.tool_safety,
         microsoft_send=settings.microsoft_accounts.configured,
         preparation_gate=PreparationGate(_preparation_limit(settings)),

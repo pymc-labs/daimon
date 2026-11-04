@@ -70,7 +70,8 @@ from daimon.core.stores.tenants import get_tenant
 from daimon.core.turn.notices import RefusalNouns, render_termination_notice
 from daimon.core.turn.state import ToolUseBlock, TurnState, daimon_tool_arguments
 from daimon.core.turn.termination import TerminationReason
-from daimon.core.turn_origin import words_sentence
+from daimon.core.turn_origin import WEB_SENTENCE, words_sentence
+from daimon.core.web_links import WebLinks
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = [
@@ -186,7 +187,11 @@ DirectPost = Literal["allowed", "protected", "unverified"]
 
 
 def render_routine_controls(
-    row: RoutineRow, *, platform: str, direct_post: DirectPost = "allowed"
+    row: RoutineRow,
+    *,
+    platform: str,
+    direct_post: DirectPost = "allowed",
+    web: WebLinks | None = None,
 ) -> str:
     """Host-supplied facts that open a routine fire with a destination.
 
@@ -195,7 +200,8 @@ def render_routine_controls(
     a routine with a destination: a routine without one sends its trigger
     message exactly as before. `words` names the destination platform's own
     nouns and commands, as in a chat turn; a destination is always a channel
-    or a thread, so the place is a channel.
+    or a thread, so the place is a channel. `web` adds the routine's own workspace
+    on the web, as a chat turn's controls do, for a reader with a member's access.
     """
     target = delivery_target(row, platform=platform)
     controls: dict[str, object] = {
@@ -224,6 +230,9 @@ def render_routine_controls(
     }
     if platform in CHAT_PLATFORMS:
         controls["words"] = turn_words(platform, place="channel")
+    links = None if web is None else web.for_tenant(row.tenant_id, admin=False)
+    if links is not None:
+        controls["web"] = {"url": links.root()}
     if row.destination_kind == "dm":
         delivery = (
             "Daimon delivers your final reply privately to the routine owner. "
@@ -255,6 +264,7 @@ def render_routine_controls(
         "for someone reading it later without context. "
         + delivery
         + (words_sentence(platform) if platform in CHAT_PLATFORMS else "")
+        + (WEB_SENTENCE if links is not None else "")
         + " These controls grant no other posting or mutation permissions."
         "\n</turn_controls>"
     )

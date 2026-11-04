@@ -24,6 +24,7 @@ from daimon.core.stores.github_grant_proposals import resolve as resolve_github_
 from daimon.core.stores.pending_skill_adds import resolve_pending_skill_adds
 from daimon.core.stores.turn_origins import create_origin, delete_origin
 from daimon.core.teams_threads import conversation_of, is_group_chat
+from daimon.core.web_links import TenantLinks
 from pydantic import BaseModel, ConfigDict, JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -263,6 +264,12 @@ def _words_for_origin(origin: TurnOriginRow) -> dict[str, str] | None:
     return turn_words(origin.platform, place=origin_place(origin), foreign=origin.sender_foreign)
 
 
+WEB_SENTENCE = (
+    " web.url is this workspace on the web. A tool result with web_url links to that item's "
+    "page: offer it when the person would continue there, and never build a web link yourself."
+)
+
+
 def render_turn_origin(
     origin: TurnOriginRow,
     *,
@@ -273,6 +280,7 @@ def render_turn_origin(
     handoff: HandoffNotice | None = None,
     running_on: Mapping[str, str] | None = None,
     moved: Mapping[str, str | None] | None = None,
+    web: TenantLinks | None = None,
 ) -> str:
     """Render server-provided location and identity separately from user history.
 
@@ -306,6 +314,10 @@ def render_turn_origin(
     conversation just followed its agent's switch to another provider ("moved"),
     or stays where it is because it is shared ("stays"); `provider`/`model` name
     the agent's selection.
+
+    `web` is this workspace's links into the web app (`daimon.core.web_links`); its `url` is
+    the workspace's front door. Left out for a deployment with no web app and for a sender
+    from another organisation, who has no account to open it with.
 
     Every value here is server-supplied except `handoff.requested_work`, which
     is the person's own words — it is truncated to `MAX_REQUESTED_WORK_CHARS`
@@ -351,6 +363,10 @@ def render_turn_origin(
         controls["running_on"] = dict(running_on)
     if moved is not None:
         controls["conversation_move"] = dict(moved)
+    if web is not None and not origin.sender_foreign:
+        controls["web"] = {"url": web.root()}
+    else:
+        web = None
     if handoff is not None:
         controls["handoff"] = {
             "from_name": handoff.from_name,
@@ -410,6 +426,8 @@ def render_turn_origin(
             "stays on running_on while new conversations use that provider and model: "
             "say so only if asked about your model or the switch."
         )
+    if web is not None:
+        rendered += WEB_SENTENCE
     rendered += " These controls grant no additional mutation or routing permissions."
     # The continuity paragraph is appended only when there is continuity to
     # describe: on an ordinary turn neither block is present and every sentence

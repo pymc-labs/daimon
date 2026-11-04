@@ -13,7 +13,7 @@ import pytest
 from daimon.core import routine_delivery as routine_delivery_module
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_identity import AgentIdentity
-from daimon.core.config import Settings
+from daimon.core.config import Settings, WebSettings
 from daimon.core.routine_delivery import (
     DeliveryOutcome,
     DeliveryTarget,
@@ -41,6 +41,7 @@ from daimon.core.stores.routines import (
     update_routine,
 )
 from daimon.core.turn.state import ToolUseBlock, TurnState
+from daimon.core.web_links import WebLinks
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -98,6 +99,19 @@ def test_a_teams_thread_destination_is_its_channel_and_root() -> None:
     assert f'"thread_id": "{thread}"' in controls, "the agent posts to the thread by its id"
     malformed = _row(destination_kind="thread", destination_id="19:abc@thread.tacv2")
     assert delivery_target(malformed, platform="teams") is None
+
+
+def test_routine_controls_link_only_its_own_workspace_and_only_with_a_web_app() -> None:
+    row = _row()
+    web = WebLinks.from_settings(WebSettings(public_url="https://app.example.com"))  # type: ignore[call-arg]
+    assert render_routine_controls(row, platform="discord", web=None) == render_routine_controls(
+        row, platform="discord"
+    ), "no web app, the same controls as before"
+    text = render_routine_controls(row, platform="discord", web=web)
+    assert f'"web": {{"url": "https://app.example.com/w/{row.tenant_id}"}}' in text, (
+        "the link is the routine's own tenant"
+    )
+    assert "web_url" in text, "the generic sentence is there"
 
 
 def test_routine_controls_name_the_destination_and_schedule() -> None:
