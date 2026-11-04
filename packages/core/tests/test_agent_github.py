@@ -182,7 +182,7 @@ def test_panel_skills_when_each_origin_then_labels_and_sorts_by_title() -> None:
     assert by_id["skill_lib"].version == "2", "a pin wins over the latest"
     assert by_id["skill_lib"].updated_at == T0, "a pin behind latest uses its version time"
     assert by_id["skill_ext"].origin == "external", "an unknown title is external"
-    assert by_id["xlsx"].origin == "anthropic", "anthropic skills keep their origin"
+    assert by_id["xlsx"].origin == "built_in", "built-in skills keep their origin"
 
 
 def test_panel_skills_when_listing_empty_then_degrades_to_ids() -> None:

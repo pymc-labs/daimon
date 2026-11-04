@@ -112,7 +112,7 @@ class VersionTimeCache:
         self._rows[key] = (self._now() + self._ttl, at)
 
 
-Origin = Literal["repo", "library", "external", "anthropic"]
+Origin = Literal["repo", "library", "external", "built_in"]
 InstallationState = Literal["active", "suspended", "removed"]
 
 
@@ -313,13 +313,13 @@ def panel_skills(
             else None
         )
         row = ledger.get(skill_id)
-        if pinned.type == "anthropic":
+        if pinned.type != "custom":
             out.append(
                 PanelSkill(
                     skill_id=skill_id,
                     title=skill_id,
                     version=version,
-                    origin="anthropic",
+                    origin="built_in",
                     updated_at=updated,
                 )
             )

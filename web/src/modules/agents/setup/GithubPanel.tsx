@@ -11,7 +11,7 @@ import { Section, type Props } from "../inspector/parts"
 import type { Agent, SyncedSkill } from "../types"
 import { hasTrouble, repoTrouble, useAgentGithub, useGithubWrites, type AgentGithub, type GithubRepo, type GithubSkill } from "./github"
 
-const ORIGIN: Record<GithubSkill["origin"], string> = { repo: "GitHub", library: "Library", external: "Published outside Daimon", anthropic: "Anthropic" }
+const ORIGIN: Record<GithubSkill["origin"], string> = { repo: "GitHub", library: "Library", external: "Published outside Daimon", built_in: "Built-in" }
 const SYNC = { pending: "Waiting", running: "Syncing", done: "Synced" } as const
 const MARK: Record<SyncedSkill["action"], string> = { created: "Added", updated: "Updated", skipped: "Skipped", failed: "Failed" }
 

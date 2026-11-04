@@ -10,7 +10,7 @@ export type GithubRepo = {
   granted_at: string | null; granted_by: string | null
 }
 export type GithubSkill = {
-  skill_id: string; title: string; version: string | null; origin: "repo" | "library" | "external" | "anthropic"
+  skill_id: string; title: string; version: string | null; origin: "repo" | "library" | "external" | "built_in"
   repo: string | null; branch: string | null; path: string | null; url: string | null; updated_at: string | null
 }
 export type AgentGithub = {
