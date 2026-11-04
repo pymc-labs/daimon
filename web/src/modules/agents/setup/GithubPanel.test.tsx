@@ -63,6 +63,19 @@ describe("GithubPanel", () => {
     expect(screen.queryByText("Sync")).toBeNull()
   })
 
+  it("links only https addresses", async () => {
+    serve({
+      ...full,
+      repos: [repo("acme/data", { url: "javascript:alert(1)" })],
+      skills: [{ ...full.skills[0], url: "http://github.com/acme/data/tree/main/skills/a" }],
+      release: { name: "v2.4.1", at: AT, url: "data:text/html,hi" },
+    })
+    view()
+    expect(await screen.findByText("acme/data")).toBeInTheDocument()
+    expect(screen.queryAllByRole("link"), "a non-https address renders as text").toEqual([])
+    expect(screen.getByText("v2.4.1")).toBeInTheDocument()
+  })
+
   it("shows the sync error", async () => {
     serve({ ...full, sync: { state: "done", at: AT, error: "GitHub says the install is paused" } })
     view()

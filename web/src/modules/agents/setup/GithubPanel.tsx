@@ -16,9 +16,12 @@ const SYNC = { pending: "Waiting", running: "Syncing", done: "Synced" } as const
 const MARK: Record<SyncedSkill["action"], string> = { created: "Added", updated: "Updated", skipped: "Skipped", failed: "Failed" }
 
 const link = "text-link hover:underline"
-const Out = ({ href, children, className }: { href: string; children: React.ReactNode; className?: string }) => (
-  <a href={href} target="_blank" rel="noreferrer" className={cn(link, className)}>{children}</a>
-)
+// Links come from repo metadata and release tags, so only https ones become links.
+const https = (url: string | null): url is string => !!url && url.startsWith("https:")
+const Out = ({ href, children, className }: { href: string | null; children: React.ReactNode; className?: string }) =>
+  https(href)
+    ? <a href={href} target="_blank" rel="noreferrer" className={cn(link, className)}>{children}</a>
+    : <span className={className}>{children}</span>
 
 /** The newest change among the agent's skills. */
 const lastChange = (g: AgentGithub) => g.skills.map((s) => s.updated_at).filter((t): t is string => !!t).sort().at(-1) ?? null
@@ -80,7 +83,7 @@ function SkillRow({ skill }: { skill: GithubSkill }) {
       </div>
       <div className="mt-0.5 flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
         <span className="shrink-0">{ORIGIN[skill.origin]}</span>
-        {skill.origin === "repo" && where && (skill.url ? <Out href={skill.url} className="truncate font-mono">{where}</Out> : <Mono className="truncate">{where}</Mono>)}
+        {skill.origin === "repo" && where && (https(skill.url) ? <Out href={skill.url} className="truncate font-mono">{where}</Out> : <Mono className="truncate">{where}</Mono>)}
       </div>
     </div>
   )
@@ -123,7 +126,7 @@ export function GithubPanel({ agent }: Props) {
       {g.release && (
         <Section title="Release">
           <div className="flex items-center gap-2 text-sm">
-            {g.release.url ? <Out href={g.release.url} className="truncate font-medium">{g.release.name}</Out> : <span className="truncate font-medium">{g.release.name}</span>}
+            <Out href={g.release.url} className="truncate font-medium">{g.release.name}</Out>
             {g.release.at && <Ago iso={g.release.at} className="ml-auto text-xs text-muted-foreground" />}
           </div>
         </Section>
