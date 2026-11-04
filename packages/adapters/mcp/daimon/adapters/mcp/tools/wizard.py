@@ -34,6 +34,7 @@ from daimon.adapters.mcp.tools.discord import (
 from daimon.adapters.mcp.tools.teams._send import (
     _post_teams_wizard_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.core.outbound.mentions import RenderedPost
 from daimon.core.outbound.reach import ReachPlan
 from daimon.core.platform_words import scrub_other_platforms
 from daimon.core.stores.wizard_session import create_wizard_session
@@ -102,11 +103,21 @@ async def _post_wizard_impl(
     prompt = scrub_other_platforms(prompt, auth.platform)
     spec = _validated(prompt, stripped_steps)
     # A form is a post like any other: it says who asked and counts toward reach.
-    # Validated again with the attribution, which lengthens the head text.
-    [post] = await prepare_posts(
-        runtime, auth, [OutgoingPost(text=prompt, place=channel_id)], plan=plan
+    # The attribution lengthens the head text, so the form is validated with it
+    # before the call is counted: a refused form counts nothing.
+    validated: list[WizardSpec] = []
+
+    def validate(rendered: list[RenderedPost]) -> None:
+        validated.append(_validated(rendered[0].text, stripped_steps))
+
+    await prepare_posts(
+        runtime,
+        auth,
+        [OutgoingPost(text=prompt, place=channel_id)],
+        plan=plan,
+        validate=validate,
     )
-    spec = _validated(post.text, stripped_steps)
+    [spec] = validated
 
     short_id = new_short_id()
 

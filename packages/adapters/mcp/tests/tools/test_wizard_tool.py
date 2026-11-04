@@ -29,6 +29,7 @@ import pytest
 from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._outbound import turn_scope
 from daimon.adapters.mcp.tools.wizard import _STOP_SIGNAL, _post_wizard_impl
 from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
 from daimon.core.media.filenames import display_filename_for
@@ -36,6 +37,7 @@ from daimon.core.outbound.reach import ReachPlan
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
 from daimon.core.stores.file_uploads import create_upload, store_upload_content
+from daimon.core.stores.reach_tallies import lock_tally
 from daimon.core.stores.wizard_session import (
     count_wizard_sessions_for_platform_user,
     get_wizard_session,
@@ -645,3 +647,35 @@ async def test_post_wizard_names_its_requester_and_counts_toward_reach(
 
     assert row is not None, "the first form posted"
     assert row.spec["prompt"].endswith("\n-# requested by <@42>"), "the form credits its asker"
+
+
+async def test_post_wizard_when_attributed_prompt_too_long_then_refused_and_counts_nothing(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The attribution line can push a form over its limit; that refusal counts no reach."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    auth = _auth_identity(tenant_id=tenant.id, account_id=account.id)
+    patch_discord_http(monkeypatch, _happy_path_handler({}, message_id="9304"))
+    runtime = _runtime(committing_sessionmaker)
+
+    # Fits on its own, not once "requested by" is appended. The requester's own DM
+    # skips the outbound length cap, so the form limit is what refuses it.
+    with pytest.raises(ToolError, match="head text"):
+        await _post_wizard_impl(
+            runtime,
+            auth,
+            prompt="<@7> " + "x" * 3950,
+            steps=[_one_choice_step()],
+            channel_id="42",
+            plan=ReachPlan(threads=0, places=0, people=1),
+        )
+
+    scope = await turn_scope(runtime, auth)
+    async with committing_sessionmaker.begin() as session:
+        tally, _ = await lock_tally(session, tenant_id=tenant.id, turn_key=scope.key)
+    assert tally.people == frozenset(), "a refused form tags nobody"
+    assert tally.threads == 0 and not tally.places, "and reaches nowhere"

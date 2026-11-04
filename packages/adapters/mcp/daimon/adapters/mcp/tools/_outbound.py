@@ -7,7 +7,7 @@ Rules are in `daimon.core.outbound`; the per-turn tally is a locked row
 from __future__ import annotations
 
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
@@ -212,10 +212,13 @@ async def prepare_posts(
     *,
     plan: ReachPlan | None,
     scope: TurnScope | None = None,
+    validate: Callable[[list[RenderedPost]], None] | None = None,
 ) -> list[RenderedPost]:
     """Render every post, then check length, captions and the reach budget as a whole.
 
-    Nothing has posted when this raises; on success the call's reach is counted.
+    ``validate`` checks the rendered posts, attribution included, and raises to
+    refuse the call. Nothing has posted when this raises, and a refused call
+    counts nothing; on success the call's reach is counted.
     """
     platform = _platform(auth)
     scope = scope or await turn_scope(runtime, auth)
@@ -257,6 +260,8 @@ async def prepare_posts(
         for post in posts
     ]
     ping_users.set(frozenset(uid for r in rendered for uid in r.user_ids))
+    if validate is not None:
+        validate(rendered)
     if not scope.interactive:
         return rendered
     settings = runtime.settings.outbound
