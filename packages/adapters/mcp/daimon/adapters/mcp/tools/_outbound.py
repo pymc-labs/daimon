@@ -41,6 +41,7 @@ from daimon.core.outbound.reach import (
     needs_approval,
 )
 from daimon.core.security_audit import record_denial
+from daimon.core.stores.direct_messages import DM_SCOPE_PREFIX
 from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.stores.file_uploads import get_upload
 from daimon.core.stores.reach_tallies import lock_tally, save_tally
@@ -114,15 +115,35 @@ def _own_origin(running: list[TurnOriginRow], session_id: str) -> TurnOriginRow 
     return running[0] if len(running) == 1 else None
 
 
-def _own_places(origin: TurnOriginRow) -> frozenset[str]:
-    """Every id a post into the turn's own thread or channel can carry.
+def canonical_place(place: str) -> str:
+    """A place with Teams' ``;messageid=`` variants folded to ``<channel>;messageid=<root>``.
 
-    Slack tools address a thread as ``channel:thread_ts``, which no origin field holds.
+    Teams ids arrive with the parameter in any case, followed by more parameters, or
+    empty; the thread is the channel plus that one id. Other platforms' ids pass through.
     """
-    places = {origin.thread_id, origin.platform_channel_id or origin.thread_id}
+    head, *params = place.strip().split(";")
+    for param in params:
+        key, _, value = param.partition("=")
+        if key.lower() == "messageid" and value:
+            return f"{head};messageid={value}"
+    return head
+
+
+def _own_places(origin: TurnOriginRow) -> frozenset[str]:
+    """Every id a plain post into the turn's own thread or direct chat can carry.
+
+    The parent channel is not one: a top-level post there reaches other people, as on
+    Discord. Slack tools address a thread as ``channel:thread_ts``, which no origin field
+    holds. A direct chat's platform id is its own; elsewhere ``platform_channel_id`` is the
+    channel the message was posted in, own only when it is not the parent channel.
+    """
+    places = {origin.thread_id}
     if origin.platform == "slack" and origin.thread_id != origin.parent_channel_id:
         places.add(f"{origin.parent_channel_id}:{origin.thread_id}")
-    return frozenset(places)
+    chat = origin.platform_channel_id
+    if chat and (origin.thread_id.startswith(DM_SCOPE_PREFIX) or chat != origin.parent_channel_id):
+        places.add(chat)
+    return frozenset(canonical_place(p) for p in places)
 
 
 async def turn_scope(runtime: McpRuntime, auth: AuthIdentity) -> TurnScope:
@@ -362,7 +383,7 @@ def _reaches(
     outside the own channel or tagging someone else. ``skip`` is None when nobody is pinged."""
     if not post.new_thread:
         return _outside(post, scope)
-    if post.place not in scope.own_channels:
+    if canonical_place(post.place) not in scope.own_channels:
         return True
     if skip is None:
         return False
@@ -371,7 +392,8 @@ def _reaches(
 
 
 def _outside(post: OutgoingPost, scope: TurnScope) -> bool:
-    return post.place not in scope.own_places and post.place != scope.requester_id
+    place = canonical_place(post.place)
+    return place not in scope.own_places and place != scope.requester_id
 
 
 def _gate(

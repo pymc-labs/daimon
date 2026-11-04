@@ -398,8 +398,14 @@ async def _session_turn(
     turns: int = 1,
     session_id: str | None = "chat-1",
     platform: str = "discord",
+    thread: str | None = None,
+    channel: str | None = None,
 ) -> tuple[McpRuntime, AuthIdentity, list[TurnOriginRow]]:
-    """A caller in a chat session with `turns` running origins of its own agent."""
+    """A caller in a chat session with `turns` running origins of its own agent.
+
+    `thread` overrides the origin's thread id; `channel` is the platform id of the
+    channel its message was posted in (`platform_channel_id`).
+    """
     now = datetime.now(UTC)
     async with sessionmaker.begin() as session:
         tenant = await make_tenant(session, platform=cast(Any, platform))
@@ -411,7 +417,8 @@ async def _session_turn(
                 account_id=account.id,
                 platform=cast(Any, platform),
                 parent_channel_id="C1",
-                thread_id=f"T{i}",
+                thread_id=thread or f"T{i}",
+                platform_channel_id=channel,
                 responder_ma_agent_id="agent_x",
                 responder_name="daimon",
                 configuration_target_ma_agent_id=None,
@@ -467,6 +474,64 @@ async def test_prepare_posts_when_slack_own_thread_then_no_line_or_limits(
     rendered = await prepare_posts(runtime, auth, [doc, video], plan=None, scope=scope)
     assert [r.text for r in rendered] == [doc.text, video.text], "no line, no refusal"
     assert await _tally(runtime, auth, scope) == ReachTally(), "and no count"
+
+
+@pytest.mark.parametrize(
+    ("platform", "thread", "own", "channel"),
+    [
+        ("slack", "T0", ["T0", "C1:T0"], "C1"),
+        ("teams", "C1;messageid=7", ["C1;messageid=7", "C1;MessageID=7;x=1"], "C1;messageid=7"),
+        ("discord", "T0", ["T0"], "C1"),
+    ],
+    ids=["slack", "teams", "discord"],
+)
+async def test_prepare_posts_when_thread_turn_posts_top_level_then_reach_but_own_thread_not(
+    sessionmaker, platform, thread, own, channel
+):
+    """The parent channel is other people's: a plain post there is counted and carries the
+    line; a reply in the own thread, in any spelling the platform's tools take, is not."""
+    runtime, auth, _ = await _session_turn(
+        sessionmaker, platform=platform, thread=thread, channel=channel
+    )
+    scope = await _outbound.turn_scope(runtime, auth)
+    tag = " ".join(TAG[platform].format(n) for n in range(1, 8))
+    for place in own:
+        [reply] = await prepare_posts(
+            runtime, auth, [OutgoingPost(text="x" * 5000, place=place)], plan=None, scope=scope
+        )
+        assert "requested by" not in reply.text, f"{platform}: {place} is the own thread"
+    assert await _tally(runtime, auth, scope) == ReachTally(), f"{platform}: own thread uncounted"
+    parent = thread.split(";", 1)[0] if platform == "teams" else "C1"
+    with pytest.raises(ToolError, match=TOO_LONG):
+        await prepare_posts(
+            runtime, auth, [OutgoingPost(text="x" * 5000, place=parent)], plan=None, scope=scope
+        )
+    if platform == "teams":
+        return  # Teams posts tag nobody, so only length and the line guard its channel
+    with pytest.raises(ToolError, match="approve_reach"):
+        await prepare_posts(
+            runtime,
+            auth,
+            [OutgoingPost(text=tag, place=parent)],
+            plan=ReachPlan(threads=0, places=1, people=1),
+            scope=scope,
+        )
+
+
+@pytest.mark.parametrize("platform", ("slack", "discord"))
+async def test_prepare_posts_when_dm_turn_posts_to_its_dm_then_own_conversation(
+    sessionmaker, platform
+):
+    """A direct chat's channel is the own conversation; its scope id is no place anyone posts to."""
+    runtime, auth, _ = await _session_turn(
+        sessionmaker, platform=platform, thread="dm:abc", channel="D9"
+    )
+    scope = await _outbound.turn_scope(runtime, auth)
+    [out] = await prepare_posts(
+        runtime, auth, [OutgoingPost(text="x" * 5000, place="D9")], plan=None, scope=scope
+    )
+    assert "requested by" not in out.text, f"{platform}: no line in the own DM"
+    assert await _tally(runtime, auth, scope) == ReachTally(), f"{platform}: nothing counted"
 
 
 async def test_turn_scope_when_server_started_origin_then_unattended(
