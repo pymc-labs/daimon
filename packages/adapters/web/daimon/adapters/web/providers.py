@@ -112,7 +112,9 @@ class SlackSignIn:
         redirect_uri: str,
         interactive: bool = False,
     ) -> str:
-        # Slack takes no PKCE and has no prompt to pick: it always shows its consent.
+        # No PKCE: Slack's switches the whole app to a public client for good (no client
+        # secret, refresh tokens capped at 30 days). `state` and the flow cookie bind the flow.
+        # Slack has no prompt to pick an account: it always shows its consent.
         return slack_authorize_url(
             client_id=self._client_id, redirect_uri=redirect_uri, state=state
         )
