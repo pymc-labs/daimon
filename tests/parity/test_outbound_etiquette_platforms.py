@@ -6,13 +6,25 @@
   ping); Slack and Teams have no silent mention, so they use the name.
 - Discord role tags stay as text: every send turns role pings off. Slack and
   Teams group pings become plain words.
+- When the never-tag lookup fails, the post still goes out: Discord keeps the
+  mention text and pings nobody; Slack names everyone unchecked, as its replies
+  do; Teams posts tag no one either way.
 """
 
+import uuid
+from types import SimpleNamespace
+from typing import Any, cast
+
 import pytest
+from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.tools import _outbound
+from daimon.adapters.mcp.tools._outbound import OutgoingPost, TurnScope, prepare_posts
+from daimon.core.config import OutboundSettings
 from daimon.core.outbound.mentions import (
     attribution_line,
     mentioned_user_ids,
     neutralise_broadcasts,
+    ping_users,
     render_post,
 )
 from daimon.core.outbound.opt_out import tag_opt_outs, untag_opted_out
@@ -105,3 +117,31 @@ async def test_never_tag_when_text_mentions_opted_out_then_plain_name(
 
 def render_post_mention(platform):
     return {"discord": "<@123>", "slack": "<@U123>"}[platform]
+
+
+_TAG = {"discord": "<@7>", "slack": "<@U7>", "teams": "<at>Ann</at>"}
+_ON_FAILURE = {"discord": "<@7> look", "slack": "@someone look", "teams": "@Ann look"}
+
+
+@pytest.mark.parametrize("platform", PLATFORMS)
+async def test_opt_out_lookup_when_it_fails_then_post_sends_without_pings(platform, monkeypatch):
+    async def broken(*_: object, **__: object) -> frozenset[str]:
+        raise RuntimeError("lookup down")
+
+    monkeypatch.setattr(_outbound, "tag_opt_outs", broken)
+    runtime = SimpleNamespace(
+        session_factory=None, settings=SimpleNamespace(outbound=OutboundSettings())
+    )
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role=cast(Any, "member"), platform=platform
+    )
+    scope = TurnScope(key="turn:x", kind="live", own_places=frozenset({"home"}), requester_id="42")
+    [post] = await prepare_posts(
+        cast(Any, runtime),
+        auth,
+        [OutgoingPost(text=f"{_TAG[platform]} look", place="home")],
+        plan=None,
+        scope=scope,
+    )
+    assert post.text == _ON_FAILURE[platform], f"{platform}: the post still goes out"
+    assert ping_users.get() == frozenset(), f"{platform}: and pings nobody unchecked"

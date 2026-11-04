@@ -170,6 +170,8 @@ async def turn_scope(runtime: McpRuntime, auth: AuthIdentity) -> TurnScope:
     )
 
 
+OPT_OUT_UNCHECKED = "Not sent: could not check whether that person accepts messages; try later."
+
 _NAME_TTL_SECONDS = 3600.0
 _NAME_CACHE_MAX = 2048
 _slack_names: dict[tuple[str, str], tuple[float, str]] = {}
@@ -220,13 +222,38 @@ async def _requester_name(
             name = None
     if name:
         return name
-    stored = await opt_out_names(
-        runtime.session_factory,
-        tenant_id=auth.tenant_id,
-        platform=_platform(auth),
-        user_ids={user_id},
-    )
+    try:
+        stored = await opt_out_names(
+            runtime.session_factory,
+            tenant_id=auth.tenant_id,
+            platform=_platform(auth),
+            user_ids={user_id},
+        )
+    except Exception:  # named boundary: a missing name never stops the post
+        log.warning("outbound.requester_name_lookup_failed", exc_info=True)
+        stored = {}
     return stored.get(user_id) or "someone"
+
+
+async def _opt_outs(
+    runtime: McpRuntime, auth: AuthIdentity, platform: Platform, user_ids: set[str]
+) -> tuple[frozenset[str], dict[str, str], bool]:
+    """Who opted out of tags, their names, and whether that could be checked.
+
+    A failed lookup never loses the post. Discord keeps the mention text and pings
+    nobody; Slack names everyone unchecked, as its replies do; Teams posts tag no one.
+    """
+    try:
+        skip = await tag_opt_outs(
+            runtime.session_factory, tenant_id=auth.tenant_id, platform=platform, user_ids=user_ids
+        )
+        names = await opt_out_names(
+            runtime.session_factory, tenant_id=auth.tenant_id, platform=platform, user_ids=skip
+        )
+    except Exception:  # named boundary: the post goes out, pinging no one unchecked
+        log.warning("outbound.opt_out_lookup_failed", exc_info=True)
+        return (frozenset(user_ids) if platform == "slack" else frozenset()), {}, False
+    return skip, names, True
 
 
 async def prepare_posts(
@@ -251,12 +278,8 @@ async def prepare_posts(
     mentioned = {uid for post in posts for uid in mentioned_user_ids(post.text, platform)}
     if scope.requester_id:
         mentioned.add(scope.requester_id)
-    skip = await tag_opt_outs(
-        runtime.session_factory, tenant_id=auth.tenant_id, platform=platform, user_ids=mentioned
-    )
-    names = await opt_out_names(
-        runtime.session_factory, tenant_id=auth.tenant_id, platform=platform, user_ids=skip
-    )
+    skip, names, checked = await _opt_outs(runtime, auth, platform, mentioned)
+    pings = pings and checked
     reach = [_reaches(post, scope, platform, skip if pings else None) for post in posts]
     credited = [p.place for p, r in zip(posts, reach, strict=True) if p.attribute and r]
     line = await _attribution(runtime, auth, scope, credited[0], skip) if credited else None
@@ -444,12 +467,11 @@ async def refuse_dm_to_opted_out(
     to a person who asked never to be tagged. Their own request to hear from Daimon stands."""
     if recipient_id == auth.platform_user_id:
         return
-    skip = await tag_opt_outs(
-        runtime.session_factory,
-        tenant_id=auth.tenant_id,
-        platform=_platform(auth),
-        user_ids={recipient_id},
-    )
+    skip, _, checked = await _opt_outs(runtime, auth, _platform(auth), {recipient_id})
+    if not checked:
+        # A DM always notifies, so one to someone unchecked is held, not sent.
+        record_denial("outbound_opt_out_unchecked_dm")
+        raise ToolError(OPT_OUT_UNCHECKED)
     if skip:
         record_denial("outbound_opted_out_dm")
         raise ToolError(
@@ -470,14 +492,8 @@ async def render_edit(runtime: McpRuntime, auth: AuthIdentity, text: str, *, pla
         if scope.interactive and _outside(OutgoingPost(text=text, place=place), scope):
             record_denial("outbound_too_long")
             raise ToolError(TOO_LONG)
-    skip = await tag_opt_outs(
-        runtime.session_factory,
-        tenant_id=auth.tenant_id,
-        platform=platform,
-        user_ids=set(mentioned_user_ids(text, platform)),
+    skip, names, _ = await _opt_outs(
+        runtime, auth, platform, set(mentioned_user_ids(text, platform))
     )
     ping_users.set(frozenset())
-    names = await opt_out_names(
-        runtime.session_factory, tenant_id=auth.tenant_id, platform=platform, user_ids=skip
-    )
     return render_post(text, platform, do_not_tag=skip, names=names, attribution=None).text

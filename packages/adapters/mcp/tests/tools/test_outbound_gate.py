@@ -300,6 +300,33 @@ async def test_prepare_posts_when_web_or_agent_chat_then_plain_attribution(sessi
     assert post.text == "hello\n-# requested by someone", f"{platform}: never <@id>"
 
 
+@pytest.mark.parametrize("platform", ("discord", "slack"))
+async def test_prepare_posts_when_opt_out_lookup_fails_then_reach_post_sends_uncounted(
+    sessionmaker, platform, monkeypatch
+):
+    """A broken lookup never loses a post elsewhere; it just pings and counts nobody."""
+
+    async def broken(*_: object, **__: object) -> frozenset[str]:
+        raise RuntimeError("lookup down")
+
+    runtime, auth = await _setup(sessionmaker, platform)
+    monkeypatch.setattr(_outbound, "tag_opt_outs", broken)
+    scope = _scope()
+    text = f"{TAG[platform].format(7)} look"
+    [post] = await prepare_posts(
+        runtime,
+        auth,
+        [OutgoingPost(text=text, place="C1")],
+        plan=ReachPlan(threads=0, places=1, people=1),
+        scope=scope,
+    )
+    assert post.text.startswith(text if platform == "discord" else "@someone look"), platform
+    assert ping_users.get() == frozenset(), f"{platform}: nobody unchecked is pinged"
+    assert (await _tally(runtime, auth, scope)).people == frozenset(), "nobody counted"
+    with pytest.raises(ToolError, match="could not check"):
+        await _outbound.refuse_dm_to_opted_out(runtime, auth, "7")
+
+
 async def test_render_edit_when_broadcast_then_neutralised_without_attribution(sessionmaker):
     runtime, auth = await _setup(sessionmaker, "slack")
     assert await render_edit(runtime, auth, "fixed <!here>", place="C1") == "fixed @here", (
