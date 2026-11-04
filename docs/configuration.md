@@ -1753,8 +1753,9 @@ Read from `daimon.core.config.OutboundSettings`. Prefix `DAIMON_OUTBOUND__`.
 
 Etiquette for posts the agent makes through tools (``DAIMON_OUTBOUND__*``).
 
-Rules live in `daimon.core.outbound`; unattended turns skip the budget, length and
-caption limits but keep mentions and attribution.
+Rules live in `daimon.core.outbound` and apply only to posts that reach other people;
+the own conversation is unchanged. Unattended turns skip the budget, length and caption
+limits but keep mentions and attribution.
 
 ### `DAIMON_OUTBOUND__REACH_BUDGET_ENABLED`
 
@@ -1768,7 +1769,8 @@ shown, the post is refused instead.
 
 `int` · optional · default `2`
 
-New threads or forum posts one interactive turn opens without approval.
+New threads or forum posts outside the own channel, or tagging someone else, one
+interactive turn opens without approval.
 
 ### `DAIMON_OUTBOUND__MAX_PLACES`
 
@@ -1781,21 +1783,22 @@ posts into without approval.
 
 `int` · optional · default `5`
 
-Distinct people one interactive turn tags in tool posts without approval.
+Distinct people one interactive turn tags in tool posts outside the own conversation
+without approval.
 
 ### `DAIMON_OUTBOUND__MAX_LENGTH`
 
 `int` · optional · default `1500`
 
-Longest tool post, in characters, an interactive turn may send outside its own reply. 0
-turns the limit off.
+Longest tool post, in characters, an interactive turn may send outside its own
+conversation. 0 turns the limit off.
 
 ### `DAIMON_OUTBOUND__MIN_MEDIA_CAPTION`
 
 `int` · optional · default `60`
 
 Shortest caption, in characters without mentions and links, for a video or audio file an
-interactive turn posts. 0 turns the rule off.
+interactive turn posts outside its own conversation. 0 turns the rule off.
 
 ## Turn Queue
 

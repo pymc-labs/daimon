@@ -2067,7 +2067,8 @@ class ThreadNamingSettings(BaseModel):
 class OutboundSettings(BaseModel):
     """Etiquette for posts the agent makes through tools (``DAIMON_OUTBOUND__*``).
 
-    Rules live in `daimon.core.outbound`; unattended turns skip the budget,
+    Rules live in `daimon.core.outbound` and apply only to posts that reach other
+    people; the own conversation is unchanged. Unattended turns skip the budget,
     length and caption limits but keep mentions and attribution.
     """
 
@@ -2083,7 +2084,10 @@ class OutboundSettings(BaseModel):
         default=2,
         ge=0,
         le=100,
-        description="New threads or forum posts one interactive turn opens without approval.",
+        description=(
+            "New threads or forum posts outside the own channel, or tagging someone else, "
+            "one interactive turn opens without approval."
+        ),
     )
     max_places: int = Field(
         default=2,
@@ -2098,7 +2102,10 @@ class OutboundSettings(BaseModel):
         default=5,
         ge=0,
         le=200,
-        description="Distinct people one interactive turn tags in tool posts without approval.",
+        description=(
+            "Distinct people one interactive turn tags in tool posts outside the own "
+            "conversation without approval."
+        ),
     )
     max_length: int = Field(
         default=1500,
@@ -2106,7 +2113,7 @@ class OutboundSettings(BaseModel):
         le=40_000,
         description=(
             "Longest tool post, in characters, an interactive turn may send outside its "
-            "own reply. 0 turns the limit off."
+            "own conversation. 0 turns the limit off."
         ),
     )
     min_media_caption: int = Field(
@@ -2115,7 +2122,8 @@ class OutboundSettings(BaseModel):
         le=1000,
         description=(
             "Shortest caption, in characters without mentions and links, for a video or "
-            "audio file an interactive turn posts. 0 turns the rule off."
+            "audio file an interactive turn posts outside its own conversation. 0 turns "
+            "the rule off."
         ),
     )
 
