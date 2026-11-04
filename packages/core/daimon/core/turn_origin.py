@@ -35,9 +35,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 #: same bound when the continuation is queued; this one is the render-time
 #: backstop for text that reached the controls by any other route.
 MAX_REQUESTED_WORK_CHARS = 500
-_ALL_CHANNEL_READS = "read_channel, read_thread, get_message, list_threads, search_messages"
-# Slack has no list_threads: a thread there is a reply chain, not a listable object.
-_CHANNEL_READS = {"slack": "read_channel, read_thread, get_message, search_messages"}
 
 
 def words_sentence(platform: ChatPlatform) -> str:
@@ -266,6 +263,7 @@ def _words_for_origin(origin: TurnOriginRow) -> dict[str, str] | None:
 
 WEB_SENTENCE = (
     " Web links: web.url plus a web.pages path, or a tool result's web_url; never any other."
+    " Offer one when the person would continue on that page."
 )
 ROUTINE_WEB_SENTENCE = " Web links: web.url or a tool result's web_url; never any other."
 
@@ -409,8 +407,7 @@ def render_turn_origin(
         "recreated namesake for a missing identity. Ask one concise question when the "
         "target is missing or ambiguous. Pass expected_ma_agent_id with target-bearing "
         "tools. Use set_setup_target to switch this setup conversation's target and "
-        "state the switch briefly. Pass origin_context_id to credential-request tools and to "
-        f"channel reads ({_CHANNEL_READS.get(origin.platform, _ALL_CHANNEL_READS)})."
+        "state the switch briefly. Pass origin_context_id to every tool that takes it."
     )
     if words is not None and origin.platform in CHAT_PLATFORMS:
         rendered += words_sentence(origin.platform)
