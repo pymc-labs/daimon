@@ -12,6 +12,7 @@ turn) is checked by each allowed handler, not here.
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Awaitable, Callable
 from typing import Any, Final
 
 import structlog
@@ -77,11 +78,14 @@ async def refuse_external_click(
     *,
     workspace_name: str | None,
     text: str | None = None,
+    untag: Callable[[str], Awaitable[str]] | None = None,
 ) -> None:
     """Tell an external clicker the control is not theirs: an ephemeral, else a thread reply.
 
     The thread reply names the person, since it is visible to the channel; it
     is the fallback for a Slack that refuses the ephemeral to an external member.
+    ``untag`` turns its mention into a plain name for someone who asked never
+    to be tagged.
     """
     container: dict[str, Any] = payload.get("container") or {}
     channel_info: dict[str, Any] = payload.get("channel") or {}
@@ -100,7 +104,10 @@ async def refuse_external_click(
         return
     except CLICK_REPLY_ERRORS as err:
         log.info("slack.external_refusal.ephemeral_failed", error=type(err).__name__)
+    mention = f"<@{user_id}>"
+    if untag is not None:
+        mention = await untag(mention)
     with contextlib.suppress(*CLICK_REPLY_ERRORS):
         await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-            channel=channel, thread_ts=thread_ts, **notice_fields(f"<@{user_id}> {text}")
+            channel=channel, thread_ts=thread_ts, **notice_fields(f"{mention} {text}")
         )

@@ -63,6 +63,7 @@ __all__ = [
     "APPROVAL_TOOLS",
     "CARDED_TOOLS",
     "CONFIRMED_DAIMON_TOOLS",
+    "REACH_APPROVAL_TOOLS",
     "WATCH_CONFIRMED_TOOLS",
     "DAIMON_SERVER_NAME",
     "OPEN_TOOL_SAFETY",
@@ -202,6 +203,8 @@ CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
     "request_agent_backend_switch": "preview_digest",
     "request_provider_allowlist": "preview_digest",
     "request_channel_pin_clear": "preview_digest",
+    # The card itself is the point: every call asks.
+    "approve_reach": "threads",
     # Every call names its action, so every call asks.
     "microsoft_send": "action",
     # Every call names its method; asks only with tool safety on.
@@ -220,6 +223,10 @@ WATCH_CONFIRMED_TOOLS: Final[frozenset[str]] = frozenset(
         "fly_extend_session",
     }
 )
+
+
+#: Asked on every turn: the requester approves a reach over the budget (`daimon.core.outbound`).
+REACH_APPROVAL_TOOLS: Final[frozenset[str]] = frozenset({"approve_reach"})
 
 
 def confirmation_gated_tools() -> frozenset[str]:

@@ -28,6 +28,7 @@ import pytest
 from cryptography.fernet import Fernet
 from daimon.adapters.slack.app import SlackApp
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.config import OutboundSettings
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
     render_preparation_failed,
@@ -72,6 +73,7 @@ _ENV_ID = "env_continuity_test"
 
 def _make_app(sessionmaker: async_sessionmaker[AsyncSession], *, tenant_id_str: str) -> SlackApp:
     settings = MagicMock()
+    settings.outbound = OutboundSettings()
     settings.crypto.keys = ()
     settings.slack.max_concurrent_turns_per_tenant = 3
     settings.slack.bot_display_name = "daimon"
@@ -1121,3 +1123,27 @@ def test_selfhosted_tool_turn_skips_output_sweep(
             requester_user_id="U_TEST",
             selfhosted=True,
         )
+
+
+async def test_output_sweep_when_opt_out_lookup_fails_then_files_still_go_out_unpinged(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A failed never-tag lookup must not drop the files; the sweep names nobody instead."""
+    app = _make_app(db_session_factory, tenant_id_str=str(uuid.uuid4()))
+    deliver = AsyncMock()
+    with (
+        patch("daimon.adapters.slack.app.untag_opted_out", AsyncMock(side_effect=OSError)),
+        patch("daimon.adapters.slack.app.deliver_session_outputs", deliver),
+    ):
+        await app._sweep_session_outputs(  # pyright: ignore[reportPrivateUsage]
+            None,
+            MagicMock(),
+            session_id="sesn_1",
+            channel_id="C_TEST",
+            thread_ts="1.2",
+            team_id="T_TEST",
+            requester_user_id="U_TEST",
+        )
+
+    deliver.assert_awaited_once()
+    assert deliver.await_args.kwargs["requester_label"] == "@someone", "nobody is pinged"

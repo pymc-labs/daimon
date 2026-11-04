@@ -36,6 +36,7 @@ from daimon.core.confirmation import (
     ConfirmationPrompt,
 )
 from daimon.core.native_admins import load_live_subject
+from daimon.core.outbound.opt_out import tag_opt_outs
 from daimon.core.posted_controls.confirmation import (
     NOT_YOURS_MESSAGE,
     ConfirmationCard,
@@ -388,9 +389,19 @@ class TeamsConfirmationCards:
                     id=prompt.requester_platform_user_id,
                     name=prompt.requester_display_name or "you",
                 )
+                if tenant_id is not None and await tag_opt_outs(
+                    rule_factory,
+                    tenant_id=tenant_id,
+                    platform="teams",
+                    user_ids=[prompt.requester_platform_user_id],
+                ):
+                    # Someone who asked never to be tagged gets the line without the @mention.
+                    mention = None
+                else:
+                    mention = requester
                 sent = await self._sender.send(
                     conversation_id,
-                    notice_card(STILL_WAITING_MESSAGE, error=False, mention=requester),
+                    notice_card(STILL_WAITING_MESSAGE, error=False, mention=mention),
                     service_url=service_url,
                 )
                 if self._feed is not None:

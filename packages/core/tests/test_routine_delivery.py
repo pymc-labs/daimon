@@ -820,8 +820,10 @@ def test_a_routine_result_never_names_another_chat_app(
     platform: str, payload: str, scrubbed: str
 ) -> None:
     row = _row(delivery_payload=payload)
-    assert render_fallback_post(row, platform=platform).endswith(f"\n\n{scrubbed}")
-    assert render_fallback_post(row, as_agent=True, platform=platform).endswith(f"\n\n{scrubbed}")
+    assert render_fallback_post(row, platform=platform).count(f"\n\n{scrubbed}\n") == 1
+    assert (
+        render_fallback_post(row, as_agent=True, platform=platform).count(f"\n\n{scrubbed}\n") == 1
+    )
     dm = render_fallback_dm(row, "destination_unavailable", platform=platform)
     assert dm.endswith(f"\n\n{scrubbed}")
     assert render_fallback_post(row).endswith(payload), "no platform, no scrubbing"

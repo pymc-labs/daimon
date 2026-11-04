@@ -6,7 +6,7 @@ import asyncio
 import dataclasses
 import json
 import uuid
-from collections.abc import Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -66,6 +66,7 @@ class _Feed:
         timeout_s: float = 5.0,
         stored: dict[str, str] | None = None,
         clock: Callable[[], float] | None = None,
+        opted_out: Callable[[str], Awaitable[bool]] | None = None,
     ) -> None:
         self.requests: list[httpx.Request] = []
         self.tasks: list[asyncio.Task[None]] = []
@@ -112,6 +113,7 @@ class _Feed:
             entra_tenant_id=ENTRA_TENANT_ID,
             spawn=spawn,
             timeout_s=timeout_s,
+            opted_out=opted_out,
         )
 
     async def settle(self) -> None:

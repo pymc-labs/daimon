@@ -431,7 +431,7 @@ configuration snapshot backfill, including null channel and thread metadata.
 ### Default capability conformance
 
 The supplementary F1 scenario in `mux.testing.conformance.default_capability` provisions
-the authored Daimon default's eleven skill bundles and immutable pins, mapped
+the authored Daimon default's twelve skill bundles and immutable pins, mapped
 builtin tools and reserved `daimon-mcp` attachment. One scripted turn loads the
 pinned file-handling skill, invokes the real read-only `describe_agent` and
 `list_my_sessions` MCP tools, exercises the six
@@ -452,7 +452,7 @@ row's tenant/account scope, retaining the SDK response for configuration snapsho
 backfill, including null channel and thread metadata, without binding projection
 or an additional read.
 
-OpenAI's supplementary F1 adapter provisions the eleven authored default skills,
+OpenAI's supplementary F1 adapter provisions the twelve authored default skills,
 declares their logical builtin mapping to hosted Bash (write/edit via separate
 `apply_patch` commands), and attaches `daimon-mcp` through remote HTTP MCP. Native
 command/MCP items normalize into paired tool records. The checked-in F1 tape is
@@ -461,7 +461,7 @@ model-quality, tool-argument or atomic agent revision-pin claim. See the OpenAI
 driver README for the explicit mapping and supported boundaries.
 Gemini's supplementary F1 default-capability adapter is replay-only and returns
 typed PENDING before provisioning until an authorized GCS bundle publisher and
-authenticated MCP/session adapters are supplied. All eleven full bundles have
+authenticated MCP/session adapters are supplied. All twelve full bundles have
 offline GCS compilation evidence; that does not certify a live default. See
 `docs/drivers/gemini/DEFAULT-CAPABILITY.md` for the explicit adapter entry.
 
@@ -672,7 +672,7 @@ Teams also uses the optional neutral lifecycle tap for local drafts. Child and s
 ### Offline Anthropic default-capability composition
 
 `tests/parity/test_f2_anthropic_default_capability.py` reuses the Anthropic F1
-scenario and its strict SDK script for all eleven authored skill uploads,
+scenario and its strict SDK script for all twelve authored skill uploads,
 immutable pins, default builtin routes and one completed root. The existing
 vault port resolves a host credential reference, and the native session
 extension mounts that vault. The scripted managed-agents provider reads the

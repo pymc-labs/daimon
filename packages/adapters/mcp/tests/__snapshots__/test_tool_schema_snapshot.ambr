@@ -417,6 +417,41 @@
         'type': 'object',
       }),
     }),
+    'approve_reach': dict({
+      'description': '''
+        Ask the person on a card before posting more widely than the turn's limit.
+        <blank line>
+        Call it when a send or thread tool refuses with the limit. Pass the whole
+        turn's counts and ``where`` naming the channels. The person sees one card;
+        on Approve, post within those counts. On Cancel, or where no card can
+        show, post nothing and offer one thread with a checklist instead. One card
+        a turn is enough, so plan everything before asking.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'people': dict({
+            'type': 'integer',
+          }),
+          'places': dict({
+            'type': 'integer',
+          }),
+          'threads': dict({
+            'type': 'integer',
+          }),
+          'where': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'threads',
+          'places',
+          'people',
+          'where',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'archive_agent': dict({
       'description': '''
         Delete an agent, for example churn-explorer, by archiving it. Admin-only.
@@ -2466,6 +2501,11 @@
       'description': '''
         Create a new thread and post content as its first message.
         <blank line>
+        ``plan`` counts everything this turn posts outside this conversation: threads,
+        places and people tagged; posts here need none. Past the limit the call is
+        refused until approve_reach returns approved. ``batch`` opens more threads in
+        the same channel in one call, counted together; the result is then a list.
+        <blank line>
         ``content`` is required and becomes the thread's first message; a thread
         cannot open without one. ``name`` is the thread's title (1-100 characters)
         where threads have titles, and is ignored elsewhere. On a text channel this
@@ -2483,8 +2523,66 @@
         workspace marked protected.
       ''',
       'parameters': dict({
+        '$defs': dict({
+          'ReachPlan': dict({
+            'description': 'Totals for a whole request: new threads, outside places, people tagged.',
+            'properties': dict({
+              'people': dict({
+                'default': 0,
+                'maximum': 10000,
+                'minimum': 0,
+                'type': 'integer',
+              }),
+              'places': dict({
+                'default': 0,
+                'maximum': 1000,
+                'minimum': 0,
+                'type': 'integer',
+              }),
+              'threads': dict({
+                'default': 0,
+                'maximum': 1000,
+                'minimum': 0,
+                'type': 'integer',
+              }),
+            }),
+            'type': 'object',
+          }),
+          'ThreadDraft': dict({
+            'description': 'One more thread for a batched create_thread call.',
+            'properties': dict({
+              'content': dict({
+                'description': "The thread's first message.",
+                'type': 'string',
+              }),
+              'name': dict({
+                'description': 'Thread title, 1-100 characters, where threads have titles.',
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'name',
+              'content',
+            ]),
+            'type': 'object',
+          }),
+        }),
         'additionalProperties': False,
         'properties': dict({
+          'batch': dict({
+            'anyOf': list([
+              dict({
+                'items': dict({
+                  '$ref': '#/$defs/ThreadDraft',
+                }),
+                'type': 'array',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
           'channel_id': dict({
             'type': 'string',
           }),
@@ -2493,6 +2591,17 @@
           }),
           'name': dict({
             'type': 'string',
+          }),
+          'plan': dict({
+            'anyOf': list([
+              dict({
+                '$ref': '#/$defs/ReachPlan',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
         }),
         'required': list([
@@ -6097,6 +6206,10 @@
       'description': '''
         Post a multi-step form in the channel instead of asking in prose.
         <blank line>
+        ``plan`` counts everything this turn posts outside this conversation: threads,
+        places and people tagged; posts here need none. Past the limit the call is
+        refused until approve_reach returns approved.
+        <blank line>
         Each entry in ``steps`` carries ``question`` (the text shown to the
         user), ``kind`` (``choice``, ``multi`` or ``text``), and ``options``
         for the two choice kinds. A step may carry one finished image by
@@ -6141,6 +6254,30 @@
               'label',
               'value',
             ]),
+            'type': 'object',
+          }),
+          'ReachPlan': dict({
+            'description': 'Totals for a whole request: new threads, outside places, people tagged.',
+            'properties': dict({
+              'people': dict({
+                'default': 0,
+                'maximum': 10000,
+                'minimum': 0,
+                'type': 'integer',
+              }),
+              'places': dict({
+                'default': 0,
+                'maximum': 1000,
+                'minimum': 0,
+                'type': 'integer',
+              }),
+              'threads': dict({
+                'default': 0,
+                'maximum': 1000,
+                'minimum': 0,
+                'type': 'integer',
+              }),
+            }),
             'type': 'object',
           }),
           'Step': dict({
@@ -6252,6 +6389,17 @@
         'properties': dict({
           'channel_id': dict({
             'type': 'string',
+          }),
+          'plan': dict({
+            'anyOf': list([
+              dict({
+                '$ref': '#/$defs/ReachPlan',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'prompt': dict({
             'type': 'string',
@@ -8246,6 +8394,11 @@
       'description': '''
         Privately message one human member of the current workspace.
         <blank line>
+        ``plan`` counts everything this turn posts outside this conversation: threads,
+        places and people; a DM to anyone but the requester needs it.
+        A person who asked never to be tagged is not messaged on someone else's
+        request; say so rather than retrying.
+        <blank line>
         Pass a user ID exactly as turn_controls or a read tool gives it, not a
         channel or mention. Both sender and recipient must still belong to this
         tenant, and the message arrives in the recipient's private chat with daimon.
@@ -8256,10 +8409,47 @@
         cross-tenant messages.
       ''',
       'parameters': dict({
+        '$defs': dict({
+          'ReachPlan': dict({
+            'description': 'Totals for a whole request: new threads, outside places, people tagged.',
+            'properties': dict({
+              'people': dict({
+                'default': 0,
+                'maximum': 10000,
+                'minimum': 0,
+                'type': 'integer',
+              }),
+              'places': dict({
+                'default': 0,
+                'maximum': 1000,
+                'minimum': 0,
+                'type': 'integer',
+              }),
+              'threads': dict({
+                'default': 0,
+                'maximum': 1000,
+                'minimum': 0,
+                'type': 'integer',
+              }),
+            }),
+            'type': 'object',
+          }),
+        }),
         'additionalProperties': False,
         'properties': dict({
           'content': dict({
             'type': 'string',
+          }),
+          'plan': dict({
+            'anyOf': list([
+              dict({
+                '$ref': '#/$defs/ReachPlan',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'recipient_id': dict({
             'type': 'string',
@@ -8275,6 +8465,14 @@
     'send_message': dict({
       'description': '''
         Post a message to a channel.
+        <blank line>
+        ``plan`` counts everything this turn posts outside this conversation: threads,
+        places and people tagged; posts here need none. Past the limit the call is
+        refused until approve_reach returns approved. Tags become plain names for
+        people who asked not to be tagged.
+        ``batch`` sends more text messages, each to its own ``channel_id``, in the same
+        call, counted together; files go with the first message only, and the result is
+        then a list.
         <blank line>
         For TEXT: only call this when the user explicitly asks you to send or
         post something to a channel. Do NOT call it to share results,
@@ -8309,6 +8507,50 @@
         unasked.
       ''',
       'parameters': dict({
+        '$defs': dict({
+          'MessageDraft': dict({
+            'description': 'One more message for a batched send_message call.',
+            'properties': dict({
+              'channel_id': dict({
+                'description': 'Where this message goes, as send_message takes it.',
+                'type': 'string',
+              }),
+              'content': dict({
+                'description': 'The message text.',
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'channel_id',
+              'content',
+            ]),
+            'type': 'object',
+          }),
+          'ReachPlan': dict({
+            'description': 'Totals for a whole request: new threads, outside places, people tagged.',
+            'properties': dict({
+              'people': dict({
+                'default': 0,
+                'maximum': 10000,
+                'minimum': 0,
+                'type': 'integer',
+              }),
+              'places': dict({
+                'default': 0,
+                'maximum': 1000,
+                'minimum': 0,
+                'type': 'integer',
+              }),
+              'threads': dict({
+                'default': 0,
+                'maximum': 1000,
+                'minimum': 0,
+                'type': 'integer',
+              }),
+            }),
+            'type': 'object',
+          }),
+        }),
         'additionalProperties': False,
         'properties': dict({
           'attachments': dict({
@@ -8319,6 +8561,20 @@
                     'type': 'string',
                   }),
                   'type': 'object',
+                }),
+                'type': 'array',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'batch': dict({
+            'anyOf': list([
+              dict({
+                'items': dict({
+                  '$ref': '#/$defs/MessageDraft',
                 }),
                 'type': 'array',
               }),
@@ -8341,6 +8597,17 @@
                   'type': 'string',
                 }),
                 'type': 'array',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'plan': dict({
+            'anyOf': list([
+              dict({
+                '$ref': '#/$defs/ReachPlan',
               }),
               dict({
                 'type': 'null',
@@ -9029,6 +9296,28 @@
               }),
             ]),
             'default': None,
+          }),
+        }),
+        'type': 'object',
+      }),
+    }),
+    'set_never_tag': dict({
+      'description': '''
+        Stop or resume Daimon tagging the person who is asking, only for themselves.
+        <blank line>
+        Call it when the person asks never to be tagged, pinged or @-mentioned
+        (``never_tag`` true), or asks to be tagged again (false). It always acts
+        for whoever sent this request and takes no one else's name; if someone asks
+        for it on another person's behalf, decline and tell them that person
+        can ask for themselves. It holds across every platform the person uses
+        Daimon on. Read the returned ``note`` back to the user.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'never_tag': dict({
+            'default': True,
+            'type': 'boolean',
           }),
         }),
         'type': 'object',

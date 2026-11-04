@@ -38,10 +38,12 @@ from daimon.core.agent_configuration import (
     provider_preview_digest,
 )
 from daimon.core.microsoft_write_paths import write_kind
+from daimon.core.outbound.reach import ReachPlan, card_consequence, card_title
 from daimon.core.tool_safety import (
     CARDED_TOOLS,
     DAIMON_SERVER_NAME,
     PUBLISH_TOOLS,
+    REACH_APPROVAL_TOOLS,
     WATCH_CONFIRMED_TOOLS,
     ToolCall,
     microsoft_send_tools,
@@ -566,6 +568,8 @@ def prompt_for_tool_call(
             admin=True,
             configuration=reference,
         )
+    if call.tool_name == "approve_reach" and own_server:
+        return _reach_prompt(data, requester_platform_user_id, now + timeout)
     if call.tool_name == "request_agent_backend_switch" and own_server:
         reference = BackendSwitchReference.model_validate(
             {
@@ -784,11 +788,29 @@ def prompt_for_tool_call(
     )
 
 
+def _reach_prompt(
+    data: Mapping[str, object], requester_platform_user_id: str, expires_at: datetime
+) -> ConfirmationPrompt:
+    # The same validation approve_reach stores, so the card never understates it.
+    plan = ReachPlan.from_args(data)
+    return ConfirmationPrompt(
+        title=_one_line(
+            card_title(plan, _one_line(str(data.get("where") or ""), limit=60)), limit=200
+        ),
+        consequence=card_consequence(plan),
+        action="Approve",
+        denied_action="Nothing posted",
+        requester_platform_user_id=requester_platform_user_id,
+        expires_at=expires_at,
+    )
+
+
 def confirmed_tools_for_turn(deps: TurnDeps) -> frozenset[str]:
     """Daimon's tools this turn's session asks before, from already-injected selectors."""
     return (
         WATCH_CONFIRMED_TOOLS
         | frozenset(CARDED_TOOLS)
+        | REACH_APPROVAL_TOOLS
         | backend_switch_tools(enabled=deps.backend_selection_enabled)
         | microsoft_send_tools(enabled=deps.microsoft_send, tool_safety_on=deps.tool_safety.enabled)
     )

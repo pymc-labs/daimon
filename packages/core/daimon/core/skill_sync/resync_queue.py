@@ -11,6 +11,7 @@ from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
 from daimon.core.config import GithubAppSettings, GithubSettings
 from daimon.core.skill_sync.resync import resync_bound_repo
+from daimon.core.skill_sync.resync_lock import resync_lock_key
 from daimon.core.stores import github_push_resync as resync_store
 from daimon.core.stores.domain import GitHubPushResyncRow
 from sqlalchemy import text
@@ -49,7 +50,7 @@ async def drain_github_push_resync_queue(
             break
 
         lock_connection = await engine.connect()
-        lock_value = f"github-push-resync:{job.repo_full_name}:{job.ref}"
+        lock_value = resync_lock_key(job.repo_full_name, job.ref)
         try:
             result = await lock_connection.execute(
                 text("SELECT pg_try_advisory_lock(hashtextextended(:lock_value, 0))"),

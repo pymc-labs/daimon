@@ -6,6 +6,11 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 from daimon.core.stores import github_push_resync as store
+from daimon.testing.factories import (
+    make_github_app_installation,
+    make_tenant,
+    make_tenant_github_repo,
+)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -213,3 +218,36 @@ async def test_new_delivery_resets_retry_streak(
 
     assert fresh is not None, "a new push should be due immediately despite old backoff"
     assert fresh.attempts == 1, "the latest delivery should start a new retry streak"
+
+
+async def test_get_latest_for_repo_refs_when_case_differs_then_matches_only_connected_repos(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The repo matches ignoring case, the ref exactly, and only for a workspace that connected it."""
+    async with db_session_factory.begin() as session:
+        ours = await make_tenant(session, workspace_id="guild-ours")
+        theirs = await make_tenant(session, workspace_id="guild-theirs")
+        await make_github_app_installation(
+            session,
+            installation_id=901,
+            account_login="owner",
+            repo_full_names=["Owner/Repo"],
+            github_repo_full_names=["Owner/Repo"],
+        )
+        await make_tenant_github_repo(
+            session, tenant_id=ours.id, repo_id=1, full_name="Owner/Repo", installation_id=901
+        )
+        await store.enqueue(
+            session, repo_full_name="Owner/Repo", ref="refs/heads/main", delivery_id="d-1"
+        )
+        main = {("owner/repo", "refs/heads/main")}
+        found = await store.get_latest_for_repo_refs(session, tenant_id=ours.id, repo_refs=main)
+        other_ref = await store.get_latest_for_repo_refs(
+            session, tenant_id=ours.id, repo_refs={("owner/repo", "refs/heads/dev")}
+        )
+        foreign = await store.get_latest_for_repo_refs(session, tenant_id=theirs.id, repo_refs=main)
+        empty = await store.get_latest_for_repo_refs(session, tenant_id=ours.id, repo_refs=set())
+    assert found is not None and found.state == "pending", "case-insensitive repo match"
+    assert other_ref is None, "the ref must match exactly"
+    assert foreign is None, "a workspace that never connected the repo sees no job"
+    assert empty is None, "no refs means no job"

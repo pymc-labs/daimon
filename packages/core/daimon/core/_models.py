@@ -3686,6 +3686,56 @@ class AgentPostedMessage(Base):
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class ReachTally(Base):
+    """What one turn's tool posts reached so far, and the plan its requester approved.
+
+    Several MCP instances serve one turn, so the tally lives here. Rows are kept
+    for a day at most (`daimon.core.stores.reach_tallies`), so the platform ids
+    they hold need no purge step.
+    """
+
+    __tablename__ = "reach_tallies"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    turn_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    threads: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    own_threads: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    places: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'")
+    )
+    people: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'")
+    )
+    approved_threads: Mapped[int | None] = mapped_column(Integer)
+    approved_places: Mapped[int | None] = mapped_column(Integer)
+    approved_people: Mapped[int | None] = mapped_column(Integer)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), index=True
+    )
+
+
+class TagOptOut(Base):
+    """A person who asked never to be tagged, by their account.
+
+    Keyed by account so the choice follows the person across every linked
+    platform identity; deleted with the account.
+    """
+
+    __tablename__ = "tag_opt_outs"
+
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class DirectMessagePolicy(Base):
     """Explicit tenant opt-in; absence leaves existing DM behavior unchanged."""
 

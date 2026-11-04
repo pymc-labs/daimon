@@ -31,6 +31,7 @@ from daimon.core.turn.posture import PolicyApproval
 _TRUSTED = frozenset({DAIMON_SERVER_NAME})
 _STANDING = frozenset(
     {
+        "approve_reach",
         "create_watch",
         "resume_watch",
         "rotate_watch_key",

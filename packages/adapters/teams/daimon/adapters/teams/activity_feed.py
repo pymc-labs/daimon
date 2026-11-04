@@ -202,7 +202,10 @@ class ActivityFeed:
         entra_tenant_id: str,
         spawn: Spawn,
         timeout_s: float = NOTICE_TIMEOUT_S,
+        opted_out: Callable[[str], Awaitable[bool]] | None = None,
     ) -> None:
+        # Whether a person asked never to be tagged: they get no notice.
+        self._opted_out = opted_out
         self._graph = graph
         self._homes = homes
         self._entra_tenant_id = entra_tenant_id
@@ -253,6 +256,9 @@ class ActivityFeed:
     ) -> None:
         try:
             async with asyncio.timeout(self._timeout_s):
+                if self._opted_out is not None and await self._opted_out(recipient_id):
+                    log.info("teams.activity_notice.skipped", reason="never tag")
+                    return
                 home = await self._homes.locate(channel_id, group_id=group_id)
                 if home is None:
                     log.info("teams.activity_notice.failed", reason="team not found")

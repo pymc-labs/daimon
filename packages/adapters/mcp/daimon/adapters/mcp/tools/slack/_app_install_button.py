@@ -22,6 +22,7 @@ from daimon.adapters.mcp.tools.slack._client import (
 )
 from daimon.adapters.mcp.tools.slack._visibility import check_channel_access
 from daimon.core.github_app_auth import build_app_install_url
+from daimon.core.outbound.opt_out import untag_opted_out
 from fastmcp.exceptions import ToolError
 from slack_sdk.errors import SlackApiError
 
@@ -56,6 +57,10 @@ async def _post_slack_app_install_button_impl(  # pyright: ignore[reportUnusedFu
             "Install the GitHub App to choose repositories it may read. "
             "Installing alone does not verify this workspace's access or bind a working repo. "
             "A working GitHub token remains an alternative; existing bound tokens stay in use."
+        )
+        # Someone who asked never to be tagged is named, not pinged.
+        text = await untag_opted_out(
+            runtime.session_factory, tenant_id=auth.tenant_id, platform="slack", text=text
         )
         sent = await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
             channel=channel_id,

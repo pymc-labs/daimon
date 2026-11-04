@@ -23,6 +23,10 @@ The `daimon` agent also references Anthropic's built-in `docx`, `pptx` and
 They have no directory here and stay off the agent itself: a Teams turn on
 the Anthropic backend adds them to its session (see `docs/defaults.md`).
 
+`skills/team-etiquette` is attached to the `daimon` agent on every platform. It
+covers posting for other people: cheaper shapes, the reach budget, routines,
+shared media and the never-tag opt-out.
+
 The default environment installs `gh` for repository work in GitHub App sessions.
 
 `microsoft-365` guides the per-person Microsoft 365 tools

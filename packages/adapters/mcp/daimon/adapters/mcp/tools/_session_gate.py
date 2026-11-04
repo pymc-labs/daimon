@@ -8,6 +8,7 @@ there was approved.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Literal
 
 import anthropic
@@ -24,13 +25,14 @@ from daimon.core.mcp_personal_servers import visible_tools
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
 from daimon.core.session_seal import session_facts
-from daimon.core.session_snapshot import hash_tools, session_tools
+from daimon.core.session_snapshot import MaTool, hash_tools, session_tools
 from daimon.core.stores.domain import ThreadSessionRow, TurnOriginRow
 from daimon.core.stores.lead_intake import confirmation_tools
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.tool_safety import (
     CARDED_TOOLS,
     DAIMON_SERVER_NAME,
+    REACH_APPROVAL_TOOLS,
     WATCH_CONFIRMED_TOOLS,
     has_confirmation_gate,
     microsoft_send_tools,
@@ -144,6 +146,16 @@ async def session_card_gap(
         return "session_unreadable"
 
 
+def _without_configs(tools: Sequence[MaTool], names: frozenset[str]) -> list[MaTool]:
+    """`tools` with Daimon's per-tool configs for `names` left out (an older template)."""
+    return [
+        tool.model_copy(update={"configs": [c for c in tool.configs or [] if c.name not in names]})
+        if tool.type == "mcp_toolset" and tool.mcp_server_name == DAIMON_SERVER_NAME
+        else tool
+        for tool in tools
+    ]
+
+
 async def _recorded_as_gated(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -221,15 +233,19 @@ async def _recorded_as_gated(
     )
     before_pin_clear = confirmed - {"request_channel_pin_clear"}
     lead_tools = await confirmation_tools(runtime.session_factory, auth.tenant_id)
-    # A bind from before the carded tools existed holds none of them gated. Such
-    # a template proves only a call to some other tool; no old hash can ever
-    # authorize a carded one.
+    # A bind made before the carded tools or the reach card holds neither gated, and
+    # the two vary independently. Such a template proves only a call to some other
+    # tool; no old hash can authorize a carded tool or a reach approval.
     carded = frozenset(CARDED_TOOLS)
     pre_carded_ok = tool_name not in carded
-    for confirmed_tools, pre_watch, pre_carded in dict.fromkeys(
+    for confirmed_tools, pre_watch, pre_reach, pre_carded in dict.fromkeys(
         (
-            (candidate - carded if pre_carded else candidate) | lead_tools | watch_tools,
+            (candidate - carded if pre_carded else candidate)
+            | lead_tools
+            | watch_tools
+            | reach_tools,
             not watch_tools,
+            not reach_tools,
             pre_carded,
         )
         for candidate in (confirmed, legacy, before_config, before_config_legacy, before_pin_clear)
@@ -240,8 +256,10 @@ async def _recorded_as_gated(
             WATCH_CONFIRMED_TOOLS - {"update_watch"},
             frozenset[str](),
         )
+        for reach_tools in (REACH_APPROVAL_TOOLS, frozenset[str]())
         if (watch_tools or tool_name not in WATCH_CONFIRMED_TOOLS)
         and (tool_name in watch_tools or tool_name != "update_watch")
+        and (reach_tools or tool_name not in REACH_APPROVAL_TOOLS)
     ):
         for asks_before_publishing in (False, True):
             for daimon_rule_tools in dict.fromkeys((frozenset[str](), rule_tools)):
@@ -259,27 +277,16 @@ async def _recorded_as_gated(
                         else ()
                     ),
                 )
-                if pre_watch or pre_carded:
-                    # Policy-on sessions add these gates implicitly too. Rebuild
-                    # the exact older template for other actions only; no old
-                    # hash can authorize watch enrollment, rotation or a carded tool.
-                    stripped = (WATCH_CONFIRMED_TOOLS if pre_watch else frozenset[str]()) | (
-                        carded if pre_carded else frozenset[str]()
-                    )
-                    tools = [
-                        tool.model_copy(
-                            update={
-                                "configs": [
-                                    config
-                                    for config in tool.configs or []
-                                    if config.name not in stripped
-                                ]
-                            }
-                        )
-                        if tool.type == "mcp_toolset" and tool.mcp_server_name == DAIMON_SERVER_NAME
-                        else tool
-                        for tool in tools
-                    ]
+                stripped = (
+                    (WATCH_CONFIRMED_TOOLS if pre_watch else frozenset[str]())
+                    | (REACH_APPROVAL_TOOLS if pre_reach else frozenset[str]())
+                    | (carded if pre_carded else frozenset[str]())
+                )
+                if stripped:
+                    # Policy-on sessions add these gates implicitly too. Rebuild the exact
+                    # older template for other actions only; no old hash can authorize
+                    # watch enrollment, rotation, a carded tool or a reach approval.
+                    tools = _without_configs(tools, stripped)
                 if hash_tools(tools) == recorded.tools_sha256 and has_confirmation_gate(
                     [tool.model_dump(mode="json") for tool in tools], tool_name=tool_name
                 ):

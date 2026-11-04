@@ -32,6 +32,7 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, Surface, authorize
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.message_split import split_fenced
+from daimon.core.outbound.opt_out import untag_opted_out
 from daimon.core.routine_delivery import (
     DeliveryOutcome,
     DeliveryTarget,
@@ -41,6 +42,7 @@ from daimon.core.routine_delivery import (
     render_fallback_dm,
     render_fallback_post,
     resolve_routine_identity,
+    routine_requester_name,
     slack_creator_may_post,
     tenant_dm_still_open,
 )
@@ -52,6 +54,7 @@ from daimon.core.stores.routines import get_routine
 from daimon.core.stores.tenants import get_tenant
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = ["make_slack_routine_poster"]
 
@@ -73,6 +76,7 @@ async def _dm_fallback(
     policy: DirectMessagePolicy,
     output_client: AsyncAnthropic,
     may_post: Callable[[], Awaitable[bool]],
+    sessionmaker: async_sessionmaker[AsyncSession] | None = None,
 ) -> DeliveryOutcome:
     creator = row.created_by_user_id
     if creator is None or not policy.allows(creator):
@@ -91,7 +95,14 @@ async def _dm_fallback(
             return DeliveryOutcome(status="skipped", note=reason)
         opened = await client.conversations_open(users=creator)  # pyright: ignore[reportUnknownMemberType]
         channel = cast("dict[str, str]", opened["channel"])["id"]
-        text = escape_mrkdwn_preserving_mentions(render_fallback_dm(row, reason, platform="slack"))
+        text = escape_mrkdwn_preserving_mentions(
+            await untag_opted_out(
+                sessionmaker,
+                tenant_id=row.tenant_id,
+                platform="slack",
+                text=render_fallback_dm(row, reason, platform="slack"),
+            )
+        )
         for chunk in split_fenced(text, 11800, word_boundary=True):
             if not await may_post():
                 return DeliveryOutcome(status="skipped", note="Fallback DM access changed.")
@@ -259,6 +270,7 @@ def make_slack_routine_poster(
                 policy=dm_policy,
                 output_client=runtime.anthropic,
                 may_post=fallback_guard,
+                sessionmaker=runtime.sessionmaker,
             )
 
         target = delivery_target(row, platform="slack")
@@ -295,7 +307,20 @@ def make_slack_routine_poster(
             # Slack drops `username` and `icon_url` without an error when the
             # install lacks chat:write.customize, so the line keeps naming the
             # agent here; only Discord, whose label always carries it, drops it.
-            text = escape_mrkdwn_preserving_mentions(render_fallback_post(row, platform="slack"))
+            text = escape_mrkdwn_preserving_mentions(
+                await untag_opted_out(
+                    runtime.sessionmaker,
+                    tenant_id=row.tenant_id,
+                    platform="slack",
+                    text=render_fallback_post(
+                        row,
+                        platform="slack",
+                        requester_name=await routine_requester_name(
+                            runtime.sessionmaker, row, "slack"
+                        ),
+                    ),
+                )
+            )
             for chunk in split_fenced(text, 11800, word_boundary=True):
                 await post_as_agent(client, identity, text=chunk, **place)
         except SlackApiError as err:

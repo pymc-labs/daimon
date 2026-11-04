@@ -450,6 +450,11 @@ def _card_failed_message(call: ToolCall) -> str:
 
 
 def _answer_message(call: ToolCall, answer: str) -> str:
+    if call.tool_name == "approve_reach":
+        from daimon.core.outbound.reach import DECLINED
+
+        log.info("reach.declined", answer=answer)
+        return DECLINED
     if answer == "expired":
         return (
             f"Nobody approved {call.key} in time, so it did not run. Do not retry it. "
@@ -680,6 +685,8 @@ def interactive_decider(
                 and rule_card_for is not None
             ):
                 prompt = prompt.model_copy(update={"tool_rule": rule_card_for(call)})
+            if call.tool_name == "approve_reach":
+                log.info("reach.approval_requested", title=prompt.title)
             response = await confirm(prompt)
         except Exception as err:
             # Named boundary: prompt validation and the adapter's card must

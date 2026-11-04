@@ -408,3 +408,98 @@ async def test_a_session_bound_before_the_carded_tools_proves_other_cards_never_
         )
         is proven
     ), f"{tool_name} should{'' if proven else ' not'} be proven by a pre-carded bind"
+
+
+@pytest.mark.parametrize("policy_enabled", [False, True])
+@pytest.mark.parametrize("with_reach", [False, True], ids=["pre-reach", "current"])
+@pytest.mark.parametrize("requested", ["request_agent_backend_switch", "approve_reach"])
+async def test_recorded_cards_with_or_before_the_reach_gate(
+    monkeypatch, policy_enabled, with_reach, requested
+):
+    """Today's binds carry the reach gate; older ones prove every card but that one."""
+    from daimon.core.tool_safety import REACH_APPROVAL_TOOLS, WATCH_CONFIRMED_TOOLS
+
+    runtime = _runtime()
+    runtime.settings.tool_safety = ToolSafetyPolicy(enabled=policy_enabled)
+    monkeypatch.setattr(_session_gate, "backend_selection_enabled", lambda _: True)
+    monkeypatch.setattr(_session_gate, "daimon_rule_tools_for", AsyncMock(return_value=frozenset()))
+    names = {"request_agent_backend_switch", *WATCH_CONFIRMED_TOOLS}
+    if policy_enabled:
+        names.add("add_skill")
+    if with_reach:
+        names |= REACH_APPROVAL_TOOLS
+    ordered = (
+        ["add_skill", *sorted(names - {"add_skill", "request_agent_backend_switch"})]
+        + ["request_agent_backend_switch"]
+        if policy_enabled
+        else sorted(names)
+    )
+    recorded_agent = ma_agent(
+        tools=[
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": "daimon-mcp",
+                "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+                "configs": [
+                    {"name": name, "enabled": True, "permission_policy": {"type": "always_ask"}}
+                    for name in ordered
+                ],
+            }
+        ],
+    )
+    live = SimpleNamespace(
+        effective_config=SimpleNamespace(tools_sha256=hash_tools(recorded_agent.tools))
+    )
+
+    proven = await _session_gate._recorded_as_gated(
+        runtime,
+        AUTH,
+        live,
+        tool_name=requested,
+        ma_agent_id=AGENT.id,
+        reported_tools_sha256=hash_tools(AGENT.tools),
+    )
+
+    assert proven is (with_reach or requested != "approve_reach"), (
+        "a bind proves the cards it gated, and only a current one proves a reach approval"
+    )
+
+
+@pytest.mark.parametrize("requested", ["add_skill", "remove_my_data", "approve_reach"])
+async def test_a_session_bound_before_both_the_carded_and_reach_gates_proves_only_other_cards(
+    monkeypatch: pytest.MonkeyPatch, requested: str
+) -> None:
+    """The two older formats are independent: a bind lacking both proves neither new kind."""
+    from daimon.core.tool_safety import CARDED_TOOLS, REACH_APPROVAL_TOOLS
+
+    monkeypatch.setattr(_session_gate, "daimon_rule_tools_for", AsyncMock(return_value=frozenset()))
+    newer = frozenset(CARDED_TOOLS) | REACH_APPROVAL_TOOLS
+    recorded = session_tools(
+        AGENT,
+        frozenset[str](),
+        tool_safety=POLICY,
+        public_url="https://mcp.example/mcp",
+        asks_before_publishing=True,
+    )
+    recorded = [
+        tool.model_copy(update={"configs": [c for c in tool.configs or [] if c.name not in newer]})
+        if tool.type == "mcp_toolset" and tool.mcp_server_name == "daimon-mcp"
+        else tool
+        for tool in recorded
+    ]
+    live = cast(
+        Any, SimpleNamespace(effective_config=SimpleNamespace(tools_sha256=hash_tools(recorded)))
+    )
+
+    proven = await _session_gate._recorded_as_gated(  # pyright: ignore[reportPrivateUsage]
+        _runtime(),
+        AUTH,
+        live,
+        tool_name=requested,
+        ma_agent_id="agent",
+        reported_tools_sha256=hash_tools(AGENT.tools),
+    )
+
+    assert proven is (requested == "add_skill"), (
+        f"{requested} should{'' if requested == 'add_skill' else ' not'} be proven by an older bind"
+    )

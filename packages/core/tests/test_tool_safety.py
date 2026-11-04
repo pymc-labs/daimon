@@ -278,6 +278,7 @@ def test_session_tools_gate_third_party_toolsets_only() -> None:
             {"name": name, "enabled": True, "permission_policy": {"type": "always_ask"}}
             for name in (
                 "add_skill",
+                "approve_reach",
                 "change_workspace_settings",
                 "create_watch",
                 "delete_allowance",
@@ -429,6 +430,7 @@ def test_a_disabled_daimon_toolset_keeps_add_skill_disabled() -> None:
         for name in sorted(
             (
                 "add_skill",
+                "approve_reach",
                 "create_watch",
                 "fly_extend_session",
                 "fly_launch_session",
@@ -763,6 +765,7 @@ def test_a_daimon_rule_makes_call_tool_and_the_named_tool_ask() -> None:
     asked = {c["name"] for c in daimon["configs"] if c["permission_policy"]["type"] == "always_ask"}
     assert asked == {
         "add_skill",
+        "approve_reach",
         "call_tool",
         "hubspot_update_objects",
         "create_watch",
@@ -792,6 +795,7 @@ def test_a_rule_naming_a_confirmed_tool_does_not_duplicate_its_config() -> None:
     assert sorted(names) == sorted(
         [
             "add_skill",
+            "approve_reach",
             "call_tool",
             "create_watch",
             "fly_extend_session",
@@ -849,6 +853,7 @@ def test_the_daimon_wildcard_gates_the_proxy_but_never_gets_a_config_of_its_own(
     assert sorted(c["name"] for c in only[1]["configs"]) == sorted(
         [
             "add_skill",
+            "approve_reach",
             "call_tool",
             "create_watch",
             "fly_extend_session",
@@ -870,6 +875,7 @@ def test_the_daimon_wildcard_gates_the_proxy_but_never_gets_a_config_of_its_own(
     assert sorted(c["name"] for c in both[1]["configs"]) == sorted(
         [
             "add_skill",
+            "approve_reach",
             "call_tool",
             "create_watch",
             "fly_extend_session",

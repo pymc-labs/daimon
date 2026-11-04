@@ -10,6 +10,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Chat answers and setup panels link to the agent, channel or routine on the web.** Each opens in the right workspace (sign-in or a workspace picker first when needed). Agent setup details, routines, billing and channel settings on Discord, Slack and Teams carry an "Open in web" button. The agent also knows the workspace's main pages to link. Nothing changes with no web app set.
 - **Everything the web admin pages do also works from Discord, Slack and Teams chat.** Admins invite people and send visitor links (sent by direct message), change roles, set agent access and workspace settings, manage spend allowances, read the audit log, spend and feedback, restore agent versions and set owners, edit skill files, and see their own credits; results link to the page. People can also run a routine on demand, clear a thread's own settings, and remove their own data (memory, sign-ins, coding keys) with one tool. Removing or reconfiguring runs only on a Confirm card in chat, and routines and other unattended runs do not list those tools. Long lists show 25 rows with a total, and people lists page on. A test keeps the web app and chat in step.
 
+- **The agent editor in the web app has a GitHub panel.** It lists the agent's repos with
+  their access, status and which one is the working repo, and where each attached skill
+  comes from: a repo (with branch and path), the library, elsewhere or Anthropic. It shows
+  whether the latest push sync failed, and the release an outside pipeline stamped in the
+  agent's `source_release`, `source_release_at` and `source_release_url` metadata. The
+  agent's owner or a server admin can connect GitHub, pick or clear the working repo, take a repo
+  off the agent and resync its repo skills now. Each change is audited like the chat tools.
+
+- **The agent posts for other people more carefully, and anyone can ask never to be tagged.**
+  Mentions of everyone, here, roles and groups no longer go out live on any platform, and
+  posts made for someone say who asked for them. One request that opens several threads,
+  posts in several places or tags many people now shows the requester an approval card
+  first, with limits an operator can change (`DAIMON_OUTBOUND__*`). `send_message` takes a
+  batch, so a request can go out in one call. A person can ask the agent to never tag them
+  with the new `set_never_tag` tool: their mentions turn into plain names in replies,
+  routines, tool posts, direct messages, cards and completion pings, they count toward no
+  limit, and the setting follows them through privacy export and erasure. The seeded agent
+  gains a short prompt block and a `team-etiquette` skill covering threads, routines and
+  shared media. Slack posts resolve names through a cache, so mentions cost fewer calls.
+
 - **The web app signs in with Slack and Microsoft again, besides Discord.** Each shows on the sign-in page once its login app is set (`DAIMON_HUB__SLACK_*`, `DAIMON_MICROSOFT_ACCOUNTS__*`); register `<web public url>/auth/slack/callback` and `/auth/microsoft/callback` on it. A signed-in member connects the other two from the account menu (see below).
 
 - **The web app remembers connected accounts.** A member signs in with one chat account, connects others from the account menu, and the workspace switcher lists the workspaces of all of them. A later sign-in with any connected account, on any device, shows them all while each was proven within 30 days; an older one returns when it signs in again. Profile lists the connected accounts and disconnects one (not the one signed in with). Guests cannot connect.

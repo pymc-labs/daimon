@@ -24,6 +24,7 @@ from typing import Final
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._outbound import OutgoingPost, prepare_posts
 from daimon.adapters.mcp.tools.discord import (
     PostedWizard,
 )
@@ -33,6 +34,8 @@ from daimon.adapters.mcp.tools.discord import (
 from daimon.adapters.mcp.tools.teams._send import (
     _post_teams_wizard_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.core.outbound.mentions import RenderedPost
+from daimon.core.outbound.reach import ReachPlan
 from daimon.core.platform_words import scrub_other_platforms
 from daimon.core.stores.wizard_session import create_wizard_session
 from daimon.core.wizard.expiry import derive_expires_at
@@ -69,6 +72,15 @@ def _scrubbed_step(step: Step, platform: str | None) -> Step:
     )
 
 
+def _validated(prompt: str, steps: list[Step]) -> WizardSpec:
+    try:
+        return WizardSpec(prompt=prompt, steps=steps)
+    except ValueError as err:
+        raise ToolError(
+            f"Invalid wizard form: {err} Split it into a shorter follow-up form."
+        ) from err
+
+
 async def _post_wizard_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -76,6 +88,7 @@ async def _post_wizard_impl(
     prompt: str,
     steps: list[Step],
     channel_id: str,
+    plan: ReachPlan | None = None,
 ) -> str:
     if auth.platform == "slack":
         raise ToolError("post_wizard isn't available here")
@@ -87,12 +100,25 @@ async def _post_wizard_impl(
     stripped_steps = [
         _scrubbed_step(step.model_copy(update={"image_url": None}), auth.platform) for step in steps
     ]
-    try:
-        spec = WizardSpec(prompt=scrub_other_platforms(prompt, auth.platform), steps=stripped_steps)
-    except ValueError as err:
-        raise ToolError(
-            f"Invalid wizard form: {err} Split it into a shorter follow-up form."
-        ) from err
+    prompt = scrub_other_platforms(prompt, auth.platform)
+    spec = _validated(prompt, stripped_steps)
+    # A form is a post like any other: it says who asked and counts toward reach.
+    # The attribution lengthens the head text, so the form is validated with it
+    # before the call is counted: a refused form counts nothing.
+    validated: list[WizardSpec] = []
+
+    def validate(rendered: list[RenderedPost]) -> None:
+        validated.append(_validated(rendered[0].text, stripped_steps))
+
+    await prepare_posts(
+        runtime,
+        auth,
+        [OutgoingPost(text=prompt, place=channel_id)],
+        plan=plan,
+        validate=validate,
+        pings=False,  # the form goes out with mentions suppressed, so it reaches no one by tag
+    )
+    [spec] = validated
 
     short_id = new_short_id()
 
@@ -150,8 +176,13 @@ def register_wizard_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         prompt: str,
         steps: list[Step],
         channel_id: str,
+        plan: ReachPlan | None = None,
     ) -> str:
         """Post a multi-step form in the channel instead of asking in prose.
+
+        ``plan`` counts everything this turn posts outside this conversation: threads,
+        places and people tagged; posts here need none. Past the limit the call is
+        refused until approve_reach returns approved.
 
         Each entry in ``steps`` carries ``question`` (the text shown to the
         user), ``kind`` (``choice``, ``multi`` or ``text``), and ``options``
@@ -173,4 +204,5 @@ def register_wizard_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             prompt=prompt,
             steps=steps,
             channel_id=channel_id,
+            plan=plan,
         )

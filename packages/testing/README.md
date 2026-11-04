@@ -592,7 +592,7 @@ financial authorization, a separate pinned lead GO, clean merged source,
 installed config/ledger receipts, reviewed recipe and authorized disposable
 bindings. Missing admission facts produce PENDING before credentials or a hold.
 A7 runs one legacy and one mux turn in two fresh sessions sequentially. F2
-uses the public default-capability flow with eleven authored skills, builtins
+uses the public default-capability flow with twelve authored skills, builtins
 and an explicitly bound provider-reachable MCP endpoint; loopback fixtures
 cannot supply live MCP evidence. Each session has one attempt, SDK retries zero,
 and an exclusive envelope marker prevents a second run at a different output.

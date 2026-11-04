@@ -202,7 +202,7 @@ def _driver(
                 ("session", "sess_f1"),
                 ("environment", ENVIRONMENT.id),
                 ("vault", VAULT_ID),
-                *(("skill", f"skill_f1_{i}") for i in range(11)),
+                *(("skill", f"skill_f1_{i}") for i in range(12)),
             }
         ),
     )
