@@ -176,3 +176,45 @@ async def test_the_update_check_asks_only_as_an_adder_who_could_sign_in(
     await people_store.update_person(db_session, person_id=person.id, status="suspended")
     await db_session.commit()
     assert await adder() is None, "they are suspended"
+
+
+async def test_a_held_update_is_shown_and_applied_by_the_owner(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """An update the backend consent held back waits for the owner's own move."""
+    agents, owner, _ = await _setup(db_session)
+    agents.router.add("POST", r"/v1/skills$", _created)
+    key = generate_signing_key()
+    settings = _settings(key).model_copy(
+        update={"server_skills": ServerSkillsSettings(enabled=True)}
+    )
+    node = _Node(SkillsServer(skills={"plots": {"SKILL.md": skill_md("plots")}}))
+    async with _client(
+        agents, node, db_session_factory, owner, key=key, settings=settings
+    ) as client:
+        await client.post(
+            "/api/agents/server-skills", json={"uri": node.skills.uri("plots")}, headers=_OWN
+        )
+        nothing = await client.post("/api/agents/ag_w/skill-follows/sk_new/apply", headers=_OWN)
+        async with db_session_factory.begin() as session:
+            mirror = await server_skills_store.mirror_of_skill(
+                session, tenant_id=owner.tenant_id, skill_id="sk_new"
+            )
+            assert mirror is not None
+            await server_skills_store.hold_update(
+                session,
+                tenant_id=owner.tenant_id,
+                agent_id="ag_w",
+                skill_id="sk_new",
+                digest=mirror.digest,
+                reason="drops differ",
+                now=_NOW,
+            )
+        held = await client.get("/api/agents/ag_w/skill-follows")
+        applied = await client.post("/api/agents/ag_w/skill-follows/sk_new/apply", headers=_OWN)
+        after = await client.get("/api/agents/ag_w/skill-follows")
+
+    assert nothing.status_code == 409, "nothing waits before a hold"
+    assert held.json()["sk_new"]["status"] == "needs_reconfirm", held.text
+    assert applied.status_code == 204, applied.text
+    assert after.json()["sk_new"]["status"] == "current", "the hold is released"

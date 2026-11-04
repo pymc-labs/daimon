@@ -28,12 +28,23 @@ from daimon.adapters.web.nodes.kinds import build_nodes
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.agent_admin import require_admin
 from daimon.core.agent_editing import AgentEditDeps, AgentEditError
+from daimon.core.authz import Subject
+from daimon.core.channel_backend import load_backend_agent, make_backend_service
+from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.mcp_rpc import McpStatusError
 from daimon.core.mcp_skills.install import ServerSkill, fetch_server_skill
 from daimon.core.mcp_skills.manifest import SkillEntry, SkillRejected, parse_entry
 from daimon.core.mcp_skills.protocol import Endpoint, fetch_skill_listing
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import retrieve_agent
 from daimon.core.server_skills.anthropic import ManagedAgentsTarget
-from daimon.core.server_skills.follows import SkillFollow, agent_follows, set_agent_follow
+from daimon.core.server_skills.consent import ConsentKeeper, Renewer
+from daimon.core.server_skills.follows import (
+    SkillFollow,
+    agent_follows,
+    apply_held_update,
+    set_agent_follow,
+)
 from daimon.core.server_skills.mirror import add_server_skill
 from daimon.core.server_skills.sync import (
     CheckResult,
@@ -52,8 +63,9 @@ from daimon.core.skill_library_files import (
 )
 from daimon.core.skills.ingest import SkillIngestError
 from daimon.core.stores import server_skills as store
-from daimon.core.stores.domain import ServerSkillRow, WebPersonRow
+from daimon.core.stores.domain import BackendAgent, ServerSkillRow, WebPersonRow
 from daimon.core.stores.web_people import get_person
+from daimon.core.turn.admission import capture_agent_source
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, JsonValue
 from sqlalchemy.exc import SQLAlchemyError
@@ -165,6 +177,43 @@ def _lock(deps: AgentEditDeps, mirror: ServerSkillRow) -> AbstractAsyncContextMa
     return skill_lock(deps, tenant_id=mirror.tenant_id, skill_id=mirror.skill_id)
 
 
+def consent_keeper(runtime: WebRuntime, edit: AgentEditDeps) -> ConsentKeeper:
+    """Renewals vouched for by each mirror's adder; consented agents are held without one."""
+    turns = runtime.turns
+
+    async def renewer(mirror: ServerSkillRow) -> Renewer | None:
+        # Without turns there is no source capture, so nothing can be renewed.
+        person = None if turns is None else await active_adder(runtime.sessionmaker, mirror)
+        if turns is None or person is None:
+            return None
+        deps = turns.deps
+        account = person.account_id
+        # Never an admin: the sync reads each source with the adder's plainest rights.
+        subject = Subject(platform_user_id=str(account))
+
+        async def capture(source: BackendAgent) -> BackendAgent:
+            return await capture_agent_source(deps, source, account_id=account, subject=subject)
+
+        service = make_backend_service(
+            runtime.sessionmaker, runtime.settings.turn, capture_source=capture
+        )
+        return Renewer(backends=service, account_id=account)
+
+    async def load(mirror: ServerSkillRow, agent_id: str) -> BackendAgent:
+        scope = resource_scope(tenant_id=str(mirror.tenant_id))
+        actual = await retrieve_agent(edit.client, agent_id, scope=scope)
+        name = (actual.metadata or {}).get(MA_METADATA_KEY_NAME, "")
+        return await load_backend_agent(
+            edit.client,
+            runtime.sessionmaker,
+            tenant_id=mirror.tenant_id,
+            agent_name=name,
+            actual_agent=actual,
+        )
+
+    return ConsentKeeper(sessionmaker=runtime.sessionmaker, renewer=renewer, load=load)
+
+
 def sync_deps(runtime: WebRuntime, node: DataServerNode) -> SyncDeps:
     edit = change_deps(runtime).edit
     upstream = NodeUpstream(runtime, node)
@@ -172,7 +221,7 @@ def sync_deps(runtime: WebRuntime, node: DataServerNode) -> SyncDeps:
         server=node.server.name,
         sessionmaker=runtime.sessionmaker,
         upstream=lambda _mirror: upstream,
-        targets=(ManagedAgentsTarget(edit.client),),
+        targets=(ManagedAgentsTarget(edit.client, consents=consent_keeper(runtime, edit)),),
         lock=lambda mirror: _lock(edit, mirror),
         now=runtime.now,
     )
@@ -397,6 +446,19 @@ def server_skills_router(runtime: WebRuntime) -> APIRouter:
                 follow=body.follow,
                 now=runtime.now(),
                 audited=recorded(runtime, caller, "Changed skill updates"),
+            )
+        except AgentEditError as exc:
+            raise edit_refusal(exc) from exc
+
+    @router.post("/{agent_id}/skill-follows/{skill_id}/apply", status_code=204)
+    async def apply_update(caller: Editor, agent_id: str, skill_id: str) -> None:  # pyright: ignore[reportUnusedFunction]
+        try:
+            await apply_held_update(
+                change_deps(runtime).edit,
+                actor=actor_of(caller),
+                agent_id=agent_id,
+                skill_id=skill_id,
+                audited=recorded(runtime, caller, "Applied skill update"),
             )
         except AgentEditError as exc:
             raise edit_refusal(exc) from exc

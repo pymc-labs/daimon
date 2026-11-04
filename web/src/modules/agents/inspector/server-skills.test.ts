@@ -28,6 +28,7 @@ describe("skillBadge", () => {
   it("puts trouble first", () => {
     expect(skillBadge({ follow: true, status: "unavailable", version: "3" }, "3").label).toBe("Unavailable")
     expect(skillBadge({ follow: true, status: "pending", version: "3" }, "3").label).toBe("Needs approval")
+    expect(skillBadge({ follow: true, status: "needs_reconfirm", version: "4" }, "3")).toEqual({ label: "Needs re-confirm", tone: "warn", apply: true })
   })
 
   it("names following, pinned and an update", () => {

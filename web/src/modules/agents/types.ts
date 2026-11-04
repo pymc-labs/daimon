@@ -215,7 +215,8 @@ export type MirrorCheck = { result: "unchanged" | "updated" | "pending" | "unava
 export type ServerSkillOption = { uri: string; name: string; description: string; skill_id: string | null; taken: boolean }
 export type ServerSkillMenu = { label: string; skills: ServerSkillOption[] }
 /** An agent's choice for one mirrored skill, and the newest version it can be pinned to. */
-export type SkillFollow = { follow: boolean; status: MirrorStatus; version: string | null }
+/** `needs_reconfirm`: an update waits because it would change what the agent's backend drops. */
+export type SkillFollow = { follow: boolean; status: MirrorStatus | "needs_reconfirm"; version: string | null }
 export type SkillDetail = LibrarySkill & { source_url: string | null }
 export type SkillVersion = { version: string; created_at: string; author: string | null }
 export type SyncedSkill = { name: string; action: "created" | "updated" | "skipped" | "failed"; detail: string | null }

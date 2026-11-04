@@ -9,7 +9,7 @@ import { Switch } from "@/components/ui/switch"
 import { cn } from "@/lib/utils"
 import { useConfirm } from "@/lib/confirm"
 import { pressProps } from "@/lib/filters"
-import { addServerSkill, saveSkillFiles, useServerSkills, useSetFollow, useSkillFiles, useSkillFollows } from "../api"
+import { addServerSkill, saveSkillFiles, useApplyUpdate, useServerSkills, useSetFollow, useSkillFiles, useSkillFollows } from "../api"
 import { Dot, Pill } from "../bits"
 import { SkillFilesEditor } from "./SkillFilesEditor"
 import type { ServerSkillOption, Skill, SkillFollow } from "../types"
@@ -150,6 +150,7 @@ function SkillBody({ agent, config, ro, update, select, skill }: Props & { skill
   const confirm = useConfirm()
   const follow = useSkillFollows(agent.id).data?.[skill.skill_id]
   const setFollow = useSetFollow(agent.id)
+  const apply = useApplyUpdate(agent.id)
   const custom = skill.type === "custom"
   const editable = custom && !ro && !follow
   const files = useSkillFiles(agent.id, skill, editable)
@@ -200,6 +201,12 @@ function SkillBody({ agent, config, ro, update, select, skill }: Props & { skill
               <Button size="xs" variant="outline" className="ml-auto"
                 onClick={() => update((c) => { const s = c.skills.find((x) => x.skill_id === skill.skill_id); if (s) s.version = badge.update! }, 0)}>
                 Update to v{badge.update}
+              </Button>
+            )}
+            {badge?.apply && !ro && (
+              <Button size="xs" variant="outline" className="ml-auto" disabled={apply.isPending}
+                onClick={() => apply.mutate(skill.skill_id)}>
+                Update to v{follow.version}
               </Button>
             )}
           </div>

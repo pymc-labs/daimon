@@ -25,12 +25,13 @@ export const titleOf = (name: string) => {
   return words.slice(0, 1).toUpperCase() + words.slice(1)
 }
 
-export type Badge = { label: string; tone: "muted" | "warn" | "bad"; update?: string }
+export type Badge = { label: string; tone: "muted" | "warn" | "bad"; update?: string; apply?: boolean }
 
-/** How a mirrored skill stands on this agent; `update` is the version a pinned agent can move to. */
+/** How a mirrored skill stands on this agent; `update` is the version a pinned agent can move to, `apply` a held one. */
 export function skillBadge(follow: SkillFollow, pinned: string): Badge {
   if (follow.status === "unavailable") return { label: "Unavailable", tone: "bad" }
   if (follow.status === "pending") return { label: "Needs approval", tone: "warn" }
+  if (follow.status === "needs_reconfirm") return { label: "Needs re-confirm", tone: "warn", apply: true }
   if (follow.follow) return { label: "Following", tone: "muted" }
   if (follow.version && follow.version !== pinned) return { label: "Update available", tone: "warn", update: follow.version }
   return { label: `Pinned v${pinned}`, tone: "muted" }

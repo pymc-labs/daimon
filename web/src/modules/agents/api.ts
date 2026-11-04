@@ -63,6 +63,19 @@ export function useSetFollow(agentId: string) {
   })
 }
 
+/** Move the agent to the update its backend consent held back; the owner then re-confirms. */
+export function useApplyUpdate(agentId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (skillId: string) => api.post(`/api/agents/${agentId}/skill-follows/${skillId}/apply`),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["agents", agentId], exact: true })
+      void qc.invalidateQueries({ queryKey: ["agents", agentId, "skill-follows"] })
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+}
+
 /** Store or remove the token an agent's MCP server is called with. */
 export function useServerToken(agentId: string, key: string) {
   const qc = useQueryClient()

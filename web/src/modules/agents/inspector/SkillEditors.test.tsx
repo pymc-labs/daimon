@@ -65,6 +65,15 @@ describe("SkillEditor", () => {
     expect(api.put).toHaveBeenCalledWith("/api/agents/ag_1/skill-follows", { skill_id: "sk_plots", follow: true })
   })
 
+  it("offers a held update to the owner, who then re-confirms the backend", async () => {
+    follows = { sk_plots: { follow: true, status: "needs_reconfirm", version: "2" } }
+    vi.mocked(api.post).mockResolvedValueOnce(undefined as never)
+    show((p) => <SkillEditor {...p} skill={plots} />)
+    expect(await screen.findByText("Needs re-confirm")).toBeInTheDocument()
+    await userEvent.click(screen.getByRole("button", { name: "Update to v2" }))
+    expect(api.post).toHaveBeenCalledWith("/api/agents/ag_1/skill-follows/sk_plots/apply")
+  })
+
   it("shows an unavailable skill and keeps it read-only", async () => {
     follows = { sk_plots: { follow: true, status: "unavailable", version: "1" } }
     show((p) => <SkillEditor {...p} skill={plots} />)
