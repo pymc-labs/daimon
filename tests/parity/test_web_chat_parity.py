@@ -3,7 +3,8 @@
 Walks the real web app's write routes (POST, PUT, PATCH, DELETE) and requires each
 `(method, path)` to be mapped in `web_chat_parity.json` to one of:
 
-- `{"tool": name}`: an MCP tool; it serves every chat platform it is tagged for.
+- `{"tool": name}`: an MCP tool; it serves every chat platform it is tagged for. It may also
+  name the chat panels that do the same (`panel`), as a record.
 - `{"panel": {platform: module}}`: a chat panel per platform, all three.
 - `{"exempt": reason}`: configures the web app itself (web chat, web sign-in, page serving).
 - `{"gap": note}`: no chat path yet. A gap may also carry a partial `panel` or `tool`.
@@ -38,7 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 ROOT = Path(__file__).resolve().parents[2]
 TABLE = Path(__file__).with_name("web_chat_parity.json")
 # Only these may go down: fill a gap, then lower the literal.
-MAX_GAPS = 27
+MAX_GAPS = 21
 MAX_READ_GAPS = 12
 
 PLATFORMS = frozenset({"discord", "slack", "teams"})
@@ -120,10 +121,10 @@ def test_rows_are_well_formed() -> None:
         if "exempt" in row:
             assert set(row) == {"exempt"}, f"{route}: an exemption stands alone"
         if "tool" in row:
-            assert set(row) <= {"tool", "not_on", "gap"}, route
+            assert set(row) <= {"tool", "not_on", "panel", "gap"}, route
         panel = row.get("panel", {})
         assert set(panel) <= PLATFORMS, f"{route}: unknown platform in {sorted(panel)}"
-        if "panel" in row and "gap" not in row:
+        if "panel" in row and "gap" not in row and "tool" not in row:
             assert set(panel) == PLATFORMS, f"{route}: a panel row covers all three platforms"
         if "gap" in row:
             assert "tool" not in row, f"{route}: a gap names no tool yet"

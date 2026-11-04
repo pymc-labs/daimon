@@ -59,6 +59,7 @@ from daimon.adapters.mcp.tools import (
     vault,
 )
 from daimon.adapters.mcp.tools.admins import register_admin_tools
+from daimon.adapters.mcp.tools.agent_coding_keys import register_agent_coding_key_tools
 from daimon.adapters.mcp.tools.agent_removal import register_agent_removal_tools
 from daimon.adapters.mcp.tools.agent_tool_rules import register_agent_tool_rule_tools
 from daimon.adapters.mcp.tools.channel_budgets import register_channel_budget_tools
@@ -82,6 +83,7 @@ from daimon.adapters.mcp.tools.media import register_media_tools, register_uploa
 from daimon.adapters.mcp.tools.microsoft._access import MicrosoftGraph
 from daimon.adapters.mcp.tools.microsoft.register import register_microsoft_tools
 from daimon.adapters.mcp.tools.models import register_model_tools
+from daimon.adapters.mcp.tools.my_data import register_my_data_tools
 from daimon.adapters.mcp.tools.notebook import register_notebook_tools
 from daimon.adapters.mcp.tools.plain_text_mentions import register_plain_text_mentions_tools
 from daimon.adapters.mcp.tools.progress_plans import register_progress_plan_tools
@@ -90,12 +92,14 @@ from daimon.adapters.mcp.tools.promo_issuing import register_promo_issuing_tools
 from daimon.adapters.mcp.tools.propagation import register_propagation_tools
 from daimon.adapters.mcp.tools.publish import register_publish_tools
 from daimon.adapters.mcp.tools.repo_memory import register_repo_memory_tools
+from daimon.adapters.mcp.tools.routine_run import register_routine_run_tool
 from daimon.adapters.mcp.tools.setup_target import register_setup_target_tools
 from daimon.adapters.mcp.tools.skill_uploads import register_skill_upload_tools
 from daimon.adapters.mcp.tools.task_continuity import register_task_continuity_tools
 from daimon.adapters.mcp.tools.teams._client import build_teams_client
 from daimon.adapters.mcp.tools.tenant_summary import register_tenant_summary_tools
 from daimon.adapters.mcp.tools.thread_model import register_thread_model_tools
+from daimon.adapters.mcp.tools.thread_overrides import register_thread_override_tools
 from daimon.adapters.mcp.tools.thread_participation import register_thread_participation_tools
 from daimon.adapters.mcp.tools.tidy import register_tidy_tools
 from daimon.adapters.mcp.tools.timers import register_timer_tools
@@ -546,6 +550,10 @@ def create_mcp_app(
     register_thread_participation_tools(mcp, runtime)  # follow/unfollow threads
     register_progress_plan_tools(mcp, runtime)  # the plan on the progress card, and its switch
     register_plain_text_mentions_tools(mcp, runtime)  # typed "@<name>" starts a turn
+    register_agent_coding_key_tools(mcp, runtime)
+    register_my_data_tools(mcp, runtime)
+    register_routine_run_tool(mcp, runtime)
+    register_thread_override_tools(mcp, runtime)
     register_cost_footer_tools(mcp, runtime)  # the line under each finished answer
     register_channel_budget_tools(mcp, runtime)  # per-channel spend budgets
     register_channel_skill_tools(mcp, runtime)  # per-channel extra skills

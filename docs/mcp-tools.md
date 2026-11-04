@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 178 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 187 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -64,6 +64,16 @@ Agent-chat primitives plus bounded ``ask`` and completed-chart delivery.
 | `list_events` | agent tokens only | List a session's events — the transcript. |
 | `list_my_sessions` | agent tokens only | List the sessions you started with this agent (id, status, title, timestamps). |
 | `start_turn` | agent tokens only | Start a new conversation turn with the agent and return a handle. |
+
+## `agent_coding_keys`
+
+List and revoke an agent's coding keys: all for an admin, the caller's own for its
+owner.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `list_agent_coding_keys` | all callers | List an agent's live coding keys, never their tokens: all for an admin, the caller's own for the agent's owner. |
+| `revoke_agent_coding_key` | all callers | Revoke an agent coding key: any for an admin, the caller's own for its owner. |
 
 ## `agent_removal`
 
@@ -342,6 +352,17 @@ Register connect_microsoft and the Microsoft Graph tools (Teams only).
 | --- | --- | --- |
 | `list_models` | all callers | List the models an agent here can run on: plain name, id, provider and list price. |
 
+## `my_data`
+
+The caller's own data: what Daimon holds for them, and letting it go.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `disconnect_my_account` | all callers | Disconnect one of the caller's accounts: saved Microsoft 365 or Slack access, or an MCP sign-in (``agent_id`` and ``key`` as listed by list_my_data). |
+| `forget_my_memory` | all callers | Delete the caller's personal memory with one agent, by the agent_id from list_my_data. |
+| `list_my_data` | all callers | List what is held for the caller: connected accounts and sign-ins, personal memory per agent, and their coding keys. |
+| `revoke_my_coding_key` | all callers | Revoke one of the caller's own coding keys, by the key_id from list_my_data. |
+
 ## `notebook`
 
 Notebook MCP tools.
@@ -430,6 +451,14 @@ Repository-scoped persistent memory, authorized by the executing turn.
 | `repo_memory_save` | all callers | Remember information for the bound working repository across sessions. |
 | `repo_memory_view` | all callers | Read a repository memory's full body by its listed slug. |
 
+## `routine_run`
+
+Run a routine now, ahead of its schedule.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `run_routine` | all callers | Run a routine now, ahead of its schedule; its own schedule continues after. |
+
 ## `routines`
 
 Routines tools: create / list / get / update / delete, and an admin's sandbox opt-in.
@@ -517,6 +546,15 @@ harder").
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `set_thread_model` | all callers | Run this conversation on another model when the person asks in words: "use opus here", "think harder". |
+
+## `thread_overrides`
+
+Thread settings that differ from their channel, and clearing one.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `clear_thread_override` | admin only, operator tokens with channels:write | Drop one thread's own setting so it follows its channel again. |
+| `list_thread_overrides` | admin only, operator tokens with tenant:read | List the threads of a channel that keep their own participation, progress plan, access rule or handoff. |
 
 ## `thread_participation`
 

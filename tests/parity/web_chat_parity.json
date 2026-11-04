@@ -13,11 +13,11 @@
    "tool": "delete_skill"
   },
   "DELETE /api/agents/{agent_id}/coding-keys/{key_id}": {
-   "gap": "teams has no coding key revoke; core: coding_keys.revoke_agent_coding_key",
    "panel": {
     "discord": "daimon.adapters.discord.agent_setup.coding_keys_view",
     "slack": "daimon.adapters.slack.agent_setup.coding_keys"
-   }
+   },
+   "tool": "revoke_agent_coding_key"
   },
   "DELETE /api/agents/{agent_id}/draft": {
    "tool": "update_agent"
@@ -48,7 +48,7 @@
    "exempt": "web sign-in and session (linked account)"
   },
   "DELETE /api/profile/keys/{key_id}": {
-   "gap": "revoke one's own coding key across agents; core: coding_keys.revoke_my_coding_key (per-agent revoke exists on Discord and Slack panels)"
+   "tool": "revoke_my_coding_key"
   },
   "DELETE /api/profile/sign-ins/{identity_id}": {
    "exempt": "web sign-in and session (profile sign-ins)"
@@ -151,7 +151,7 @@
    "tool": "add_channel_skill"
   },
   "POST /api/channels/{channel_id}/threads/clear": {
-   "gap": "clear one thread's own setting (thread rule, hand-off); core: channel_settings.clear_thread_override"
+   "tool": "clear_thread_override"
   },
   "POST /api/chat/messages/{message_id}/feedback": {
    "exempt": "web chat"
@@ -195,7 +195,7 @@
    "exempt": "web sign-in and session (invite accept)"
   },
   "POST /api/profile/connections/disconnect": {
-   "gap": "disconnect an MCP sign-in or token; core: profile.disconnect_mcp_sign_in, disconnect_token"
+   "tool": "disconnect_my_account"
   },
   "POST /api/profile/delete": {
    "panel": {
@@ -205,19 +205,29 @@
    }
   },
   "POST /api/profile/memory/{agent_id}/forget": {
-   "gap": "forget personal memory; core: profile.forget_personal_memory"
+   "tool": "forget_my_memory"
   },
   "POST /api/routines": {
    "tool": "create_routine"
   },
   "POST /api/routines/{routine_id}/pause": {
+   "panel": {
+    "discord": "daimon.adapters.discord.routines_panel.write",
+    "slack": "daimon.adapters.slack.routines_panel.actions",
+    "teams": "daimon.adapters.teams.routines_panel"
+   },
    "tool": "update_routine"
   },
   "POST /api/routines/{routine_id}/resume": {
+   "panel": {
+    "discord": "daimon.adapters.discord.routines_panel.write",
+    "slack": "daimon.adapters.slack.routines_panel.actions",
+    "teams": "daimon.adapters.teams.routines_panel"
+   },
    "tool": "update_routine"
   },
   "POST /api/routines/{routine_id}/run": {
-   "gap": "run a routine now; core: routine_service.run_now (not in any panel or tool)"
+   "tool": "run_routine"
   },
   "POST /api/workspaces/switch": {
    "exempt": "web workspace switch"
