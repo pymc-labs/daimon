@@ -113,7 +113,8 @@ export function agentChoices(roster: { name: string; avatar: string | null }[], 
     else out.push({ key, name: ENTITY_FALLBACK.agent, avatar: null })
   }
   for (const a of roster) out.push({ key: used.get(a.name) ?? a.name, name: a.name, avatar: a.avatar })
-  return out
+  const seen = new Set<string>()
+  return out.filter((c) => !seen.has(c.key) && !!seen.add(c.key))
 }
 
 export type Ask = { title: string; body?: string; action: string; destructive?: boolean; alternate?: string }

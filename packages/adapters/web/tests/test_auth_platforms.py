@@ -21,26 +21,38 @@ from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .chat_support import funded_workspace, shown_trail, signed_in, visitor_of
-from .conftest import PUBLIC_URL, WebClientFactory, discord_settings, fake_discord, web_settings
+from .conftest import (
+    MICROSOFT_APP,
+    MICROSOFT_TENANT,
+    PUBLIC_URL,
+    FakeUpstream,
+    WebClientFactory,
+    chat_settings,
+    discord_settings,
+    fake_discord,
+    fake_microsoft,
+    fake_slack,
+    web_settings,
+)
 
 _SESSION = "__Host-daimon_web"
 _OWN = {"X-Daimon-Web": "1", "Origin": PUBLIC_URL}
 
 
 async def _walk(
-    client: httpx.AsyncClient, *, link: bool = False
+    client: httpx.AsyncClient, *, connect: bool = False, provider: str = "discord"
 ) -> tuple[httpx.Response, httpx.Response]:
-    """Start a Discord sign-in (or link) and come back with a code, as a browser would."""
-    if link:
-        start = await client.post("/auth/discord/link", json={}, headers=_OWN)
+    """Start a sign-in (or connect) and come back with a code, as a browser would."""
+    if connect:
+        start = await client.post(f"/auth/{provider}/connect", json={}, headers=_OWN)
         assert start.status_code == 200, start.text
         authorize = start.json()["url"]
     else:
-        start = await client.get("/auth/discord/start")
+        start = await client.get(f"/auth/{provider}/start")
         assert start.status_code == 303, start.text
         authorize = start.headers["location"]
     state = parse_qs(urlsplit(authorize).query)["state"][0]
-    back = await client.get("/auth/discord/callback", params={"code": "c", "state": state})
+    back = await client.get(f"/auth/{provider}/callback", params={"code": "c", "state": state})
     return start, back
 
 
@@ -69,10 +81,12 @@ async def _web_member(
         )
 
 
-async def _people_of(factory: async_sessionmaker[AsyncSession], subject: str) -> list[WebPersonRow]:
+async def _people_of(
+    factory: async_sessionmaker[AsyncSession], subject: str, provider: str = "discord"
+) -> list[WebPersonRow]:
     async with factory() as db:
         rows = await identities_store.find_identity(
-            db, provider="discord", issuer="", subject=subject
+            db, provider=provider, issuer="", subject=subject
         )
         return [
             p
@@ -160,13 +174,15 @@ async def _link_rig(
     person: WebPersonRow,
     user_id: str,
     run: Callable[[httpx.AsyncClient], Any],
+    *,
+    upstream: FakeUpstream | None = None,
 ) -> Any:
-    token = await signed_in(factory, person)
+    token = await signed_in(factory, person, identity=False)
     async with web_client(
         web_settings(),
         sessionmaker=factory,
-        provider=fake_discord({"id": user_id, "username": "ada"}, [("g1", "Acme")]),
-        settings=discord_settings(),
+        provider=upstream or fake_discord({"id": user_id, "username": "ada"}, [("g1", "Acme")]),
+        settings=chat_settings(),
     ) as client:
         client.cookies.set(_SESSION, token, domain="web.example.com")
         return await run(client)
@@ -223,9 +239,10 @@ async def test_link_moves_a_person_without_history_onto_their_existing_discord_a
     )
     assert carried == "admin", "the role moved with them"
     assert sorted((a, d) for a, _, d in trail) == [
+        ("Connected account", "Discord"),
         ("Moved role to linked account", "Admin"),
         ("Switched account on link", "Discord"),
-    ], "the role move and the account switch are audited"
+    ], "the connect, the role move and the account switch are audited"
 
 
 async def test_link_is_refused_when_the_web_id_has_history(
@@ -264,7 +281,7 @@ async def test_link_needs_a_signed_in_person(
         provider=fake_discord({"id": "u1", "username": "a"}, []),
         settings=discord_settings(),
     ) as client:
-        res = await client.post("/auth/discord/link", json={}, headers=_OWN)
+        res = await client.post("/auth/discord/connect", json={}, headers=_OWN)
     assert res.status_code == 401, "linking starts from a signed-in session"
 
 
@@ -280,9 +297,9 @@ async def test_link_start_is_a_post_behind_the_csrf_check(
 
     async def attempts(client: httpx.AsyncClient) -> tuple[httpx.Response, ...]:
         return (
-            await client.post("/auth/discord/link", json={}),
+            await client.post("/auth/discord/connect", json={}),
             await client.post(
-                "/auth/discord/link", json={}, headers={**_OWN, "Origin": "https://evil.example"}
+                "/auth/discord/connect", json={}, headers={**_OWN, "Origin": "https://evil.example"}
             ),
             await client.get("/auth/discord/start", params={"link": "1"}),
         )
@@ -326,7 +343,7 @@ async def test_the_link_url_shows_discord_consent_but_sign_in_stays_silent(
     person = await _web_member(db_session_factory, tenant.id, "ada@example.com")
 
     async def both(client: httpx.AsyncClient) -> tuple[str, str]:
-        linking = (await client.post("/auth/discord/link", json={}, headers=_OWN)).json()["url"]
+        linking = (await client.post("/auth/discord/connect", json={}, headers=_OWN)).json()["url"]
         signing = (await client.get("/auth/discord/start")).headers["location"]
         return linking, signing
 
@@ -336,7 +353,7 @@ async def test_the_link_url_shows_discord_consent_but_sign_in_stays_silent(
 
 
 async def _walk_link(client: httpx.AsyncClient) -> tuple[httpx.Response, httpx.Response]:
-    return await _walk(client, link=True)
+    return await _walk(client, connect=True)
 
 
 async def test_a_visitor_cannot_link_a_chat_account(
@@ -348,9 +365,292 @@ async def test_a_visitor_cannot_link_a_chat_account(
     visitor = await visitor_of(db_session_factory, ws)
 
     async def start(client: httpx.AsyncClient) -> httpx.Response:
-        return await client.post("/auth/discord/link", json={}, headers=_OWN)
+        return await client.post("/auth/discord/connect", json={}, headers=_OWN)
 
     res = await _link_rig(web_client, db_session_factory, visitor, "u7", start)
 
     assert res.status_code == 403, "a guest can't be moved onto a chat account"
     assert await _people_of(db_session_factory, "u7") == [], "nothing was linked"
+
+
+async def _chat_rig(
+    web_client: WebClientFactory,
+    factory: async_sessionmaker[AsyncSession],
+    upstream: FakeUpstream,
+    run: Callable[[httpx.AsyncClient], Any],
+) -> Any:
+    async with web_client(
+        web_settings(), sessionmaker=factory, provider=upstream, settings=chat_settings()
+    ) as client:
+        return await run(client)
+
+
+async def test_every_configured_chat_platform_is_offered(
+    web_client: WebClientFactory, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    async def listed(client: httpx.AsyncClient) -> list[dict[str, Any]]:
+        return (await client.get("/auth/providers")).json()
+
+    providers = await _chat_rig(web_client, db_session_factory, fake_slack(team=None), listed)
+    assert [(p["id"], p["label"], p["kind"]) for p in providers] == [
+        ("discord", "Discord", "redirect"),
+        ("slack", "Slack", "redirect"),
+        ("microsoft", "Microsoft", "redirect"),
+    ], providers
+
+
+async def test_slack_authorize_url_asks_for_the_user_grant_without_pkce(
+    web_client: WebClientFactory, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    async def start(client: httpx.AsyncClient) -> httpx.Response:
+        return await client.get("/auth/slack/start")
+
+    res: httpx.Response = await _chat_rig(
+        web_client, db_session_factory, fake_slack(team=None), start
+    )
+    url = urlsplit(res.headers["location"])
+    query = parse_qs(url.query)
+    assert (url.netloc, url.path) == ("slack.com", "/oauth/v2/authorize"), url
+    assert query["user_scope"] == ["users:read"] and "scope" not in query, (
+        "a user grant only: `scope` would install the bot"
+    )
+    assert query["redirect_uri"] == [f"{PUBLIC_URL}/auth/slack/callback"], query
+    assert "code_challenge" not in query, "Slack takes no PKCE"
+
+
+async def test_slack_sign_in_reaches_only_the_installed_workspace_it_was_given_in(
+    web_client: WebClientFactory,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    installed = await make_tenant(db_session, platform="slack", workspace_id="T1")
+    await db_session.commit()
+
+    async def walk(client: httpx.AsyncClient) -> httpx.Response:
+        return (await _walk(client, provider="slack"))[1]
+
+    back = await _chat_rig(
+        web_client, db_session_factory, fake_slack(team=("T1", "Acme"), user_id="U1"), walk
+    )
+    people = await _people_of(db_session_factory, "T1:U1", "slack")
+    async with db_session_factory() as db:
+        principal = await find_platform_principal(
+            db, tenant_id=installed.id, platform="slack", external_id="U1"
+        )
+    assert _error(back) is None, back.headers
+    assert [p.tenant_id for p in people] == [installed.id], "the one workspace the grant names"
+    assert principal is not None and people[0].account_id == principal.account_id, (
+        "the person runs as their Slack user id, the principal the bot uses"
+    )
+    assert people[0].display_name == "ada" and people[0].workspace_name == "Acme", people[0]
+
+
+async def test_slack_sign_in_to_a_workspace_without_daimon_is_refused(
+    web_client: WebClientFactory,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await make_tenant(db_session, platform="slack", workspace_id="T1")
+    await db_session.commit()
+
+    async def walk(client: httpx.AsyncClient) -> httpx.Response:
+        return (await _walk(client, provider="slack"))[1]
+
+    back = await _chat_rig(
+        web_client, db_session_factory, fake_slack(team=("T9", "Elsewhere")), walk
+    )
+    assert _error(back) == "Daimon isn't in any of your workspaces yet. Ask an admin.", back.headers
+    assert _SESSION not in back.cookies, "a refused sign-in opens no session"
+
+
+async def test_slack_grant_without_a_team_is_refused(
+    web_client: WebClientFactory,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await make_tenant(db_session, platform="slack", workspace_id="T1")
+    await db_session.commit()
+
+    async def walk(client: httpx.AsyncClient) -> httpx.Response:
+        return (await _walk(client, provider="slack"))[1]
+
+    back = await _chat_rig(web_client, db_session_factory, fake_slack(team=None), walk)
+    assert _error(back) == "Sign-in didn't work. Try again.", back.headers
+    assert _SESSION not in back.cookies, "no workspace proven, no session"
+    assert await _people_of(db_session_factory, "T1:U1", "slack") == [], "nobody was created"
+
+
+async def test_microsoft_sign_in_reaches_the_teams_workspace_of_its_directory(
+    web_client: WebClientFactory,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    oid = "22222222-2222-2222-2222-222222222222"
+    teams = await make_tenant(db_session, platform="teams", workspace_id=MICROSOFT_TENANT)
+    await db_session.commit()
+    upstream = fake_microsoft(tid=MICROSOFT_TENANT, oid=oid.upper(), aud=MICROSOFT_APP, name="Ines")
+
+    async def walk(client: httpx.AsyncClient) -> httpx.Response:
+        return (await _walk(client, provider="microsoft"))[1]
+
+    back = await _chat_rig(web_client, db_session_factory, upstream, walk)
+    async with db_session_factory() as db:
+        principal = await find_platform_principal(
+            db, tenant_id=teams.id, platform="teams", external_id=oid
+        )
+        people = await people_store.list_people(db, tenant_id=teams.id)
+    assert _error(back) is None, back.headers
+    assert principal is not None, "the account is the Teams person, by canonical object id"
+    assert [p.account_id for p in people] == [principal.account_id], people
+    assert people[0].display_name == "Ines", people[0]
+
+
+async def test_microsoft_sign_in_from_another_directory_is_refused(
+    web_client: WebClientFactory,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    teams = await make_tenant(db_session, platform="teams", workspace_id=MICROSOFT_TENANT)
+    await db_session.commit()
+    upstream = fake_microsoft(
+        tid="33333333-3333-3333-3333-333333333333",
+        oid="22222222-2222-2222-2222-222222222222",
+        aud=MICROSOFT_APP,
+    )
+
+    async def walk(client: httpx.AsyncClient) -> httpx.Response:
+        return (await _walk(client, provider="microsoft"))[1]
+
+    back = await _chat_rig(web_client, db_session_factory, upstream, walk)
+    async with db_session_factory() as db:
+        people = await people_store.list_people(db, tenant_id=teams.id)
+    assert _error(back) == "Sign-in didn't work. Try again.", back.headers
+    assert _SESSION not in back.cookies and people == [], "a foreign tenant reaches nothing"
+
+
+async def test_microsoft_link_asks_to_pick_an_account_but_sign_in_does_not(
+    web_client: WebClientFactory,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="g1")
+    await db_session.commit()
+    person = await _web_member(db_session_factory, tenant.id, "ada@example.com")
+
+    async def both(client: httpx.AsyncClient) -> tuple[str, str]:
+        linking = (await client.post("/auth/microsoft/connect", json={}, headers=_OWN)).json()[
+            "url"
+        ]
+        signing = (await client.get("/auth/microsoft/start")).headers["location"]
+        return linking, signing
+
+    urls: tuple[str, str] = await _link_rig(
+        web_client, db_session_factory, person, "u7", both, upstream=fake_microsoft()
+    )
+    link_query, sign_query = (parse_qs(urlsplit(u).query) for u in urls)
+    assert link_query["prompt"] == ["select_account"], "a link lets the person pick the account"
+    assert "prompt" not in sign_query, "sign-in takes the account the browser has"
+    assert link_query["scope"] == ["openid profile"], "identity only, no email or Graph access"
+    assert link_query["code_challenge_method"] == ["S256"], link_query
+
+
+async def test_link_proves_a_slack_user_onto_the_persons_account(
+    web_client: WebClientFactory,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session, platform="slack", workspace_id="T1")
+    await db_session.commit()
+    person = await _web_member(db_session_factory, tenant.id, "ada@example.com")
+
+    async def walk(client: httpx.AsyncClient) -> httpx.Response:
+        return (await _walk(client, connect=True, provider="slack"))[1]
+
+    back = await _link_rig(
+        web_client,
+        db_session_factory,
+        person,
+        "U7",
+        walk,
+        upstream=fake_slack(team=("T1", "Acme"), user_id="U7"),
+    )
+    async with db_session_factory() as db:
+        principal = await find_platform_principal(
+            db, tenant_id=tenant.id, platform="slack", external_id="U7"
+        )
+    assert _error(back) is None, back.headers
+    assert principal is not None and principal.account_id == person.account_id, (
+        "a Slack user id Daimon never saw joins the signed-in person's account"
+    )
+    assert [p.id for p in await _people_of(db_session_factory, "T1:U7", "slack")] == [person.id]
+
+
+async def test_connecting_another_platform_never_links_it_onto_the_person(
+    web_client: WebClientFactory,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    discord = await make_tenant(db_session, platform="discord", workspace_id="g1")
+    await make_tenant(db_session, platform="slack", workspace_id="T1")
+    await db_session.commit()
+    person = await _web_member(db_session_factory, discord.id, "ada@example.com")
+
+    async def walk(client: httpx.AsyncClient) -> httpx.Response:
+        return (await _walk(client, connect=True, provider="slack"))[1]
+
+    back = await _link_rig(
+        web_client,
+        db_session_factory,
+        person,
+        "U7",
+        walk,
+        upstream=fake_slack(team=("T1", "Acme"), user_id="U7"),
+    )
+    slack_people = await _people_of(db_session_factory, "T1:U7", "slack")
+    assert _error(back) is None, back.headers
+    assert [p.id for p in slack_people] != [person.id] and len(slack_people) == 1, (
+        "the Slack account stays its own person in its own workspace, not the Discord person"
+    )
+
+
+async def test_link_is_refused_for_a_slack_user_already_linked_to_someone_else(
+    web_client: WebClientFactory,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session, platform="slack", workspace_id="T1")
+    await db_session.commit()
+    ada = await _web_member(db_session_factory, tenant.id, "ada@example.com")
+    bea = await _web_member(db_session_factory, tenant.id, "bea@example.com")
+
+    async def walk(client: httpx.AsyncClient) -> httpx.Response:
+        return (await _walk(client, connect=True, provider="slack"))[1]
+
+    upstream = fake_slack(team=("T1", "Acme"), user_id="U7")
+    first = await _link_rig(web_client, db_session_factory, ada, "U7", walk, upstream=upstream)
+    second = await _link_rig(web_client, db_session_factory, bea, "U7", walk, upstream=upstream)
+    async with db_session_factory() as db:
+        kept = await people_store.get_person(db, tenant_id=tenant.id, person_id=bea.id)
+    assert _error(first) is None, first.headers
+    assert _error(second) == "This account is linked to someone else. Ask an admin.", second.headers
+    assert kept is not None and kept.account_id == bea.account_id, "the second person kept theirs"
+
+
+async def test_a_visitor_cannot_link_slack_or_microsoft(
+    web_client: WebClientFactory,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    ws = await funded_workspace(db_session_factory)
+    visitor = await visitor_of(db_session_factory, ws)
+
+    async def starts(client: httpx.AsyncClient) -> list[int]:
+        return [
+            (await client.post(f"/auth/{p}/connect", json={}, headers=_OWN)).status_code
+            for p in ("slack", "microsoft")
+        ]
+
+    codes = await _link_rig(
+        web_client, db_session_factory, visitor, "U7", starts, upstream=fake_slack(team=None)
+    )
+    assert codes == [403, 403], "a guest can't be moved onto a chat account"

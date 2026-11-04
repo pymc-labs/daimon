@@ -58,6 +58,10 @@ _TENANT_ID_EXEMPT: dict[str, str] = {
     # The account fence for mux writers: a deleted account may have private state in
     # any tenant, and the fence must outlive the tenant the account was created in.
     "erased_account": "one bare account id per erased account; spans every tenant it was in",
+    # A web login groups one person's chat accounts across workspaces. Access
+    # always joins through a tenant's web_identities row for an active member.
+    "web_logins": "one web login spans every workspace its accounts reach",
+    "web_login_accounts": "keyed by login_id; workspaces come from tenant-scoped web_identities",
     "erased_principal": "one bare principal id per erased account's principal; same reason",
     # Push delivery receipts and jobs are deployment-wide GitHub metadata, not
     # tenant data. Resync resolves each tenant's bindings and scoped credentials

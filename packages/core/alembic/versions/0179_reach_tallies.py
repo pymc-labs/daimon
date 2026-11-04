@@ -1,6 +1,6 @@
 """reach_tallies: per-turn reach counts and the approved plan
 
-Revision ID: 0178_reach_tallies
+Revision ID: 0179_reach_tallies
 Revises: 0177_invite_files
 
 downgrade: safe
@@ -12,8 +12,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0178_reach_tallies"
-down_revision: str | None = "0177_invite_files"
+revision: str = "0179_reach_tallies"
+down_revision: str | None = "0178_web_logins"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

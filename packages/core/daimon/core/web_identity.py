@@ -1,7 +1,7 @@
-"""Who a web person is: a verified Discord sign-in, the people (one per workspace) it
-acts as, and the principal their turns, spend and memory run as.
+"""Who a web person is: a verified Discord, Slack or Microsoft sign-in, the people (one per
+workspace) it acts as, and the principal their turns, spend and memory run as.
 
-A sign-in proves a Discord account (`VerifiedIdentity`); this module maps it to person
+A sign-in proves a chat account (`VerifiedIdentity`); this module maps it to person
 rows, one per workspace the account is in and Daimon is installed in, each running as
 the account's chat principal. Only the platform id ever links, never an email.
 """
@@ -25,7 +25,7 @@ from daimon.core.stores import web_chat as chat_store
 from daimon.core.stores import web_identities as identities_store
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores import web_roles as roles_store
-from daimon.core.stores.domain import Role, WebPersonRow
+from daimon.core.stores.domain import ChatPlatform, Role, WebPersonRow
 from daimon.core.stores.identity import (
     create_platform_principal,
     find_platform_principal,
@@ -50,6 +50,22 @@ class VerifiedIdentity:
     display_name: str
     # (workspace id, workspace name) pairs the sign-in vouches for.
     workspaces: tuple[tuple[str, str], ...] = ()
+    # The chat platform's own id for the person, when `subject` also names the workspace
+    # (Slack and Teams ids are only unique within one).
+    platform_user_id: str | None = None
+
+    @property
+    def chat_user_id(self) -> str:
+        """The id the person's chat principal carries."""
+        return self.platform_user_id or self.subject
+
+
+# The platform each sign-in proves an id on: Microsoft accounts are Teams people.
+PLATFORM_OF: Final[dict[WebProvider, ChatPlatform]] = {
+    "discord": "discord",
+    "slack": "slack",
+    "microsoft": "teams",
+}
 
 
 async def resolve_web_people(
@@ -63,8 +79,8 @@ async def resolve_web_people(
     """
     tenants = await resolve_hub_tenants(
         session_factory,
-        platform=identity.provider,
-        platform_user_id=identity.subject,
+        platform=PLATFORM_OF[identity.provider],
+        platform_user_id=identity.chat_user_id,
         workspaces=identity.workspaces,
     )
     if not tenants:
@@ -121,8 +137,8 @@ async def link_web_identity(
     only if nothing is recorded under their own `web` id, since merging two accounts'
     spend and memory is an admin's call.
     """
-    user_id = identity.subject
-    platform = identity.provider
+    user_id = identity.chat_user_id
+    platform = PLATFORM_OF[identity.provider]
     async with session_factory() as session, session.begin():
         tenant = await tenants_store.get_tenant(session, person.tenant_id)
         workspace_ids = {workspace_id for workspace_id, _ in identity.workspaces}

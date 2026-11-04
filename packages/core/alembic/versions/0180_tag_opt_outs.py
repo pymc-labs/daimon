@@ -1,7 +1,7 @@
 """tag_opt_outs: people who asked never to be tagged
 
-Revision ID: 0179_tag_opt_outs
-Revises: 0178_reach_tallies
+Revision ID: 0180_tag_opt_outs
+Revises: 0179_reach_tallies
 
 downgrade: destructive
 """
@@ -11,8 +11,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0179_tag_opt_outs"
-down_revision: str | None = "0178_reach_tallies"
+revision: str = "0180_tag_opt_outs"
+down_revision: str | None = "0179_reach_tallies"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

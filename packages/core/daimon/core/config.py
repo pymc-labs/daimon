@@ -452,7 +452,8 @@ class HubSettings(BaseModel):
         description=(
             "Slack OAuth app client ID for the /slack/mcp login mount. Register "
             "<hub origin>/slack/auth/callback as a redirect URL on the Slack app "
-            "(see public_url)."
+            "(see public_url). Web app sign-in with Slack uses this app too: "
+            "also register <web public url>/auth/slack/callback."
         ),
     )
     slack_client_secret: SecretStr | None = Field(
@@ -1073,7 +1074,7 @@ def origin_of(url: str) -> str:
     return f"{parts.scheme}://{host}{suffix}"
 
 
-WebProvider = Literal["discord"]
+WebProvider = Literal["discord", "slack", "microsoft"]
 WebModuleKey = Literal["chat", "agents", "channels", "routines", "credits", "integrations", "admin"]
 _WEB_MODULES: tuple[WebModuleKey, ...] = (
     "chat",
@@ -1153,7 +1154,7 @@ class WebNodesSettings(BaseModel):
 
 
 class WebSettings(BaseModel):
-    """The web app: its server, Discord sign-in and connection nodes.
+    """The web app: its server, chat-platform sign-in and connection nodes.
 
     Optional so deployments without the web app boot unchanged; the block is
     ``None`` when no ``DAIMON_WEB__*`` variable is set.
@@ -1386,7 +1387,8 @@ class MicrosoftAccountsSettings(BaseModel):
         description=(
             "Application (client) ID of the Entra app registration people sign in to "
             "with Connect Microsoft. Its Web redirect URI is "
-            "`<public root>/oauth/microsoft/callback`."
+            "`<public root>/oauth/microsoft/callback`; web app sign-in with Microsoft "
+            "also needs `<web public url>/auth/microsoft/callback`."
         ),
     )
     client_secret: SecretStr | None = Field(

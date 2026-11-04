@@ -44,7 +44,7 @@ authenticated call back from the agent's sandbox.
 | `daimon.adapters.discord` | `packages/adapters/discord/` | Discord I/O, rendering, permissions, slash commands. |
 | `daimon.adapters.slack` | `packages/adapters/slack/` | Slack I/O, Block Kit rendering, per-user OAuth. |
 | `daimon.adapters.teams` | `packages/adapters/teams/` | Teams HTTP ingress, Adaptive Card rendering, private replies, file delivery. |
-| `daimon.adapters.web` | `packages/adapters/web/` | Web app server: Discord sign-in, sessions, connection nodes, the JSON API and the built single-page app. |
+| `daimon.adapters.web` | `packages/adapters/web/` | Web app server: Discord, Slack and Microsoft sign-in, sessions, connection nodes, the JSON API and the built single-page app. |
 | `daimon.adapters.mcp` | `packages/adapters/mcp/` | The MCP server the agent calls, plus the OAuth, webhook and hub HTTP routes. |
 | `daimon.adapters.scheduler` | `packages/adapters/scheduler/` | Routine dispatch, long-job workers and maintenance sweeps. |
 | `daimon.adapters.sidecar` | `packages/adapters/sidecar/` | Signed watch callbacks and poll scheduling. Runs no turns and holds no provider key. |

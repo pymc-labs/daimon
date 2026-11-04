@@ -48,6 +48,21 @@ def test_settings_canonicalise_the_tenant_and_report_configured() -> None:
     assert not MicrosoftAccountsSettings().configured, "the feature is inert when unset"
 
 
+def test_authorize_url_asks_to_pick_an_account_unless_told_not_to() -> None:
+    def prompt(*, select_account: bool) -> list[str] | None:
+        url = build_authorize_url(
+            CONFIG,
+            redirect_uri="https://d.example/cb",
+            state="st",
+            code_challenge="ch",
+            select_account=select_account,
+        )
+        return parse_qs(urlsplit(url).query).get("prompt")
+
+    assert prompt(select_account=True) == ["select_account"], "the account picker is shown"
+    assert prompt(select_account=False) is None, "sign-in leaves the account to the browser"
+
+
 def test_authorize_url_uses_the_tenant_endpoint_with_pkce() -> None:
     url = urlsplit(
         build_authorize_url(

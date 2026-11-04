@@ -14,6 +14,7 @@ import { Label } from "@/components/ui/label"
 import { api } from "@/lib/api"
 import { useConfirm } from "@/lib/confirm"
 import { plural, shortDate } from "@/lib/format"
+import { useMe } from "@/lib/hooks"
 import { Pill } from "@/modules/agents/bits"
 
 type AgentRef = { id: string; name: string }
@@ -50,7 +51,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 const Empty = ({ children }: { children: React.ReactNode }) => <div className="px-4 py-6 text-center text-sm text-muted-foreground">{children}</div>
-const Row = ({ children }: { children: React.ReactNode }) => <div className="flex items-center gap-3 px-4 py-3 text-sm">{children}</div>
+const Row = ({ children }: { children: React.ReactNode }) => <div className="flex min-h-14 items-center gap-3 px-4 py-3 text-sm">{children}</div>
 
 function Body({ d }: { d: Profile }) {
   const qc = useQueryClient()
@@ -63,6 +64,15 @@ function Body({ d }: { d: Profile }) {
   const disconnect = useMutation({
     mutationFn: (c: Profile["connections"][number]) => api.post("/api/profile/connections/disconnect", { kind: c.kind, agent_id: c.agent?.id, key: c.key }),
     onSuccess: () => done("Disconnected"),
+  })
+  const me = useMe()
+  const accounts = me.data?.accounts ?? []
+  const platforms = new Set(accounts.map((a) => (a.provider === "microsoft" ? "teams" : a.provider)))
+  const chatAccounts = d.chat_accounts.filter((a) => !platforms.has(a.platform))
+  const signIns = d.sign_ins.filter((s) => !accounts.some((a) => a.provider === s.provider && a.label === s.label))
+  const detach = useMutation({
+    mutationFn: (id: string) => api.del(`/api/me/accounts/${id}`),
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: ["me"] }); done("Disconnected") },
   })
   const unlink = useMutation({ mutationFn: (id: string) => api.del(`/api/profile/sign-ins/${id}`), onSuccess: () => done("Sign-in removed") })
   const revoke = useMutation({ mutationFn: (id: string) => api.del(`/api/profile/keys/${id}`), onSuccess: () => done("Key revoked") })
@@ -83,14 +93,26 @@ function Body({ d }: { d: Profile }) {
         ))}
       </Section>
 
-      <Section title="Connected accounts">
-        {d.chat_accounts.map((a) => (
+      {!!(accounts.length || chatAccounts.length || signIns.length) && <Section title="Sign-ins">
+        {accounts.map((a) => (
+          <Row key={a.id}>
+            <BrandIcon brand={a.provider} />
+            <span className="min-w-0 flex-1 truncate">{a.provider_label}{a.label && <span className="text-muted-foreground"> {a.label}</span>}</span>
+            <span className={`text-xs text-muted-foreground ${a.current ? "" : "hidden sm:inline"}`}>{a.current ? "Signed in" : <>Used <Ago iso={a.last_used} /></>}</span>
+            {!a.current && (
+              <Button variant="ghost" size="sm" disabled={detach.isPending} aria-label={`Disconnect ${a.provider_label} ${a.label}`} onClick={async () => {
+                if (await confirm({ title: `Disconnect ${a.provider_label}?`, action: "Disconnect", destructive: true })) detach.mutate(a.id)
+              }}>Disconnect</Button>
+            )}
+          </Row>
+        ))}
+        {chatAccounts.map((a) => (
           <Row key={a.platform}>
             <BrandIcon brand={a.platform} />
             <span className="min-w-0 flex-1 truncate">{a.platform[0]!.toUpperCase() + a.platform.slice(1)}{a.name && <span className="text-muted-foreground"> {a.name}</span>}</span>
           </Row>
         ))}
-        {d.sign_ins.map((s) => (
+        {signIns.map((s) => (
           <Row key={s.id}>
             <BrandIcon brand={s.provider} />
             <span className="min-w-0 flex-1 truncate">{s.label || s.provider}</span>
@@ -100,6 +122,9 @@ function Body({ d }: { d: Profile }) {
             }}>Remove</Button>
           </Row>
         ))}
+      </Section>}
+
+      <Section title="Connected accounts">
         {d.connections.map((c) => (
           <Row key={`${c.kind}:${c.agent?.id}:${c.key}`}>
             <span className="flex min-w-0 flex-1 items-center gap-1.5 truncate">{c.label}{c.agent && <><span className="text-muted-foreground">for</span><AgentLink id={c.agent.id} name={c.agent.name} /></>}</span>
@@ -108,7 +133,7 @@ function Body({ d }: { d: Profile }) {
             }}>Disconnect</Button>
           </Row>
         ))}
-        {!d.chat_accounts.length && !d.sign_ins.length && !d.connections.length && <Empty>Nothing is connected</Empty>}
+        {!d.connections.length && <Empty>Nothing is connected</Empty>}
       </Section>
 
       <Section title="Coding keys">
