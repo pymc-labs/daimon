@@ -1719,8 +1719,8 @@
     }),
     'create_allowance': dict({
       'description': '''
-        Set a spending limit (allowance) for a person (web person id), a group (name, or
-        ``everyone``) or an invite (id), in billed dollars, monthly or in total, for every agent
+        Set an allowance for a person (web person id), a group (name, or ``everyone``) or
+        an invite (id): a limit in billed dollars, monthly or in total, for every agent
         or one. A cap is monthly, for everyone or one person, with no agent or end date.
       ''',
       'parameters': dict({
@@ -6969,8 +6969,8 @@
     'remove_my_data': dict({
       'description': '''
         Remove your own, by ids from list_my_data or list_coding_keys: memory (agent_id), a
-        microsoft or slack sign-in, an mcp sign-in (agent_id, key) or a coding_key (key; an
-        admin adds agent_id for another person's).
+        connected account (its kind, as listed), an mcp sign-in (agent_id, key) or a
+        coding_key (key; an admin adds agent_id for another person's).
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -9929,8 +9929,9 @@
     }),
     'update_agent': dict({
       'description': '''
-        Change an agent's instructions (system prompt), model or skills, such as
-        build-models. Scalar ``model``, ``description`` and ``system`` fields replace.
+        Change an agent's instructions (system prompt), switch its model, or add existing
+        skills such as build-models. Scalar ``model``, ``description`` and ``system`` fields
+        replace.
         <blank line>
         Prefer current-generation ``claude-sonnet-5-5`` for Sonnet,
         ``claude-opus-5-5`` for Opus and ``claude-haiku-5-5`` for the cheapest

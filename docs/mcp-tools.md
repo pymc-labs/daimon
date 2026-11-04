@@ -122,7 +122,7 @@ Agent tools: list / get / create / update / fork / archive.
 | `request_agent_backend_switch` | all callers | Preview a requested agent backend switch, then Confirm in this chat. |
 | `set_agent_backend` | all callers | Set an enabled model provider, or clear the agent setting with backend=null. |
 | `set_agent_builtin_tool` | all callers | Turn one of an agent's built-in tools on or off, e.g. "turn off its web search". |
-| `update_agent` | all callers | Change an agent's instructions (system prompt), model or skills, such as build-models. |
+| `update_agent` | all callers | Change an agent's instructions (system prompt), switch its model, or add existing skills such as build-models. |
 
 ## `allowances`
 
@@ -131,7 +131,7 @@ invite.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `create_allowance` | admin only | Set a spending limit (allowance) for a person (web person id), a group (name, or ``everyone``) or an invite (id), in billed dollars, monthly or in total, for every agent or one. |
+| `create_allowance` | admin only | Set an allowance for a person (web person id), a group (name, or ``everyone``) or an invite (id): a limit in billed dollars, monthly or in total, for every agent or one. |
 | `delete_allowance` | admin only | Remove an allowance or cap. |
 | `list_allowances` | admin only | List the workspace's spend allowances and caps, newest first. |
 | `set_allowance_amount` | admin only | Change the dollar amount of an existing allowance or cap. |
@@ -405,7 +405,7 @@ The caller's own data: what Daimon holds for them, and letting it go.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `list_my_data` | all callers | List what is held for you: connected accounts and sign-ins, and personal memory per agent. |
-| `remove_my_data` | all callers | Remove your own, by ids from list_my_data or list_coding_keys: memory (agent_id), a microsoft or slack sign-in, an mcp sign-in (agent_id, key) or a coding_key (key; an admin adds agent_id for another person's). |
+| `remove_my_data` | all callers | Remove your own, by ids from list_my_data or list_coding_keys: memory (agent_id), a connected account (its kind, as listed), an mcp sign-in (agent_id, key) or a coding_key (key; an admin adds agent_id for another person's). |
 
 ## `never_tag`
 

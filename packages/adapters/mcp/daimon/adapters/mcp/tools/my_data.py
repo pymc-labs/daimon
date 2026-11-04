@@ -170,8 +170,8 @@ def register_my_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         key: str = "",
     ) -> MyDataChange:
         """Remove your own, by ids from list_my_data or list_coding_keys: memory (agent_id), a
-        microsoft or slack sign-in, an mcp sign-in (agent_id, key) or a coding_key (key; an
-        admin adds agent_id for another person's)."""
+        connected account (its kind, as listed), an mcp sign-in (agent_id, key) or a
+        coding_key (key; an admin adds agent_id for another person's)."""
         auth = await _auth(ctx)
         if kind == "memory":
             if not agent_id:
