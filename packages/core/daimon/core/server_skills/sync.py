@@ -29,6 +29,7 @@ from daimon.core.server_skills.gate import (
 from daimon.core.skills.ingest import SkillBundle, SkillIngestError, bundle_from_files
 from daimon.core.stores import server_skills as store
 from daimon.core.stores.domain import ServerSkillRow, ServerSkillStatus
+from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = [
@@ -187,6 +188,8 @@ async def _accept(
     entry: SkillEntry,
     digest: str,
     bundle: SkillBundle | None,
+    *,
+    allowed_tools: JsonValue,
 ) -> CheckResult:
     async with deps.sessionmaker.begin() as session:
         await store.accept_version(
@@ -195,7 +198,7 @@ async def _accept(
             digest=digest,
             manifest=manifest_of(entry),
             version_label=version_label(entry),
-            allowed_tools=allowed_tools_of(entry.frontmatter),
+            allowed_tools=allowed_tools,
             now=deps.now(),
         )
         accepted = await store.get_mirror(session, mirror.id)
@@ -257,7 +260,10 @@ async def _check_locked(
     if digest == mirror.digest:
         if mirror.status != "current":
             log.info("server_skill.resumed", mirror_id=str(mirror.id))
-        result = await _accept(deps, mirror, entry, digest, None)
+        # Same files, so the same tools: an unchecked listing never rewrites them.
+        result = await _accept(
+            deps, mirror, entry, digest, None, allowed_tools=mirror.allowed_tools
+        )
         return "unchanged" if result == "updated" else result
     if digest == mirror.pending_digest and approve != digest:
         await _check(deps, mirror, status="pending", error=None)
@@ -269,6 +275,8 @@ async def _check_locked(
     except (UpstreamUnreachable, SkillIngestError) as err:
         await _check(deps, mirror, status=mirror.status, error=str(err)[:200])
         return "failed"
+    # The fetched entry's frontmatter is checked against SKILL.md; the listing's is not.
+    entry = fetched.entry
     changes = diff_manifests(mirror.manifest, manifest)
     gated = needs_approval(
         changes,
@@ -288,7 +296,9 @@ async def _check_locked(
             )
         log.info("server_skill.approval_requested", mirror_id=str(mirror.id), digest=digest)
         return "pending"
-    return await _accept(deps, mirror, entry, digest, bundle)
+    return await _accept(
+        deps, mirror, entry, digest, bundle, allowed_tools=allowed_tools_of(entry.frontmatter)
+    )
 
 
 async def approve_update(deps: SyncDeps, mirror_id: uuid.UUID, *, digest: str) -> CheckResult:

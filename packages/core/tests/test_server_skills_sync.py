@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -38,6 +39,8 @@ class FakeUpstream:
     server: SkillsServer
     tools: Any = None
     gone: bool = False
+    unlisted_tools: bool = False
+    """The listing leaves `allowed-tools` out, whatever SKILL.md says."""
 
     def current(self) -> SkillEntry:
         raw = self.server.entries()[0]
@@ -50,7 +53,11 @@ class FakeUpstream:
     async def entry(self, mirror: ServerSkillRow) -> SkillEntry | None:
         if self.gone:
             raise UpstreamGone("refused")
-        return self.current()
+        entry = self.current()
+        if not self.unlisted_tools:
+            return entry
+        listed = {k: v for k, v in entry.frontmatter.items() if k != "allowed-tools"}
+        return dataclasses.replace(entry, frontmatter=listed)
 
     async def fetch(self, mirror: ServerSkillRow) -> ServerSkill:
         return ServerSkill(entry=self.current(), files=dict(self.server.skills[NAME]))
@@ -220,6 +227,28 @@ async def test_risky_update_waits_for_approval(
     row = await _row(world)
     assert row.status == "current" and row.pending_digest is None
     assert world.first.agents["follows"] == "2"
+
+
+async def test_tools_are_read_from_the_checked_skill_md(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    world = await _world(db_session, db_session_factory)
+    world.upstream.tools = "Bash"
+    world.upstream.unlisted_tools = True
+    world.upstream.server.skills[NAME]["SKILL.md"] = skill_md(NAME).replace(
+        b"---\nDo", b"allowed-tools: Bash\n---\nDo"
+    )
+    assert await check_mirror(world.deps, world.mirror.id) == "pending"
+    assert world.first.agents["follows"] == "1"
+
+
+async def test_a_listing_never_rewrites_the_accepted_tools(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    world = await _world(db_session, db_session_factory)
+    world.upstream.tools = "Bash"
+    assert await check_mirror(world.deps, world.mirror.id) == "unchanged"
+    assert (await _row(world)).allowed_tools is None
 
 
 async def test_approval_applies_only_the_reviewed_update(
