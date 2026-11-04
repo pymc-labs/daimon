@@ -52,3 +52,24 @@ def test_a_page_of_a_module_that_is_off_has_no_link() -> None:
     assert tenant.agent("ag_1") is not None
     assert tenant.routine(TENANT) is None, "routines module is off"
     assert tenant.channel("c1") is None, "channels module is off"
+
+
+def test_pages_are_the_list_pages_the_caller_may_open() -> None:
+    root = f"https://app.example.com/w/{TENANT}"
+    member = _links().for_tenant(TENANT, admin=False).pages()
+    assert member == {
+        "chat": f"{root}/chat",
+        "channels": f"{root}/channels",
+        "routines": f"{root}/routines",
+        "spend": f"{root}/credits/spend",
+        "profile": f"{root}/profile",
+    }, "a member has no integrations or admin pages"
+    admin = _links().for_tenant(TENANT, admin=True).pages()
+    assert admin["integrations"] == f"{root}/integrations", "an admin has the integrations list"
+    assert admin["github"] == f"{root}/integrations/github"
+    assert admin["admin"] == f"{root}/admin", "the admin page opens on no one"
+
+
+def test_pages_leave_out_modules_that_are_off_but_keep_the_profile() -> None:
+    pages = _links("chat").for_tenant(TENANT, admin=True).pages()
+    assert set(pages) == {"chat", "profile"}, "every other page belongs to a module that is off"

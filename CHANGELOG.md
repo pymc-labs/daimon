@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **Chat answers and setup panels link to the agent, channel or routine on the web.** Each opens in the right workspace (sign-in or a workspace picker first when needed). Agent setup details, routines, billing and channel settings on Discord, Slack and Teams carry an "Open in web" button. Nothing changes with no web app set.
+- **Chat answers and setup panels link to the agent, channel or routine on the web.** Each opens in the right workspace (sign-in or a workspace picker first when needed). Agent setup details, routines, billing and channel settings on Discord, Slack and Teams carry an "Open in web" button. The agent also knows the workspace's main pages to link. Nothing changes with no web app set.
 
 - **The web app signs in with Slack and Microsoft again, besides Discord.** Each shows on the sign-in page once its login app is set (`DAIMON_HUB__SLACK_*`, `DAIMON_MICROSOFT_ACCOUNTS__*`); register `<web public url>/auth/slack/callback` and `/auth/microsoft/callback` on it. A signed-in member connects the other two from the account menu (see below).
 

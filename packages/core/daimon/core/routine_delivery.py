@@ -232,7 +232,7 @@ def render_routine_controls(
         controls["words"] = turn_words(platform, place="channel")
     links = None if web is None else web.for_tenant(row.tenant_id, admin=False)
     if links is not None:
-        controls["web"] = {"url": links.root()}
+        controls["web"] = {"url": links.root(), "pages": links.pages()}
     if row.destination_kind == "dm":
         delivery = (
             "Daimon delivers your final reply privately to the routine owner. "

@@ -28,6 +28,7 @@ LinkKey = Literal[
     "spend",
     "allowance",
     "mcp_server",
+    "integrations",
     "github",
     "chat",
 ]
@@ -53,6 +54,7 @@ DEEP_LINKS: Final[Mapping[LinkKey, DeepLink]] = {
     "spend": DeepLink("/credits/spend", None, "credits", "credits.view_own"),
     "allowance": DeepLink("/credits/allowances", "allowance", "credits", "credits.manage"),
     "mcp_server": DeepLink("/integrations/mcp", "server", "integrations", "integrations.view"),
+    "integrations": DeepLink("/integrations", None, "integrations", "integrations.view"),
     "github": DeepLink("/integrations/github", None, "integrations", "integrations.view"),
     "chat": DeepLink("/chat", "agent", "chat", "chat.use"),
 }
@@ -125,6 +127,10 @@ class TenantLinks:
     def person(self, person_id: str) -> str | None:
         return self._url("person", None, person_id)
 
+    def person_list(self) -> str | None:
+        """The admin page, with no person opened."""
+        return self._url("person")
+
     def spend(self) -> str | None:
         return self._url("spend")
 
@@ -137,8 +143,27 @@ class TenantLinks:
     def github(self) -> str | None:
         return self._url("github")
 
+    def integrations(self) -> str | None:
+        return self._url("integrations")
+
     def chat(self, agent_id: str | None = None) -> str | None:
         return self._url("chat", None, agent_id)
+
+    def pages(self) -> dict[str, str]:
+        """Page key to URL for the pages this caller may open: the list pages of the
+        modules that are on, plus the profile every signed-in person has."""
+        found = {
+            "chat": self.chat(),
+            "channels": self.channel(),
+            "routines": self.routine(),
+            "spend": self.spend(),
+            "integrations": self.integrations(),
+            "github": self.github(),
+            "admin": self.person_list(),
+        }
+        pages = {key: url for key, url in found.items() if url is not None}
+        pages["profile"] = f"{self.root()}/profile"
+        return pages
 
 
 @dataclass(frozen=True)

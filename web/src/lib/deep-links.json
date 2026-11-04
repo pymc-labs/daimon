@@ -8,6 +8,7 @@
   "spend": { "path": "/credits/spend", "param": null, "module": "credits", "cap": "credits.view_own" },
   "allowance": { "path": "/credits/allowances", "param": "allowance", "module": "credits", "cap": "credits.manage" },
   "mcp_server": { "path": "/integrations/mcp", "param": "server", "module": "integrations", "cap": "integrations.view" },
+  "integrations": { "path": "/integrations", "param": null, "module": "integrations", "cap": "integrations.view" },
   "github": { "path": "/integrations/github", "param": null, "module": "integrations", "cap": "integrations.view" },
   "chat": { "path": "/chat", "param": "agent", "module": "chat", "cap": "chat.use" }
 }

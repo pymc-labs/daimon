@@ -108,9 +108,10 @@ def test_routine_controls_link_only_its_own_workspace_and_only_with_a_web_app() 
         row, platform="discord"
     ), "no web app, the same controls as before"
     text = render_routine_controls(row, platform="discord", web=web)
-    assert f'"web": {{"url": "https://app.example.com/w/{row.tenant_id}"}}' in text, (
-        "the link is the routine's own tenant"
-    )
+    root = f"https://app.example.com/w/{row.tenant_id}"
+    assert f'"url": "{root}"' in text, "the link is the routine's own tenant"
+    assert f'"channels": "{root}/channels"' in text, "with the pages a member may open"
+    assert "/admin" not in text, "and none that needs an admin"
     assert "web_url" in text, "the generic sentence is there"
 
 

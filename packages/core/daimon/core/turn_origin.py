@@ -265,8 +265,9 @@ def _words_for_origin(origin: TurnOriginRow) -> dict[str, str] | None:
 
 
 WEB_SENTENCE = (
-    " web.url is this workspace on the web. A tool result with web_url links to that item's "
-    "page: offer it when the person would continue there, and never build a web link yourself."
+    " web.url is this workspace on the web and web.pages its pages. A tool result with web_url "
+    "links to that item's page. Offer one of these when the person would continue there; "
+    "never build a web link yourself."
 )
 
 
@@ -316,8 +317,9 @@ def render_turn_origin(
     the agent's selection.
 
     `web` is this workspace's links into the web app (`daimon.core.web_links`); its `url` is
-    the workspace's front door. Left out for a deployment with no web app and for a sender
-    from another organisation, who has no account to open it with.
+    the workspace's front door and `pages` the pages the sender may open. Left out for a
+    deployment with no web app and for a sender from another organisation, who has no account
+    to open it with.
 
     Every value here is server-supplied except `handoff.requested_work`, which
     is the person's own words — it is truncated to `MAX_REQUESTED_WORK_CHARS`
@@ -364,7 +366,7 @@ def render_turn_origin(
     if moved is not None:
         controls["conversation_move"] = dict(moved)
     if web is not None and not origin.sender_foreign:
-        controls["web"] = {"url": web.root()}
+        controls["web"] = {"url": web.root(), "pages": web.pages()}
     else:
         web = None
     if handoff is not None:

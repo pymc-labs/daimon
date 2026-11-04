@@ -688,14 +688,21 @@ def test_controls_without_web_links_are_what_they_were() -> None:
     assert '"web"' not in plain and "web_url" not in plain, "nothing about the web is rendered"
 
 
-def test_controls_carry_the_workspace_front_door_and_one_generic_sentence() -> None:
+def test_controls_carry_the_workspace_front_door_and_the_pages_its_caller_may_open() -> None:
     rendered = render_turn_origin(_origin(), effective_is_admin=False, web=_web())
 
     web = _controls(rendered)["web"]
-    assert web == {"url": "https://app.example.com/w/22222222-2222-2222-2222-222222222222"}, (
-        "the workspace root is the only link in the controls"
-    )
+    root = "https://app.example.com/w/22222222-2222-2222-2222-222222222222"
+    assert web["url"] == root, "the workspace root"
+    assert web["pages"] == {
+        "chat": f"{root}/chat",
+        "channels": f"{root}/channels",
+        "routines": f"{root}/routines",
+        "spend": f"{root}/credits/spend",
+        "profile": f"{root}/profile",
+    }, "a member gets the pages a member may open"
     assert rendered.count("web_url") == 1, "one sentence says how tool results link out"
+    assert "web.pages" in rendered, "and that the pages may be linked"
 
 
 def test_a_sender_from_another_organisation_gets_no_web_links() -> None:
