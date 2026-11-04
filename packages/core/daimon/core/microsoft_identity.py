@@ -77,7 +77,10 @@ def build_authorize_url(
     state: str,
     code_challenge: str,
     scopes: tuple[str, ...] = MICROSOFT_SCOPES,
+    select_account: bool = True,
 ) -> str:
+    """The consent URL. `select_account` shows the account picker; sign-in leaves it off
+    so a returning person passes straight through."""
     params = {
         "client_id": config.client_id or "",
         "response_type": "code",
@@ -87,8 +90,9 @@ def build_authorize_url(
         "state": state,
         "code_challenge": code_challenge,
         "code_challenge_method": "S256",
-        "prompt": "select_account",
     }
+    if select_account:
+        params["prompt"] = "select_account"
     return f"{_endpoint(config, 'authorize')}?{urlencode(params)}"
 
 
