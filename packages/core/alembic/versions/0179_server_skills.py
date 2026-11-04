@@ -3,7 +3,8 @@
 `server_skills` holds one row per (tenant, server, upstream skill): the library skill it
 owns, the accepted manifest and digest, and an update waiting for approval.
 `server_skill_deployments` records the concrete version each provider holds for a digest.
-`agent_skill_follows` stores an agent's choice to pin a skill; no row means it follows.
+`agent_skill_follows` stores an agent's choice to pin a skill (no row means it follows),
+and the update its backend consent held back until the owner re-confirms.
 Downgrading drops all three tables; the library skills stay as plain custom skills.
 
 downgrade: destructive
@@ -91,6 +92,8 @@ def upgrade() -> None:
         sa.Column("agent_id", sa.Text(), nullable=False),
         sa.Column("skill_id", sa.Text(), nullable=False),
         sa.Column("follow", sa.Boolean(), nullable=False),
+        sa.Column("held_digest", sa.Text(), nullable=True),
+        sa.Column("held_reason", sa.Text(), nullable=True),
         _at("updated_at"),
         sa.PrimaryKeyConstraint("tenant_id", "agent_id", "skill_id"),
     )

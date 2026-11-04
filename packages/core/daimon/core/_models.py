@@ -5477,6 +5477,9 @@ class AgentSkillFollow(Base):
     agent_id: Mapped[str] = mapped_column(Text, primary_key=True)
     skill_id: Mapped[str] = mapped_column(Text, primary_key=True)
     follow: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    # The update the agent's backend consent held back: it waits for the owner's re-confirm.
+    held_digest: Mapped[str | None] = mapped_column(Text, nullable=True)
+    held_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

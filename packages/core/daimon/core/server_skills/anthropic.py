@@ -1,7 +1,9 @@
-"""The Managed Agents target: every Daimon agent's source record, which holds its skill pins.
+"""The Managed Agents target: the agent record the web editor edits, which holds skill pins.
 
-OpenAI, Gemini and self-hosted runs derive their skills from the pinned source version
-at turn start, so pinning it here is what moves them too.
+An agent switched to OpenAI or Gemini runs from this record under a consent pinned to
+it, so its repin goes through `ConsentKeeper`: renewed when the declared drops stay the
+same, held otherwise. Those providers get the skill only through an operator's source
+representation; self-hosted channels run their own spec. `tests/parity` records both.
 """
 
 from __future__ import annotations
@@ -12,11 +14,13 @@ from typing import Final
 import anthropic
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSkillParams
+from daimon.core.channel_backend import AgentBackendRefused
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_TENANT
 from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import publish_skill_version, update_agent
+from daimon.core.server_skills.consent import ConsentKeeper
 from daimon.core.server_skills.gate import AttachedAgent
 from daimon.core.server_skills.sync import TargetError
 from daimon.core.skills.ingest import SkillBundle
@@ -26,7 +30,8 @@ from mux.contracts.errors import ProviderError, ScopeViolation
 __all__ = ["PROVIDER", "ManagedAgentsTarget"]
 
 PROVIDER: Final = "managed_agents"
-_FAILURES = (anthropic.APIError, ProviderError, ScopeViolation)
+# An agent the backend service can't read is gone or moved: retried, never held.
+_FAILURES = (anthropic.APIError, ProviderError, ScopeViolation, AgentBackendRefused)
 
 
 def _params(
@@ -45,6 +50,8 @@ def _params(
 @dataclass(frozen=True)
 class ManagedAgentsTarget:
     client: AsyncAnthropic
+    consents: ConsentKeeper | None = None
+    """None only where no agent can carry a backend consent (backend choice is off)."""
 
     @property
     def provider(self) -> str:
@@ -95,6 +102,13 @@ class ManagedAgentsTarget:
             )
 
         try:
+            consented = (
+                await self.consents.check(mirror, agent_id, version)
+                if self.consents is not None
+                else None
+            )
             await update_agent_with_version_retry(self.client, agent_id, apply, scope=scope)
+            if consented is not None and self.consents is not None:
+                await self.consents.renew(mirror, agent_id, consented)
         except _FAILURES as err:
             raise TargetError(f"repin refused ({type(err).__name__})") from err

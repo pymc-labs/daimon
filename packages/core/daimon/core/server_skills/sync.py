@@ -2,6 +2,7 @@
 
 Every step is derived from the database again on the next run, so a crash or a failed
 provider is retried then. A provider's agents move only to a version that provider holds.
+An agent whose backend consent can't be renewed for the update is held, not moved.
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = [
     "CheckResult",
+    "NeedsReconfirm",
     "SkillTarget",
     "SyncDeps",
     "TargetError",
@@ -61,6 +63,10 @@ class UpstreamUnreachable(DaimonError):
 
 class TargetError(DaimonError):
     """A provider refused a publish or a repin; the next run tries again."""
+
+
+class NeedsReconfirm(DaimonError):
+    """The agent's backend consent can't be renewed for this update; its owner re-confirms."""
 
 
 class Upstream(Protocol):
@@ -90,7 +96,11 @@ class SkillTarget(Protocol):
         ...
 
     async def repin(self, mirror: ServerSkillRow, agent_id: str, version: str) -> None:
-        """Pin the agent to `version` as a new agent revision."""
+        """Pin the agent to `version` as a new agent revision.
+
+        Raises `NeedsReconfirm`, leaving the agent as it is, when its backend consent
+        would not hold after the update.
+        """
         ...
 
 
@@ -130,10 +140,29 @@ async def _bundle(
     return bundle, fetched
 
 
-async def _repin(target: SkillTarget, mirror: ServerSkillRow, repin: Repin) -> bool:
+async def _repin(deps: SyncDeps, target: SkillTarget, mirror: ServerSkillRow, repin: Repin) -> bool:
     """Move one agent; one that is refused stays as it is and the others still move."""
     try:
         await target.repin(mirror, repin.agent_id, repin.version)
+    except NeedsReconfirm as err:
+        async with deps.sessionmaker.begin() as session:
+            await store.hold_update(
+                session,
+                tenant_id=mirror.tenant_id,
+                agent_id=repin.agent_id,
+                skill_id=mirror.skill_id,
+                digest=mirror.digest,
+                reason=str(err)[:200],
+                now=deps.now(),
+            )
+        log.info(
+            "server_skill.repin_held",
+            mirror_id=str(mirror.id),
+            provider=target.provider,
+            agent_id=repin.agent_id,
+        )
+        # Held is a settled outcome: the owner's re-confirm, not a retry, moves it on.
+        return True
     except TargetError as err:
         log.warning(
             "server_skill.repin_failed",
@@ -143,6 +172,13 @@ async def _repin(target: SkillTarget, mirror: ServerSkillRow, repin: Repin) -> b
             err_type=type(err).__name__,
         )
         return False
+    async with deps.sessionmaker.begin() as session:
+        await store.release_holds(
+            session,
+            tenant_id=mirror.tenant_id,
+            agent_ids=[repin.agent_id],
+            skill_id=mirror.skill_id,
+        )
     log.info(
         "server_skill.agent_repinned",
         mirror_id=str(mirror.id),
@@ -188,8 +224,18 @@ async def _deploy(deps: SyncDeps, mirror: ServerSkillRow, bundle: SkillBundle | 
                     provider=target.provider,
                     version=version,
                 )
-            for repin in plan_repins(await target.attached(mirror), version=version, pinned=pinned):
-                complete = await _repin(target, mirror, repin) and complete
+            attached = await target.attached(mirror)
+            for repin in plan_repins(attached, version=version, pinned=pinned):
+                complete = await _repin(deps, target, mirror, repin) and complete
+            # One held after its repin moved (its consent changed meanwhile) is released
+            # here next run; from then on its backend settings ask for the re-confirm.
+            async with deps.sessionmaker.begin() as session:
+                await store.release_holds(
+                    session,
+                    tenant_id=mirror.tenant_id,
+                    agent_ids=[a.agent_id for a in attached if a.version == version],
+                    skill_id=mirror.skill_id,
+                )
         except (TargetError, UpstreamGone, UpstreamUnreachable, SkillIngestError) as err:
             complete = False
             log.warning(

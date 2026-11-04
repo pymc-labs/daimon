@@ -16,6 +16,7 @@ from daimon.core.mcp_skills.install import ServerSkill
 from daimon.core.mcp_skills.manifest import SkillEntry, parse_entry
 from daimon.core.server_skills.gate import AttachedAgent, manifest_digest, manifest_of
 from daimon.core.server_skills.sync import (
+    NeedsReconfirm,
     SyncDeps,
     TargetError,
     UpstreamGone,
@@ -69,6 +70,8 @@ class FakeTarget:
     agents: dict[str, str | None]
     failing: bool = False
     refuses: set[str] = field(default_factory=set[str])
+    held: set[str] = field(default_factory=set[str])
+    """Agents whose backend consent would not survive the update."""
     published: list[str] = field(default_factory=list[str])
 
     async def publish(self, mirror: ServerSkillRow, bundle: SkillBundle) -> str:
@@ -83,6 +86,8 @@ class FakeTarget:
     async def repin(self, mirror: ServerSkillRow, agent_id: str, version: str) -> None:
         if self.failing or agent_id in self.refuses:
             raise TargetError("down")
+        if agent_id in self.held:
+            raise NeedsReconfirm("drops differ")
         self.agents[agent_id] = version
 
 
@@ -255,6 +260,53 @@ async def test_tools_are_read_from_the_checked_skill_md(
     )
     assert await check_mirror(world.deps, world.mirror.id) == "pending"
     assert world.first.agents["follows"] == "1"
+
+    digest = (await _row(world)).pending_digest
+    assert await approve_update(world.deps, world.mirror.id, digest=str(digest)) == "updated"
+    row = await _row(world)
+    assert row.allowed_tools == "Bash", "the approved tools come from SKILL.md, not the listing"
+    assert world.first.agents["follows"] == "2"
+
+
+async def _held(world: World, agent_id: str) -> dict[str, str]:
+    async with world.deps.sessionmaker() as session:
+        return await store.held_updates(
+            session, tenant_id=world.mirror.tenant_id, agent_id=agent_id
+        )
+
+
+async def test_an_agent_whose_consent_would_change_is_held_not_moved(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A held agent keeps its version and shows the update; the others move on."""
+    world = await _world(db_session, db_session_factory)
+    world.first.held = {"follows"}
+    world.upstream.server.skills[NAME]["guide.md"] = b"More.\n"
+
+    assert await check_mirror(world.deps, world.mirror.id) == "updated", "a hold is no failure"
+    assert world.first.agents["follows"] == "1", "a held agent is never moved"
+    assert world.second.agents == {"other": "2"}
+    digest = (await _row(world)).digest
+    assert await _held(world, "follows") == {"skill_1": digest}
+
+    world.first.held = set()
+    assert await check_mirror(world.deps, world.mirror.id) == "unchanged"
+    assert world.first.agents["follows"] == "2", "the hold is retried each run"
+    assert await _held(world, "follows") == {}, "a moved agent's hold is released"
+
+
+async def test_a_hold_is_released_once_the_agent_is_current(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """An owner who moved the agent by hand clears the stale hold on the next run."""
+    world = await _world(db_session, db_session_factory)
+    world.first.held = {"follows"}
+    world.upstream.server.skills[NAME]["guide.md"] = b"More.\n"
+    assert await check_mirror(world.deps, world.mirror.id) == "updated"
+
+    world.first.agents["follows"] = "2"
+    assert await check_mirror(world.deps, world.mirror.id) == "unchanged"
+    assert await _held(world, "follows") == {}, "an agent already current holds nothing"
 
 
 async def test_a_listing_never_rewrites_the_accepted_tools(
