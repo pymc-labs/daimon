@@ -11,7 +11,7 @@ const repo = (name: string, extra: Partial<GithubRepo> = {}): GithubRepo => ({
   granted_at: ago(200), granted_by: "Maya Lindqvist", ...extra,
 })
 
-type Link = Omit<AgentGithub, "skills" | "can_manage"> & { origins: Record<string, Partial<GithubSkill>> }
+type Link = Omit<AgentGithub, "skills" | "can_manage" | "can_connect"> & { origins: Record<string, Partial<GithubSkill>> }
 const fromRepo = (name: string, path: string, at: number): Partial<GithubSkill> =>
   ({ origin: "repo", repo: name, branch: "main", path, url: `https://github.com/${name}/tree/main/${path}`, updated_at: ago(at) })
 
@@ -56,7 +56,7 @@ function body(id: string, r: NonNullable<ReturnType<typeof roster.find>>): Agent
     skill_id: s.skill_id, title: s.title, version: s.version === "latest" ? null : `v${s.version}`, origin: "library",
     repo: null, branch: null, path: null, url: null, updated_at: null, ...origins[s.skill_id],
   }))
-  return { ...link, can_manage: true, skills }
+  return { ...link, can_manage: true, can_connect: true, skills }
 }
 
 const GH = "/api/agents/:id/github"

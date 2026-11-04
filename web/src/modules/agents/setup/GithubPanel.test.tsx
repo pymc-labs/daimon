@@ -21,7 +21,7 @@ const repo = (name: string, extra: Partial<AgentGithub["repos"][number]> = {}): 
   granted_at: AT, granted_by: "Ada", ...extra,
 })
 const full: AgentGithub = {
-  configured: true, can_manage: true,
+  configured: true, can_manage: true, can_connect: true,
   repos: [repo("acme/data", { access: "write", working: true }), repo("acme/shared", { shared: true })],
   sync: { state: "done", at: AT, error: null },
   skills: [
@@ -84,11 +84,19 @@ describe("GithubPanel", () => {
   })
 
   it("offers no actions to someone who cannot manage", async () => {
-    serve({ ...full, can_manage: false })
+    serve({ ...full, can_manage: false, can_connect: false })
     view()
     await screen.findByText("acme/data")
     expect(screen.getByText("View only")).toBeInTheDocument()
     expect(screen.queryByRole("button")).toBeNull()
+  })
+
+  it("offers resync but not connect to someone who can manage only", async () => {
+    serve({ ...full, can_connect: false })
+    view()
+    expect(await screen.findByRole("button", { name: "Resync now" }), "managing allows a resync").toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "Connect" }), "connecting needs its own right").toBeNull()
+    expect(screen.queryByText("View only"), "a manager is not view only").toBeNull()
   })
 
   it("is plain facts when GitHub is not set up", async () => {

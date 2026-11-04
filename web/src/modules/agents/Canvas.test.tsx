@@ -14,7 +14,7 @@ vi.mock("@/lib/api", () => ({ api: { get: vi.fn() } }))
 
 const AT = "2026-11-01T00:00:00Z"
 const github: AgentGithub = {
-  configured: true, can_manage: true, skills: [], release: { name: "v2.4.1", at: AT, url: null }, sync: null,
+  configured: true, can_manage: true, can_connect: true, skills: [], release: { name: "v2.4.1", at: AT, url: null }, sync: null,
   repos: [{ name: "acme/data", url: "https://github.com/acme/data", access: "write", working: true, shared: false, status: "active", installation: "active", granted_at: AT, granted_by: "Ada" }],
 }
 

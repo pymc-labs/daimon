@@ -14,7 +14,7 @@ export type GithubSkill = {
   repo: string | null; branch: string | null; path: string | null; url: string | null; updated_at: string | null
 }
 export type AgentGithub = {
-  configured: boolean; can_manage: boolean
+  configured: boolean; can_manage: boolean; can_connect: boolean
   repos: GithubRepo[]
   sync: { state: "pending" | "running" | "done"; at: string; error: string | null } | null
   skills: GithubSkill[]

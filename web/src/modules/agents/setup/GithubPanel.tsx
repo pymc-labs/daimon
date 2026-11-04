@@ -98,6 +98,7 @@ export function GithubPanel({ agent }: Props) {
 
   if (!g) return <Section title="GitHub"><div className="text-sm text-muted-foreground">{q.isError ? q.error.message : "Loading"}</div></Section>
   const manage = g.configured && g.can_manage
+  const connect = g.configured && g.can_connect
   const busy = w.setWorking.isPending || w.remove.isPending
   const remove = async (name: string) => {
     if (await confirm({ title: `Remove ${name}?`, action: "Remove", destructive: true })) w.remove.mutate(name)
@@ -108,9 +109,9 @@ export function GithubPanel({ agent }: Props) {
     <>
       <Section
         title="Repos"
-        action={manage
+        action={connect
           ? <Button variant="outline" size="xs" disabled={w.connect.isPending} onClick={() => w.connect.mutate()}><BrandIcon brand="github" className="size-3" />Connect</Button>
-          : g.configured ? <Pill>View only</Pill> : undefined}
+          : g.configured && !manage ? <Pill>View only</Pill> : undefined}
       >
         {g.repos.length ? (
           <div className="divide-y rounded-lg border">
