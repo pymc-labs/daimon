@@ -103,15 +103,16 @@ def test_check_reach_when_plan_over_limit_then_asks_before_first_post():
     assert verdict == "needs_approval", "the plan is counted before anything posts"
 
 
-def test_check_reach_when_actual_passes_plan_then_plan_too_small():
+@pytest.mark.parametrize(("so_far", "expected"), [(1, "ok"), (2, "needs_approval")])
+def test_check_reach_when_actual_passes_plan_then_actual_counts(so_far, expected):
     verdict = check_reach(
-        plan=ReachPlan(threads=1, places=0, people=0),
-        so_far=ReachTally(threads=1),
+        plan=ReachPlan(threads=0, places=0, people=0),
+        so_far=ReachTally(threads=so_far),
         call=ReachTally(threads=1),
         limits=LIMITS,
         approved=None,
     )
-    assert verdict == "plan_too_small", "an undercounted plan is refused (backstop)"
+    assert verdict == expected, "a plan below actual is never refused on its own"
 
 
 def test_check_reach_when_approved_then_ok_until_past_approval():

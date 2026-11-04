@@ -38,7 +38,6 @@ from daimon.core.outbound.reach import (
     check_reach,
     client_tally_key,
     needs_approval,
-    plan_too_small,
 )
 from daimon.core.security_audit import record_denial
 from daimon.core.stores.domain import TurnOriginRow
@@ -316,8 +315,6 @@ def _gate(
     if verdict == "ok":
         return
     record_denial(f"reach_{verdict}")
-    if verdict == "plan_too_small":
-        raise ToolError(plan_too_small(so_far.plus(call).counts()))
     log.info("reach.over_budget", key=scope.key, has_card=scope.origin is not None)
     if scope.kind != "live" or auth.no_confirmation_surface:
         # No card can be shown (an outside client, or a backend without one): fail closed.

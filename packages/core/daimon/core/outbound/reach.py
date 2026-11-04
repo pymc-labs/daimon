@@ -11,7 +11,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-ReachVerdict = Literal["ok", "plan_too_small", "needs_approval"]
+ReachVerdict = Literal["ok", "needs_approval"]
 
 # An outside client's budget renews each window, so it limits bursts, not a lifetime.
 CLIENT_WINDOW = timedelta(hours=2)
@@ -87,22 +87,12 @@ def check_reach(
 ) -> ReachVerdict:
     """Decide before anything posts: max(declared plan, actual + this call) against the ceiling.
 
-    A plan smaller than what the turn actually reached is refused, so the agent
-    declares the whole request; past an approved plan it must ask again.
+    A plan smaller than actual just counts as actual, never a refusal of its own;
+    past the limits or an approved plan it must ask.
     """
     actual = so_far.plus(call).counts()
-    if not plan.covers(actual):
-        return "plan_too_small"
     ceiling = approved.widest(limits) if approved is not None else limits
     return "ok" if ceiling.covers(plan.widest(actual)) else "needs_approval"
-
-
-def plan_too_small(actual: ReachPlan) -> str:
-    return (
-        "Not posted: the plan must give the totals for the whole request, including this "
-        f"call. So far with this call: {describe(actual)}. Call again with a plan that "
-        "covers everything you will post."
-    )
 
 
 def needs_approval(plan: ReachPlan, limits: ReachPlan) -> str:

@@ -121,12 +121,16 @@ async def test_prepare_posts_when_approved_then_posts_until_past_plan(sessionmak
 
 
 @pytest.mark.parametrize("platform", PLATFORMS)
-async def test_prepare_posts_when_plan_undercounts_then_backstop_refuses(sessionmaker, platform):
+async def test_prepare_posts_when_plan_undercounts_then_actual_counts(sessionmaker, platform):
+    """A plan below actual is never refused on its own: the gate takes the larger."""
     runtime, auth = await _setup(sessionmaker, platform)
     scope = _scope()
-    plan = ReachPlan(threads=1, places=0, people=0)
+    plan = ReachPlan(threads=0, places=0, people=0)
     await prepare_posts(runtime, auth, _threads(1), plan=plan, scope=scope)
-    with pytest.raises(ToolError, match="covers everything"):
+    assert await prepare_posts(runtime, auth, _threads(1), plan=plan, scope=scope), (
+        f"{platform}: two threads are within the limit whatever the plan said"
+    )
+    with pytest.raises(ToolError, match="approve_reach"):
         await prepare_posts(runtime, auth, _threads(1), plan=plan, scope=scope)
 
 
@@ -422,8 +426,8 @@ async def test_prepare_posts_when_another_call_holds_the_tally_then_it_waits_and
             session,
             tenant_id=auth.tenant_id,
             turn_key=scope.key,
-            tally=ReachTally(threads=1),
+            tally=ReachTally(threads=2),
         )
 
-    with pytest.raises(ToolError, match="."):
+    with pytest.raises(ToolError, match="approve_reach"):
         await racer
