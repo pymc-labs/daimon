@@ -19,6 +19,7 @@ from daimon.core.mcp_skills.install import ServerSkill
 from daimon.core.mcp_skills.manifest import SkillEntry
 from daimon.core.server_skills.gate import (
     AttachedAgent,
+    Repin,
     allowed_tools_of,
     diff_manifests,
     manifest_digest,
@@ -129,6 +130,29 @@ async def _bundle(
     return bundle, fetched
 
 
+async def _repin(target: SkillTarget, mirror: ServerSkillRow, repin: Repin) -> bool:
+    """Move one agent; one that is refused stays as it is and the others still move."""
+    try:
+        await target.repin(mirror, repin.agent_id, repin.version)
+    except TargetError as err:
+        log.warning(
+            "server_skill.repin_failed",
+            mirror_id=str(mirror.id),
+            provider=target.provider,
+            agent_id=repin.agent_id,
+            err_type=type(err).__name__,
+        )
+        return False
+    log.info(
+        "server_skill.agent_repinned",
+        mirror_id=str(mirror.id),
+        provider=target.provider,
+        agent_id=repin.agent_id,
+        version=repin.version,
+    )
+    return True
+
+
 async def _deploy(deps: SyncDeps, mirror: ServerSkillRow, bundle: SkillBundle | None) -> bool:
     """Publish the accepted files where missing, then repin each provider's followers.
 
@@ -165,14 +189,7 @@ async def _deploy(deps: SyncDeps, mirror: ServerSkillRow, bundle: SkillBundle | 
                     version=version,
                 )
             for repin in plan_repins(await target.attached(mirror), version=version, pinned=pinned):
-                await target.repin(mirror, repin.agent_id, repin.version)
-                log.info(
-                    "server_skill.agent_repinned",
-                    mirror_id=str(mirror.id),
-                    provider=target.provider,
-                    agent_id=repin.agent_id,
-                    version=repin.version,
-                )
+                complete = await _repin(target, mirror, repin) and complete
         except (TargetError, UpstreamGone, UpstreamUnreachable, SkillIngestError) as err:
             complete = False
             log.warning(

@@ -68,6 +68,7 @@ class FakeTarget:
     provider: str
     agents: dict[str, str | None]
     failing: bool = False
+    refuses: set[str] = field(default_factory=set[str])
     published: list[str] = field(default_factory=list[str])
 
     async def publish(self, mirror: ServerSkillRow, bundle: SkillBundle) -> str:
@@ -80,7 +81,7 @@ class FakeTarget:
         return [AttachedAgent(agent, version) for agent, version in self.agents.items()]
 
     async def repin(self, mirror: ServerSkillRow, agent_id: str, version: str) -> None:
-        if self.failing:
+        if self.failing or agent_id in self.refuses:
             raise TargetError("down")
         self.agents[agent_id] = version
 
@@ -198,6 +199,19 @@ async def test_a_failing_provider_keeps_its_agents_and_retries(
     assert await check_mirror(world.deps, world.mirror.id) == "unchanged"
     assert await _versions(world) == {"first": "2", "second": "2"}
     assert world.first.published == [NAME], "the provider that held it is not republished"
+    assert world.second.agents == {"other": "2"}
+
+
+async def test_one_refused_agent_does_not_hold_back_the_others(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    world = await _world(db_session, db_session_factory)
+    world.first.agents = {"archived": "1", "follows": "1"}
+    world.first.refuses = {"archived"}
+    world.upstream.server.skills[NAME]["guide.md"] = b"More.\n"
+
+    assert await check_mirror(world.deps, world.mirror.id) == "failed"
+    assert world.first.agents == {"archived": "1", "follows": "2"}
     assert world.second.agents == {"other": "2"}
 
 
