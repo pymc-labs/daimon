@@ -38,7 +38,8 @@ from daimon.core.skill_library import SyncedSkill, github_url_of
 from daimon.core.skill_sync.orchestrator import SyncReport, sync_agent_skills
 from daimon.core.skill_sync.resync_lock import hold_resync_locks
 from daimon.core.specs import SkillRepo
-from daimon.core.stores.domain import GitHubPushResyncRow, UserSkillRow
+from daimon.core.stores.accounts import get_account_with_tenant
+from daimon.core.stores.domain import GitHubPushResyncRow, Role, UserSkillRow
 from daimon.core.stores.github_access import (
     AgentRepo,
     InstallationLimitError,
@@ -127,6 +128,7 @@ class GitHubPanel(BaseModel):
 
     configured: bool
     can_manage: bool
+    can_connect: bool
     repos: list[PanelRepo]
     sync: PanelSync | None
     skills: list[PanelSkill]
@@ -408,12 +410,34 @@ def resync_results(
 # ---- reads ----------------------------------------------------------------------
 
 
-def can_manage(actor: AgentActor, target: AgentTarget) -> bool:
-    """An admin, or an owner of an agent the defaults do not manage, as the chat tools judge."""
+@dataclass(frozen=True)
+class GitHubAuthority:
+    manage: bool
+    connect: bool
+    # The actor's chat account, which a connect link is pinned to.
+    platform_user_id: str | None = None
+
+
+async def github_authority(
+    session: AsyncSession, actor: AgentActor, target: AgentTarget
+) -> GitHubAuthority:
+    """The agent's owner, or a platform admin, as GitHub's own checks judge them.
+
+    GitHub never accepts delegated authority, so a web workspace role alone does not
+    count. Connecting also needs the chat account a live admin check can attest: the
+    connect link's confirm step refuses anyone else, so the panel never offers it.
+    """
     if not target.sees_setup:
-        return False
-    return actor.subject.is_admin or (
-        target.owned and target.agent.metadata.get(MA_METADATA_KEY_MANAGED) != "true"
+        return GitHubAuthority(manage=False, connect=False)
+    identity = await get_account_with_tenant(session, account_id=actor.account_id)
+    if identity is not None and identity.tenant_id != actor.tenant_id:
+        identity = None
+    user_id = identity.platform_user_id if identity is not None else None
+    if target.owned and target.agent.metadata.get(MA_METADATA_KEY_MANAGED) != "true":
+        return GitHubAuthority(manage=True, connect=True, platform_user_id=user_id)
+    admin = identity is not None and identity.role is Role.ADMIN
+    return GitHubAuthority(
+        manage=admin, connect=admin and user_id is not None, platform_user_id=user_id
     )
 
 
@@ -495,6 +519,7 @@ async def _panel(
             session, tenant_id=actor.tenant_id, agent_name=agent_name_of(agent)
         )
         sources = repo_sources(agent, rows, target.agent_id)
+        authority = await github_authority(session, actor, target)
         sync = await get_latest_for_repo_refs(
             session,
             tenant_id=actor.tenant_id,
@@ -504,7 +529,8 @@ async def _panel(
     times = await _version_times(deps, actor, agent, listing)
     return GitHubPanel(
         configured=configured,
-        can_manage=can_manage(actor, target),
+        can_manage=authority.manage,
+        can_connect=authority.connect,
         repos=panel_repos(repos, installations, {a: p.display_name for a, p in people.items()}),
         sync=panel_sync(sync),
         skills=panel_skills(
@@ -530,11 +556,15 @@ async def get_panel(
 # ---- changes --------------------------------------------------------------------
 
 
-async def _managed_target(deps: AgentEditDeps, actor: AgentActor, ma_agent_id: str) -> AgentTarget:
+async def _managed_target(
+    deps: AgentEditDeps, actor: AgentActor, ma_agent_id: str, *, connecting: bool = False
+) -> tuple[AgentTarget, GitHubAuthority]:
     target = await _target(deps, actor, ma_agent_id)
-    if not can_manage(actor, target):
+    async with deps.session_factory() as session:
+        authority = await github_authority(session, actor, target)
+    if not (authority.connect if connecting else authority.manage):
         raise AgentEditError(ASK_WHO, kind="forbidden")
-    return target
+    return target, authority
 
 
 async def _audit(
@@ -573,7 +603,7 @@ async def connect_url(
     audited: ChangeRecorder | None = None,
 ) -> str:
     """A single-use Connect GitHub link for this agent only, minted for its manager."""
-    target = await _managed_target(deps, actor, ma_agent_id)
+    target, authority = await _managed_target(deps, actor, ma_agent_id, connecting=True)
     if root is None:
         raise AgentEditError(NOT_CONFIGURED, kind="conflict")
     async with deps.session_factory() as session, session.begin():
@@ -590,6 +620,8 @@ async def connect_url(
             session,
             tenant_id=actor.tenant_id,
             requester_account_id=actor.account_id,
+            # Pins the link to this chat account, as the chat tool's link is.
+            requester_platform_user_id=authority.platform_user_id,
             agent_id=target.agent_id,
             agent_name=target.agent.name,
             agent_ma_id=target.agent.id,
@@ -622,7 +654,7 @@ async def set_working(
     audited: ChangeRecorder | None = None,
 ) -> GitHubPanel:
     """Make one of the agent's repos its working repo, or clear it with None."""
-    target = await _managed_target(deps, actor, ma_agent_id)
+    target, _authority = await _managed_target(deps, actor, ma_agent_id)
     name = _repo_name(repo) if repo is not None else None
     async with deps.session_factory() as session, session.begin():
         try:
@@ -659,7 +691,7 @@ async def remove_repo(
     audited: ChangeRecorder | None = None,
 ) -> GitHubPanel:
     """Take one repo off this agent; other agents keep theirs, a shared repo stays shared."""
-    target = await _managed_target(deps, actor, ma_agent_id)
+    target, _authority = await _managed_target(deps, actor, ma_agent_id)
     name = _repo_name(repo)
     async with deps.session_factory() as session, session.begin():
         repo_id = await repo_id_for_agent_removal(
@@ -694,7 +726,7 @@ async def resync(
     Holds each source's push-queue lock throughout, so a push sync or another
     manual one of the same branch, in any process, gets a conflict instead.
     """
-    target = await _managed_target(deps, actor, ma_agent_id)
+    target, _authority = await _managed_target(deps, actor, ma_agent_id)
     app_id, app_key = sync.app_id, sync.app_private_key
     if app_id is None or app_key is None:
         raise AgentEditError(NOT_CONFIGURED, kind="conflict")

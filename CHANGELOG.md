@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   comes from: a repo (with branch and path), the library, elsewhere or Anthropic. It shows
   whether the latest push sync failed, and the release an outside pipeline stamped in the
   agent's `source_release`, `source_release_at` and `source_release_url` metadata. The
-  agent's owner or an admin can connect GitHub, pick or clear the working repo, take a repo
+  agent's owner or a server admin can connect GitHub, pick or clear the working repo, take a repo
   off the agent and resync its repo skills now. Each change is audited like the chat tools.
 
 - **The web app signs in with Slack and Microsoft again, besides Discord.** Each shows on the sign-in page once its login app is set (`DAIMON_HUB__SLACK_*`, `DAIMON_MICROSOFT_ACCOUNTS__*`); register `<web public url>/auth/slack/callback` and `/auth/microsoft/callback` on it. A signed-in member connects the other two from the account menu (see below).

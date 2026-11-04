@@ -13,7 +13,10 @@ from cryptography.fernet import Fernet
 from daimon.core.config import Settings
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.skill_sync.resync_lock import resync_lock_key
-from daimon.core.stores import github_access, github_push_resync, security_audit
+from daimon.core.stores import github_access, github_connect, github_push_resync, security_audit
+from daimon.core.stores.accounts import set_role
+from daimon.core.stores.domain import Role
+from daimon.core.stores.identity import create_platform_principal
 from daimon.core.stores.user_skills import upsert_user_skill
 from daimon.testing.factories import make_github_app_installation, make_tenant_github_repo
 from sqlalchemy import text
@@ -140,6 +143,7 @@ async def test_get_panel_when_owner_then_lists_repos_skills_and_release(
     body: dict[str, Any] = got.json()
     assert got.status_code == 200, got.text
     assert body["configured"] is False and body["can_manage"] is True, "owner manages"
+    assert body["can_connect"] is True, "an owner's link is one the confirm step accepts"
     assert [r["name"] for r in body["repos"]] == ["acme/docs", "acme/app"], "working first"
     assert body["repos"][0]["working"] and body["repos"][0]["installation"] == "active"
     [skill] = body["skills"]
@@ -239,16 +243,48 @@ async def test_get_panel_when_stranger_or_unknown_then_403_or_404(
     assert missing.status_code == 404, missing.text
 
 
-async def test_get_panel_when_admin_then_manages(
+async def test_github_authority_when_web_or_platform_admin_then_follows_github_checks(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    """A workspace admin who does not own the agent may manage it."""
+    """A web role alone manages nothing; a platform admin manages, and connects with a chat id."""
     agents, owner, other = await agent_people(db_session)
     await make_admin(db_session_factory, other)
     token = await sign_in_token(db_session_factory, other)
-    async with agent_client(agents, owner.tenant_id, db_session_factory, token) as client:
-        got = await client.get("/api/agents/ag_w/github")
-    assert got.status_code == 200 and got.json()["can_manage"] is True, got.text
+    url = "/api/agents/ag_w/github"
+
+    async def calls() -> tuple[dict[str, Any], int, httpx.Response]:
+        async with agent_client(
+            agents, owner.tenant_id, db_session_factory, token, settings=_configured()
+        ) as client:
+            got = await client.get(url)
+            put = await client.put(f"{url}/working", json={"repo": None}, headers=OWN)
+            link = await client.post(f"{url}/connect", headers=OWN)
+        return got.json(), put.status_code, link
+
+    web_only = await calls()
+    async with db_session_factory.begin() as db:
+        await set_role(db, other.account_id, Role.ADMIN)
+    stored = await calls()
+    async with db_session_factory.begin() as db:
+        await create_platform_principal(
+            db,
+            tenant_id=other.tenant_id,
+            platform="discord",
+            external_id="u-77",
+            account_id=other.account_id,
+        )
+    attested = await calls()
+    pinned = attested[2].json()["url"].rsplit("/", 1)[1]
+    async with db_session_factory() as db:
+        invitation = await github_connect.get_invitation(db, github_connect.digest(pinned))
+    assert (web_only[0]["can_manage"], web_only[0]["can_connect"]) == (False, False), web_only
+    assert (web_only[1], web_only[2].status_code) == (403, 403), "a web role alone is refused"
+    assert (stored[0]["can_manage"], stored[0]["can_connect"]) == (True, False), stored
+    assert (stored[1], stored[2].status_code) == (200, 403), "no chat id: no dead-end link"
+    assert attested[0]["can_connect"] is True and attested[2].status_code == 200, attested
+    assert invitation is not None and invitation.requester_platform_user_id == "u-77", (
+        "the link is pinned to the admin's chat account"
+    )
 
 
 async def test_connect_when_unconfigured_then_409_and_when_configured_then_link(
