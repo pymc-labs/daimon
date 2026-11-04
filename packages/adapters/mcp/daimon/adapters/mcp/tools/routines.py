@@ -90,6 +90,7 @@ from daimon.core.stores.domain import (
 )
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.teams_graph import GraphUnavailable
+from daimon.core.web_links import TenantLinks
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel
@@ -635,7 +636,11 @@ class RoutineView(RoutineRow):
 
 async def _viewed(runtime: McpRuntime, auth: AuthIdentity, row: RoutineRow) -> RoutineView:
     """`row` with its drawer on the web, when the workspace has one for this caller."""
-    links = await tenant_links(runtime, auth)
+    return _with_link(row, await tenant_links(runtime, auth))
+
+
+def _with_link(row: RoutineRow, links: TenantLinks | None) -> RoutineView:
+    """`row` with its drawer, from links resolved once for the whole call."""
     view = RoutineView.model_validate(row, from_attributes=True)
     return view if links is None else view.model_copy(update={"web_url": links.routine(row.id)})
 
@@ -729,9 +734,9 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def list_routines(ctx: Context) -> list[RoutineView]:  # pyright: ignore[reportUnusedFunction]
         """List the routines you created (an admin sees every routine in the workspace)."""
         auth = await _auth(ctx)
-        return [
-            await _viewed(runtime, auth, row) for row in await _list_routines_impl(runtime, auth)
-        ]
+        rows = await _list_routines_impl(runtime, auth)
+        links = await tenant_links(runtime, auth)
+        return [_with_link(row, links) for row in rows]
 
     @mcp.tool
     async def get_routine(ctx: Context, routine_id: UUID) -> RoutineView:  # pyright: ignore[reportUnusedFunction]

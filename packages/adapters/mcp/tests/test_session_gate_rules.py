@@ -360,3 +360,51 @@ async def test_recorded_suppression_still_proves_confirmation(
         ma_agent_id="agent",
         reported_tools_sha256=hash_tools(agent.tools),
     )
+
+
+def _without_carded(tools: list[Any]) -> list[Any]:
+    """The tools a session bound before the carded tools existed was sent."""
+    from daimon.core.tool_safety import CARDED_TOOLS
+
+    return [
+        tool.model_copy(
+            update={"configs": [c for c in tool.configs or [] if c.name not in CARDED_TOOLS]}
+        )
+        if tool.type == "mcp_toolset" and tool.mcp_server_name == "daimon-mcp"
+        else tool
+        for tool in tools
+    ]
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "proven"),
+    [("add_skill", True), ("publish_report", True), ("forget_my_memory", False)],
+)
+async def test_a_session_bound_before_the_carded_tools_proves_other_cards_never_a_carded_one(
+    monkeypatch: pytest.MonkeyPatch, tool_name: str, proven: bool
+) -> None:
+    """The old hash still proves add_skill and publish, but no old hash authorizes a carded tool."""
+    monkeypatch.setattr(_session_gate, "daimon_rule_tools_for", AsyncMock(return_value=frozenset()))
+    recorded = _without_carded(
+        session_tools(
+            AGENT,
+            frozenset[str](),
+            tool_safety=POLICY,
+            public_url="https://mcp.example/mcp",
+            asks_before_publishing=True,
+        )
+    )
+    live = cast(
+        Any, SimpleNamespace(effective_config=SimpleNamespace(tools_sha256=hash_tools(recorded)))
+    )
+    assert (
+        await _session_gate._recorded_as_gated(  # pyright: ignore[reportPrivateUsage]
+            _runtime(),
+            AUTH,
+            live,
+            tool_name=tool_name,
+            ma_agent_id="agent",
+            reported_tools_sha256=hash_tools(AGENT.tools),
+        )
+        is proven
+    ), f"{tool_name} should{'' if proven else ' not'} be proven by a pre-carded bind"

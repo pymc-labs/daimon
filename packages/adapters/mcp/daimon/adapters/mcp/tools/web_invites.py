@@ -175,9 +175,11 @@ async def _create_impl(
         raise refused(err) from err
     try:
         await send_privately(runtime, auth, f"Invite link for {email}: {_link_of(runtime, token)}")
-    except Exception as err:
+    except BaseException as err:  # a cancelled delivery must not leave the link live
         async with runtime.session_factory.begin() as db:
             await web_admin.revoke_invite(db, actor, now(), invite.id)
+        if not isinstance(err, Exception):
+            raise
         why = str(err) if isinstance(err, ToolError) else "The link could not be sent."
         raise ToolError(f"{why} The invite was revoked.") from err
     links = await tenant_links(runtime, auth)
@@ -234,9 +236,11 @@ async def _issue_link_impl(
         raise refused(err) from err
     try:
         await send_privately(runtime, auth, f"Sign-in link: {_link_of(runtime, token)}")
-    except Exception as err:
+    except BaseException as err:  # a cancelled delivery must not leave the link live
         async with runtime.session_factory.begin() as db:
             await web_admin.revoke_issued_link(db, actor, now(), link_id)
+        if not isinstance(err, Exception):
+            raise
         why = str(err) if isinstance(err, ToolError) else "The link could not be sent."
         raise ToolError(f"{why} The link was revoked.") from err
     links = await tenant_links(runtime, auth)

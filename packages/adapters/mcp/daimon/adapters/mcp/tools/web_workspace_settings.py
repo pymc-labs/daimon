@@ -39,7 +39,7 @@ async def _change_impl(
     invoker_people: list[str],
     dm_enabled: bool | None,
     dm_memory_read_only: bool | None,
-    origin_context_id: str | None = None,
+    origin_context_id: str,
 ) -> WorkspaceSettingsChanged:
     actor = await web_admin_of(runtime, auth)
     await require_card(
@@ -71,18 +71,19 @@ def register_web_workspace_settings_tool(mcp: FastMCP, runtime: McpRuntime) -> N
     @mcp.tool(name="change_workspace_settings", tags={"admin"})
     async def change_settings(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
+        origin_context_id: str,
         modules: dict[ModuleName, bool] | None = None,
         default_agent: str | None = None,
         everyone_invokes: bool | None = None,
         invoker_people: list[str] | None = None,
         dm_enabled: bool | None = None,
         dm_memory_read_only: bool | None = None,
-        origin_context_id: str | None = None,
     ) -> WorkspaceSettingsChanged:
         """Change the workspace's web modules (chat, agents, channels, routines, credits,
         integrations), its web chat agent, who may start turns (everyone, or exactly the
         web people in ``invoker_people``) and the direct-message rules. Admin-only.
-        Runs on the person's Confirm card in chat; pass this active turn's origin_context_id."""
+        Runs on the person's Confirm card in chat; every call needs this active turn's
+        origin_context_id."""
         return await _change_impl(
             runtime,
             await _auth(ctx),

@@ -1,5 +1,6 @@
 """Web admin tools: the admin gate, the core call, and that no link or token reaches a result."""
 
+import asyncio
 import dataclasses
 import uuid
 from datetime import UTC, datetime
@@ -137,6 +138,7 @@ async def test_every_admin_tool_when_member_then_refused(runtime):
             invoker_people=[],
             dm_enabled=None,
             dm_memory_read_only=None,
+            origin_context_id="ctx",
         )
 
 
@@ -272,6 +274,7 @@ async def test_change_settings_when_admin_then_reports_changes(runtime, monkeypa
         invoker_people=[],
         dm_enabled=None,
         dm_memory_read_only=None,
+        origin_context_id="ctx",
     )
     assert [(c.setting, c.value) for c in out.changes] == [("Who can use the agents", "Everyone")]
 
@@ -522,6 +525,46 @@ async def test_issue_link_when_delivery_raises_then_only_that_link_is_revoked(ru
     assert revoked == [link_id], "just the link issued is revoked"
 
 
+async def test_delivery_cancelled_then_the_issued_link_is_revoked_and_cancel_propagates(
+    runtime, monkeypatch
+):
+    """A cancelled turn is not a delivery: neither the invite nor the link may stay live."""
+    revoked: list[uuid.UUID] = []
+    invite, link_id = _invite(), uuid.uuid4()
+
+    async def fake_create(_db, _admin, _now, **_kw):
+        return invite, TOKEN
+
+    async def fake_issue(*_a: Any, **_k: Any):
+        return SimpleNamespace(), TOKEN, link_id
+
+    async def fake_revoke(_db, _admin, _now, got):
+        revoked.append(got)
+
+    async def cancelled(*_a: Any):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(invite_tool.web_admin, "create_invite", fake_create)
+    monkeypatch.setattr(invite_tool.web_admin, "issue_sign_in_link", fake_issue)
+    monkeypatch.setattr(invite_tool.web_admin, "revoke_invite", fake_revoke)
+    monkeypatch.setattr(invite_tool.web_admin, "revoke_issued_link", fake_revoke)
+    monkeypatch.setattr(invite_tool, "send_privately", cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        await invite_tool._create_impl(
+            runtime,
+            make_auth(),
+            email="v@example.com",
+            role="visitor",
+            agent_ids=["a1"],
+            credit_usd=Decimal(0),
+            days=7,
+            allow_files=False,
+        )
+    with pytest.raises(asyncio.CancelledError):
+        await invite_tool._issue_link_impl(runtime, make_auth(), str(uuid.uuid4()))
+    assert revoked == [invite.id, link_id], "each undelivered link is revoked"
+
+
 async def test_create_invite_when_email_is_not_valid_then_refused(runtime):
     with pytest.raises(ToolError, match="valid email"):
         await invite_tool._create_impl(
@@ -558,3 +601,16 @@ async def test_web_admin_of_when_web_person_suspended_then_refused(runtime, monk
     monkeypatch.setattr(shared.web_people, "get_person_for_account", suspended)
     with pytest.raises(ToolError, match="suspended"):
         await shared.web_admin_of(runtime, make_auth())
+
+
+async def test_change_settings_tool_requires_origin_context_id() -> None:
+    """The card key must be on every call; an optional one lets a call skip the card."""
+    from daimon.adapters.mcp.tools.web_workspace_settings import (
+        register_web_workspace_settings_tool,
+    )
+    from fastmcp import FastMCP
+
+    mcp = FastMCP("t")
+    register_web_workspace_settings_tool(mcp, fake_runtime())
+    tool = await mcp.get_tool("change_workspace_settings")
+    assert "origin_context_id" in tool.parameters["required"], "required in the tool signature"

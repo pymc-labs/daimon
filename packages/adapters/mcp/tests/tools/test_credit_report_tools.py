@@ -89,3 +89,34 @@ async def test_feedback_when_days_out_of_range_then_tool_error(runtime):
     for days in (0, 366):
         with pytest.raises(ToolError, match="days"):
             await tool._feedback_impl(runtime, make_auth(), days)
+
+
+@pytest.mark.parametrize(
+    ("dm", "names", "details"),
+    [(True, ["ada", "No person"], "shown"), (False, ["Person 1", "No person"], "direct_message")],
+)
+async def test_spend_by_person_when_not_a_dm_then_names_withheld(
+    runtime, monkeypatch, dm, names, details
+):
+    """Person names default to the email local part, so they show only in the admin's DM."""
+
+    async def origin(*_a: Any, **_k: Any):
+        return SimpleNamespace(
+            platform="discord",
+            thread_id="dm:1" if dm else "C9",
+            parent_channel_id="",
+            shared_channel=False,
+            sender_foreign=False,
+        )
+
+    async def fake_spend(_sessions, **_kw: Any):
+        return [
+            credit_report.SpendEntry("p1", "ada", 3, 2.0),
+            credit_report.SpendEntry(credit_report.NO_PERSON, "No person", 1, 0.5),
+        ]
+
+    monkeypatch.setattr(shared, "get_chat_origin", origin)
+    monkeypatch.setattr(tool.credit_report, "spend_breakdown", fake_spend)
+    out = await tool._spend_impl(runtime, make_auth(), "person", "30d", "ctx")
+    assert [r.name for r in out.rows] == names, "names shown only in a direct message"
+    assert out.private_details == details, "the field says what was left out"

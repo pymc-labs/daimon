@@ -167,7 +167,8 @@ async def _recorded_as_gated(
     the newly added watch gates. The requested action must still ask in that
     exact recorded template. Watch enrollment never uses this compatibility path.
     A session bound before `update_watch` was gated proves every other card it
-    gated, never an edit.
+    gated, never an edit. Likewise one bound before `CARDED_TOOLS` proves the
+    other cards, never a carded tool.
     """
     recorded = live.effective_config
     if recorded is None:
@@ -220,9 +221,20 @@ async def _recorded_as_gated(
     )
     before_pin_clear = confirmed - {"request_channel_pin_clear"}
     lead_tools = await confirmation_tools(runtime.session_factory, auth.tenant_id)
-    for confirmed_tools, pre_watch in dict.fromkeys(
-        (candidate | lead_tools | watch_tools, not watch_tools)
+    # A bind from before the carded tools existed holds none of them gated. Such
+    # a template proves only a call to some other tool; no old hash can ever
+    # authorize a carded one.
+    carded = frozenset(CARDED_TOOLS)
+    pre_carded_ok = tool_name not in carded
+    for confirmed_tools, pre_watch, pre_carded in dict.fromkeys(
+        (
+            (candidate - carded if pre_carded else candidate) | lead_tools | watch_tools,
+            not watch_tools,
+            pre_carded,
+        )
         for candidate in (confirmed, legacy, before_config, before_config_legacy, before_pin_clear)
+        for pre_carded in (False, True)
+        if pre_carded_ok or not pre_carded
         for watch_tools in (
             WATCH_CONFIRMED_TOOLS,
             WATCH_CONFIRMED_TOOLS - {"update_watch"},
@@ -247,17 +259,20 @@ async def _recorded_as_gated(
                         else ()
                     ),
                 )
-                if pre_watch:
-                    # Policy-on sessions add watch gates implicitly too. Rebuild
-                    # the exact pre-watch template for non-watch actions only;
-                    # no old hash can authorize watch enrollment or rotation.
+                if pre_watch or pre_carded:
+                    # Policy-on sessions add these gates implicitly too. Rebuild
+                    # the exact older template for other actions only; no old
+                    # hash can authorize watch enrollment, rotation or a carded tool.
+                    stripped = (WATCH_CONFIRMED_TOOLS if pre_watch else frozenset[str]()) | (
+                        carded if pre_carded else frozenset[str]()
+                    )
                     tools = [
                         tool.model_copy(
                             update={
                                 "configs": [
                                     config
                                     for config in tool.configs or []
-                                    if config.name not in WATCH_CONFIRMED_TOOLS
+                                    if config.name not in stripped
                                 ]
                             }
                         )

@@ -146,6 +146,7 @@ async def test_web_admin_tools_when_no_card_then_refused(monkeypatch: pytest.Mon
             invoker_people=[],
             dm_enabled=None,
             dm_memory_read_only=None,
+            origin_context_id="ctx",
         ),
     ]
     for call in calls:

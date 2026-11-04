@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import Literal
 
@@ -13,7 +13,13 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
-from daimon.adapters.mcp.tools._web_admin import agent_names, now, web_admin_of
+from daimon.adapters.mcp.tools._web_admin import (
+    PrivateDetails,
+    agent_names,
+    now,
+    private_details,
+    web_admin_of,
+)
 from daimon.adapters.mcp.tools._web_url import WebUrl, tenant_links
 from daimon.core import credit_report, credit_views
 from daimon.core.credit_report import AgentLabel, DailyEntry, LedgerEntry, SpendBy, TurnEntry
@@ -65,6 +71,8 @@ class CreditsOverview:
 class CreditsSpend:
     by: SpendBy
     rows: list[SpendLine]
+    private_details: PrivateDetails
+    """By person, names show only when `shown`; otherwise rows read `Person 1`, `Person 2`."""
     web_url: WebUrl = None
 
 
@@ -142,9 +150,14 @@ async def _overview_impl(runtime: McpRuntime, auth: AuthIdentity) -> CreditsOver
 
 
 async def _spend_impl(
-    runtime: McpRuntime, auth: AuthIdentity, by: SpendBy, period: credit_views.Period
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    by: SpendBy,
+    period: credit_views.Period,
+    origin_context_id: str | None = None,
 ) -> CreditsSpend:
     actor = await web_admin_of(runtime, auth)
+    details = await private_details(runtime, auth, origin_context_id)
     rows = await credit_report.spend_breakdown(
         runtime.session_factory,
         tenant_id=actor.tenant_id,
@@ -156,8 +169,15 @@ async def _spend_impl(
         channel_names=_stored_names,
     )
     links = await tenant_links(runtime, auth)
+    lines = [_line(e) for e in rows]
+    if by == "person" and details != "shown":
+        # Person names default to the email local part, which is private.
+        lines = [
+            line if line.id == credit_report.NO_PERSON else replace(line, name=f"Person {n}")
+            for n, line in enumerate(lines, 1)
+        ]
     return CreditsSpend(
-        by=by, rows=[_line(e) for e in rows], web_url=links.spend() if links else None
+        by=by, rows=lines, private_details=details, web_url=links.spend() if links else None
     )
 
 
@@ -202,11 +222,16 @@ def register_credit_report_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool(tags={"admin"})
     async def get_credits_spend(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, by: SpendBy = "person", period: credit_views.Period = "30d"
+        ctx: Context,
+        by: SpendBy = "person",
+        period: credit_views.Period = "30d",
+        origin_context_id: str | None = None,
     ) -> CreditsSpend:
         """The workspace's spend in billed dollars over ``period``, one row per ``person``,
-        ``agent`` or ``channel``, biggest first. Admin-only."""
-        return await _spend_impl(runtime, await _auth(ctx), by, period)
+        ``agent`` or ``channel``, biggest first. Person names show only in a direct message
+        with the admin; elsewhere ``private_details`` is ``direct_message`` and they read
+        ``Person 1``, ``Person 2``. Pass this active turn's origin_context_id. Admin-only."""
+        return await _spend_impl(runtime, await _auth(ctx), by, period, origin_context_id)
 
     @mcp.tool(tags={"admin"})
     async def get_feedback_summary(ctx: Context, days: int = 30) -> FeedbackSummary:  # pyright: ignore[reportUnusedFunction]
