@@ -68,12 +68,17 @@ async def set_agent_follow(
 ) -> None:
     """Follow the skill's new versions, or keep the version the agent pins.
 
-    The caller moves a newly following agent with `sync.follow_now`.
+    Under the skill's lock, so a sync in flight finishes before the choice lands and the
+    next one sees it. The caller moves a newly following agent with `sync.follow_now`.
     """
     target = await load_target(deps, actor=actor, ma_agent_id=agent_id)
     require_setup(target, "Skills")
     _require_unmanaged(target.managed)
-    async with deps.session_factory() as session, session.begin():
+    async with (
+        skill_lock(deps, tenant_id=actor.tenant_id, skill_id=skill_id),
+        deps.session_factory() as session,
+        session.begin(),
+    ):
         if (
             await store.mirror_of_skill(session, tenant_id=actor.tenant_id, skill_id=skill_id)
             is None
