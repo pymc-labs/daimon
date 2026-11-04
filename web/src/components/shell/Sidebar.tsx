@@ -6,7 +6,7 @@ import { useMemo, useState } from "react"
 import { Link, NavLink, useMatch, useNavigate } from "react-router"
 import { toast } from "sonner"
 
-import { BrandIcon, Logo } from "@/components/brand"
+import { BrandIcon } from "@/components/brand"
 import { AgentAvatar, Avatar, Kbd } from "@/components/common"
 import { useConfirm } from "@/lib/confirm"
 import { CreditMeter } from "@/components/CreditMeter"
@@ -86,7 +86,7 @@ function WorkspaceSwitcher({ me }: { me: Me }) {
   const pick = (id: string) => { if (id !== me.workspace.id) switchTo.mutate(id) }
   const label = (
     <>
-      <Logo className="size-6" />
+      <BrandIcon brand={me.workspace.platform} className="size-6" />
       <span className="truncate text-sm font-semibold">{me.workspace.name}</span>
     </>
   )
