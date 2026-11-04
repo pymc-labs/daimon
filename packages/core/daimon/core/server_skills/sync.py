@@ -45,6 +45,7 @@ __all__ = [
     "UpstreamUnreachable",
     "approve_update",
     "check_mirror",
+    "follow_now",
     "version_label",
 ]
 
@@ -366,6 +367,31 @@ async def _check_locked(
     return await _accept(
         deps, mirror, entry, digest, bundle, allowed_tools=allowed_tools_of(entry.frontmatter)
     )
+
+
+async def follow_now(deps: SyncDeps, *, tenant_id: uuid.UUID, skill_id: str, agent_id: str) -> None:
+    """Move an agent that just chose to follow onto the current version, as the sync would."""
+    async with deps.sessionmaker() as session:
+        first = await store.mirror_of_skill(session, tenant_id=tenant_id, skill_id=skill_id)
+    if first is None:
+        return
+    async with deps.lock(first):
+        async with deps.sessionmaker() as session:
+            mirror = await store.get_mirror(session, first.id)
+            deployments = await store.list_deployments(session, first.id)
+            pinned = await store.pinned_agents(session, tenant_id=tenant_id, skill_id=skill_id)
+        if mirror is None or agent_id in pinned:
+            return
+        for target in deps.targets:
+            held = deployments.get(target.provider)
+            if held is None or held.digest != mirror.digest:
+                continue  # the next check deploys it first
+            try:
+                attached = [a for a in await target.attached(mirror) if a.agent_id == agent_id]
+            except TargetError:
+                continue  # the next check moves it
+            for repin in plan_repins(attached, version=held.version, pinned=pinned):
+                await _repin(deps, target, mirror, repin)
 
 
 async def approve_update(deps: SyncDeps, mirror_id: uuid.UUID, *, digest: str) -> CheckResult:

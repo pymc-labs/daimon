@@ -72,16 +72,16 @@ def repin_residue(source: BackendAgent, skill_id: str) -> str:
     """
     from daimon.core.turn.runtime_manifest import source_preservation_pin
 
-    update: dict[str, object] = {"configuration_digest": "repin"}
-    if (native := source.source) is not None:
-        raw = native.native
+    update: dict[str, object] = {}
+    if (native := source.source) is not None and isinstance(raw := native.native, dict):
+        # The record digest covers the native record, so it is blanked only alongside it:
+        # an unreadable record keeps both, and any repin then changes the residue.
+        update["configuration_digest"] = "repin"
         update["source"] = native.model_copy(
             update={
                 "revision": Revision(local=0),
                 "updated_at": None,
-                "native": {k: v for k, v in raw.items() if k not in _REPIN_MARKS}
-                if isinstance(raw, dict)
-                else raw,
+                "native": {k: v for k, v in raw.items() if k not in _REPIN_MARKS},
             }
         )
     blanked = with_skill_version(source.model_copy(update=update), skill_id, "")
@@ -147,8 +147,12 @@ class ConsentKeeper:
             renewed = await renewer.backends.renew_consent(
                 agent,
                 expected=consented.revision,
-                account_id=renewer.account_id,
-                reason=f"server skill update; skill={mirror.skill_id}; digest={mirror.digest}",
+                # The sync renews, not a person; the adder only lends their read rights.
+                account_id=None,
+                reason=(
+                    f"actor=server_skill_sync; added_by={renewer.account_id}; "
+                    f"agent={agent_id}; skill={mirror.skill_id}; digest={mirror.digest}"
+                ),
                 vouch=lambda captured: (
                     repin_residue(captured, mirror.skill_id) == consented.residue
                 ),

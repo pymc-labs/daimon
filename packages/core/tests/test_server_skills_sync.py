@@ -22,6 +22,7 @@ from daimon.core.server_skills.sync import (
     UpstreamGone,
     approve_update,
     check_mirror,
+    follow_now,
 )
 from daimon.core.skills.ingest import SkillBundle
 from daimon.core.stores import server_skills as store
@@ -307,6 +308,40 @@ async def test_a_hold_is_released_once_the_agent_is_current(
     world.first.agents["follows"] = "2"
     assert await check_mirror(world.deps, world.mirror.id) == "unchanged"
     assert await _held(world, "follows") == {}, "an agent already current holds nothing"
+
+
+async def test_an_agent_that_resumes_following_moves_at_once(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Following again repins to the deployed version now, not on the next check."""
+    world = await _world(db_session, db_session_factory)
+    tenant = world.mirror.tenant_id
+    async with world.deps.sessionmaker.begin() as session:
+        await store.put_deployment(
+            session,
+            mirror_id=world.mirror.id,
+            tenant_id=tenant,
+            provider="first",
+            digest=world.mirror.digest,
+            version="5",
+            now=NOW,
+        )
+    await follow_now(world.deps, tenant_id=tenant, skill_id="skill_1", agent_id="pins")
+    assert world.first.agents["pins"] == "1", "a pinned agent stays until it follows"
+
+    async with world.deps.sessionmaker.begin() as session:
+        await store.set_follow(
+            session, tenant_id=tenant, agent_id="pins", skill_id="skill_1", follow=True, now=NOW
+        )
+    world.first.held = {"follows"}
+    await follow_now(world.deps, tenant_id=tenant, skill_id="skill_1", agent_id="pins")
+    assert world.first.agents == {"follows": "1", "pins": "5"}, "only that agent moves"
+
+    world.first.held = {"pins"}
+    world.first.agents["pins"] = "1"
+    await follow_now(world.deps, tenant_id=tenant, skill_id="skill_1", agent_id="pins")
+    assert world.first.agents["pins"] == "1", "the consent rules still apply"
+    assert await _held(world, "pins") == {"skill_1": world.mirror.digest}
 
 
 async def test_a_listing_never_rewrites_the_accepted_tools(

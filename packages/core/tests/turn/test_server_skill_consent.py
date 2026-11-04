@@ -5,7 +5,12 @@ from types import SimpleNamespace
 
 import pytest
 from daimon.core.channel_backend import AgentBackendService
-from daimon.core.server_skills.consent import ConsentKeeper, Renewer, with_skill_version
+from daimon.core.server_skills.consent import (
+    ConsentKeeper,
+    Renewer,
+    repin_residue,
+    with_skill_version,
+)
 from daimon.core.server_skills.sync import NeedsReconfirm
 from daimon.core.turn import runtime_manifest
 from daimon.core.turn.runtime_manifest import source_preservation_pin
@@ -103,8 +108,15 @@ async def test_same_drops_renew_the_consent_and_audit_it(consented):
     events = await service.audit(agent.tenant_id)
     renewal = events[-1]
     assert renewal.operation == "renew" and renewal.outcome == "allowed"
-    assert renewal.account_id == actor.account_id, "the mirror's adder vouches for it"
-    for part in ("skill=skill_1", "digest=digest-2", f"source_pin={old_pin}->{new_pin}"):
+    assert renewal.account_id is None, "the sync renews, not a person"
+    for part in (
+        "actor=server_skill_sync",
+        f"added_by={actor.account_id}",
+        "agent=agent",
+        "skill=skill_1",
+        "digest=digest-2",
+        f"source_pin={old_pin}->{new_pin}",
+    ):
         assert part in renewal.reason, f"the audit names {part}"
 
 
@@ -164,6 +176,32 @@ async def test_an_edit_racing_the_repin_is_never_renewed(consented):
         await keeper.renew(MIRROR, "agent", checked)
     assert await service.current(agent) == revision, "no renewal was written"
     assert await service.audit(agent.tenant_id) == before, "nothing renewed, nothing audited"
+
+
+async def test_another_skill_changing_alongside_the_repin_is_never_renewed(consented):
+    """Only the followed skill may move; any other skill change stays for the owner."""
+    keeper, service, agent, _, captured, revision = consented
+    checked = await keeper.check(MIRROR, "agent", "2")
+    assert checked is not None
+    _repin(captured)
+    spec = captured[0].effective_spec
+    skills = (*spec.skills, SkillRef(id="skill_2", version="7", source="custom"))
+    spec = spec.model_copy(update={"skills": skills})
+    native = captured[0].source.model_copy(update={"spec": spec})
+    captured[0] = captured[0].model_copy(update={"effective_spec": spec, "source": native})
+    with pytest.raises(NeedsReconfirm, match="changed since the check"):
+        await keeper.renew(MIRROR, "agent", checked)
+    assert await service.current(agent) == revision, "no renewal was written"
+
+
+def test_an_unreadable_record_keeps_its_digest_in_the_residue():
+    """Without a native record to blank, the record digest still tells repins apart."""
+    source = _with_skill(captured_source())
+    opaque = source.model_copy(
+        update={"source": source.source.model_copy(update={"native": "opaque"})}
+    )
+    moved = opaque.model_copy(update={"configuration_digest": "d" * 64})
+    assert repin_residue(opaque, "skill_1") != repin_residue(moved, "skill_1")
 
 
 async def test_without_anyone_to_vouch_the_update_is_held(consented):
