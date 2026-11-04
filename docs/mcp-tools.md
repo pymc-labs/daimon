@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 206 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 215 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -74,6 +74,17 @@ owner.
 | --- | --- | --- |
 | `list_agent_coding_keys` | all callers | List an agent's live coding keys, never their tokens: all for an admin, the caller's own for the agent's owner. |
 | `revoke_agent_coding_key` | all callers | Revoke an agent coding key: any for an admin, the caller's own for its owner. |
+
+## `agent_edits`
+
+Chat tools for the agent page's remaining writes: revert to a recorded version, change
+owners and save a skill's files.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `revert_agent` | all callers | Write a recorded version of an agent's setup as its next version; its name, avatar, places and sign-ins stay as they are. |
+| `save_agent_skill_files` | all callers | Publish text files as a new version of one of an agent's skills, or as a new skill when ``skill_id`` is left out, and pin it on the agent. |
+| `set_agent_owners` | admin only | Make an agent's owner and co-owners exactly these people, each a web person id or an account id. |
 
 ## `agent_removal`
 
@@ -230,6 +241,18 @@ Post requester-only private forms for agent keys, MCP tokens and GitHub access.
 | `request_mcp_oauth` | Discord callers, Slack callers, Teams callers | Connect an agent to an MCP server that signs people in through the browser, such as Notion or Atlassian. |
 | `request_mcp_token` | Discord callers, Slack callers, Teams callers | Connect an agent such as research-bot to Linear through an MCP endpoint with a bearer token, not browser OAuth. |
 | `request_watch_credential` | Discord callers | Ask the person for their own read-only key for a server their watches check. |
+
+## `credit_reports`
+
+The web app's credit and feedback pages, from chat: a person's own use, the workspace
+overview, spend by person, agent or channel, and what people said about answers.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `get_credits_overview` | admin only | The workspace's credit balance, spend over the last 30 days and this month with a projection, daily spend and the credit history. |
+| `get_credits_spend` | admin only | The workspace's spend in billed dollars over ``period``, one row per ``person``, ``agent`` or ``channel``, biggest first. |
+| `get_feedback_summary` | admin only | Thumbs and the reasons picked per agent over the last ``days`` days, as counts. |
+| `get_my_credits` | all callers | The caller's own use in billed dollars over ``period`` (``30d``, ``this`` month or ``last`` month), by agent, and their latest turns. |
 
 ## `environments`
 
@@ -522,6 +545,16 @@ Authenticated turn origins and identity-pinned configuration targets.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `set_setup_target` | all callers | Switch this setup conversation to an explicitly selected MA agent identity. |
+
+## `skill_library_edits`
+
+Chat tools for the skill library's version writes: save a skill's files as its next
+version and restore an older one.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `restore_library_skill_version` | admin only | Publish an older version of a library skill again as its next version. |
+| `save_library_skill_files` | admin only | Publish text files as a library skill's next version. |
 
 ## `skill_uploads`
 

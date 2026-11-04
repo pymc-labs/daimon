@@ -12,11 +12,14 @@ from daimon.adapters.mcp.tools._ctx import (
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.direct_messages import send_direct_message_impl
+from daimon.core import web_admin
+from daimon.core.agent_target import ChangeRecorder
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.stores import web_roles
 from daimon.core.web_admin import WebAdmin, WebAdminError
 from daimon.core.web_roles_rules import role_for
 from fastmcp.exceptions import ToolError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 def now() -> datetime:
@@ -53,3 +56,21 @@ async def send_privately(runtime: McpRuntime, auth: AuthIdentity, text: str) -> 
     if not auth.platform_user_id:
         raise ToolError("Could not deliver by direct message: the caller has no chat user.")
     await send_direct_message_impl(runtime, auth, recipient_id=auth.platform_user_id, content=text)
+
+
+def audit_to(auth: AuthIdentity, action: str, detail: str | None = None) -> ChangeRecorder:
+    """A recorder naming the agent or skill changed, written in the change's transaction.
+    `detail` never carries a value."""
+
+    async def record(db: AsyncSession, name: str) -> None:
+        await web_admin.audit(
+            db,
+            tenant_id=auth.tenant_id,
+            actor_account_id=auth.account_id,
+            action=action,
+            target=name,
+            detail=detail,
+            at=now(),
+        )
+
+    return record

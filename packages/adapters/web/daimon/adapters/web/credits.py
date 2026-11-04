@@ -9,8 +9,8 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import uuid
-from collections.abc import Collection
-from datetime import datetime, timedelta
+from collections.abc import Collection, Sequence
+from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Literal
 
@@ -26,7 +26,7 @@ from daimon.adapters.web.channel_names import named_spend_channels
 from daimon.adapters.web.chat_json import AgentRef, agent_ref
 from daimon.adapters.web.faces import avatars_of
 from daimon.adapters.web.runtime import WebRuntime
-from daimon.core import credit_views, web_allowances
+from daimon.core import credit_report, credit_views, web_allowances
 from daimon.core.allowances import window_start
 from daimon.core.billing import (
     CheckoutAmountUnavailable,
@@ -35,7 +35,6 @@ from daimon.core.billing import (
 )
 from daimon.core.ma_resolver import retrieve_agent_cached
 from daimon.core.panel_audit import record_panel_write
-from daimon.core.platform_names import UNNAMED_CHANNEL
 from daimon.core.promo_codes import describe_refusal
 from daimon.core.promo_credit import PromoRedeemed, PromoRedeemRefused, redeem_in_transaction
 from daimon.core.spend_gate import (
@@ -45,7 +44,6 @@ from daimon.core.spend_gate import (
     spend_person_of_account,
 )
 from daimon.core.stores import spend_allowances, tenant_ledger
-from daimon.core.stores import tenants as tenants_store
 from daimon.core.stores import web_identities as identities_store
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores.domain import SpendAllowanceRow, WebPersonRow
@@ -58,24 +56,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 #: Amounts, in whole dollars, a card checkout may buy.
 CHECKOUT_AMOUNTS = frozenset({10, 25, 50, 100})
-_LEDGER_LIMIT = 50
 #: Refusals worded for the web app, where there is no channel to redeem in.
 _REDEEM_WORDS = {
     "needs_channel": "That code adds to a channel's budget. Redeem it in that channel.",
 }
-_RECENT_TURNS = 12
-_CENT = Decimal("0.01")
-_NO_AGENT = "other"
-_NO_PERSON = "none"
-_NO_CHANNEL = "none"
+_NO_AGENT = credit_report.NO_AGENT
 
 
 def _omit_none(value: object) -> bool:
     return value is None
 
 
-def _usd(value: Decimal) -> float:
-    return float(value.quantize(_CENT))
+_usd = credit_report.usd_of
 
 
 class CreditMeter(BaseModel):
@@ -236,19 +228,6 @@ async def person_meter(
     )
 
 
-def _ledger_wording(line: credit_views.LedgerLine, actor: str | None) -> tuple[str, str]:
-    """Who and what a ledger row reads as."""
-    if line.actor_account_id is not None:
-        return actor or "An admin", "Manual grant"
-    named = {
-        "topup": ("Stripe", "Card payment"),
-        "promo_credit": ("Daimon", "Promo code"),
-        "trial": ("Daimon", "Welcome credit"),
-        "manual_credit": ("Support", "Manual credit"),
-    }
-    return named.get(line.reason, ("Daimon", line.reason.replace("_", " ").capitalize()))
-
-
 def credits_router(runtime: WebRuntime) -> APIRouter:
     router = APIRouter(prefix="/api/credits")
     markup = runtime.settings.billing.markup
@@ -279,36 +258,21 @@ def credits_router(runtime: WebRuntime) -> APIRouter:
             i: agent_ref(agent, i, avatars.get(i, "")) for i, agent in zip(ids, found, strict=True)
         }
 
-    def spend_rows(rows: list[SpendRow]) -> list[SpendRow]:
-        """One row per id, summed, biggest first."""
-        merged: dict[str, SpendRow] = {}
-        for row in rows:
-            seen = merged.get(row.id)
-            merged[row.id] = (
-                row
-                if seen is None
-                else seen.model_copy(
-                    update={"turns": seen.turns + row.turns, "usd": seen.usd + row.usd}
-                )
-            )
-        return sorted(merged.values(), key=lambda r: (-r.usd, r.name))
-
-    async def agent_rows(
-        tenant_id: uuid.UUID, spend: list[credit_views.AgentSpend]
-    ) -> list[SpendRow]:
-        refs = await agents_by_id(tenant_id, {s.agent_id for s in spend if s.agent_id})
-        return spend_rows(
-            [
-                SpendRow(
-                    id=s.agent_id or _NO_AGENT,
-                    name=refs[s.agent_id].name if s.agent_id else "Other",
-                    avatar=refs[s.agent_id].avatar if s.agent_id else "",
-                    turns=s.turns,
-                    usd=_usd(s.usd),
-                )
-                for s in spend
-            ]
+    def spend_row(entry: credit_report.SpendEntry) -> SpendRow:
+        return SpendRow(
+            id=entry.id,
+            name=entry.name,
+            avatar=entry.avatar,
+            kind=entry.kind,
+            turns=entry.turns,
+            usd=entry.usd,
         )
+
+    async def agent_labels(
+        tenant_id: uuid.UUID, agent_ids: Collection[str]
+    ) -> dict[str, credit_report.AgentLabel]:
+        refs = await agents_by_id(tenant_id, agent_ids)
+        return {i: credit_report.AgentLabel(r.name, r.avatar) for i, r in refs.items()}
 
     @router.get("/meter")
     async def meter(  # pyright: ignore[reportUnusedFunction]
@@ -322,83 +286,60 @@ def credits_router(runtime: WebRuntime) -> APIRouter:
     async def mine(  # pyright: ignore[reportUnusedFunction]
         caller: Member, period: credit_views.Period = "30d"
     ) -> Mine:
-        now, tenant_id = runtime.now(), caller.person.tenant_id
-        since, until = credit_views.period_window(period, now=now)
+        tenant_id = caller.person.tenant_id
         async with runtime.sessionmaker() as db:
             _, user_id = await linked_identity(db, caller.person)
-            spend = await credit_views.spend_by_agent_for_user(
-                db,
-                tenant_id=tenant_id,
-                platform_user_id=user_id,
-                markup=markup,
-                since=since,
-                until=until,
-            )
-            charges = await credit_views.recent_turns(
-                db,
-                tenant_id=tenant_id,
-                account_id=caller.person.account_id,
-                markup=markup,
-                since=now - timedelta(days=30),
-                limit=_RECENT_TURNS,
-            )
-        by_agent = await agent_rows(tenant_id, spend)
-        refs = await agents_by_id(tenant_id, {c.agent_id for c in charges if c.agent_id})
+        report = await credit_report.my_credits(
+            runtime.sessionmaker,
+            tenant_id=tenant_id,
+            account_id=caller.person.account_id,
+            platform_user_id=user_id,
+            period=period,
+            now=runtime.now(),
+            markup=markup,
+            agent_labels=lambda ids: agent_labels(tenant_id, ids),
+        )
+        refs = await agents_by_id(tenant_id, {t.agent_id for t in report.turns if t.agent_id})
         return Mine(
-            by_agent=by_agent,
+            by_agent=[spend_row(e) for e in report.by_agent],
             turns=[
                 Turn(
-                    id=str(c.id),
-                    at=c.at.isoformat(),
-                    agent=refs[c.agent_id] if c.agent_id else agent_ref(None, _NO_AGENT),
-                    title=c.title or "Conversation",
-                    platform=c.platform,
-                    usd=_usd(c.usd),
+                    id=t.id,
+                    at=t.at,
+                    agent=refs[t.agent_id] if t.agent_id else agent_ref(None, _NO_AGENT),
+                    title=t.title,
+                    platform=t.platform,
+                    usd=t.usd,
                 )
-                for c in charges
+                for t in report.turns
             ],
-            spent_usd=_usd(sum((s.usd for s in spend), Decimal(0))),
-            turn_count=sum(r.turns for r in by_agent),
+            spent_usd=report.spent_usd,
+            turn_count=report.turn_count,
         )
 
     @router.get("/overview")
     async def overview(caller: Admin) -> Overview:  # pyright: ignore[reportUnusedFunction]
-        now, tenant_id = runtime.now(), caller.person.tenant_id
-        async with runtime.sessionmaker() as db:
-            recent = await credit_views.spend_overview(
-                db, tenant_id=tenant_id, now=now, markup=markup
-            )
-            lines = await credit_views.ledger_history(db, tenant_id=tenant_id, limit=_LEDGER_LIMIT)
-            actors = await credit_views.web_people_by_account(
-                db,
-                tenant_id=tenant_id,
-                account_ids={x.actor_account_id for x in lines if x.actor_account_id},
-            )
-            tenant = await tenants_store.get_tenant(db, tenant_id)
-        ledger: list[LedgerEntry] = []
-        for line in lines:
-            actor = actors.get(line.actor_account_id) if line.actor_account_id else None
-            by, note = _ledger_wording(line, actor.display_name if actor else None)
-            ledger.append(
-                LedgerEntry(
-                    id=str(line.id),
-                    at=line.at.isoformat(),
-                    kind=line.kind,
-                    amount_usd=_usd(line.usd),
-                    by=by,
-                    note=note,
-                )
-            )
+        report = await credit_report.overview_report(
+            runtime.sessionmaker,
+            tenant_id=caller.person.tenant_id,
+            now=runtime.now(),
+            markup=markup,
+        )
         return Overview(
-            balance_usd=_usd(recent.balance_usd),
-            spent_usd=_usd(recent.spent_usd),
-            turns=recent.turns,
-            spent_month_usd=_usd(recent.month_usd),
-            projected_month_usd=_usd(credit_views.projected_month(recent.month_usd, now=now)),
-            daily=[DailySpend(day=d.day.isoformat(), usd=_usd(d.usd)) for d in recent.daily],
-            ledger=ledger,
+            balance_usd=report.balance_usd,
+            spent_usd=report.spent_usd,
+            turns=report.turns,
+            spent_month_usd=report.spent_month_usd,
+            projected_month_usd=report.projected_month_usd,
+            daily=[DailySpend(day=d.day, usd=d.usd) for d in report.daily],
+            ledger=[
+                LedgerEntry(
+                    id=e.id, at=e.at, kind=e.kind, amount_usd=e.amount_usd, by=e.by, note=e.note
+                )
+                for e in report.ledger
+            ],
             topup=topup_mode(),
-            funding=tenant.funding_mode if tenant else "prepaid",
+            funding=report.funding,
         )
 
     @router.get("/spend")
@@ -408,53 +349,23 @@ def credits_router(runtime: WebRuntime) -> APIRouter:
         period: credit_views.Period = "30d",
     ) -> list[SpendRow]:
         tenant_id = caller.person.tenant_id
-        since, until = credit_views.period_window(period, now=runtime.now())
-        if by == "channel":
-            async with runtime.sessionmaker() as db:
-                channels = await credit_views.spend_by_channel(
-                    db, tenant_id=tenant_id, markup=markup, since=since, until=until
-                )
-                names = await credit_views.channel_names(db, tenant_id=tenant_id, rows=channels)
-            # Asked outside the read: a platform answer can take a few seconds.
-            names = await named_spend_channels(
-                runtime,
-                tenant_id,
-                names,
-                [(c.platform, c.channel_id) for c in channels if c.channel_id],
-            )
-            return spend_rows([_channel_row(c, names) for c in channels])
-        async with runtime.sessionmaker() as db:
-            if by == "agent":
-                by_agent = await credit_views.spend_by_agent_in_tenant(
-                    db, tenant_id=tenant_id, markup=markup, since=since, until=until
-                )
-                return await agent_rows(tenant_id, by_agent)
-            people = await credit_views.spend_by_person(
-                db, tenant_id=tenant_id, markup=markup, since=since, until=until
-            )
-            labels = await credit_views.label_people(
-                db, tenant_id=tenant_id, user_ids=[p.user_id for p in people if p.user_id]
-            )
-        rows: list[SpendRow] = []
-        for person in people:
-            if person.user_id is None:
-                rows.append(
-                    SpendRow(
-                        id=_NO_PERSON, name="No person", turns=person.turns, usd=_usd(person.usd)
-                    )
-                )
-                continue
-            label = labels.get(person.user_id)
-            rows.append(
-                SpendRow(
-                    id=str(label.person_id) if label and label.person_id else person.user_id,
-                    name=label.name if label else "Unknown person",
-                    kind="Visitor" if label and label.visitor else None,
-                    turns=person.turns,
-                    usd=_usd(person.usd),
-                )
-            )
-        return spend_rows(rows)
+
+        async def channel_names(
+            names: dict[tuple[str, str], str], channels: Sequence[tuple[str, str]]
+        ) -> dict[tuple[str, str], str]:
+            return await named_spend_channels(runtime, tenant_id, names, channels)
+
+        rows = await credit_report.spend_breakdown(
+            runtime.sessionmaker,
+            tenant_id=tenant_id,
+            by=by,
+            period=period,
+            now=runtime.now(),
+            markup=markup,
+            agent_labels=lambda ids: agent_labels(tenant_id, ids),
+            channel_names=channel_names,
+        )
+        return [spend_row(e) for e in rows]
 
     async def allowance_json(
         db: AsyncSession,
@@ -742,20 +653,6 @@ def credits_router(runtime: WebRuntime) -> APIRouter:
         raise HTTPException(status_code=404, detail="Adding credit isn't available here.")
 
     return router
-
-
-def _channel_row(spend: credit_views.ChannelSpend, names: dict[tuple[str, str], str]) -> SpendRow:
-    if spend.origin == "routine":
-        row_id, name, kind = "routines", "Routines", "routine"
-    elif credit_views.is_web_spend(spend.platform, spend.channel_id):
-        row_id, name, kind = "web", "Web", "web"
-    elif spend.channel_id is None:
-        row_id, name, kind = _NO_CHANNEL, "No channel", None
-    else:
-        row_id = f"{spend.platform}:{spend.channel_id}"
-        name = names.get((spend.platform, spend.channel_id or ""), UNNAMED_CHANNEL)
-        kind = spend.platform
-    return SpendRow(id=row_id, name=name, kind=kind, turns=spend.turns, usd=_usd(spend.usd))
 
 
 async def _invited(db: AsyncSession, row: SpendAllowanceRow) -> list[WebPersonRow]:

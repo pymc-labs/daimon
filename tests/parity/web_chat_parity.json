@@ -108,7 +108,7 @@
    "tool": "sync_skills"
   },
   "POST /api/agents/skills/{skill_id}/restore": {
-   "gap": "restore a library skill version; core: skill_library_files.restore_library_version"
+   "tool": "restore_library_skill_version"
   },
   "POST /api/agents/{agent_id}/apply": {
    "tool": "update_agent"
@@ -133,10 +133,10 @@
    "gap": "data-server node disconnect; logic lives in the web adapter (nodes.data_server), move to core first"
   },
   "POST /api/agents/{agent_id}/revert": {
-   "gap": "revert to a recorded version; core: agent_changes.revert"
+   "tool": "revert_agent"
   },
   "POST /api/agents/{agent_id}/skills": {
-   "gap": "edit an agent skill's files; core: agent_skill_files.save_skill_files (add_skill only uploads a whole skill)"
+   "tool": "save_agent_skill_files"
   },
   "POST /api/channels/{channel_id}/channel-copy/retire": {
    "tool": "archive_channel_copy"
@@ -245,7 +245,7 @@
    "tool": "update_environment"
   },
   "PUT /api/agents/skills/{skill_id}/files": {
-   "gap": "edit a library skill's files; core: skill_library_files.save_library_files"
+   "tool": "save_library_skill_files"
   },
   "PUT /api/agents/{agent_id}/keys/{key}": {
    "tool": "request_agent_key"
@@ -257,7 +257,7 @@
    "gap": "data-server node tool switches; move nodes.data_server to core first"
   },
   "PUT /api/agents/{agent_id}/owners": {
-   "gap": "set agent owners; core: agent_admin.set_owners"
+   "tool": "set_agent_owners"
   },
   "PUT /api/agents/{agent_id}/tool-rules": {
    "tool": "set_agent_tool_rule"
@@ -305,10 +305,5 @@
    "exempt": "serves the web app's own pages"
   }
  },
- "read_gaps": {
-  "GET /api/admin/feedback": "message feedback review",
-  "GET /api/credits/mine": "own spend detail; core: credit_views.spend_by_agent_for_user, recent_turns",
-  "GET /api/credits/overview": "workspace spend overview and ledger; core: credit_views.spend_overview, ledger_history",
-  "GET /api/credits/spend": "spend by agent, channel and person; core: credit_views.spend_by_*"
- }
+ "read_gaps": {}
 }

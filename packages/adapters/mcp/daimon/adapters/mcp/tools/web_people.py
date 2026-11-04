@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Literal
 
@@ -12,6 +12,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._web_admin import now, refused, web_admin_of
+from daimon.adapters.mcp.tools._web_url import WebUrl, tenant_links
 from daimon.core import web_admin
 from daimon.core.allowances import EVERYONE
 from daimon.core.defaults.ma_index import list_agents_by_tenant
@@ -37,11 +38,14 @@ class WebPerson:
     status: WebPersonStatus
     groups: list[str]
     last_seen: datetime
+    web_url: WebUrl = None
+    """Set on the result of a change, not in a list."""
 
 
 @dataclass(frozen=True)
 class WebPeople:
     people: list[WebPerson]
+    web_url: WebUrl = None
 
 
 @dataclass(frozen=True)
@@ -52,6 +56,7 @@ class WebPersonDetail:
     invite_id: str | None
     allow_files: bool | None
     """A visitor's invite and whether it lets them attach files; null for everyone else."""
+    web_url: WebUrl = None
 
 
 @dataclass(frozen=True)
@@ -128,7 +133,11 @@ async def _people_impl(
         )
         identities = await identities_store.list_for_people(db, person_ids=[p.id for p in rows])
         roles = await roles_of(db, rows)
-    return WebPeople([_person(p, roles[p.id], _groups(identities[p.id])) for p in rows])
+    links = tenant_links(runtime, auth)
+    return WebPeople(
+        [_person(p, roles[p.id], _groups(identities[p.id])) for p in rows],
+        links.person_list() if links else None,
+    )
 
 
 async def _person_impl(runtime: McpRuntime, auth: AuthIdentity, person_id: str) -> WebPersonDetail:
@@ -146,11 +155,13 @@ async def _person_impl(runtime: McpRuntime, auth: AuthIdentity, person_id: str) 
             else None
         )
     open_invite = invite if invite is not None and invite.revoked_at is None else None
+    links = tenant_links(runtime, auth)
     return WebPersonDetail(
         person=_person(person, role, _groups(identities)),
         identities=[f"{i.provider}:{i.label}" for i in identities],
         invite_id=None if open_invite is None else str(open_invite.id),
         allow_files=None if open_invite is None else open_invite.allow_files,
+        web_url=links.person(str(person.id)) if links else None,
     )
 
 
@@ -185,7 +196,11 @@ async def _update_impl(
             shown = await role_of(db, changed)
     except WebAdminError as err:
         raise refused(err) from err
-    return _person(changed, shown, _groups(identities))
+    links = tenant_links(runtime, auth)
+    return replace(
+        _person(changed, shown, _groups(identities)),
+        web_url=links.person(str(changed.id)) if links else None,
+    )
 
 
 async def _access_list_impl(runtime: McpRuntime, auth: AuthIdentity) -> AgentWebAccessList:

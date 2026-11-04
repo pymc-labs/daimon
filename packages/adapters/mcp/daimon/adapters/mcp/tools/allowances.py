@@ -11,6 +11,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._web_admin import agent_names, now, refused, web_admin_of
+from daimon.adapters.mcp.tools._web_url import WebUrl, tenant_links
 from daimon.core import credit_views, web_allowances
 from daimon.core.allowances import EVERYONE
 from daimon.core.stores import spend_allowances
@@ -40,11 +41,13 @@ class AllowanceLine:
 @dataclass(frozen=True)
 class Allowances:
     allowances: list[AllowanceLine]
+    web_url: WebUrl = None
 
 
 @dataclass(frozen=True)
 class AllowanceChanged:
     allowance: AllowanceLine
+    web_url: WebUrl = None
 
 
 @dataclass(frozen=True)
@@ -103,7 +106,11 @@ async def _list_impl(runtime: McpRuntime, auth: AuthIdentity) -> Allowances:
     actor = await web_admin_of(runtime, auth)
     async with runtime.session_factory() as db:
         rows = await spend_allowances.list_for_tenant(db, tenant_id=actor.tenant_id)
-    return Allowances(list(reversed(await _lines(runtime, actor.tenant_id, rows))))
+    links = tenant_links(runtime, auth)
+    return Allowances(
+        list(reversed(await _lines(runtime, actor.tenant_id, rows))),
+        links.allowance() if links else None,
+    )
 
 
 async def _create_impl(
@@ -140,7 +147,8 @@ async def _create_impl(
     except WebAdminError as err:
         raise refused(err) from err
     [line] = await _lines(runtime, actor.tenant_id, [row])
-    return AllowanceChanged(line)
+    links = tenant_links(runtime, auth)
+    return AllowanceChanged(line, links.allowance(line.allowance_id) if links else None)
 
 
 async def _set_impl(
@@ -161,7 +169,8 @@ async def _set_impl(
     except WebAdminError as err:
         raise refused(err) from err
     [line] = await _lines(runtime, actor.tenant_id, [row])
-    return AllowanceChanged(line)
+    links = tenant_links(runtime, auth)
+    return AllowanceChanged(line, links.allowance(line.allowance_id) if links else None)
 
 
 async def _delete_impl(

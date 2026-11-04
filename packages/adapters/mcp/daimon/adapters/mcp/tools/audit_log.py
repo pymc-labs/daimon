@@ -12,6 +12,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._web_admin import web_admin_of
+from daimon.adapters.mcp.tools._web_url import WebUrl, tenant_links
 from daimon.core import audit_trail
 from daimon.core.audit_trail import AuditFilter
 from daimon.core.stores import web_people as people_store
@@ -36,6 +37,7 @@ class AuditLine:
 @dataclass(frozen=True)
 class AuditLog:
     entries: list[AuditLine]
+    web_url: WebUrl = None
 
 
 @dataclass(frozen=True)
@@ -56,6 +58,11 @@ def _day(value: str | None, name: str) -> date | None:
         return date.fromisoformat(value)
     except ValueError as err:
         raise ToolError(f"{name} must be a date like 2026-01-31.") from err
+
+
+def _audit_url(runtime: McpRuntime, auth: AuthIdentity) -> str | None:
+    links = tenant_links(runtime, auth)
+    return links.audit() if links else None
 
 
 async def _log_impl(
@@ -87,7 +94,7 @@ async def _log_impl(
                 None,
             )
             if chosen is None:
-                return AuditLog([])
+                return AuditLog([], _audit_url(runtime, auth))
             account = chosen.account_id
         found = await audit_trail.list_entries(
             db,
@@ -124,7 +131,7 @@ async def _log_impl(
                     e.row.outcome,
                 )
             )
-    return AuditLog(lines)
+    return AuditLog(lines, _audit_url(runtime, auth))
 
 
 async def _kinds_impl(runtime: McpRuntime, auth: AuthIdentity) -> AuditKinds:

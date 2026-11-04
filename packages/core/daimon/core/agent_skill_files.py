@@ -30,6 +30,7 @@ from mux.errors import ProviderError
 from pydantic import BaseModel, ConfigDict
 
 __all__ = [
+    "with_skill",
     "MAX_EDIT_BYTES",
     "SkillFileDoc",
     "SkillFilesDoc",
@@ -243,3 +244,14 @@ async def save_skill_files(
         description=bundle.preview.description,
         version=added.version or "",
     )
+
+
+def with_skill(config: AgentConfigDoc, skill: SkillDoc) -> AgentConfigDoc:
+    """`config` with `skill` pinned: it replaces the entry of the same skill, else is added."""
+    held = [s.skill_id for s in config.skills]
+    skills = (
+        [skill if s.skill_id == skill.skill_id else s for s in config.skills]
+        if skill.skill_id in held
+        else [*config.skills, skill]
+    )
+    return config.model_copy(update={"skills": skills})

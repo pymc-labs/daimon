@@ -60,6 +60,7 @@ from daimon.adapters.mcp.tools import (
 )
 from daimon.adapters.mcp.tools.admins import register_admin_tools
 from daimon.adapters.mcp.tools.agent_coding_keys import register_agent_coding_key_tools
+from daimon.adapters.mcp.tools.agent_edits import register_agent_edit_tools
 from daimon.adapters.mcp.tools.agent_removal import register_agent_removal_tools
 from daimon.adapters.mcp.tools.agent_tool_rules import register_agent_tool_rule_tools
 from daimon.adapters.mcp.tools.allowances import register_allowance_tools
@@ -73,6 +74,7 @@ from daimon.adapters.mcp.tools.channels import register_channel_tools
 from daimon.adapters.mcp.tools.cli_token import register_cli_token_tool
 from daimon.adapters.mcp.tools.cost_footer import register_cost_footer_tools
 from daimon.adapters.mcp.tools.credential_requests import register_credential_request_tools
+from daimon.adapters.mcp.tools.credit_reports import register_credit_report_tools
 from daimon.adapters.mcp.tools.github_app import register_github_app_tools
 from daimon.adapters.mcp.tools.github_connect import register_github_connect_tools
 from daimon.adapters.mcp.tools.github_remove_repo import register_github_remove_repo_tools
@@ -96,6 +98,7 @@ from daimon.adapters.mcp.tools.publish import register_publish_tools
 from daimon.adapters.mcp.tools.repo_memory import register_repo_memory_tools
 from daimon.adapters.mcp.tools.routine_run import register_routine_run_tool
 from daimon.adapters.mcp.tools.setup_target import register_setup_target_tools
+from daimon.adapters.mcp.tools.skill_library_edits import register_skill_library_edit_tools
 from daimon.adapters.mcp.tools.skill_uploads import register_skill_upload_tools
 from daimon.adapters.mcp.tools.task_continuity import register_task_continuity_tools
 from daimon.adapters.mcp.tools.teams._client import build_teams_client
@@ -566,6 +569,9 @@ def create_mcp_app(
     register_web_workspace_settings_tool(mcp, runtime)
     register_allowance_tools(mcp, runtime)
     register_audit_log_tools(mcp, runtime)
+    register_agent_edit_tools(mcp, runtime)  # agent revert, owners, skill files
+    register_skill_library_edit_tools(mcp, runtime)  # library skill files and versions
+    register_credit_report_tools(mcp, runtime)  # own credits, overview, spend, feedback
     register_cost_footer_tools(mcp, runtime)  # the line under each finished answer
     register_channel_budget_tools(mcp, runtime)  # per-channel spend budgets
     register_channel_skill_tools(mcp, runtime)  # per-channel extra skills

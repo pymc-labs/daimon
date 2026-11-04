@@ -14,6 +14,7 @@ from daimon.adapters.mcp.tools import audit_log as audit_tool
 from daimon.adapters.mcp.tools import web_invites as invite_tool
 from daimon.adapters.mcp.tools import web_people as people_tool
 from daimon.adapters.mcp.tools import web_workspace_settings as settings_tool
+from daimon.core.config import WebSettings
 from daimon.core.stores.domain import SpendAllowanceRow, WebInviteRow
 from daimon.core.web_admin import WebAdminError
 from fastmcp.exceptions import ToolError
@@ -38,7 +39,7 @@ def runtime(monkeypatch):
     for module in (invite_tool, settings_tool, allowance_tool):
         monkeypatch.setattr(module, "agent_names", agents)
     rt = fake_runtime()
-    rt.settings = SimpleNamespace(web=SimpleNamespace(public_url="https://web.test"))  # type: ignore[misc]
+    rt.settings = SimpleNamespace(web=WebSettings(public_url="https://web.test"))  # type: ignore[misc,call-arg]
     return rt
 
 
@@ -151,6 +152,7 @@ async def test_create_invite_when_admin_then_link_goes_by_dm_not_in_result(runti
     assert out.delivered == "direct_message", "the result names where the link went"
     assert sent == [f"Invite link for v@x.test: {LINK}"], "the admin gets the link by DM"
     assert TOKEN not in repr(out), "the token must never be in the result"
+    assert out.web_url is not None and out.web_url.endswith(f"/admin/invites?invite={invite.id}")
 
 
 async def test_create_invite_when_dm_fails_then_revokes_and_refuses(runtime, monkeypatch):
@@ -234,6 +236,7 @@ async def test_update_person_when_admin_then_passes_role_to_core(runtime, monkey
         "core gets the role asked for and the caller's web role"
     )
     assert out.role == "admin", "the result shows the person's role after the change"
+    assert out.web_url is not None and f"?person={person.id}" in out.web_url, "their page"
 
 
 async def test_update_person_when_bad_id_then_tool_error(runtime):
@@ -315,6 +318,7 @@ async def test_create_allowance_when_admin_then_core_row_is_returned(runtime, mo
     )
     assert out.allowance.subject_name == "Everyone", "the group reads as Everyone"
     assert out.allowance.amount_usd == 5.0, "the amount is the one stored"
+    assert out.web_url is not None and out.web_url.endswith(f"?allowance={row.id}"), "its page"
 
 
 async def test_delete_allowance_when_gone_then_tool_error(runtime, monkeypatch):
@@ -324,6 +328,28 @@ async def test_delete_allowance_when_gone_then_tool_error(runtime, monkeypatch):
     monkeypatch.setattr(allowance_tool.web_allowances, "delete_allowance", gone)
     with pytest.raises(ToolError, match="no longer exists"):
         await allowance_tool._delete_impl(runtime, make_auth(), str(uuid.uuid4()))
+
+
+async def test_update_person_when_no_web_app_then_no_link(runtime, monkeypatch):
+    runtime.settings = SimpleNamespace(web=None)
+    person = SimpleNamespace(
+        id=uuid.uuid4(), display_name="P", email=None, status="active", last_seen_at=NOW
+    )
+
+    async def fake_change(*_a: Any, **_k: Any):
+        return person
+
+    async def no_identities(*_a: Any, **_k: Any):
+        return []
+
+    async def role(*_a: Any, **_k: Any):
+        return "admin"
+
+    monkeypatch.setattr(people_tool.web_admin, "change_person", fake_change)
+    monkeypatch.setattr(people_tool.identities_store, "list_for_person", no_identities)
+    monkeypatch.setattr(people_tool, "role_of", role)
+    out = await people_tool._update_impl(runtime, make_auth(), str(uuid.uuid4()), "admin", None)
+    assert out.web_url is None, "no web app, no link"
 
 
 async def test_audit_log_when_bad_date_then_tool_error(runtime):

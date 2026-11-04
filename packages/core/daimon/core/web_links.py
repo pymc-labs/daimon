@@ -25,6 +25,10 @@ LinkKey = Literal[
     "skill",
     "environment",
     "person",
+    "invites",
+    "audit",
+    "feedback",
+    "credits",
     "spend",
     "allowance",
     "mcp_server",
@@ -51,6 +55,10 @@ DEEP_LINKS: Final[Mapping[LinkKey, DeepLink]] = {
     "skill": DeepLink("/agents/skills/{id}", None, "agents", "workspace.manage"),
     "environment": DeepLink("/agents/environments", "env", "agents", "workspace.manage"),
     "person": DeepLink("/admin", "person", "admin", "people.manage"),
+    "invites": DeepLink("/admin/invites", "invite", "admin", "people.manage"),
+    "audit": DeepLink("/admin/audit", None, "admin", "audit.view"),
+    "feedback": DeepLink("/admin/feedback", None, "admin", "audit.view"),
+    "credits": DeepLink("/credits", None, "credits", "credits.view_own"),
     "spend": DeepLink("/credits/spend", None, "credits", "credits.view_own"),
     "allowance": DeepLink("/credits/allowances", "allowance", "credits", "credits.manage"),
     "mcp_server": DeepLink("/integrations/mcp", "server", "integrations", "integrations.view"),
@@ -130,6 +138,19 @@ class TenantLinks:
     def person_list(self) -> str | None:
         """The admin page, with no person opened."""
         return self._url("person")
+
+    def invites(self, invite_id: str | None = None) -> str | None:
+        return self._url("invites", None, invite_id)
+
+    def audit(self) -> str | None:
+        return self._url("audit")
+
+    def feedback(self) -> str | None:
+        return self._url("feedback")
+
+    def credits(self) -> str | None:
+        """The credits page: the overview for an admin, a person's own use for a member."""
+        return self._url("credits")
 
     def spend(self) -> str | None:
         return self._url("spend")

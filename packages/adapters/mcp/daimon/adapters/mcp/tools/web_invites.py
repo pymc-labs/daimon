@@ -19,6 +19,7 @@ from daimon.adapters.mcp.tools._web_admin import (
     send_privately,
     web_admin_of,
 )
+from daimon.adapters.mcp.tools._web_url import WebUrl, tenant_links
 from daimon.core import web_admin
 from daimon.core.stores import web_invites
 from daimon.core.stores.domain import WebInviteRow
@@ -45,6 +46,7 @@ class WebInvite:
 @dataclass(frozen=True)
 class WebInvites:
     invites: list[WebInvite]
+    web_url: WebUrl = None
 
 
 @dataclass(frozen=True)
@@ -52,11 +54,13 @@ class WebInviteSent:
     invite: WebInvite
     delivered: Literal["direct_message"]
     """Where the link went; it is never in this result."""
+    web_url: WebUrl = None
 
 
 @dataclass(frozen=True)
 class WebInviteChanged:
     invite: WebInvite
+    web_url: WebUrl = None
 
 
 @dataclass(frozen=True)
@@ -68,6 +72,7 @@ class WebInviteRevoked:
 class VisitorLinkSent:
     person_id: str
     delivered: Literal["direct_message"]
+    web_url: WebUrl = None
 
 
 @dataclass(frozen=True)
@@ -114,7 +119,8 @@ async def _list_impl(runtime: McpRuntime, auth: AuthIdentity) -> WebInvites:
     async with runtime.session_factory() as db:
         found = await web_invites.list_invites(db, tenant_id=actor.tenant_id, limit=_LIMIT)
     at = now()
-    return WebInvites([_shown(i, at) for i in found])
+    links = tenant_links(runtime, auth)
+    return WebInvites([_shown(i, at) for i in found], links.invites() if links else None)
 
 
 async def _create_impl(
@@ -155,7 +161,9 @@ async def _create_impl(
         async with runtime.session_factory.begin() as db:
             await web_admin.revoke_invite(db, actor, now(), invite.id)
         raise ToolError(f"{err} The invite was revoked.") from err
-    return WebInviteSent(_shown(invite, at), "direct_message")
+    links = tenant_links(runtime, auth)
+    url = links.invites(str(invite.id)) if links else None
+    return WebInviteSent(_shown(invite, at), "direct_message", url)
 
 
 async def _files_impl(
@@ -170,7 +178,9 @@ async def _files_impl(
             )
     except WebAdminError as err:
         raise refused(err) from err
-    return WebInviteChanged(_shown(invite, at))
+    links = tenant_links(runtime, auth)
+    url = links.invites(str(invite.id)) if links else None
+    return WebInviteChanged(_shown(invite, at), url)
 
 
 async def _revoke_impl(runtime: McpRuntime, auth: AuthIdentity, invite_id: str) -> WebInviteRevoked:
@@ -199,7 +209,8 @@ async def _issue_link_impl(
         async with runtime.session_factory.begin() as db:
             await web_admin.revoke_sign_in_link(db, actor, now(), person)
         raise ToolError(f"{err} The link was revoked.") from err
-    return VisitorLinkSent(person_id, "direct_message")
+    links = tenant_links(runtime, auth)
+    return VisitorLinkSent(person_id, "direct_message", links.person(person_id) if links else None)
 
 
 async def _revoke_link_impl(
