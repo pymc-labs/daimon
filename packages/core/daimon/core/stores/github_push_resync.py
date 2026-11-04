@@ -7,7 +7,7 @@ from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
-from daimon.core._models import GitHubPushDelivery, GitHubPushResync
+from daimon.core._models import GitHubPushDelivery, GitHubPushResync, TenantGitHubRepo
 from daimon.core.stores.domain import GitHubPushResyncRow
 from sqlalchemy import CursorResult, and_, case, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -88,10 +88,14 @@ async def get_for_repo_ref(
 async def get_latest_for_repo_refs(
     session: AsyncSession,
     *,
+    tenant_id: uuid.UUID,
     repo_refs: Collection[tuple[str, str]],
-    states: Collection[str] | None = None,
 ) -> GitHubPushResyncRow | None:
-    """The most recently touched row among these (repo, ref) pairs, repo matched without case."""
+    """The most recently touched row among these (repo, ref) pairs, repo matched without case.
+
+    Jobs are shared by every workspace that connected the repo, so only a repo this
+    workspace connected counts, as in `integration_reads.list_sync_trouble`.
+    """
     if not repo_refs:
         return None
     match = or_(
@@ -103,10 +107,13 @@ async def get_latest_for_repo_refs(
             for repo, ref in repo_refs
         )
     )
+    connected = select(func.lower(TenantGitHubRepo.repo_full_name)).where(
+        TenantGitHubRepo.tenant_id == tenant_id
+    )
     row = (
         await session.scalars(
             select(GitHubPushResync)
-            .where(match, *(() if states is None else (GitHubPushResync.state.in_(states),)))
+            .where(match, func.lower(GitHubPushResync.repo_full_name).in_(connected))
             .order_by(GitHubPushResync.updated_at.desc())
             .limit(1)
         )

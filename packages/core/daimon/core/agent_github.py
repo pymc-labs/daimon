@@ -226,7 +226,10 @@ def panel_sync(row: GitHubPushResyncRow | None) -> PanelSync | None:
     state: Literal["pending", "running", "done"] = (
         "pending" if row.state == "pending" else "running" if row.state == "running" else "done"
     )
-    return PanelSync(state=state, at=row.updated_at, error=row.last_error)
+    # The job is shared by every workspace on the repo, so its raw error (binding
+    # counts across them) never leaves the server; a failed pass is always retried.
+    error = "The last sync failed. It will try again." if row.last_error else None
+    return PanelSync(state=state, at=row.updated_at, error=error)
 
 
 def _ledger(rows: Sequence[UserSkillRow], agent_id: uuid.UUID) -> dict[str, UserSkillRow]:
@@ -493,7 +496,9 @@ async def _panel(
         )
         sources = repo_sources(agent, rows, target.agent_id)
         sync = await get_latest_for_repo_refs(
-            session, repo_refs={(s.repo, f"refs/heads/{s.branch}") for s in sources}
+            session,
+            tenant_id=actor.tenant_id,
+            repo_refs={(s.repo, f"refs/heads/{s.branch}") for s in sources},
         )
     listing = await _listing(deps)
     times = await _version_times(deps, actor, agent, listing)

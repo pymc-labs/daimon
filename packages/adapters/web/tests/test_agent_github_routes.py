@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -12,7 +13,7 @@ from cryptography.fernet import Fernet
 from daimon.core.config import Settings
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.skill_sync.resync_lock import resync_lock_key
-from daimon.core.stores import github_access, security_audit
+from daimon.core.stores import github_access, github_push_resync, security_audit
 from daimon.core.stores.user_skills import upsert_user_skill
 from daimon.testing.factories import make_github_app_installation, make_tenant_github_repo
 from sqlalchemy import text
@@ -159,6 +160,57 @@ async def test_get_panel_when_skills_listing_fails_then_still_answers(
         got = await client.get("/api/agents/ag_w/github")
     assert got.status_code == 200, got.text
     assert [s["title"] for s in got.json()["skills"]] == ["skill_repo"], "falls back to id"
+
+
+async def test_get_panel_sync_when_repo_not_connected_here_then_hidden_else_plain_error(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A shared push job shows only to a workspace that connected the repo, never its raw error."""
+    agents, owner, _other = await agent_people(db_session, skills=[SKILL])
+    await _repo_skill(db_session_factory, owner.tenant_id)
+    now, lease = datetime.now(UTC), uuid.uuid4()
+    async with db_session_factory.begin() as db:
+        await github_push_resync.enqueue(
+            db, repo_full_name="acme/skills", ref="refs/heads/main", delivery_id="d-1"
+        )
+        job = await github_push_resync.claim_due(
+            db, lease_owner=lease, lease_for=timedelta(minutes=1), now=now + timedelta(seconds=1)
+        )
+        assert job is not None, "the push is due"
+        await github_push_resync.retry(
+            db,
+            job=job,
+            lease_owner=lease,
+            retry_after=now + timedelta(minutes=5),
+            error="7 binding sync(s) failed",
+            now=now,
+        )
+    token = await sign_in_token(db_session_factory, owner)
+    async with agent_client(agents, owner.tenant_id, db_session_factory, token) as client:
+        hidden = await client.get("/api/agents/ag_w/github")
+    async with db_session_factory.begin() as db:
+        await make_github_app_installation(
+            db,
+            installation_id=8001,
+            account_login="acme",
+            repo_full_names=["acme/skills"],
+            github_repo_full_names=["acme/skills"],
+        )
+        await make_tenant_github_repo(
+            db,
+            tenant_id=owner.tenant_id,
+            repo_id=301,
+            full_name="acme/skills",
+            installation_id=8001,
+        )
+    async with agent_client(agents, owner.tenant_id, db_session_factory, token) as client:
+        shown = await client.get("/api/agents/ag_w/github")
+    assert hidden.json()["sync"] is None, "another workspace's repo job stays hidden"
+    assert shown.json()["sync"] == {
+        "state": "pending",
+        "at": shown.json()["sync"]["at"],
+        "error": "The last sync failed. It will try again.",
+    }, shown.text
 
 
 def _fail() -> httpx.Response:

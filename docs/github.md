@@ -129,7 +129,7 @@ and logs it until you archive the duplicates. A new push on the default branch
 then starts another pass.
 
 The GitHub panel in the agent editor shows the agent's repos, where each skill
-comes from and the latest sync with its error. Its **Resync** button syncs the
+comes from and whether the latest sync failed. Its **Resync** button syncs the
 repo skills now, unless a sync is already running. A pipeline that publishes
 the agent can set three metadata keys for the panel to show: `source_release`
 (the release name), `source_release_at` (ISO 8601 with an offset) and
