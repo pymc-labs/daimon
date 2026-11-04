@@ -40,11 +40,11 @@ _OWN = {"X-Daimon-Web": "1", "Origin": PUBLIC_URL}
 
 
 async def _walk(
-    client: httpx.AsyncClient, *, link: bool = False, provider: str = "discord"
+    client: httpx.AsyncClient, *, connect: bool = False, provider: str = "discord"
 ) -> tuple[httpx.Response, httpx.Response]:
-    """Start a sign-in (or link) and come back with a code, as a browser would."""
-    if link:
-        start = await client.post(f"/auth/{provider}/link", json={}, headers=_OWN)
+    """Start a sign-in (or connect) and come back with a code, as a browser would."""
+    if connect:
+        start = await client.post(f"/auth/{provider}/connect", json={}, headers=_OWN)
         assert start.status_code == 200, start.text
         authorize = start.json()["url"]
     else:
@@ -280,7 +280,7 @@ async def test_link_needs_a_signed_in_person(
         provider=fake_discord({"id": "u1", "username": "a"}, []),
         settings=discord_settings(),
     ) as client:
-        res = await client.post("/auth/discord/link", json={}, headers=_OWN)
+        res = await client.post("/auth/discord/connect", json={}, headers=_OWN)
     assert res.status_code == 401, "linking starts from a signed-in session"
 
 
@@ -296,9 +296,9 @@ async def test_link_start_is_a_post_behind_the_csrf_check(
 
     async def attempts(client: httpx.AsyncClient) -> tuple[httpx.Response, ...]:
         return (
-            await client.post("/auth/discord/link", json={}),
+            await client.post("/auth/discord/connect", json={}),
             await client.post(
-                "/auth/discord/link", json={}, headers={**_OWN, "Origin": "https://evil.example"}
+                "/auth/discord/connect", json={}, headers={**_OWN, "Origin": "https://evil.example"}
             ),
             await client.get("/auth/discord/start", params={"link": "1"}),
         )
@@ -342,7 +342,7 @@ async def test_the_link_url_shows_discord_consent_but_sign_in_stays_silent(
     person = await _web_member(db_session_factory, tenant.id, "ada@example.com")
 
     async def both(client: httpx.AsyncClient) -> tuple[str, str]:
-        linking = (await client.post("/auth/discord/link", json={}, headers=_OWN)).json()["url"]
+        linking = (await client.post("/auth/discord/connect", json={}, headers=_OWN)).json()["url"]
         signing = (await client.get("/auth/discord/start")).headers["location"]
         return linking, signing
 
@@ -352,7 +352,7 @@ async def test_the_link_url_shows_discord_consent_but_sign_in_stays_silent(
 
 
 async def _walk_link(client: httpx.AsyncClient) -> tuple[httpx.Response, httpx.Response]:
-    return await _walk(client, link=True)
+    return await _walk(client, connect=True)
 
 
 async def test_a_visitor_cannot_link_a_chat_account(
@@ -364,7 +364,7 @@ async def test_a_visitor_cannot_link_a_chat_account(
     visitor = await visitor_of(db_session_factory, ws)
 
     async def start(client: httpx.AsyncClient) -> httpx.Response:
-        return await client.post("/auth/discord/link", json={}, headers=_OWN)
+        return await client.post("/auth/discord/connect", json={}, headers=_OWN)
 
     res = await _link_rig(web_client, db_session_factory, visitor, "u7", start)
 
@@ -537,7 +537,9 @@ async def test_microsoft_link_asks_to_pick_an_account_but_sign_in_does_not(
     person = await _web_member(db_session_factory, tenant.id, "ada@example.com")
 
     async def both(client: httpx.AsyncClient) -> tuple[str, str]:
-        linking = (await client.post("/auth/microsoft/link", json={}, headers=_OWN)).json()["url"]
+        linking = (await client.post("/auth/microsoft/connect", json={}, headers=_OWN)).json()[
+            "url"
+        ]
         signing = (await client.get("/auth/microsoft/start")).headers["location"]
         return linking, signing
 
@@ -561,7 +563,7 @@ async def test_link_proves_a_slack_user_onto_the_persons_account(
     person = await _web_member(db_session_factory, tenant.id, "ada@example.com")
 
     async def walk(client: httpx.AsyncClient) -> httpx.Response:
-        return (await _walk(client, link=True, provider="slack"))[1]
+        return (await _walk(client, connect=True, provider="slack"))[1]
 
     back = await _link_rig(
         web_client,
@@ -593,7 +595,7 @@ async def test_link_from_another_platforms_workspace_is_refused(
     person = await _web_member(db_session_factory, discord.id, "ada@example.com")
 
     async def walk(client: httpx.AsyncClient) -> httpx.Response:
-        return (await _walk(client, link=True, provider="slack"))[1]
+        return (await _walk(client, connect=True, provider="slack"))[1]
 
     back = await _link_rig(
         web_client,
@@ -618,7 +620,7 @@ async def test_link_is_refused_for_a_slack_user_already_linked_to_someone_else(
     bea = await _web_member(db_session_factory, tenant.id, "bea@example.com")
 
     async def walk(client: httpx.AsyncClient) -> httpx.Response:
-        return (await _walk(client, link=True, provider="slack"))[1]
+        return (await _walk(client, connect=True, provider="slack"))[1]
 
     upstream = fake_slack(team=("T1", "Acme"), user_id="U7")
     first = await _link_rig(web_client, db_session_factory, ada, "U7", walk, upstream=upstream)
@@ -640,7 +642,7 @@ async def test_a_visitor_cannot_link_slack_or_microsoft(
 
     async def starts(client: httpx.AsyncClient) -> list[int]:
         return [
-            (await client.post(f"/auth/{p}/link", json={}, headers=_OWN)).status_code
+            (await client.post(f"/auth/{p}/connect", json={}, headers=_OWN)).status_code
             for p in ("slack", "microsoft")
         ]
 

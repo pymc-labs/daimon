@@ -71,8 +71,9 @@ class SignInFlow:
     verifier: str
     state: str
     next: str
-    # Set when a signed-in person links this sign-in to themselves rather than signing in.
-    link_person: str | None = None
+    # Set when a signed-in session connects this account to itself rather than signing in:
+    # the session's id.
+    connect_session: str | None = None
 
 
 def seal_flow(fernet: MultiFernet, flow: SignInFlow) -> str:
@@ -82,7 +83,7 @@ def seal_flow(fernet: MultiFernet, flow: SignInFlow) -> str:
             "v": flow.verifier,
             "s": flow.state,
             "x": flow.next,
-            "p": flow.link_person,
+            "c": flow.connect_session,
         }
     ).encode()
     return fernet.encrypt(payload).decode()
@@ -98,7 +99,7 @@ def open_flow(fernet: MultiFernet, sealed: str | None) -> SignInFlow | None:
             verifier=data["v"],
             state=data["s"],
             next=data["x"],
-            link_person=data.get("p"),
+            connect_session=data.get("c"),
         )
     except (InvalidToken, ValueError, KeyError, TypeError):
         return None
