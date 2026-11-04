@@ -1,6 +1,7 @@
 import type { LibrarySkill } from "../types"
 
-export const sourceLabel = (s: Pick<LibrarySkill, "source" | "default">) => (s.source === "anthropic" ? "Anthropic" : s.default ? "Built in" : "Custom")
+export const sourceLabel = (s: Pick<LibrarySkill, "source" | "default" | "server">) =>
+  s.source === "anthropic" ? "Anthropic" : s.default ? "Built in" : s.server ? "Skills server" : "Custom"
 
 // No YAML package is installed, so only the single-line `description:` of the front matter block is
 // read or written; anything else in the block, and the body, is left as it is.

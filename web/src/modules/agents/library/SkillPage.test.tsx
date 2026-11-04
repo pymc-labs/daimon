@@ -9,7 +9,7 @@ import { ApiError, api } from "@/lib/api"
 import type { SkillDetail } from "../types"
 import { SkillPage } from "./SkillPage"
 
-vi.mock("sonner", () => ({ toast: { error: vi.fn() } }))
+vi.mock("sonner", () => ({ toast: Object.assign(vi.fn(), { error: vi.fn() }) }))
 vi.mock("@/lib/api", async (orig) => ({ ...(await orig<typeof import("@/lib/api")>()), api: { get: vi.fn(), put: vi.fn(), post: vi.fn(), del: vi.fn() } }))
 
 const skill = (version: string): SkillDetail => ({
@@ -18,11 +18,12 @@ const skill = (version: string): SkillDetail => ({
 })
 
 let latest = "1"
+let server: SkillDetail["server"] = null
 const serve = () => vi.mocked(api.get).mockImplementation((url: string) => {
   if (url === "/api/me") return Promise.resolve({ capabilities: [], workspace: { name: "Workspace" } }) as never
   if (url.endsWith("/versions")) return Promise.resolve([]) as never
   if (url.includes("/files")) return Promise.resolve({ skill_id: "sk_1", version: latest, files: [{ path: "SKILL.md", size: 5, content: `v${latest}` }] }) as never
-  return Promise.resolve(skill(latest)) as never
+  return Promise.resolve({ ...skill(latest), server }) as never
 })
 
 const show = () => render(
@@ -36,6 +37,7 @@ const show = () => render(
 beforeEach(() => {
   vi.clearAllMocks()
   latest = "1"
+  server = null
   vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} })
   serve()
 })
@@ -65,5 +67,21 @@ describe("SkillPage", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Reload" }))
     await waitFor(() => expect(screen.getByLabelText("SKILL.md")).toHaveValue("v2"))
     expect(screen.queryByText(/This skill changed/)).not.toBeInTheDocument()
+  })
+
+  it("keeps a server skill read-only and approves its waiting update", async () => {
+    server = {
+      server: "data", uri: "skill://review", version_label: "1.0", status: "pending", pending_label: "1.1",
+      pending_changes: { added: ["run.py"], removed: [], changed: ["SKILL.md"] }, last_checked_at: null,
+    }
+    vi.mocked(api.post).mockResolvedValueOnce({ result: "updated", server: { ...server, status: "current" } } as never)
+    show()
+    expect(await screen.findByText("Needs approval")).toBeInTheDocument()
+    expect(screen.getByText("run.py")).toBeInTheDocument()
+    expect(screen.getByText("Skills server")).toBeInTheDocument()
+    await userEvent.type(await screen.findByLabelText("SKILL.md"), " mine")
+    expect(screen.queryByRole("button", { name: "Save version" })).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole("button", { name: "Approve update" }))
+    expect(api.post).toHaveBeenCalledWith("/api/agents/skills/sk_1/approve")
   })
 })

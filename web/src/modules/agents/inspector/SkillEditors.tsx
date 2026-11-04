@@ -1,22 +1,52 @@
+import { useQueryClient } from "@tanstack/react-query"
 import { Plus, Trash2, X } from "lucide-react"
 import { useState } from "react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command"
 import { Input } from "@/components/ui/input"
+import { Switch } from "@/components/ui/switch"
 import { cn } from "@/lib/utils"
 import { useConfirm } from "@/lib/confirm"
 import { pressProps } from "@/lib/filters"
-import { saveSkillFiles, useSkillFiles } from "../api"
+import { addServerSkill, saveSkillFiles, useServerSkills, useSetFollow, useSkillFiles, useSkillFollows } from "../api"
 import { Dot, Pill } from "../bits"
 import { SkillFilesEditor } from "./SkillFilesEditor"
-import type { Skill } from "../types"
+import type { ServerSkillOption, Skill, SkillFollow } from "../types"
 import { Field, Section, type Props } from "./parts"
+import { menuEntries, skillBadge, titleOf } from "./server-skills"
+
+const TONE = { muted: "", warn: "border-warning/40 text-warning", bad: "border-destructive/40 text-destructive" }
+
+function MirrorBadge({ follow, pinned }: { follow: SkillFollow; pinned: string }) {
+  const badge = skillBadge(follow, pinned)
+  return <Pill className={TONE[badge.tone]}>{badge.label}</Pill>
+}
 
 export function SkillsEditor(p: Props) {
-  const { config, catalog, ro, update, changed, select } = p
+  const { agent, config, catalog, ro, update, changed, select } = p
+  const qc = useQueryClient()
   const have = new Set(config.skills.map((s) => s.skill_id))
+  const follows = useSkillFollows(agent.id).data ?? {}
+  const menu = useServerSkills(!ro).data
+  const [adding, setAdding] = useState<string | null>(null)
   const add = (s: Skill) => { update((c) => { c.skills.push(structuredClone(s)) }, 0); toast(`Added ${s.title}`) }
+  const addFromServer = async (o: ServerSkillOption) => {
+    setAdding(o.uri)
+    try {
+      const ref = await addServerSkill(o.uri)
+      const title = titleOf(ref.name)
+      update((c) => { if (!c.skills.some((x) => x.skill_id === ref.id)) c.skills.push({ type: "custom", skill_id: ref.id, title, description: o.description, version: ref.version }) }, 0)
+      toast(`Added ${title}`)
+      void qc.invalidateQueries({ queryKey: ["agents", "server-skills"] })
+      void qc.invalidateQueries({ queryKey: ["agents", agent.id, "skill-follows"] })
+      void qc.invalidateQueries({ queryKey: ["agents", "library", "skills"] })
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not add the skill")
+    } finally {
+      setAdding(null)
+    }
+  }
   return (
     <>
       <Section title={`Attached (${config.skills.length})`}>
@@ -25,7 +55,8 @@ export function SkillsEditor(p: Props) {
             <div key={s.skill_id} {...pressProps(() => select(`skill:${s.skill_id}`))} className="group flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-sm hover:bg-accent">
               <span className="truncate">{s.title}</span>
               {changed.has(`skill:${s.skill_id}`) && <Dot />}
-              <span className="truncate text-xs text-faint">{s.type === "anthropic" ? "Anthropic" : s.skill_id}</span>
+              {follows[s.skill_id] ? <MirrorBadge follow={follows[s.skill_id]!} pinned={s.version} />
+                : <span className="truncate text-xs text-faint">{s.type === "anthropic" ? "Anthropic" : s.skill_id}</span>}
               {!ro && (
                 <button onClick={(e) => { e.stopPropagation(); update((c) => { c.skills = c.skills.filter((x) => x.skill_id !== s.skill_id) }, 0) }}
                   className="ml-auto rounded p-1 text-faint opacity-0 group-hover:opacity-100 hover:bg-background hover:text-foreground" aria-label={`Remove ${s.title}`}>
@@ -43,7 +74,21 @@ export function SkillsEditor(p: Props) {
             <CommandInput placeholder="Search skills" />
             <CommandList className="max-h-80">
               <CommandEmpty>No match</CommandEmpty>
-              <CommandGroup>
+              {menu && (
+                <CommandGroup heading={menu.label}>
+                  {menuEntries(menu.skills, config.skills).map(({ option: o, disabled }) => (
+                    <CommandItem key={o.uri} value={`${menu.label} ${o.name} ${o.uri}`} disabled={!!disabled || adding !== null}
+                      onSelect={() => void addFromServer(o)} className="items-start py-2">
+                      <Plus className="mt-0.5" />
+                      <span className="min-w-0">
+                        <span className="block text-sm">{titleOf(o.name)}{disabled && <span className="ml-2 text-xs text-faint">{disabled}</span>}</span>
+                        <span className="line-clamp-1 text-xs text-muted-foreground">{o.description}</span>
+                      </span>
+                    </CommandItem>
+                  ))}
+                </CommandGroup>
+              )}
+              <CommandGroup heading={menu ? "Library" : undefined}>
                 {catalog?.skills.filter((s) => !have.has(s.skill_id)).map((s) => (
                   <CommandItem key={s.skill_id} value={`${s.title} ${s.skill_id}`} onSelect={() => add(s)} className="items-start py-2">
                     <Plus className="mt-0.5" />
@@ -103,8 +148,12 @@ export function SkillEditor(p: Props & { skill: Skill }) {
 
 function SkillBody({ agent, config, ro, update, select, skill }: Props & { skill: Skill }) {
   const confirm = useConfirm()
+  const follow = useSkillFollows(agent.id).data?.[skill.skill_id]
+  const setFollow = useSetFollow(agent.id)
   const custom = skill.type === "custom"
-  const files = useSkillFiles(agent.id, skill, custom && !ro)
+  const editable = custom && !ro && !follow
+  const files = useSkillFiles(agent.id, skill, editable)
+  const badge = follow && skillBadge(follow, skill.version)
   const servers = (skill.requires ?? []).map((k) => ({ k, s: config.mcp_servers.find((x) => x.key === k) }))
 
   const save = async (body: Record<string, string | null>) => {
@@ -130,8 +179,9 @@ function SkillBody({ agent, config, ro, update, select, skill }: Props & { skill
       <div className="space-y-1 border-b px-5 py-4">
         <div className="flex items-center gap-2">
           <h2 className="text-base font-semibold">{skill.title}</h2>
-          <Pill>{custom ? "Custom" : "Anthropic"}</Pill>
-          <span className="text-xs text-faint">{skill.version && skill.version !== "latest" ? "Pinned" : "Latest"}</span>
+          <Pill>{follow ? "Server" : custom ? "Custom" : "Anthropic"}</Pill>
+          {follow ? <MirrorBadge follow={follow} pinned={skill.version} />
+            : <span className="text-xs text-faint">{skill.version && skill.version !== "latest" ? "Pinned" : "Latest"}</span>}
           {!ro && (
             <Button variant="ghost" size="xs" className="ml-auto text-muted-foreground hover:text-destructive" onClick={() => void removeSkill()}>
               <Trash2 />Remove skill
@@ -139,6 +189,21 @@ function SkillBody({ agent, config, ro, update, select, skill }: Props & { skill
           )}
         </div>
         <p className="text-sm text-muted-foreground">{skill.description}</p>
+        {follow && (
+          <div className="flex items-center gap-2 pt-2 text-sm">
+            <label className="flex items-center gap-2">
+              <Switch size="sm" checked={follow.follow} disabled={ro || setFollow.isPending}
+                onCheckedChange={(on) => setFollow.mutate({ skill_id: skill.skill_id, follow: on })} />
+              Follow updates
+            </label>
+            {badge?.update && !ro && (
+              <Button size="xs" variant="outline" className="ml-auto"
+                onClick={() => update((c) => { const s = c.skills.find((x) => x.skill_id === skill.skill_id); if (s) s.version = badge.update! }, 0)}>
+                Update to v{badge.update}
+              </Button>
+            )}
+          </div>
+        )}
         {(servers.length > 0 || skill.platforms) && (
           <div className="flex flex-wrap items-center gap-1.5 pt-2 text-xs text-muted-foreground">
             {servers.map(({ k, s }) => (
@@ -150,7 +215,7 @@ function SkillBody({ agent, config, ro, update, select, skill }: Props & { skill
           </div>
         )}
       </div>
-      {custom && !ro ? (
+      {editable ? (
         files.isPending ? <div className="px-5 py-4 text-sm text-muted-foreground">Loading</div>
           : files.isError ? <div className="px-5 py-4 text-sm text-muted-foreground">Files unavailable</div>
           : <SkillFilesEditor files={files.data.files} onSave={save} />

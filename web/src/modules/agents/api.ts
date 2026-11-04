@@ -2,10 +2,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useEffect, useRef } from "react"
 import { toast } from "sonner"
 
-import { api } from "@/lib/api"
+import { ApiError, api } from "@/lib/api"
 import type {
   Agent, AgentConfig, AgentSummary, AgentVersion, Backend, Catalog, DataServerAgent, DataServerAgentPatch, DataServerScope, DataServerStatus,
-  DataServerToolPut, DataServerTools, Draft, Effect, Skill, SkillFiles, Template,
+  DataServerToolPut, DataServerTools, Draft, Effect, ServerSkillMenu, Skill, SkillFiles, SkillFollow, Template,
 } from "./types"
 
 export const useAgents = () => useQuery({ queryKey: ["agents"], queryFn: () => api.get<AgentSummary[]>("/api/agents") })
@@ -29,6 +29,39 @@ export const useSkillFiles = (agentId: string, skill: Skill, enabled: boolean) =
 /** Publish `files` as a new version of the skill (or a new skill when `skillId` is null); a null body keeps that file as `version` has it. */
 export const saveSkillFiles = (agentId: string, skillId: string | null, files: Record<string, string | null>, version?: string) =>
   api.post<Skill>(`/api/agents/${agentId}/skills`, { skill_id: skillId, files, version })
+
+/** The skills the node's server offers, or null when the server skills feature is off. */
+export const useServerSkills = (enabled: boolean) =>
+  useQuery({
+    queryKey: ["agents", "server-skills"],
+    queryFn: async () => {
+      try {
+        return await api.get<ServerSkillMenu>("/api/agents/server-skills")
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 404) return null
+        throw e
+      }
+    },
+    enabled,
+    retry: false,
+    staleTime: 60_000,
+  })
+
+/** Mirror a server skill into the library, or find its mirror; the ref pins its current version. */
+export const addServerSkill = (uri: string) => api.post<{ id: string; name: string; version: string }>("/api/agents/server-skills", { uri })
+
+/** Each mirrored skill: whether this agent follows it, and its state. */
+export const useSkillFollows = (agentId: string) =>
+  useQuery({ queryKey: ["agents", agentId, "skill-follows"], queryFn: () => api.get<Record<string, SkillFollow>>(`/api/agents/${agentId}/skill-follows`), retry: false })
+
+export function useSetFollow(agentId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (b: { skill_id: string; follow: boolean }) => api.put(`/api/agents/${agentId}/skill-follows`, b),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["agents", agentId, "skill-follows"] }),
+    onError: (e: Error) => toast.error(e.message),
+  })
+}
 
 /** Store or remove the token an agent's MCP server is called with. */
 export function useServerToken(agentId: string, key: string) {

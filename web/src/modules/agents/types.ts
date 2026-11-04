@@ -202,7 +202,20 @@ export type LibrarySkill = {
   /** A skill the server ships. */
   default: boolean
   used_by: SkillUse[]
+  /** Set for a read-only skill mirrored from a skills server. */
+  server?: MirrorDoc | null
 }
+export type MirrorStatus = "current" | "pending" | "unavailable"
+export type MirrorDoc = {
+  server: string; uri: string; version_label: string | null; status: MirrorStatus
+  pending_label: string | null; pending_changes: Record<"added" | "removed" | "changed", string[]> | null; last_checked_at: string | null
+}
+export type MirrorCheck = { result: "unchanged" | "updated" | "pending" | "unavailable" | "failed"; server: MirrorDoc | null }
+/** A skill the node's server offers; `skill_id` once it is in the library, `taken` when another library skill holds its name. */
+export type ServerSkillOption = { uri: string; name: string; description: string; skill_id: string | null; taken: boolean }
+export type ServerSkillMenu = { label: string; skills: ServerSkillOption[] }
+/** An agent's choice for one mirrored skill, and the newest version it can be pinned to. */
+export type SkillFollow = { follow: boolean; status: MirrorStatus; version: string | null }
 export type SkillDetail = LibrarySkill & { source_url: string | null }
 export type SkillVersion = { version: string; created_at: string; author: string | null }
 export type SyncedSkill = { name: string; action: "created" | "updated" | "skipped" | "failed"; detail: string | null }
