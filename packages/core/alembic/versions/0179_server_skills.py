@@ -17,8 +17,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 
-revision: str = "0178_server_skills"
-down_revision: str | None = "0177_invite_files"
+revision: str = "0179_server_skills"
+down_revision: str | None = "0178_web_logins"
 branch_labels: str | None = None
 depends_on: str | None = None
 
