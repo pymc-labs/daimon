@@ -796,3 +796,11 @@ def test_no_rendered_card_has_a_dot_separator_or_a_user_label() -> None:
         text = json.dumps(_body(panel_card(state, since=JAN)), ensure_ascii=False)
         assert "·" not in text and "≈" not in text, text
         assert "User " not in text and "19:c" not in text, text
+
+
+def test_the_card_offers_open_in_web_only_with_a_spend_url() -> None:
+    since = datetime(2026, 1, 1, tzinfo=UTC)
+    url = "https://app.example.com/w/t/spend"
+    shown = json.dumps(panel_card(_state(), since=since, web_url=url).model_dump(by_alias=True))
+    assert '"title": "Open in web"' in shown and url in shown
+    assert "Open in web" not in json.dumps(panel_card(_state(), since=since).model_dump())

@@ -24,6 +24,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.platform_names import remember_user_name
 from daimon.core.stores.identity import find_platform_principal, get_or_create_platform_principal
+from daimon.core.web_links import OPEN_IN_WEB, TenantLinks, panel_links
 from microsoft_teams.api import (
     AdaptiveCardActionCardResponse,
     AdaptiveCardActionMessageResponse,
@@ -46,6 +47,7 @@ from microsoft_teams.cards import (
     AdaptiveCard,
     CardElement,
     ExecuteAction,
+    OpenUrlAction,
     TextBlock,
 )
 from sqlalchemy.exc import SQLAlchemyError
@@ -68,6 +70,7 @@ class Actor:
     is_admin: bool
     conversation_id: str
     is_platform_admin: bool = False
+    foreign: bool = False
 
     def admin_for(self, action: DelegatedAction | None = None) -> bool:
         return admin_for_action(
@@ -131,6 +134,7 @@ async def card_actor(
         is_admin=daimon_admin,
         is_platform_admin=platform_admin,
         conversation_id=conversation.id,
+        foreign=foreign,
     )
 
 
@@ -217,6 +221,17 @@ def button(
     return ExecuteAction(
         title=title, verb=verb, data={"action": verb, "op": op} | data, style=style
     )
+
+
+def web_links(
+    runtime: TeamsRuntime, tenant_id: uuid.UUID, *, admin: bool, foreign: bool = False
+) -> TenantLinks | None:
+    """The web links a card may offer; none to a sender from another organisation."""
+    return None if foreign else panel_links(runtime.settings.web, tenant_id, admin=admin)
+
+
+def open_in_web(url: str) -> OpenUrlAction:
+    return OpenUrlAction(title=OPEN_IN_WEB, url=url)
 
 
 def clip(text: str, limit: int) -> str:
