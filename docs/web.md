@@ -60,16 +60,18 @@ web app at once. This needs the bot's member list, which Discord shares only
 with the Server Members intent. Until the list loads, or while the intent is
 off, the sign-in itself decides.
 
-A signed-in member connects other chat accounts from the account menu; the workspace
-switcher then lists the workspaces of every connected account. A later sign-in with any
-of them, on any device, shows them all while each was proven within 30 days, and an older
-one returns when it signs in again. A workspace is remembered only while its synced member
-list still names the person (Teams: the 30 days alone), so an unsynced Discord or Slack
-workspace needs a fresh sign-in. Profile lists the sign-ins and disconnects one, but not
-the account the session signed in with; disconnecting ends every session signed in with it
-and removes its people from the login's other sessions. A connection is refused where
-signing in with that account would be, a Microsoft guest account is refused, an account linked to another person in the
-workspace is refused, and guests cannot connect.
+A signed-in member connects more chat accounts from the account menu. The
+workspace switcher then lists the workspaces of every connected account. A later
+sign-in with any of them, on any device, shows each one proven within 30 days. A
+workspace stays only while its synced member list still names the person, so an
+unsynced Discord or Slack workspace needs a fresh sign-in. Teams relies on the 30
+days alone.
+
+Profile lists the connected accounts and disconnects any but the one the session
+signed in with. Disconnecting one ends every session signed in with it and
+removes its people from the login's other sessions. A connection is refused
+wherever signing in with that account would be. So is a Microsoft guest account,
+or an account linked to another person in the workspace. Guests cannot connect.
 
 ## Become the owner
 
