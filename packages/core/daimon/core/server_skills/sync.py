@@ -95,6 +95,8 @@ class SkillTarget(Protocol):
 
 @dataclass(frozen=True)
 class SyncDeps:
+    server: str
+    """The configured server's name; a mirror of any other server is unavailable."""
     sessionmaker: async_sessionmaker[AsyncSession]
     upstream: Callable[[ServerSkillRow], Upstream]
     targets: Sequence[SkillTarget]
@@ -245,6 +247,8 @@ async def _check_locked(
     deps: SyncDeps, mirror: ServerSkillRow, *, approve: str | None
 ) -> CheckResult:
     try:
+        if mirror.server != deps.server:
+            raise UpstreamGone("its server is no longer configured")
         if mirror.added_by_person_id is None:
             raise UpstreamGone("the person who added it is gone")
         entry = await deps.upstream(mirror).entry(mirror)

@@ -150,6 +150,7 @@ def sync_deps(runtime: WebRuntime, node: DataServerNode) -> SyncDeps:
     edit = change_deps(runtime).edit
     upstream = NodeUpstream(runtime, node)
     return SyncDeps(
+        server=node.server.name,
         sessionmaker=runtime.sessionmaker,
         upstream=lambda _mirror: upstream,
         targets=(ManagedAgentsTarget(edit.client),),

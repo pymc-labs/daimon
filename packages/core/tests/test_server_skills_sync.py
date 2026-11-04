@@ -136,6 +136,7 @@ async def _world(db_session: AsyncSession, factory: async_sessionmaker[AsyncSess
     )
     await db_session.flush()
     deps = SyncDeps(
+        server="data",
         sessionmaker=factory,
         upstream=lambda _m: upstream,
         targets=(first, second),
@@ -296,6 +297,16 @@ async def test_skill_of_a_purged_person_is_unavailable(
     )
     assert (await _row(world)).added_by_person_id is None
     assert await check_mirror(world.deps, world.mirror.id) == "unavailable"
+
+
+async def test_a_mirror_of_another_server_is_unavailable(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    world = await _world(db_session, db_session_factory)
+    world.upstream.server.skills[NAME]["guide.md"] = b"Other server.\n"
+    deps = dataclasses.replace(world.deps, server="other")
+    assert await check_mirror(deps, world.mirror.id) == "unavailable"
+    assert world.first.published == [] and world.first.agents["follows"] == "1"
 
 
 async def test_unknown_mirror_fails(
