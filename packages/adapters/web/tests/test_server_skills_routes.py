@@ -6,13 +6,23 @@ import re
 
 import httpx
 from anthropic.types.beta import SkillListResponse
+from daimon.adapters.web.server_skills import active_adder
 from daimon.core.config import ServerSkillsSettings
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.mcp_identity import generate_signing_key
+from daimon.core.stores import server_skills as server_skills_store
+from daimon.core.stores import web_people as people_store
+from daimon.core.stores import workspace_members as members_store
+from daimon.testing.factories import (
+    make_account,
+    make_platform_principal,
+    make_tenant,
+    make_web_person,
+)
 from daimon.testing.mcp_skills import SkillsServer, skill_md
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .test_nodes import _OWN, _client, _Server, _settings, _setup
+from .test_nodes import _NOW, _OWN, _client, _Server, _settings, _setup
 
 
 class _Node(_Server):
@@ -123,3 +133,46 @@ async def test_a_skill_whose_name_is_taken_is_marked(
     ) as client:
         res = await client.get("/api/agents/server-skills")
     assert res.json()["skills"][0]["taken"] is True
+
+
+async def test_the_update_check_asks_only_as_an_adder_who_could_sign_in(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="g-1")
+    account = await make_account(db_session, tenant=tenant)
+    await make_platform_principal(
+        db_session, platform="discord", external_id="u-1", tenant=tenant, account=account
+    )
+    person = await make_web_person(db_session, tenant=tenant, account=account)
+    mirror = await server_skills_store.create_mirror(
+        db_session,
+        tenant_id=tenant.id,
+        server="data",
+        uri="skill://plots",
+        name="plots",
+        skill_id="sk_1",
+        version_label=None,
+        digest="d",
+        manifest={},
+        allowed_tools=None,
+        added_by_person_id=person.id,
+        now=_NOW,
+    )
+    await db_session.commit()
+
+    async def adder() -> object:
+        found = await active_adder(db_session_factory, mirror)
+        return None if found is None else found.id
+
+    assert await adder() == person.id
+    await members_store.replace_members(
+        db_session, tenant_id=tenant.id, members={"u-2": False}, workspace_name="w", now=_NOW
+    )
+    await db_session.commit()
+    assert await adder() is None, "they left the chat workspace"
+    await members_store.replace_members(
+        db_session, tenant_id=tenant.id, members={"u-1": False}, workspace_name="w", now=_NOW
+    )
+    await people_store.update_person(db_session, person_id=person.id, status="suspended")
+    await db_session.commit()
+    assert await adder() is None, "they are suspended"

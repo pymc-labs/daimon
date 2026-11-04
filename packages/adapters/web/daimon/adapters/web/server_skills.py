@@ -16,6 +16,7 @@ import httpx
 import structlog
 from daimon.adapters.web.agent_access import Editor, Viewer, actor_of, change_deps, edit_refusal
 from daimon.adapters.web.agent_audit import recorded
+from daimon.adapters.web.caller import chat_standings, has_left
 from daimon.adapters.web.nodes.data_server import DataServerNode
 from daimon.adapters.web.nodes.exchange import (
     NodeAccessError,
@@ -56,8 +57,14 @@ from daimon.core.stores.web_people import get_person
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, JsonValue
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-__all__ = ["server_skills_node", "server_skills_router", "sync_server_skills_forever"]
+__all__ = [
+    "active_adder",
+    "server_skills_node",
+    "server_skills_router",
+    "sync_server_skills_forever",
+]
 
 log = structlog.get_logger(__name__)
 
@@ -73,6 +80,23 @@ def server_skills_node(runtime: WebRuntime) -> DataServerNode | None:
     return next((n for n in build_nodes(runtime.settings) if isinstance(n, DataServerNode)), None)
 
 
+async def active_adder(
+    sessionmaker: async_sessionmaker[AsyncSession], mirror: ServerSkillRow
+) -> WebPersonRow | None:
+    """Who added the mirror, while they could still sign in: not suspended, not left."""
+    if mirror.added_by_person_id is None:
+        return None
+    async with sessionmaker() as db:
+        person = await get_person(
+            db, tenant_id=mirror.tenant_id, person_id=mirror.added_by_person_id
+        )
+        if person is None or person.status == "suspended":
+            return None
+        if has_left(await chat_standings(db, [person]), person):
+            return None
+    return person
+
+
 @dataclass(frozen=True)
 class NodeUpstream:
     """The node's server, asked as the person who added a mirror."""
@@ -84,12 +108,7 @@ class NodeUpstream:
     async def _endpoint(
         self, mirror: ServerSkillRow
     ) -> AsyncIterator[tuple[httpx.AsyncClient, Endpoint]]:
-        person = None
-        if mirror.added_by_person_id is not None:
-            async with self.runtime.sessionmaker() as db:
-                person = await get_person(
-                    db, tenant_id=mirror.tenant_id, person_id=mirror.added_by_person_id
-                )
+        person = await active_adder(self.runtime.sessionmaker, mirror)
         if person is None:
             raise UpstreamGone("the person who added it is gone")
         async with node_http(self.runtime, self.node.server) as http:
