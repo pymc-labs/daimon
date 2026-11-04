@@ -47,6 +47,7 @@ from daimon.core.scope import ChannelConfigRow
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.thread_agent_bindings import get_binding
+from daimon.core.web_links import panel_links
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import discord
@@ -421,6 +422,7 @@ async def load_details_for(
             public_mcp_url=public_mcp_url(runtime),
             is_admin=state.is_admin,
             channel_label=_channel_label(state),
+            web=panel_links(runtime.settings.web, _tenant_id(state), admin=state.is_admin),
         )
         state.avatar_urls[agent.name] = None
         if not state.is_admin:

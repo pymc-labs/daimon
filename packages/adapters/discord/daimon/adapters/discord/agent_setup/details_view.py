@@ -65,6 +65,7 @@ from daimon.core.setup_conversations import (
 )
 from daimon.core.stores.domain import CompatibilityPreview
 from daimon.core.turn.notices import conversations_follow_line
+from daimon.core.web_links import OPEN_IN_WEB
 from mux.contracts.config import BackendConfig
 
 import discord
@@ -487,6 +488,12 @@ class DetailsView(PanelViewBase):
             )
             add_skill_button.callback = self._on_add_skill  # type: ignore[method-assign]  # per-instance callback
             action_row.add_item(add_skill_button)
+        if details.web_url is not None:
+            action_row.add_item(
+                discord.ui.Button(
+                    label=OPEN_IN_WEB, style=discord.ButtonStyle.link, url=details.web_url
+                )
+            )
         if action_row.children:  # Discord rejects an empty row
             container.add_item(action_row)
 

@@ -15,6 +15,9 @@ from urllib.parse import quote
 
 from daimon.core.config import WebModuleKey, WebSettings
 
+OPEN_IN_WEB: Final = "Open in web"
+"""The label of every panel button that opens the web app, on every platform."""
+
 LinkKey = Literal[
     "agent",
     "channel",
@@ -106,12 +109,12 @@ class TenantLinks:
         """An agent's editor; `node` opens one part of it (`instructions`, `skill:<id>`)."""
         return self._url("agent", agent_id, node)
 
-    def channel(self, channel_id: str) -> str | None:
+    def channel(self, channel_id: str | None = None) -> str | None:
         """A channel's settings; the id is encoded, as a Teams id holds `:` and `@`."""
         return self._url("channel", None, channel_id)
 
-    def routine(self, routine_id: uuid.UUID | str) -> str | None:
-        return self._url("routine", None, str(routine_id))
+    def routine(self, routine_id: uuid.UUID | str | None = None) -> str | None:
+        return self._url("routine", None, None if routine_id is None else str(routine_id))
 
     def skill(self, skill_id: str) -> str | None:
         return self._url("skill", skill_id)
@@ -155,3 +158,11 @@ class WebLinks:
     def for_tenant(self, tenant_id: uuid.UUID, *, admin: bool) -> TenantLinks:
         """Links into `tenant_id`'s workspace for a caller who is an admin or not."""
         return TenantLinks(self.base, tenant_id, self.modules, admin)
+
+
+def panel_links(
+    web: WebSettings | None, tenant_id: uuid.UUID, *, admin: bool
+) -> TenantLinks | None:
+    """The links a chat panel may offer in `tenant_id`; None with no web app."""
+    links = WebLinks.from_settings(web)
+    return None if links is None else links.for_tenant(tenant_id, admin=admin)

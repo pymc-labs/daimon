@@ -996,3 +996,24 @@ async def test_resume_race_replies_already_running_without_callback_error(monkey
     assert sent["embed"].description == "This routine is already on."
     assert sent["ephemeral"] is True
     error.assert_not_awaited()
+
+
+def test_open_in_web_link_button_opens_the_selected_routine() -> None:
+    """With links the panel offers one link button to the selected routine; without, none."""
+    from daimon.core.web_links import WebLinks
+
+    entry = _make_entry()
+    links = WebLinks("https://app.example.com", frozenset({"routines"})).for_tenant(
+        entry.routine.tenant_id, admin=True
+    )
+    state = RoutinesPanelState.initial(
+        rows=[entry], over_cap_count=0, agent_name_map={}, links=links
+    )
+    button = _find_button(
+        RoutinesPanelView(state, runtime=_make_runtime(), allowed_user_id=42), "Open in web"
+    )
+    assert button.url == links.routine(entry.routine.id), "it opens the selected routine"
+    assert button.style == discord.ButtonStyle.link, "it is a link button"
+    plain = RoutinesPanelView(_make_state([entry]), runtime=_make_runtime(), allowed_user_id=42)
+    labels = [c.label for c in plain.walk_children() if isinstance(c, discord.ui.Button)]
+    assert "Open in web" not in labels, "no web app, no button"
