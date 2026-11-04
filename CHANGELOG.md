@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The agent editor in the web app has a GitHub panel.** It lists the agent's repos with
+  their access, status and which one is the working repo, and where each attached skill
+  comes from: a repo (with branch and path), the library, elsewhere or Anthropic. It shows
+  whether the latest push sync failed, and the release an outside pipeline stamped in the
+  agent's `source_release`, `source_release_at` and `source_release_url` metadata. The
+  agent's owner or a server admin can connect GitHub, pick or clear the working repo, take a repo
+  off the agent and resync its repo skills now. Each change is audited like the chat tools.
+
 - **The agent posts for other people more carefully, and anyone can ask never to be tagged.**
   Mentions of everyone, here, roles and groups no longer go out live on any platform, and
   posts made for someone say who asked for them. One request that opens several threads,

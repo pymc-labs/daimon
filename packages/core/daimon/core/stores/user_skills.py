@@ -54,6 +54,18 @@ async def list_user_skills_for_agent(
     return [UserSkillRow.model_validate(row) for row in result.scalars()]
 
 
+async def list_user_skills_for_agent_name(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_name: str
+) -> list[UserSkillRow]:
+    """Every principal's rows for one agent name: the ledger moved from user to agent keys."""
+    stmt = (
+        select(UserSkill)
+        .where(UserSkill.tenant_id == tenant_id, UserSkill.agent_name == agent_name)
+        .order_by(UserSkill.name)
+    )
+    return [UserSkillRow.model_validate(row) for row in (await session.execute(stmt)).scalars()]
+
+
 async def list_repo_skill_sources(
     session: AsyncSession,
 ) -> list[tuple[uuid.UUID, uuid.UUID, str, str, str, str]]:

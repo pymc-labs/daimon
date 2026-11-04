@@ -134,7 +134,11 @@ class Context:
             operation_key="owned-budget-turn",
         )
         args.update(changes)
-        return await self.reader.run_turn(**args)
+        result = await self.reader.run_turn(**args)
+        # The turn's outcome row is written by a background task; settle it so a
+        # later statement recorder never sees its INSERT.
+        await drain_outcomes()
+        return result
 
 
 @pytest.fixture(params=["anthropic", "openai", "gemini"])
