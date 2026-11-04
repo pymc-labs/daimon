@@ -51,6 +51,7 @@ from daimon.core.channel_budget import balance_footer
 from daimon.core.cost_footer import cost_footer_shown
 from daimon.core.native_footer_cost import native_footer_text
 from daimon.core.ops_alerts import alert_ops
+from daimon.core.outbound.opt_out import tag_opt_outs
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.card_state import CardState as EmbedState
@@ -524,6 +525,22 @@ class DiscordTurnLifecycle(OutputGate):
         # The first chunk actually rendered into the message: once set, the
         # answer is delivered.
         self._revealed_first_chunk: str | None = None
+
+    async def _requester_opted_out(self) -> bool:
+        """A person who asked never to be tagged gets the reply without the ping."""
+        if self._tenant_id is None or self._requester_id is None:
+            return False
+        try:
+            skip = await tag_opt_outs(
+                self._sessionmaker,
+                tenant_id=self._tenant_id,
+                platform="discord",
+                user_ids=[str(self._requester_id)],
+            )
+        except Exception:  # named boundary: the answer still lands, just without a ping
+            log.warning("turn.opt_out_lookup_failed", exc_info=True)
+            return True
+        return bool(skip)
 
     async def on_acknowledgment(self, phase: Acknowledgment) -> None:
         if not self._notify_on_completion or self._trigger_message is None or self._unprompted:
@@ -1288,6 +1305,7 @@ class DiscordTurnLifecycle(OutputGate):
             and self._requester_id is not None
             and not self._unprompted
             and not cancelled
+            and not await self._requester_opted_out()
         )
         self._apply_usage(state)
         if self._tool_markup_only and not response_text and not cancelled:

@@ -17,7 +17,7 @@ platform-user-scoped, after the principal row on purpose: see the call) ->
 teams_messages and microsoft_user_tokens (Teams principals only, keyed by (tenant,
 Entra user)).
 Account-level deletes (mcp_tokens, GitHub connect requests and click intents,
-message_feedback, user_configs, accounts)
+message_feedback, tag_opt_outs, user_configs, accounts)
 run in `purge_account` after all principal rows are gone; mcp_tokens and
 message_feedback are keyed by account_id and are deleted before delete_account
 so their CASCADE FKs to accounts.id are satisfied. message_feedback is deleted
@@ -165,6 +165,7 @@ from daimon.core.stores import selfhosted_resources as selfhosted_store
 from daimon.core.stores import slack_turn_contexts as slack_turn_contexts_store
 from daimon.core.stores import slack_user_tokens as slack_user_tokens_store
 from daimon.core.stores import support_escalation as support_escalation_store
+from daimon.core.stores import tag_opt_outs as tag_opt_outs_store
 from daimon.core.stores import teams_message_admissions as teams_admissions_store
 from daimon.core.stores import tenants as tenants_store
 from daimon.core.stores import user_skills as user_skills_store
@@ -205,6 +206,7 @@ class PurgeReport(BaseModel):
     slack_user_tokens: int = 0
     slack_turn_contexts: int = 0
     direct_message_conversations: int = 0
+    tag_opt_outs: int = 0
     credential_requests: int = 0
     wizard_sessions: int = 0
     message_feedback: int = 0
@@ -250,6 +252,7 @@ class PurgeReport(BaseModel):
             direct_message_conversations=(
                 self.direct_message_conversations + other.direct_message_conversations
             ),
+            tag_opt_outs=self.tag_opt_outs + other.tag_opt_outs,
             credential_requests=self.credential_requests + other.credential_requests,
             wizard_sessions=self.wizard_sessions + other.wizard_sessions,
             message_feedback=self.message_feedback + other.message_feedback,
@@ -661,6 +664,7 @@ async def _purge_account_transaction(
     direct_message_count = await direct_messages_store.delete_conversations_for_account(
         session, account_id=account_id
     )
+    tag_opt_outs_count = await tag_opt_outs_store.delete_for_account(session, account_id=account_id)
     # The web app's people (identities, tokens and browser sessions go with them) and
     # admin grants cascade from accounts.id; deleted here so the report counts them.
     web_people_count = await web_people_store.delete_for_account(session, account_id=account_id)
@@ -702,6 +706,7 @@ async def _purge_account_transaction(
             github_user_links=github_user_links_count,
             slack_turn_contexts=slack_turn_contexts_count,
             direct_message_conversations=direct_message_count,
+            tag_opt_outs=tag_opt_outs_count,
             web_people=web_people_count,
             web_admin_grants=web_admin_grants_count,
         )

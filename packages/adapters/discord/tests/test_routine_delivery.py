@@ -202,7 +202,7 @@ async def test_posts_the_tail_with_mentions_disabled(
 
     assert outcome.status == "delivered"
     kwargs = channel.send.await_args.kwargs
-    assert kwargs["content"].endswith("All green @everyone.")
+    assert kwargs["content"].endswith("All green @\u200beveryone.\n-# requested by <@1>")
     mentions = kwargs["allowed_mentions"]
     assert not mentions.everyone and not mentions.users and not mentions.roles
 
@@ -230,7 +230,10 @@ async def test_with_identity_the_result_posts_as_the_agent_without_from_wording(
     )
     assert made["builtin"] is False and made["identity_enabled"] is True
     (sent,) = _Transport.sent
-    assert sent["content"] == "Result from the Monday routine at 09:00 UTC:\n\nAll green @everyone."
+    assert (
+        sent["content"]
+        == "Result from the Monday routine at 09:00 UTC:\n\nAll green @\u200beveryone.\n-# requested by <@1>"
+    )
     assert sent["_prefix_if_fallback"] is True, "a bot fallback still names the agent"
     mentions = sent["allowed_mentions"]
     assert not mentions.everyone and not mentions.users and not mentions.roles
@@ -253,7 +256,9 @@ async def test_with_identity_a_long_result_leaves_room_for_the_fallback_label(
     assert all(len(sent["content"]) + len(prefix) <= 2000 for sent in _Transport.sent)
     assert _Transport.sent[0]["_prefix_if_fallback"] is True
     assert all(not sent["_prefix_if_fallback"] for sent in _Transport.sent[1:])
-    assert "".join(sent["content"] for sent in _Transport.sent).split("\n\n", 1)[1] == "x" * 2500
+    assert "".join(sent["content"] for sent in _Transport.sent).split("\n\n", 1)[1] == (
+        "x" * 2500 + "\n-# requested by <@1>"
+    )
 
 
 async def test_the_built_in_agent_posts_as_the_bot_with_todays_text(
@@ -559,7 +564,8 @@ async def test_a_bot_fallback_labels_the_result_with_the_subtext_name_line(
     assert outcome.status == "delivered"
     content = channel.send.await_args.kwargs["content"]
     assert content == fallback_name_prefix(
-        "research", "Result from the Monday routine at 09:00 UTC:\n\nAll green @everyone."
+        "research",
+        "Result from the Monday routine at 09:00 UTC:\n\nAll green @\u200beveryone.\n-# requested by <@1>",
     )
     assert content.startswith("-# research\nResult from the Monday routine"), (
         "the label is #530's subtext line"
@@ -585,7 +591,7 @@ async def test_long_routine_delivers_every_word_to_channel_or_creator(
     )
     assert len(texts) > 1 and all(len(text) <= 2000 for text in texts)
     # The result is the last paragraph; above it, the post's one line or the DM's two.
-    delivered = "".join(texts).split("\n\n")[-1]
+    delivered = "".join(texts).split("\n\n")[-1].split("\n-# requested by")[0]
     assert delivered == result, "deliver the beginning and ending, without cutting a word"
     if not fallback:
         assert all(
@@ -729,6 +735,7 @@ async def test_routine_dm_does_not_replace_an_active_private_conversation(
     dms = _Dms()
     outcome = await _poster(db_session_factory, {}, dms=dms)(routine)
     assert outcome.status == "delivered" and dms.sent
+    assert all("requested by" not in text for *_, text in dms.sent), "the creator asked"
     async with db_session_factory() as session:
         after = await get_conversation(
             session, platform="discord", route_key="physical-dm", external_user_id="1"

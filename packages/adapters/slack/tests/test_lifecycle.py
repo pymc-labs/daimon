@@ -69,8 +69,12 @@ from daimon.adapters.slack.blockkit import ERROR_COLOR, NEUTRAL_COLOR
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.core.agent_identity import AgentIdentity
 from daimon.core.errors import TurnError
+from daimon.core.outbound.reach import ReachPlan, turn_tally_key
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.stores import tenant_ledger
+from daimon.core.stores.platform_names import KnownName, upsert_user_names
+from daimon.core.stores.reach_tallies import lock_tally, save_tally
+from daimon.core.stores.tag_opt_outs import set_opt_out
 from daimon.core.stores.tenants import set_funding_mode
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.lifecycle import TurnLifecycle
@@ -85,7 +89,14 @@ from daimon.core.turn.state import (
 )
 from daimon.core.turn.status_lines import SUMMARY_GAP as GAP
 from daimon.core.turn.termination import TerminationReason
-from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
+from daimon.core.turn_origin import current_origin_id
+from daimon.testing.factories import (
+    make_account,
+    make_channel_budget,
+    make_ledger_entry,
+    make_platform_principal,
+    make_tenant,
+)
 from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from slack_sdk.errors import SlackApiError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -224,6 +235,7 @@ def _make_lifecycle(
     intent_id: uuid.UUID | None = None,
     requester_is_admin: bool = True,
     requester_foreign: bool = False,
+    author_id: str = "U_AUTHOR",
 ) -> tuple[SlackTurnLifecycle, asyncio.Event, dict[str, tuple[asyncio.Event, str]], list[str]]:
     """Create a SlackTurnLifecycle with recorder callables for registry operations.
 
@@ -251,7 +263,7 @@ def _make_lifecycle(
         channel="C_TEST",
         thread_ts="1700000000.000000",
         cancel=cancel,
-        author_id="U_AUTHOR",
+        author_id=author_id,
         requester_is_admin=requester_is_admin,
         requester_foreign=requester_foreign,
         agent_name=agent_name,
@@ -2202,3 +2214,142 @@ async def test_nothing_posted_names_another_app(fake_slack_web_client: Any) -> N
     final = _block_text(_last_update_blocks(fake_slack_web_client))
     assert "Use Slack, not another app. See another app." in final
     assert "Discord" not in final and "Teams" not in final
+
+
+@pytest.mark.asyncio
+async def test_terminal_success_when_answer_tags_an_opted_out_person_then_plain_name(
+    fake_slack_web_client: Any,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The model's answer is Daimon's own post, so a never-tag choice holds there too."""
+    tenant = await make_tenant(db_session, platform="slack", workspace_id="T_LC_OPT")
+    account = await make_account(db_session, tenant=tenant)
+    await make_platform_principal(
+        db_session, platform="slack", external_id="U2", tenant=tenant, account=account
+    )
+    await set_opt_out(db_session, account_id=account.id, tenant_id=tenant.id)
+    await upsert_user_names(
+        db_session, tenant_id=tenant.id, platform="slack", names={"U2": KnownName("Bo")}
+    )
+    await db_session.commit()
+    lc, *_ = _make_lifecycle(
+        fake_slack_web_client, sessionmaker=db_session_factory, tenant_id=tenant.id
+    )
+    await lc.post_initial()
+    await lc.on_terminal_success(
+        TurnState(content=[TextBlock(kind="text", text="ask <@U2> or <@U3>")])
+    )
+
+    text = _block_text(_last_update_blocks(fake_slack_web_client))
+    assert "@Bo" in text and "<@U2>" not in text, "the opted-out person is named, not tagged"
+    assert "<@U3>" in text, "everyone else keeps their tag"
+
+
+def _tags(n: int) -> str:
+    return " ".join(f"<@U{i}>" for i in range(1, n + 1))
+
+
+@pytest.mark.asyncio
+async def test_terminal_success_when_answer_tags_past_the_people_limit_then_extras_are_plain_names(
+    fake_slack_web_client: Any,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The answer pings at most the people limit, the author not counted; the rest are named."""
+    tenant = await make_tenant(db_session, platform="slack", workspace_id="T_LC_CAP")
+    for uid in ("U6", "U8"):
+        await make_platform_principal(db_session, platform="slack", external_id=uid, tenant=tenant)
+    await upsert_user_names(
+        db_session,
+        tenant_id=tenant.id,
+        platform="slack",
+        names={"U6": KnownName("Fay"), "U8": KnownName("Hal")},
+    )
+    await db_session.commit()
+    lc, *_ = _make_lifecycle(
+        fake_slack_web_client,
+        sessionmaker=db_session_factory,
+        tenant_id=tenant.id,
+        author_id="UAUTH",
+    )
+    await lc.post_initial()
+    answer = f"<@UAUTH> {_tags(8)} done"
+    await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text=answer)]))
+
+    text = _block_text(_last_update_blocks(fake_slack_web_client))
+    assert "<@UAUTH>" in text, "the author is not counted"
+    assert all(f"<@U{i}>" in text for i in range(1, 6)), "five others keep their ping"
+    assert "<@U6>" not in text and "<@U8>" not in text, "the rest carry no mention markup"
+    assert "@Fay" in text and "@Hal" in text and "@someone" in text, "named, never dropped"
+
+
+@pytest.mark.asyncio
+async def test_terminal_success_when_people_were_approved_then_the_higher_limit_applies(
+    fake_slack_web_client: Any,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session, platform="slack", workspace_id="T_LC_CAP2")
+    await db_session.commit()
+    origin_id = uuid.uuid4()
+    async with db_session_factory.begin() as session:
+        key = turn_tally_key(origin_id)
+        await lock_tally(session, tenant_id=tenant.id, turn_key=key)
+        await save_tally(
+            session,
+            tenant_id=tenant.id,
+            turn_key=key,
+            approved=ReachPlan(threads=0, places=0, people=7),
+        )
+    lc, *_ = _make_lifecycle(
+        fake_slack_web_client, sessionmaker=db_session_factory, tenant_id=tenant.id
+    )
+    await lc.post_initial()
+    token = current_origin_id.set(origin_id)
+    try:
+        await lc.on_terminal_success(
+            TurnState(content=[TextBlock(kind="text", text=f"{_tags(9)} done")])
+        )
+    finally:
+        current_origin_id.reset(token)
+
+    text = _block_text(_last_update_blocks(fake_slack_web_client))
+    assert all(f"<@U{i}>" in text for i in range(1, 8)), "seven approved people ping"
+    assert "<@U8>" not in text and "<@U9>" not in text, "past the approval they are plain names"
+
+
+@pytest.mark.asyncio
+async def test_terminal_success_when_reply_is_uncapped_then_everyone_keeps_their_ping(
+    fake_slack_web_client: Any,
+) -> None:
+    """Unattended turns and a switched-off budget leave the answer's mentions alone."""
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+    lc._reply_people_cap = None  # pyright: ignore[reportPrivateUsage]
+    await lc.post_initial()
+    await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text=_tags(8))]))
+
+    text = _block_text(_last_update_blocks(fake_slack_web_client))
+    assert all(f"<@U{i}>" in text for i in range(1, 9))
+
+
+@pytest.mark.asyncio
+async def test_terminal_success_when_opt_out_lookup_fails_then_answer_lands_unpinged(
+    fake_slack_web_client: Any,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A lookup failure must not lose the answer, and nobody unchecked is pinged."""
+    tenant = await make_tenant(db_session, platform="slack", workspace_id="T_LC_OPT2")
+    await db_session.commit()
+    lc, *_ = _make_lifecycle(
+        fake_slack_web_client, sessionmaker=db_session_factory, tenant_id=tenant.id
+    )
+    await lc.post_initial()
+    with patch.object(lifecycle_mod, "tag_opt_outs", side_effect=OSError("db down")):
+        await lc.on_terminal_success(
+            TurnState(content=[TextBlock(kind="text", text="ask <@U2|Bo> today")])
+        )
+
+    text = _block_text(_last_update_blocks(fake_slack_web_client))
+    assert "ask @Bo today" in text, "the answer lands with the person named, not tagged"

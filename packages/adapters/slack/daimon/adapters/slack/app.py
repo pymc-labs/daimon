@@ -249,6 +249,7 @@ from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
 from daimon.core.observability import capture_exception_with_scope
+from daimon.core.outbound.opt_out import untag_opted_out
 from daimon.core.output_delivery import NoticedFiles
 from daimon.core.platform_words import words_for
 from daimon.core.routine_delivery import run_delivery_poller
@@ -758,6 +759,17 @@ class SlackApp:
             with contextlib.suppress(Exception):
                 await previous
         try:
+            # A person who asked never to be tagged is named in the sweep, not pinged.
+            requester_label = await untag_opted_out(
+                self.runtime.sessionmaker,
+                tenant_id=derive_tenant_uuid(platform="slack", workspace_id=team_id),
+                platform="slack",
+                text=f"<@{requester_user_id}>",
+            )
+        except Exception:  # named boundary: the files still go out, pinging nobody
+            log.warning("slack.output_delivery.opt_out_lookup_failed", exc_info=True)
+            requester_label = "@someone"
+        try:
             await deliver_session_outputs(
                 self.runtime.turn_deps.anthropic,
                 web_client,
@@ -768,6 +780,7 @@ class SlackApp:
                 team_id=team_id,
                 noticed_files=self._noticed_output_files,
                 requester_user_id=requester_user_id,
+                requester_label=requester_label,
             )
         except Exception as exc:  # named boundary: a sweep failure must never escape
             log.warning(
@@ -1662,6 +1675,15 @@ class SlackApp:
         except (SlackApiError, aiohttp.ClientError, InvalidToken, SQLAlchemyError) as exc:
             log.warning("slack.slash_refusal_notice_failed", team_id=team_id, exc_info=exc)
 
+    async def _untag_for(self, team_id: str, text: str) -> str:
+        """``text`` with anyone who asked never to be tagged shown by plain name."""
+        return await untag_opted_out(
+            self.runtime.sessionmaker,
+            tenant_id=derive_tenant_uuid(platform="slack", workspace_id=team_id),
+            platform="slack",
+            text=text,
+        )
+
     async def _refuse_external_click(
         self, payload: dict[str, Any], *, text: str | None = None
     ) -> None:
@@ -1674,7 +1696,11 @@ class SlackApp:
             if team_id not in self._workspace_names:
                 await self._bot_user_id(team_id, client)
             await refuse_external_click(
-                client, payload, workspace_name=self._workspace_names.get(team_id), text=text
+                client,
+                payload,
+                workspace_name=self._workspace_names.get(team_id),
+                text=text,
+                untag=functools.partial(self._untag_for, team_id),
             )
         except (SlackApiError, aiohttp.ClientError, InvalidToken, SQLAlchemyError) as exc:
             log.warning("slack.external_refusal_notice_failed", team_id=team_id, exc_info=exc)
@@ -2573,6 +2599,7 @@ class SlackApp:
         cancel_event = asyncio.Event()
         lifecycle = SlackTurnLifecycle(
             sessionmaker=self.runtime.sessionmaker,
+            reply_people_cap=self._reply_people_cap(),
             alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
             ask_human=slack_support_enabled(self.runtime.settings.support),
             tenant_id=tenant_id,
@@ -3032,6 +3059,7 @@ class SlackApp:
             def _recovery_lifecycle(cancel: asyncio.Event) -> TurnLifecycle:
                 new_lifecycle = SlackTurnLifecycle(
                     sessionmaker=self.runtime.sessionmaker,
+                    reply_people_cap=self._reply_people_cap(),
                     alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                     ask_human=slack_support_enabled(self.runtime.settings.support),
                     tenant_id=tenant_id,
@@ -3291,6 +3319,11 @@ class SlackApp:
                         await clear_active_turn(_clear_session, id=_marker_id)
                         await _clear_session.commit()
 
+    def _reply_people_cap(self, attended: bool = True) -> int | None:
+        """People an automatic reply may ping besides its author; None leaves it uncapped."""
+        outbound = self.runtime.settings.outbound
+        return outbound.max_people if attended and outbound.reach_budget_enabled else None
+
     async def _run_continuation_turn(
         self,
         row: TaskContinuationRow,
@@ -3479,6 +3512,9 @@ class SlackApp:
             log.warning("slack.agent_identity_lookup_failed", error_type=type(exc).__name__)
         follow_lifecycle = SlackTurnLifecycle(
             sessionmaker=self.runtime.sessionmaker,
+            reply_people_cap=self._reply_people_cap(
+                attended=row.reason != "watch_fired" and continuation_attended(row)
+            ),
             alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
             ask_human=slack_support_enabled(self.runtime.settings.support),
             tenant_id=tenant_id,
@@ -3577,6 +3613,9 @@ class SlackApp:
         def _follow_up_recovery_lifecycle(cancel: asyncio.Event) -> TurnLifecycle:
             new_lifecycle = SlackTurnLifecycle(
                 sessionmaker=self.runtime.sessionmaker,
+                reply_people_cap=self._reply_people_cap(
+                    attended=row.reason != "watch_fired" and continuation_attended(row)
+                ),
                 alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                 ask_human=slack_support_enabled(self.runtime.settings.support),
                 tenant_id=tenant_id,

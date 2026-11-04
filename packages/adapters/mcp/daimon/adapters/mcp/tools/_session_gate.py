@@ -8,6 +8,7 @@ there was approved.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Literal
 
 import anthropic
@@ -24,12 +25,13 @@ from daimon.core.mcp_personal_servers import visible_tools
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
 from daimon.core.session_seal import session_facts
-from daimon.core.session_snapshot import hash_tools, session_tools
+from daimon.core.session_snapshot import MaTool, hash_tools, session_tools
 from daimon.core.stores.domain import ThreadSessionRow, TurnOriginRow
 from daimon.core.stores.lead_intake import confirmation_tools
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.tool_safety import (
     DAIMON_SERVER_NAME,
+    REACH_APPROVAL_TOOLS,
     WATCH_CONFIRMED_TOOLS,
     has_confirmation_gate,
     microsoft_send_tools,
@@ -143,6 +145,16 @@ async def session_card_gap(
         return "session_unreadable"
 
 
+def _without_configs(tools: Sequence[MaTool], names: frozenset[str]) -> list[MaTool]:
+    """`tools` with Daimon's per-tool configs for `names` left out (an older template)."""
+    return [
+        tool.model_copy(update={"configs": [c for c in tool.configs or [] if c.name not in names]})
+        if tool.type == "mcp_toolset" and tool.mcp_server_name == DAIMON_SERVER_NAME
+        else tool
+        for tool in tools
+    ]
+
+
 async def _recorded_as_gated(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -215,16 +227,20 @@ async def _recorded_as_gated(
     )
     before_pin_clear = confirmed - {"request_channel_pin_clear"}
     lead_tools = await confirmation_tools(runtime.session_factory, auth.tenant_id)
-    for confirmed_tools, pre_watch in dict.fromkeys(
-        (candidate | lead_tools | watch_tools, not watch_tools)
+    # A bind made before the reach card holds no approve_reach gate; it proves
+    # every other card it gated, never a reach approval.
+    for confirmed_tools, pre_watch, pre_reach in dict.fromkeys(
+        (candidate | lead_tools | watch_tools | reach_tools, not watch_tools, not reach_tools)
         for candidate in (confirmed, legacy, before_config, before_config_legacy, before_pin_clear)
         for watch_tools in (
             WATCH_CONFIRMED_TOOLS,
             WATCH_CONFIRMED_TOOLS - {"update_watch"},
             frozenset[str](),
         )
+        for reach_tools in (REACH_APPROVAL_TOOLS, frozenset[str]())
         if (watch_tools or tool_name not in WATCH_CONFIRMED_TOOLS)
         and (tool_name in watch_tools or tool_name != "update_watch")
+        and (reach_tools or tool_name not in REACH_APPROVAL_TOOLS)
     ):
         for asks_before_publishing in (False, True):
             for daimon_rule_tools in dict.fromkeys((frozenset[str](), rule_tools)):
@@ -242,24 +258,13 @@ async def _recorded_as_gated(
                         else ()
                     ),
                 )
+                if pre_reach:
+                    tools = _without_configs(tools, REACH_APPROVAL_TOOLS)
                 if pre_watch:
                     # Policy-on sessions add watch gates implicitly too. Rebuild
                     # the exact pre-watch template for non-watch actions only;
                     # no old hash can authorize watch enrollment or rotation.
-                    tools = [
-                        tool.model_copy(
-                            update={
-                                "configs": [
-                                    config
-                                    for config in tool.configs or []
-                                    if config.name not in WATCH_CONFIRMED_TOOLS
-                                ]
-                            }
-                        )
-                        if tool.type == "mcp_toolset" and tool.mcp_server_name == DAIMON_SERVER_NAME
-                        else tool
-                        for tool in tools
-                    ]
+                    tools = _without_configs(tools, WATCH_CONFIRMED_TOOLS)
                 if hash_tools(tools) == recorded.tools_sha256 and has_confirmation_gate(
                     [tool.model_dump(mode="json") for tool in tools], tool_name=tool_name
                 ):

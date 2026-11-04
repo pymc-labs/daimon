@@ -141,6 +141,7 @@ from daimon.core.ma import ORPHAN_INTERRUPT_TIMEOUT_S, interrupt_orphaned_sessio
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.ops_alerts import alert_ops
+from daimon.core.outbound.opt_out import untag_opted_out
 from daimon.core.output_delivery import NoticedFiles
 from daimon.core.participation_gates import BATCH_MAX_MESSAGES, BATCH_MAX_QUIET_PERIODS
 from daimon.core.permissions import channel_permissions
@@ -920,6 +921,7 @@ class DaimonBot(commands.Bot):
         # A DM has one reader, so a file posted apart from the answer needs no attribution.
         attributed = lifecycle if isinstance(thread, discord.Thread) else None
         try:
+            requester_label = await self._sweep_requester_label(thread, attributed)
             await deliver_session_outputs(
                 self.runtime.turn_deps.anthropic,
                 thread,
@@ -930,6 +932,7 @@ class DaimonBot(commands.Bot):
                 turn_window=lifecycle.turn_window if lifecycle is not None else None,
                 answer=lifecycle.answer_message if lifecycle is not None else None,
                 requester_id=attributed.requester_id if attributed is not None else None,
+                requester_label=requester_label,
                 reply_to=attributed.files_reply_to(thread.id) if attributed is not None else None,
             )
         except Exception as exc:  # detached sweep must not fail the completed turn
@@ -997,6 +1000,29 @@ class DaimonBot(commands.Bot):
             self._release_thread(thread.id)
             for queued in self._pending.pop(thread.id, []):
                 self._spawn(self.on_message(queued, resume_admitted=True))
+
+    async def _sweep_requester_label(
+        self, thread: discord.abc.Messageable, lifecycle: DiscordTurnLifecycle | None
+    ) -> str | None:
+        """How the sweep names the turn's person when they asked never to be tagged.
+
+        ``None`` leaves the usual mention. A lookup that fails names no one by tag.
+        """
+        guild = getattr(thread, "guild", None)
+        if lifecycle is None or lifecycle.requester_id is None or guild is None:
+            return None
+        mention = f"<@{lifecycle.requester_id}>"
+        try:
+            text = await untag_opted_out(
+                self.runtime.sessionmaker,
+                tenant_id=derive_tenant_uuid(platform="discord", workspace_id=str(guild.id)),
+                platform="discord",
+                text=mention,
+            )
+        except Exception as exc:  # no tag is safer than a ping the person declined
+            log.warning("discord.sweep_opt_out_lookup_failed", error=str(exc))
+            return "@someone"
+        return text if text != mention else None
 
     def _schedule_output_sweep(
         self,

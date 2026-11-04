@@ -44,6 +44,7 @@ from daimon.adapters.slack.shared_channel import (
 )
 from daimon.adapters.slack.support_escalation import ASK_HUMAN_ACTION_ID
 from daimon.adapters.slack.tool_confirmation import SlackConfirmationCards
+from daimon.core.config import OutboundSettings
 from daimon.core.confirmation import ApprovedConfirmation, ConfirmationPrompt, prompt_for_tool_call
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -576,6 +577,7 @@ class _FakeSocketClient:
 
 def _make_app() -> SlackApp:
     settings = MagicMock()
+    settings.outbound = OutboundSettings()
     settings.crypto.keys = (SecretStr("dummykey"),)
     settings.slack.max_concurrent_turns_per_tenant = 3
     runtime = SlackRuntime(
@@ -988,6 +990,7 @@ def test_admission_refusals_never_send_an_external_member_to_commands_or_admins(
     from daimon.adapters.slack.runtime import admission_refusal_message
 
     settings = MagicMock()
+    settings.outbound = OutboundSettings()
     settings.slack.bot_display_name = "daimon"
     text = admission_refusal_message(reason, settings, foreign=True)
     for word in ("/billing", "/agent-setup", "an admin"):
@@ -998,6 +1001,7 @@ def test_an_external_member_is_told_daimon_has_no_credit_yet_when_it_never_had_a
     from daimon.adapters.slack.runtime import admission_refusal_message
 
     settings = MagicMock()
+    settings.outbound = OutboundSettings()
     settings.slack.bot_display_name = "daimon"
     text = admission_refusal_message(
         "balance_depleted", settings, foreign=True, cause="no_credit_yet"
@@ -1048,6 +1052,7 @@ def test_an_external_members_provider_refusal_keeps_its_cause_and_fix_together(c
     from daimon.core.turn.notices import admission_refusal_text
 
     settings = MagicMock()
+    settings.outbound = OutboundSettings()
     settings.slack.bot_display_name = "daimon"
     text = admission_refusal_message(
         "backend_unsupported", settings, foreign=True, cause=cause, provider="openai"

@@ -26,7 +26,7 @@ from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.slack.app import SlackApp
-from daimon.core.config import McpSettings, TurnQueueSettings
+from daimon.core.config import McpSettings, OutboundSettings, TurnQueueSettings
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.membership import Membership
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
@@ -235,6 +235,7 @@ async def test_dm_reply_delivery_and_deduplication(
     )
     await existing._start(tenant, deps, admission)
     settings = MagicMock()
+    settings.outbound = OutboundSettings()
     settings.discord.max_concurrent_turns = 10
     settings.turn_queue = TurnQueueSettings()
     runtime = DiscordRuntime(

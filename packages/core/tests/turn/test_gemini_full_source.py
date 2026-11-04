@@ -692,7 +692,7 @@ async def test_full_default_preparation_and_fresh_followup_turns(full, request):
     assert isinstance(full, tuple), "full source could not retain its authority"
     request, plan, canonical, native, calls, posts, token, *_ = full
     assert BUILT_IN, "the default agent carries Anthropic built-ins for this test to skip"
-    assert len(canonical.target_spec.skills) == len(CUSTOM) == 11, (
+    assert len(canonical.target_spec.skills) == len(CUSTOM) == 12, (
         "every authored skill is represented and the Anthropic built-ins are left out"
     )
     # Assert the native request carries the complete represented authority.
@@ -700,7 +700,7 @@ async def test_full_default_preparation_and_fresh_followup_turns(full, request):
     assert {
         tool["type"] for tool in native["tools"] if tool["type"] != "mcp_server"
     } == expected_tools
-    assert len(native["base_environment"]["sources"]) == 11
+    assert len(native["base_environment"]["sources"]) == 12
     assert all(s["type"] == "gcs" for s in native["base_environment"]["sources"])
     selected = await read_preparation_counterpart(scope_channel_runtimes(request)[0])
     assert selected.verified_counterpart == selected.counterpart
@@ -791,7 +791,7 @@ async def test_gemini_gated_mcp_tool_loss_is_explicit_and_keeps_siblings(full):
     assert target.declared_drops == (*markers, "memory", "sandbox")
     assert all(marker in target.system for marker in markers)
     assert not {"tools", "skills", "mcp"}.intersection(target.declared_drops)
-    assert len(target.skills) == len(native["base_environment"]["sources"]) == 11
+    assert len(target.skills) == len(native["base_environment"]["sources"]) == 12
     allowed = set(GATED_CATALOGUE) - confirmation_gated_tools()
     assert set(target.mcp_servers[0].tool_policy["allowed_tools"]) == allowed
     remote = next(tool for tool in native["tools"] if tool["type"] == "mcp_server")

@@ -33,6 +33,10 @@ from ..harness import registered_account_token
 _SECRET = b"a" * 32
 
 
+_ONE_POST = {"threads": 0, "places": 1, "people": 0}
+_ONE_THREAD = {"threads": 1, "places": 1, "people": 0}
+
+
 async def _call_tool(
     app: ASGIApp, *, token: str, tool_name: str, arguments: dict[str, object]
 ) -> dict[str, object]:
@@ -272,7 +276,7 @@ async def test_send_message_slack_caller_no_longer_hits_unsupported_branch(
         app,
         token=token,
         tool_name="send_message",
-        arguments={"channel_id": "C_TEST", "content": "hi"},
+        arguments={"channel_id": "C_TEST", "content": "hi", "plan": _ONE_POST},
     )
 
     assert call_result.get("isError") is True
@@ -626,7 +630,7 @@ async def test_create_thread_slack_caller_routes_to_slack_impl_and_fails_on_miss
         app,
         token=token,
         tool_name="create_thread",
-        arguments={"channel_id": "C_TEST", "name": "t", "content": "hi"},
+        arguments={"channel_id": "C_TEST", "name": "t", "content": "hi", "plan": _ONE_THREAD},
     )
 
     assert call_result.get("isError") is True
@@ -668,7 +672,7 @@ async def test_create_thread_discord_caller_routes_to_discord_impl_and_fails_on_
         app,
         token=token,
         tool_name="create_thread",
-        arguments={"channel_id": "C_TEST", "name": "t", "content": "hi"},
+        arguments={"channel_id": "C_TEST", "name": "t", "content": "hi", "plan": _ONE_THREAD},
     )
 
     assert call_result.get("isError") is True

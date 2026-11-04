@@ -39,6 +39,7 @@ from daimon.core.routine_delivery import (
     delivery_target,
     render_fallback_dm,
     render_fallback_post,
+    routine_requester_name,
     teams_thread_id,
 )
 from daimon.core.routine_files import payload_for, unsupported_files_note
@@ -129,9 +130,10 @@ def make_teams_routine_poster(
                 "routine.delivery_refused", routine_id=str(row.id), reason="creator_cannot_post"
             )
             return await fallback("creator_cannot_post")
-        text = render_fallback_post(row, platform="teams") + unsupported_files_note(
-            payload_for(row)
-        )
+        name = await routine_requester_name(sessionmaker, row, "teams")
+        text = render_fallback_post(
+            row, platform="teams", requester_name=name
+        ) + unsupported_files_note(payload_for(row))
         conversation = teams_thread_id(target)
         try:
             ids = [

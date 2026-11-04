@@ -164,12 +164,12 @@ async def test_actual_default_sdk_provisioning_record_and_fresh_replay(
         replay = await replay_default_capability(path, manifest, factory)
         assert replay.status == "pass", replay.evidence
         assert factory.scripts[0] is not factory.scripts[1]
-        assert len(factory.scripts[0].skill_uploads) == len(factory.scripts[1].skill_uploads) == 11
+        assert len(factory.scripts[0].skill_uploads) == len(factory.scripts[1].skill_uploads) == 12
         assert all(tool.name == "bash" for tool in BUILTIN_MAPPING.values())
         for script in factory.scripts:
             script.assert_consumed()
             agent = script.deployed_agent
-            assert agent.skills is not None and len(agent.skills) == 11
+            assert agent.skills is not None and len(agent.skills) == 12
             assert all(pin.version == "1" for pin in agent.skills)
             posted = next(
                 request for request in script.requests if request.url.path == "/v1/agents"
@@ -205,7 +205,7 @@ async def test_checked_in_scripted_tape_reprovisions_fresh_upstream(
     async with OpenAIDefaultCapabilityFactory(manifest, sdk_factory=build_async_openai) as factory:
         result = await replay_default_capability(TAPE, manifest, factory)
         assert result.status == "pass", result.evidence
-        assert len(factory.scripts[0].skill_uploads) == 11
+        assert len(factory.scripts[0].skill_uploads) == 12
         assert not any(
             request.url.path.endswith("/events") for request in factory.scripts[0].requests
         )

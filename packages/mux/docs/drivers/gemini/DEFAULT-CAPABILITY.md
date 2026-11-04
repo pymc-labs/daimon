@@ -27,7 +27,7 @@ UTF-8 root SKILL.md, safe canonical paths and no file/directory collisions.
 The host must supply an authorized, idempotent publisher, immutable retention
 and provider-readable GCS access; the driver discovers no bucket/credentials
 and does not make content public. Its receipt is the publisher's attestation,
-not an independent remote download verification. Offline tests carry all eleven
+not an independent remote download verification. Offline tests carry all twelve
 real default bundles byte-for-byte through a scripted publisher and the actual
 SDK over MockTransport. They certify compiler/pin behavior, not a live GCS
 deployment. F1's adapter supplies no publisher, so its dependency remains
@@ -58,7 +58,7 @@ budget rates. The primary is `gemini-3.8-flash`, with fallback only after a 503 
 authorize a call. This adapter ships no live path.
 
 F2 offline proof (`tests/parity/test_f2_gemini_default_capability.py`) explicitly
-injects a full-byte GCS publisher and N3 credential resolver. All eleven authored
+injects a full-byte GCS publisher and N3 credential resolver. All twelve authored
 skills, including binary font assets, are retained and pinned; no asset filtering
 or implicit publisher is enabled. The wire request maps the six logical builtins
 to one Python code-execution tool and the neutral `daimon-mcp` toolset selector

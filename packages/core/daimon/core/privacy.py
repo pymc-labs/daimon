@@ -45,6 +45,7 @@ from daimon.core.stores import selfhosted_resources as selfhosted_store
 from daimon.core.stores import slack_turn_contexts as slack_turn_contexts_store
 from daimon.core.stores import slack_user_tokens as slack_user_tokens_store
 from daimon.core.stores import support_escalation as support_escalation_store
+from daimon.core.stores import tag_opt_outs as tag_opt_outs_store
 from daimon.core.stores import teams_message_admissions as teams_admissions_store
 from daimon.core.stores import tenants as tenants_store
 from daimon.core.stores import user_skills as user_skills_store
@@ -94,6 +95,7 @@ class PurgePreview(BaseModel):
     slack_user_tokens: PurgePreviewRow
     slack_turn_contexts: PurgePreviewRow
     direct_message_conversations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    tag_opt_outs: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     credential_requests: PurgePreviewRow
     wizard_sessions: PurgePreviewRow
     message_feedback: PurgePreviewRow
@@ -140,6 +142,7 @@ def held_lines(preview: PurgePreview) -> list[str]:
         (preview.slack_user_tokens, "saved access token"),
         (preview.slack_turn_contexts, "temporary request record"),
         (preview.direct_message_conversations, "private conversation"),
+        (preview.tag_opt_outs, "never-tag setting"),
         (preview.daimon_admins, "Daimon admin grants"),
         (preview.agent_post_requesters, "post an agent made for you"),
         (preview.platform_user_names, "remembered name"),
@@ -509,6 +512,9 @@ async def collect_purge_preview(
         github_connect_requests_count = await github_connect_store.count_requests_for_account(
             session, account_id=account_id
         )
+        tag_opt_outs_count = await tag_opt_outs_store.count_for_account(
+            session, account_id=account_id
+        )
         github_connect_click_intents_count = (
             await github_connect_store.count_click_intents_for_account(
                 session, account_id=account_id
@@ -541,6 +547,7 @@ async def collect_purge_preview(
         daimon_admins=PurgePreviewRow(count=daimon_admins_total, example=None),
         agent_post_requesters=PurgePreviewRow(count=agent_post_requesters_total, example=None),
         direct_message_conversations=PurgePreviewRow(count=direct_message_count, example=None),
+        tag_opt_outs=PurgePreviewRow(count=tag_opt_outs_count, example=None),
         platform_user_names=PurgePreviewRow(count=platform_user_names_total, example=None),
         teams_messages=PurgePreviewRow(count=teams_messages_total, example=None),
         microsoft_user_tokens=PurgePreviewRow(count=microsoft_user_tokens_total, example=None),

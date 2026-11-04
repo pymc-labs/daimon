@@ -34,6 +34,7 @@ from daimon.core.confirmation import (
     ConfirmationPrompt,
 )
 from daimon.core.native_admins import load_live_subject
+from daimon.core.outbound.opt_out import untag_opted_out
 from daimon.core.posted_controls.confirmation import (
     CONFIRMATION_CUSTOM_ID_PREFIX,
     NOT_YOURS_MESSAGE,
@@ -289,7 +290,12 @@ class SlackConfirmationCards:
                     channel=channel,
                     thread_ts=thread_ts or card_ts,
                     # The mention stays in `text` so it notifies; the words ride the card.
-                    text=f"<@{prompt.requester_platform_user_id}>",
+                    text=await untag_opted_out(
+                        runtime.sessionmaker if runtime is not None else None,
+                        tenant_id=tenant_id,
+                        platform="slack",
+                        text=f"<@{prompt.requester_platform_user_id}>",
+                    ),
                     attachments=notice_attachments(STILL_WAITING_MESSAGE, neutral=True),
                 )
 

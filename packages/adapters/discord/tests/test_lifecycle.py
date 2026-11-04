@@ -19,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, NoReturn
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import daimon.adapters.discord.lifecycle as lifecycle_module
 import daimon.core.turn.run as turn_runner
@@ -2698,6 +2698,14 @@ class TestDegradedTurnReply:
         )
 
 
+async def test_completion_ping_when_answer_tags_many_then_only_the_requester_pings():
+    lifecycle, sends, _ = _make_lifecycle(notify_on_completion=True)
+    await lifecycle.post_initial()
+    tags = " ".join(f"<@{900 + i}>" for i in range(8))
+    await lifecycle.on_terminal_success(_make_success_state(f"{tags} done"))
+    assert sends[-1]["allowed_mentions"].to_dict()["users"] == [123], "the answer's tags stay text"
+
+
 async def test_completion_ping_posts_fresh_answer_and_limits_mentions():
     lifecycle, sends, edits = _make_lifecycle(notify_on_completion=True)
     await lifecycle.post_initial()
@@ -3523,3 +3531,18 @@ class TestOtherAppsNeverNamed:
         await lc.on_render(TurnState(content=[TextBlock(kind="text", text=sealed), tool]))
         posted = "\n".join(str(kwargs.get("content", "")) for kwargs in sends)
         assert "another app" in posted and "Slack" not in posted
+
+
+async def test_terminal_success_when_opt_out_lookup_fails_then_answer_lands_unpinged() -> None:
+    """A never-tag lookup failure must not lose the answer; the requester just isn't pinged."""
+    lc, sends, edits = _make_lifecycle(notify_on_completion=True, tenant_id=uuid.uuid4())
+    await lc.post_initial()
+    with patch(
+        "daimon.adapters.discord.lifecycle.tag_opt_outs", AsyncMock(side_effect=OSError("db"))
+    ):
+        await lc.on_terminal_success(_make_success_state("Here you go"))
+
+    rendered = "\n".join(str(kwargs.get("content", "")) for kwargs in sends)
+    delivered = rendered + "\n".join(str(kwargs) for _, kwargs in edits)
+    assert "Here you go" in delivered, "the answer is delivered"
+    assert "<@123>" not in rendered, "an unchecked requester is not pinged"

@@ -38,6 +38,7 @@ from daimon.adapters.slack.app import SlackApp
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core import allowance_limits
+from daimon.core.config import OutboundSettings
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import build_multifernet, encrypt_token
@@ -328,6 +329,7 @@ def _make_app(
 ) -> SlackApp:
     """Build a SlackApp with injected dependencies for testing."""
     settings = MagicMock()
+    settings.outbound = OutboundSettings()
     if crypto_key is not None:
         settings.crypto.keys = (SecretStr(crypto_key),)
     else:

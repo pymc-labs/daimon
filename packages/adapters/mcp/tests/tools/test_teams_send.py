@@ -353,7 +353,8 @@ async def test_teams_caller_reaches_only_teams_tagged_channel_tools(
 
     # Reaches the Teams branch, which refuses a token with no Teams user bound.
     assert "teams-bound identity" in await call(
-        "send_message", {"channel_id": _THREAD, "content": "hi"}
+        "send_message",
+        {"channel_id": _THREAD, "content": "hi", "plan": {"threads": 0, "places": 1, "people": 0}},
     )
     assert "teams-bound identity" in await call("list_channels", {})
     # Untagged for Teams: hidden, so the registry does not know it.

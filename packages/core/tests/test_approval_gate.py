@@ -32,6 +32,7 @@ WRITE = ToolCall(tool_use_id="t1", server_name="third-party", tool_name="create_
 
 
 ADMIN_INPUTS: dict[str, dict[str, object]] = {
+    "approve_reach": {"threads": 2, "places": 0, "people": 0, "where": "#general"},
     "request_agent_backend_switch": {
         "agent_name": "agent",
         "target_backend": "anthropic",
