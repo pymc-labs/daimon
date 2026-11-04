@@ -2,8 +2,10 @@
 
 Signing in with any account shows the workspaces of the others, while each was proven
 within `LOGIN_MEMORY`. Connecting proves another account from a signed-in session and adds
-its workspaces; disconnecting takes them away again. A session never holds two people of
-one workspace: the one already there stays.
+its workspaces; disconnecting takes them away again, ends every session signed in with it
+and takes its people out of the login's other sessions. A remembered account's people join
+only where the workspace's synced member list still names them (Teams has none: the window
+alone applies). A session never holds two people of one workspace: the one already there stays.
 """
 
 from __future__ import annotations
@@ -20,7 +22,8 @@ from daimon.core.stores import web_identities as identities_store
 from daimon.core.stores import web_logins as logins_store
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores import web_sessions as sessions_store
-from daimon.core.stores.domain import WebPersonRow, WebSessionRow
+from daimon.core.stores import workspace_members as members_store
+from daimon.core.stores.domain import WebLoginSessionPersonRow, WebPersonRow, WebSessionRow
 from daimon.core.web_identity import (
     PLATFORM_OF,
     VerifiedIdentity,
@@ -34,6 +37,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 LOGIN_MEMORY: Final = timedelta(days=30)
 
 _INVITE = "invite"
+#: Providers whose workspaces have no member list to check a remembered person against.
+#: Teams has none, so there the window alone applies; every other platform needs a synced
+#: list that still names the person, or a fresh sign-in with that account.
+_UNLISTED: Final = frozenset({"microsoft"})
+_SIGN_IN_AGAIN = "Sign in again."
 
 
 class ConnectedAccountNotFound(UserFacingError):
@@ -64,14 +72,38 @@ async def _remembered(
     skip: tuple[str, str],
     now: datetime,
 ) -> list[WebPersonRow]:
-    """Active members of the login's other accounts that proved themselves recently."""
+    """Active members of the login's other accounts that proved themselves recently and
+    can be checked: a workspace whose synced member list still names them (Teams has no
+    list, so the window alone stands)."""
     accounts = await logins_store.list_accounts(session, login_id=login_id)
     recent = {
         (a.provider, a.subject)
         for a in accounts
         if (a.provider, a.subject) != skip and a.last_proven_at >= now - LOGIN_MEMORY
     }
-    return await identities_store.list_active_members_of_accounts(session, accounts=recent)
+    reached = await identities_store.list_active_members_of_accounts(session, accounts=recent)
+    standings = await members_store.list_chat_standings(
+        session, people={(p.tenant_id, p.account_id) for p, _ in reached}
+    )
+    kept: list[WebPersonRow] = []
+    for person, provider in reached:
+        standing = standings.get((person.tenant_id, person.account_id))
+        if provider in _UNLISTED or (standing is not None and standing.synced and standing.member):
+            kept.append(person)
+    return kept
+
+
+async def _require_own_account(session: AsyncSession, web_session: WebSessionRow) -> None:
+    """The account the session signed in with must still be in its login: disconnecting it
+    from another device ends this session's right to manage the rest. Invite sessions
+    signed in with no account."""
+    if web_session.provider == _INVITE:
+        return
+    own = await logins_store.get_account(
+        session, provider=web_session.provider, subject=web_session.subject
+    )
+    if own is None or own.login_id != web_session.login_id:
+        raise WebSignInRefused(_SIGN_IN_AGAIN)
 
 
 async def sign_in_login(
@@ -134,6 +166,8 @@ async def connect_account(
     to the session. Refused as signing in with it would be."""
     if person.kind == "visitor":
         raise WebSignInRefused("Guests can't connect an account.")
+    async with session_factory() as session:
+        await _require_own_account(session, web_session)
     await _link_first(session_factory, person=person, identity=identity, now=now)
     people = await resolve_web_people(session_factory, identity=identity)
     async with session_factory() as session, session.begin():
@@ -186,37 +220,49 @@ async def disconnect_account(
     if (provider, subject) == (web_session.provider, web_session.subject):
         raise WebSignInRefused("You signed in with this account.")
     async with session_factory() as session, session.begin():
+        await _require_own_account(session, web_session)
         account = await logins_store.get_account(session, provider=provider, subject=subject)
-        if (
-            account is None
-            or web_session.login_id is None
-            or account.login_id != web_session.login_id
-        ):
+        login_id = web_session.login_id
+        if account is None or login_id is None or account.login_id != login_id:
             raise ConnectedAccountNotFound("This account isn't connected.")
         await logins_store.remove_account(session, provider=provider, subject=subject)
+        await sessions_store.delete_signed_in_with(session, provider=provider, subject=subject)
         keep_via = {
             (a.provider, a.subject)
-            for a in await logins_store.list_accounts(session, login_id=web_session.login_id)
+            for a in await logins_store.list_accounts(session, login_id=login_id)
         }
-        ids = await sessions_store.list_session_people(session, session_id=web_session.id)
-        held = await identities_store.list_for_people(session, person_ids=ids)
-        gone = [
+        reached = await sessions_store.list_login_people(session, login_id=login_id)
+        held = await identities_store.list_for_people(
+            session, person_ids={r.person_id for r in reached}
+        )
+        gone = {
             person_id
             for person_id, rows in held.items()
             if any((r.provider, r.subject) == (provider, subject) for r in rows)
             and not any(r.provider == _INVITE or (r.provider, r.subject) in keep_via for r in rows)
-        ]
-        await sessions_store.remove_people(session, session_id=web_session.id, person_ids=gone)
-        if person.id in gone:
+        }
+        by_session: dict[uuid.UUID, list[WebLoginSessionPersonRow]] = {}
+        for row in reached:
+            by_session.setdefault(row.session_id, []).append(row)
+        for session_id, rows in by_session.items():
+            dropped = [r.person_id for r in rows if r.person_id in gone]
+            if not dropped:
+                continue
+            await sessions_store.remove_people(session, session_id=session_id, person_ids=dropped)
+            if rows[0].current_person_id not in dropped:
+                continue
             left = await people_store.get_people(
-                session, person_ids=[i for i in ids if i not in gone]
+                session, person_ids=[r.person_id for r in rows if r.person_id not in gone]
             )
             target = next((p for p in left if p.status == "active"), left[0] if left else None)
-            if target is None:
+            if target is not None:
+                await sessions_store.switch_person(
+                    session, session_id=session_id, tenant_id=target.tenant_id
+                )
+            elif session_id == web_session.id:
                 raise WebSignInRefused("This is the only way into your workspaces.")
-            await sessions_store.switch_person(
-                session, session_id=web_session.id, tenant_id=target.tenant_id
-            )
+            else:
+                await sessions_store.delete_by_ids(session, session_ids=[session_id])
         await _audit(session, person, "Disconnected account", provider, now)
 
 

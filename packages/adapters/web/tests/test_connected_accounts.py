@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
+from daimon.core.stores import workspace_members as members_store
+from daimon.core.stores.domain import Platform
 from daimon.testing.factories import make_tenant, make_web_person
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -48,8 +51,15 @@ async def _me(client: httpx.AsyncClient) -> dict[str, Any]:
 
 
 async def _installed(db_session: AsyncSession) -> None:
-    await make_tenant(db_session, platform="discord", workspace_id="g1")
-    await make_tenant(db_session, platform="slack", workspace_id="T1")
+    """Both workspaces have a synced member list naming Ada's two accounts, which is what
+    lets one account's workspaces be remembered on another's sign-in."""
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    listed: tuple[tuple[Platform, str, str], ...] = (("discord", "g1", "d1"), ("slack", "T1", "U1"))
+    for platform, workspace_id, user in listed:
+        tenant = await make_tenant(db_session, platform=platform, workspace_id=workspace_id)
+        await members_store.replace_members(
+            db_session, tenant_id=tenant.id, members={user: False}, workspace_name="W", now=now
+        )
     await db_session.commit()
 
 

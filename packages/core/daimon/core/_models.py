@@ -5327,7 +5327,12 @@ class WebSession(Base):
     """
 
     __tablename__ = "web_sessions"
-    __table_args__ = (Index("ix_web_sessions_expires_at", "expires_at"),)
+    __table_args__ = (
+        Index("ix_web_sessions_expires_at", "expires_at"),
+        Index("ix_web_sessions_login", "login_id"),
+        # The account a sign-in came with: disconnecting it ends every session of it.
+        Index("ix_web_sessions_account", "provider", "subject"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()

@@ -130,12 +130,13 @@ async def count_people_by_group(session: AsyncSession, *, tenant_id: uuid.UUID) 
 
 async def list_active_members_of_accounts(
     session: AsyncSession, *, accounts: Collection[tuple[str, str]]
-) -> list[WebPersonRow]:
-    """The active members these (provider, subject) accounts are signed in as, oldest first."""
+) -> list[tuple[WebPersonRow, str]]:
+    """The active members these (provider, subject) accounts are signed in as, oldest first,
+    each with the provider it was reached through. A person two accounts reach appears twice."""
     if not accounts:
         return []
-    rows = await session.scalars(
-        select(WebPerson)
+    rows = await session.execute(
+        select(WebPerson, WebIdentity.provider)
         .join(WebIdentity, WebIdentity.person_id == WebPerson.id)
         .where(
             WebIdentity.issuer == "",
@@ -145,4 +146,4 @@ async def list_active_members_of_accounts(
         )
         .order_by(WebPerson.created_at, WebPerson.id)
     )
-    return [WebPersonRow.model_validate(orm) for orm in rows]
+    return [(WebPersonRow.model_validate(orm), provider) for orm, provider in rows.tuples()]

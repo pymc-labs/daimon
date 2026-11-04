@@ -2,7 +2,9 @@
 
 `web_logins` groups the accounts one member connected; `web_login_accounts` holds each
 account once, with when it last proved itself. `web_sessions.login_id` is null for
-sessions that predate this and for invite sessions. Downgrading drops the groups.
+invite sessions. Existing browser sign-ins are deleted: none of them is on a login, so
+disconnecting an account could not reach them and everyone signs in once more.
+Downgrading drops the groups.
 
 downgrade: destructive
 """
@@ -59,10 +61,15 @@ def upgrade() -> None:
             nullable=True,
         ),
     )
+    op.execute("DELETE FROM web_sessions")
+    op.create_index("ix_web_sessions_login", "web_sessions", ["login_id"])
+    op.create_index("ix_web_sessions_account", "web_sessions", ["provider", "subject"])
 
 
 def downgrade() -> None:
     op.execute("SET LOCAL lock_timeout = '5s'")
+    op.drop_index("ix_web_sessions_account", table_name="web_sessions")
+    op.drop_index("ix_web_sessions_login", table_name="web_sessions")
     op.drop_column("web_sessions", "login_id")
     op.drop_index("ix_web_login_accounts_login", table_name="web_login_accounts")
     op.drop_table("web_login_accounts")

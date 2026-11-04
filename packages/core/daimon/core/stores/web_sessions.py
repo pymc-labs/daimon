@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from typing import Any, cast
 
 from daimon.core._models import WebPerson, WebSession, WebSessionPerson
-from daimon.core.stores.domain import WebPersonRow, WebSessionRow
+from daimon.core.stores.domain import WebLoginSessionPersonRow, WebPersonRow, WebSessionRow
 from sqlalchemy import CursorResult, delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -155,6 +155,33 @@ async def switch_person(
         )
     ).scalar_one_or_none()
     return None if orm is None else WebSessionRow.model_validate(orm)
+
+
+async def delete_signed_in_with(session: AsyncSession, *, provider: str, subject: str) -> int:
+    """End every session that signed in with the account, wherever it is open."""
+    result = await session.execute(
+        delete(WebSession).where(WebSession.provider == provider, WebSession.subject == subject)
+    )
+    return cast(CursorResult[Any], result).rowcount
+
+
+async def delete_by_ids(session: AsyncSession, *, session_ids: Sequence[uuid.UUID]) -> None:
+    await session.execute(delete(WebSession).where(WebSession.id.in_(session_ids)))
+
+
+async def list_login_people(
+    session: AsyncSession, *, login_id: uuid.UUID
+) -> list[WebLoginSessionPersonRow]:
+    """Every person every session of the login reaches, with the person each is working as."""
+    rows = await session.execute(
+        select(WebSession.id, WebSession.current_person_id, WebSessionPerson.person_id)
+        .join(WebSessionPerson, WebSessionPerson.session_id == WebSession.id)
+        .where(WebSession.login_id == login_id)
+    )
+    return [
+        WebLoginSessionPersonRow(session_id=sid, current_person_id=cur, person_id=pid)
+        for sid, cur, pid in rows.tuples()
+    ]
 
 
 async def touch(session: AsyncSession, *, session_id: uuid.UUID, now: datetime) -> None:

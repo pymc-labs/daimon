@@ -20,7 +20,14 @@ from daimon.core.config import Settings
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
-from daimon.core.stores import web_audit, web_identities, web_invites, web_people, web_sessions
+from daimon.core.stores import (
+    web_audit,
+    web_identities,
+    web_invites,
+    web_logins,
+    web_people,
+    web_sessions,
+)
 from daimon.core.stores import web_chat as chat_store
 from daimon.core.stores.domain import WebMessageBlocks, WebMessageRow, WebPersonRow, WebThreadRow
 from daimon.core.stores.identity import get_or_create_platform_principal
@@ -156,9 +163,17 @@ async def new_thread(
 
 
 async def signed_in(factory: async_sessionmaker[AsyncSession], person: WebPersonRow) -> str:
-    """A live sign-in for `person`; its session cookie value."""
+    """A live sign-in for `person`; its session cookie value. Like a real one, it sits on
+    a login that holds the account it signed in with."""
     token = new_session_token()
     async with factory.begin() as db:
+        login = await web_logins.prove_account(
+            db,
+            provider="discord",
+            subject=str(person.id),
+            display_name=person.display_name,
+            now=datetime.now(UTC),
+        )
         await web_identities.link_identity(
             db,
             tenant_id=person.tenant_id,
@@ -178,6 +193,7 @@ async def signed_in(factory: async_sessionmaker[AsyncSession], person: WebPerson
             people=[person],
             ttl=timedelta(days=1),
             now=datetime.now(UTC),
+            login_id=login.login_id,
         )
     return token
 

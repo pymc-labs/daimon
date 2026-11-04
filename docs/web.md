@@ -63,9 +63,12 @@ off, the sign-in itself decides.
 A signed-in member connects other chat accounts from the account menu; the workspace
 switcher then lists the workspaces of every connected account. A later sign-in with any
 of them, on any device, shows them all while each was proven within 30 days, and an older
-one returns when it signs in again. Profile lists the connected accounts and disconnects
-one, but not the account the session signed in with. A connection is refused where
-signing in with that account would be, an account linked to another person in the
+one returns when it signs in again. A workspace is remembered only while its synced member
+list still names the person (Teams: the 30 days alone), so an unsynced Discord or Slack
+workspace needs a fresh sign-in. Profile lists the sign-ins and disconnects one, but not
+the account the session signed in with; disconnecting ends every session signed in with it
+and removes its people from the login's other sessions. A connection is refused where
+signing in with that account would be, a Microsoft guest account is refused, an account linked to another person in the
 workspace is refused, and guests cannot connect.
 
 ## Become the owner
@@ -89,8 +92,8 @@ From then on, invite people and grant roles under **Admin** > **People**.
 ## Your profile
 
 Everyone signed in opens **Profile** from the user menu. It lists what each
-agent remembers about you, with **Forget**, and the accounts connected to you:
-sign-ins, Microsoft 365 and tool servers, each with a disconnect. Disconnecting
+agent remembers about you, with **Forget**, your sign-ins (Discord, Slack, Microsoft)
+and the accounts connected to you (Microsoft 365 and tool servers), each with a disconnect. Disconnecting
 deletes what Daimon holds; it does not revoke the grant at the other service.
 It also lists your coding keys, which you can revoke.
 

@@ -10,6 +10,7 @@ import pytest
 from daimon.core.stores import web_logins as logins_store
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores import web_sessions as sessions_store
+from daimon.core.stores import workspace_members as members_store
 from daimon.core.stores.domain import WebPersonRow, WebSessionRow
 from daimon.core.web_identity import VerifiedIdentity, WebSignInRefused, resolve_web_people
 from daimon.core.web_login import (
@@ -19,7 +20,7 @@ from daimon.core.web_login import (
     disconnect_account,
     sign_in_login,
 )
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_tenant, make_web_person
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 NOW = datetime(2030, 1, 1, 12, tzinfo=UTC)
@@ -74,10 +75,24 @@ async def _tenants(factory: Factory, session_id: uuid.UUID) -> set[uuid.UUID]:
         return {p.tenant_id for p in await people_store.get_people(db, person_ids=ids)}
 
 
+async def _listed(db_session: AsyncSession, tenant_id: uuid.UUID, *members: str) -> None:
+    """Load the workspace's member list in full: exactly `members` are in it."""
+    await members_store.replace_members(
+        db_session,
+        tenant_id=tenant_id,
+        members=dict.fromkeys(members, False),
+        workspace_name="W",
+        now=NOW,
+    )
+    await db_session.commit()
+
+
 async def _two_workspaces(db_session: AsyncSession) -> tuple[uuid.UUID, uuid.UUID]:
+    """A Discord and a Slack workspace, each with a synced list naming Ada's account."""
     discord = await make_tenant(db_session, platform="discord", workspace_id="g1")
     slack = await make_tenant(db_session, platform="slack", workspace_id="T1")
-    await db_session.commit()
+    await _listed(db_session, discord.id, "d1")
+    await _listed(db_session, slack.id, "U1")
     return discord.id, slack.id
 
 
@@ -221,6 +236,7 @@ async def test_a_session_never_holds_two_people_of_one_workspace(
     db_session: AsyncSession, db_session_factory: Factory
 ) -> None:
     g1, _ = await _two_workspaces(db_session)
+    await _listed(db_session, g1, "d1", "d2")
     web_session, people = await _sign_in(db_session_factory, _discord(("g1", "Acme")))
 
     result = await connect_account(
@@ -305,3 +321,222 @@ async def test_the_account_a_session_signed_in_with_cannot_be_disconnected(
             subject="T1:unknown",
             now=NOW,
         )
+
+
+async def test_disconnect_takes_the_account_out_of_the_logins_other_sessions(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    web_session, people, g1, _ = await _connected(db_session_factory, db_session)
+    elsewhere, _ = await _sign_in(db_session_factory, _discord(("g1", "Acme")), now=NOW)
+    assert len(await _tenants(db_session_factory, elsewhere.id)) == 2, "the other device has both"
+
+    await disconnect_account(
+        db_session_factory,
+        web_session=web_session,
+        person=people[0],
+        provider="slack",
+        subject="T1:U1",
+        now=NOW,
+    )
+
+    assert await _tenants(db_session_factory, elsewhere.id) == {g1}, (
+        "the second live session of the login lost the Slack workspace too"
+    )
+
+
+async def test_disconnect_ends_sessions_signed_in_with_the_account(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    web_session, people, _, _ = await _connected(db_session_factory, db_session)
+    via_slack, _ = await _sign_in(
+        db_session_factory, _slack(("T1", "Beta")), token=b"s" * 32, now=NOW
+    )
+    assert via_slack.login_id == web_session.login_id, "signing in with Slack joined the login"
+
+    await disconnect_account(
+        db_session_factory,
+        web_session=web_session,
+        person=people[0],
+        provider="slack",
+        subject="T1:U1",
+        now=NOW,
+    )
+
+    async with db_session_factory() as db:
+        ended = await sessions_store.get_live_session(db, token_sha256=b"s" * 32, now=NOW)
+        kept = await sessions_store.get_live_session(db, token_sha256=TOKEN, now=NOW)
+    assert ended is None, "the Slack sign-in is cut off everywhere"
+    assert kept is not None, "the session that disconnected it stays"
+
+
+async def test_a_merge_does_not_bring_an_account_proven_over_thirty_days_ago(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    g1, t1 = await _two_workspaces(db_session)
+    g2 = await make_tenant(db_session, platform="discord", workspace_id="g2")
+    await _listed(db_session, g2.id, "d2")
+    old = NOW - LOGIN_MEMORY - timedelta(days=10)
+    elsewhere = _discord(("g2", "Other"), subject="d2")
+    other, _ = await _sign_in(db_session_factory, elsewhere, now=old)
+    await _sign_in(db_session_factory, _slack(("T1", "Beta")), now=NOW)
+    async with db_session_factory.begin() as db:
+        # Slack's own login joins the other one; Discord d2 was last proven long ago.
+        await logins_store.add_account(
+            db,
+            login_id=other.login_id or uuid.uuid4(),
+            provider="slack",
+            subject="T1:U1",
+            display_name="Ada",
+            now=NOW,
+        )
+    web_session, people = await _sign_in(db_session_factory, _discord(("g1", "Acme")), now=NOW)
+
+    result = await connect_account(
+        db_session_factory,
+        web_session=web_session,
+        person=people[0],
+        identity=_slack(("T1", "Beta")),
+        now=NOW,
+    )
+
+    assert result.merged, "Slack was in the other login"
+    assert await _tenants(db_session_factory, web_session.id) == {g1, t1}, (
+        "the merged-in Discord account lapsed, so its workspace stays out"
+    )
+
+
+async def test_a_person_who_left_a_synced_workspace_is_not_remembered(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    _, _, g1, t1 = await _connected(db_session_factory, db_session)
+    await _listed(db_session, g1)
+
+    later, _ = await _sign_in(
+        db_session_factory, _slack(("T1", "Beta")), now=NOW + timedelta(days=1)
+    )
+
+    assert await _tenants(db_session_factory, later.id) == {t1}, (
+        "the synced Discord list no longer names Ada, so only a fresh Discord sign-in counts"
+    )
+
+
+async def test_a_workspace_without_a_synced_list_is_not_remembered(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    discord = await make_tenant(db_session, platform="discord", workspace_id="g1")
+    slack = await make_tenant(db_session, platform="slack", workspace_id="T1")
+    await _listed(db_session, slack.id, "U1")
+    web_session, people = await _sign_in(db_session_factory, _discord(("g1", "Acme")))
+    await connect_account(
+        db_session_factory,
+        web_session=web_session,
+        person=people[0],
+        identity=_slack(("T1", "Beta")),
+        now=NOW,
+    )
+
+    later, _ = await _sign_in(
+        db_session_factory, _slack(("T1", "Beta")), now=NOW + timedelta(days=1)
+    )
+
+    assert discord.id not in await _tenants(db_session_factory, later.id), (
+        "nothing can confirm Ada is still in the unlisted Discord workspace"
+    )
+    assert await _tenants(db_session_factory, later.id) == {slack.id}
+
+
+async def test_a_teams_account_is_remembered_by_the_window_alone(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    teams = await make_tenant(db_session, platform="teams", workspace_id="tid")
+    slack = await make_tenant(db_session, platform="slack", workspace_id="T1")
+    await _listed(db_session, slack.id, "U1")
+    microsoft = VerifiedIdentity(
+        provider="microsoft",
+        subject="tid:o1",
+        display_name="Ada",
+        workspaces=(("tid", "Teams"),),
+        platform_user_id="o1",
+    )
+    web_session, people = await _sign_in(db_session_factory, microsoft)
+    await connect_account(
+        db_session_factory,
+        web_session=web_session,
+        person=people[0],
+        identity=_slack(("T1", "Beta")),
+        now=NOW,
+    )
+
+    later, _ = await _sign_in(
+        db_session_factory, _slack(("T1", "Beta")), now=NOW + timedelta(days=1)
+    )
+
+    assert await _tenants(db_session_factory, later.id) == {teams.id, slack.id}, (
+        "Teams has no member list to check, so the 30-day window decides"
+    )
+
+
+async def test_connect_and_disconnect_are_refused_once_the_sessions_own_account_left_the_login(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    web_session, people, _, _ = await _connected(db_session_factory, db_session)
+    async with db_session_factory.begin() as db:
+        await logins_store.remove_account(db, provider="discord", subject="d1")
+
+    with pytest.raises(WebSignInRefused, match="Sign in again"):
+        await connect_account(
+            db_session_factory,
+            web_session=web_session,
+            person=people[0],
+            identity=_discord(("g1", "Acme"), subject="d2"),
+            now=NOW,
+        )
+    with pytest.raises(WebSignInRefused, match="Sign in again"):
+        await disconnect_account(
+            db_session_factory,
+            web_session=web_session,
+            person=people[0],
+            provider="slack",
+            subject="T1:U1",
+            now=NOW,
+        )
+
+
+async def test_a_member_who_joined_by_invite_link_can_connect_an_account(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    g1, t1 = await _two_workspaces(db_session)
+    discord = await make_tenant(db_session, platform="discord", workspace_id="g3")
+    member = await make_web_person(db_session, tenant=discord)
+    await db_session.commit()
+    async with db_session_factory.begin() as db:
+        invited = await sessions_store.create_session(
+            db,
+            token_sha256=TOKEN,
+            provider="invite",
+            issuer="",
+            subject="inv-1",
+            people=[member],
+            ttl=timedelta(days=1),
+            now=NOW,
+        )
+    assert invited.login_id is None, "an invite session starts with no login"
+
+    result = await connect_account(
+        db_session_factory,
+        web_session=invited,
+        person=member,
+        identity=_slack(("T1", "Beta")),
+        now=NOW,
+    )
+
+    async with db_session_factory() as db:
+        live = await sessions_store.get_live_session(db, token_sha256=TOKEN, now=NOW)
+        accounts = await logins_store.list_accounts(
+            db, login_id=(live.login_id if live else None) or uuid.uuid4()
+        )
+    assert live is not None and live.login_id is not None, "connecting gave the session a login"
+    assert [a.provider for a in accounts] == ["slack"], "the login holds the new account"
+    assert [p.tenant_id for p in result.added] == [t1], "the Slack workspace joined the session"
+    assert await _tenants(db_session_factory, invited.id) == {discord.id, t1}
+    assert g1 not in await _tenants(db_session_factory, invited.id)
