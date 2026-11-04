@@ -241,8 +241,22 @@ async def test_prepare_posts_when_own_thread_cap_is_approved_then_rest_of_turn_p
     scope = _scope()
     await approve(runtime, auth, scope, ReachPlan(threads=8, places=0, people=0))
     await prepare_posts(runtime, auth, _own(8), plan=None, scope=scope)
-    await prepare_posts(runtime, auth, _own(2), plan=None, scope=scope)
-    assert (await _tally(runtime, auth, scope)).own_threads == 10, f"{platform}: approval holds"
+    assert (await _tally(runtime, auth, scope)).own_threads == 8, f"{platform}: approval holds"
+    with pytest.raises(ToolError, match="approve_reach"):
+        await prepare_posts(runtime, auth, _own(1), plan=None, scope=scope)
+
+
+@pytest.mark.parametrize("platform", PLATFORMS)
+async def test_prepare_posts_when_a_small_approval_then_own_thread_cap_still_holds(
+    sessionmaker, platform
+):
+    """Approving one outside post does not lift the cap on threads in the own channel."""
+    runtime, auth = await _setup(sessionmaker, platform)
+    scope = _scope()
+    await approve(runtime, auth, scope, ReachPlan(threads=1, places=0, people=0))
+    await prepare_posts(runtime, auth, _own(5), plan=None, scope=scope)
+    with pytest.raises(ToolError, match="approve_reach"):
+        await prepare_posts(runtime, auth, _own(1), plan=None, scope=scope)
 
 
 @pytest.mark.parametrize("platform", PLATFORMS)
@@ -510,6 +524,7 @@ async def _session_turn(
     platform: str = "discord",
     thread: str | None = None,
     channel: str | None = None,
+    parent: str = "C1",
 ) -> tuple[McpRuntime, AuthIdentity, list[TurnOriginRow]]:
     """A caller in a chat session with `turns` running origins of its own agent.
 
@@ -526,7 +541,7 @@ async def _session_turn(
                 tenant_id=tenant.id,
                 account_id=account.id,
                 platform=cast(Any, platform),
-                parent_channel_id="C1",
+                parent_channel_id=parent,
                 thread_id=thread or f"T{i}",
                 platform_channel_id=channel,
                 responder_ma_agent_id="agent_x",
@@ -642,6 +657,19 @@ async def test_prepare_posts_when_dm_turn_posts_to_its_dm_then_own_conversation(
     )
     assert "requested by" not in out.text, f"{platform}: no line in the own DM"
     assert await _tally(runtime, auth, scope) == ReachTally(), f"{platform}: nothing counted"
+
+
+async def test_prepare_posts_when_slack_dm_turn_posts_to_its_dm_then_own_conversation(sessionmaker):
+    """A Slack DM stores the message ts as the thread and the ``D...`` id as its channel."""
+    runtime, auth, _ = await _session_turn(
+        sessionmaker, platform="slack", thread="1700000000.000100", channel="D9", parent="D9"
+    )
+    scope = await _outbound.turn_scope(runtime, auth)
+    [out] = await prepare_posts(
+        runtime, auth, [OutgoingPost(text="x" * 5000, place="D9")], plan=None, scope=scope
+    )
+    assert "requested by" not in out.text, "no line in the own DM"
+    assert await _tally(runtime, auth, scope) == ReachTally(), "nothing counted"
 
 
 async def test_turn_scope_when_server_started_origin_then_unattended(

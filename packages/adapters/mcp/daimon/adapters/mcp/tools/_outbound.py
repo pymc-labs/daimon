@@ -41,11 +41,11 @@ from daimon.core.outbound.reach import (
     turn_tally_key,
 )
 from daimon.core.security_audit import record_denial
-from daimon.core.stores.direct_messages import DM_SCOPE_PREFIX
 from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.stores.file_uploads import get_upload
 from daimon.core.stores.reach_tallies import lock_tally, save_tally
 from daimon.core.stores.routines import get_routine
+from daimon.core.turn_origin import origin_place
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -141,7 +141,7 @@ def _own_places(origin: TurnOriginRow) -> frozenset[str]:
     if origin.platform == "slack" and origin.thread_id != origin.parent_channel_id:
         places.add(f"{origin.parent_channel_id}:{origin.thread_id}")
     chat = origin.platform_channel_id
-    if chat and (origin.thread_id.startswith(DM_SCOPE_PREFIX) or chat != origin.parent_channel_id):
+    if chat and (origin_place(origin) == "dm" or chat != origin.parent_channel_id):
         places.add(chat)
     return frozenset(canonical_place(p) for p in places)
 
@@ -431,7 +431,7 @@ def _gate(
     )
     verdict = check_reach(plan=plan, so_far=so_far, call=call, limits=limits, approved=approved)
     own_total = so_far.own_threads + call.own_threads
-    own_over = approved is None and own_total > settings.max_own_threads
+    own_over = own_total > max(settings.max_own_threads, approved.threads if approved else 0)
     if verdict == "ok" and not own_over:
         return
     record_denial(f"reach_{verdict}" if verdict != "ok" else "reach_own_threads")
