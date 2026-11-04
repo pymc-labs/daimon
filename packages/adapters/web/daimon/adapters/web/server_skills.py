@@ -54,6 +54,7 @@ from daimon.core.server_skills.sync import (
     UpstreamUnreachable,
     approve_update,
     check_mirror,
+    follow_now,
 )
 from daimon.core.skill_library import MirrorDoc, mirror_doc
 from daimon.core.skill_library_files import (
@@ -451,6 +452,14 @@ def server_skills_router(runtime: WebRuntime) -> APIRouter:
             )
         except AgentEditError as exc:
             raise edit_refusal(exc) from exc
+        node = server_skills_node(runtime)
+        if body.follow and node is not None:
+            await follow_now(
+                sync_deps(runtime, node),
+                tenant_id=actor_of(caller).tenant_id,
+                skill_id=body.skill_id,
+                agent_id=agent_id,
+            )
 
     @router.post("/{agent_id}/skill-follows/{skill_id}/apply", status_code=204)
     async def apply_update(caller: Editor, agent_id: str, skill_id: str) -> None:  # pyright: ignore[reportUnusedFunction]

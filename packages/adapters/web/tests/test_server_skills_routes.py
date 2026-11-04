@@ -210,10 +210,17 @@ async def test_a_held_update_is_shown_and_applied_by_the_owner(
                 now=_NOW,
             )
         held = await client.get("/api/agents/ag_w/skill-follows")
+        follow = {"skill_id": "sk_new", "follow": False}
+        await client.put("/api/agents/ag_w/skill-follows", json=follow, headers=_OWN)
+        pinned = await client.post("/api/agents/ag_w/skill-follows/sk_new/apply", headers=_OWN)
+        follow["follow"] = True
+        refollow = await client.put("/api/agents/ag_w/skill-follows", json=follow, headers=_OWN)
         applied = await client.post("/api/agents/ag_w/skill-follows/sk_new/apply", headers=_OWN)
         after = await client.get("/api/agents/ag_w/skill-follows")
 
     assert nothing.status_code == 409, "nothing waits before a hold"
     assert held.json()["sk_new"]["status"] == "needs_reconfirm", held.text
+    assert pinned.status_code == 409, "a pinned agent takes no held update"
+    assert refollow.status_code == 204, refollow.text
     assert applied.status_code == 204, applied.text
     assert after.json()["sk_new"]["status"] == "current", "the hold is released"
