@@ -7,6 +7,7 @@ sync asks as the person who added the skill, so the server's own visibility rule
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
@@ -35,7 +36,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.mcp_rpc import McpStatusError
 from daimon.core.mcp_skills.install import ServerSkill, fetch_server_skill
 from daimon.core.mcp_skills.manifest import SkillEntry, SkillRejected, parse_entry
-from daimon.core.mcp_skills.protocol import Endpoint, fetch_skill_listing
+from daimon.core.mcp_skills.protocol import Endpoint, fetch_serves_skills, fetch_skill_listing
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
 from daimon.core.server_skills.anthropic import ManagedAgentsTarget
@@ -84,6 +85,7 @@ log = structlog.get_logger(__name__)
 
 _GONE = frozenset({403, 404})
 CHECK_INTERVAL_S: Final = 900
+SERVES_TTL_S: Final = 300
 """Seconds between checks of each added skill for a new version."""
 
 type _Call[T] = Callable[[httpx.AsyncClient, Endpoint], Awaitable[T]]
@@ -318,6 +320,7 @@ def _options(
 
 def server_skills_router(runtime: WebRuntime) -> APIRouter:
     router = APIRouter(prefix="/api/agents")
+    served: dict[str, tuple[float, bool]] = {}
 
     def node_or_404() -> DataServerNode:
         node = server_skills_node(runtime)
@@ -355,9 +358,20 @@ def server_skills_router(runtime: WebRuntime) -> APIRouter:
             fresh = await store.get_mirror(session, mirror.id)
         return MirrorCheck(result=result, server=mirror_doc(fresh))
 
+    async def _serves(node: DataServerNode, person: WebPersonRow) -> bool:
+        """Whether the node's server offers skills; remembered, so editor loads don't ask."""
+        seen = served.get(node.server.name)
+        if seen is not None and time.monotonic() - seen[0] < SERVES_TTL_S:
+            return seen[1]
+        answer = await _ask(node, person, fetch_serves_skills)
+        served[node.server.name] = (time.monotonic(), answer)
+        return answer
+
     @router.get("/server-skills")
     async def menu(caller: Editor) -> ServerSkillMenu:  # pyright: ignore[reportUnusedFunction]
         node = node_or_404()
+        if not await _serves(node, caller.person):
+            raise HTTPException(status_code=404, detail="Not found.")
 
         async def listing(http: httpx.AsyncClient, endpoint: Endpoint) -> Sequence[JsonValue]:
             return await fetch_skill_listing(http, endpoint, keep=lambda _raw: True)

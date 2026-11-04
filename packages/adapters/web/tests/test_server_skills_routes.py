@@ -66,6 +66,35 @@ async def test_without_a_data_server_node_there_is_no_menu(
     assert res.status_code == 404
 
 
+async def test_a_server_without_skills_has_no_menu_and_no_error(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The node's server may not offer skills at all: not found, never a bad gateway."""
+    agents, owner, _ = await _setup(db_session)
+    key = generate_signing_key()
+    async with _client(
+        agents, _Server(), db_session_factory, owner, key=key, settings=_settings(key)
+    ) as client:
+        res = await client.get("/api/agents/server-skills")
+    assert res.status_code == 404, res.text
+
+
+async def test_whether_the_server_offers_skills_is_asked_once(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    agents, owner, _ = await _setup(db_session)
+    key = generate_signing_key()
+    node = _Node(SkillsServer(skills={"plots": {"SKILL.md": skill_md("plots")}}))
+    async with _client(
+        agents, node, db_session_factory, owner, key=key, settings=_settings(key)
+    ) as client:
+        first = await client.get("/api/agents/server-skills")
+        second = await client.get("/api/agents/server-skills")
+    assert first.status_code == second.status_code == 200, second.text
+    asked = [m for m, _p, _h in node.skills.requests if m == "server/discover"]
+    assert len(asked) == 1, "the answer is remembered between editor loads"
+
+
 async def test_a_skill_is_offered_added_and_pinned(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
