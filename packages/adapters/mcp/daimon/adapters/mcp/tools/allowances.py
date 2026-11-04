@@ -9,6 +9,7 @@ from decimal import Decimal
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._card import require_card
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._web_admin import agent_names, now, refused, web_admin_of
 from daimon.adapters.mcp.tools._web_url import WebUrl, tenant_links
@@ -106,7 +107,7 @@ async def _list_impl(runtime: McpRuntime, auth: AuthIdentity) -> Allowances:
     actor = await web_admin_of(runtime, auth)
     async with runtime.session_factory() as db:
         rows = await spend_allowances.list_for_tenant(db, tenant_id=actor.tenant_id)
-    links = tenant_links(runtime, auth)
+    links = await tenant_links(runtime, auth)
     return Allowances(
         list(reversed(await _lines(runtime, actor.tenant_id, rows))),
         links.allowance() if links else None,
@@ -147,7 +148,7 @@ async def _create_impl(
     except WebAdminError as err:
         raise refused(err) from err
     [line] = await _lines(runtime, actor.tenant_id, [row])
-    links = tenant_links(runtime, auth)
+    links = await tenant_links(runtime, auth)
     return AllowanceChanged(line, links.allowance(line.allowance_id) if links else None)
 
 
@@ -169,14 +170,17 @@ async def _set_impl(
     except WebAdminError as err:
         raise refused(err) from err
     [line] = await _lines(runtime, actor.tenant_id, [row])
-    links = tenant_links(runtime, auth)
+    links = await tenant_links(runtime, auth)
     return AllowanceChanged(line, links.allowance(line.allowance_id) if links else None)
 
 
 async def _delete_impl(
-    runtime: McpRuntime, auth: AuthIdentity, allowance_id: str
+    runtime: McpRuntime, auth: AuthIdentity, allowance_id: str, origin_context_id: str | None = None
 ) -> AllowanceDeleted:
     actor = await web_admin_of(runtime, auth)
+    await require_card(
+        runtime, auth, tool_name="delete_allowance", origin_context_id=origin_context_id
+    )
     names = await agent_names(runtime, actor.tenant_id)
     try:
         async with runtime.session_factory.begin() as db:
@@ -228,9 +232,12 @@ def register_allowance_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         return await _set_impl(runtime, await _auth(ctx), allowance_id, amount_usd)
 
     @mcp.tool(name="delete_allowance", tags={"admin"})
-    async def delete_allowance(ctx: Context, allowance_id: str) -> AllowanceDeleted:  # pyright: ignore[reportUnusedFunction]
-        """Remove an allowance or cap. Admin-only."""
-        return await _delete_impl(runtime, await _auth(ctx), allowance_id)
+    async def delete_allowance(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, allowance_id: str, origin_context_id: str | None = None
+    ) -> AllowanceDeleted:
+        """Remove an allowance or cap. Admin-only.
+        Runs on the person's Confirm card in chat; pass this active turn's origin_context_id."""
+        return await _delete_impl(runtime, await _auth(ctx), allowance_id, origin_context_id)
 
 
 __all__ = ["register_allowance_tools"]

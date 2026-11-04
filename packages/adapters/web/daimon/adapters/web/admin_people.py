@@ -161,7 +161,7 @@ def people_router(runtime: WebRuntime) -> APIRouter:
         """A one-time sign-in link for a visitor, who has no other way back in."""
         try:
             async with runtime.sessionmaker.begin() as db:
-                _, token = await web_admin.issue_sign_in_link(
+                _, token, _ = await web_admin.issue_sign_in_link(
                     db, admin_of(caller), runtime.now(), person_id
                 )
         except WebAdminError as error:

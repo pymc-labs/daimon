@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 from daimon.adapters.mcp.tools import _web_admin as shared
+from daimon.adapters.mcp.tools import _web_url as web_url
 from daimon.adapters.mcp.tools import credit_reports as tool
 from daimon.core import credit_report
 from daimon.core.config import WebSettings
@@ -25,7 +26,12 @@ def runtime(monkeypatch):
     async def agents(*_a: Any, **_k: Any):
         return {"a1": "Ada"}
 
+    async def role(*_a: Any, chat_admin: bool, **_k: Any):
+        return "admin" if chat_admin else "member"
+
     monkeypatch.setattr(shared.web_roles, "get_workspace_role", no_grant)
+    monkeypatch.setattr(shared.web_people, "get_person_for_account", no_grant)
+    monkeypatch.setattr(web_url, "role_of_account", role)
     monkeypatch.setattr(tool, "agent_names", agents)
     rt = fake_runtime()
     web = WebSettings(public_url="https://web.test")  # type: ignore[call-arg]

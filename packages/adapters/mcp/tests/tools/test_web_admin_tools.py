@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 from daimon.adapters.mcp.tools import _web_admin as shared
+from daimon.adapters.mcp.tools import _web_url as web_url
 from daimon.adapters.mcp.tools import allowances as allowance_tool
 from daimon.adapters.mcp.tools import audit_log as audit_tool
 from daimon.adapters.mcp.tools import web_invites as invite_tool
@@ -32,6 +33,18 @@ def runtime(monkeypatch):
         return None
 
     monkeypatch.setattr(shared.web_roles, "get_workspace_role", no_grant)
+    monkeypatch.setattr(shared.web_people, "get_person_for_account", no_grant)
+
+    async def admin_role(*_a: Any, **_k: Any):
+        return "admin"
+
+    monkeypatch.setattr(web_url, "role_of_account", admin_role)
+
+    async def carded(*_a: Any, **_k: Any) -> None:
+        return None
+
+    for module in (invite_tool, people_tool, settings_tool, allowance_tool):
+        monkeypatch.setattr(module, "require_card", carded)
 
     async def agents(*_a: Any, **_k: Any):
         return {"a1": "Ada"}
@@ -48,7 +61,7 @@ def _invite(**over: Any) -> WebInviteRow:
         id=uuid.uuid4(),
         tenant_id=uuid.uuid4(),
         kind="invite",
-        email="v@x.test",
+        email="v@example.com",
         role="visitor",
         credit_usd=Decimal(0),
         allow_files=False,
@@ -142,7 +155,7 @@ async def test_create_invite_when_admin_then_link_goes_by_dm_not_in_result(runti
     out = await invite_tool._create_impl(
         runtime,
         make_auth(),
-        email="v@x.test",
+        email="v@example.com",
         role="visitor",
         agent_ids=["a1"],
         credit_usd=Decimal(0),
@@ -150,7 +163,7 @@ async def test_create_invite_when_admin_then_link_goes_by_dm_not_in_result(runti
         allow_files=False,
     )
     assert out.delivered == "direct_message", "the result names where the link went"
-    assert sent == [f"Invite link for v@x.test: {LINK}"], "the admin gets the link by DM"
+    assert sent == [f"Invite link for v@example.com: {LINK}"], "the admin gets the link by DM"
     assert TOKEN not in repr(out), "the token must never be in the result"
     assert out.web_url is not None and out.web_url.endswith(f"/admin/invites?invite={invite.id}")
 
@@ -175,7 +188,7 @@ async def test_create_invite_when_dm_fails_then_revokes_and_refuses(runtime, mon
         await invite_tool._create_impl(
             runtime,
             make_auth(),
-            email="v@x.test",
+            email="v@example.com",
             role="visitor",
             agent_ids=["a1"],
             credit_usd=Decimal(0),
@@ -199,7 +212,7 @@ async def test_issue_visitor_link_when_admin_then_dm_only(runtime, monkeypatch):
     sent: list[str] = []
 
     async def fake_issue(*_a: Any, **_k: Any):
-        return SimpleNamespace(), TOKEN
+        return SimpleNamespace(), TOKEN, uuid.uuid4()
 
     async def fake_send(_rt, _auth, text):
         sent.append(text)
@@ -364,3 +377,184 @@ async def test_audit_log_when_bad_date_then_tool_error(runtime):
             last=None,
             limit=10,
         )
+
+
+def _origin(**over: Any) -> Any:
+    base: dict[str, Any] = dict(
+        attended=True,
+        platform="discord",
+        thread_id="dm:1",
+        parent_channel_id="",
+        shared_channel=False,
+        sender_foreign=False,
+    )
+    return SimpleNamespace(**{**base, **over})
+
+
+def _origin_is(monkeypatch: pytest.MonkeyPatch, origin: Any) -> None:
+    async def fake(*_a: Any, **_k: Any) -> Any:
+        return origin
+
+    monkeypatch.setattr(shared, "get_chat_origin", fake)
+
+
+async def test_private_details_when_dm_then_shown_else_direct_message(runtime, monkeypatch):
+    cases = [
+        (_origin(), "shown"),
+        (_origin(platform="web", thread_id="w1"), "shown"),
+        (_origin(thread_id="C1", shared_channel=True), "direct_message"),
+        (_origin(thread_id="dm:1", sender_foreign=True), "direct_message"),
+        (_origin(thread_id="C9"), "direct_message"),
+        (None, "direct_message"),
+    ]
+    for origin, expected in cases:
+        _origin_is(monkeypatch, origin)
+        got = await shared.private_details(runtime, make_auth(), "ctx")
+        assert got == expected, f"origin {origin} gives {expected}"
+
+
+async def test_list_invites_when_not_a_dm_then_no_email(runtime, monkeypatch):
+    async def rows(*_a: Any, **_k: Any):
+        return [_invite()]
+
+    monkeypatch.setattr(invite_tool.web_invites, "list_invites", rows)
+    _origin_is(monkeypatch, _origin(thread_id="C1", shared_channel=True))
+    out = await invite_tool._list_impl(runtime, make_auth(), "ctx")
+    assert out.private_details == "direct_message", "a field says a DM shows the rest"
+    assert out.invites[0].email is None, "no address goes into a shared channel"
+    _origin_is(monkeypatch, _origin())
+    out = await invite_tool._list_impl(runtime, make_auth(), "ctx")
+    assert out.invites[0].email == "v@example.com", "the admin's DM shows the address"
+
+
+async def test_list_people_when_not_a_dm_then_no_email_or_identity(runtime, monkeypatch):
+    pid = uuid.uuid4()
+    person = SimpleNamespace(
+        id=pid, display_name="P", email="p@example.com", status="active", last_seen_at=NOW
+    )
+    ident = SimpleNamespace(groups=["staff"], provider="google", label="p@example.com")
+
+    async def rows(*_a: Any, **_k: Any):
+        return [person]
+
+    async def idents(*_a: Any, **_k: Any):
+        return {pid: [ident]}
+
+    async def roles(*_a: Any, **_k: Any):
+        return {pid: "member"}
+
+    async def one_ident(*_a: Any, **_k: Any):
+        return [ident]
+
+    async def one_person(*_a: Any, **_k: Any):
+        return person
+
+    monkeypatch.setattr(people_tool.people_store, "list_people", rows)
+    monkeypatch.setattr(people_tool.identities_store, "list_for_people", idents)
+    monkeypatch.setattr(people_tool.identities_store, "list_for_person", one_ident)
+    monkeypatch.setattr(people_tool.people_store, "get_person", one_person)
+    monkeypatch.setattr(people_tool, "roles_of", roles)
+    _origin_is(monkeypatch, _origin(thread_id="C1", shared_channel=True))
+    out = await people_tool._people_impl(runtime, make_auth(), None, 10, "ctx")
+    assert out.private_details == "direct_message", "a field says a DM shows the rest"
+    assert out.people[0].email is None, "no address goes into a shared channel"
+    assert out.people[0].groups == ["staff"], "the rows themselves stay"
+    _origin_is(monkeypatch, _origin())
+    out = await people_tool._people_impl(runtime, make_auth(), None, 10, "ctx")
+    assert out.people[0].email == "p@example.com", "the admin's DM shows the address"
+
+
+async def test_create_invite_when_delivery_raises_anything_then_revokes_that_invite(
+    runtime, monkeypatch
+):
+    revoked: list[uuid.UUID] = []
+    invite = _invite()
+
+    async def fake_create(_db, _admin, _now, **_kw):
+        return invite, TOKEN
+
+    async def fake_revoke(_db, _admin, _now, invite_id):
+        revoked.append(invite_id)
+
+    async def failing(*_a: Any):
+        raise RuntimeError(f"boom {LINK}")
+
+    monkeypatch.setattr(invite_tool.web_admin, "create_invite", fake_create)
+    monkeypatch.setattr(invite_tool.web_admin, "revoke_invite", fake_revoke)
+    monkeypatch.setattr(invite_tool, "send_privately", failing)
+    with pytest.raises(ToolError) as err:
+        await invite_tool._create_impl(
+            runtime,
+            make_auth(),
+            email="v@example.com",
+            role="visitor",
+            agent_ids=["a1"],
+            credit_usd=Decimal(0),
+            days=7,
+            allow_files=False,
+        )
+    assert revoked == [invite.id], "any delivery failure revokes the invite"
+    assert TOKEN not in str(err.value), "a raw error never reaches the result"
+
+
+async def test_issue_link_when_delivery_raises_then_only_that_link_is_revoked(runtime, monkeypatch):
+    link_id = uuid.uuid4()
+    revoked: list[uuid.UUID] = []
+
+    async def fake_issue(*_a: Any, **_k: Any):
+        return SimpleNamespace(), TOKEN, link_id
+
+    async def fake_revoke_one(_db, _admin, _now, got):
+        revoked.append(got)
+
+    async def revoke_all(*_a: Any, **_k: Any):
+        raise AssertionError("the person's other links must stay")
+
+    async def failing(*_a: Any):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(invite_tool.web_admin, "issue_sign_in_link", fake_issue)
+    monkeypatch.setattr(invite_tool.web_admin, "revoke_issued_link", fake_revoke_one)
+    monkeypatch.setattr(invite_tool.web_admin, "revoke_sign_in_link", revoke_all)
+    monkeypatch.setattr(invite_tool, "send_privately", failing)
+    with pytest.raises(ToolError):
+        await invite_tool._issue_link_impl(runtime, make_auth(), str(uuid.uuid4()))
+    assert revoked == [link_id], "just the link issued is revoked"
+
+
+async def test_create_invite_when_email_is_not_valid_then_refused(runtime):
+    with pytest.raises(ToolError, match="valid email"):
+        await invite_tool._create_impl(
+            runtime,
+            make_auth(),
+            email="not-an-email",
+            role="member",
+            agent_ids=[],
+            credit_usd=Decimal(0),
+            days=7,
+            allow_files=False,
+        )
+
+
+async def test_create_invite_when_too_many_agents_then_core_refuses(runtime):
+    agents = [f"a{i}" for i in range(51)]
+    with pytest.raises(ToolError, match="at most 50"):
+        await invite_tool._create_impl(
+            runtime,
+            make_auth(),
+            email="v@example.com",
+            role="member",
+            agent_ids=agents,
+            credit_usd=Decimal(0),
+            days=7,
+            allow_files=False,
+        )
+
+
+async def test_web_admin_of_when_web_person_suspended_then_refused(runtime, monkeypatch):
+    async def suspended(*_a: Any, **_k: Any):
+        return SimpleNamespace(id=uuid.uuid4(), status="suspended")
+
+    monkeypatch.setattr(shared.web_people, "get_person_for_account", suspended)
+    with pytest.raises(ToolError, match="suspended"):
+        await shared.web_admin_of(runtime, make_auth())

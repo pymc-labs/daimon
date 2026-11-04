@@ -11,10 +11,13 @@ from typing import Literal
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._card import require_card
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._web_admin import (
+    PrivateDetails,
     agent_names,
     now,
+    private_details,
     refused,
     send_privately,
     web_admin_of,
@@ -26,15 +29,18 @@ from daimon.core.stores.domain import WebInviteRow
 from daimon.core.web_admin import WebAdminError, link_url
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
+from pydantic import EmailStr, TypeAdapter, ValidationError
 
 InviteRole = Literal["visitor", "member"]
 _LIMIT = 100
+_EMAIL: TypeAdapter[str] = TypeAdapter(EmailStr)
 
 
 @dataclass(frozen=True)
 class WebInvite:
     invite_id: str
-    email: str
+    email: str | None
+    """Null unless `private_details` is `shown`."""
     role: str
     agent_ids: list[str]
     credit_usd: float
@@ -46,6 +52,7 @@ class WebInvite:
 @dataclass(frozen=True)
 class WebInvites:
     invites: list[WebInvite]
+    private_details: PrivateDetails
     web_url: WebUrl = None
 
 
@@ -54,12 +61,14 @@ class WebInviteSent:
     invite: WebInvite
     delivered: Literal["direct_message"]
     """Where the link went; it is never in this result."""
+    private_details: PrivateDetails
     web_url: WebUrl = None
 
 
 @dataclass(frozen=True)
 class WebInviteChanged:
     invite: WebInvite
+    private_details: PrivateDetails
     web_url: WebUrl = None
 
 
@@ -80,7 +89,7 @@ class VisitorLinkRevoked:
     person_id: str
 
 
-def _shown(invite: WebInviteRow, at: datetime) -> WebInvite:
+def _shown(invite: WebInviteRow, at: datetime, details: PrivateDetails) -> WebInvite:
     status: Literal["pending", "accepted", "expired"] = (
         "accepted"
         if invite.accepted_at is not None
@@ -90,7 +99,7 @@ def _shown(invite: WebInviteRow, at: datetime) -> WebInvite:
     )
     return WebInvite(
         invite_id=str(invite.id),
-        email=invite.email,
+        email=invite.email if details == "shown" else None,
         role=invite.role,
         agent_ids=list(invite.agent_ids),
         credit_usd=float(invite.credit_usd),
@@ -114,13 +123,18 @@ def _uuid(value: str, what: str) -> uuid.UUID:
         raise ToolError(f"{what} is not valid.") from err
 
 
-async def _list_impl(runtime: McpRuntime, auth: AuthIdentity) -> WebInvites:
+async def _list_impl(
+    runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str | None = None
+) -> WebInvites:
     actor = await web_admin_of(runtime, auth)
+    details = await private_details(runtime, auth, origin_context_id)
     async with runtime.session_factory() as db:
         found = await web_invites.list_invites(db, tenant_id=actor.tenant_id, limit=_LIMIT)
     at = now()
-    links = tenant_links(runtime, auth)
-    return WebInvites([_shown(i, at) for i in found], links.invites() if links else None)
+    links = await tenant_links(runtime, auth)
+    return WebInvites(
+        [_shown(i, at, details) for i in found], details, links.invites() if links else None
+    )
 
 
 async def _create_impl(
@@ -133,10 +147,14 @@ async def _create_impl(
     credit_usd: Decimal,
     days: int,
     allow_files: bool,
+    origin_context_id: str | None = None,
 ) -> WebInviteSent:
     actor = await web_admin_of(runtime, auth)
-    if "@" not in email or not 1 <= days <= 90 or not 0 <= credit_usd <= 100_000:
-        raise ToolError("Give an email, 1 to 90 days and a credit from 0 to 100000 dollars.")
+    details = await private_details(runtime, auth, origin_context_id)
+    try:
+        email = _EMAIL.validate_python(email)
+    except ValidationError:
+        raise ToolError("Give a valid email address.") from None
     agents = await agent_names(runtime, actor.tenant_id)
     at = now()
     try:
@@ -149,7 +167,7 @@ async def _create_impl(
                 role=role,
                 agent_ids=agent_ids,
                 agents=agents,
-                credit_usd=credit_usd.quantize(Decimal("0.01")),
+                credit_usd=credit_usd,
                 days=days,
                 allow_files=allow_files,
             )
@@ -157,19 +175,25 @@ async def _create_impl(
         raise refused(err) from err
     try:
         await send_privately(runtime, auth, f"Invite link for {email}: {_link_of(runtime, token)}")
-    except ToolError as err:
+    except Exception as err:
         async with runtime.session_factory.begin() as db:
             await web_admin.revoke_invite(db, actor, now(), invite.id)
-        raise ToolError(f"{err} The invite was revoked.") from err
-    links = tenant_links(runtime, auth)
+        why = str(err) if isinstance(err, ToolError) else "The link could not be sent."
+        raise ToolError(f"{why} The invite was revoked.") from err
+    links = await tenant_links(runtime, auth)
     url = links.invites(str(invite.id)) if links else None
-    return WebInviteSent(_shown(invite, at), "direct_message", url)
+    return WebInviteSent(_shown(invite, at, details), "direct_message", details, url)
 
 
 async def _files_impl(
-    runtime: McpRuntime, auth: AuthIdentity, invite_id: str, allow: bool
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    invite_id: str,
+    allow: bool,
+    origin_context_id: str | None = None,
 ) -> WebInviteChanged:
     actor = await web_admin_of(runtime, auth)
+    details = await private_details(runtime, auth, origin_context_id)
     at = now()
     try:
         async with runtime.session_factory.begin() as db:
@@ -178,13 +202,18 @@ async def _files_impl(
             )
     except WebAdminError as err:
         raise refused(err) from err
-    links = tenant_links(runtime, auth)
+    links = await tenant_links(runtime, auth)
     url = links.invites(str(invite.id)) if links else None
-    return WebInviteChanged(_shown(invite, at), url)
+    return WebInviteChanged(_shown(invite, at, details), details, url)
 
 
-async def _revoke_impl(runtime: McpRuntime, auth: AuthIdentity, invite_id: str) -> WebInviteRevoked:
+async def _revoke_impl(
+    runtime: McpRuntime, auth: AuthIdentity, invite_id: str, origin_context_id: str | None = None
+) -> WebInviteRevoked:
     actor = await web_admin_of(runtime, auth)
+    await require_card(
+        runtime, auth, tool_name="revoke_web_invite", origin_context_id=origin_context_id
+    )
     try:
         async with runtime.session_factory.begin() as db:
             await web_admin.revoke_invite(db, actor, now(), _uuid(invite_id, "invite_id"))
@@ -200,23 +229,27 @@ async def _issue_link_impl(
     person = _uuid(person_id, "person_id")
     try:
         async with runtime.session_factory.begin() as db:
-            _, token = await web_admin.issue_sign_in_link(db, actor, now(), person)
+            _, token, link_id = await web_admin.issue_sign_in_link(db, actor, now(), person)
     except WebAdminError as err:
         raise refused(err) from err
     try:
         await send_privately(runtime, auth, f"Sign-in link: {_link_of(runtime, token)}")
-    except ToolError as err:
+    except Exception as err:
         async with runtime.session_factory.begin() as db:
-            await web_admin.revoke_sign_in_link(db, actor, now(), person)
-        raise ToolError(f"{err} The link was revoked.") from err
-    links = tenant_links(runtime, auth)
+            await web_admin.revoke_issued_link(db, actor, now(), link_id)
+        why = str(err) if isinstance(err, ToolError) else "The link could not be sent."
+        raise ToolError(f"{why} The link was revoked.") from err
+    links = await tenant_links(runtime, auth)
     return VisitorLinkSent(person_id, "direct_message", links.person(person_id) if links else None)
 
 
 async def _revoke_link_impl(
-    runtime: McpRuntime, auth: AuthIdentity, person_id: str
+    runtime: McpRuntime, auth: AuthIdentity, person_id: str, origin_context_id: str | None = None
 ) -> VisitorLinkRevoked:
     actor = await web_admin_of(runtime, auth)
+    await require_card(
+        runtime, auth, tool_name="revoke_visitor_link", origin_context_id=origin_context_id
+    )
     try:
         async with runtime.session_factory.begin() as db:
             await web_admin.revoke_sign_in_link(db, actor, now(), _uuid(person_id, "person_id"))
@@ -227,9 +260,14 @@ async def _revoke_link_impl(
 
 def register_web_invite_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool(name="list_web_invites", tags={"admin"})
-    async def list_invites(ctx: Context) -> WebInvites:  # pyright: ignore[reportUnusedFunction]
-        """List the web app's invites: open, accepted or expired, newest first. Admin-only."""
-        return await _list_impl(runtime, await _auth(ctx))
+    async def list_invites(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, origin_context_id: str | None = None
+    ) -> WebInvites:
+        """List the web app's invites: open, accepted or expired, newest first. Emails show
+        only in a direct message with the admin; elsewhere ``private_details`` is
+        ``direct_message`` and they are null. Pass this active turn's origin_context_id.
+        Admin-only."""
+        return await _list_impl(runtime, await _auth(ctx), origin_context_id)
 
     @mcp.tool(name="create_web_invite", tags={"admin"})
     async def create_invite(  # pyright: ignore[reportUnusedFunction]
@@ -240,9 +278,11 @@ def register_web_invite_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         credit_usd: Decimal = Decimal(0),
         days: int = 7,
         allow_files: bool = False,
+        origin_context_id: str | None = None,
     ) -> WebInviteSent:
         """Invite someone to the web app by email as a member, or as a visitor of the given
-        agents. The link is sent to the caller by direct message, never shown here. Admin-only."""
+        agents (at most 50). The link is sent to the caller by direct message, never shown
+        here. Pass this active turn's origin_context_id. Admin-only."""
         return await _create_impl(
             runtime,
             await _auth(ctx),
@@ -252,19 +292,24 @@ def register_web_invite_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             credit_usd=credit_usd,
             days=days,
             allow_files=allow_files,
+            origin_context_id=origin_context_id,
         )
 
     @mcp.tool(name="set_web_invite_files", tags={"admin"})
     async def set_files(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, invite_id: str, allow: bool
+        ctx: Context, invite_id: str, allow: bool, origin_context_id: str | None = None
     ) -> WebInviteChanged:
-        """Turn file attachments on or off for a visitor invite, accepted or not. Admin-only."""
-        return await _files_impl(runtime, await _auth(ctx), invite_id, allow)
+        """Turn file attachments on or off for a visitor invite, accepted or not. Pass this
+        active turn's origin_context_id. Admin-only."""
+        return await _files_impl(runtime, await _auth(ctx), invite_id, allow, origin_context_id)
 
     @mcp.tool(name="revoke_web_invite", tags={"admin"})
-    async def revoke_invite(ctx: Context, invite_id: str) -> WebInviteRevoked:  # pyright: ignore[reportUnusedFunction]
-        """Revoke a web invite so its link stops working. Admin-only."""
-        return await _revoke_impl(runtime, await _auth(ctx), invite_id)
+    async def revoke_invite(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, invite_id: str, origin_context_id: str | None = None
+    ) -> WebInviteRevoked:
+        """Revoke a web invite so its link stops working. Admin-only.
+        Runs on the person's Confirm card in chat; pass this active turn's origin_context_id."""
+        return await _revoke_impl(runtime, await _auth(ctx), invite_id, origin_context_id)
 
     @mcp.tool(name="issue_visitor_link", tags={"admin"})
     async def issue_link(ctx: Context, person_id: str) -> VisitorLinkSent:  # pyright: ignore[reportUnusedFunction]
@@ -274,9 +319,13 @@ def register_web_invite_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         return await _issue_link_impl(runtime, await _auth(ctx), person_id)
 
     @mcp.tool(name="revoke_visitor_link", tags={"admin"})
-    async def revoke_link(ctx: Context, person_id: str) -> VisitorLinkRevoked:  # pyright: ignore[reportUnusedFunction]
-        """Revoke a person's open sign-in links, as when one went to the wrong place. Admin-only."""
-        return await _revoke_link_impl(runtime, await _auth(ctx), person_id)
+    async def revoke_link(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, person_id: str, origin_context_id: str | None = None
+    ) -> VisitorLinkRevoked:
+        """Revoke a person's open sign-in links, as when one went to the wrong place.
+        Admin-only.
+        Runs on the person's Confirm card in chat; pass this active turn's origin_context_id."""
+        return await _revoke_link_impl(runtime, await _auth(ctx), person_id, origin_context_id)
 
 
 __all__ = ["register_web_invite_tools"]

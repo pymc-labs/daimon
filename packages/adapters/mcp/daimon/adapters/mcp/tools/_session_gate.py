@@ -29,6 +29,7 @@ from daimon.core.stores.domain import ThreadSessionRow, TurnOriginRow
 from daimon.core.stores.lead_intake import confirmation_tools
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.tool_safety import (
+    CARDED_TOOLS,
     DAIMON_SERVER_NAME,
     WATCH_CONFIRMED_TOOLS,
     has_confirmation_gate,
@@ -199,9 +200,13 @@ async def _recorded_as_gated(
         agent_id=agent.id,
     )
     selection = backend_selection_enabled(runtime.settings.turn)
-    confirmed = backend_switch_tools(enabled=selection) | microsoft_send_tools(
-        enabled=runtime.settings.microsoft_accounts.configured,
-        tool_safety_on=runtime.settings.tool_safety.enabled,
+    confirmed = (
+        frozenset(CARDED_TOOLS)
+        | backend_switch_tools(enabled=selection)
+        | microsoft_send_tools(
+            enabled=runtime.settings.microsoft_accounts.configured,
+            tool_safety_on=runtime.settings.tool_safety.enabled,
+        )
     )
     # A bind sent while the retired chat channel switch was also gated holds
     # that one more gated tool; it still proves every card it gated.

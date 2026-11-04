@@ -256,7 +256,7 @@ async def _with_agent_link(
     runtime: McpRuntime, auth: AuthIdentity, result: SetAgentRuleResult
 ) -> SetAgentRuleResult:
     """`result` with the agent's page on the web, when there is one for this caller."""
-    links = tenant_links(runtime, auth)
+    links = await tenant_links(runtime, auth)
     if links is None:
         return result
     agent = await find_agent_by_daimon_tag(
@@ -325,7 +325,7 @@ def register_channel_rule_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             copy_from=copy_from,
             release_agents=release_agents,
         )
-        links = tenant_links(runtime, auth)
+        links = await tenant_links(runtime, auth)
         url = None if links is None else links.channel(result.channel_id)
         return result if url is None else replace(result, web_url=url)
 

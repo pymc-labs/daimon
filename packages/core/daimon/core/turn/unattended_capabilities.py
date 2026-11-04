@@ -54,6 +54,7 @@ from daimon.core.mcp_server_url import same_mcp_endpoint
 from daimon.core.session_ports_compat import update_session_record
 from daimon.core.stores.thread_sessions import invalidate_session_tools
 from daimon.core.tool_safety import (
+    CARDED_TOOLS,
     DAIMON_SERVER_NAME,
     SERVER_SEPARATOR,
     WATCH_CONFIRMED_TOOLS,
@@ -159,6 +160,7 @@ def protected_tools(policy: ToolSafetyPolicy) -> frozenset[str]:
     return (
         frozenset({"lead_intake_resolve"})
         | WATCH_CONFIRMED_TOOLS
+        | frozenset(CARDED_TOOLS)
         | backend_switch_tools(enabled=True)
         | microsoft_send_tools(enabled=True, tool_safety_on=policy.enabled)
     )

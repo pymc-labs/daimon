@@ -8,6 +8,7 @@ from typing import Literal
 
 from daimon.core.config import WebModuleKey
 from daimon.core.stores import accounts as accounts_store
+from daimon.core.stores import web_people as people_store
 from daimon.core.stores import web_roles as roles_store
 from daimon.core.stores import workspace_members as members_store
 from daimon.core.stores.domain import ChatStandingRow, WebPersonKind, WebPersonRow, WebRoleGrant
@@ -228,3 +229,25 @@ async def roles_of(
 async def role_of(session: AsyncSession, person: WebPersonRow) -> Role:
     """The person's role in their workspace."""
     return (await roles_of(session, [person]))[person.id]
+
+
+async def role_of_account(
+    session: AsyncSession, *, tenant_id: uuid.UUID, account_id: uuid.UUID, chat_admin: bool
+) -> Role | None:
+    """The web role an account holds in a workspace, as its web person does when they have
+    one; None for a suspended person, who can open nothing. `chat_admin` is the caller's
+    admin standing in chat, used when the account has no web person yet."""
+    person = await people_store.get_person_for_account(
+        session, tenant_id=tenant_id, account_id=account_id
+    )
+    if person is not None:
+        return None if person.status == "suspended" else await role_of(session, person)
+    return role_for(
+        kind="member",
+        workspace_grant=await roles_store.get_workspace_role(
+            session, tenant_id=tenant_id, account_id=account_id
+        ),
+        platform_admin=(await accounts_store.list_roles(session, {account_id})).get(account_id)
+        == AccountRole.ADMIN,
+        chat_admin=chat_admin,
+    )

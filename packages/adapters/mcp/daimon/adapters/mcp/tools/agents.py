@@ -263,11 +263,11 @@ async def _build_agent_info(
     return AgentInfo.from_ma(agent, sync_warnings=sync_warnings, skill_titles=skill_titles)
 
 
-def _with_web_url(
+async def _with_web_url(
     runtime: McpRuntime, auth: AuthIdentity, info: AgentInfo, node: str | None = None
 ) -> AgentInfo:
     """`info` with its page on the web, when there is one for this caller."""
-    links = tenant_links(runtime, auth)
+    links = await tenant_links(runtime, auth)
     url = None if links is None else links.agent(info.id, node)
     return info if url is None else info.model_copy(update={"web_url": url})
 
@@ -2391,7 +2391,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             expected_ma_agent_id=expected_ma_agent_id,
             origin_context_id=origin_context_id,
         )
-        return _with_web_url(runtime, auth, info)
+        return await _with_web_url(runtime, auth, info)
 
     @mcp.tool
     async def create_agent(  # pyright: ignore[reportUnusedFunction]
@@ -2443,7 +2443,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         )
         auth = await _auth(ctx)
         info = await _create_agent_impl(runtime, auth, spec, origin_context_id, backend=backend)
-        return _with_web_url(runtime, auth, info)
+        return await _with_web_url(runtime, auth, info)
 
     @mcp.tool
     async def update_agent(  # pyright: ignore[reportUnusedFunction]
@@ -2499,7 +2499,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             if model is not None
             else None
         )
-        return _with_web_url(runtime, auth, info, node)
+        return await _with_web_url(runtime, auth, info, node)
 
     @mcp.tool
     async def set_agent_builtin_tool(  # pyright: ignore[reportUnusedFunction]
@@ -2608,7 +2608,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             origin_context_id=origin_context_id,
             model=model,
         )
-        return _with_web_url(runtime, auth, info)
+        return await _with_web_url(runtime, auth, info)
 
     @mcp.tool(tags={"admin"})
     async def archive_agent(  # pyright: ignore[reportUnusedFunction]

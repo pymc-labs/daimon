@@ -212,6 +212,24 @@ async def revoke_invite(
     return None if orm is None else (await _with_agents(session, [orm]))[0]
 
 
+async def revoke_link(
+    session: AsyncSession, *, tenant_id: uuid.UUID, link_id: uuid.UUID, now: datetime
+) -> WebInviteRow | None:
+    """Revoke one link of any kind that nobody has used yet. None if it is gone or spent."""
+    orm = await session.scalar(
+        update(WebInvite)
+        .where(
+            WebInvite.id == link_id,
+            WebInvite.tenant_id == tenant_id,
+            WebInvite.accepted_at.is_(None),
+            WebInvite.revoked_at.is_(None),
+        )
+        .values(revoked_at=now)
+        .returning(WebInvite)
+    )
+    return None if orm is None else (await _with_agents(session, [orm]))[0]
+
+
 async def revoke_open_links(
     session: AsyncSession,
     *,

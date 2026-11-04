@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._card import require_card
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._web_admin import audit_to, now
 from daimon.adapters.mcp.tools._web_url import WebUrl, tenant_links
@@ -88,15 +89,20 @@ def _change_deps(runtime: McpRuntime) -> AgentChangeDeps:
 
 
 async def _revert_impl(
-    runtime: McpRuntime, auth: AuthIdentity, agent_id: str, version: int
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    agent_id: str,
+    version: int,
+    origin_context_id: str | None = None,
 ) -> AgentReverted:
+    await require_card(runtime, auth, tool_name="revert_agent", origin_context_id=origin_context_id)
     try:
         written = await agent_changes.revert(
             _change_deps(runtime), actor=_edit_actor(auth), ma_agent_id=agent_id, version=version
         )
     except AgentEditError as err:
         raise ToolError(str(err)) from err
-    links = tenant_links(runtime, auth)
+    links = await tenant_links(runtime, auth)
     return AgentReverted(
         agent_id=agent_id,
         reverted_to=version,
@@ -111,7 +117,11 @@ async def _owners_impl(
     agent_id: str,
     owner: str | None,
     co_owners: list[str],
+    origin_context_id: str | None = None,
 ) -> AgentOwnersSet:
+    await require_card(
+        runtime, auth, tool_name="set_agent_owners", origin_context_id=origin_context_id
+    )
     try:
         changed = await agent_admin.set_owners_by_ref(
             _edit_deps(runtime),
@@ -123,7 +133,7 @@ async def _owners_impl(
         )
     except AgentEditError as err:
         raise ToolError(str(err)) from err
-    links = tenant_links(runtime, auth)
+    links = await tenant_links(runtime, auth)
     return AgentOwnersSet(
         agent_id=agent_id, changed=changed, web_url=links.agent(agent_id) if links else None
     )
@@ -162,7 +172,7 @@ async def _save_skill_impl(
             applied = False
     except AgentEditError as err:
         raise ToolError(str(err)) from err
-    links = tenant_links(runtime, auth)
+    links = await tenant_links(runtime, auth)
     return AgentSkillSaved(
         agent_id=agent_id,
         skill_id=saved.skill_id,
@@ -174,18 +184,28 @@ async def _save_skill_impl(
 
 def register_agent_edit_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool
-    async def revert_agent(ctx: Context, agent_id: str, version: int) -> AgentReverted:  # pyright: ignore[reportUnusedFunction]
+    async def revert_agent(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, agent_id: str, version: int, origin_context_id: str | None = None
+    ) -> AgentReverted:
         """Write a recorded version of an agent's setup as its next version; its name, avatar,
-        places and sign-ins stay as they are. For the agent's owner or an admin."""
-        return await _revert_impl(runtime, await _auth(ctx), agent_id, version)
+        places and sign-ins stay as they are. For the agent's owner or an admin.
+        Runs on the person's Confirm card in chat; pass this active turn's origin_context_id."""
+        return await _revert_impl(runtime, await _auth(ctx), agent_id, version, origin_context_id)
 
     @mcp.tool(tags={"admin"})
     async def set_agent_owners(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, agent_id: str, owner: str | None, co_owners: list[str] | None = None
+        ctx: Context,
+        agent_id: str,
+        owner: str | None,
+        co_owners: list[str] | None = None,
+        origin_context_id: str | None = None,
     ) -> AgentOwnersSet:
         """Make an agent's owner and co-owners exactly these people, each a web person id or
-        an account id. Admin-only."""
-        return await _owners_impl(runtime, await _auth(ctx), agent_id, owner, co_owners or [])
+        an account id. Admin-only.
+        Runs on the person's Confirm card in chat; pass this active turn's origin_context_id."""
+        return await _owners_impl(
+            runtime, await _auth(ctx), agent_id, owner, co_owners or [], origin_context_id
+        )
 
     @mcp.tool
     async def save_agent_skill_files(  # pyright: ignore[reportUnusedFunction]

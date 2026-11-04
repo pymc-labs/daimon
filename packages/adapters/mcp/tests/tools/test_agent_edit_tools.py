@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from daimon.adapters.mcp.tools import _web_url as web_url
 from daimon.adapters.mcp.tools import agent_edits as edits
 from daimon.adapters.mcp.tools import skill_library_edits as library
 from daimon.core.agent_editing import AgentEditError
@@ -23,6 +24,16 @@ def runtime(monkeypatch):
         monkeypatch.setattr(module, "_edit_deps", lambda _rt: object(), raising=False)
         monkeypatch.setattr(module, "_edit_actor", lambda _a: object(), raising=False)
     monkeypatch.setattr(edits, "_change_deps", lambda _rt: object())
+
+    async def confirmed(*_a: Any, **_k: Any) -> None:
+        return None
+
+    async def admin_role(*_a: Any, **_k: Any) -> str:
+        return "admin"
+
+    for module in (edits, library):
+        monkeypatch.setattr(module, "require_card", confirmed)
+    monkeypatch.setattr(web_url, "role_of_account", admin_role)
     rt = fake_runtime()
     web = WebSettings(public_url="https://web.test")  # type: ignore[call-arg]
     rt.settings = SimpleNamespace(web=web)  # type: ignore[misc]

@@ -118,6 +118,8 @@ from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.slots import register_spend_recheck
 from daimon.core.turn_hold import RequesterOrg, TurnHold
 from daimon.core.web_links import TenantLinks
+from daimon.core.web_roles_rules import is_admin as is_web_admin
+from daimon.core.web_roles_rules import role_of_account
 from mux.contracts.admission import Admission as BackendAdmission
 from mux.contracts.config import BackendConfig, ConfigRevision, ResolvedBackend, resolve_default
 from mux.contracts.ids import ChannelRef, Provider, Scope, ThreadRef
@@ -1663,7 +1665,7 @@ async def _admit_gates(
         grant=grant,
         model_override=thread_model.model_override,
         model_fell_back=thread_model.fell_back,
-        web=_web_links(deps, tenant_id, admin=effective_admin),
+        web=await _web_links(deps, tenant_id, principal.account_id, chat_admin=effective_admin),
     )
     if follow_generation is not None:
         # Admitted: this conversation follows its agent (M03), only if its slot is
@@ -2358,7 +2360,9 @@ async def capture_backend_source(
                 private_dm_id=(private_dm_id or context.thread_id or context.channel_id)
                 if is_dm
                 else private_dm_id,
-                web=_web_links(deps, context.tenant_id, admin=grant.subject.is_admin),
+                web=await _web_links(
+                    deps, context.tenant_id, context.account_id, chat_admin=grant.subject.is_admin
+                ),
             )
             request = ProviderPreparationRequest(
                 deps,
@@ -2468,9 +2472,18 @@ def running_on(admission: Admission) -> dict[str, str]:
     return {"provider": provider, "model": model}
 
 
-def _web_links(deps: TurnDeps, tenant_id: uuid.UUID, *, admin: bool) -> TenantLinks | None:
-    """The tenant's web links for a caller of this role; None with no web app."""
-    return None if deps.web_links is None else deps.web_links.for_tenant(tenant_id, admin=admin)
+async def _web_links(
+    deps: TurnDeps, tenant_id: uuid.UUID, account_id: uuid.UUID, *, chat_admin: bool
+) -> TenantLinks | None:
+    """The tenant's web links for the web role the account holds; None with no web app or
+    for a suspended person."""
+    if deps.web_links is None:
+        return None
+    async with deps.sessionmaker() as session:
+        role = await role_of_account(
+            session, tenant_id=tenant_id, account_id=account_id, chat_admin=chat_admin
+        )
+    return None if role is None else deps.web_links.for_tenant(tenant_id, admin=is_web_admin(role))
 
 
 def backend_facts(admission: Admission) -> dict[str, Any]:

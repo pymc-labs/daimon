@@ -60,8 +60,8 @@ def _day(value: str | None, name: str) -> date | None:
         raise ToolError(f"{name} must be a date like 2026-01-31.") from err
 
 
-def _audit_url(runtime: McpRuntime, auth: AuthIdentity) -> str | None:
-    links = tenant_links(runtime, auth)
+async def _audit_url(runtime: McpRuntime, auth: AuthIdentity) -> str | None:
+    links = await tenant_links(runtime, auth)
     return links.audit() if links else None
 
 
@@ -94,7 +94,7 @@ async def _log_impl(
                 None,
             )
             if chosen is None:
-                return AuditLog([], _audit_url(runtime, auth))
+                return AuditLog([], await _audit_url(runtime, auth))
             account = chosen.account_id
         found = await audit_trail.list_entries(
             db,
@@ -131,7 +131,7 @@ async def _log_impl(
                     e.row.outcome,
                 )
             )
-    return AuditLog(lines, _audit_url(runtime, auth))
+    return AuditLog(lines, await _audit_url(runtime, auth))
 
 
 async def _kinds_impl(runtime: McpRuntime, auth: AuthIdentity) -> AuditKinds:

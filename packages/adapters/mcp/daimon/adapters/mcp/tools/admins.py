@@ -72,7 +72,7 @@ async def granted(
 ) -> GrantAdminResult:
     """The grant's result, with the person's admin page when they have one on the web."""
     message = "Daimon admin granted."
-    links = tenant_links(runtime, auth)
+    links = await tenant_links(runtime, auth)
     if links is None or subject_kind != "user" or auth.platform is None:
         return GrantAdminResult(message)
     async with runtime.session_factory() as session:

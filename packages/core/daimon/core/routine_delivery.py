@@ -192,6 +192,7 @@ def render_routine_controls(
     platform: str,
     direct_post: DirectPost = "allowed",
     web: WebLinks | None = None,
+    held: bool = False,
 ) -> str:
     """Host-supplied facts that open a routine fire with a destination.
 
@@ -201,7 +202,8 @@ def render_routine_controls(
     message exactly as before. `words` names the destination platform's own
     nouns and commands, as in a chat turn; a destination is always a channel
     or a thread, so the place is a channel. `web` adds the routine's own workspace
-    on the web, as a chat turn's controls do, for a reader with a member's access.
+    on the web, as a chat turn's controls do, for a reader with a member's access; a `held`
+    fire, into a channel shared with another organisation, gets none.
     """
     target = delivery_target(row, platform=platform)
     controls: dict[str, object] = {
@@ -230,7 +232,7 @@ def render_routine_controls(
     }
     if platform in CHAT_PLATFORMS:
         controls["words"] = turn_words(platform, place="channel")
-    links = None if web is None else web.for_tenant(row.tenant_id, admin=False)
+    links = None if web is None or held else web.for_tenant(row.tenant_id, admin=False)
     if links is not None:
         controls["web"] = {"url": links.root(), "pages": links.pages()}
     if row.destination_kind == "dm":

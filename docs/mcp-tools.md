@@ -680,7 +680,7 @@ Web invites and visitor sign-in links, from chat.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `create_web_invite` | admin only | Invite someone to the web app by email as a member, or as a visitor of the given agents. |
+| `create_web_invite` | admin only | Invite someone to the web app by email as a member, or as a visitor of the given agents (at most 50). |
 | `issue_visitor_link` | admin only | Issue a one-time sign-in link for a web visitor. |
 | `list_web_invites` | admin only | List the web app's invites: open, accepted or expired, newest first. |
 | `revoke_visitor_link` | admin only | Revoke a person's open sign-in links, as when one went to the wrong place. |
@@ -697,7 +697,7 @@ The web app's people, groups and agent access, from chat.
 | `list_agent_web_access` | admin only | List each agent's web chat access: on or off, who may use it and the channel it is kept to, if any. |
 | `list_web_groups` | admin only | List everyone and each group the web sign-ins carry, with head counts. |
 | `list_web_people` | admin only | List the web app's people, oldest first, with role, status and groups. |
-| `set_agent_web_access` | admin only | Turn web chat on or off for an agent and choose who may use it there: everyone, the given groups or invitees. |
+| `set_agent_web_access` | admin only | Turn web chat on or off for an agent and choose who may use it there: everyone, the given groups or invitees (at most 100). |
 | `update_web_person` | admin only | Change a web person's role (admin or member) or suspend or restore them. |
 
 ## `web_workspace_settings`

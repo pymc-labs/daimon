@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from typing import Literal
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -12,10 +13,12 @@ from daimon.adapters.mcp.tools._ctx import (
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.direct_messages import send_direct_message_impl
+from daimon.adapters.mcp.tools.setup_target import get_chat_origin
 from daimon.core import web_admin
 from daimon.core.agent_target import ChangeRecorder
 from daimon.core.defaults.ma_index import list_agents_by_tenant
-from daimon.core.stores import web_roles
+from daimon.core.session_seal import is_private_conversation
+from daimon.core.stores import web_people, web_roles
 from daimon.core.web_admin import WebAdmin, WebAdminError
 from daimon.core.web_roles_rules import role_for
 from fastmcp.exceptions import ToolError
@@ -30,21 +33,53 @@ async def web_admin_of(runtime: McpRuntime, auth: AuthIdentity) -> WebAdmin:
     """The calling chat admin as the web app sees them, with the role their grant gives."""
     _require_admin(auth)
     async with runtime.session_factory() as db:
+        person = await web_people.get_person_for_account(
+            db, tenant_id=auth.tenant_id, account_id=auth.account_id
+        )
         grant = await web_roles.get_workspace_role(
             db, tenant_id=auth.tenant_id, account_id=auth.account_id
         )
+    if person is not None and person.status == "suspended":
+        raise ToolError("Your web access is suspended.")
     role = role_for(
         kind="member",
         workspace_grant=grant,
         platform_admin=auth.is_platform_admin,
         chat_admin=auth.is_admin,
     )
-    return WebAdmin(tenant_id=auth.tenant_id, account_id=auth.account_id, role=role)
+    return WebAdmin(
+        tenant_id=auth.tenant_id,
+        account_id=auth.account_id,
+        role=role,
+        person_id=None if person is None else person.id,
+    )
 
 
 async def agent_names(runtime: McpRuntime, tenant_id: uuid.UUID) -> dict[str, str]:
     agents = await list_agents_by_tenant(runtime.client, tenant_id=tenant_id)
     return {a.id: a.name for a in agents}
+
+
+PrivateDetails = Literal["shown", "direct_message"]
+"""`direct_message`: emails and sign-ins are left out; they show in a direct message."""
+
+
+async def private_details(
+    runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str | None
+) -> PrivateDetails:
+    """`shown` only when this turn runs in the admin's own direct message or web chat."""
+    origin = await get_chat_origin(runtime, auth, origin_context_id)
+    private = (
+        origin is not None
+        and not origin.shared_channel
+        and not origin.sender_foreign
+        and (
+            origin.platform == "web"
+            or is_private_conversation(origin.thread_id)
+            or is_private_conversation(origin.parent_channel_id)
+        )
+    )
+    return "shown" if private else "direct_message"
 
 
 def refused(error: WebAdminError) -> ToolError:

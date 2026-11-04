@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._card import require_card
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._web_admin import audit_to
 from daimon.adapters.mcp.tools._web_url import WebUrl, tenant_links
@@ -30,8 +31,8 @@ class LibrarySkillVersion:
     web_url: WebUrl = None
 
 
-def _shown(runtime: McpRuntime, auth: AuthIdentity, ref: SkillRef) -> LibrarySkillVersion:
-    links = tenant_links(runtime, auth)
+async def _shown(runtime: McpRuntime, auth: AuthIdentity, ref: SkillRef) -> LibrarySkillVersion:
+    links = await tenant_links(runtime, auth)
     return LibrarySkillVersion(
         skill_id=ref.id,
         name=ref.name,
@@ -58,12 +59,22 @@ async def _save_impl(
         )
     except AgentEditError as err:
         raise ToolError(str(err)) from err
-    return _shown(runtime, auth, ref)
+    return await _shown(runtime, auth, ref)
 
 
 async def _restore_impl(
-    runtime: McpRuntime, auth: AuthIdentity, skill_id: str, version: str
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    skill_id: str,
+    version: str,
+    origin_context_id: str | None = None,
 ) -> LibrarySkillVersion:
+    await require_card(
+        runtime,
+        auth,
+        tool_name="restore_library_skill_version",
+        origin_context_id=origin_context_id,
+    )
     try:
         ref = await skill_library_files.restore_library_version(
             _edit_deps(runtime),
@@ -74,7 +85,7 @@ async def _restore_impl(
         )
     except AgentEditError as err:
         raise ToolError(str(err)) from err
-    return _shown(runtime, auth, ref)
+    return await _shown(runtime, auth, ref)
 
 
 def register_skill_library_edit_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
@@ -89,10 +100,11 @@ def register_skill_library_edit_tools(mcp: FastMCP, runtime: McpRuntime) -> None
 
     @mcp.tool(tags={"admin"})
     async def restore_library_skill_version(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, skill_id: str, version: str
+        ctx: Context, skill_id: str, version: str, origin_context_id: str | None = None
     ) -> LibrarySkillVersion:
-        """Publish an older version of a library skill again as its next version. Admin-only."""
-        return await _restore_impl(runtime, await _auth(ctx), skill_id, version)
+        """Publish an older version of a library skill again as its next version. Admin-only.
+        Runs on the person's Confirm card in chat; pass this active turn's origin_context_id."""
+        return await _restore_impl(runtime, await _auth(ctx), skill_id, version, origin_context_id)
 
 
 __all__ = ["register_skill_library_edit_tools"]

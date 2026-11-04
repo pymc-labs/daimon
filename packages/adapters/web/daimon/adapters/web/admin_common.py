@@ -62,7 +62,9 @@ class AdminPersonDetail(AdminPerson):
 
 def admin_of(caller: WebCaller) -> WebAdmin:
     """The signed-in admin as the shared admin changes see them."""
-    return WebAdmin(caller.person.tenant_id, caller.person.account_id, caller.role)
+    return WebAdmin(
+        caller.person.tenant_id, caller.person.account_id, caller.role, caller.person.id
+    )
 
 
 def refused(error: WebAdminError) -> HTTPException:

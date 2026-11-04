@@ -252,14 +252,14 @@ async def _clear_channel_environment_impl(
     )
 
 
-def _with_channel_link(
+async def _with_channel_link(
     runtime: McpRuntime, auth: AuthIdentity, result: ChannelEnvironmentResult
 ) -> ChannelEnvironmentResult:
     """`result` with the channel's page on the web, for a channel scope when there is one."""
     channel_id = (
         result.scope.removeprefix("channel:") if result.scope.startswith("channel:") else None
     )
-    links = tenant_links(runtime, auth)
+    links = await tenant_links(runtime, auth)
     url = None if links is None or channel_id is None else links.channel(channel_id)
     return result if url is None else replace(result, web_url=url)
 
@@ -295,7 +295,7 @@ def register_channel_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> Non
             channel_id=channel_id,
             confirm_open_network=confirm_open_network,
         )
-        return _with_channel_link(runtime, auth, result)
+        return await _with_channel_link(runtime, auth, result)
 
     @mcp.tool(tags={"admin", *scope_tags("channels:write")})
     async def clear_channel_environment(  # pyright: ignore[reportUnusedFunction]
@@ -321,4 +321,4 @@ def register_channel_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> Non
             channel_id=channel_id,
             confirm_open_network=confirm_open_network,
         )
-        return _with_channel_link(runtime, auth, result)
+        return await _with_channel_link(runtime, auth, result)

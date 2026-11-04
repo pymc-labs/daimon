@@ -414,7 +414,7 @@ def register_channel_budget_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             starts_at=starts_at,
             ends_at=ends_at,
         )
-        links = tenant_links(runtime, auth)
+        links = await tenant_links(runtime, auth)
         url = None if links is None else links.channel(result.channel_id)
         return result if url is None else replace(result, web_url=url)
 

@@ -633,9 +633,9 @@ class RoutineView(RoutineRow):
     web_url: WebUrl = None
 
 
-def _viewed(runtime: McpRuntime, auth: AuthIdentity, row: RoutineRow) -> RoutineView:
+async def _viewed(runtime: McpRuntime, auth: AuthIdentity, row: RoutineRow) -> RoutineView:
     """`row` with its drawer on the web, when the workspace has one for this caller."""
-    links = tenant_links(runtime, auth)
+    links = await tenant_links(runtime, auth)
     view = RoutineView.model_validate(row, from_attributes=True)
     return view if links is None else view.model_copy(update={"web_url": links.routine(row.id)})
 
@@ -723,20 +723,24 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             destination_id=destination_id,
             origin_context_id=origin_context_id,
         )
-        return _viewed(runtime, auth, row)
+        return await _viewed(runtime, auth, row)
 
     @mcp.tool
     async def list_routines(ctx: Context) -> list[RoutineView]:  # pyright: ignore[reportUnusedFunction]
         """List the routines you created (an admin sees every routine in the workspace)."""
         auth = await _auth(ctx)
-        return [_viewed(runtime, auth, row) for row in await _list_routines_impl(runtime, auth)]
+        return [
+            await _viewed(runtime, auth, row) for row in await _list_routines_impl(runtime, auth)
+        ]
 
     @mcp.tool
     async def get_routine(ctx: Context, routine_id: UUID) -> RoutineView:  # pyright: ignore[reportUnusedFunction]
         """Get a routine by id. Raises if not found, cross-tenant, or someone else's and you
         are not an admin."""
         auth = await _auth(ctx)
-        return _viewed(runtime, auth, await _get_routine_impl(runtime, auth, routine_id=routine_id))
+        return await _viewed(
+            runtime, auth, await _get_routine_impl(runtime, auth, routine_id=routine_id)
+        )
 
     @mcp.tool
     async def update_routine(  # pyright: ignore[reportUnusedFunction]
@@ -783,7 +787,7 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             destination_id=destination_id,
             clear_destination=clear_destination,
         )
-        return _viewed(runtime, auth, row)
+        return await _viewed(runtime, auth, row)
 
     @mcp.tool
     async def delete_routine(ctx: Context, routine_id: UUID) -> DeleteResult:  # pyright: ignore[reportUnusedFunction]

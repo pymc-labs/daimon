@@ -115,6 +115,13 @@ def test_routine_controls_link_only_its_own_workspace_and_only_with_a_web_app() 
     assert "web_url" in text, "the generic sentence is there"
 
 
+def test_routine_controls_omit_web_links_when_the_channel_is_held() -> None:
+    web = WebLinks.from_settings(WebSettings(public_url="https://app.example.com"))  # type: ignore[call-arg]
+    text = render_routine_controls(_row(), platform="discord", web=web, held=True)
+    assert "app.example.com" not in text, "a shared channel's readers get no web links"
+    assert '"web"' not in text, "and no web control at all"
+
+
 def test_routine_controls_name_the_destination_and_schedule() -> None:
     text = render_routine_controls(_row(), platform="discord")
     assert text.startswith("<turn_controls>\n{")

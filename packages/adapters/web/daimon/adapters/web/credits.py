@@ -464,6 +464,7 @@ def credits_router(runtime: WebRuntime) -> APIRouter:
             tenant_id=caller.person.tenant_id,
             account_id=caller.person.account_id,
             role=caller.role,
+            person_id=caller.person.id,
         )
 
     async def agent_names_of(tenant_id: uuid.UUID, agent_ids: Collection[str]) -> dict[str, str]:

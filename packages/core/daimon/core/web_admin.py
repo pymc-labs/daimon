@@ -38,6 +38,10 @@ from daimon.core.web_roles_rules import ROLE_WORDS, Role, at_or_above, is_admin,
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 SIGN_IN_LINK_TTL = timedelta(days=7)
+MAX_INVITE_AGENTS = 50
+MAX_ACCESS_GROUPS = 100
+MAX_INVITE_CREDIT_USD = 100_000
+MAX_INVITE_DAYS = 90
 _BUSY = "Settings are being changed. Try again."
 ModuleName = Literal["chat", "agents", "channels", "routines", "credits", "integrations"]
 
@@ -57,6 +61,9 @@ class WebAdmin:
     tenant_id: uuid.UUID
     account_id: uuid.UUID
     role: Role
+    person_id: uuid.UUID | None = None
+    """Their web person, when they have one: what a change checks to keep them from
+    suspending themselves."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +173,16 @@ async def create_invite(
 ) -> tuple[WebInviteRow, str]:
     """Invite someone by email. `agents` maps the workspace's agent ids to their names."""
     picked = list(dict.fromkeys(agent_ids))
+    if len(agent_ids) > MAX_INVITE_AGENTS:
+        raise WebAdminError(f"Pick at most {MAX_INVITE_AGENTS} agents.", status=422)
+    if not 1 <= days <= MAX_INVITE_DAYS:
+        raise WebAdminError(f"Give 1 to {MAX_INVITE_DAYS} days.", status=422)
+    if not 0 <= credit_usd <= MAX_INVITE_CREDIT_USD or credit_usd != credit_usd.quantize(
+        Decimal("0.01")
+    ):
+        raise WebAdminError(
+            f"Give a credit from 0 to {MAX_INVITE_CREDIT_USD:,} dollars, in cents.", status=422
+        )
     if any(a not in agents for a in picked):
         raise WebAdminError("Pick agents from this workspace.", status=422)
     if role == "visitor" and not picked:
@@ -302,7 +319,7 @@ async def change_person(
             at=now,
         )
     if status is not None and status != target.status:
-        if target.account_id == admin.account_id:
+        if target.id == admin.person_id:
             raise WebAdminError("You can't suspend yourself.", status=409)
         await web_people.update_person(db, person_id=target.id, status=status)
         if status == "suspended":
@@ -323,15 +340,16 @@ async def change_person(
 
 async def issue_sign_in_link(
     db: AsyncSession, admin: WebAdmin, now: datetime, person_id: uuid.UUID
-) -> tuple[WebPersonRow, str]:
-    """A one-time sign-in link for a visitor, who has no other way back in."""
+) -> tuple[WebPersonRow, str, uuid.UUID]:
+    """A one-time sign-in link for a visitor, who has no other way back in. Returns the
+    person, the token and the link's id."""
     person = await person_in(db, admin.tenant_id, person_id)
     if person.kind != "visitor":
         raise WebAdminError("This person isn't in the workspace.", status=404)
     # A link signs in as the person, so it must never hand a caller a higher role.
     if at_or_above(await role_of(db, person), admin.role):
         raise WebAdminError("Ask an owner.", status=403)
-    _, token = await issue_link(
+    link, token = await issue_link(
         db,
         tenant_id=person.tenant_id,
         kind="sign_in",
@@ -348,7 +366,25 @@ async def issue_sign_in_link(
         target=person_target(person.id),
         at=now,
     )
-    return person, token
+    return person, token, link.id
+
+
+async def revoke_issued_link(
+    db: AsyncSession, admin: WebAdmin, now: datetime, link_id: uuid.UUID
+) -> None:
+    """Revoke the one link just issued, as when it could not be delivered. The person's
+    other open links stay."""
+    link = await web_invites.revoke_link(db, tenant_id=admin.tenant_id, link_id=link_id, now=now)
+    if link is None or link.person_id is None:
+        return
+    await audit(
+        db,
+        tenant_id=link.tenant_id,
+        actor_account_id=admin.account_id,
+        action="Revoked sign-in link",
+        target=person_target(link.person_id),
+        at=now,
+    )
 
 
 async def revoke_sign_in_link(
@@ -421,6 +457,8 @@ async def set_agent_access(
     groups: Sequence[str] | None = None,
 ) -> AgentAccess:
     """Turn web chat on or off for an agent and choose who may use it there."""
+    if groups is not None and len(groups) > MAX_ACCESS_GROUPS:
+        raise WebAdminError(f"Pick at most {MAX_ACCESS_GROUPS} groups.", status=422)
     if current.fixed_to is not None:
         raise WebAdminError("This agent is kept to its channel.", status=403)
     new_web = current.web if web is None else web

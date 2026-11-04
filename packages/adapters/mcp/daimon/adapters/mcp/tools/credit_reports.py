@@ -109,7 +109,7 @@ async def _mine_impl(
         markup=runtime.settings.billing.markup,
         agent_labels=_labels(runtime, auth.tenant_id),
     )
-    links = tenant_links(runtime, auth)
+    links = await tenant_links(runtime, auth)
     return MyCredits(
         by_agent=[_line(e) for e in report.by_agent],
         turns=report.turns,
@@ -127,7 +127,7 @@ async def _overview_impl(runtime: McpRuntime, auth: AuthIdentity) -> CreditsOver
         now=now(),
         markup=runtime.settings.billing.markup,
     )
-    links = tenant_links(runtime, auth)
+    links = await tenant_links(runtime, auth)
     return CreditsOverview(
         balance_usd=report.balance_usd,
         spent_usd=report.spent_usd,
@@ -155,7 +155,7 @@ async def _spend_impl(
         agent_labels=_labels(runtime, actor.tenant_id),
         channel_names=_stored_names,
     )
-    links = tenant_links(runtime, auth)
+    links = await tenant_links(runtime, auth)
     return CreditsSpend(
         by=by, rows=[_line(e) for e in rows], web_url=links.spend() if links else None
     )
@@ -178,7 +178,7 @@ async def _feedback_impl(runtime: McpRuntime, auth: AuthIdentity, days: int) -> 
             )
     except FeedbackNotAllowed as err:
         raise ToolError(str(err)) from err
-    links = tenant_links(runtime, auth)
+    links = await tenant_links(runtime, auth)
     return FeedbackSummary(
         report=feedback_report(found, names=names, days=days),
         web_url=links.feedback() if links else None,

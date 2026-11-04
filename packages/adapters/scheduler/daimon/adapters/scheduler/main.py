@@ -847,6 +847,7 @@ async def _build_fire(
                     platform=platform,
                     direct_post=direct_post,
                     web=WebLinks.from_settings(settings.web),
+                    held=fire_hold is not None,
                 )
                 + "\n"
                 + row.trigger_message

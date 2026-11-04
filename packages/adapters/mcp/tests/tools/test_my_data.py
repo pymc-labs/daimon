@@ -9,6 +9,16 @@ from fastmcp.exceptions import ToolError
 from .parity_fakes import fake_runtime, make_auth
 
 
+@pytest.fixture(autouse=True)
+def card_confirmed(monkeypatch):
+    """These tests cover the data calls; `test_card_gate` covers the person's card."""
+
+    async def confirmed(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(tool, "require_card", confirmed)
+
+
 @pytest.mark.parametrize("extra", [{"foreign_home_id": "other-org"}, {"agent_id": uuid.uuid4()}])
 async def test_forget_when_not_a_person_then_refused(extra, monkeypatch):
     called = []

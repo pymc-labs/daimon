@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._card import require_card
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._web_admin import agent_names, now, refused, web_admin_of
 from daimon.core import web_admin
@@ -38,8 +39,12 @@ async def _change_impl(
     invoker_people: list[str],
     dm_enabled: bool | None,
     dm_memory_read_only: bool | None,
+    origin_context_id: str | None = None,
 ) -> WorkspaceSettingsChanged:
     actor = await web_admin_of(runtime, auth)
+    await require_card(
+        runtime, auth, tool_name="change_workspace_settings", origin_context_id=origin_context_id
+    )
     try:
         people = [uuid.UUID(p) for p in invoker_people]
     except ValueError as err:
@@ -72,10 +77,12 @@ def register_web_workspace_settings_tool(mcp: FastMCP, runtime: McpRuntime) -> N
         invoker_people: list[str] | None = None,
         dm_enabled: bool | None = None,
         dm_memory_read_only: bool | None = None,
+        origin_context_id: str | None = None,
     ) -> WorkspaceSettingsChanged:
         """Change the workspace's web modules (chat, agents, channels, routines, credits,
         integrations), its web chat agent, who may start turns (everyone, or exactly the
-        web people in ``invoker_people``) and the direct-message rules. Admin-only."""
+        web people in ``invoker_people``) and the direct-message rules. Admin-only.
+        Runs on the person's Confirm card in chat; pass this active turn's origin_context_id."""
         return await _change_impl(
             runtime,
             await _auth(ctx),
@@ -85,6 +92,7 @@ def register_web_workspace_settings_tool(mcp: FastMCP, runtime: McpRuntime) -> N
             invoker_people=invoker_people or [],
             dm_enabled=dm_enabled,
             dm_memory_read_only=dm_memory_read_only,
+            origin_context_id=origin_context_id,
         )
 
 
