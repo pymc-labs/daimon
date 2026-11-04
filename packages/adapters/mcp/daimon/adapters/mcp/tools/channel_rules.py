@@ -76,6 +76,8 @@ class SetAgentRuleResult:
     runs_in: list[str] | None
     changed: bool
     note: str
+    web_url: WebUrl = None
+    """The agent's page on the web, when the workspace has a web app and the caller may open it."""
 
 
 def _platform(auth: AuthIdentity) -> str:
@@ -250,6 +252,20 @@ async def _set_agent_rule_impl(
     )
 
 
+async def _with_agent_link(
+    runtime: McpRuntime, auth: AuthIdentity, result: SetAgentRuleResult
+) -> SetAgentRuleResult:
+    """`result` with the agent's page on the web, when there is one for this caller."""
+    links = tenant_links(runtime, auth)
+    if links is None:
+        return result
+    agent = await find_agent_by_daimon_tag(
+        runtime.client, tenant_id=auth.tenant_id, name=result.agent_name
+    )
+    url = None if agent is None else links.agent(agent.id)
+    return result if url is None else replace(result, web_url=url)
+
+
 def _widens(before: tuple[str, ...] | None, after: tuple[str, ...] | None) -> bool:
     """Whether a rule change lets the agent run somewhere it couldn't before.
 
@@ -327,6 +343,6 @@ def register_channel_rule_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Naming a channel only its own agents read makes the agent one of them, so name
         that channel alone.
         """
-        return await _set_agent_rule_impl(
-            runtime, await _auth(ctx), agent_name=agent_name, runs_in=runs_in
-        )
+        auth = await _auth(ctx)
+        result = await _set_agent_rule_impl(runtime, auth, agent_name=agent_name, runs_in=runs_in)
+        return await _with_agent_link(runtime, auth, result)

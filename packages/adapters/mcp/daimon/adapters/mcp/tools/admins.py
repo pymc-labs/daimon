@@ -2,15 +2,29 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
+from daimon.adapters.mcp.tools._web_url import WebUrl, tenant_links
 from daimon.core.admin_authority import resolve_authority
 from daimon.core.stores.daimon_admins import AdminGrant, SubjectKind, change_grant
 from daimon.core.stores.daimon_admins import list_admins as list_grants
+from daimon.core.stores.web_people import get_person_for_platform_user
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
+
+
+@dataclass(frozen=True)
+class GrantAdminResult:
+    """Result returned from grant_admin."""
+
+    message: str
+    web_url: WebUrl = None
+    """The person's page in the web app's admin section, when the workspace has a web app,
+    the caller may open it and the person has an account there."""
 
 
 async def change_admin(
@@ -53,6 +67,24 @@ async def change_admin(
         )
 
 
+async def granted(
+    runtime: McpRuntime, auth: AuthIdentity, *, subject_id: str, subject_kind: SubjectKind
+) -> GrantAdminResult:
+    """The grant's result, with the person's admin page when they have one on the web."""
+    message = "Daimon admin granted."
+    links = tenant_links(runtime, auth)
+    if links is None or subject_kind != "user" or auth.platform is None:
+        return GrantAdminResult(message)
+    async with runtime.session_factory() as session:
+        person = await get_person_for_platform_user(
+            session,
+            tenant_id=auth.tenant_id,
+            platform=auth.platform,
+            platform_user_id=subject_id,
+        )
+    return GrantAdminResult(message, None if person is None else links.person(str(person.id)))
+
+
 def register_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool(tags={*scope_tags("tenant:read")})
     async def list_admins(ctx: Context) -> list[AdminGrant]:  # pyright: ignore[reportUnusedFunction]
@@ -71,7 +103,7 @@ def register_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context,
         subject_id: str,
         subject_kind: SubjectKind = "user",
-    ) -> str:
+    ) -> GrantAdminResult:
         """Granted admins can change what agents do, including agents platform admins use.
 
         Grant Daimon admin to a user or a supported role (platform admins only).
@@ -79,10 +111,9 @@ def register_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Chat, routines and all agent-run credentials are refused. Delegates cannot delegate.
         Configuration changes only; billing and spend caps remain platform-only.
         """
-        await change_admin(
-            runtime, await _auth(ctx), subject_id=subject_id, subject_kind=subject_kind
-        )
-        return "Daimon admin granted."
+        auth = await _auth(ctx)
+        await change_admin(runtime, auth, subject_id=subject_id, subject_kind=subject_kind)
+        return await granted(runtime, auth, subject_id=subject_id, subject_kind=subject_kind)
 
     @mcp.tool(tags={"admin"})
     async def revoke_admin(  # pyright: ignore[reportUnusedFunction]

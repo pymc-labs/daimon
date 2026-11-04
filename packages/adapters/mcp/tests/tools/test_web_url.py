@@ -31,7 +31,7 @@ _BASE = f"https://app.example.com/w/{_TENANT}"
 
 
 def _runtime(web: WebSettings | None) -> McpRuntime:
-    return cast(McpRuntime, SimpleNamespace(settings=SimpleNamespace(web=web)))
+    return cast(McpRuntime, SimpleNamespace(client=None, settings=SimpleNamespace(web=web)))
 
 
 _WEB = WebSettings(public_url="https://app.example.com")  # type: ignore[call-arg]
@@ -129,3 +129,20 @@ def test_a_member_gets_links_only_to_pages_a_member_may_open() -> None:
     assert links.agent("agent_1") is not None, "members view agents"
     assert links.skill("skill_1") is None, "skills are for those who manage the workspace"
     assert links.person("u1") is None, "people are for admins"
+
+
+async def test_set_agent_rule_links_to_the_agents_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The result carries the page of the agent the rule is about, found by name."""
+    from daimon.adapters.mcp.tools import channel_rules
+    from daimon.adapters.mcp.tools.channel_rules import SetAgentRuleResult, _with_agent_link
+
+    async def find(_client: object, *, tenant_id: uuid.UUID, name: str) -> object:
+        return SimpleNamespace(id="agent_1")
+
+    monkeypatch.setattr(channel_rules, "find_agent_by_daimon_tag", find)
+    result = SetAgentRuleResult(agent_name="stats", runs_in=None, changed=True, note="")
+
+    linked = await _with_agent_link(_runtime(_WEB), make_identity(tenant_id=_TENANT), result)
+    assert linked.web_url == f"{_BASE}/agents/agent_1", "the agent's own page"
+    plain = await _with_agent_link(_runtime(None), make_identity(tenant_id=_TENANT), result)
+    assert plain == result, "no web app, the result is what it was"
