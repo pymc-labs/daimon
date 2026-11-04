@@ -12,8 +12,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
-import aiohttp
-import httpx
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -205,13 +203,13 @@ async def _slack_user_name(runtime: McpRuntime, team_id: str, user_id: str) -> s
     if hit is not None and time.monotonic() - hit[0] < _NAME_TTL_SECONDS:
         return hit[1]
     from daimon.adapters.mcp.tools.slack._client import slack_web_client
-    from slack_sdk.errors import SlackApiError
 
     try:
         client = await slack_web_client(runtime, team_id=team_id)
         response = await client.users_info(user=user_id)  # pyright: ignore[reportUnknownMemberType]
-    except (SlackApiError, ToolError, aiohttp.ClientError, TimeoutError):
-        # No name means no attribution line, never a refused post; a failure is not cached.
+    except Exception:  # named boundary: a name lookup never loses the post
+        # No name means the stored name or "someone"; a failure is not cached.
+        log.warning("outbound.slack_name_lookup_failed", exc_info=True)
         return None
     user = cast("dict[str, Any]", response.get("user") or {})  # pyright: ignore[reportUnknownMemberType]
     profile = cast("dict[str, Any]", user.get("profile") or {})
@@ -239,7 +237,8 @@ async def _requester_name(
         try:
             member = await runtime.teams_client.get_member(place.split(";", 1)[0], user_id)
             name = member.name if member else None
-        except (httpx.HTTPError, ValueError):
+        except Exception:  # named boundary: a name lookup never loses the post
+            log.warning("outbound.teams_name_lookup_failed", exc_info=True)
             name = None
     if name:
         return name

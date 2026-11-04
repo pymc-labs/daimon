@@ -667,6 +667,32 @@ async def test_prepare_posts_when_live_name_unknown_then_stored_name_else_someon
     assert post.text == f"hello\nrequested by {expected}", "the attribution line is never dropped"
 
 
+@pytest.mark.parametrize("platform", ("slack", "teams"))
+@pytest.mark.parametrize("failure", [RuntimeError("boom"), KeyError("user"), TypeError("bad")])
+async def test_prepare_posts_when_name_lookup_raises_anything_then_post_goes_out_as_someone(
+    sessionmaker, platform, failure, monkeypatch
+):
+    """A name is only for the line saying who asked; whatever its lookup raises, the post sends."""
+
+    async def broken(*_: object, **__: object) -> None:
+        raise failure
+
+    runtime, auth = await _setup(sessionmaker, platform)
+    if platform == "slack":
+        monkeypatch.setattr("daimon.adapters.mcp.tools.slack._client.slack_web_client", broken)
+        auth = dataclasses.replace(auth, external_id=f"T{uuid.uuid4().hex}")
+    else:
+        cast(Any, runtime).teams_client = SimpleNamespace(get_member=broken)
+    [post] = await prepare_posts(
+        runtime,
+        auth,
+        [OutgoingPost(text="hello", place="C1")],
+        plan=ReachPlan(threads=0, places=1, people=0),
+        scope=_scope(),
+    )
+    assert post.text == "hello\nrequested by someone", f"{platform}: the post is not lost"
+
+
 async def test_prepare_posts_when_another_call_holds_the_tally_then_it_waits_and_sees_its_posts(
     committing_sessionmaker,
 ):
