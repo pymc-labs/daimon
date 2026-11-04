@@ -12,7 +12,7 @@ from typing import Any, cast
 import pytest
 from daimon.core import agent_admin, agent_skill_files, credit_report, credit_views
 from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError
-from daimon.core.agent_view import AgentConfigDoc, SkillDoc
+from daimon.core.agent_view import AgentConfigDoc, ModelChoice, SkillDoc
 from daimon.core.feedback_summary import (
     MIN_SHOWN,
     UNKNOWN_AGENT,
@@ -26,11 +26,23 @@ _CODE = next(iter(FEEDBACK_REASONS))
 
 
 def _skill(skill_id: str, version: str) -> SkillDoc:
-    return SkillDoc.model_construct(skill_id=skill_id, version=version)
+    return SkillDoc(type="custom", skill_id=skill_id, title=skill_id, version=version)
 
 
 def _config(*skills: SkillDoc) -> AgentConfigDoc:
-    return AgentConfigDoc.model_construct(skills=list(skills))
+    return AgentConfigDoc(
+        name="helper",
+        purpose="",
+        avatar="",
+        model=ModelChoice(
+            id="claude-sonnet-4-6", backend="anthropic", speed="standard", effort="high"
+        ),
+        system=None,
+        skills=list(skills),
+        tools=[],
+        mcp_servers=[],
+        places=None,
+    )
 
 
 def test_with_skill_when_held_then_replaced_in_place_else_added() -> None:

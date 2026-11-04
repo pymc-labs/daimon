@@ -32,13 +32,16 @@ async def test_a_granted_user_with_a_web_person_links_to_their_admin_page(
 ) -> None:
     async with committing_sessionmaker.begin() as session:
         tenant = await make_tenant(session, platform="discord")
+        # Links follow the caller's web role: the admin has no web person yet, so their
+        # chat admin standing counts, while the granted user is a member on the web.
+        admin = await make_account(session, tenant=tenant)
         account = await make_account(session, tenant=tenant)
         await make_platform_principal(
             session, platform="discord", external_id="U42", tenant=tenant, account=account
         )
         person = await make_web_person(session, tenant=tenant, account=account)
     auth = AuthIdentity(
-        account_id=account.id,
+        account_id=admin.id,
         tenant_id=tenant.id,
         role=Role.ADMIN,
         platform="discord",

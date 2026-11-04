@@ -216,9 +216,9 @@ def register_my_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         key: str | None = None,
         origin_context_id: str | None = None,
     ) -> MyDataChange:
-        """Disconnect one of the caller's accounts: saved Microsoft 365 or Slack access, or an
-        MCP sign-in (``agent_id`` and ``key`` as listed by list_my_data). Runs on the person's
-        Confirm card in chat; pass this active turn's origin_context_id."""
+        """Disconnect one of the caller's accounts: saved Microsoft 365 access, saved workspace
+        access, or an MCP sign-in (``agent_id`` and ``key`` as listed by list_my_data). Runs on
+        the person's Confirm card in chat; pass this active turn's origin_context_id."""
         return await _disconnect_impl(
             runtime,
             await _auth(ctx),

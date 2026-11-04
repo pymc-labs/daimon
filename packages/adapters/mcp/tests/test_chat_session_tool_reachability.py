@@ -55,6 +55,18 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.types import ASGIApp
 
 SECRET = "a" * 32
+_ADMIN_CARDED_TOOLS = frozenset(
+    {
+        "change_workspace_settings",
+        "delete_allowance",
+        "restore_library_skill_version",
+        "revoke_visitor_link",
+        "revoke_web_invite",
+        "set_agent_owners",
+        "set_agent_web_access",
+        "update_web_person",
+    }
+)
 _NOW = dt.datetime(2026, 4, 24, tzinfo=dt.UTC)
 
 
@@ -367,5 +379,7 @@ async def test_chat_execution_identity_preserves_exact_tools_list(
             - backend_switch_tools(enabled=True)
             - microsoft_send_tools(enabled=True, tool_safety_on=True)
             - {"set_routine_sandbox_tools"}
+            # Carded tools tagged admin stay hidden from a non-admin credential.
+            - _ADMIN_CARDED_TOOLS
         ),
     }

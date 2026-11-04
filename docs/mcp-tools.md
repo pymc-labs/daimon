@@ -403,7 +403,7 @@ The caller's own data: what Daimon holds for them, and letting it go.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `disconnect_my_account` | all callers | Disconnect one of the caller's accounts: saved Microsoft 365 or Slack access, or an MCP sign-in (``agent_id`` and ``key`` as listed by list_my_data). |
+| `disconnect_my_account` | all callers | Disconnect one of the caller's accounts: saved Microsoft 365 access, saved workspace access, or an MCP sign-in (``agent_id`` and ``key`` as listed by list_my_data). |
 | `forget_my_memory` | all callers | Delete the caller's personal memory with one agent, by the agent_id from list_my_data. |
 | `list_my_data` | all callers | List what is held for the caller: connected accounts and sign-ins, personal memory per agent, and their coding keys. |
 | `revoke_my_coding_key` | all callers | Revoke one of the caller's own coding keys, by the key_id from list_my_data. |

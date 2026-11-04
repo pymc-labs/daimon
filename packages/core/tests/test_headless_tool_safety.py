@@ -20,7 +20,7 @@ from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.core.config import McpSettings
 from daimon.core.headless_runner import run_turn
 from daimon.core.sessions import create_session
-from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
+from daimon.core.tool_safety import CARDED_TOOLS, OPEN_TOOL_SAFETY, ToolSafetyPolicy
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.testing.ma_models import (
     ma_agent,
@@ -408,18 +408,21 @@ async def test_a_session_for_an_agent_with_daimon_rules_asks_on_call_tool_and_th
         c["name"] for c in daimon["configs"] if c["permission_policy"]["type"] == "always_ask"
     )
     # Enrollment requires a person's card independently of agent-specific rules.
-    assert asked == [
-        "add_skill",
-        "call_tool",
-        "create_watch",
-        "fly_extend_session",
-        "fly_launch_session",
-        "hubspot_update_objects",
-        "resume_watch",
-        "rotate_watch_key",
-        "start_long_job",
-        "update_watch",
-    ]
+    assert asked == sorted(
+        [
+            "add_skill",
+            "call_tool",
+            "create_watch",
+            "fly_extend_session",
+            "fly_launch_session",
+            "hubspot_update_objects",
+            "resume_watch",
+            "rotate_watch_key",
+            "start_long_job",
+            "update_watch",
+            *CARDED_TOOLS,
+        ]
+    ), "the rule's tool, the proxy, the standing actions and the carded tools ask"
 
 
 async def test_a_session_for_an_agent_without_daimon_rules_is_exactly_as_before() -> None:
@@ -431,16 +434,19 @@ async def test_a_session_for_an_agent_without_daimon_rules_is_exactly_as_before(
 
     assert without == inert, "rules that are not applied leave the session's tools alone"
     (daimon,) = [t for t in without["tools"] if t.get("mcp_server_name") == "daimon-mcp"]
-    assert [c["name"] for c in daimon["configs"]] == [
-        "add_skill",
-        "create_watch",
-        "fly_extend_session",
-        "fly_launch_session",
-        "resume_watch",
-        "rotate_watch_key",
-        "start_long_job",
-        "update_watch",
-    ]
+    assert [c["name"] for c in daimon["configs"]] == sorted(
+        [
+            "add_skill",
+            "create_watch",
+            "fly_extend_session",
+            "fly_launch_session",
+            "resume_watch",
+            "rotate_watch_key",
+            "start_long_job",
+            "update_watch",
+            *CARDED_TOOLS,
+        ]
+    ), "only the standing and carded tools are configured"
 
 
 def test_no_production_signature_defaults_the_policy() -> None:
