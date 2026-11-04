@@ -32,16 +32,21 @@ from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.mux_compat import create_skill, publish_skill_version
 from daimon.core.skill_library import library_skill, own_skills
 from daimon.core.skills.ingest import SkillIngestError, bundle_from_files
+from daimon.core.stores.server_skills import mirror_of_skill
 from mux.contracts.errors import ProviderError, ScopeViolation
 from pydantic import BaseModel
 from sqlalchemy import text
 
 __all__ = [
     "SkillRef",
+    "create_custom_skill",
     "create_library_skill",
+    "custom_skill_names",
+    "fork_library_skill",
     "read_library_files",
     "restore_library_version",
     "save_library_files",
+    "skill_lock",
 ]
 
 _NAME = re.compile(r"[^a-z0-9]+")
@@ -62,7 +67,7 @@ _LOCKS: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictio
 
 
 @asynccontextmanager
-async def _skill_lock(
+async def skill_lock(
     deps: AgentEditDeps, *, tenant_id: uuid.UUID, skill_id: str
 ) -> AsyncIterator[None]:
     """Serialize publishing versions of one skill, until the block ends.
@@ -93,6 +98,10 @@ async def _custom(
     row, name = await library_skill(deps, actor, skill_id)
     if row.source != "custom":
         raise AgentEditError(f"A built-in skill can't be {verb}.", kind="forbidden")
+    async with deps.session_factory() as session:
+        mirror = await mirror_of_skill(session, tenant_id=actor.tenant_id, skill_id=skill_id)
+    if mirror is not None:
+        raise AgentEditError(f"A server skill can't be {verb}. Fork it first.", kind="forbidden")
     return name, row.latest_version or ""
 
 
@@ -153,7 +162,7 @@ async def save_library_files(
     that is a conflict: the editor reloads rather than overwrite it.
     """
     require_admin(actor, "The skill library")
-    async with _skill_lock(deps, tenant_id=actor.tenant_id, skill_id=skill_id):
+    async with skill_lock(deps, tenant_id=actor.tenant_id, skill_id=skill_id):
         name, latest = await _custom(deps, actor, skill_id, verb="edited")
         if latest != expected_version:
             raise AgentEditError(
@@ -197,7 +206,7 @@ async def restore_library_version(
 ) -> SkillRef:
     """Publish an older version's files again as the next version."""
     require_admin(actor, "The skill library")
-    async with _skill_lock(deps, tenant_id=actor.tenant_id, skill_id=skill_id):
+    async with skill_lock(deps, tenant_id=actor.tenant_id, skill_id=skill_id):
         name, _latest = await _custom(deps, actor, skill_id, verb="edited")
         old = await download_files(deps, actor=actor, skill_id=skill_id, version=version)
         return await _publish(
@@ -223,12 +232,29 @@ async def create_library_skill(
     slug = slug_of(name)
     summary = " ".join(description.split())
     skill_md = f"---\nname: {slug}\ndescription: {json.dumps(summary)}\n---\n\n# {name.strip()}\n"
+    ref = await create_custom_skill(deps, actor=actor, files={"SKILL.md": skill_md.encode("utf-8")})
+    if audited is not None:
+        async with deps.session_factory() as session, session.begin():
+            await audited(session, _target(ref.name, ref.version))
+    return ref
+
+
+async def custom_skill_names(deps: AgentEditDeps, *, actor: AgentActor) -> frozenset[str]:
+    """The names the tenant's own library skills hold."""
+    rows, _truncated = await list_skills_lenient(deps.client)
+    return frozenset(bare for row, bare in own_skills(actor, rows) if row.source == "custom")
+
+
+async def create_custom_skill(
+    deps: AgentEditDeps, *, actor: AgentActor, files: dict[str, bytes]
+) -> SkillRef:
+    """A new library skill holding `files`, named by their SKILL.md, after every ingest check."""
     try:
-        bundle = bundle_from_files({"SKILL.md": skill_md.encode("utf-8")})
+        bundle = bundle_from_files(files)
     except SkillIngestError as exc:
         raise AgentEditError(str(exc), kind="invalid") from exc
-    rows, _truncated = await list_skills_lenient(deps.client)
-    if any(bare == slug and row.source == "custom" for row, bare in own_skills(actor, rows)):
+    slug = bundle.preview.name
+    if slug in await custom_skill_names(deps, actor=actor):
         raise AgentEditError(f"A skill named {slug} already exists.", kind="taken")
     title = tenant_scoped_display_title(tenant_id=actor.tenant_id, name=slug)
     try:
@@ -240,7 +266,49 @@ async def create_library_skill(
             "The skill could not be created. Try again.", kind="unavailable"
         ) from exc
     version = created.latest_version or ""
+    if version in ("", "latest"):
+        raise AgentEditError("The skill could not be created. Try again.", kind="unavailable")
+    return SkillRef(id=created.id, name=slug, version=version)
+
+
+_FRONT = re.compile(r"\A---\r?\n.*?\r?\n---(?:\r?\n|\Z)", re.DOTALL)
+_FRONT_NAME = re.compile(r"^name:[^\r\n]*", re.MULTILINE)
+
+
+def _renamed(skill_md: str, slug: str) -> str | None:
+    """SKILL.md with its frontmatter `name:` set to `slug`; None without one."""
+    front = _FRONT.match(skill_md)
+    if front is None:
+        return None
+    head, count = _FRONT_NAME.subn(f"name: {slug}", front.group(0), count=1)
+    return None if count != 1 else head + skill_md[front.end() :]
+
+
+async def fork_library_skill(
+    deps: AgentEditDeps,
+    *,
+    actor: AgentActor,
+    skill_id: str,
+    name: str,
+    audited: ChangeRecorder | None = None,
+) -> SkillRef:
+    """An editable copy of a server skill's latest version, under `name`; it follows nothing."""
+    require_admin(actor, "The skill library")
+    row, _old = await library_skill(deps, actor, skill_id)
+    slug = slug_of(name)
+    if not slug:
+        raise AgentEditError("Give the copy a name.", kind="invalid")
+    files = await download_files(
+        deps, actor=actor, skill_id=skill_id, version=row.latest_version or ""
+    )
+    skill_md = files.get("SKILL.md", b"").decode("utf-8", errors="replace")
+    renamed = _renamed(skill_md, slug)
+    if renamed is None:
+        raise AgentEditError("This skill has no name to change.", kind="invalid")
+    ref = await create_custom_skill(
+        deps, actor=actor, files={**files, "SKILL.md": renamed.encode("utf-8")}
+    )
     if audited is not None:
         async with deps.session_factory() as session, session.begin():
-            await audited(session, _target(slug, version))
-    return SkillRef(id=created.id, name=slug, version=version)
+            await audited(session, _target(ref.name, ref.version))
+    return ref

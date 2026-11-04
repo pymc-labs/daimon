@@ -18,13 +18,19 @@ from daimon.core import skill_library, skill_library_files
 from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError
 from daimon.core.authz import Subject, Surface
 from daimon.core.defaults.metadata import tenant_scoped_display_title
-from daimon.core.stores import web_audit
+from daimon.core.mcp_skills.install import ServerSkill
+from daimon.core.mcp_skills.manifest import parse_entry
+from daimon.core.server_skills.mirror import add_server_skill
+from daimon.core.stores import server_skills, web_audit
+from daimon.core.stores.web_people import get_person_for_account
 from daimon.testing.factories import make_account, make_tenant, make_web_person
+from daimon.testing.mcp_skills import SkillsServer, skill_md
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _TS = "2026-04-21T00:00:00Z"
 _SKILL_MD = "---\nname: notes\ndescription: Take notes.\n---\nWrite them down.\n"
+_NOW = datetime(2030, 1, 1, tzinfo=UTC)
 
 
 def _uploaded_files(request: httpx.Request) -> dict[str, bytes]:
@@ -317,3 +323,84 @@ async def test_a_version_names_who_saved_it(
     versions = await skill_library.skill_versions(deps, actor=actor, skill_id="sk_1")
 
     assert [(v.version, v.author) for v in versions] == [("2", "Ada"), ("1", None)]
+
+
+async def _mirror_sk_1(deps: AgentEditDeps, actor: AgentActor) -> None:
+    async with deps.session_factory() as session, session.begin():
+        await server_skills.create_mirror(
+            session,
+            tenant_id=actor.tenant_id,
+            server="data",
+            uri="skill://example/notes/SKILL.md",
+            name="notes",
+            skill_id="sk_1",
+            version_label=None,
+            digest="d",
+            manifest={},
+            allowed_tools=None,
+            added_by_person_id=None,
+            now=datetime(2030, 1, 1, tzinfo=UTC),
+        )
+
+
+async def test_a_server_skill_is_read_only_until_forked(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    library, deps, actor = await _setup(db_session, db_session_factory)
+    await _mirror_sk_1(deps, actor)
+
+    with pytest.raises(AgentEditError) as refused:
+        await skill_library_files.save_library_files(
+            deps, actor=actor, skill_id="sk_1", files={"ref.md": "x"}, expected_version="2"
+        )
+    fork = await skill_library_files.fork_library_skill(
+        deps, actor=actor, skill_id="sk_1", name="My Notes"
+    )
+
+    assert refused.value.kind == "forbidden"
+    assert (fork.id, fork.name) == ("sk_new", "my-notes")
+    sent = httpx.Request(
+        "POST", "https://example.com", content=library.created[0].encode("latin-1")
+    )
+    files = _uploaded_files(sent)
+    assert b"name: my-notes\n" in files["SKILL.md"] and files["ref.md"] == b"reference"
+
+
+def test_a_fork_renames_only_the_frontmatter() -> None:
+    renamed = skill_library_files._renamed(  # pyright: ignore[reportPrivateUsage]
+        "---\nname: notes\ndescription: d\n---\nname: keep\n", "copy"
+    )
+    assert renamed == "---\nname: copy\ndescription: d\n---\nname: keep\n"
+    assert skill_library_files._renamed("no frontmatter", "copy") is None  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_adding_a_server_skill_mirrors_it_once(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    library, deps, actor = await _setup(db_session, db_session_factory)
+    server = SkillsServer(skills={"plots": {"SKILL.md": skill_md("plots")}})
+    entry = parse_entry(server.entries()[0])
+    assert entry is not None
+    fetched = ServerSkill(entry=entry, files=dict(server.skills["plots"]))
+    async with db_session_factory() as session:
+        row = await get_person_for_account(
+            session, tenant_id=actor.tenant_id, account_id=actor.account_id
+        )
+    assert row is not None
+    person = row.id
+    first = await add_server_skill(
+        deps, actor=actor, person_id=person, server="data", fetched=fetched, now=_NOW
+    )
+    again = await add_server_skill(
+        deps, actor=actor, person_id=person, server="data", fetched=fetched, now=_NOW
+    )
+
+    assert (first.id, first.name) == ("sk_new", "plots") and again == first
+    assert len(library.created) == 1
+    async with db_session_factory() as session:
+        mirror = await server_skills.mirror_of_skill(
+            session, tenant_id=actor.tenant_id, skill_id="sk_new"
+        )
+        assert mirror is not None and mirror.uri == entry.uri
+        held = await server_skills.list_deployments(session, mirror.id)
+    assert {p: d.version for p, d in held.items()} == {"managed_agents": "1"}
