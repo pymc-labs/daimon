@@ -2486,6 +2486,24 @@ def _default_pollable_tools() -> list[PollableTool]:
     ]
 
 
+class ServerSkillsSettings(BaseModel):
+    """Skills added from a connection node's skills server, and the updates that follow them."""
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Offer the skills a connection node's server serves in the agent editor, and keep "
+            "added skills up to date. Needs a configured node. Read by the web service."
+        ),
+    )
+    check_interval_s: int = Field(
+        default=900,
+        ge=60,
+        le=86_400,
+        description="Seconds between checks of each added skill for a new version.",
+    )
+
+
 class WatchesSettings(BaseModel):
     @field_validator("executor_secret", mode="before")
     @classmethod
@@ -2847,6 +2865,7 @@ class Settings(BaseSettings):
     thread_naming: ThreadNamingSettings = Field(default_factory=ThreadNamingSettings)
     turn_queue: TurnQueueSettings = Field(default_factory=TurnQueueSettings)
     watches: WatchesSettings = Field(default_factory=WatchesSettings)
+    server_skills: ServerSkillsSettings = Field(default_factory=ServerSkillsSettings)
     private_channel_messages: PrivateChannelMessagesSettings = Field(
         default_factory=PrivateChannelMessagesSettings
     )

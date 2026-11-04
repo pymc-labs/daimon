@@ -55,6 +55,7 @@ typo is silent — check the spelling here.
 - [Thread Naming](#thread-naming)
 - [Turn Queue](#turn-queue)
 - [Watches](#watches)
+- [Server Skills](#server-skills)
 - [Private Channel Messages](#private-channel-messages)
 - [Tool Safety](#tool-safety)
 - [Artifacts](#artifacts)
@@ -1834,6 +1835,25 @@ JSON list of tool names on MCP servers that return chat or archive text, such as
 archive search. A watch could fire on its own report through them, so POLLABLE_TOOLS
 refuses them on any MCP server, whatever returns_chat says. Daimon's own read_thread,
 read_channel and search_messages are always refused there. Default: none.
+
+## Server Skills
+
+Read from `daimon.core.config.ServerSkillsSettings`. Prefix `DAIMON_SERVER_SKILLS__`.
+
+Skills added from a connection node's skills server, and the updates that follow them.
+
+### `DAIMON_SERVER_SKILLS__ENABLED`
+
+`bool` · optional · default `False`
+
+Offer the skills a connection node's server serves in the agent editor, and keep added
+skills up to date. Needs a configured node. Read by the web service.
+
+### `DAIMON_SERVER_SKILLS__CHECK_INTERVAL_S`
+
+`int` · optional · default `900`
+
+Seconds between checks of each added skill for a new version.
 
 ## Private Channel Messages
 

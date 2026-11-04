@@ -1593,6 +1593,45 @@ class WebNodeTokenRow(BaseModel):
     expires_at: datetime
 
 
+ServerSkillStatus = Literal["current", "pending", "unavailable"]
+
+
+class ServerSkillRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    server: str
+    uri: str
+    name: str
+    skill_id: str
+    version_label: str | None
+    digest: str
+    manifest: dict[str, str]
+    """Each file's sha256 hex digest by path."""
+    allowed_tools: JsonValue
+    status: ServerSkillStatus
+    pending_digest: str | None
+    pending_label: str | None
+    pending_changes: dict[str, list[str]] | None
+    """`added`, `removed` and `changed` paths of the update awaiting approval."""
+    added_by_person_id: uuid.UUID | None
+    last_checked_at: datetime | None
+    last_error: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ServerSkillDeploymentRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    mirror_id: uuid.UUID
+    provider: str
+    tenant_id: uuid.UUID
+    digest: str
+    version: str
+
+
 WebInviteKind = Literal["invite", "sign_in", "owner"]
 WebInviteRole = Literal["visitor", "member"]
 WebAgentWho = Literal["everyone", "groups", "invites"]
