@@ -228,15 +228,15 @@ async def prepare_posts(
     names = await opt_out_names(
         runtime.session_factory, tenant_id=auth.tenant_id, platform=platform, user_ids=skip
     )
-    # An opted-out requester is credited by plain name, never by tag.
+    # Discord tags the requester unless they opted out; everyone else is credited by
+    # plain name, looked up the same way, so the line is never dropped.
+    needs_name = bool(scope.requester_id) and (
+        platform != "discord" or scope.requester_id in skip
+    )
     requester_name = (
-        names.get(scope.requester_id)
-        if scope.requester_id and scope.requester_id in skip
-        else (
-            await _requester_name(runtime, auth, posts[0].place, scope.requester_id)
-            if platform != "discord" and posts and scope.requester_id
-            else None
-        )
+        await _requester_name(runtime, auth, posts[0].place, scope.requester_id)
+        if needs_name and posts and scope.requester_id
+        else None
     )
     line = attribution_line(
         platform,

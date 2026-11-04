@@ -168,6 +168,29 @@ async def test_prepare_posts_when_discord_requester_opted_out_then_credited_by_n
     assert "<@42>" not in post.text, "no mention of the opted-out requester"
 
 
+@pytest.mark.parametrize("platform", ("discord", "slack", "teams"))
+async def test_prepare_posts_when_opted_out_requester_has_no_stored_name_then_line_says_someone(
+    sessionmaker: async_sessionmaker[AsyncSession], platform: Platform
+) -> None:
+    """An opted-out requester nobody can name is still credited; the line is never dropped."""
+    auth = await _person(sessionmaker, platform, "42")
+    async with sessionmaker.begin() as session:
+        await store.set_opt_out(session, account_id=auth.account_id, tenant_id=auth.tenant_id)
+    scope = TurnScope(
+        key=f"turn:{uuid.uuid4()}", kind="unattended", own_places=frozenset(), requester_id="42"
+    )
+
+    [post] = await prepare_posts(
+        _runtime(sessionmaker),
+        auth,
+        [OutgoingPost(text="done", place="C1")],
+        plan=None,
+        scope=scope,
+    )
+
+    assert "requested by someone" in post.text, f"{platform}: credited as someone, not dropped"
+
+
 async def test_requester_name_when_slack_asked_twice_then_looked_up_once(
     sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
