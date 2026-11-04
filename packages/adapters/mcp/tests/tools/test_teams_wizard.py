@@ -14,6 +14,7 @@ from daimon.adapters.mcp.tools.wizard import (
     _post_wizard_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.config import OutboundSettings
+from daimon.core.outbound.reach import ReachPlan
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
 from daimon.core.stores.wizard_session import get_wizard_session
@@ -33,6 +34,8 @@ _STEP = Step(
     kind=StepKind.CHOICE,
     options=[Option(label="Red", value="red")],
 )
+#: A form in another place reaches people, so it declares its plan.
+_PLAN = ReachPlan(threads=1, places=1, people=0)
 
 
 class _Fake:
@@ -110,6 +113,7 @@ async def test_a_form_is_a_card_stored_where_it_lives(
         prompt="Order form",
         steps=[_STEP],
         channel_id=channel_id,
+        plan=_PLAN,
     )
     assert result.startswith("WIZARD_POSTED")
     assert fake.card()["type"] == "AdaptiveCard"
@@ -142,5 +146,6 @@ async def test_a_form_is_refused_in_a_group_chat_or_with_images(
             prompt="Order form",
             steps=[step],
             channel_id=channel_id,
+            plan=_PLAN,
         )
     assert [r for r in fake.requests if "/activities" in str(r.url)] == []
