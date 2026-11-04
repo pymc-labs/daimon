@@ -11,8 +11,9 @@ import { creditsHandlers } from "./credits"
 import { integrationsHandlers } from "./integrations"
 import { profileHandlers } from "./profile"
 import { routinesHandlers } from "./routines"
+import { serverSkillsHandlers } from "./agent-server-skills"
 
 // Module handlers first, so a module can override a core route it owns.
 export const worker = setupWorker(
-  ...chatHandlers, ...agentLibraryHandlers, ...agentSetupHandlers, ...agentsHandlers, ...channelsHandlers, ...routinesHandlers, ...creditsHandlers, ...integrationsHandlers, ...profileHandlers, ...adminHandlers, ...coreHandlers,
+  ...chatHandlers, ...serverSkillsHandlers, ...agentLibraryHandlers, ...agentSetupHandlers, ...agentsHandlers, ...channelsHandlers, ...routinesHandlers, ...creditsHandlers, ...integrationsHandlers, ...profileHandlers, ...adminHandlers, ...coreHandlers,
 )

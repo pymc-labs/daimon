@@ -190,7 +190,7 @@ function SkillBody({ agent, config, ro, update, select, skill }: Props & { skill
           )}
         </div>
         <p className="text-sm text-muted-foreground">{skill.description}</p>
-        {follow && (
+        {follow && follow.status !== "managed" && (
           <div className="flex items-center gap-2 pt-2 text-sm">
             <label className="flex items-center gap-2">
               <Switch size="sm" checked={follow.follow} disabled={ro || setFollow.isPending}

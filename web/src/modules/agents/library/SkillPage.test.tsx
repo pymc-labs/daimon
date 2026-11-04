@@ -21,6 +21,7 @@ let latest = "1"
 let server: SkillDetail["server"] = null
 const serve = () => vi.mocked(api.get).mockImplementation((url: string) => {
   if (url === "/api/me") return Promise.resolve({ capabilities: [], workspace: { name: "Workspace" } }) as never
+  if (url === "/api/agents/skills") return Promise.resolve([skill(latest), { ...skill("1"), id: "sk_2", name: "review-copy" }]) as never
   if (url.endsWith("/versions")) return Promise.resolve([]) as never
   if (url.includes("/files")) return Promise.resolve({ skill_id: "sk_1", version: latest, files: [{ path: "SKILL.md", size: 5, content: `v${latest}` }] }) as never
   return Promise.resolve({ ...skill(latest), server }) as never
@@ -83,5 +84,24 @@ describe("SkillPage", () => {
     expect(screen.queryByRole("button", { name: "Save version" })).not.toBeInTheDocument()
     await userEvent.click(screen.getByRole("button", { name: "Approve update" }))
     expect(api.post).toHaveBeenCalledWith("/api/agents/skills/sk_1/approve", { digest: "d2" })
+  })
+
+  it("forks a server skill under a name no other skill holds", async () => {
+    server = {
+      server: "data", uri: "skill://review", version_label: "1.0", status: "current", pending_digest: null, pending_label: null,
+      pending_changes: null, last_checked_at: null,
+    }
+    vi.mocked(api.post).mockResolvedValueOnce({ id: "sk_3", name: "review-mine", version: "1" } as never)
+    show()
+    await userEvent.click(await screen.findByRole("button", { name: "More" }))
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Fork" }))
+    const name = await screen.findByLabelText("Name")
+    expect(name).toHaveValue("review-copy")
+    expect(await screen.findByText("review-copy is taken")).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Fork" })).toBeDisabled()
+    await userEvent.clear(name)
+    await userEvent.type(name, "Review mine")
+    await userEvent.click(screen.getByRole("button", { name: "Fork" }))
+    expect(api.post).toHaveBeenCalledWith("/api/agents/skills/sk_1/fork", { name: "review-mine" })
   })
 })

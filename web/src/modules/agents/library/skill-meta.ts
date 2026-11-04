@@ -51,3 +51,6 @@ export function withDescription(md: string, text: string) {
   const eol = md.includes("\r\n") ? "\r\n" : "\n"
   return md.slice(0, f.start) + lines.join(eol) + md.slice(f.end)
 }
+
+/** The server's `slug_of`: the name a skill is saved under. */
+export const slugOf = (text: string) => text.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")

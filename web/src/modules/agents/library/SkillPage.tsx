@@ -9,6 +9,8 @@ import { AgentLink, ChannelLink } from "@/components/links"
 import { PanelMenu, PanelSection, SettingRow, Tag, type MenuAction } from "@/components/panel"
 import { Page } from "@/components/shell/Page"
 import { Button } from "@/components/ui/button"
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { ApiError } from "@/lib/api"
 import { useConfirm } from "@/lib/confirm"
@@ -17,8 +19,8 @@ import { cn } from "@/lib/utils"
 import { SkillFilesView } from "../inspector/SkillFilesEditor"
 import { useSkillFilesDraft } from "../inspector/useSkillFilesDraft"
 import type { MirrorCheck, MirrorDoc, SkillDetail, SkillFiles, SkillVersion } from "../types"
-import { useLibraryFiles, useSkill, useSkillVersions, useSkillWrites } from "./api"
-import { descriptionField, sourceLabel, withDescription } from "./skill-meta"
+import { useLibraryFiles, useLibrarySkills, useSkill, useSkillVersions, useSkillWrites } from "./api"
+import { descriptionField, slugOf, sourceLabel, withDescription } from "./skill-meta"
 
 export function SkillPage() {
   const { id = "" } = useParams()
@@ -51,7 +53,8 @@ function Loaded({ skill, custom, files, filesLoading, versions, viewing }: {
   const navigate = useNavigate()
   const confirm = useConfirm()
   const [, setVersion] = useParam("version")
-  const { save, restore, remove, check, approve, fork } = useSkillWrites()
+  const { save, restore, remove, check, approve } = useSkillWrites()
+  const [forking, setForking] = useState(false)
   const mirror = skill.server ?? null
   const waiting = mirror?.status === "pending" ? mirror.pending_digest : null
   const readOnly = !custom || skill.default || viewing !== null || !!mirror
@@ -82,7 +85,7 @@ function Loaded({ skill, custom, files, filesLoading, versions, viewing }: {
   const menu: MenuAction[] = [
     ...(mirror ? [
       { label: "Check now", icon: <RefreshCw />, disabled: check.isPending, onSelect: () => check.mutate(skill.id, { onSuccess: checked }) },
-      { label: "Fork", icon: <Copy />, disabled: fork.isPending, onSelect: () => fork.mutate({ id: skill.id, name: `${skill.name}-copy` }, { onSuccess: (r) => navigate(`/agents/skills/${r.id}`) }) },
+      { label: "Fork", icon: <Copy />, onSelect: () => setForking(true) },
     ] : []),
     ...(skill.source_url ? [{ label: "Open source", icon: <ExternalLink />, onSelect: () => window.open(skill.source_url!, "_blank", "noopener") }] : []),
     ...(custom && !skill.default ? [{ label: "Delete", icon: <Trash2 />, destructive: true, onSelect: () => void drop() }] : []),
@@ -184,7 +187,35 @@ function Loaded({ skill, custom, files, filesLoading, versions, viewing }: {
           )}
         </aside>
       </div>
+      {forking && <ForkSkill skill={skill} onClose={() => setForking(false)} />}
     </Page>
+  )
+}
+
+function ForkSkill({ skill, onClose }: { skill: SkillDetail; onClose: () => void }) {
+  const navigate = useNavigate()
+  const { fork } = useSkillWrites()
+  const library = useLibrarySkills()
+  const [name, setName] = useState(`${skill.name}-copy`)
+  const slug = slugOf(name)
+  const taken = !!slug && (library.data ?? []).some((s) => s.name === slug)
+  const go = () => slug && !taken && fork.mutate({ id: skill.id, name: slug }, {
+    onSuccess: (r) => { onClose(); navigate(`/agents/skills/${encodeURIComponent(r.id)}`) },
+  })
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader><DialogTitle>Fork {skill.title}</DialogTitle></DialogHeader>
+        <form id="fork-skill" className="space-y-1" onSubmit={(e) => { e.preventDefault(); go() }}>
+          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Name" aria-label="Name" aria-invalid={taken} className="h-8" autoFocus />
+          {taken && <p className="text-xs text-destructive">{slug} is taken</p>}
+        </form>
+        <DialogFooter>
+          <Button variant="ghost" onClick={onClose}>Cancel</Button>
+          <Button type="submit" form="fork-skill" disabled={!slug || taken || fork.isPending || library.isPending}>Fork</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 

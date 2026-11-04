@@ -58,7 +58,11 @@ export function useSetFollow(agentId: string) {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (b: { skill_id: string; follow: boolean }) => api.put(`/api/agents/${agentId}/skill-follows`, b),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["agents", agentId, "skill-follows"] }),
+    // Following again moves the agent at once, so its pins change too.
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["agents", agentId], exact: true })
+      void qc.invalidateQueries({ queryKey: ["agents", agentId, "skill-follows"] })
+    },
     onError: (e: Error) => toast.error(e.message),
   })
 }
