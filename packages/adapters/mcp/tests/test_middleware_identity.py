@@ -1459,7 +1459,9 @@ async def test_selfhosted_mcp_dispatch_blocks_legacy_helpers_and_preserves_neutr
                 result = await client.call_tool("send_message", arguments)
                 assert "1700000001.000100" in str(result.data)
                 post = http.requests[("POST", URL("https://slack.com/api/chat.postMessage"))][0]
-                assert post.kwargs["json"]["text"] == "requested report"  # pyright: ignore[reportUnknownMemberType]
+                assert post.kwargs["json"]["text"] == "requested report\nrequested by someone", (  # pyright: ignore[reportUnknownMemberType]
+                    "a post outside the requester's conversation says who asked"
+                )
                 assert "username" not in post.kwargs["json"]  # pyright: ignore[reportUnknownMemberType]
                 if with_file:
                     uploaded = http.requests[("POST", URL("https://files.slack.com/upload/test"))][
