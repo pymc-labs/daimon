@@ -39,6 +39,11 @@ MA_METADATA_KEY_ACCOUNT = "daimon_account"
 # Only agent-chat-created sessions can be driven by headless MCP/hub callers.
 MA_METADATA_KEY_AGENT_CHAT = "daimon_agent_chat"
 MA_METADATA_KEY_MANAGED = "daimon_managed"
+# Set by an outside release pipeline that publishes the agent: the release's name,
+# when it was cut (ISO 8601 with offset) and its https page. Daimon only reads them.
+MA_METADATA_KEY_SOURCE_RELEASE = "source_release"
+MA_METADATA_KEY_SOURCE_RELEASE_AT = "source_release_at"
+MA_METADATA_KEY_SOURCE_RELEASE_URL = "source_release_url"
 MA_METADATA_KEY_SPEC_HASH = "daimon_spec_hash"
 MA_METADATA_KEY_ISOLATED = "daimon_isolated"
 # Stamped on a copy a member made of the agent answering them: they own it, but the
