@@ -12,15 +12,24 @@ import pytest
 from anthropic.types.beta import SkillListResponse
 from anthropic.types.beta.skills.version_list_response import VersionListResponse
 from cryptography.fernet import Fernet
+from daimon.core import agent_github
 from daimon.core.config import Settings
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.skill_sync.orchestrator import SyncReport
 from daimon.core.skill_sync.resync_lock import resync_lock_key
+from daimon.core.specs import SkillRepo
 from daimon.core.stores import github_access, github_connect, github_push_resync, security_audit
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
 from daimon.core.stores.identity import create_platform_principal
 from daimon.core.stores.user_skills import upsert_user_skill
-from daimon.testing.factories import make_github_app_installation, make_tenant_github_repo
+from daimon.testing.factories import (
+    make_account,
+    make_github_app_installation,
+    make_tenant,
+    make_tenant_github_repo,
+    make_web_person,
+)
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -55,11 +64,14 @@ def _configured() -> Settings:
 
 
 async def _repos(
-    factory: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, granter: uuid.UUID
+    factory: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    granter: uuid.UUID,
+    names: dict[int, str] | None = None,
 ) -> None:
-    """Grant acme/app and acme/docs to the agent, each connected for it alone."""
+    """Grant `names` (acme/app and acme/docs) to the agent, each connected for it alone."""
     agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_w")
-    names = {101: "acme/docs", 102: "acme/app"}
+    names = names or {101: "acme/docs", 102: "acme/app"}
     install = 7000 + uuid.uuid4().int % 1000
     async with factory.begin() as db:
         await make_github_app_installation(
@@ -91,21 +103,27 @@ async def _repos(
 
 
 async def _repo_skill(
-    factory: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, *, url: str = URL
+    factory: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    *,
+    url: str = URL,
+    agent: tuple[str, str] = ("ag_w", "helper"),
+    skill_id: str = "skill_repo",
+    content_hash: str = "h1",
 ) -> None:
-    """Record the attached skill as synced from `url` (acme/skills) on main."""
+    """Record `skill_id` of `agent` (MA id, name) as synced from `url` (acme/skills) on main."""
     async with factory.begin() as db:
         await upsert_user_skill(
             db,
             tenant_id=tenant_id,
-            principal_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_w"),
-            agent_name="helper",
+            principal_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent[0]),
+            agent_name=agent[1],
             name="deploy",
             source_repo_url=url,
             source_repo_branch="main",
             source_path="skills",
-            content_hash="h1",
-            anthropic_id="skill_repo",
+            content_hash=content_hash,
+            anthropic_id=skill_id,
             anthropic_latest_version="1",
         )
 
@@ -479,3 +497,75 @@ async def test_resync_when_source_lock_held_elsewhere_then_409(
     assert "github_resync" not in await _tools(db_session_factory, owner.tenant_id), (
         "a refused resync changes nothing"
     )
+
+
+async def test_resync_when_granted_then_syncs_only_this_agents_source_and_maps_results(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A granted source syncs alone; the ledger diff and the report become per-skill results."""
+    agents, owner, _other = await agent_people(db_session, skills=[SKILL])
+    await _repos(db_session_factory, owner.tenant_id, owner.account_id, {103: "acme/skills"})
+    await _repo_skill(db_session_factory, owner.tenant_id)
+    await _repo_skill(
+        db_session_factory,
+        owner.tenant_id,
+        url="https://github.com/acme/other",
+        agent=("ag_other", "other"),
+        skill_id="skill_other",
+    )
+    calls: list[dict[str, Any]] = []
+
+    # The real sync reads GitHub tarballs and uploads to the provider; this stands in
+    # for both and changes the ledger the way a pushed new version would.
+    async def fake_sync(**kwargs: Any) -> SyncReport:
+        calls.append(kwargs)
+        await _repo_skill(db_session_factory, owner.tenant_id, content_hash="h2")
+        return SyncReport(updated=1, failed_uploads=[("broken", "No SKILL.md at skills/broken")])
+
+    monkeypatch.setattr(agent_github, "sync_agent_skills", fake_sync)
+    token = await sign_in_token(db_session_factory, owner)
+    async with agent_client(
+        agents, owner.tenant_id, db_session_factory, token, settings=_configured()
+    ) as client:
+        res = await client.post("/api/agents/ag_w/github/resync", headers=OWN)
+    assert res.status_code == 200, res.text
+    assert [(c["agent_name"], c["target_ma_agent_id"], c["repos"]) for c in calls] == [
+        ("helper", "ag_w", [SkillRepo(url=URL, branch="main", path="skills")])
+    ], "one call, for this agent's own source only"
+    assert calls[0]["tenant_id"] == owner.tenant_id, "synced in the actor's workspace"
+    assert res.json()["results"] == [
+        {"name": "broken", "action": "failed", "detail": "No SKILL.md at skills/broken"},
+        {"name": "deploy", "action": "updated", "detail": None},
+    ], "a failed upload and a changed skill each get a line"
+    assert "github_resync" in await _tools(db_session_factory, owner.tenant_id), "audited"
+
+
+async def test_actions_when_agent_of_another_workspace_then_404(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """An admin of another workspace finds no such agent on the read or any change."""
+    agents, _owner, _other = await agent_people(db_session)
+    tenant = await make_tenant(db_session)
+    outsider = await make_web_person(
+        db_session, tenant=tenant, account=await make_account(db_session, tenant=tenant)
+    )
+    await db_session.commit()
+    await make_admin(db_session_factory, outsider)
+    token = await sign_in_token(db_session_factory, outsider)
+    async with agent_client(
+        agents, tenant.id, db_session_factory, token, settings=_configured()
+    ) as client:
+        replies = {
+            "get": await client.get("/api/agents/ag_w/github"),
+            "working": await client.put(
+                "/api/agents/ag_w/github/working", json={"repo": None}, headers=OWN
+            ),
+            "remove": await client.delete("/api/agents/ag_w/github/repos/acme/app", headers=OWN),
+            "resync": await client.post("/api/agents/ag_w/github/resync", headers=OWN),
+            "connect": await client.post("/api/agents/ag_w/github/connect", headers=OWN),
+        }
+    assert {k: r.status_code for k, r in replies.items()} == dict.fromkeys(replies, 404), {
+        k: r.text for k, r in replies.items()
+    }
