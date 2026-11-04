@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import uuid
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from daimon.core._models import WebPerson
 from daimon.core.mcp_skills.install import ServerSkill
 from daimon.core.mcp_skills.manifest import SkillEntry, parse_entry
+from daimon.core.server_skills import follows as follows_module
+from daimon.core.server_skills.follows import set_agent_follow
 from daimon.core.server_skills.gate import AttachedAgent, manifest_digest, manifest_of
 from daimon.core.server_skills.sync import (
     NeedsReconfirm,
@@ -24,6 +28,7 @@ from daimon.core.server_skills.sync import (
     check_mirror,
     follow_now,
 )
+from daimon.core.skill_library_files import skill_lock
 from daimon.core.skills.ingest import SkillBundle
 from daimon.core.stores import server_skills as store
 from daimon.core.stores.domain import ServerSkillRow
@@ -344,6 +349,19 @@ async def test_an_agent_that_resumes_following_moves_at_once(
     assert await _held(world, "pins") == {"skill_1": world.mirror.digest}
 
 
+async def test_following_again_survives_a_failing_provider(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The choice is saved before the move, so a failed move is left to the next sync."""
+    world = await _world(db_session, db_session_factory)
+
+    async def broken(_mirror: ServerSkillRow) -> list[AttachedAgent]:
+        raise RuntimeError("database down")
+
+    world.first.attached = broken  # pyright: ignore[reportAttributeAccessIssue]
+    await follow_now(world.deps, tenant_id=world.mirror.tenant_id, skill_id="skill_1", agent_id="x")
+
+
 async def test_a_listing_never_rewrites_the_accepted_tools(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
@@ -415,3 +433,63 @@ async def test_unknown_mirror_fails(
 ) -> None:
     world = await _world(db_session, db_session_factory)
     assert await check_mirror(world.deps, uuid.uuid4()) == "failed"
+
+
+@dataclass
+class SlowTarget(FakeTarget):
+    """Pauses while reading its agents, as a sync does between reading the pins and repinning."""
+
+    reading: asyncio.Event = field(default_factory=asyncio.Event)
+    resume: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def attached(self, mirror: ServerSkillRow) -> list[AttachedAgent]:
+        self.reading.set()
+        await self.resume.wait()
+        return await super().attached(mirror)
+
+
+async def test_a_pin_chosen_mid_sync_waits_for_it_and_then_holds(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sync reads the pins once, so a choice that lands during it would be ignored."""
+    world = await _world(db_session, db_session_factory)
+    tenant = world.mirror.tenant_id
+    edit: Any = SimpleNamespace(session_factory=db_session_factory)
+    slow = SlowTarget("first", {"follows": "1", "pins": "1"})
+
+    async def target(*_a: object, **_k: object) -> Any:
+        return SimpleNamespace(
+            agent=SimpleNamespace(id="follows", name="follows"), managed=False, sees_setup=True
+        )
+
+    monkeypatch.setattr(follows_module, "load_target", target)
+
+    def lock(mirror: ServerSkillRow) -> AbstractAsyncContextManager[None]:
+        return skill_lock(edit, tenant_id=mirror.tenant_id, skill_id=mirror.skill_id)
+
+    deps = dataclasses.replace(world.deps, targets=(slow, world.second), lock=lock)
+    world.upstream.server.skills[NAME]["guide.md"] = b"More.\n"
+    sync = asyncio.create_task(check_mirror(deps, world.mirror.id))
+    await slow.reading.wait()
+    pin = asyncio.create_task(
+        set_agent_follow(
+            edit,
+            actor=SimpleNamespace(tenant_id=tenant),  # pyright: ignore[reportArgumentType]
+            agent_id="ag",
+            skill_id="skill_1",
+            follow=False,
+            now=NOW,
+        )
+    )
+    await asyncio.sleep(0.05)
+    assert not pin.done(), "the choice waits for the sync that read the old pins"
+    slow.resume.set()
+    assert await sync == "updated"
+    await pin
+
+    world.upstream.server.skills[NAME]["guide.md"] = b"Again.\n"
+    assert await check_mirror(deps, world.mirror.id) == "updated"
+    assert slow.agents["follows"] == "2", "the next sync leaves the agent on the version it pinned"
+    assert world.second.agents == {"other": "3"}

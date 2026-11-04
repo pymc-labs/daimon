@@ -370,7 +370,22 @@ async def _check_locked(
 
 
 async def follow_now(deps: SyncDeps, *, tenant_id: uuid.UUID, skill_id: str, agent_id: str) -> None:
-    """Move an agent that just chose to follow onto the current version, as the sync would."""
+    """Move an agent that just chose to follow onto the current version, as the sync would.
+
+    Best effort: the choice is already saved, so a failure here leaves the agent for the
+    next sync instead of failing the request that made it.
+    """
+    try:
+        await _follow_now(deps, tenant_id=tenant_id, skill_id=skill_id, agent_id=agent_id)
+    except Exception:  # the saved choice stands; the next sync moves the agent
+        log.warning(
+            "server_skill.follow_failed", skill_id=skill_id, agent_id=agent_id, exc_info=True
+        )
+
+
+async def _follow_now(
+    deps: SyncDeps, *, tenant_id: uuid.UUID, skill_id: str, agent_id: str
+) -> None:
     async with deps.sessionmaker() as session:
         first = await store.mirror_of_skill(session, tenant_id=tenant_id, skill_id=skill_id)
     if first is None:
