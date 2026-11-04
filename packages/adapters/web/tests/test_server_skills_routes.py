@@ -7,7 +7,6 @@ import re
 import httpx
 from anthropic.types.beta import SkillListResponse
 from daimon.adapters.web.server_skills import active_adder
-from daimon.core.config import ServerSkillsSettings
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.mcp_identity import generate_signing_key
 from daimon.core.stores import server_skills as server_skills_store
@@ -51,12 +50,18 @@ def _created(_r: httpx.Request, _m: object) -> httpx.Response:
     return httpx.Response(200, json=body.model_dump(mode="json"))
 
 
-async def test_without_the_setting_there_is_no_menu(
+async def test_without_a_data_server_node_there_is_no_menu(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     agents, owner, _ = await _setup(db_session)
     key = generate_signing_key()
-    async with _client(agents, _Server(), db_session_factory, owner, key=key) as client:
+    base = _settings(key)
+    assert base.web is not None
+    nodes = base.web.nodes.model_copy(update={"data_server": None})
+    settings = base.model_copy(update={"web": base.web.model_copy(update={"nodes": nodes})})
+    async with _client(
+        agents, _Server(), db_session_factory, owner, key=key, settings=settings
+    ) as client:
         res = await client.get("/api/agents/server-skills")
     assert res.status_code == 404
 
@@ -67,9 +72,7 @@ async def test_a_skill_is_offered_added_and_pinned(
     agents, owner, _ = await _setup(db_session)
     agents.router.add("POST", r"/v1/skills$", _created)
     key = generate_signing_key()
-    settings = _settings(key).model_copy(
-        update={"server_skills": ServerSkillsSettings(enabled=True)}
-    )
+    settings = _settings(key)
     node = _Node(SkillsServer(skills={"plots": {"SKILL.md": skill_md("plots")}}))
     async with _client(
         agents, node, db_session_factory, owner, key=key, settings=settings
@@ -124,9 +127,7 @@ async def test_a_skill_whose_name_is_taken_is_marked(
     listing = re.compile(r"/v1/skills$")
     agents.router.routes.insert(0, ("GET", listing, lambda _r, _m: httpx.Response(200, json=mine)))
     key = generate_signing_key()
-    settings = _settings(key).model_copy(
-        update={"server_skills": ServerSkillsSettings(enabled=True)}
-    )
+    settings = _settings(key)
     node = _Node(SkillsServer(skills={"plots": {"SKILL.md": skill_md("plots")}}))
     async with _client(
         agents, node, db_session_factory, owner, key=key, settings=settings
@@ -185,9 +186,7 @@ async def test_a_held_update_is_shown_and_applied_by_the_owner(
     agents, owner, _ = await _setup(db_session)
     agents.router.add("POST", r"/v1/skills$", _created)
     key = generate_signing_key()
-    settings = _settings(key).model_copy(
-        update={"server_skills": ServerSkillsSettings(enabled=True)}
-    )
+    settings = _settings(key)
     node = _Node(SkillsServer(skills={"plots": {"SKILL.md": skill_md("plots")}}))
     async with _client(
         agents, node, db_session_factory, owner, key=key, settings=settings

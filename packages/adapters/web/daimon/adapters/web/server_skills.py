@@ -11,6 +11,7 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
+from typing import Final
 
 import httpx
 import structlog
@@ -81,13 +82,15 @@ __all__ = [
 log = structlog.get_logger(__name__)
 
 _GONE = frozenset({403, 404})
+CHECK_INTERVAL_S: Final = 900
+"""Seconds between checks of each added skill for a new version."""
 
 type _Call[T] = Callable[[httpx.AsyncClient, Endpoint], Awaitable[T]]
 
 
 def server_skills_node(runtime: WebRuntime) -> DataServerNode | None:
-    """The node whose server's skills are offered; None while the feature is off."""
-    if not runtime.settings.server_skills.enabled or runtime.anthropic is None:
+    """The node whose server's skills are offered; None without a data server node."""
+    if runtime.anthropic is None:
         return None
     return next((n for n in build_nodes(runtime.settings) if isinstance(n, DataServerNode)), None)
 
@@ -241,14 +244,13 @@ async def sync_server_skills(runtime: WebRuntime, node: DataServerNode) -> None:
 
 
 async def sync_server_skills_forever(runtime: WebRuntime, node: DataServerNode) -> None:
-    """Check every mirror now and then every configured interval, until cancelled."""
-    every_s = runtime.settings.server_skills.check_interval_s
+    """Check every mirror now and then every `CHECK_INTERVAL_S`, until cancelled."""
     while True:
         try:
             await sync_server_skills(runtime, node)
         except SQLAlchemyError:
             log.warning("server_skill.sync_failed", exc_info=True)
-        await asyncio.sleep(every_s)
+        await asyncio.sleep(CHECK_INTERVAL_S)
 
 
 class ServerSkillOption(BaseModel):

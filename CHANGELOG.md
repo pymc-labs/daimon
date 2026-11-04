@@ -8,8 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - **The web app's agent editor offers the skills of a connected data server, and
-  keeps them current.** With `DAIMON_SERVER_SKILLS__ENABLED` set, **Add skill** lists the
-  server's skills. An added skill joins the library read-only, and new versions move every
+  keeps them current.** **Add skill** lists the server's skills. An added skill joins the library read-only, and new versions move every
   agent that follows it; a pinned agent shows **Update available**. An agent switched to
   OpenAI or Gemini moves only when its dropped capabilities stay the same, else it shows
   **Needs re-confirm**. Script and `allowed-tools` changes wait for an admin's approval;
