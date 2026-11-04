@@ -71,7 +71,7 @@ describe("SkillPage", () => {
 
   it("keeps a server skill read-only and approves its waiting update", async () => {
     server = {
-      server: "data", uri: "skill://review", version_label: "1.0", status: "pending", pending_label: "1.1",
+      server: "data", uri: "skill://review", version_label: "1.0", status: "pending", pending_digest: "d2", pending_label: "1.1",
       pending_changes: { added: ["run.py"], removed: [], changed: ["SKILL.md"] }, last_checked_at: null,
     }
     vi.mocked(api.post).mockResolvedValueOnce({ result: "updated", server: { ...server, status: "current" } } as never)
@@ -82,6 +82,6 @@ describe("SkillPage", () => {
     await userEvent.type(await screen.findByLabelText("SKILL.md"), " mine")
     expect(screen.queryByRole("button", { name: "Save version" })).not.toBeInTheDocument()
     await userEvent.click(screen.getByRole("button", { name: "Approve update" }))
-    expect(api.post).toHaveBeenCalledWith("/api/agents/skills/sk_1/approve")
+    expect(api.post).toHaveBeenCalledWith("/api/agents/skills/sk_1/approve", { digest: "d2" })
   })
 })

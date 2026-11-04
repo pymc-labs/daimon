@@ -216,9 +216,30 @@ async def test_risky_update_waits_for_approval(
     if change == "script":
         assert row.pending_changes == {"added": ["run.py"], "removed": [], "changed": []}
 
-    assert await approve_update(world.deps, world.mirror.id) == "updated"
+    assert await approve_update(world.deps, world.mirror.id, digest=row.pending_digest) == "updated"
     row = await _row(world)
     assert row.status == "current" and row.pending_digest is None
+    assert world.first.agents["follows"] == "2"
+
+
+async def test_approval_applies_only_the_reviewed_update(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    world = await _world(db_session, db_session_factory)
+    world.upstream.server.skills[NAME]["run.py"] = b"print(1)\n"
+    assert await check_mirror(world.deps, world.mirror.id) == "pending"
+    reviewed = (await _row(world)).pending_digest
+    assert reviewed is not None
+    world.upstream.server.skills[NAME]["run.py"] = b"print(2)\n"
+    assert await check_mirror(world.deps, world.mirror.id) == "pending"
+    newer = (await _row(world)).pending_digest
+    assert newer not in (None, reviewed)
+
+    assert await approve_update(world.deps, world.mirror.id, digest=reviewed) == "pending"
+    assert world.first.published == [] and world.first.agents["follows"] == "1"
+    assert (await _row(world)).pending_digest == newer, "the newer update still waits"
+
+    assert await approve_update(world.deps, world.mirror.id, digest=str(newer)) == "updated"
     assert world.first.agents["follows"] == "2"
 
 

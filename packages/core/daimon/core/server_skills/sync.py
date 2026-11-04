@@ -291,12 +291,17 @@ async def _check_locked(
     return await _accept(deps, mirror, entry, digest, bundle)
 
 
-async def approve_update(deps: SyncDeps, mirror_id: uuid.UUID) -> CheckResult:
-    """Apply the update awaiting approval, if the server still serves exactly it."""
+async def approve_update(deps: SyncDeps, mirror_id: uuid.UUID, *, digest: str) -> CheckResult:
+    """Apply the update the person reviewed (`digest`), if it still waits and is still served.
+
+    A newer update that replaced it is left waiting for its own review.
+    """
     mirror = await _row(deps, mirror_id)
     if mirror is None or mirror.pending_digest is None:
         return "failed"
-    result = await check_mirror(deps, mirror_id, approve=mirror.pending_digest)
+    if mirror.pending_digest != digest:
+        return "pending"
+    result = await check_mirror(deps, mirror_id, approve=digest)
     if result == "updated":
         log.info("server_skill.update_approved", mirror_id=str(mirror_id))
     return result

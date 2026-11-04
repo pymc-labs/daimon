@@ -59,6 +59,8 @@ class MirrorDoc(BaseModel):
     uri: str
     version_label: str | None
     status: Literal["current", "pending", "unavailable"]
+    pending_digest: str | None
+    """Names the waiting update; approving sends it back so only that update applies."""
     pending_label: str | None
     pending_changes: dict[str, list[str]] | None
     last_checked_at: str | None
@@ -72,6 +74,7 @@ def mirror_doc(row: ServerSkillRow | None) -> MirrorDoc | None:
         uri=row.uri,
         version_label=row.version_label,
         status=row.status,
+        pending_digest=row.pending_digest,
         pending_label=row.pending_label,
         pending_changes=row.pending_changes,
         last_checked_at=None if row.last_checked_at is None else row.last_checked_at.isoformat(),

@@ -208,7 +208,7 @@ export type LibrarySkill = {
 export type MirrorStatus = "current" | "pending" | "unavailable"
 export type MirrorDoc = {
   server: string; uri: string; version_label: string | null; status: MirrorStatus
-  pending_label: string | null; pending_changes: Record<"added" | "removed" | "changed", string[]> | null; last_checked_at: string | null
+  pending_digest: string | null; pending_label: string | null; pending_changes: Record<"added" | "removed" | "changed", string[]> | null; last_checked_at: string | null
 }
 export type MirrorCheck = { result: "unchanged" | "updated" | "pending" | "unavailable" | "failed"; server: MirrorDoc | null }
 /** A skill the node's server offers; `skill_id` once it is in the library, `taken` when another library skill holds its name. */

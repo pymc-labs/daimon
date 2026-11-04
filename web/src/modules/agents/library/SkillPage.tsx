@@ -53,6 +53,7 @@ function Loaded({ skill, custom, files, filesLoading, versions, viewing }: {
   const [, setVersion] = useParam("version")
   const { save, restore, remove, check, approve, fork } = useSkillWrites()
   const mirror = skill.server ?? null
+  const waiting = mirror?.status === "pending" ? mirror.pending_digest : null
   const readOnly = !custom || skill.default || viewing !== null || !!mirror
   // The draft outlives refetches. `base` is the version it sits on; if the skill moves past it, or a
   // save is refused, they pick Reload or Overwrite, so a newer version is never replaced unasked.
@@ -98,8 +99,8 @@ function Loaded({ skill, custom, files, filesLoading, versions, viewing }: {
         <>
           {showDirty && <Button size="sm" variant="ghost" disabled={draft.busy} onClick={draft.discard}>Discard</Button>}
           {showDirty && !changed && <Button size="sm" disabled={draft.busy} onClick={() => void submit()}>Save version</Button>}
-          {mirror?.status === "pending" && (
-            <Button size="sm" disabled={approve.isPending} onClick={() => approve.mutate(skill.id, { onSuccess: checked })}>Approve update</Button>
+          {waiting && (
+            <Button size="sm" disabled={approve.isPending} onClick={() => approve.mutate({ id: skill.id, digest: waiting }, { onSuccess: checked })}>Approve update</Button>
           )}
           <PanelMenu items={menu} />
         </>

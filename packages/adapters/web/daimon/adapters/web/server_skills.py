@@ -206,6 +206,11 @@ class FollowBody(BaseModel):
     follow: bool
 
 
+class ApproveBody(BaseModel):
+    digest: str = Field(min_length=1, max_length=128)
+    """The waiting update's `pending_digest`, as the person reviewed it."""
+
+
 class ForkBody(BaseModel):
     name: str = Field(min_length=1, max_length=64)
 
@@ -327,7 +332,7 @@ def server_skills_router(runtime: WebRuntime) -> APIRouter:
         return await _checked(mirror, await check_mirror(sync_deps(runtime, node), mirror.id))
 
     @router.post("/skills/{skill_id}/approve")
-    async def approve(caller: Editor, skill_id: str) -> MirrorCheck:  # pyright: ignore[reportUnusedFunction]
+    async def approve(caller: Editor, skill_id: str, body: ApproveBody) -> MirrorCheck:  # pyright: ignore[reportUnusedFunction]
         node = node_or_404()
         try:
             require_admin(actor_of(caller), "The skill library")
@@ -336,7 +341,7 @@ def server_skills_router(runtime: WebRuntime) -> APIRouter:
         mirror = await _mirror(caller.person.tenant_id, skill_id)
         if mirror.pending_digest is None:
             raise HTTPException(status_code=409, detail="No update is waiting.")
-        result = await approve_update(sync_deps(runtime, node), mirror.id)
+        result = await approve_update(sync_deps(runtime, node), mirror.id, digest=body.digest)
         return await _checked(mirror, result)
 
     @router.post("/skills/{skill_id}/fork", status_code=201)

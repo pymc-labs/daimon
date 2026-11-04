@@ -45,7 +45,7 @@ export function useSkillWrites() {
     }),
     restore: useMutation({ mutationFn: (b: { id: string; version: string }) => api.post<Ref>(`/api/agents/skills/${b.id}/restore`, { version: b.version }), onSuccess: done, onError: fail }),
     check: useMutation({ mutationFn: (id: string) => api.post<MirrorCheck>(`/api/agents/skills/${id}/check`), onSuccess: done, onError: fail }),
-    approve: useMutation({ mutationFn: (id: string) => api.post<MirrorCheck>(`/api/agents/skills/${id}/approve`), onSuccess: done, onError: fail }),
+    approve: useMutation({ mutationFn: (b: { id: string; digest: string }) => api.post<MirrorCheck>(`/api/agents/skills/${b.id}/approve`, { digest: b.digest }), onSuccess: done, onError: fail }),
     fork: useMutation({ mutationFn: (b: { id: string; name: string }) => api.post<Ref>(`/api/agents/skills/${b.id}/fork`, { name: b.name }), onSuccess: done, onError: fail }),
   }
 }
