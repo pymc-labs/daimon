@@ -162,9 +162,12 @@ async def new_thread(
     return thread, message
 
 
-async def signed_in(factory: async_sessionmaker[AsyncSession], person: WebPersonRow) -> str:
+async def signed_in(
+    factory: async_sessionmaker[AsyncSession], person: WebPersonRow, *, identity: bool = True
+) -> str:
     """A live sign-in for `person`; its session cookie value. Like a real one, it sits on
-    a login that holds the account it signed in with."""
+    a login that holds the account it signed in with. `identity=False` leaves the person
+    without a Discord identity, for tests that link one."""
     token = new_session_token()
     async with factory.begin() as db:
         login = await web_logins.prove_account(
@@ -174,16 +177,17 @@ async def signed_in(factory: async_sessionmaker[AsyncSession], person: WebPerson
             display_name=person.display_name,
             now=datetime.now(UTC),
         )
-        await web_identities.link_identity(
-            db,
-            tenant_id=person.tenant_id,
-            person_id=person.id,
-            provider="discord",
-            issuer="",
-            subject=str(person.id),
-            label=person.email or "",
-            groups=(),
-        )
+        if identity:
+            await web_identities.link_identity(
+                db,
+                tenant_id=person.tenant_id,
+                person_id=person.id,
+                provider="discord",
+                issuer="",
+                subject=str(person.id),
+                label=person.email or "",
+                groups=(),
+            )
         await web_sessions.create_session(
             db,
             token_sha256=token_sha256(token),

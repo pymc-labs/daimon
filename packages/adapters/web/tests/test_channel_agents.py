@@ -18,7 +18,7 @@ def _caller(*capabilities: str) -> WebCaller:
 
 
 @pytest.fixture(autouse=True)
-def _agents(monkeypatch: pytest.MonkeyPatch) -> None:
+def _agents(monkeypatch: pytest.MonkeyPatch) -> None:  # pyright: ignore[reportUnusedFunction]
     agent = SimpleNamespace(id="ag_1", name="Analyst", metadata={})
 
     async def listed(_runtime: Any, _tenant_id: uuid.UUID) -> list[Any]:

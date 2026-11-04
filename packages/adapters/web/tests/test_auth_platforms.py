@@ -177,7 +177,7 @@ async def _link_rig(
     *,
     upstream: FakeUpstream | None = None,
 ) -> Any:
-    token = await signed_in(factory, person)
+    token = await signed_in(factory, person, identity=False)
     async with web_client(
         web_settings(),
         sessionmaker=factory,
@@ -239,9 +239,10 @@ async def test_link_moves_a_person_without_history_onto_their_existing_discord_a
     )
     assert carried == "admin", "the role moved with them"
     assert sorted((a, d) for a, _, d in trail) == [
+        ("Connected account", "Discord"),
         ("Moved role to linked account", "Admin"),
         ("Switched account on link", "Discord"),
-    ], "the role move and the account switch are audited"
+    ], "the connect, the role move and the account switch are audited"
 
 
 async def test_link_is_refused_when_the_web_id_has_history(
