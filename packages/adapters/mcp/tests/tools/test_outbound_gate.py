@@ -69,7 +69,14 @@ def _scope(*, card: bool = True, interactive: bool = True) -> TurnScope:
         own_places=frozenset({"home"}),
         requester_id="42",
         origin=cast(Any, object()) if card else None,
+        own_channels=frozenset({"home", "own"}),
     )
+
+
+async def _tally(runtime: McpRuntime, auth: AuthIdentity, scope: TurnScope) -> ReachTally:
+    async with runtime.session_factory() as session, session.begin():
+        tally, _ = await lock_tally(session, tenant_id=auth.tenant_id, turn_key=scope.key)
+    return tally
 
 
 def _threads(n: int) -> list[OutgoingPost]:
@@ -158,14 +165,61 @@ async def test_prepare_posts_when_long_or_bare_media_in_own_conversation_then_po
     sessionmaker, platform, place
 ):
     runtime, auth = await _setup(sessionmaker, platform)
-    plan = ReachPlan(threads=0, places=0, people=0)
+    scope = _scope()
     for post in (
         OutgoingPost(text="x" * 5000, place=place),
         OutgoingPost(text="clip", place=place, media=True),
     ):
-        assert await prepare_posts(runtime, auth, [post], plan=plan, scope=_scope()), (
-            f"{platform}: the requester's own conversation takes long docs and bare videos"
+        [out] = await prepare_posts(runtime, auth, [post], plan=None, scope=scope)
+        assert out.text == post.text, f"{platform}: no line in the requester's own conversation"
+    assert await _tally(runtime, auth, scope) == ReachTally(), f"{platform}: nothing counted"
+
+
+@pytest.mark.parametrize("platform", PLATFORMS)
+async def test_prepare_posts_when_untagged_threads_in_own_channel_then_no_card(
+    sessionmaker, platform
+):
+    """Threads for oneself in the own channel are personal use, not reach."""
+    runtime, auth = await _setup(sessionmaker, platform)
+    scope = _scope()
+    posts = [OutgoingPost(text=f"note {i}", place="own", new_thread=True) for i in range(3)]
+    rendered = await prepare_posts(runtime, auth, posts, plan=None, scope=scope)
+    assert [r.text for r in rendered] == [p.text for p in posts], f"{platform}: no line"
+    assert await _tally(runtime, auth, scope) == ReachTally(), f"{platform}: no thread count"
+
+
+@pytest.mark.parametrize("platform", ("discord", "slack"))
+async def test_prepare_posts_when_tagged_threads_in_own_channel_then_card_before_first_post(
+    sessionmaker, platform
+):
+    """A thread that tags someone else reaches them, even in the own channel. Teams posts
+    tag nobody, so there a thread in the own channel never reaches anyone."""
+    runtime, auth = await _setup(sessionmaker, platform)
+    posts = [
+        OutgoingPost(text=f"{TAG[platform].format(7)} item {i}", place="own", new_thread=True)
+        for i in range(10)
+    ]
+    with pytest.raises(ToolError, match="approve_reach"):
+        await prepare_posts(
+            runtime, auth, posts, plan=ReachPlan(threads=10, places=0, people=1), scope=_scope()
         )
+
+
+@pytest.mark.parametrize("platform", ("discord", "slack"))
+@pytest.mark.parametrize("requester", ["42", "43"], ids=["requester", "second_collaborator"])
+async def test_prepare_posts_when_collaborators_tagged_in_own_thread_then_no_card(
+    sessionmaker, platform, requester
+):
+    """Crediting or looping in six people here is collaboration, whoever in the thread asked."""
+    runtime, auth = await _setup(sessionmaker, platform)
+    scope = dataclasses.replace(_scope(), requester_id=requester)
+    text = " ".join(TAG[platform].format(n) for n in range(1, 7)) + " thanks"
+    [post] = await prepare_posts(
+        runtime, auth, [OutgoingPost(text=text, place="home")], plan=None, scope=scope
+    )
+    assert len(post.user_ids) == 6, f"{platform}: all six are tagged"
+    assert "requested by" not in post.text, f"{platform}: no line in the own thread"
+    assert await _tally(runtime, auth, scope) == ReachTally(), f"{platform}: nobody counted"
 
 
 @pytest.mark.parametrize("platform", ("discord", "slack"))
@@ -187,8 +241,8 @@ async def test_prepare_posts_when_person_opted_out_then_untagged_and_uncounted(
     [post] = await prepare_posts(
         runtime,
         auth,
-        [OutgoingPost(text=text, place="home")],
-        plan=ReachPlan(threads=0, places=0, people=5),
+        [OutgoingPost(text=text, place="C1")],
+        plan=ReachPlan(threads=0, places=1, people=5),
         scope=_scope(),
     )
     assert opted not in post.user_ids, f"{platform}: an opted-out person is never tagged"
@@ -200,8 +254,8 @@ async def test_prepare_posts_when_discord_then_attribution_never_pings(sessionma
     [post] = await prepare_posts(
         runtime,
         auth,
-        [OutgoingPost(text="<@7> please look", place="home")],
-        plan=ReachPlan(threads=0, places=0, people=1),
+        [OutgoingPost(text="<@7> please look", place="C1")],
+        plan=ReachPlan(threads=0, places=1, people=1),
         scope=_scope(),
     )
     assert post.text.endswith("-# requested by <@42>"), "the requester is named on the last line"
@@ -254,18 +308,19 @@ async def _session_turn(
     attended: bool = True,
     turns: int = 1,
     session_id: str | None = "chat-1",
+    platform: str = "discord",
 ) -> tuple[McpRuntime, AuthIdentity, list[TurnOriginRow]]:
     """A caller in a chat session with `turns` running origins of its own agent."""
     now = datetime.now(UTC)
     async with sessionmaker.begin() as session:
-        tenant = await make_tenant(session, platform="discord")
+        tenant = await make_tenant(session, platform=cast(Any, platform))
         account = await make_account(session, tenant=tenant)
         origins = [
             await create_origin(
                 session,
                 tenant_id=tenant.id,
                 account_id=account.id,
-                platform="discord",
+                platform=cast(Any, platform),
                 parent_channel_id="C1",
                 thread_id=f"T{i}",
                 responder_ma_agent_id="agent_x",
@@ -282,12 +337,16 @@ async def _session_turn(
             )
             for i in range(turns)
         ]
-    runtime = SimpleNamespace(session_factory=sessionmaker)
+    runtime = SimpleNamespace(
+        session_factory=sessionmaker,
+        settings=SimpleNamespace(outbound=OutboundSettings()),
+        teams_client=None,
+    )
     auth = AuthIdentity(
         account_id=account.id,
         tenant_id=tenant.id,
         role=cast(Any, "member"),
-        platform="discord",
+        platform=platform,
         chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_x"),
         chat_session_id="chat-1",
         token_jti="jti-1",
@@ -305,6 +364,20 @@ async def test_turn_scope_when_attended_origin_then_live_with_card(
     assert scope.kind == "live", "a person's running turn can show a card"
     assert scope.origin is not None and scope.origin.id == origin.id, "the turn's own origin"
     assert scope.key == f"turn:{origin.id}", "the tally is the turn's"
+
+
+@pytest.mark.parametrize("place", ["T0", "C1:T0"], ids=["thread_ts", "channel_thread_ts"])
+async def test_prepare_posts_when_slack_own_thread_then_no_line_or_limits(
+    sessionmaker: async_sessionmaker[AsyncSession], place: str
+) -> None:
+    """Slack tools name a thread ``channel:thread_ts``; that is still the own thread."""
+    runtime, auth, _ = await _session_turn(sessionmaker, platform="slack")
+    scope = await _outbound.turn_scope(runtime, auth)
+    doc = OutgoingPost(text="x" * 5000, place=place)
+    video = OutgoingPost(text="clip", place=place, media=True)
+    rendered = await prepare_posts(runtime, auth, [doc, video], plan=None, scope=scope)
+    assert [r.text for r in rendered] == [doc.text, video.text], "no line, no refusal"
+    assert await _tally(runtime, auth, scope) == ReachTally(), "and no count"
 
 
 async def test_turn_scope_when_server_started_origin_then_unattended(
@@ -398,8 +471,8 @@ async def test_prepare_posts_when_live_name_unknown_then_stored_name_else_someon
     [post] = await prepare_posts(
         runtime,
         auth,
-        [OutgoingPost(text="hello", place="home")],
-        plan=ReachPlan(threads=0, places=0, people=0),
+        [OutgoingPost(text="hello", place="C1")],
+        plan=ReachPlan(threads=0, places=1, people=0),
         scope=_scope(),
     )
     assert post.text == f"hello\nrequested by {expected}", "the attribution line is never dropped"

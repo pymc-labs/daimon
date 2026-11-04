@@ -83,6 +83,8 @@ class TurnScope:
     requester_id: str | None
     routine_name: str | None = None
     origin: TurnOriginRow | None = None
+    # Where a new thread stays in the conversation: the own places and their parent channel.
+    own_channels: frozenset[str] = frozenset()
 
     @property
     def interactive(self) -> bool:
@@ -111,6 +113,17 @@ def _own_origin(running: list[TurnOriginRow], session_id: str) -> TurnOriginRow 
     return running[0] if len(running) == 1 else None
 
 
+def _own_places(origin: TurnOriginRow) -> frozenset[str]:
+    """Every id a post into the turn's own thread or channel can carry.
+
+    Slack tools address a thread as ``channel:thread_ts``, which no origin field holds.
+    """
+    places = {origin.thread_id, origin.platform_channel_id or origin.thread_id}
+    if origin.platform == "slack" and origin.thread_id != origin.parent_channel_id:
+        places.add(f"{origin.parent_channel_id}:{origin.thread_id}")
+    return frozenset(places)
+
+
 async def turn_scope(runtime: McpRuntime, auth: AuthIdentity) -> TurnScope:
     """Unattended only when the server proves it started the turn; anything not a
     live turn with a card is an outside client."""
@@ -131,11 +144,10 @@ async def turn_scope(runtime: McpRuntime, auth: AuthIdentity) -> TurnScope:
             return TurnScope(
                 key=f"turn:{origin.id}",
                 kind="live" if origin.attended else "unattended",
-                own_places=frozenset(
-                    {origin.thread_id, origin.platform_channel_id or origin.thread_id}
-                ),
+                own_places=_own_places(origin),
                 requester_id=auth.platform_user_id,
                 origin=origin,
+                own_channels=_own_places(origin) | {origin.parent_channel_id},
             )
     return TurnScope(
         key=client_tally_key(str(auth.token_jti or auth.account_id), datetime.now(UTC)),
@@ -232,31 +244,19 @@ async def prepare_posts(
     names = await opt_out_names(
         runtime.session_factory, tenant_id=auth.tenant_id, platform=platform, user_ids=skip
     )
-    # Discord tags the requester unless they opted out; everyone else is credited by
-    # plain name, looked up the same way, so the line is never dropped.
-    needs_name = bool(scope.requester_id) and (platform != "discord" or scope.requester_id in skip)
-    requester_name = (
-        await _requester_name(runtime, auth, posts[0].place, scope.requester_id)
-        if needs_name and posts and scope.requester_id
-        else None
-    )
-    line = attribution_line(
-        platform,
-        requester_id=(
-            scope.requester_id if platform == "discord" and scope.requester_id not in skip else None
-        ),
-        requester_name=requester_name,
-        routine_name=scope.routine_name,
-    )
+    reach = [_reaches(post, scope, platform, skip if pings else None) for post in posts]
+    credited = [p.place for p, r in zip(posts, reach, strict=True) if p.attribute and r]
+    line = await _attribution(runtime, auth, scope, credited[0], skip) if credited else None
+    # Only a post that reaches other people says who asked; the own conversation is theirs.
     rendered = [
         render_post(
             post.text,
             platform,
             do_not_tag=skip,
             names=names,
-            attribution=line if post.attribute else None,
+            attribution=line if post.attribute and r else None,
         )
-        for post in posts
+        for post, r in zip(posts, reach, strict=True)
     ]
     ping_users.set(frozenset(uid for r in rendered for uid in r.user_ids) if pings else frozenset())
     if validate is not None:
@@ -264,9 +264,8 @@ async def prepare_posts(
     if not scope.interactive:
         return rendered
     settings = runtime.settings.outbound
-    # Length and captions guard other people's attention; the requester's own thread
-    # and their own DM are theirs to fill.
-    for post in (p for p in posts if _outside(p, scope)):
+    # Length and captions guard other people's attention, item by item.
+    for post in (p for p, r in zip(posts, reach, strict=True) if r):
         if settings.max_length and len(post.text) > settings.max_length:
             record_denial("outbound_too_long")
             raise ToolError(TOO_LONG)
@@ -277,13 +276,16 @@ async def prepare_posts(
         ):
             record_denial("outbound_short_caption")
             raise ToolError(SHORT_CAPTION)
+    reaching = [(p, out) for p, out, r in zip(posts, rendered, reach, strict=True) if r]
     call = ReachTally(
-        threads=sum(post.new_thread for post in posts),
-        places=frozenset(p.place for p in posts if not p.new_thread and _outside(p, scope)),
-        people=frozenset(uid for r in rendered for uid in r.user_ids) - skip
+        threads=sum(p.new_thread for p, _ in reaching),
+        places=frozenset(p.place for p, _ in reaching if not p.new_thread),
+        people=frozenset(uid for _, out in reaching for uid in out.user_ids) - skip
         if pings
         else frozenset(),
     )
+    if not reaching:
+        return rendered
     async with runtime.session_factory() as session, session.begin():
         so_far, approved = await lock_tally(session, tenant_id=auth.tenant_id, turn_key=scope.key)
         if settings.reach_budget_enabled:
@@ -292,6 +294,40 @@ async def prepare_posts(
             session, tenant_id=auth.tenant_id, turn_key=scope.key, tally=so_far.plus(call)
         )
     return rendered
+
+
+async def _attribution(
+    runtime: McpRuntime, auth: AuthIdentity, scope: TurnScope, place: str, skip: frozenset[str]
+) -> str | None:
+    """The "requested by" line: Discord tags the requester without a ping unless they
+    opted out; everyone else is credited by plain name, so the line is never dropped."""
+    platform = _platform(auth)
+    requester = scope.requester_id
+    needs_name = bool(requester) and (platform != "discord" or requester in skip)
+    requester_name = (
+        await _requester_name(runtime, auth, place, requester) if needs_name and requester else None
+    )
+    return attribution_line(
+        platform,
+        requester_id=requester if platform == "discord" and requester not in skip else None,
+        requester_name=requester_name,
+        routine_name=scope.routine_name,
+    )
+
+
+def _reaches(
+    post: OutgoingPost, scope: TurnScope, platform: Platform, skip: frozenset[str] | None
+) -> bool:
+    """Whether a post goes to other people: outside the own conversation, or a new thread
+    outside the own channel or tagging someone else. ``skip`` is None when nobody is pinged."""
+    if not post.new_thread:
+        return _outside(post, scope)
+    if post.place not in scope.own_channels:
+        return True
+    if skip is None:
+        return False
+    tagged = set(mentioned_user_ids(post.text, platform)) - skip - {scope.requester_id}
+    return bool(tagged)
 
 
 def _outside(post: OutgoingPost, scope: TurnScope) -> bool:

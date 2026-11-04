@@ -617,7 +617,7 @@ async def test_post_wizard_names_its_requester_and_counts_toward_reach(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A form is a post like any other: it says who asked, and a plan too small is refused."""
+    """A form is a post like any other: it says who asked, and past the limit it is refused."""
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     await db_session.commit()
@@ -635,15 +635,21 @@ async def test_post_wizard_names_its_requester_and_counts_toward_reach(
         plan=ReachPlan(threads=0, places=1, people=1),
     )
     row = await get_wizard_session(db_session, short_id=_short_id_from_posted(posted))
-    with pytest.raises(ToolError, match="plan"):
-        await _post_wizard_impl(
-            runtime,
-            auth,
-            prompt="Again <@8>",
-            steps=[_one_choice_step()],
-            channel_id="333",
-            plan=ReachPlan(threads=0, places=0, people=0),
-        )
+    for channel_id in ("333", "444"):
+        posted.clear()
+        try:
+            await _post_wizard_impl(
+                runtime,
+                auth,
+                prompt="Again <@8>",
+                steps=[_one_choice_step()],
+                channel_id=channel_id,
+                plan=ReachPlan(threads=0, places=0, people=0),
+            )
+        except ToolError as refused:
+            assert channel_id == "444", f"only the third place is past the limit: {refused}"
+        else:
+            assert channel_id == "333", "a third place must be refused"
 
     assert row is not None, "the first form posted"
     assert row.spec["prompt"].endswith("\n-# requested by <@42>"), "the form credits its asker"
@@ -654,7 +660,8 @@ async def test_post_wizard_when_attributed_prompt_too_long_then_refused_and_coun
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The attribution line can push a form over its limit; that refusal counts no reach."""
+    """The attribution line can push a form elsewhere over its limit; that refusal counts
+    no reach. The requester's own DM carries no line, so the same form posts there."""
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     await db_session.commit()
@@ -662,16 +669,16 @@ async def test_post_wizard_when_attributed_prompt_too_long_then_refused_and_coun
     patch_discord_http(monkeypatch, _happy_path_handler({}, message_id="9304"))
     runtime = _runtime(committing_sessionmaker)
 
-    # Fits on its own, not once "requested by" is appended. The requester's own DM
-    # skips the outbound length cap, so the form limit is what refuses it.
+    # Fits on its own, not once "requested by" is appended.
+    prompt = "<@7> " + "x" * 3950
     with pytest.raises(ToolError, match="head text"):
         await _post_wizard_impl(
             runtime,
             auth,
-            prompt="<@7> " + "x" * 3950,
+            prompt=prompt,
             steps=[_one_choice_step()],
-            channel_id="42",
-            plan=ReachPlan(threads=0, places=0, people=1),
+            channel_id="222",
+            plan=ReachPlan(threads=0, places=1, people=1),
         )
 
     scope = await turn_scope(runtime, auth)
@@ -679,6 +686,9 @@ async def test_post_wizard_when_attributed_prompt_too_long_then_refused_and_coun
         tally, _ = await lock_tally(session, tenant_id=tenant.id, turn_key=scope.key)
     assert tally.people == frozenset(), "a refused form tags nobody"
     assert tally.threads == 0 and not tally.places, "and reaches nowhere"
+    await _post_wizard_impl(
+        runtime, auth, prompt=prompt, steps=[_one_choice_step()], channel_id="42"
+    )
 
 
 async def test_post_wizard_when_prompt_tags_someone_then_no_people_counted(
