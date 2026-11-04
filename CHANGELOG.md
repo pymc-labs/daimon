@@ -9,12 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The web app's agent editor offers the skills of a connected data server, and
   keeps them current.** With `DAIMON_SERVER_SKILLS__ENABLED` set, **Add skill** lists the
-  skills the server serves under the server's name. An added skill joins the library
-  read-only, and every agent that has it follows new versions on every provider, while a
-  pinned agent shows **Update available**. Updates that add or change scripts, or change
-  `allowed-tools`, wait for an admin to approve them in the library. A skill the server
-  stops offering keeps its last version and shows as unavailable. **Fork** makes an
-  editable copy.
+  server's skills. An added skill joins the library read-only, and new versions move every
+  agent that follows it; a pinned agent shows **Update available**. An agent switched to
+  OpenAI or Gemini moves only when its dropped capabilities stay the same, else it shows
+  **Needs re-confirm**. Script and `allowed-tools` changes wait for an admin's approval;
+  other files apply at once. A skill the server stops offering keeps its last version and
+  shows as unavailable. **Fork** makes an editable copy.
 
 - **The web app signs in with Slack and Microsoft again, besides Discord.** Each shows on the sign-in page once its login app is set (`DAIMON_HUB__SLACK_*`, `DAIMON_MICROSOFT_ACCOUNTS__*`); register `<web public url>/auth/slack/callback` and `/auth/microsoft/callback` on it. A signed-in member connects the other two from the account menu (see below).
 
