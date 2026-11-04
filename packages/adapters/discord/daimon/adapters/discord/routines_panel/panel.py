@@ -355,8 +355,8 @@ class RoutinesPanelView(discord.ui.LayoutView):
         container.add_item(discord.ui.ActionRow(NewButton(), DeleteButton(state)))
         web_url = (
             None
-            if state.links is None or state.selected is None
-            else state.links.routine(state.selected.routine.id)
+            if state.links is None
+            else state.links.routine(None if state.selected is None else state.selected.routine.id)
         )
         if web_url is not None:
             buttons_row.add_item(

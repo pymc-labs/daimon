@@ -1017,3 +1017,18 @@ def test_open_in_web_link_button_opens_the_selected_routine() -> None:
     plain = RoutinesPanelView(_make_state([entry]), runtime=_make_runtime(), allowed_user_id=42)
     labels = [c.label for c in plain.walk_children() if isinstance(c, discord.ui.Button)]
     assert "Open in web" not in labels, "no web app, no button"
+
+
+def test_open_in_web_link_button_on_an_empty_panel_opens_the_routines_list() -> None:
+    """With no routines the panel still links to the web app's routines page."""
+    from daimon.core.web_links import WebLinks
+
+    tenant = uuid.uuid4()
+    links = WebLinks("https://app.example.com", frozenset({"routines"})).for_tenant(
+        tenant, admin=True
+    )
+    state = RoutinesPanelState.initial(rows=[], over_cap_count=0, agent_name_map={}, links=links)
+    button = _find_button(
+        RoutinesPanelView(state, runtime=_make_runtime(), allowed_user_id=42), "Open in web"
+    )
+    assert button.url == links.routine(), "it opens the list"
