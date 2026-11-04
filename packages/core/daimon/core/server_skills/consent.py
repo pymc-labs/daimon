@@ -15,11 +15,11 @@ from daimon.core.channel_backend import AgentBackendRefused, AgentBackendService
 from daimon.core.server_skills.sync import NeedsReconfirm
 from daimon.core.stores import agent_backends
 from daimon.core.stores.domain import AgentBackendRevision, BackendAgent, ServerSkillRow
-from mux.contracts.ids import SkillRef
+from mux.contracts.ids import Revision, SkillRef
 from mux.errors import UnsupportedCapability
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-__all__ = ["ConsentKeeper", "Renewer", "with_skill_version"]
+__all__ = ["Consented", "ConsentKeeper", "Renewer", "repin_residue", "with_skill_version"]
 
 
 @dataclass(frozen=True)
@@ -61,6 +61,41 @@ def with_skill_version(source: BackendAgent, skill_id: str, version: str) -> Bac
     return source.model_copy(update=update)
 
 
+_REPIN_MARKS = frozenset({"version", "updated_at", "skills"})
+
+
+def repin_residue(source: BackendAgent, skill_id: str) -> str:
+    """The source's pin with only a repin's own marks blanked, so a repin keeps it.
+
+    A repin moves the skill's version, the agent's revision and timestamps, and the
+    digest of its whole record; any other edit changes the residue.
+    """
+    from daimon.core.turn.runtime_manifest import source_preservation_pin
+
+    update: dict[str, object] = {"configuration_digest": "repin"}
+    if (native := source.source) is not None:
+        raw = native.native
+        update["source"] = native.model_copy(
+            update={
+                "revision": Revision(local=0),
+                "updated_at": None,
+                "native": {k: v for k, v in raw.items() if k not in _REPIN_MARKS}
+                if isinstance(raw, dict)
+                else raw,
+            }
+        )
+    blanked = with_skill_version(source.model_copy(update=update), skill_id, "")
+    return source_preservation_pin(blanked)
+
+
+@dataclass(frozen=True)
+class Consented:
+    """A consent to renew after a repin, and the source it vouches for."""
+
+    revision: AgentBackendRevision
+    residue: str
+
+
 @dataclass(frozen=True)
 class ConsentKeeper:
     """Checks a follower's consent before its repin and renews it after."""
@@ -71,10 +106,8 @@ class ConsentKeeper:
     load: Callable[[ServerSkillRow, str], Awaitable[BackendAgent]]
     """The agent, by its provider id, as the backend service reads it."""
 
-    async def check(
-        self, mirror: ServerSkillRow, agent_id: str, version: str
-    ) -> AgentBackendRevision | None:
-        """The consent revision to renew after the repin, or None when there is none.
+    async def check(self, mirror: ServerSkillRow, agent_id: str, version: str) -> Consented | None:
+        """The consent to renew after the repin, or None when there is none.
 
         Raises `NeedsReconfirm` when the consent would not hold after the update.
         """
@@ -90,21 +123,22 @@ class ConsentKeeper:
         if revision is None or revision.drop_consent is None:
             return None
         try:
-            kept = await renewer.backends.keeps_drops(
+            kept = await renewer.backends.source_keeping_drops(
                 agent,
                 revision,
                 lambda captured: with_skill_version(captured, mirror.skill_id, version),
             )
         except (AgentBackendRefused, UnsupportedCapability) as err:
             raise NeedsReconfirm(f"its source can't be read ({type(err).__name__})") from err
-        if not kept:
+        if kept is None:
             raise NeedsReconfirm("its backend would drop different capabilities")
-        return revision
+        return Consented(revision, repin_residue(kept, mirror.skill_id))
 
-    async def renew(
-        self, mirror: ServerSkillRow, agent_id: str, revision: AgentBackendRevision
-    ) -> None:
-        """Renew the consent for the repinned source; `NeedsReconfirm` if it no longer holds."""
+    async def renew(self, mirror: ServerSkillRow, agent_id: str, consented: Consented) -> None:
+        """Renew the consent for the repinned source; `NeedsReconfirm` if it no longer holds.
+
+        Any edit besides the repin since the check, by anyone, leaves it for the owner.
+        """
         renewer = await self.renewer(mirror)
         if renewer is None:
             raise NeedsReconfirm("no one can renew its backend consent")
@@ -112,11 +146,14 @@ class ConsentKeeper:
         try:
             renewed = await renewer.backends.renew_consent(
                 agent,
-                expected=revision,
+                expected=consented.revision,
                 account_id=renewer.account_id,
                 reason=f"server skill update; skill={mirror.skill_id}; digest={mirror.digest}",
+                vouch=lambda captured: (
+                    repin_residue(captured, mirror.skill_id) == consented.residue
+                ),
             )
         except (AgentBackendRefused, UnsupportedCapability) as err:
             raise NeedsReconfirm(f"its source can't be read ({type(err).__name__})") from err
         if renewed is None:
-            raise NeedsReconfirm("its backend would drop different capabilities")
+            raise NeedsReconfirm("its source or its drops changed since the check")

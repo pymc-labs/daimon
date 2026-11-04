@@ -1102,6 +1102,7 @@ class AgentBackendService:
         target: Provider | None,
         model: str | None = None,
         settings: AgentSettings | None = None,
+        captured: BackendAgent | None = None,
     ) -> CompatibilityPreview:
         capture = self._capture_source if target is not None else None
         current = await agent_backends.current(session, agent.tenant_id, agent.agent_id)
@@ -1113,7 +1114,7 @@ class AgentBackendService:
             raise AgentBackendRefused("selfhosted_requires_channel_configuration")
         original = agent
         if capture is not None:
-            agent = await capture(agent)
+            agent = captured if captured is not None else await capture(agent)
             if (agent.tenant_id, agent.agent_id) != (original.tenant_id, original.agent_id):
                 raise AgentBackendRefused("tenant_mismatch")
         preview = compatibility_preview(
@@ -1438,13 +1439,13 @@ class AgentBackendService:
             agent, None, expected_revision, actor, "revert", expected_preview_digest
         )
 
-    async def keeps_drops(
+    async def source_keeping_drops(
         self,
         agent: BackendAgent,
         revision: AgentBackendRevision,
         change: Callable[[BackendAgent], BackendAgent],
-    ) -> bool:
-        """Whether `revision`'s consent still holds for the agent and would after `change`.
+    ) -> BackendAgent | None:
+        """The captured source when `revision`'s consent holds for it and would after `change`.
 
         The changed source must declare exactly the drops the owner accepted. A
         consent that no longer matches the source is never vouched for here.
@@ -1453,12 +1454,12 @@ class AgentBackendService:
 
         consent = revision.drop_consent
         if consent is None or self._capture_source is None:
-            return False
+            return None
         captured = await self._capture_source(agent)
         if (captured.tenant_id, captured.agent_id) != (agent.tenant_id, agent.agent_id) or (
             source_preservation_pin(captured) != consent.source_pin
         ):
-            return False
+            return None
         changed = change(captured)
         selection = agent_selection(
             revision.backend or DEFAULT_BACKEND, revision.model, AgentSettings.of(revision)
@@ -1469,8 +1470,8 @@ class AgentBackendService:
                 ModelRef(provider=selection.backend, id=selection.model or changed.model or ""),
             )
         except UnsupportedCapability:
-            return False
-        return proposed.declared_drops == consent.declared_drops
+            return None
+        return captured if proposed.declared_drops == consent.declared_drops else None
 
     async def renew_consent(
         self,
@@ -1479,15 +1480,17 @@ class AgentBackendService:
         expected: AgentBackendRevision,
         account_id: uuid.UUID | None,
         reason: str,
+        vouch: Callable[[BackendAgent], bool],
     ) -> AgentBackendRevision | None:
         """Renew `expected`'s drop consent for the agent's changed source, as a new revision.
 
-        Only while the revision is still current and the source declares exactly the
+        Only while the revision is still current, `vouch` accepts the captured source
+        as the consented one plus the expected change, and it declares exactly the
         drops the owner accepted; otherwise None, and the owner re-confirms. Revert
         skips the renewal: it returns to what the owner chose before.
         """
         consent = expected.drop_consent
-        if not self.enabled or consent is None:
+        if not self.enabled or consent is None or self._capture_source is None:
             return None
         async with policy_store.policy_write_transaction(
             self._sessions, tenant_id=agent.tenant_id
@@ -1500,9 +1503,12 @@ class AgentBackendService:
             ):
                 return None
             settings = AgentSettings.of(current)
+            captured = await self._capture_source(agent)
+            if not vouch(captured):
+                return None
             try:
                 preview = await self._preview(
-                    session, agent, current.backend, current.model, settings
+                    session, agent, current.backend, current.model, settings, captured
                 )
             except AgentBackendRefused:
                 return None

@@ -1,5 +1,6 @@
 """A followed skill update renews a backend consent only when its drops stay the same."""
 
+import datetime as dt
 from types import SimpleNamespace
 
 import pytest
@@ -8,7 +9,7 @@ from daimon.core.server_skills.consent import ConsentKeeper, Renewer, with_skill
 from daimon.core.server_skills.sync import NeedsReconfirm
 from daimon.core.turn import runtime_manifest
 from daimon.core.turn.runtime_manifest import source_preservation_pin
-from mux.contracts.ids import SkillRef
+from mux.contracts.ids import Revision, SkillRef
 
 from ..test_agent_backend import enable
 from ..test_agent_backend import owned as owned
@@ -62,7 +63,22 @@ async def consented(request, owned):
 
 
 def _repin(captured):
-    captured[0] = with_skill_version(captured[0], "skill_1", "2")
+    """The source as the provider reads it after a repin: a new version and record."""
+    source = with_skill_version(captured[0], "skill_1", "2")
+    native = source.source
+    native = native.model_copy(
+        update={
+            "revision": Revision(local=2, native="2"),
+            "updated_at": dt.datetime(2026, 1, 2, tzinfo=dt.UTC),
+            "native": {**native.native, "version": 2, "skills": [{"version": "2"}]},
+        }
+    )
+    captured[0] = source.model_copy(update={"source": native, "configuration_digest": "c" * 64})
+
+
+def _edit_system(captured, text):
+    spec = captured[0].effective_spec.model_copy(update={"system": text})
+    captured[0] = captured[0].model_copy(update={"effective_spec": spec})
 
 
 async def test_same_drops_renew_the_consent_and_audit_it(consented):
@@ -70,7 +86,7 @@ async def test_same_drops_renew_the_consent_and_audit_it(consented):
     keeper, service, agent, actor, captured, revision = consented
     old_pin = revision.drop_consent.source_pin
     checked = await keeper.check(MIRROR, "agent", "2")
-    assert checked == revision, "the consent to renew is the current one"
+    assert checked is not None and checked.revision == revision, "the current consent"
 
     _repin(captured)
     await keeper.renew(MIRROR, "agent", checked)
@@ -114,8 +130,7 @@ async def test_different_drops_hold_the_agent_untouched(consented, monkeypatch):
 async def test_a_consent_already_stale_is_never_renewed(consented):
     """A source the owner never confirmed stays for the owner to re-confirm."""
     keeper, service, agent, _, captured, revision = consented
-    spec = captured[0].effective_spec.model_copy(update={"system": "Changed after consent"})
-    captured[0] = captured[0].model_copy(update={"effective_spec": spec})
+    _edit_system(captured, "Changed after consent")
     with pytest.raises(NeedsReconfirm):
         await keeper.check(MIRROR, "agent", "2")
     assert await service.current(agent) == revision
@@ -135,6 +150,20 @@ async def test_drops_that_change_during_the_repin_refuse_the_renewal(consented, 
     with pytest.raises(NeedsReconfirm):
         await keeper.renew(MIRROR, "agent", checked)
     assert await service.current(agent) == revision, "no renewal was written"
+
+
+async def test_an_edit_racing_the_repin_is_never_renewed(consented):
+    """An edit landing between the check and the repin stays for the owner to confirm."""
+    keeper, service, agent, _, captured, revision = consented
+    checked = await keeper.check(MIRROR, "agent", "2")
+    assert checked is not None
+    before = await service.audit(agent.tenant_id)
+    _edit_system(captured, "Edited while the update ran")
+    _repin(captured)
+    with pytest.raises(NeedsReconfirm, match="changed since the check"):
+        await keeper.renew(MIRROR, "agent", checked)
+    assert await service.current(agent) == revision, "no renewal was written"
+    assert await service.audit(agent.tenant_id) == before, "nothing renewed, nothing audited"
 
 
 async def test_without_anyone_to_vouch_the_update_is_held(consented):
