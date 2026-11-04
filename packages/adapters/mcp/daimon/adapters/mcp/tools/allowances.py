@@ -129,7 +129,7 @@ async def _create_impl(
     actor = await web_admin_of(runtime, auth)
     names = await agent_names(runtime, actor.tenant_id)
     if agent_id is not None and agent_id not in names:
-        raise ToolError("Pick an agent from this workspace.")
+        raise ToolError("Pick one of this team's agents.")
     try:
         async with runtime.session_factory.begin() as db:
             row = await web_allowances.create_allowance(

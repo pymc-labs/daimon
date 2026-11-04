@@ -143,7 +143,7 @@ async def _disconnect_impl(
     try:
         if kind == "mcp":
             if agent_id is None or not key:
-                raise ToolError("An MCP sign-in needs its agent_id and key, as listed.")
+                raise ToolError("A sign-in needs its agent_id and key, as listed.")
             gone = await profile.disconnect_mcp_sign_in(
                 runtime.client,
                 sessionmaker=runtime.session_factory,

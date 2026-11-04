@@ -112,7 +112,7 @@ def _shown(invite: WebInviteRow, at: datetime, details: PrivateDetails) -> WebIn
 def _link_of(runtime: McpRuntime, token: str) -> str:
     web = runtime.settings.web
     if web is None:
-        raise ToolError("The web app is not set up for this deployment.")
+        raise ToolError("The web app is not set up here.")
     return link_url(web, token)
 
 

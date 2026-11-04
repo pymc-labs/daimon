@@ -256,7 +256,7 @@ async def _access_set_impl(
         if a.id == agent_id
     ]
     if not agents:
-        raise ToolError("This agent isn't in the workspace.")
+        raise ToolError("This agent isn't on this team.")
     try:
         async with runtime.session_factory.begin() as db:
             [current] = await web_admin.agent_access_rows(db, actor.tenant_id, agents)
