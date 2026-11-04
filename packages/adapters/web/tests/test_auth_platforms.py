@@ -584,7 +584,7 @@ async def test_link_proves_a_slack_user_onto_the_persons_account(
     assert [p.id for p in await _people_of(db_session_factory, "T1:U7", "slack")] == [person.id]
 
 
-async def test_link_from_another_platforms_workspace_is_refused(
+async def test_connecting_another_platform_never_links_it_onto_the_person(
     web_client: WebClientFactory,
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -605,8 +605,11 @@ async def test_link_from_another_platforms_workspace_is_refused(
         walk,
         upstream=fake_slack(team=("T1", "Acme"), user_id="U7"),
     )
-    assert _error(back) == "This account isn't in this workspace.", back.headers
-    assert await _people_of(db_session_factory, "T1:U7", "slack") == [], "nothing was linked"
+    slack_people = await _people_of(db_session_factory, "T1:U7", "slack")
+    assert _error(back) is None, back.headers
+    assert [p.id for p in slack_people] != [person.id] and len(slack_people) == 1, (
+        "the Slack account stays its own person in its own workspace, not the Discord person"
+    )
 
 
 async def test_link_is_refused_for_a_slack_user_already_linked_to_someone_else(
