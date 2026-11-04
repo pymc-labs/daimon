@@ -25,9 +25,9 @@ const fail = (e: Error) => toast.error(e.message)
 const key = (id: string) => ["agents", id, "github"] as const
 const base = (id: string) => `/api/agents/${id}/github`
 
-/** The agent's GitHub link; `enabled` is whether the reader sees setup. */
+/** The agent's GitHub link; `enabled` is whether the reader sees setup. Each read asks the model provider for skill versions, so it stays fresh a minute. */
 export const useAgentGithub = (id: string, enabled: boolean) =>
-  useQuery({ queryKey: key(id), queryFn: () => api.get<AgentGithub>(base(id)), enabled, retry: false })
+  useQuery({ queryKey: key(id), queryFn: () => api.get<AgentGithub>(base(id)), enabled, retry: false, staleTime: 60_000 })
 
 /** What is wrong with a repo, in words; empty when it works. A paused or removed install explains the rest. */
 export function repoTrouble(r: GithubRepo): string[] {
