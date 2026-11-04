@@ -60,9 +60,13 @@ web app at once. This needs the bot's member list, which Discord shares only
 with the Server Members intent. Until the list loads, or while the intent is
 off, the sign-in itself decides.
 
-A signed-in member links the other methods from the account menu, then switches
-between all their workspaces. An account already linked to another person is
-refused, and guests cannot link.
+A signed-in member connects other chat accounts from the account menu; the workspace
+switcher then lists the workspaces of every connected account. A later sign-in with any
+of them, on any device, shows them all while each was proven within 30 days, and an older
+one returns when it signs in again. Profile lists the connected accounts and disconnects
+one, but not the account the session signed in with. A connection is refused where
+signing in with that account would be, an account linked to another person in the
+workspace is refused, and guests cannot connect.
 
 ## Become the owner
 
