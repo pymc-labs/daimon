@@ -35,6 +35,7 @@ def agent_github_router(runtime: WebRuntime) -> APIRouter:
                 actor=actor_of(caller),
                 ma_agent_id=agent_id,
                 configured=root() is not None,
+                version_times=runtime.github_version_times,
             )
         except AgentEditError as exc:
             raise edit_refusal(exc) from exc
@@ -63,6 +64,7 @@ def agent_github_router(runtime: WebRuntime) -> APIRouter:
                 ma_agent_id=agent_id,
                 repo=body.repo,
                 configured=root() is not None,
+                version_times=runtime.github_version_times,
                 audited=recorded(runtime, caller, "Set working repo", body.repo),
             )
         except AgentEditError as exc:
@@ -78,6 +80,7 @@ def agent_github_router(runtime: WebRuntime) -> APIRouter:
                 ma_agent_id=agent_id,
                 repo=repo,
                 configured=root() is not None,
+                version_times=runtime.github_version_times,
                 audited=recorded(runtime, caller, "Removed GitHub repo", repo),
             )
         except AgentEditError as exc:

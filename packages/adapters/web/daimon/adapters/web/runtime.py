@@ -19,6 +19,7 @@ from daimon.adapters.web.card_listener import NoticeListener
 from daimon.adapters.web.directory import AgentDirectory
 from daimon.adapters.web.single_process import hold_web_process_lock
 from daimon.adapters.web.turns import WebTurns
+from daimon.core.agent_github import VersionTimeCache
 from daimon.core.billing import BillingConfig, load_billing_config
 from daimon.core.channel_budget_notice import drain_budget_notices
 from daimon.core.config import Settings, WebSettings
@@ -81,6 +82,8 @@ class WebRuntime:
     skill_descriptions: Mapping[str, str] = field(default_factory=dict[str, str])
     agent_templates: Sequence[AgentSpec] = ()
     agents: AgentDirectory = field(default_factory=AgentDirectory)
+    # When skill versions were made, for the agent GitHub panel.
+    github_version_times: VersionTimeCache = field(default_factory=VersionTimeCache)
     # Signs who a chat sign-in is, for node token exchanges; None where no node is set.
     identity_key: Ed25519PrivateKey | None = None
     # (person, node kind) whose exchange failed: until when it is not tried again, and why.

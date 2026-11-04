@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 import anthropic
@@ -62,6 +62,7 @@ from daimon.core.stores.integration_reads import get_installation_states
 from daimon.core.stores.security_audit import append_event
 from daimon.core.stores.user_skills import list_user_skills_for_agent_name
 from daimon.core.stores.web_people import get_people_for_accounts
+from mux.errors import MuxError
 from pydantic import BaseModel, ConfigDict, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -74,6 +75,42 @@ NOT_CONFIGURED = "GitHub is not set up here. Ask an admin."
 _VERSION_LOOKUPS = 12
 _VERSION_CONCURRENCY = 4
 _VERSION_PAGE = 50
+_VERSION_TIMES_TTL = timedelta(minutes=5)
+_VERSION_TIMES_CAP = 2048
+
+type _VersionKey = tuple[uuid.UUID, str, str]
+
+
+class VersionTimeCache:
+    """When each skill version was made, per workspace, for a few minutes.
+
+    A panel read otherwise walks up to a dozen version listings. A version not on the
+    first page is kept as unknown too; a failed lookup is not kept.
+    """
+
+    def __init__(
+        self,
+        *,
+        now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        ttl: timedelta = _VERSION_TIMES_TTL,
+        cap: int = _VERSION_TIMES_CAP,
+    ) -> None:
+        self._now, self._ttl, self._cap = now, ttl, cap
+        self._rows: dict[_VersionKey, tuple[datetime, datetime | None]] = {}
+
+    def get(self, key: _VersionKey) -> tuple[bool, datetime | None]:
+        """(known, time): known is False when the key was never stored or has expired."""
+        row = self._rows.get(key)
+        if row is None or row[0] <= self._now():
+            self._rows.pop(key, None)
+            return False, None
+        return True, row[1]
+
+    def put(self, key: _VersionKey, at: datetime | None) -> None:
+        if key not in self._rows and len(self._rows) >= self._cap:
+            del self._rows[next(iter(self._rows))]
+        self._rows[key] = (self._now() + self._ttl, at)
+
 
 Origin = Literal["repo", "library", "external", "anthropic"]
 InstallationState = Literal["active", "suspended", "removed"]
@@ -468,6 +505,7 @@ async def _version_times(
     actor: AgentActor,
     agent: BetaManagedAgentsAgent,
     listing: Sequence[SkillListResponse],
+    cache: VersionTimeCache | None,
 ) -> dict[tuple[str, str], datetime]:
     """When each skill pinned behind its latest version got that version; bounded."""
     latest = {row.id: row.latest_version for row in listing}
@@ -483,25 +521,37 @@ async def _version_times(
     found: dict[tuple[str, str], datetime] = {}
 
     async def look(skill_id: str, version: str) -> None:
-        async with gate:
-            try:
-                async for row in list_skill_versions(
-                    deps.client, skill_id, limit=_VERSION_PAGE, scope=actor.scope()
-                ):
-                    if row.version == version:
-                        at = _parse_time(row.created_at)
-                        if at is not None:
-                            found[(skill_id, version)] = at
-                        return
-            except (anthropic.APIError, httpx.HTTPError):
-                _log.warning("agent_github.version_lookup_failed", skill_id=skill_id)
+        key = (actor.tenant_id, skill_id, version)
+        known, at = cache.get(key) if cache is not None else (False, None)
+        if not known:
+            async with gate:
+                try:
+                    async for row in list_skill_versions(
+                        deps.client, skill_id, limit=_VERSION_PAGE, scope=actor.scope()
+                    ):
+                        if row.version == version:
+                            at = _parse_time(row.created_at)
+                            break
+                except (anthropic.AnthropicError, httpx.HTTPError, MuxError):
+                    # Any provider or scope failure leaves the time empty: the panel still answers.
+                    _log.warning("agent_github.version_lookup_failed", skill_id=skill_id)
+                    return
+            if cache is not None:
+                cache.put(key, at)
+        if at is not None:
+            found[(skill_id, version)] = at
 
     await asyncio.gather(*(look(skill_id, version) for skill_id, version in wanted))
     return found
 
 
 async def _panel(
-    deps: AgentEditDeps, actor: AgentActor, target: AgentTarget, *, configured: bool
+    deps: AgentEditDeps,
+    actor: AgentActor,
+    target: AgentTarget,
+    *,
+    configured: bool,
+    version_times: VersionTimeCache | None,
 ) -> GitHubPanel:
     agent = target.agent
     async with deps.session_factory() as session:
@@ -526,7 +576,7 @@ async def _panel(
             repo_refs={(s.repo, f"refs/heads/{s.branch}") for s in sources},
         )
     listing = await _listing(deps)
-    times = await _version_times(deps, actor, agent, listing)
+    times = await _version_times(deps, actor, agent, listing, version_times)
     return GitHubPanel(
         configured=configured,
         can_manage=authority.manage,
@@ -546,11 +596,16 @@ async def _panel(
 
 
 async def get_panel(
-    deps: AgentEditDeps, *, actor: AgentActor, ma_agent_id: str, configured: bool
+    deps: AgentEditDeps,
+    *,
+    actor: AgentActor,
+    ma_agent_id: str,
+    configured: bool,
+    version_times: VersionTimeCache | None = None,
 ) -> GitHubPanel:
     """The panel for someone who sees the agent's setup (an admin, or its owner)."""
     target = await _target(deps, actor, ma_agent_id)
-    return await _panel(deps, actor, target, configured=configured)
+    return await _panel(deps, actor, target, configured=configured, version_times=version_times)
 
 
 # ---- changes --------------------------------------------------------------------
@@ -652,6 +707,7 @@ async def set_working(
     repo: str | None,
     configured: bool,
     audited: ChangeRecorder | None = None,
+    version_times: VersionTimeCache | None = None,
 ) -> GitHubPanel:
     """Make one of the agent's repos its working repo, or clear it with None."""
     target, _authority = await _managed_target(deps, actor, ma_agent_id)
@@ -678,7 +734,7 @@ async def set_working(
             raise AgentEditError("That repo is not on this agent's list.", kind="invalid") from exc
         if audited is not None:
             await audited(session, target.agent.name)
-    return await _panel(deps, actor, target, configured=configured)
+    return await _panel(deps, actor, target, configured=configured, version_times=version_times)
 
 
 async def remove_repo(
@@ -689,6 +745,7 @@ async def remove_repo(
     repo: str,
     configured: bool,
     audited: ChangeRecorder | None = None,
+    version_times: VersionTimeCache | None = None,
 ) -> GitHubPanel:
     """Take one repo off this agent; other agents keep theirs, a shared repo stays shared."""
     target, _authority = await _managed_target(deps, actor, ma_agent_id)
@@ -710,7 +767,7 @@ async def remove_repo(
             raise AgentEditError("That repo is no longer on this agent's list.", kind="not_found")
         if audited is not None:
             await audited(session, target.agent.name)
-    return await _panel(deps, actor, target, configured=configured)
+    return await _panel(deps, actor, target, configured=configured, version_times=version_times)
 
 
 async def resync(

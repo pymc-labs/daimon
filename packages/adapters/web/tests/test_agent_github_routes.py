@@ -9,6 +9,8 @@ from typing import Any
 
 import httpx
 import pytest
+from anthropic.types.beta import SkillListResponse
+from anthropic.types.beta.skills.version_list_response import VersionListResponse
 from cryptography.fernet import Fernet
 from daimon.core.config import Settings
 from daimon.core.ma_identity import derive_agent_uuid
@@ -164,6 +166,52 @@ async def test_get_panel_when_skills_listing_fails_then_still_answers(
         got = await client.get("/api/agents/ag_w/github")
     assert got.status_code == 200, got.text
     assert [s["title"] for s in got.json()["skills"]] == ["skill_repo"], "falls back to id"
+
+
+async def test_get_panel_when_version_lookup_fails_then_null_time_and_retried_then_cached(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A failed version lookup leaves the time empty and is not kept; a found one is."""
+    pinned = {"type": "custom", "skill_id": "skill_pin", "version": "1"}
+    agents, owner, _other = await agent_people(db_session, skills=[pinned])
+    agents.skills = [
+        SkillListResponse(
+            id="skill_pin",
+            created_at="2030-01-01T00:00:00Z",
+            display_title="Deploy",
+            latest_version="3",
+            source="custom",
+            type="skill",
+            updated_at="2030-01-03T00:00:00Z",
+        ).model_dump(mode="json")
+    ]
+    row = VersionListResponse(
+        id="skillver_1",
+        created_at="2030-01-02T00:00:00Z",
+        description="d",
+        directory="deploy",
+        name="deploy",
+        skill_id="skill_pin",
+        type="skill_version",
+        version="1",
+    ).model_dump(mode="json")
+    calls: list[int] = []
+
+    def versions(_r: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return _fail()
+        return httpx.Response(200, json={"data": [row], "has_more": False, "next_page": None})
+
+    agents.router.add("GET", r"/v1/skills/skill_pin/versions", versions)
+    token = await sign_in_token(db_session_factory, owner)
+    async with agent_client(agents, owner.tenant_id, db_session_factory, token) as client:
+        reads = [(await client.get("/api/agents/ag_w/github")) for _ in range(3)]
+    times = [r.json()["skills"][0]["updated_at"] for r in reads]
+    assert [r.status_code for r in reads] == [200, 200, 200], [r.text for r in reads]
+    assert times[0] is None, "a failed lookup leaves the time empty"
+    assert times[1] == times[2] == "2030-01-02T00:00:00Z", times
+    assert len(calls) == 2, "the failure was retried, the found time was kept"
 
 
 async def test_get_panel_sync_when_repo_not_connected_here_then_hidden_else_plain_error(

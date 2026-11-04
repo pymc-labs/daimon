@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from anthropic.types.beta import SkillListResponse
 from daimon.core.agent_github import (
     RepoSource,
+    VersionTimeCache,
     panel_repos,
     panel_skills,
     parse_release,
@@ -258,3 +259,18 @@ def test_resync_results_when_repo_skipped_then_repo_failed() -> None:
     report = SyncReport(skipped_repos=[(URL, "not found")])
     results = resync_results(source, [], [], report, agent_id=AGENT)
     assert [(r.name, r.action) for r in results] == [("acme/skills", "failed")], "repo failed"
+
+
+def test_version_time_cache_when_fresh_expired_or_full_then_hits_misses_or_evicts() -> None:
+    """A stored time (or a stored unknown) is a hit until it expires; the oldest goes when full."""
+    clock = [T0]
+    cache = VersionTimeCache(now=lambda: clock[0], ttl=timedelta(minutes=5), cap=2)
+    cache.put((TENANT, "skill_a", "1"), T1)
+    cache.put((TENANT, "skill_b", "1"), None)
+    assert cache.get((TENANT, "skill_a", "1")) == (True, T1), "a fresh time is a hit"
+    assert cache.get((TENANT, "skill_b", "1")) == (True, None), "a known unknown is a hit"
+    assert cache.get((uuid.uuid4(), "skill_a", "1")) == (False, None), "keyed per workspace"
+    cache.put((TENANT, "skill_c", "1"), T1)
+    assert cache.get((TENANT, "skill_a", "1"))[0] is False, "the oldest entry goes when full"
+    clock[0] = T0 + timedelta(minutes=5)
+    assert cache.get((TENANT, "skill_c", "1")) == (False, None), "an expired entry is a miss"
