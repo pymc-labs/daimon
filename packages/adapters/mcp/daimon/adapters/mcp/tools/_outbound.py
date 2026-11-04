@@ -139,7 +139,19 @@ async def turn_scope(runtime: McpRuntime, auth: AuthIdentity) -> TurnScope:
             routine_name=(routine.name or routine.agent_name) if routine else None,
         )
     if auth.chat_session_id is not None:
-        origin = _own_origin(await list_running_origins(runtime, auth), auth.chat_session_id)
+        running = await list_running_origins(runtime, auth)
+        origin = _own_origin(running, auth.chat_session_id)
+        if origin is None and running:
+            # Ambiguous: every running turn's conversation is the caller's own; elsewhere
+            # still fails closed, with no card and no other turn's tally.
+            places = frozenset[str]().union(*(_own_places(o) for o in running))
+            return TurnScope(
+                key=client_tally_key(str(auth.token_jti or auth.account_id), datetime.now(UTC)),
+                kind="outside",
+                own_places=places,
+                requester_id=auth.platform_user_id,
+                own_channels=places | {o.parent_channel_id for o in running},
+            )
         if origin is not None:
             # Only the server records origins, and it marks the ones nobody attends.
             return TurnScope(
@@ -304,17 +316,17 @@ async def prepare_posts(
 async def _attribution(
     runtime: McpRuntime, auth: AuthIdentity, scope: TurnScope, place: str, skip: frozenset[str]
 ) -> str | None:
-    """The "requested by" line: Discord tags the requester without a ping unless they
-    opted out; everyone else is credited by plain name, so the line is never dropped."""
+    """The "requested by" line: a Discord requester is tagged without a ping unless they
+    opted out; everyone else, web and agent chat included, by plain name, never dropped."""
     platform = _platform(auth)
     requester = scope.requester_id
-    needs_name = bool(requester) and (platform != "discord" or requester in skip)
+    tag = auth.platform == "discord" and requester is not None and requester not in skip
     requester_name = (
-        await _requester_name(runtime, auth, place, requester) if needs_name and requester else None
+        await _requester_name(runtime, auth, place, requester) if requester and not tag else None
     )
     return attribution_line(
         platform,
-        requester_id=requester if platform == "discord" and requester not in skip else None,
+        requester_id=requester if tag else None,
         requester_name=requester_name,
         routine_name=scope.routine_name,
     )

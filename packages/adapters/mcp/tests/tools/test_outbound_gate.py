@@ -178,12 +178,17 @@ async def test_prepare_posts_when_too_long_or_bare_media_then_refused_if_attende
 
 
 @pytest.mark.parametrize("platform", PLATFORMS)
-@pytest.mark.parametrize("place", ["home", "42"], ids=["own_thread", "dm_to_requester"])
+@pytest.mark.parametrize(
+    ("place", "card"),
+    [("home", True), ("42", True), ("42", False)],
+    ids=["own_thread", "dm_to_requester", "outside_client_own_dm"],
+)
 async def test_prepare_posts_when_long_or_bare_media_in_own_conversation_then_posts(
-    sessionmaker, platform, place
+    sessionmaker, platform, place, card
 ):
+    """By tool or by DM to oneself, and from an outside client to its own DM."""
     runtime, auth = await _setup(sessionmaker, platform)
-    scope = _scope()
+    scope = _scope(card=card)
     for post in (
         OutgoingPost(text="x" * 5000, place=place),
         OutgoingPost(text="clip", place=place, media=True),
@@ -278,6 +283,21 @@ async def test_prepare_posts_when_discord_then_attribution_never_pings(sessionma
     )
     assert post.text.endswith("-# requested by <@42>"), "the requester is named on the last line"
     assert ping_users.get() == frozenset({"7"}), "only the tagged person may be pinged"
+
+
+@pytest.mark.parametrize("platform", ["web", "agent"])
+async def test_prepare_posts_when_web_or_agent_chat_then_plain_attribution(sessionmaker, platform):
+    """A chat outside Discord has no Discord id to tag, so the line names the asker in text."""
+    runtime, auth = await _setup(sessionmaker, "discord")
+    auth = dataclasses.replace(auth, platform=platform)
+    [post] = await prepare_posts(
+        runtime,
+        auth,
+        [OutgoingPost(text="hello", place="C1")],
+        plan=ReachPlan(threads=0, places=1, people=0),
+        scope=_scope(),
+    )
+    assert post.text == "hello\n-# requested by someone", f"{platform}: never <@id>"
 
 
 async def test_render_edit_when_broadcast_then_neutralised_without_attribution(sessionmaker):
@@ -445,6 +465,18 @@ async def test_turn_scope_when_two_turns_share_a_session_then_neither_borrows_th
 
     assert scope.kind == "outside", "an ambiguous turn gets no card"
     assert not scope.key.startswith("turn:"), "and no other turn's tally or approval"
+    doc = OutgoingPost(text="x" * 5000, place="T1")
+    [out] = await prepare_posts(runtime, auth, [doc], plan=None, scope=scope)
+    assert out.text == doc.text, "every running turn's thread is still the caller's own"
+    with pytest.raises(ToolError) as refused:
+        await prepare_posts(
+            runtime,
+            auth,
+            [OutgoingPost(text=f"t{i}", place="C9", new_thread=True) for i in range(3)],
+            plan=ReachPlan(threads=3, places=0, people=0),
+            scope=scope,
+        )
+    assert str(refused.value) == NO_CARD, "a truly outside place fails closed"
 
 
 async def test_turn_scope_when_grant_names_its_origin_then_that_turn_only(
