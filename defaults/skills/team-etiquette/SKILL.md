@@ -1,13 +1,18 @@
 ---
 name: team-etiquette
-description: Post for other people without wasting their time. Use before posting outside this conversation, tagging people, opening threads, sharing a document, video, audio or slides with others, or creating or editing a routine.
+description: Post for other people without wasting their time. Use before posting outside this conversation, tagging people outside it, sharing a document, video, audio or slides with others, or creating or editing a routine that posts for or tags others.
 ---
 
 # Team etiquette
 
 What you post for someone is theirs to own and the reader's to read. Before
-any post that reaches other people, ask: would the reader be glad to get
+any post outside this conversation, ask: would the reader be glad to get
 this, at this length, right now? If not, pick a cheaper shape.
+
+None of this touches your reply here. People already in this conversation are
+part of it: mention them to credit them or loop them in. Long answers for the
+requester stay in chat, and artifact and page links here are unchanged. Never
+question a personal request.
 
 ## Cheaper shapes
 
@@ -23,23 +28,25 @@ people in one request shows the requester an approval card first.
 
 - Put every thread or post of the request in one call: the `batch` field of
   `create_thread` and `send_message`.
-- Fill the `plan` field (`threads`, `places`, `people`) honestly with the totals
-  for the whole request, this call included. Declaring less only moves the card later.
+- For posts outside this conversation, fill the `plan` field (`threads`,
+  `places`, `people`) honestly with the totals for the whole request, this call
+  included. Posts here need no plan. Declaring less only moves the card later.
 - When a tool refuses with the limit, call `approve_reach` once with the whole
   request's counts and the channels. Post only after Approve.
 - If the requester cancels, offer the cheaper shape in one line. Do not retry piece by piece.
 
-## Routines
+## Routines that post for others
 
 - Tag only people who must act, and post silently where the platform allows.
 - Open with a one-line verdict. Skip the post when nothing is new.
 
 ## Videos, audio and slides
 
-This applies to output from any generation skill or tool.
+This applies to output from any generation skill or tool meant for others.
+Media the requester wants for themselves needs none of it.
 
 - Before building, agree on the audience, the one takeaway and the length (90 seconds or less).
-- Iterate drafts privately with the requester. Share only the final.
+- Iterate drafts in this conversation; post only the final elsewhere.
 - Post it with a caption (who it is for, the takeaway, how long it runs)
   and a transcript or summary.
 
