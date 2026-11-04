@@ -57,7 +57,8 @@ export function useGithubWrites(id: string) {
     }),
     resync: useMutation({
       mutationFn: () => api.post<{ results: SyncedSkill[] }>(`${base(id)}/resync`),
-      onSuccess: () => { void qc.invalidateQueries({ queryKey: key(id) }) },
+      // The agent's prefix, so its skill list refreshes with the link.
+      onSuccess: () => { void qc.invalidateQueries({ queryKey: ["agents", id] }) },
       onError: fail,
     }),
   }
