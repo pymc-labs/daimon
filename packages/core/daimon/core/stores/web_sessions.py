@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from typing import Any, cast
 
 from daimon.core._models import WebPerson, WebSession, WebSessionPerson
-from daimon.core.stores.domain import WebPersonRow, WebSessionRow
+from daimon.core.stores.domain import WebLoginSessionPersonRow, WebPersonRow, WebSessionRow
 from sqlalchemy import CursorResult, delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,6 +26,7 @@ async def create_session(
     people: Sequence[WebPersonRow],
     ttl: timedelta,
     now: datetime,
+    login_id: uuid.UUID | None = None,
 ) -> WebSessionRow:
     """Start a session on the first active of `people`; it may switch among all of them.
 
@@ -46,6 +47,7 @@ async def create_session(
         last_seen_at=now,
         expires_at=now + ttl,
         roles_checked_at=now,
+        login_id=login_id,
     )
     session.add(orm)
     await session.flush()
@@ -96,6 +98,41 @@ async def list_session_people(session: AsyncSession, *, session_id: uuid.UUID) -
     return list(rows.scalars())
 
 
+async def add_people(
+    session: AsyncSession, *, session_id: uuid.UUID, people: Sequence[WebPersonRow]
+) -> list[WebPersonRow]:
+    """Let the session reach more people, never a second one in a workspace it already
+    reaches: the one there stays. Returns those added."""
+    held = set(
+        await session.scalars(
+            select(WebSessionPerson.tenant_id).where(WebSessionPerson.session_id == session_id)
+        )
+    )
+    added: list[WebPersonRow] = []
+    for person in people:
+        if person.tenant_id in held:
+            continue
+        held.add(person.tenant_id)
+        added.append(person)
+    session.add_all(
+        WebSessionPerson(session_id=session_id, tenant_id=p.tenant_id, person_id=p.id)
+        for p in added
+    )
+    await session.flush()
+    return added
+
+
+async def remove_people(
+    session: AsyncSession, *, session_id: uuid.UUID, person_ids: Sequence[uuid.UUID]
+) -> None:
+    """Stop the session reaching these people; it does not change who is current."""
+    await session.execute(
+        delete(WebSessionPerson).where(
+            WebSessionPerson.session_id == session_id, WebSessionPerson.person_id.in_(person_ids)
+        )
+    )
+
+
 async def switch_person(
     session: AsyncSession, *, session_id: uuid.UUID, tenant_id: uuid.UUID
 ) -> WebSessionRow | None:
@@ -118,6 +155,33 @@ async def switch_person(
         )
     ).scalar_one_or_none()
     return None if orm is None else WebSessionRow.model_validate(orm)
+
+
+async def delete_signed_in_with(session: AsyncSession, *, provider: str, subject: str) -> int:
+    """End every session that signed in with the account, wherever it is open."""
+    result = await session.execute(
+        delete(WebSession).where(WebSession.provider == provider, WebSession.subject == subject)
+    )
+    return cast(CursorResult[Any], result).rowcount
+
+
+async def delete_by_ids(session: AsyncSession, *, session_ids: Sequence[uuid.UUID]) -> None:
+    await session.execute(delete(WebSession).where(WebSession.id.in_(session_ids)))
+
+
+async def list_login_people(
+    session: AsyncSession, *, login_id: uuid.UUID
+) -> list[WebLoginSessionPersonRow]:
+    """Every person every session of the login reaches, with the person each is working as."""
+    rows = await session.execute(
+        select(WebSession.id, WebSession.current_person_id, WebSessionPerson.person_id)
+        .join(WebSessionPerson, WebSessionPerson.session_id == WebSession.id)
+        .where(WebSession.login_id == login_id)
+    )
+    return [
+        WebLoginSessionPersonRow(session_id=sid, current_person_id=cur, person_id=pid)
+        for sid, cur, pid in rows.tuples()
+    ]
 
 
 async def touch(session: AsyncSession, *, session_id: uuid.UUID, now: datetime) -> None:

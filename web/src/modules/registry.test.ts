@@ -10,7 +10,7 @@ const ADMIN: Capability[] = [...MEMBER, "credits.manage", "integrations.view", "
 const person = (over: Partial<Me> = {}): Me => ({
   id: "p1", name: "Ada", email: "ada@example.com", role: "member",
   workspace: { id: "w1", name: "Daimon QA", platform: "discord", role: "member", members: 3 }, workspaces: [],
-  modules: ["chat", "agents", "routines", "credits", "integrations", "admin"], capabilities: MEMBER, identities: [], credit: null, ...over,
+  modules: ["chat", "agents", "routines", "credits", "integrations", "admin"], capabilities: MEMBER, identities: [], accounts: [], credit: null, ...over,
 })
 
 describe("sidebar", () => {

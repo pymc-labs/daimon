@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import json
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
@@ -33,6 +35,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from stripe import StripeClient
 
 PUBLIC_URL = "https://web.example.com"
+MICROSOFT_APP = "app-1"
+MICROSOFT_TENANT = "11111111-1111-1111-1111-111111111111"
 
 
 def web_settings(**overrides: object) -> WebSettings:
@@ -45,6 +49,26 @@ def discord_settings(**overrides: object) -> Settings:
     fields: dict[str, object] = {
         "database": {"url": "postgresql+asyncpg://u:p@h/db"},
         "hub": {"discord_client_id": "dc", "discord_client_secret": "ds"},
+    }
+    return Settings(_env_file=None, **{**fields, **overrides})  # pyright: ignore[reportCallIssue, reportArgumentType]
+
+
+def chat_settings(**overrides: object) -> Settings:
+    """Settings with Discord, Slack and Microsoft sign-in all configured."""
+    fields: dict[str, object] = {
+        "database": {"url": "postgresql+asyncpg://u:p@h/db"},
+        "hub": {
+            "discord_client_id": "dc",
+            "discord_client_secret": "ds",
+            "slack_client_id": "sc",
+            "slack_client_secret": "ss",
+        },
+        "microsoft_accounts": {
+            "client_id": MICROSOFT_APP,
+            "client_secret": "ms",
+            "tenant_id": MICROSOFT_TENANT,
+            "authority": "https://login.example.com",
+        },
     }
     return Settings(_env_file=None, **{**fields, **overrides})  # pyright: ignore[reportCallIssue, reportArgumentType]
 
@@ -71,6 +95,39 @@ def fake_discord(
                 return httpx.Response(200, json=[{"id": g, "name": n} for g, n in guilds])
         if fallback is not None:
             return fallback.handler(request)
+        return httpx.Response(404)
+
+    return FakeUpstream(handler)
+
+
+def fake_slack(
+    *, team: tuple[str, str] | None, user_id: str = "U1", name: str = "ada"
+) -> FakeUpstream:
+    """Slack's token and `users.info` endpoints; `team=None` is a grant that names no workspace."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/oauth.v2.access":
+            grant: dict[str, object] = {
+                "ok": True,
+                "authed_user": {"id": user_id, "access_token": "xoxp-1", "scope": "users:read"},
+            }
+            if team is not None:
+                grant["team"] = {"id": team[0], "name": team[1]}
+            return httpx.Response(200, json=grant)
+        if request.url.path == "/api/users.info":
+            return httpx.Response(200, json={"ok": True, "user": {"real_name": name}})
+        return httpx.Response(404)
+
+    return FakeUpstream(handler)
+
+
+def fake_microsoft(**claims: object) -> FakeUpstream:
+    """The Entra token endpoint answering with an id_token that carries `claims`."""
+    body = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == f"/{MICROSOFT_TENANT}/oauth2/v2.0/token":
+            return httpx.Response(200, json={"access_token": "at", "id_token": f"e30.{body}.s"})
         return httpx.Response(404)
 
     return FakeUpstream(handler)

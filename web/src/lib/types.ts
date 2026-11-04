@@ -13,6 +13,9 @@ export type Workspace = { id: string; name: string; platform: Platform; role: Ro
 /** A linked sign-in: provider id and name, the account's label; `icon` is "link" for invites. */
 export type Identity = { provider: string; provider_label: string; label: string; icon?: string }
 
+/** An account that signs this person in: `current` is the one this session proved. */
+export type ConnectedAccount = { id: string; provider: string; provider_label: string; label: string; last_used: string; current: boolean }
+
 export type CreditMeter = { left_usd: number; total_usd: number; window: "month" | "total"; resets_at: string | null }
 
 export type Me = {
@@ -25,6 +28,7 @@ export type Me = {
   modules: ModuleKey[]
   capabilities: Capability[]
   identities: Identity[]
+  accounts: ConnectedAccount[]
   credit: CreditMeter | null
   /** Visitors: who invited them, named when credit runs out. */
   invited_by?: string

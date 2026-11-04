@@ -532,7 +532,9 @@ otherwise invalidate every issued login).
 `str | None` · optional · default unset
 
 Slack OAuth app client ID for the /slack/mcp login mount. Register &lt;hub
-origin&gt;/slack/auth/callback as a redirect URL on the Slack app (see public_url).
+origin&gt;/slack/auth/callback as a redirect URL on the Slack app (see public_url). Web
+app sign-in with Slack uses this app too: also register &lt;web public
+url&gt;/auth/slack/callback.
 
 ### `DAIMON_HUB__SLACK_CLIENT_SECRET`
 
@@ -1068,7 +1070,7 @@ choose Get link to team and copy the groupId parameter. Unset: nobody is an admi
 
 Read from `daimon.core.config.WebSettings`. Prefix `DAIMON_WEB__`.
 
-The web app: its server, Discord sign-in and connection nodes.
+The web app: its server, chat-platform sign-in and connection nodes.
 
 Optional so deployments without the web app boot unchanged; the block is ``None`` when
 no ``DAIMON_WEB__*`` variable is set.
@@ -1263,7 +1265,8 @@ Inert until `client_id`, `client_secret` and `tenant_id` are all set.
 `str | None` · optional · default unset
 
 Application (client) ID of the Entra app registration people sign in to with Connect
-Microsoft. Its Web redirect URI is `&lt;public root&gt;/oauth/microsoft/callback`.
+Microsoft. Its Web redirect URI is `&lt;public root&gt;/oauth/microsoft/callback`; web
+app sign-in with Microsoft also needs `&lt;web public url&gt;/auth/microsoft/callback`.
 
 ### `DAIMON_MICROSOFT_ACCOUNTS__CLIENT_SECRET`
 

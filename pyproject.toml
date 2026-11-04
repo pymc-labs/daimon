@@ -401,6 +401,7 @@ source_modules = [
     "daimon.core.usage_outbox_drain",
     "daimon.core.infrastructure_cost",
     "daimon.core.web_identity",
+    "daimon.core.web_login",
     "daimon.core.token_exchange",
     "daimon.core.wizard",
     "daimon.core.wizard_sweep",

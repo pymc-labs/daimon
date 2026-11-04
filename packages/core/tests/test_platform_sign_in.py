@@ -1,14 +1,34 @@
-"""Chat-platform sign-in helpers: Discord user and guilds, Slack user grant."""
+"""Chat-platform sign-in helpers: Discord user and guilds, Slack grant and name, Microsoft account."""
 
 from __future__ import annotations
 
+import base64
+import json
+from urllib.parse import parse_qs, urlsplit
+
 import httpx
 import pytest
+from daimon.core.config import MicrosoftAccountsSettings
+from daimon.core.microsoft_identity import MicrosoftIdentityMismatch, MicrosoftTokens
 from daimon.core.platform_sign_in import (
+    MicrosoftGuestRefused,
     PlatformSignInError,
     exchange_slack_user_code,
     fetch_discord_user,
     fetch_discord_workspaces,
+    fetch_slack_user_name,
+    slack_authorize_url,
+    verify_microsoft_sign_in,
+)
+from pydantic import HttpUrl, SecretStr
+
+TENANT = "11111111-1111-1111-1111-111111111111"
+OID = "22222222-2222-2222-2222-222222222222"
+MICROSOFT = MicrosoftAccountsSettings(
+    client_id="app-1",
+    client_secret=SecretStr("app-secret"),
+    tenant_id=TENANT,
+    authority=HttpUrl("https://login.example.com"),
 )
 
 
@@ -30,6 +50,13 @@ def _slack_http(payload: dict[str, object]) -> httpx.AsyncClient:
         return httpx.Response(200, json=payload)
 
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+def _microsoft_tokens(**claims: object) -> MicrosoftTokens:
+    body = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+    return MicrosoftTokens(
+        access_token="at", refresh_token=None, expires_in=3600, scope="", id_token=f"e30.{body}.s"
+    )
 
 
 async def test_fetch_discord_workspaces_returns_user_and_guilds() -> None:
@@ -92,3 +119,100 @@ async def test_slack_exchange_refuses_unusable_answers(
         await exchange_slack_user_code(
             _slack_http(payload), client_id="c", client_secret="s", code="x", redirect_uri="r"
         )
+
+
+def test_slack_authorize_url_asks_for_a_user_grant_only() -> None:
+    url = urlsplit(
+        slack_authorize_url(client_id="c", redirect_uri="https://d.example/cb", state="st")
+    )
+    query = parse_qs(url.query)
+    assert (url.netloc, url.path) == ("slack.com", "/oauth/v2/authorize"), url
+    assert query["user_scope"] == ["users:read"], "identity only"
+    assert "scope" not in query, "a bot scope would install the app into the workspace"
+    assert query["state"] == ["st"] and query["redirect_uri"] == ["https://d.example/cb"], query
+    assert "code_challenge" not in query, "Slack takes no PKCE"
+
+
+@pytest.mark.parametrize(
+    ("user", "expected"),
+    [
+        ({"profile": {"display_name": "ines"}, "real_name": "Ines R", "name": "ir"}, "ines"),
+        ({"profile": {"display_name": ""}, "real_name": "Ines R", "name": "ir"}, "Ines R"),
+        ({"profile": {}, "name": "ir"}, "ir"),
+        ({}, None),
+    ],
+)
+async def test_fetch_slack_user_name_prefers_display_then_real_then_handle(
+    user: dict[str, object], expected: str | None
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/users.info", request.url
+        assert request.url.params["user"] == "U1", request.url
+        assert request.headers["Authorization"] == "Bearer xoxp-1", request.headers
+        return httpx.Response(200, json={"ok": True, "user": user})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    name = await fetch_slack_user_name(http, access_token="xoxp-1", user_id="U1")
+    assert name == expected, f"got {name!r}"
+
+
+async def test_fetch_slack_user_name_is_none_when_slack_refuses() -> None:
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(200, json={"ok": False, "error": "missing_scope"})
+        )
+    )
+    name = await fetch_slack_user_name(http, access_token="xoxp-1", user_id="U1")
+    assert name is None, "a refusal falls back to the caller's default, it does not raise"
+
+
+def test_microsoft_sign_in_returns_the_canonical_directory_and_object_ids() -> None:
+    tokens = _microsoft_tokens(
+        tid=TENANT.upper(), oid=OID.upper(), aud="app-1", name="Ines", preferred_username="i@x"
+    )
+    signed = verify_microsoft_sign_in(tokens, MICROSOFT)
+    assert (signed.tenant_id, signed.object_id, signed.name) == (TENANT, OID, "Ines"), signed
+
+
+@pytest.mark.parametrize(
+    "claims",
+    [
+        {"tid": "33333333-3333-3333-3333-333333333333", "oid": OID, "aud": "app-1"},
+        {"tid": TENANT, "oid": OID, "aud": "other-app"},
+        {"tid": TENANT, "aud": "app-1"},
+    ],
+    ids=["other-tenant", "other-app", "no-object-id"],
+)
+def test_microsoft_sign_in_refuses_foreign_directories_apps_and_missing_ids(
+    claims: dict[str, str],
+) -> None:
+    with pytest.raises(MicrosoftIdentityMismatch):
+        verify_microsoft_sign_in(_microsoft_tokens(**claims), MICROSOFT)
+
+
+def test_microsoft_sign_in_refuses_a_response_without_an_id_token() -> None:
+    tokens = MicrosoftTokens(
+        access_token="at", refresh_token=None, expires_in=3600, scope="", id_token=None
+    )
+    with pytest.raises(MicrosoftIdentityMismatch):
+        verify_microsoft_sign_in(tokens, MICROSOFT)
+
+
+def test_microsoft_sign_in_refuses_a_directory_guest() -> None:
+    claims = {
+        "tid": TENANT,
+        "oid": OID,
+        "aud": "app-1",
+        "iss": f"https://login.example.com/{TENANT}/v2.0",
+        "idp": "https://sts.example.net/home-directory/",
+    }
+    with pytest.raises(MicrosoftGuestRefused, match="admin"):
+        verify_microsoft_sign_in(_microsoft_tokens(**claims), MICROSOFT)
+
+
+def test_microsoft_sign_in_accepts_a_member_whose_idp_is_the_directory_itself() -> None:
+    issuer = f"https://login.example.com/{TENANT}/v2.0"
+    tokens = _microsoft_tokens(tid=TENANT, oid=OID, aud="app-1", iss=issuer, idp=issuer)
+    assert verify_microsoft_sign_in(tokens, MICROSOFT).object_id == OID, (
+        "idp equal to iss is no guest"
+    )
