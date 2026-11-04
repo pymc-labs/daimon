@@ -55,19 +55,19 @@ def test_a_page_of_a_module_that_is_off_has_no_link() -> None:
 
 
 def test_pages_are_the_list_pages_the_caller_may_open() -> None:
-    root = f"https://app.example.com/w/{TENANT}"
+    """Pages are paths under the workspace root, so the id is spelled once per turn."""
     member = _links().for_tenant(TENANT, admin=False).pages()
     assert member == {
-        "chat": f"{root}/chat",
-        "channels": f"{root}/channels",
-        "routines": f"{root}/routines",
-        "spend": f"{root}/credits/spend",
-        "profile": f"{root}/profile",
+        "chat": "/chat",
+        "channels": "/channels",
+        "routines": "/routines",
+        "spend": "/credits/spend",
+        "profile": "/profile",
     }, "a member has no integrations or admin pages"
     admin = _links().for_tenant(TENANT, admin=True).pages()
-    assert admin["integrations"] == f"{root}/integrations", "an admin has the integrations list"
-    assert admin["github"] == f"{root}/integrations/github"
-    assert admin["admin"] == f"{root}/admin", "the admin page opens on no one"
+    assert admin["integrations"] == "/integrations", "an admin has the integrations list"
+    assert admin["github"] == "/integrations/github"
+    assert admin["admin"] == "/admin", "the admin page opens on no one"
 
 
 def test_pages_leave_out_modules_that_are_off_but_keep_the_profile() -> None:

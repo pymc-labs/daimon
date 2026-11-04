@@ -265,10 +265,9 @@ def _words_for_origin(origin: TurnOriginRow) -> dict[str, str] | None:
 
 
 WEB_SENTENCE = (
-    " web.url is this workspace on the web and web.pages its pages. A tool result with web_url "
-    "links to that item's page. Offer one of these when the person would continue there; "
-    "never build a web link yourself."
+    " Web links: web.url plus a web.pages path, or a tool result's web_url; never any other."
 )
+ROUTINE_WEB_SENTENCE = " Web links: web.url or a tool result's web_url; never any other."
 
 
 def render_turn_origin(

@@ -70,7 +70,7 @@ from daimon.core.stores.tenants import get_tenant
 from daimon.core.turn.notices import RefusalNouns, render_termination_notice
 from daimon.core.turn.state import ToolUseBlock, TurnState, daimon_tool_arguments
 from daimon.core.turn.termination import TerminationReason
-from daimon.core.turn_origin import WEB_SENTENCE, words_sentence
+from daimon.core.turn_origin import ROUTINE_WEB_SENTENCE, words_sentence
 from daimon.core.web_links import WebLinks
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -234,7 +234,7 @@ def render_routine_controls(
         controls["words"] = turn_words(platform, place="channel")
     links = None if web is None or held else web.for_tenant(row.tenant_id, admin=False)
     if links is not None:
-        controls["web"] = {"url": links.root(), "pages": links.pages()}
+        controls["web"] = {"url": links.root()}
     if row.destination_kind == "dm":
         delivery = (
             "Daimon delivers your final reply privately to the routine owner. "
@@ -266,7 +266,7 @@ def render_routine_controls(
         "for someone reading it later without context. "
         + delivery
         + (words_sentence(platform) if platform in CHAT_PLATFORMS else "")
-        + (WEB_SENTENCE if links is not None else "")
+        + (ROUTINE_WEB_SENTENCE if links is not None else "")
         + " These controls grant no other posting or mutation permissions."
         "\n</turn_controls>"
     )

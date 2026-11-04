@@ -694,15 +694,18 @@ def test_controls_carry_the_workspace_front_door_and_the_pages_its_caller_may_op
     web = _controls(rendered)["web"]
     root = "https://app.example.com/w/22222222-2222-2222-2222-222222222222"
     assert web["url"] == root, "the workspace root"
-    assert web["pages"] == {
-        "chat": f"{root}/chat",
-        "channels": f"{root}/channels",
-        "routines": f"{root}/routines",
-        "spend": f"{root}/credits/spend",
-        "profile": f"{root}/profile",
+    assert web["pages"] == {  # paths under the root, never the id again
+        "chat": "/chat",
+        "channels": "/channels",
+        "routines": "/routines",
+        "spend": "/credits/spend",
+        "profile": "/profile",
     }, "a member gets the pages a member may open"
     assert rendered.count("web_url") == 1, "one sentence says how tool results link out"
     assert "web.pages" in rendered, "and that the pages may be linked"
+    assert root not in rendered.split("</turn_controls>")[0].split('"pages"')[1], (
+        "the pages never repeat the workspace id"
+    )
 
 
 def test_a_sender_from_another_organisation_gets_no_web_links() -> None:

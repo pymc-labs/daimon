@@ -101,7 +101,7 @@ class TenantLinks:
         """The workspace's front door, `{public_url}/w/{workspace}`."""
         return f"{self.base}/w/{self.tenant_id}"
 
-    def _url(
+    def _path(
         self, key: LinkKey, segment: str | None = None, value: str | None = None
     ) -> str | None:
         link = DEEP_LINKS[key]
@@ -110,10 +110,15 @@ class TenantLinks:
         if not self.admin and link.cap not in MEMBER_CAPS:
             return None
         path = link.path.replace("{id}", _quote(segment)) if segment is not None else link.path
-        url = f"{self.root()}{path}"
         if link.param is not None and value:
-            url += f"?{link.param}={_quote(value)}"
-        return url
+            path += f"?{link.param}={_quote(value)}"
+        return path
+
+    def _url(
+        self, key: LinkKey, segment: str | None = None, value: str | None = None
+    ) -> str | None:
+        path = self._path(key, segment, value)
+        return None if path is None else f"{self.root()}{path}"
 
     def agent(self, agent_id: str, node: str | None = None) -> str | None:
         """An agent's editor; `node` opens one part of it (`instructions`, `skill:<id>`)."""
@@ -171,19 +176,19 @@ class TenantLinks:
         return self._url("chat", None, agent_id)
 
     def pages(self) -> dict[str, str]:
-        """Page key to URL for the pages this caller may open: the list pages of the
-        modules that are on, plus the profile every signed-in person has."""
+        """Page key to path under `root()` for the pages this caller may open: the list
+        pages of the modules that are on, plus the profile every signed-in person has."""
         found = {
-            "chat": self.chat(),
-            "channels": self.channel(),
-            "routines": self.routine(),
-            "spend": self.spend(),
-            "integrations": self.integrations(),
-            "github": self.github(),
-            "admin": self.person_list(),
+            "chat": self._path("chat"),
+            "channels": self._path("channel"),
+            "routines": self._path("routine"),
+            "spend": self._path("spend"),
+            "integrations": self._path("integrations"),
+            "github": self._path("github"),
+            "admin": self._path("person"),
         }
-        pages = {key: url for key, url in found.items() if url is not None}
-        pages["profile"] = f"{self.root()}/profile"
+        pages = {key: path for key, path in found.items() if path is not None}
+        pages["profile"] = "/profile"
         return pages
 
 
