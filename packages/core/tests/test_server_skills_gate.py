@@ -32,7 +32,17 @@ def test_text_changes_apply_without_approval() -> None:
 
 
 @pytest.mark.parametrize(
-    ("path", "body"), [("run.py", b"print(1)\n"), ("tool", b"#!/bin/sh\necho\n")]
+    ("path", "body"),
+    [
+        ("run.py", b"print(1)\n"),
+        ("tool", b"#!/bin/sh\necho\n"),
+        ("notes.md", b"#!/bin/sh\necho\n"),
+        ("bin/tool", b"echo hi\n"),
+        ("scripts/Run.PY", b"print(1)\n"),
+        ("a/b/fit.R", b"x <- 1\n"),
+        ("lib/helper.whl", b"PK"),
+        ("Makefile", b"all:\n"),
+    ],
 )
 def test_a_new_or_changed_script_waits(path: str, body: bytes) -> None:
     added = diff_manifests({"SKILL.md": "1"}, {"SKILL.md": "1", path: "1"})

@@ -6,6 +6,8 @@ import hashlib
 import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from pathlib import PurePosixPath
+from typing import Final
 
 from daimon.core.mcp_skills.manifest import SkillEntry
 from daimon.core.skills.ingest import is_script
@@ -19,9 +21,36 @@ __all__ = [
     "diff_manifests",
     "manifest_digest",
     "manifest_of",
+    "may_run",
     "needs_approval",
     "plan_repins",
 ]
+
+
+# Files that only hold text or data. Anything else could be run, so a change to it waits.
+_INERT_SUFFIXES: Final = frozenset(
+    {
+        ".csv",
+        ".gif",
+        ".jpeg",
+        ".jpg",
+        ".json",
+        ".md",
+        ".pdf",
+        ".png",
+        ".svg",
+        ".tsv",
+        ".txt",
+        ".webp",
+        ".yaml",
+        ".yml",
+    }
+)
+
+
+def may_run(path: str, body: bytes) -> bool:
+    """Whether a skill file could be run: a script, or anything not known to be inert."""
+    return is_script(path, body) or PurePosixPath(path).suffix.lower() not in _INERT_SUFFIXES
 
 
 def manifest_of(entry: SkillEntry) -> dict[str, str]:
@@ -68,9 +97,9 @@ def needs_approval(
     old_tools: JsonValue,
     new_tools: JsonValue,
 ) -> bool:
-    """An added or changed file that runs, or a changed `allowed-tools`, waits for a person."""
+    """An added or changed file that may run, or a changed `allowed-tools`, waits for a person."""
     touched = (*changes.added, *changes.changed)
-    return old_tools != new_tools or any(is_script(p, files.get(p, b"")) for p in touched)
+    return old_tools != new_tools or any(may_run(p, files.get(p, b"")) for p in touched)
 
 
 @dataclass(frozen=True, slots=True)
