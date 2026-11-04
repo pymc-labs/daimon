@@ -131,8 +131,10 @@ library read-only and follows the server.
 
 Daimon checks the server every 15 minutes, or on **Check now** in the library.
 A new version moves every agent that follows the skill. An agent that pins it
-shows **Update available** instead. A skill the server no longer offers keeps
-its last version. **Fork** makes an editable copy that no longer follows.
+shows **Update available** instead; following again moves it at once. A skill
+the server no longer offers keeps its last version. **Fork** makes an editable
+copy, under a name you choose, that no longer follows. Agents fixed by the
+server's settings show **Managed by settings** and never move.
 
 An update that adds or changes a script, or changes `allowed-tools`, waits
 until an admin approves it. Other changes, such as `.md` and `.txt` files,
