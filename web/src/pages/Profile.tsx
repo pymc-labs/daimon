@@ -51,7 +51,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 const Empty = ({ children }: { children: React.ReactNode }) => <div className="px-4 py-6 text-center text-sm text-muted-foreground">{children}</div>
-const Row = ({ children }: { children: React.ReactNode }) => <div className="flex items-center gap-3 px-4 py-3 text-sm">{children}</div>
+const Row = ({ children }: { children: React.ReactNode }) => <div className="flex min-h-14 items-center gap-3 px-4 py-3 text-sm">{children}</div>
 
 function Body({ d }: { d: Profile }) {
   const qc = useQueryClient()
@@ -93,7 +93,7 @@ function Body({ d }: { d: Profile }) {
         ))}
       </Section>
 
-      <Section title="Connected accounts">
+      {!!(accounts.length || chatAccounts.length || signIns.length) && <Section title="Sign-ins">
         {accounts.map((a) => (
           <Row key={a.id}>
             <BrandIcon brand={a.provider} />
@@ -122,6 +122,9 @@ function Body({ d }: { d: Profile }) {
             }}>Remove</Button>
           </Row>
         ))}
+      </Section>}
+
+      <Section title="Connected accounts">
         {d.connections.map((c) => (
           <Row key={`${c.kind}:${c.agent?.id}:${c.key}`}>
             <span className="flex min-w-0 flex-1 items-center gap-1.5 truncate">{c.label}{c.agent && <><span className="text-muted-foreground">for</span><AgentLink id={c.agent.id} name={c.agent.name} /></>}</span>
@@ -130,7 +133,7 @@ function Body({ d }: { d: Profile }) {
             }}>Disconnect</Button>
           </Row>
         ))}
-        {!accounts.length && !chatAccounts.length && !signIns.length && !d.connections.length && <Empty>Nothing is connected</Empty>}
+        {!d.connections.length && <Empty>Nothing is connected</Empty>}
       </Section>
 
       <Section title="Coding keys">

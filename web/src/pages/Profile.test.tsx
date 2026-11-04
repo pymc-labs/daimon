@@ -53,6 +53,8 @@ describe("Profile", () => {
   it("disconnects a connected account but never the one signed in with", async () => {
     view()
     expect(await screen.findByText("Signed in")).toBeInTheDocument()
+    expect(screen.getByText("Sign-ins")).toBeInTheDocument()
+    expect(screen.getByText("Connected accounts")).toBeInTheDocument()
     expect(screen.queryByRole("button", { name: "Disconnect Discord maya.l" })).toBeNull()
     await userEvent.click(await screen.findByRole("button", { name: "Disconnect Slack maya@northwind" }))
     await userEvent.click(await screen.findByRole("button", { name: "Disconnect" }))
