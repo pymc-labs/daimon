@@ -7,6 +7,7 @@ import uuid
 from typing import Any
 
 import httpx
+import pytest
 from cryptography.fernet import Fernet
 from daimon.core.config import Settings
 from daimon.core.ma_identity import derive_agent_uuid
@@ -244,6 +245,26 @@ async def test_working_and_remove_when_owner_then_returns_panel(
     assert [r["name"] for r in removed.json()["repos"]] == ["acme/docs"], "only that repo goes"
     assert again.status_code == 404, "a repo no longer listed is not found"
     assert "set_working_repo" in await _tools(db_session_factory, owner.tenant_id), "audited"
+
+
+async def test_working_when_grants_exceed_a_limit_then_409_with_its_line(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A grant set over a limit (here a lowered one) is refused with the limit's own line."""
+    agents, owner, _other = await agent_people(db_session)
+    await _repos(db_session_factory, owner.tenant_id, owner.account_id)
+    monkeypatch.setattr(github_access, "MAX_AGENT_INSTALLATIONS", 0)
+    token = await sign_in_token(db_session_factory, owner)
+    async with agent_client(agents, owner.tenant_id, db_session_factory, token) as client:
+        put = await client.put(
+            "/api/agents/ag_w/github/working", json={"repo": "acme/app"}, headers=OWN
+        )
+    assert put.status_code == 409, put.text
+    assert "up to 0 GitHub accounts or orgs" in put.text, (
+        "the limit's own line, not the not-on-the-list one"
+    )
 
 
 async def test_actions_when_not_manager_then_403(

@@ -41,6 +41,9 @@ from daimon.core.specs import SkillRepo
 from daimon.core.stores.domain import GitHubPushResyncRow, UserSkillRow
 from daimon.core.stores.github_access import (
     AgentRepo,
+    InstallationLimitError,
+    ReadOnlyMultiInstallationError,
+    SessionVaultBudgetError,
     active_grant_for_repo,
     list_agent_repos,
     remove_agent_repo,
@@ -626,7 +629,15 @@ async def set_working(
                 account_id=actor.account_id,
                 agent_name=target.agent.name,
             )
+        except (
+            InstallationLimitError,
+            SessionVaultBudgetError,
+            ReadOnlyMultiInstallationError,
+        ) as exc:
+            # Each says in one line what limit the change hits, as the chat tool relays it.
+            raise AgentEditError(str(exc), kind="conflict") from exc
         except ValueError as exc:
+            # The store's one plain ValueError: the repo is not a live grant of this agent.
             raise AgentEditError("That repo is not on this agent's list.", kind="invalid") from exc
         if audited is not None:
             await audited(session, target.agent.name)
