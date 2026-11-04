@@ -116,6 +116,7 @@ async def _post_wizard_impl(
         [OutgoingPost(text=prompt, place=channel_id)],
         plan=plan,
         validate=validate,
+        pings=False,  # the form goes out with mentions suppressed, so it reaches no one by tag
     )
     [spec] = validated
 

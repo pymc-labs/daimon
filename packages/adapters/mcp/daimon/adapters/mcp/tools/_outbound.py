@@ -213,12 +213,14 @@ async def prepare_posts(
     plan: ReachPlan | None,
     scope: TurnScope | None = None,
     validate: Callable[[list[RenderedPost]], None] | None = None,
+    pings: bool = True,
 ) -> list[RenderedPost]:
     """Render every post, then check length, captions and the reach budget as a whole.
 
     ``validate`` checks the rendered posts, attribution included, and raises to
     refuse the call. Nothing has posted when this raises, and a refused call
-    counts nothing; on success the call's reach is counted.
+    counts nothing; on success the call's reach is counted. ``pings=False`` is for a
+    post sent without mentions: its people are not counted, since nobody is reached.
     """
     platform = _platform(auth)
     scope = scope or await turn_scope(runtime, auth)
@@ -233,9 +235,7 @@ async def prepare_posts(
     )
     # Discord tags the requester unless they opted out; everyone else is credited by
     # plain name, looked up the same way, so the line is never dropped.
-    needs_name = bool(scope.requester_id) and (
-        platform != "discord" or scope.requester_id in skip
-    )
+    needs_name = bool(scope.requester_id) and (platform != "discord" or scope.requester_id in skip)
     requester_name = (
         await _requester_name(runtime, auth, posts[0].place, scope.requester_id)
         if needs_name and posts and scope.requester_id
@@ -259,7 +259,7 @@ async def prepare_posts(
         )
         for post in posts
     ]
-    ping_users.set(frozenset(uid for r in rendered for uid in r.user_ids))
+    ping_users.set(frozenset(uid for r in rendered for uid in r.user_ids) if pings else frozenset())
     if validate is not None:
         validate(rendered)
     if not scope.interactive:
@@ -281,7 +281,9 @@ async def prepare_posts(
     call = ReachTally(
         threads=sum(post.new_thread for post in posts),
         places=frozenset(p.place for p in posts if not p.new_thread and _outside(p, scope)),
-        people=frozenset(uid for r in rendered for uid in r.user_ids) - skip,
+        people=frozenset(uid for r in rendered for uid in r.user_ids) - skip
+        if pings
+        else frozenset(),
     )
     async with runtime.session_factory() as session, session.begin():
         so_far, approved = await lock_tally(session, tenant_id=auth.tenant_id, turn_key=scope.key)

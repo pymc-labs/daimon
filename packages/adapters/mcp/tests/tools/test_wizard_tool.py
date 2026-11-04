@@ -679,3 +679,32 @@ async def test_post_wizard_when_attributed_prompt_too_long_then_refused_and_coun
         tally, _ = await lock_tally(session, tenant_id=tenant.id, turn_key=scope.key)
     assert tally.people == frozenset(), "a refused form tags nobody"
     assert tally.threads == 0 and not tally.places, "and reaches nowhere"
+
+
+async def test_post_wizard_when_prompt_tags_someone_then_no_people_counted(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A form goes out with mentions suppressed, so a tag in it reaches no one."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    auth = _auth_identity(tenant_id=tenant.id, account_id=account.id)
+    patch_discord_http(monkeypatch, _happy_path_handler({}, message_id="9305"))
+    runtime = _runtime(committing_sessionmaker)
+
+    await _post_wizard_impl(
+        runtime,
+        auth,
+        prompt="Configure <@7>'s pipeline",
+        steps=[_one_choice_step()],
+        channel_id="222",
+        plan=ReachPlan(threads=0, places=1, people=0),
+    )
+
+    scope = await turn_scope(runtime, auth)
+    async with committing_sessionmaker.begin() as session:
+        tally, _ = await lock_tally(session, tenant_id=tenant.id, turn_key=scope.key)
+    assert tally.people == frozenset(), "nobody was pinged, so nobody is counted"
+    assert tally.places == frozenset({"222"}), "the place still counts"
