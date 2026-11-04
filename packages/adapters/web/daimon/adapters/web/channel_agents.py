@@ -16,6 +16,7 @@ from daimon.adapters.web.caller import WebCaller
 from daimon.adapters.web.faces import avatars_of
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.agent_pins import agent_pin_names
+from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from pydantic import BaseModel
 
 
@@ -42,10 +43,14 @@ async def agent_refs(
     if not wanted:
         return {}
     found: dict[str, BetaManagedAgentsAgent] = {}
-    for agent in await listed_agents(runtime, tenant_id):
-        for name in agent_pin_names(agent.name, agent.metadata):
-            if name in wanted:
-                found.setdefault(name, agent)
+    agents = await listed_agents(runtime, tenant_id)
+    # An agent's own names win over the source names a reader variant also answers to.
+    for borrowed in (False, True):
+        for agent in agents:
+            own = (agent.name, agent.metadata.get(MA_METADATA_KEY_NAME))
+            for name in agent_pin_names(agent.name, agent.metadata):
+                if name in wanted and (borrowed or name in own):
+                    found.setdefault(name, agent)
     if "agents.view" not in caller.capabilities:
         return {key: _PRIVATE if key in found else _GONE for key in wanted}
     avatars = await avatars_of(runtime, tenant_id, list({a.id: a for a in found.values()}.values()))
