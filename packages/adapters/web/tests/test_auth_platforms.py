@@ -547,7 +547,7 @@ async def test_microsoft_link_asks_to_pick_an_account_but_sign_in_does_not(
     link_query, sign_query = (parse_qs(urlsplit(u).query) for u in urls)
     assert link_query["prompt"] == ["select_account"], "a link lets the person pick the account"
     assert "prompt" not in sign_query, "sign-in takes the account the browser has"
-    assert link_query["scope"] == ["openid profile email"], "identity only, no Graph access"
+    assert link_query["scope"] == ["openid profile"], "identity only, no email or Graph access"
     assert link_query["code_challenge_method"] == ["S256"], link_query
 
 

@@ -34,8 +34,9 @@ SLACK_TOKEN_URL = "https://slack.com/api/oauth.v2.access"
 SLACK_USERS_INFO_URL = "https://slack.com/api/users.info"
 # A user grant needs one user scope; this one also lets sign-in read the person's name.
 SLACK_SIGN_IN_USER_SCOPES: tuple[str, ...] = ("users:read",)
-# Sign-in only needs who the person is; the Connect Microsoft scopes are asked for there.
-MICROSOFT_SIGN_IN_SCOPES: tuple[str, ...] = ("openid", "profile", "email")
+# Sign-in reads only name, username, tid, oid and aud. No "email": tenants consent org-wide
+# to openid and profile, and an extra scope would prompt each person for it.
+MICROSOFT_SIGN_IN_SCOPES: tuple[str, ...] = ("openid", "profile")
 
 
 def code_challenge_s256(verifier: str) -> str:
