@@ -7997,6 +7997,24 @@
         'type': 'object',
       }),
     }),
+    'resync_agent_skills': dict({
+      'description': '''
+        Sync an agent's repo skills now from their recorded repos; an unchanged skill is
+        skipped. Only an owner of the agent or an admin.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'agent_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'agent_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'revert_agent': dict({
       'description': '''
         Restore a recorded version of an agent's setup as its next version; name, avatar,

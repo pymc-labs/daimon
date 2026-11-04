@@ -11,7 +11,9 @@ from daimon.adapters.mcp.tools import _web_url as web_url
 from daimon.adapters.mcp.tools import agent_edits as edits
 from daimon.adapters.mcp.tools import skill_library_edits as library
 from daimon.core.agent_editing import AgentEditError
+from daimon.core.agent_github import NOT_CONFIGURED, ResyncResults
 from daimon.core.config import WebSettings
+from daimon.core.skill_library import SyncedSkill
 from daimon.core.skill_library_files import SkillRef
 from fastmcp.exceptions import ToolError
 
@@ -24,6 +26,7 @@ def runtime(monkeypatch):
         monkeypatch.setattr(module, "_edit_deps", lambda _rt: object(), raising=False)
         monkeypatch.setattr(module, "_edit_actor", lambda _a: object(), raising=False)
     monkeypatch.setattr(edits, "_change_deps", lambda _rt: object())
+    monkeypatch.setattr(edits, "_web_edit_deps", lambda _rt: object())
 
     async def confirmed(*_a: Any, **_k: Any) -> None:
         return None
@@ -36,7 +39,12 @@ def runtime(monkeypatch):
     monkeypatch.setattr(web_url, "role_of_account", admin_role)
     rt = fake_runtime()
     web = WebSettings(public_url="https://web.test")  # type: ignore[call-arg]
-    rt.settings = SimpleNamespace(web=web)  # type: ignore[misc]
+    rt.settings = SimpleNamespace(  # type: ignore[misc]
+        web=web,
+        github_app=SimpleNamespace(app_id="1", private_key="key"),
+        github=SimpleNamespace(max_tarball_bytes=10, max_tarball_decompressed_bytes=20),
+    )
+    object.__setattr__(rt, "fernet", object())
     return rt
 
 
@@ -104,3 +112,47 @@ async def test_library_restore_when_admin_then_name_version_and_link(runtime, mo
     monkeypatch.setattr(library.skill_library_files, "restore_library_version", fake_restore)
     out = await library._restore_impl(runtime, make_auth(), "notes", "3")
     assert (out.name, out.version) == ("Notes", "9"), "the version written, not the one restored"
+
+
+async def test_resync_when_owner_then_results_and_agent_link(runtime, monkeypatch):
+    seen: dict[str, Any] = {}
+
+    async def fake_resync(_deps, **kw: Any):
+        seen.update(kw)
+        return ResyncResults(results=[SyncedSkill(name="notes", action="updated")])
+
+    monkeypatch.setattr(edits.agent_github, "resync", fake_resync)
+    auth = make_auth(admin=False)
+    out = await edits._resync_impl(runtime, auth, "ag")
+    assert seen["ma_agent_id"] == "ag", "the agent asked for reaches core"
+    assert seen["sync"].app_id == "1", "the sync reads the deployment's GitHub app settings"
+    assert [(r.name, r.action) for r in out.results] == [("notes", "updated")], "data, not text"
+    assert out.web_url == f"https://web.test/w/{auth.tenant_id}/agents/ag", "the agent's page"
+
+
+async def test_resync_when_not_owner_or_admin_then_tool_error(runtime, monkeypatch):
+    async def forbidden(*_a: Any, **_k: Any):
+        raise AgentEditError("Ask an admin or an owner.", kind="forbidden")
+
+    monkeypatch.setattr(edits.agent_github, "resync", forbidden)
+    with pytest.raises(ToolError, match="admin or an owner"):
+        await edits._resync_impl(runtime, make_auth(admin=False), "ag")
+
+
+async def test_resync_when_github_not_configured_then_tool_error(runtime, monkeypatch):
+    async def unreachable(*_a: Any, **_k: Any):
+        raise AssertionError("no sync without the stored-token key")
+
+    monkeypatch.setattr(edits.agent_github, "resync", unreachable)
+    object.__setattr__(runtime, "fernet", None)
+    with pytest.raises(ToolError, match=NOT_CONFIGURED):
+        await edits._resync_impl(runtime, make_auth(), "ag")
+
+    object.__setattr__(runtime, "fernet", object())
+
+    async def not_set_up(*_a: Any, **_k: Any):
+        raise AgentEditError(NOT_CONFIGURED, kind="conflict")
+
+    monkeypatch.setattr(edits.agent_github, "resync", not_set_up)
+    with pytest.raises(ToolError, match=NOT_CONFIGURED):
+        await edits._resync_impl(runtime, make_auth(), "ag")

@@ -22,6 +22,9 @@
   "DELETE /api/agents/{agent_id}/draft": {
    "tool": "update_agent"
   },
+  "DELETE /api/agents/{agent_id}/github/repos/{owner}/{name}": {
+   "tool": "remove_repo"
+  },
   "DELETE /api/agents/{agent_id}/keys/{key}": {
    "tool": "remove_agent_key"
   },
@@ -125,6 +128,12 @@
   },
   "POST /api/agents/{agent_id}/copy": {
    "tool": "fork_agent"
+  },
+  "POST /api/agents/{agent_id}/github/connect": {
+   "tool": "github_connect"
+  },
+  "POST /api/agents/{agent_id}/github/resync": {
+   "tool": "resync_agent_skills"
   },
   "POST /api/agents/{agent_id}/nodes/data_server/connect": {
    "gap": "data-server node connect; logic lives in the web adapter (nodes.data_server), move to core first"
@@ -246,6 +255,9 @@
   },
   "PUT /api/agents/skills/{skill_id}/files": {
    "tool": "save_library_skill_files"
+  },
+  "PUT /api/agents/{agent_id}/github/working": {
+   "tool": "set_working_repo"
   },
   "PUT /api/agents/{agent_id}/keys/{key}": {
    "tool": "request_agent_key"

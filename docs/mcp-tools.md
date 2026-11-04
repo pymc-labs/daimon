@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 213 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 214 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -81,6 +81,7 @@ owners and save a skill's files.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
+| `resync_agent_skills` | all callers | Sync an agent's repo skills now from their recorded repos; an unchanged skill is skipped. |
 | `revert_agent` | all callers | Restore a recorded version of an agent's setup as its next version; name, avatar, places and sign-ins stay. |
 | `save_agent_skill_files` | all callers | Edit an agent's skill file: publish text files as a new version of one of its skills, or a new skill when ``skill_id`` is left out, and pin it. |
 | `set_agent_owners` | admin only | Set an agent's owner and co-owners to exactly these web person or account ids. |
