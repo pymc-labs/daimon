@@ -24,6 +24,7 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.outbound.mentions import ping_users
 from daimon.core.outbound.reach import (
     NO_CARD,
+    NO_PLAN,
     SHORT_CAPTION,
     TOO_LONG,
     ReachPlan,
@@ -139,6 +140,23 @@ async def test_prepare_posts_when_plan_undercounts_then_actual_counts(sessionmak
     )
     with pytest.raises(ToolError, match="approve_reach"):
         await prepare_posts(runtime, auth, _threads(1), plan=plan, scope=scope)
+
+
+@pytest.mark.parametrize("platform", PLATFORMS)
+@pytest.mark.parametrize("plan", [None, ReachPlan(threads=0, places=0, people=0)], ids=str)
+async def test_prepare_posts_when_reach_call_has_no_plan_then_one_line_ask(
+    sessionmaker, platform, plan
+):
+    """A zero plan is counted as actual; only a missing one is refused, and only for reach."""
+    runtime, auth = await _setup(sessionmaker, platform)
+    post = [OutgoingPost(text="hello", place="C1")]
+    if plan is not None:
+        assert await prepare_posts(runtime, auth, post, plan=plan, scope=_scope()), platform
+        return
+    with pytest.raises(ToolError) as refused:
+        await prepare_posts(runtime, auth, post, plan=plan, scope=_scope())
+    assert str(refused.value) == NO_PLAN, f"{platform}: one line asking for the totals"
+    assert "\n" not in NO_PLAN, "the ask is a single line"
 
 
 @pytest.mark.parametrize("platform", PLATFORMS)

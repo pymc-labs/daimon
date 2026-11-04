@@ -21,6 +21,7 @@ NO_CARD = (
     "Not posted: this reaches more threads, places or people than Daimon posts without "
     f"approval, and approval cannot be asked here. {CHEAPER_SHAPE}"
 )
+NO_PLAN = "Not posted: add plan with the totals for the whole request (threads, places, people)."
 TOO_LONG = "Lead with the ask and a three-line summary; attach or link the rest."
 SHORT_CAPTION = "Say who it is for, the one takeaway, and how long it runs."
 

@@ -176,13 +176,13 @@ def register_wizard_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         prompt: str,
         steps: list[Step],
         channel_id: str,
-        plan: ReachPlan,
+        plan: ReachPlan | None = None,
     ) -> str:
         """Post a multi-step form in the channel instead of asking in prose.
 
-        ``plan`` counts everything this turn will post: threads, places and people
-        tagged. Past the limit the call is refused until approve_reach returns
-        approved.
+        ``plan`` counts everything this turn posts outside this conversation: threads,
+        places and people tagged; posts here need none. Past the limit the call is
+        refused until approve_reach returns approved.
 
         Each entry in ``steps`` carries ``question`` (the text shown to the
         user), ``kind`` (``choice``, ``multi`` or ``text``), and ``options``

@@ -193,11 +193,12 @@ async def _send_one(
 def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
     async def send_direct_message(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, recipient_id: str, content: str, plan: ReachPlan
+        ctx: Context, recipient_id: str, content: str, plan: ReachPlan | None = None
     ) -> DirectMessageResult:
         """Privately message one human member of the current workspace.
 
-        ``plan`` counts everything this turn will post: threads, places and people.
+        ``plan`` counts everything this turn posts outside this conversation: threads,
+        places and people; a DM to anyone but the requester needs it.
         A person who asked never to be tagged is not messaged on someone else's
         request; say so rather than retrying.
 
@@ -426,7 +427,7 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         channel_id: str,
         name: str,
         content: str,
-        plan: ReachPlan,
+        plan: ReachPlan | None = None,
         batch: list[ThreadDraft] | None = None,
     ) -> (
         ThreadRow
@@ -436,10 +437,10 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ):
         """Create a new thread and post content as its first message.
 
-        ``plan`` counts everything this turn will post: threads, places and people
-        tagged. Past the limit the call is refused until approve_reach returns
-        approved. ``batch`` opens more threads in the same channel in one call,
-        counted together; the result is then a list.
+        ``plan`` counts everything this turn posts outside this conversation: threads,
+        places and people tagged; posts here need none. Past the limit the call is
+        refused until approve_reach returns approved. ``batch`` opens more threads in
+        the same channel in one call, counted together; the result is then a list.
 
         ``content`` is required and becomes the thread's first message; a thread
         cannot open without one. ``name`` is the thread's title (1-100 characters)
@@ -572,7 +573,7 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context,
         channel_id: str,
         content: str,
-        plan: ReachPlan,
+        plan: ReachPlan | None = None,
         attachments: list[dict[str, str]] | None = None,
         file_handles: list[str] | None = None,
         batch: list[MessageDraft] | None = None,
@@ -584,9 +585,10 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ):
         """Post a message to a channel.
 
-        ``plan`` counts everything this turn will post: threads, places and people
-        tagged. Past the limit the call is refused until approve_reach returns
-        approved. Tags become plain names for people who asked not to be tagged.
+        ``plan`` counts everything this turn posts outside this conversation: threads,
+        places and people tagged; posts here need none. Past the limit the call is
+        refused until approve_reach returns approved. Tags become plain names for
+        people who asked not to be tagged.
         ``batch`` sends more text messages, each to its own ``channel_id``, in the same
         call, counted together; files go with the first message only, and the result is
         then a list.

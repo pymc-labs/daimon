@@ -31,6 +31,7 @@ from daimon.core.outbound.mentions import (
 from daimon.core.outbound.opt_out import opt_out_names, tag_opt_outs
 from daimon.core.outbound.reach import (
     NO_CARD,
+    NO_PLAN,
     SHORT_CAPTION,
     TOO_LONG,
     ReachPlan,
@@ -286,6 +287,10 @@ async def prepare_posts(
     )
     if not reaching:
         return rendered
+    if plan is None and settings.reach_budget_enabled:
+        # The own conversation never needs a plan; reaching others does, so the card shows it all.
+        record_denial("reach_no_plan")
+        raise ToolError(NO_PLAN)
     async with runtime.session_factory() as session, session.begin():
         so_far, approved = await lock_tally(session, tenant_id=auth.tenant_id, turn_key=scope.key)
         if settings.reach_budget_enabled:

@@ -65,6 +65,8 @@ _SEND_MESSAGES = 1 << 11
 
 _SHORT_ID_RE = re.compile(r"wz:([A-Za-z0-9]{8}):")
 
+_ONE_PLACE = ReachPlan(threads=0, places=1, people=0)
+
 
 def _runtime(
     sessionmaker: async_sessionmaker[AsyncSession],
@@ -280,6 +282,7 @@ async def test_post_wizard_returns_the_stop_signal(
         prompt="Configure the pipeline",
         steps=[_one_choice_step()],
         channel_id="222",
+        plan=_ONE_PLACE,
     )
     assert result == _STOP_SIGNAL, "the tool must return exactly the module's stop-signal constant"
     assert "end your reply" in result.lower(), (
@@ -310,6 +313,7 @@ async def test_post_wizard_stores_the_form_with_its_message_id(
         prompt="Configure the pipeline",
         steps=[_one_choice_step()],
         channel_id="222",
+        plan=_ONE_PLACE,
     )
 
     short_id = _short_id_from_posted(posted)
@@ -392,6 +396,7 @@ async def test_post_wizard_persists_a_content_address_for_every_step_image(
             _one_choice_step(key="region", image_handle=handle2_id),
         ],
         channel_id="222",
+        plan=_ONE_PLACE,
     )
 
     short_id = _short_id_from_posted(posted)
@@ -447,6 +452,7 @@ async def test_post_wizard_expiry_follows_the_image_signature(
         prompt="Configure the pipeline",
         steps=[_one_choice_step(image_handle=handle_id)],
         channel_id="222",
+        plan=_ONE_PLACE,
     )
 
     short_id = _short_id_from_posted(posted)
@@ -475,6 +481,7 @@ async def test_post_wizard_expiry_defaults_with_no_images(
         prompt="Configure the pipeline",
         steps=[_one_choice_step()],
         channel_id="222",
+        plan=_ONE_PLACE,
     )
 
     short_id = _short_id_from_posted(posted)
@@ -507,6 +514,7 @@ async def test_post_wizard_strips_a_caller_supplied_image_url(
         prompt="Configure the pipeline",
         steps=[_one_choice_step(image_url="https://evil.example.com/x.png")],
         channel_id="222",
+        plan=_ONE_PLACE,
     )
 
     short_id = _short_id_from_posted(posted)
@@ -541,6 +549,7 @@ async def test_post_wizard_rejects_an_over_ceiling_form(
             prompt="Configure the pipeline",
             steps=[step],
             channel_id="222",
+            plan=_ONE_PLACE,
         )
     assert "too_many" in str(excinfo.value), "the error must name the offending step's key"
 
@@ -583,6 +592,7 @@ async def test_post_wizard_writes_no_row_when_the_post_fails(
             prompt="Configure the pipeline",
             steps=[_one_choice_step()],
             channel_id="222",
+            plan=_ONE_PLACE,
         )
 
     assert (
@@ -609,6 +619,7 @@ async def test_post_wizard_refuses_on_slack(
             prompt="Configure the pipeline",
             steps=[_one_choice_step()],
             channel_id="222",
+            plan=_ONE_PLACE,
         )
 
 
