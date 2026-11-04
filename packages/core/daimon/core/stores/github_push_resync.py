@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from daimon.core._models import GitHubPushDelivery, GitHubPushResync
 from daimon.core.stores.domain import GitHubPushResyncRow
-from sqlalchemy import CursorResult, and_, case, delete, or_, select, update
+from sqlalchemy import CursorResult, and_, case, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -81,6 +82,35 @@ async def get_for_repo_ref(
         .execution_options(populate_existing=True)
     )
     row = result.scalar_one_or_none()
+    return GitHubPushResyncRow.model_validate(row) if row is not None else None
+
+
+async def get_latest_for_repo_refs(
+    session: AsyncSession,
+    *,
+    repo_refs: Collection[tuple[str, str]],
+    states: Collection[str] | None = None,
+) -> GitHubPushResyncRow | None:
+    """The most recently touched row among these (repo, ref) pairs, repo matched without case."""
+    if not repo_refs:
+        return None
+    match = or_(
+        *(
+            and_(
+                func.lower(GitHubPushResync.repo_full_name) == repo.casefold(),
+                GitHubPushResync.ref == ref,
+            )
+            for repo, ref in repo_refs
+        )
+    )
+    row = (
+        await session.scalars(
+            select(GitHubPushResync)
+            .where(match, *(() if states is None else (GitHubPushResync.state.in_(states),)))
+            .order_by(GitHubPushResync.updated_at.desc())
+            .limit(1)
+        )
+    ).first()
     return GitHubPushResyncRow.model_validate(row) if row is not None else None
 
 

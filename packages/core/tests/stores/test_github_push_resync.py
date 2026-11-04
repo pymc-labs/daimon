@@ -213,3 +213,27 @@ async def test_new_delivery_resets_retry_streak(
 
     assert fresh is not None, "a new push should be due immediately despite old backoff"
     assert fresh.attempts == 1, "the latest delivery should start a new retry streak"
+
+
+async def test_get_latest_for_repo_refs_when_case_differs_then_matches_and_filters_state(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The repo matches ignoring case, the ref exactly; a state filter narrows it."""
+    async with db_session_factory.begin() as session:
+        await store.enqueue(
+            session, repo_full_name="Owner/Repo", ref="refs/heads/main", delivery_id="d-1"
+        )
+        found = await store.get_latest_for_repo_refs(
+            session, repo_refs={("owner/repo", "refs/heads/main")}
+        )
+        other_ref = await store.get_latest_for_repo_refs(
+            session, repo_refs={("owner/repo", "refs/heads/dev")}
+        )
+        running = await store.get_latest_for_repo_refs(
+            session, repo_refs={("owner/repo", "refs/heads/main")}, states=("running",)
+        )
+        empty = await store.get_latest_for_repo_refs(session, repo_refs=set())
+    assert found is not None and found.state == "pending", "case-insensitive repo match"
+    assert other_ref is None, "the ref must match exactly"
+    assert running is None, "a pending job is not running"
+    assert empty is None, "no refs means no job"
