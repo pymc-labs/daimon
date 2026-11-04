@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -744,3 +745,20 @@ def test_here_offers_explicit_server_channel_and_thread_choices() -> None:
         for scope in ("server", "channel", "thread")
         for value in ("on", "off", "inherit")
     }
+
+
+def _web_buttons(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        element
+        for block in blocks
+        if block["type"] == "actions"
+        for element in block["elements"]
+        if element["type"] == "button" and element["text"]["text"] == "Open in web"
+    ]
+
+
+def test_here_card_has_an_open_in_web_url_button_only_with_a_web_url() -> None:
+    url = "https://app.example.com/w/x/channels?channel=C1"
+    linked = build_here_attachment(_card("channel").model_copy(update={"web_url": url}))
+    assert [b["url"] for b in _web_buttons(linked["blocks"])] == [url], "one url button"
+    assert not _web_buttons(build_here_attachment(_card("channel"))["blocks"]), "no url, no button"

@@ -10,6 +10,7 @@ import dataclasses
 
 from daimon.core.routines import Glyph
 from daimon.core.stores.domain import RoutineRow
+from daimon.core.web_links import TenantLinks
 
 __all__ = ["RoutineEntry", "RoutinesPanelState"]
 
@@ -31,3 +32,4 @@ class RoutinesPanelState:
     rows: list[RoutineEntry]
     over_cap_count: int
     agent_name_map: dict[str, str]
+    links: TenantLinks | None = None

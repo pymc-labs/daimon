@@ -48,6 +48,7 @@ from daimon.core.posted_controls.routines import apply_routine_action
 from daimon.core.routines import can_manage_routine, can_read_routine_output, routine_label
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import get_routine, pause_routine, resume_routine
+from daimon.core.web_links import panel_links
 from slack_sdk.errors import SlackApiError
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -97,6 +98,7 @@ async def handle_routines_command(runtime: SlackRuntime, payload: dict[str, Any]
             rows=entries,
             over_cap_count=over_cap_count,
             agent_name_map=agent_name_map,
+            links=panel_links(runtime.settings.web, tenant_id, admin=False),
         )
         # No hash — single updater, Pitfall 3.
         await client.views_update(  # pyright: ignore[reportUnknownMemberType]
@@ -233,6 +235,7 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
                 rows=entries,
                 over_cap_count=over_cap_count,
                 agent_name_map=agent_name_map,
+                links=panel_links(runtime.settings.web, tenant_id, admin=False),
             )
             await client.views_update(  # pyright: ignore[reportUnknownMemberType]
                 view_id=view_id,
@@ -343,6 +346,7 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
                 rows=entries,
                 over_cap_count=over_cap_count,
                 agent_name_map=agent_name_map,
+                links=panel_links(runtime.settings.web, tenant_id, admin=False),
             )
             await client.views_update(  # pyright: ignore[reportUnknownMemberType]
                 view_id=view_id,

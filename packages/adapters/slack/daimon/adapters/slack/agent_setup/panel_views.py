@@ -34,6 +34,7 @@ from daimon.adapters.slack.modal_limits import (
 )
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn, escape_mrkdwn_preserving_mentions
 from daimon.adapters.slack.setup_conversations import setup_button
+from daimon.adapters.slack.web_button import open_in_web_button
 from daimon.core import channel_backend
 from daimon.core.agent_detail_lists import DetailListName, format_detail_lists
 from daimon.core.agent_details import AgentDetails
@@ -648,6 +649,8 @@ def build_details_view(
             0,
             _button(action_id=ACTION_CODING_TOOLS, label=CODING_TOOLS_LABEL, value=details.name),
         )
+    if details.web_url is not None:
+        actions.append(open_in_web_button(details.web_url))
     blocks.append({"type": "actions", "elements": actions})
     if may_use_coding_tools and not coding_tools_available:
         blocks.append(_context(CODING_TOOLS_UNAVAILABLE_NOTE))

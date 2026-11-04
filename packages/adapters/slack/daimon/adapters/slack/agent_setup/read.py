@@ -22,6 +22,7 @@ from daimon.core.scope import (
     DeploymentDefault,
 )
 from daimon.core.stores.identity import get_slack_principal_for_account
+from daimon.core.web_links import panel_links
 from sqlalchemy.ext.asyncio import AsyncSession
 
 __all__ = [
@@ -140,6 +141,7 @@ async def load_panel_details(
         public_mcp_url=public_mcp_url(runtime),
         is_admin=is_admin,
         channel_label=f"<#{channel_id}>",
+        web=panel_links(runtime.settings.web, tenant_id, admin=is_admin),
     )
 
 

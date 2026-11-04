@@ -47,6 +47,7 @@ from daimon.core.routine_service import (
     RoutineRefused,
     UnknownAgent,
 )
+from daimon.core.web_links import panel_links
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.exc import SQLAlchemyError
@@ -382,7 +383,10 @@ async def run_routines_delete_submission(
                 viewer_user_id=await routines_viewer(web_client, user_id=user_id, team_id=team_id),
             )
         state = RoutinesPanelState(
-            rows=entries, over_cap_count=over_cap_count, agent_name_map=agent_name_map
+            rows=entries,
+            over_cap_count=over_cap_count,
+            agent_name_map=agent_name_map,
+            links=panel_links(runtime.settings.web, tenant_id, admin=False),
         )
         if root_view_id:
             await web_client.views_update(  # pyright: ignore[reportUnknownMemberType]

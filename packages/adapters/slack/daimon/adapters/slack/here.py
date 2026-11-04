@@ -13,6 +13,7 @@ from daimon.adapters.slack.errors import generate_request_id, surface_command_er
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.outsiders import channel_outsiders
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.adapters.slack.web_button import open_in_web_button
 from daimon.core.access_policy import Approvals
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_details import GitHubDeploymentFacts
@@ -26,6 +27,7 @@ from daimon.core.outsiders import OutsiderVisibility
 from daimon.core.permissions import channel_permissions
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.identity import find_platform_principal
+from daimon.core.web_links import panel_links
 from slack_sdk.errors import SlackApiError, SlackClientError
 from slack_sdk.web.async_client import AsyncWebClient
 from slack_sdk.webhook.async_client import AsyncWebhookClient
@@ -138,6 +140,8 @@ def build_here_attachment(card: HereCard, *, is_admin: bool = False) -> dict[str
                 ],
             }
         )
+    if card.web_url is not None:
+        blocks.append({"type": "actions", "elements": [open_in_web_button(card.web_url)]})
     return {"color": shown.colour, "fallback": card.text, "blocks": blocks}
 
 
@@ -265,6 +269,7 @@ async def handle_here_command(runtime: SlackRuntime, payload: dict[str, Any]) ->
                 if runtime.settings.mcp.public_url is not None
                 else None,
                 is_admin=is_admin,
+                web=panel_links(runtime.settings.web, tenant_id, admin=is_admin),
                 caller_account_id=principal.account_id if principal else None,
                 resolve_setter_display=lambda external_id: _setter_display_name(
                     client, external_id

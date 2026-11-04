@@ -680,3 +680,16 @@ async def test_a_slow_or_failed_users_info_shows_the_stored_name() -> None:
     assert names == ["Live", "Stored B", "Stored C", None], (
         "live wins; a failure or a timeout shows the stored name; never named stays None"
     )
+
+
+def test_open_in_web_url_button_ends_the_actions_when_given_a_web_url() -> None:
+    from daimon.adapters.slack.billing_panel.views import build_billing_view
+
+    url = "https://app.example.com/w/x/credits/spend"
+    member = _make_member_state()
+    linked = build_billing_view(member, now=_NOW, since=_SINCE, web_url=url)
+    button = linked["blocks"][-1]["elements"][-1]
+    assert button["text"]["text"] == "Open in web", "the button is labelled for the web app"
+    assert button["url"] == url, "it opens the given page"
+    plain = build_billing_view(member, now=_NOW, since=_SINCE)
+    assert "Open in web" not in json.dumps(plain), "no url, no button"
