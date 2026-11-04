@@ -29,7 +29,7 @@ from daimon.adapters.web.redirects import (
     workspaces_url,
 )
 from daimon.adapters.web.runtime import WebRuntime
-from daimon.core.errors import DaimonError
+from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.platform_sign_in import code_challenge_s256
 from daimon.core.stores import web_sessions as sessions_store
 from daimon.core.stores.domain import WebPersonRow
@@ -255,6 +255,9 @@ def auth_router(runtime: WebRuntime) -> APIRouter:
             identity = await provider.complete(
                 code=code, code_verifier=flow.verifier, redirect_uri=redirect_uri(provider_id)
             )
+        except UserFacingError as refused:
+            log.warning("web.signin.refused", provider=provider_id, reason=str(refused))
+            return fail(str(refused))
         except (DaimonError, httpx.HTTPError) as exc:
             log.warning("web.signin.rejected", provider=provider_id, error=type(exc).__name__)
             return fail(_FAILED)

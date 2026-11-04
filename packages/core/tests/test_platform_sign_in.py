@@ -11,6 +11,7 @@ import pytest
 from daimon.core.config import MicrosoftAccountsSettings
 from daimon.core.microsoft_identity import MicrosoftIdentityMismatch, MicrosoftTokens
 from daimon.core.platform_sign_in import (
+    MicrosoftGuestRefused,
     PlatformSignInError,
     exchange_slack_user_code,
     fetch_discord_user,
@@ -195,3 +196,23 @@ def test_microsoft_sign_in_refuses_a_response_without_an_id_token() -> None:
     )
     with pytest.raises(MicrosoftIdentityMismatch):
         verify_microsoft_sign_in(tokens, MICROSOFT)
+
+
+def test_microsoft_sign_in_refuses_a_directory_guest() -> None:
+    claims = {
+        "tid": TENANT,
+        "oid": OID,
+        "aud": "app-1",
+        "iss": f"https://login.example.com/{TENANT}/v2.0",
+        "idp": "https://sts.example.net/home-directory/",
+    }
+    with pytest.raises(MicrosoftGuestRefused, match="admin"):
+        verify_microsoft_sign_in(_microsoft_tokens(**claims), MICROSOFT)
+
+
+def test_microsoft_sign_in_accepts_a_member_whose_idp_is_the_directory_itself() -> None:
+    issuer = f"https://login.example.com/{TENANT}/v2.0"
+    tokens = _microsoft_tokens(tid=TENANT, oid=OID, aud="app-1", iss=issuer, idp=issuer)
+    assert verify_microsoft_sign_in(tokens, MICROSOFT).object_id == OID, (
+        "idp equal to iss is no guest"
+    )

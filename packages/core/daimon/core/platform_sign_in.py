@@ -16,7 +16,7 @@ from urllib.parse import urlencode
 
 import httpx
 from daimon.core.config import MicrosoftAccountsSettings
-from daimon.core.errors import DaimonError
+from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.microsoft_identity import (
     MicrosoftIdentityMismatch,
     MicrosoftTokens,
@@ -238,6 +238,10 @@ async def exchange_slack_user_code(
     )
 
 
+class MicrosoftGuestRefused(UserFacingError):
+    """The account is a guest of the directory, not a member."""
+
+
 @dataclass(frozen=True, slots=True)
 class MicrosoftUser:
     # Canonical lowercase UUIDs: the Entra directory, and the person's object id in it.
@@ -263,6 +267,14 @@ def verify_microsoft_sign_in(
         raise MicrosoftIdentityMismatch("account belongs to another tenant")
     if claims.get("aud") != config.client_id:
         raise MicrosoftIdentityMismatch("id_token was issued to another app")
+    # A B2B or personal-account guest carries the identity provider that vouched for it in
+    # `idp`; a member of the directory has none, or its own issuer.
+    idp = claims.get("idp")
+    if idp is not None and idp != claims.get("iss"):
+        raise MicrosoftGuestRefused(
+            "Guest accounts can't sign in. Use an account of your organization's directory "
+            "or ask its Microsoft admin."
+        )
     oid = canonical_uuid(claims.get("oid"))
     if oid is None:
         raise MicrosoftIdentityMismatch("id_token carried no object id")
