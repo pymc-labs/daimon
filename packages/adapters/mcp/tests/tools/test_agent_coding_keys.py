@@ -20,6 +20,11 @@ def _deps(monkeypatch):
 
     monkeypatch.setattr(tool, "require_card", card)
 
+    async def not_mine(*_a, **_k):
+        return False
+
+    monkeypatch.setattr(tool.coding_keys, "revoke_my_coding_key", not_mine)
+
 
 async def test_revoke_when_allowed_then_names_the_key(monkeypatch):
     seen = {}
@@ -66,3 +71,23 @@ async def test_revoke_own_key_when_not_the_callers_then_tool_error(monkeypatch):
 async def test_revoke_own_key_when_malformed_then_same_tool_error():
     with pytest.raises(ToolError, match="No such key"):
         await tool.revoke_coding_key(fake_runtime(), make_auth(), "not-a-uuid", None, "ctx")
+
+
+async def test_revoke_own_key_with_the_agent_id_list_coding_keys_gave_then_revoked_as_own(
+    monkeypatch,
+):
+    """A member passes the agent_id their key listed; it is theirs, so no admin path runs."""
+
+    async def mine(*_a, **_k):
+        return True
+
+    async def admin(*_a, **_k):
+        raise AssertionError("the owner/admin path must not run for the caller's own key")
+
+    monkeypatch.setattr(tool.coding_keys, "revoke_my_coding_key", mine)
+    monkeypatch.setattr(tool.coding_keys, "revoke_agent_coding_key", admin)
+    key = str(uuid.uuid4())
+    out = await tool.revoke_coding_key(
+        fake_runtime(), make_auth(admin=False), key, "agent-1", "ctx"
+    )
+    assert out.key_id == key, "the member's own key is revoked whatever agent_id says"

@@ -13,7 +13,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
-from daimon.adapters.mcp.tools._pagination import capped
+from daimon.adapters.mcp.tools._pagination import paged
 from daimon.adapters.mcp.tools._web_admin import (
     PrivateDetails,
     agent_names,
@@ -74,7 +74,7 @@ class CreditsSpend:
     by: SpendBy
     rows: list[SpendLine]
     total: int
-    more: bool
+    next_page: str | None
     private_details: PrivateDetails
     """By person, names show only when `shown`; otherwise rows read `Person 1`, `Person 2`."""
     web_url: WebUrl = None
@@ -160,6 +160,7 @@ async def _spend_impl(
     by: SpendBy,
     period: credit_views.Period,
     origin_context_id: str | None = None,
+    after: str | None = None,
 ) -> CreditsSpend:
     actor = await web_admin_of(runtime, auth)
     details = await private_details(runtime, auth, origin_context_id)
@@ -181,12 +182,12 @@ async def _spend_impl(
             line if line.id == credit_report.NO_PERSON else replace(line, name=f"Person {n}")
             for n, line in enumerate(lines, 1)
         ]
-    shown, total, more = capped(lines)
+    shown, total, next_page = paged(lines, after)
     return CreditsSpend(
         by=by,
         rows=shown,
         total=total,
-        more=more,
+        next_page=next_page,
         private_details=details,
         web_url=links.spend() if links else None,
     )
@@ -237,12 +238,14 @@ def register_credit_report_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         by: SpendBy = "person",
         period: credit_views.Period = "30d",
         origin_context_id: str | None = None,
+        after: str | None = None,
     ) -> CreditsSpend:
         """The workspace's spend in billed dollars over ``period``, one row per ``person``,
         ``agent`` or ``channel``, biggest first. Person names show only in a direct message
         with the admin; elsewhere ``private_details`` is ``direct_message`` and they read
-        ``Person 1``, ``Person 2``. Pass this active turn's origin_context_id. Admin-only."""
-        return await _spend_impl(runtime, await _auth(ctx), by, period, origin_context_id)
+        ``Person 1``, ``Person 2``. Pass this active turn's origin_context_id. Admin-only.
+        ``next_page`` goes back as ``after``."""
+        return await _spend_impl(runtime, await _auth(ctx), by, period, origin_context_id, after)
 
     @mcp.tool(tags={"admin"})
     async def get_feedback_summary(ctx: Context, days: int = 30) -> FeedbackSummary:  # pyright: ignore[reportUnusedFunction]

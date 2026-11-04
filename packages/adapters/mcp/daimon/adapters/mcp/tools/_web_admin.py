@@ -14,7 +14,7 @@ from daimon.adapters.mcp.tools._ctx import (
 )
 from daimon.adapters.mcp.tools.direct_messages import send_direct_message_impl
 from daimon.adapters.mcp.tools.setup_target import get_chat_origin
-from daimon.core import web_admin
+from daimon.core import web_admin, web_roles_rules
 from daimon.core.agent_target import ChangeRecorder
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.session_seal import is_private_conversation
@@ -30,23 +30,26 @@ def now() -> datetime:
 
 
 async def web_admin_of(runtime: McpRuntime, auth: AuthIdentity) -> WebAdmin:
-    """The calling chat admin as the web app sees them, with the role their grant gives."""
+    """The calling chat admin as the web app sees them, with the web role they hold."""
     _require_admin(auth)
     async with runtime.session_factory() as db:
         person = await web_people.get_person_for_account(
             db, tenant_id=auth.tenant_id, account_id=auth.account_id
         )
-        grant = await web_roles.get_workspace_role(
-            db, tenant_id=auth.tenant_id, account_id=auth.account_id
-        )
-    if person is not None and person.status == "suspended":
-        raise ToolError("Your web access is suspended.")
-    role = role_for(
-        kind="member",
-        workspace_grant=grant,
-        platform_admin=auth.is_platform_admin,
-        chat_admin=auth.is_admin,
-    )
+        if person is not None and person.status == "suspended":
+            raise ToolError("Your web access is suspended.")
+        if person is not None:
+            # Their own role: a visitor or an unadmitted member is no admin in the web app.
+            role = await web_roles_rules.role_of(db, person)
+        else:
+            role = role_for(
+                kind="member",
+                workspace_grant=await web_roles.get_workspace_role(
+                    db, tenant_id=auth.tenant_id, account_id=auth.account_id
+                ),
+                platform_admin=auth.is_platform_admin,
+                chat_admin=auth.is_admin,
+            )
     return WebAdmin(
         tenant_id=auth.tenant_id,
         account_id=auth.account_id,

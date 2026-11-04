@@ -99,24 +99,25 @@ async def revoke_coding_key(
     agent_id: str | None,
     origin_context_id: str | None = None,
 ) -> CodingKeyRevoked:
-    if agent_id is None:
-        _own(auth)
+    """Revoke a key on the person's card: their own whatever `agent_id` says, else an admin's."""
+    _own(auth)
     await require_card(
         runtime, auth, tool_name="remove_my_data", origin_context_id=origin_context_id
     )
     jti = _uuid(key_id)
-    if agent_id is None:
-        async with runtime.session_factory.begin() as session:
-            done = await coding_keys.revoke_my_coding_key(
-                session,
-                jti=jti,
-                tenant_id=auth.tenant_id,
-                account_id=auth.account_id,
-                now=datetime.now(UTC),
-            )
-        if not done:
-            raise ToolError(_GONE)
+    # A member passes the agent_id list_coding_keys returned for their own key.
+    async with runtime.session_factory.begin() as session:
+        done = await coding_keys.revoke_my_coding_key(
+            session,
+            jti=jti,
+            tenant_id=auth.tenant_id,
+            account_id=auth.account_id,
+            now=datetime.now(UTC),
+        )
+    if done:
         return CodingKeyRevoked(key_id)
+    if agent_id is None:
+        raise ToolError(_GONE)
     try:
         await coding_keys.revoke_agent_coding_key(
             _edit_deps(runtime),

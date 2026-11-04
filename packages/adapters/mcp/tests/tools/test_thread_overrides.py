@@ -66,12 +66,18 @@ async def test_list_when_admin_then_returns_entries(monkeypatch):
     )
 
 
-async def test_list_when_over_25_then_first_25_with_total_and_more(monkeypatch):
-    """A channel with many thread settings lists 25 and says more exist."""
+async def test_list_when_over_25_then_a_cursor_reaches_the_rest(monkeypatch):
+    """A channel with many thread settings lists 25, and next_page reaches the other 5."""
 
     async def fake_list(_session, **_kwargs):
         return [ThreadOverride(thread_id=f"t{n}", kind="handoff", value="on") for n in range(30)]
 
     monkeypatch.setattr(tool, "list_thread_overrides", fake_list)
     out = await tool._list_impl(fake_runtime(), make_auth(), "c")
-    assert (len(out.overrides), out.total, out.more) == (25, 30, True), "cut at 25 of 30"
+    assert (len(out.overrides), out.total) == (25, 30), "cut at 25 of 30"
+    assert out.next_page is not None, "more exist, so there is a cursor"
+    rest = await tool._list_impl(fake_runtime(), make_auth(), "c", out.next_page)
+    assert [o.thread_id for o in rest.overrides] == [f"t{n}" for n in range(25, 30)], (
+        "the cursor lists the rows after the first page"
+    )
+    assert rest.next_page is None, "the last page has no cursor"

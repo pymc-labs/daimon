@@ -18,7 +18,7 @@ from daimon.adapters.mcp.tools import web_people as people_tool
 from daimon.adapters.mcp.tools import web_workspace_settings as settings_tool
 from daimon.core.config import WebSettings
 from daimon.core.stores.domain import SpendAllowanceRow, WebInviteRow
-from daimon.core.web_admin import WebAdminError
+from daimon.core.web_admin import AgentAccess, WebAdminError
 from fastmcp.exceptions import ToolError
 
 from .parity_fakes import fake_runtime, make_auth
@@ -603,6 +603,24 @@ async def test_web_admin_of_when_web_person_suspended_then_refused(runtime, monk
         await shared.web_admin_of(runtime, make_auth())
 
 
+@pytest.mark.parametrize("role", ["visitor", "member"])
+async def test_web_admin_of_when_person_not_admin_then_no_admin_links(runtime, monkeypatch, role):
+    """A visitor or unadmitted person holds no admin role, so the chat admin gets no admin pages."""
+
+    async def person(*_a: Any, **_k: Any):
+        return SimpleNamespace(id=uuid.uuid4(), status="active")
+
+    async def own_role(*_a: Any, **_k: Any):
+        return role
+
+    monkeypatch.setattr(shared.web_people, "get_person_for_account", person)
+    monkeypatch.setattr(shared.web_roles_rules, "role_of", own_role)
+    actor = await shared.web_admin_of(runtime, make_auth())
+    assert actor.role == role, "the person's own role, not the member-kind one"
+    links = web_url.admin_links(runtime, actor)
+    assert links is not None and links.audit() is None, "no admin pages"
+
+
 async def test_change_settings_tool_requires_origin_context_id() -> None:
     """The card key must be on every call; an optional one lets a call skip the card."""
     from daimon.adapters.mcp.tools.web_workspace_settings import (
@@ -652,3 +670,48 @@ async def test_list_people_when_more_than_a_page_then_cursor_round_trips(runtime
     assert seen[1]["after"] == (NOW, people[1].id), "the cursor is the last person shown"
     with pytest.raises(ToolError, match="after"):
         await people_tool._people_impl(runtime, make_auth(), None, 2, None, "junk")
+
+
+async def test_list_allowances_when_over_25_then_a_cursor_reaches_the_rest(runtime, monkeypatch):
+    """Newest first, 25 to a page; next_page reaches the other 5."""
+    rows = [_allowance() for _ in range(30)]
+
+    async def fake_rows(*_a: Any, **_k: Any):
+        return rows
+
+    async def fake_lines(_runtime: Any, _tenant: Any, shown: list[SpendAllowanceRow]):
+        return [str(r.id) for r in shown]
+
+    monkeypatch.setattr(allowance_tool.spend_allowances, "list_for_tenant", fake_rows)
+    monkeypatch.setattr(allowance_tool, "_lines", fake_lines)
+    first = await allowance_tool._list_impl(runtime, make_auth())
+    assert (len(first.allowances), first.total) == (25, 30), "cut at 25 of 30"
+    assert first.next_page is not None, "more exist, so there is a cursor"
+    rest = await allowance_tool._list_impl(runtime, make_auth(), first.next_page)
+    assert first.allowances + rest.allowances == [str(r.id) for r in reversed(rows)], (
+        "the two pages are the whole list, newest first, with no repeat"
+    )
+    assert rest.next_page is None, "the last page has no cursor"
+
+
+async def test_list_agent_web_access_when_over_25_then_a_cursor_reaches_the_rest(
+    runtime, monkeypatch
+):
+    rows = [AgentAccess(f"a{n}", f"Agent {n}", True, "everyone", [], None) for n in range(30)]
+
+    async def fake_agents(*_a: Any, **_k: Any):
+        return []
+
+    async def fake_rows(*_a: Any, **_k: Any):
+        return rows
+
+    monkeypatch.setattr(people_tool, "list_agents_by_tenant", fake_agents)
+    monkeypatch.setattr(people_tool.web_admin, "agent_access_rows", fake_rows)
+    first = await people_tool._access_list_impl(runtime, make_auth())
+    assert (len(first.agents), first.total) == (25, 30), "cut at 25 of 30"
+    assert first.next_page is not None, "more exist, so there is a cursor"
+    rest = await people_tool._access_list_impl(runtime, make_auth(), first.next_page)
+    assert [a.agent_id for a in first.agents + rest.agents] == [r.agent_id for r in rows], (
+        "the two pages are the whole list, with no repeat"
+    )
+    assert rest.next_page is None, "the last page has no cursor"

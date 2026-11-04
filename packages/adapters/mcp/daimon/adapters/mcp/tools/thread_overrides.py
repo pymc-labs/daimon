@@ -11,7 +11,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools._pagination import capped
+from daimon.adapters.mcp.tools._pagination import paged
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.channel_settings import (
@@ -36,7 +36,7 @@ class ThreadOverrides:
     channel_id: str
     overrides: list[ThreadOverrideEntry]
     total: int
-    more: bool
+    next_page: str | None
 
 
 @dataclass(frozen=True)
@@ -47,19 +47,21 @@ class ThreadOverrideCleared:
     cleared: bool
 
 
-async def _list_impl(runtime: McpRuntime, auth: AuthIdentity, channel_id: str) -> ThreadOverrides:
+async def _list_impl(
+    runtime: McpRuntime, auth: AuthIdentity, channel_id: str, after: str | None = None
+) -> ThreadOverrides:
     require_scope(auth, "tenant:read")
     _require_admin(auth, action=DelegatedAction.CHANNEL_PERMISSIONS)
     async with runtime.session_factory() as session:
         found = await list_thread_overrides(
             session, tenant_id=auth.tenant_id, platform=auth.platform or "", channel_id=channel_id
         )
-    shown, total, more = capped(found)
+    shown, total, next_page = paged(found, after)
     return ThreadOverrides(
         channel_id=channel_id,
         overrides=[ThreadOverrideEntry(o.thread_id, o.kind, o.value) for o in shown],
         total=total,
-        more=more,
+        next_page=next_page,
     )
 
 
@@ -91,10 +93,13 @@ async def _clear_impl(
 
 def register_thread_override_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool(name="list_thread_overrides", tags={"admin", *scope_tags("tenant:read")})
-    async def list_overrides(ctx: Context, channel_id: str) -> ThreadOverrides:  # pyright: ignore[reportUnusedFunction]
+    async def list_overrides(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, channel_id: str, after: str | None = None
+    ) -> ThreadOverrides:
         """List the threads of a channel that keep their own participation, progress plan,
-        access rule or handoff. Admin-only."""
-        return await _list_impl(runtime, await _auth(ctx), channel_id)
+        access rule or handoff. Admin-only.
+        ``next_page`` goes back as ``after``."""
+        return await _list_impl(runtime, await _auth(ctx), channel_id, after)
 
     @mcp.tool(name="clear_thread_override", tags={"admin", *scope_tags("channels:write")})
     async def clear_override(  # pyright: ignore[reportUnusedFunction]

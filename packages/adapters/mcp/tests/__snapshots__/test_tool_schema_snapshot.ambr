@@ -3914,10 +3914,22 @@
         ``agent`` or ``channel``, biggest first. Person names show only in a direct message
         with the admin; elsewhere ``private_details`` is ``direct_message`` and they read
         ``Person 1``, ``Person 2``. Pass this active turn's origin_context_id. Admin-only.
+        ``next_page`` goes back as ``after``.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
+          'after': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
           'by': dict({
             'default': 'person',
             'enum': list([
@@ -5089,10 +5101,22 @@
       'description': '''
         List each agent's web chat access: on or off, who may use it and the channel it is
         kept to, if any. Admin-only.
+        ``next_page`` goes back as ``after``.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
+          'after': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
         }),
         'type': 'object',
       }),
@@ -5148,10 +5172,24 @@
       }),
     }),
     'list_allowances': dict({
-      'description': "List the workspace's spend allowances and caps, newest first. Admin-only.",
+      'description': '''
+        List the workspace's spend allowances and caps, newest first. Admin-only.
+        ``next_page`` goes back as ``after``.
+      ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
+          'after': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
         }),
         'type': 'object',
       }),
@@ -5708,10 +5746,22 @@
       'description': '''
         List the threads of a channel that keep their own participation, progress plan,
         access rule or handoff. Admin-only.
+        ``next_page`` goes back as ``after``.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
+          'after': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
           'channel_id': dict({
             'type': 'string',
           }),

@@ -11,7 +11,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._card import require_card
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
-from daimon.adapters.mcp.tools._pagination import capped
+from daimon.adapters.mcp.tools._pagination import paged
 from daimon.adapters.mcp.tools._web_admin import agent_names, now, refused, web_admin_of
 from daimon.adapters.mcp.tools._web_url import WebUrl, admin_links
 from daimon.core import credit_views, web_allowances
@@ -44,7 +44,7 @@ class AllowanceLine:
 class Allowances:
     allowances: list[AllowanceLine]
     total: int
-    more: bool
+    next_page: str | None
     web_url: WebUrl = None
 
 
@@ -106,16 +106,18 @@ async def _lines(
     return lines
 
 
-async def _list_impl(runtime: McpRuntime, auth: AuthIdentity) -> Allowances:
+async def _list_impl(
+    runtime: McpRuntime, auth: AuthIdentity, after: str | None = None
+) -> Allowances:
     actor = await web_admin_of(runtime, auth)
     async with runtime.session_factory() as db:
         rows = await spend_allowances.list_for_tenant(db, tenant_id=actor.tenant_id)
     links = admin_links(runtime, actor)
-    shown, total, more = capped(list(reversed(rows)))
+    shown, total, next_page = paged(list(reversed(rows)), after)
     return Allowances(
         await _lines(runtime, actor.tenant_id, shown),
         total,
-        more,
+        next_page,
         links.allowance() if links else None,
     )
 
@@ -200,9 +202,12 @@ async def _delete_impl(
 
 def register_allowance_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool(name="list_allowances", tags={"admin"})
-    async def list_allowances(ctx: Context) -> Allowances:  # pyright: ignore[reportUnusedFunction]
-        """List the workspace's spend allowances and caps, newest first. Admin-only."""
-        return await _list_impl(runtime, await _auth(ctx))
+    async def list_allowances(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, after: str | None = None
+    ) -> Allowances:
+        """List the workspace's spend allowances and caps, newest first. Admin-only.
+        ``next_page`` goes back as ``after``."""
+        return await _list_impl(runtime, await _auth(ctx), after)
 
     @mcp.tool(name="create_allowance", tags={"admin"})
     async def create_allowance(  # pyright: ignore[reportUnusedFunction]

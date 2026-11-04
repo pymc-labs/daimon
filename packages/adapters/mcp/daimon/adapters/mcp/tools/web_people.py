@@ -12,7 +12,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._card import require_card
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
-from daimon.adapters.mcp.tools._pagination import capped
+from daimon.adapters.mcp.tools._pagination import paged
 from daimon.adapters.mcp.tools._web_admin import (
     PrivateDetails,
     now,
@@ -98,7 +98,7 @@ class AgentWebAccess:
 class AgentWebAccessList:
     agents: list[AgentWebAccess]
     total: int
-    more: bool
+    next_page: str | None
 
 
 def _person(
@@ -249,13 +249,15 @@ async def _update_impl(
     )
 
 
-async def _access_list_impl(runtime: McpRuntime, auth: AuthIdentity) -> AgentWebAccessList:
+async def _access_list_impl(
+    runtime: McpRuntime, auth: AuthIdentity, after: str | None = None
+) -> AgentWebAccessList:
     actor = await web_admin_of(runtime, auth)
     agents = await list_agents_by_tenant(runtime.client, tenant_id=actor.tenant_id)
     async with runtime.session_factory() as db:
         rows = await web_admin.agent_access_rows(db, actor.tenant_id, agents)
-    shown, total, more = capped(rows)
-    return AgentWebAccessList([_access(r) for r in shown], total, more)
+    shown, total, next_page = paged(rows, after)
+    return AgentWebAccessList([_access(r) for r in shown], total, next_page)
 
 
 async def _access_set_impl(
@@ -335,10 +337,13 @@ def register_web_people_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         )
 
     @mcp.tool(name="list_agent_web_access", tags={"admin"})
-    async def list_access(ctx: Context) -> AgentWebAccessList:  # pyright: ignore[reportUnusedFunction]
+    async def list_access(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, after: str | None = None
+    ) -> AgentWebAccessList:
         """List each agent's web chat access: on or off, who may use it and the channel it is
-        kept to, if any. Admin-only."""
-        return await _access_list_impl(runtime, await _auth(ctx))
+        kept to, if any. Admin-only.
+        ``next_page`` goes back as ``after``."""
+        return await _access_list_impl(runtime, await _auth(ctx), after)
 
     @mcp.tool(name="set_agent_web_access", tags={"admin"})
     async def set_access(  # pyright: ignore[reportUnusedFunction]

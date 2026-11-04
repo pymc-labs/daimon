@@ -122,15 +122,19 @@ async def test_spend_by_person_when_not_a_dm_then_names_withheld(
     assert out.private_details == details, "the field says what was left out"
 
 
-async def test_spend_when_over_25_rows_then_first_25_with_total_and_more(runtime, monkeypatch):
-    """A long breakdown shows 25 rows, the full count and a flag."""
+async def test_spend_when_over_25_rows_then_a_cursor_reaches_the_rest(runtime, monkeypatch):
+    """A long breakdown shows 25 rows and the full count; next_page reaches the other 15."""
 
     async def fake_spend(_sessions, **_kw: Any):
         return [credit_report.SpendEntry(f"a{n}", f"Agent {n}", 1, 1.0) for n in range(40)]
 
     monkeypatch.setattr(tool.credit_report, "spend_breakdown", fake_spend)
     out = await tool._spend_impl(runtime, make_auth(), "agent", "30d")
-    assert (len(out.rows), out.total, out.more) == (25, 40, True), "cut at 25 of 40"
+    assert (len(out.rows), out.total) == (25, 40), "cut at 25 of 40"
+    assert out.next_page is not None, "more exist, so there is a cursor"
+    rest = await tool._spend_impl(runtime, make_auth(), "agent", "30d", after=out.next_page)
+    assert [r.id for r in rest.rows] == [f"a{n}" for n in range(25, 40)], "the rest, in order"
+    assert rest.next_page is None, "the last page has no cursor"
 
 
 async def test_overview_asks_core_for_twenty_ledger_rows(runtime, monkeypatch):
