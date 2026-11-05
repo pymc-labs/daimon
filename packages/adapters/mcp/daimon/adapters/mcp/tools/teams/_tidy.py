@@ -4,7 +4,9 @@ Ownership, limits and audit rules are the shared ones in tools/_tidy.py.
 Bot Framework also lets the bot update and delete only its own activities.
 A post is keyed by its conversation (what ``send_message`` or
 ``create_thread`` returned, or the chat or thread a turn or routine posted
-in) and its activity id. A turn's or routine's post also takes the
+in) and its activity id. A thread's root may be recorded under its channel
+or under the thread it roots, so a lookup that misses tries the other form,
+and the call then acts on the form it found. A turn's or routine's post also takes the
 conversation rules: the turn is over, and the caller asked for it or is a
 Teams admin (an owner of the admin team).
 """
@@ -35,7 +37,7 @@ from daimon.adapters.mcp.tools.teams._send import (
     _conversation_id,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.channel_tidy import TidyOperation, TidyTarget
-from daimon.core.stores.agent_posts import AgentPostRow
+from daimon.core.stores.agent_posts import AgentPostRow, get_post
 from fastmcp.exceptions import ToolError
 
 _PLATFORM = "teams"
@@ -57,6 +59,28 @@ async def _check_place(
     channel, _ = split_thread(conversation_id)
     require_not_escalation_channel(runtime, channel_id=conversation_id, parent_channel_id=channel)
     return client
+
+
+async def _ledger_key(
+    runtime: McpRuntime, ctx: TidyContext, conversation_id: str, message_id: str
+) -> str:
+    """The form of `conversation_id` the post is recorded under, for a thread's root."""
+    channel, root = split_thread(conversation_id)
+    if conversation_id.startswith("a:") or root not in (None, message_id):
+        return conversation_id
+    forms = (conversation_id, channel if root else thread_id(channel, message_id))
+    async with runtime.session_factory() as session:
+        for form in forms:
+            found = await get_post(
+                session,
+                tenant_id=ctx.actor.tenant_id,
+                platform=_PLATFORM,
+                channel_id=form,
+                message_id=message_id,
+            )
+            if found is not None:
+                return form
+    return conversation_id
 
 
 def _recheck(conversation_id: str, post: AgentPostRow) -> Check:
@@ -93,10 +117,11 @@ async def _prepare(
     message_id: str,
     origin_context_id: str | None,
 ) -> tuple[TidyContext, TeamsBotClient, str, AgentPostRow]:
-    conversation_id = _conversation_id(channel_id)
+    named = _conversation_id(channel_id)
     ctx = await resolve_tidy_context(
         runtime, auth, platform=_PLATFORM, origin_context_id=origin_context_id
     )
+    conversation_id = await _ledger_key(runtime, ctx, named, message_id)
     client = await _check_place(runtime, ctx, auth, conversation_id)
     post = await require_own_post(
         runtime,

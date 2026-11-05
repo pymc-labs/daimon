@@ -362,3 +362,47 @@ async def test_a_running_turn_or_another_persons_turn_is_not_tidied(
     assert world.teams.edits_and_deletes() == [], "a refused call never reaches Teams"
     reasons = {r.reason for r in await world.audit() if r.outcome == "denied"}
     assert reasons == {"turn_in_progress", "not_conversation_owner"}, "each refusal is audited"
+
+
+async def _routine_post(world: _World, *, requester: str = _CALLER) -> str:
+    """A routine's result posted to the channel, recorded as Teams routine delivery does."""
+    activity = f"act-routine-{uuid.uuid4().hex[:6]}"
+    await record_turn_post(
+        world.sessionmaker,
+        tenant_id=world.tenant_id,
+        platform="teams",
+        ma_agent_id=_AGENT,
+        channel_id=f"{_CHANNEL};messageid={activity}",
+        message_id=activity,
+        requester_platform_user_id=requester,
+        source="routine",
+        parent_channel_id=_CHANNEL,
+    )
+    return activity
+
+
+@pytest.mark.parametrize("named", ["thread", "channel"])
+async def test_a_threads_root_is_found_under_either_form_of_its_channel(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], named: str
+) -> None:
+    """send_message to a channel records the root under the channel, a routine under
+    its thread; either is tidied whichever form names it, acting on the recorded one."""
+    world = await _world(committing_sessionmaker)
+    auth, origin = await world.turn()
+    sent = await _teams_send_message_impl(world.runtime, auth, channel_id=_CHANNEL, content="hi")
+    routine = await _routine_post(world)
+
+    for activity, recorded in [(sent.activity_id, _CHANNEL), (routine, None)]:
+        recorded = recorded or f"{_CHANNEL};messageid={activity}"
+        channel_id = f"{_CHANNEL};messageid={activity}" if named == "thread" else _CHANNEL
+        await _teams_delete_message_impl(
+            world.runtime,
+            auth,
+            channel_id=channel_id,
+            message_id=activity,
+            origin_context_id=origin,
+        )
+        assert world.teams.edits_and_deletes()[-1] == (
+            "DELETE",
+            f"/{recorded}/activities/{activity}",
+        ), "the delete acts on the form the post is recorded under"
