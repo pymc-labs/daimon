@@ -1478,6 +1478,12 @@ def source_preservation_pin(source: BackendAgent) -> str:
     # Derived representation evidence must not change old consent pins, nor
     # recursively become part of the source it attests.
     facts.pop("representations", None)
+    # Daimon's own gating changes with a release or a place, not with the agent:
+    # pin the source before it, so it never asks to confirm a switch again.
+    facts.pop("asks_before_publishing", None)
+    ungated = facts.pop("ungated_spec", None)
+    if ungated is not None:
+        facts["effective_spec"] = ungated
     return request_digest(cast(JsonValue, TypeAdapter(object).dump_python(facts, mode="json")))
 
 

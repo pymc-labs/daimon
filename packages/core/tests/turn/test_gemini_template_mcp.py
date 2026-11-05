@@ -476,7 +476,44 @@ async def test_an_unlisted_grant_still_represents_no_mcp(template, monkeypatch):
     monkeypatch.setattr(tool_safety, "_ask_for", grant)
     request, *_ = template
     captured = await capture_preparation_source(_gated(request, "tool_safety"), fresh=True)
-    assert not [r for r in captured.representations if r.target.mcp_servers]
+    assert not [r for r in captured.representations if r.target.mcp_servers], "a grant fails closed"
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_the_source_pin_ignores_daimon_gating_but_not_an_agent_edit(template, monkeypatch):
+    """A release that gates one more tool, or a place that asks before publishing,
+    is not a change to the agent: its confirmed switch must not be asked again."""
+    from daimon.core import tool_safety
+    from daimon.core.turn.runtime_manifest import capture_preparation_source as capture
+    from daimon.core.turn.runtime_manifest import source_preservation_pin as pin
+
+    request, *_ = template
+    plain = pin(await capture(request, fresh=True))
+    for gating in ("tool_safety", "asks_before_publishing"):
+        assert pin(await capture(_gated(request, gating), fresh=True)) == plain, gating
+    gates = tool_safety._always_confirmed_tools()  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(tool_safety, "_always_confirmed_tools", lambda: gates | {"new_gate"})
+    assert pin(await capture(_gated(request, "tool_safety"), fresh=True)) == plain, "release"
+    agent = request.admission.agent
+    tools = [
+        {
+            **tool,
+            "configs": [
+                {
+                    "name": "call_tool",
+                    "enabled": False,
+                    "permission_policy": {"type": "always_allow"},
+                }
+            ],
+        }
+        if tool.get("type") == "mcp_toolset"
+        else tool
+        for tool in (t.model_dump(mode="json") for t in agent.tools)
+    ]
+    for edit in ({"system": "Edited instructions"}, {"tools": tools}):
+        edited = agent.model_validate({**agent.model_dump(mode="json"), **edit})
+        changed = replace(request, source=None, admission=replace(request.admission, agent=edited))
+        assert pin(await capture(changed)) != plain, f"an owner edit re-pins: {sorted(edit)}"
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
