@@ -145,6 +145,7 @@ from daimon.core.memory_resource import (
 )
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import agent_posts as agent_posts_store
+from daimon.core.stores import coding_key_claims as coding_key_claims_store
 from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores import direct_messages as direct_messages_store
 from daimon.core.stores import gemini_runtime_state as gemini_state_store
@@ -621,7 +622,11 @@ async def _purge_account_transaction(
     # Account-scoped (keyed by account_id, not principal): delete the
     # per-agent MCP token rows BEFORE delete_account — they reference
     # accounts.id, so leaving them trips the FK and rolls back the purge.
-    mcp_tokens_count = await mcp_tokens_store.delete_tokens_for_account(
+    # The pending codes that trade for a key count with the tokens they would make.
+    mcp_tokens_count = await coding_key_claims_store.delete_claims_for_account(
+        session, account_id=account_id
+    )
+    mcp_tokens_count += await mcp_tokens_store.delete_tokens_for_account(
         session, account_id=account_id
     )
     github_connect_requests_count = await github_connect_store.delete_requests_for_account(

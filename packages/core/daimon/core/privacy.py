@@ -28,6 +28,7 @@ from typing import Final
 
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import agent_posts as agent_posts_store
+from daimon.core.stores import coding_key_claims as coding_key_claims_store
 from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores import direct_messages as direct_messages_store
 from daimon.core.stores import gemini_runtime_state as gemini_state_store
@@ -332,7 +333,7 @@ async def collect_purge_preview(
         # a single count mirrors the account/user_configs blocks above.
         mcp_tokens_count = await mcp_tokens_store.count_tokens_for_account(
             session, account_id=account_id
-        )
+        ) + await coding_key_claims_store.count_claims_for_account(session, account_id=account_id)
         mcp_tokens = PurgePreviewRow(count=mcp_tokens_count, example=None)
 
         # 11. slack_user_tokens — Slack platform principals only, 0 or 1 per

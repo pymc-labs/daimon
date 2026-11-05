@@ -191,11 +191,18 @@ export type DataServerScope = { id: string; kind: string; name: string }
 /** A stored key as the keys node lists it: its name only, never the value. */
 export type AgentKey = { key: string; updated_at: string }
 
-/** A coding key as listed: who made it and when it ends, never the token. */
-export type CodingKey = { id: string; creator: string; created_at: string; expires_at: string | null; mine: boolean }
+/** A coding key as listed: who made it, for which tool and when it ends, never the token. `client` is a tool id, or "token" for a key made by hand; null for a key from before tools were recorded. */
+export type CodingKey = { id: string; creator: string; created_at: string; expires_at: string | null; mine: boolean; client: string | null }
 
 /** A coding key as made: `token` appears here once. */
-export type MintedCodingKey = { id: string; token: string; command: string; config: string; expires_at: string }
+export type MintedCodingKey = { id: string; token: string; url: string; expires_at: string }
+
+/** One tool's prompt: it holds a single-use code, never a key. */
+export type ConnectPrompt = { id: string; name: string; prompt: string }
+/** The prompts of one batch of codes; the first one used kills the rest. */
+export type ConnectBatch = { batch: string; expires_at: string; prompts: ConnectPrompt[] }
+/** Whether one of the batch's codes was used, and by which tool. */
+export type ConnectStatus = { connected: boolean; client: string | null }
 
 export type SkillUse = { kind: "agent" | "channel"; id: string; name: string; /** The version pinned there; null is the latest. */ version: string | null }
 export type LibrarySkill = {

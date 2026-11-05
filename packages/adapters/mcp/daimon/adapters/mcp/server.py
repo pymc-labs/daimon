@@ -24,6 +24,7 @@ from daimon.adapters.mcp.artifacts import build_artifact_store
 from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
 from daimon.adapters.mcp.bundles import build_bundles_route
 from daimon.adapters.mcp.checkout import billing_cancel, billing_success, build_checkout_route
+from daimon.adapters.mcp.coding_key_claim import build_coding_key_claim_route
 from daimon.adapters.mcp.hub.app import mount_hub_apps
 from daimon.adapters.mcp.middleware.ma_errors import MaErrorMiddleware
 from daimon.adapters.mcp.middleware.mcp_identity import (
@@ -119,6 +120,7 @@ from daimon.adapters.mcp.tools.wizard import register_wizard_tools
 from daimon.adapters.mcp.uploads import build_helper_files_route, build_upload_route
 from daimon.adapters.mcp.web_shell import CSS_SHA256, STATIC_DIR, configure_environment_label
 from daimon.adapters.mcp.webhooks import build_github_webhook, build_stripe_webhook
+from daimon.core.agent_editing import AgentEditDeps
 from daimon.core.billing import BillingConfig, load_billing_config
 from daimon.core.config import Settings, load_settings
 from daimon.core.constants import MA_MAX_RETRIES
@@ -486,6 +488,10 @@ def create_mcp_app(
     bundle_rate_limiter = RateLimiter(
         max_requests=effective_settings.mcp.bundle_uploads_per_hour,
     )
+    claim_rate_limiter = RateLimiter(
+        max_requests=effective_settings.mcp.coding_claim_attempts,
+        window=timedelta(minutes=effective_settings.mcp.coding_claim_window_minutes),
+    )
 
     deployment_default = parse_deployment_default(effective_settings.defaults_root)
     artifact_store = (
@@ -639,6 +645,28 @@ def create_mcp_app(
             rate_limiter=bundle_rate_limiter,
         ),
         methods=["PUT"],
+    )
+    # The code in the form body IS the credential, as with /uploads.
+    app.add_route(
+        "/coding-keys/claim",
+        build_coding_key_claim_route(
+            deps=AgentEditDeps(
+                client=effective_anthropic,
+                session_factory=effective_sessionmaker,
+                public_url=(
+                    str(effective_settings.mcp.public_url)
+                    if effective_settings.mcp.public_url is not None
+                    else None
+                ),
+                denied_tools=effective_settings.tool_safety.denied,
+                resolver_cache=runtime.resolver_cache,
+                deployment_default=deployment_default,
+            ),
+            jwt_secret=effective_settings.mcp.jwt_secret,
+            rate_limiter=claim_rate_limiter,
+            forwarded_entries=effective_settings.mcp.claim_forwarded_entries,
+        ),
+        methods=["POST"],
     )
     app.add_route("/healthz", _healthz, methods=["GET"])
     if relay_clients:

@@ -54,3 +54,11 @@ describe("Canvas GitHub card", () => {
     expect(api.get).not.toHaveBeenCalledWith("/api/agents/ag_w/github")
   })
 })
+
+describe("Canvas Access via MCP card", () => {
+  it("is named for the connection, not the tools", async () => {
+    show(true)
+    expect(await screen.findByLabelText("Access via MCP")).toBeInTheDocument()
+    expect(screen.queryByLabelText("Coding tools")).toBeNull()
+  })
+})

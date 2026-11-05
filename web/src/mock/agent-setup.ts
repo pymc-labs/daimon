@@ -1,7 +1,8 @@
 // Mock API for what an agent holds beyond its config: keys, coding keys, owners, knowledge, lifecycle.
 import { http, HttpResponse } from "msw"
 
-import type { AgentKey, AgentToolRule, CodingKey, MintedCodingKey } from "@/modules/agents/types"
+import { CODING_CLIENTS } from "@/modules/agents/setup/clients"
+import type { AgentKey, AgentToolRule, CodingKey, ConnectBatch, ConnectStatus, MintedCodingKey } from "@/modules/agents/types"
 import { roster } from "./agents"
 import { forbidden, notFound, unauthorized, wait } from "./util"
 import { PEOPLE } from "./world"
@@ -24,8 +25,37 @@ const KEYS = new Map<string, AgentKey[]>([
   ["ag_sales", [{ key: "HUBSPOT_ACCESS_TOKEN", updated_at: ago(120) }]],
 ])
 const CODING = new Map<string, (CodingKey & { by: string })[]>([
-  ["ag_mmm", [{ id: "ck_1", creator: "Maya Lindqvist", by: "p_maya", created_at: ago(240), expires_at: new Date(Date.now() + 60 * 86_400_000).toISOString(), mine: false }]],
+  ["ag_mmm", [{ id: "ck_1", creator: "Maya Lindqvist", by: "p_maya", created_at: ago(240), expires_at: new Date(Date.now() + 60 * 86_400_000).toISOString(), mine: false, client: "claude-code" }]],
 ])
+/** Connect batches by id: when each was minted, or null once replaced. A live batch reads as connected about 20 seconds on. */
+const BATCHES = new Map<string, number | null>()
+const PROMPT_TTL_MS = 10 * 60_000
+const CLAIM_URL = "https://daimon.example.com/coding-keys/claim"
+const MCP_URL = "https://daimon.example.com/mcp"
+
+/** Where each tool keeps its MCP servers, the entry it holds there, and what to do after. */
+const TOOLS: Record<string, { where: string; after: string; entry: (name: string) => string }> = {
+  "claude-code": { where: 'the top-level "mcpServers" object in ~/.claude.json', after: "restart Claude Code", entry: (n) => `"${n}": {"type": "http", "url": "${MCP_URL}", "headers": {"Authorization": "Bearer <key>"}}` },
+  codex: { where: "~/.codex/config.toml, replacing any existing table for this server", after: "restart Codex", entry: (n) => `[mcp_servers.${n}]\nurl = "${MCP_URL}"\nhttp_headers = { Authorization = "Bearer <key>" }` },
+  cursor: { where: 'the "mcpServers" object in ~/.cursor/mcp.json', after: "reload Cursor", entry: (n) => `"${n}": {"url": "${MCP_URL}", "headers": {"Authorization": "Bearer <key>"}}` },
+  pi: { where: 'the "mcpServers" object in ~/.pi/agent/mcp.json', after: "run /reload", entry: (n) => `"${n}": {"url": "${MCP_URL}", "headers": {"Authorization": "Bearer <key>"}, "exposure": "direct"}` },
+  mcp: { where: "your MCP config, as a streamable HTTP server", after: "reload your MCP servers", entry: (n) => `name: ${n}\nurl: ${MCP_URL}\nheader: Authorization: Bearer <key>` },
+}
+/** The real prompt's shape: no agent name but the server key's slug. */
+const slugOf = (name: string) => name.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 32).replace(/^-+|-+$/g, "") || "agent"
+const PROMPT_TEXT = (tool: string, slug: string, code: string) => {
+  const t = TOOLS[tool]
+  return (
+    "Connect yourself to a Daimon agent as a remote MCP server. " +
+    `Add this to ${t.where}, keeping everything else:\n\n${t.entry(`daimon-${slug}`)}\n\n` +
+    "Get <key> with ONE shell command that runs " +
+    `\`curl -fsS -X POST ${CLAIM_URL} -d code=${code}\` (the response body is the bare key) ` +
+    "and writes it straight into the file, so it never appears in this chat. " +
+    "Never print, read back or echo it. If the command exits non-zero or prints nothing, " +
+    "stop and tell me what it said; do not retry or make up a key.\n\n" +
+    `Then tell me to ${t.after}. The code works once, within 10 minutes.`
+  )
+}
 
 const isAdmin = () => roster.viewer()?.admin === true
 
@@ -137,13 +167,32 @@ export const agentSetupHandlers = [
     const token = `mock.${Math.random().toString(36).slice(2)}.${Math.random().toString(36).slice(2)}`
     const expires = new Date(Date.now() + (s.v.admin ? 90 : 30) * 86_400_000).toISOString()
     const key = `ck_${Date.now().toString(36)}`
-    CODING.set(id, [{ id: key, creator: nameOf(s.v.id), by: s.v.id, created_at: new Date().toISOString(), expires_at: expires, mine: true }, ...(CODING.get(id) ?? [])])
-    const url = "https://daimon.example.com/mcp"
-    const out: MintedCodingKey = {
-      id: key, token, expires_at: expires,
-      command: `claude mcp add --transport http daimon-${s.r.id} ${url} --header "Authorization: Bearer ${token}"`,
-      config: JSON.stringify({ mcpServers: { [`daimon-${s.r.id}`]: { type: "http", url, headers: { Authorization: `Bearer ${token}` } } } }, null, 2),
+    CODING.set(id, [{ id: key, creator: nameOf(s.v.id), by: s.v.id, created_at: new Date().toISOString(), expires_at: expires, mine: true, client: "token" }, ...(CODING.get(id) ?? [])])
+    const out: MintedCodingKey = { id: key, token, url: "https://daimon.example.com/mcp", expires_at: expires }
+    return HttpResponse.json(out)
+  }),
+  http.post("/api/agents/:id/coding-keys/connect", async ({ params, request }) => {
+    await wait(300)
+    const s = setupOf(String(params.id))
+    if (s.res) return s.res
+    const body = (await request.json().catch(() => ({}))) as { replaces?: string }
+    if (body.replaces && BATCHES.has(body.replaces)) BATCHES.set(body.replaces, null)
+    const batch = `cb_${Date.now().toString(36)}`
+    BATCHES.set(batch, Date.now())
+    const slug = slugOf(s.r.versions.at(-1)?.config.name ?? "")
+    const out: ConnectBatch = {
+      batch, expires_at: new Date(Date.now() + PROMPT_TTL_MS).toISOString(),
+      prompts: CODING_CLIENTS.filter((c) => c.id !== "token").map((c) => ({ id: c.id, name: c.name, prompt: PROMPT_TEXT(c.id, slug, `${batch}_${c.id}_${Math.random().toString(36).slice(2, 10)}`) })),
     }
+    return HttpResponse.json(out)
+  }),
+  http.get("/api/agents/:id/coding-keys/connect/:batch", async ({ params }) => {
+    await wait(150)
+    const s = setupOf(String(params.id))
+    if (s.res) return s.res
+    const at = BATCHES.get(String(params.batch))
+    if (at === undefined) return notFound()
+    const out: ConnectStatus = at !== null && Date.now() - at > 20_000 ? { connected: true, client: "codex" } : { connected: false, client: null }
     return HttpResponse.json(out)
   }),
   http.delete("/api/agents/:id/coding-keys/:key", async ({ params }) => {

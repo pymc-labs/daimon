@@ -73,6 +73,7 @@ class KeyOut(BaseModel):
     created_at: str
     expires_at: str | None
     bound: bool
+    client: str | None
 
 
 class ProfileOut(BaseModel):
@@ -230,6 +231,7 @@ def profile_router(runtime: WebRuntime) -> APIRouter:
                     created_at=k.created_at.isoformat(),
                     expires_at=k.expires_at.isoformat() if k.expires_at else None,
                     bound=k.bound,
+                    client=k.client,
                 )
                 for k in keys
             ],

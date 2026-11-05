@@ -16,6 +16,7 @@ import { useConfirm } from "@/lib/confirm"
 import { plural, shortDate } from "@/lib/format"
 import { useMe } from "@/lib/hooks"
 import { Pill } from "@/modules/agents/bits"
+import { clientName } from "@/modules/agents/setup/clients"
 
 type AgentRef = { id: string; name: string }
 export type Profile = {
@@ -24,7 +25,7 @@ export type Profile = {
   connections: { kind: "microsoft" | "slack" | "mcp"; label: string; agent: AgentRef | null; key: string }[]
   sign_ins: { id: string; provider: string; label: string }[]
   chat_accounts: { platform: string; name: string | null }[]
-  keys: { id: string; agent: AgentRef | null; created_at: string; expires_at: string | null; bound: boolean }[]
+  keys: { id: string; agent: AgentRef | null; client: string | null; created_at: string; expires_at: string | null; bound: boolean }[]
 }
 export type DeletePreview = { enabled: boolean; held: string[]; kept: string[] }
 
@@ -136,12 +137,17 @@ function Body({ d }: { d: Profile }) {
         {!d.connections.length && <Empty>Nothing is connected</Empty>}
       </Section>
 
-      <Section title="Coding keys">
-        {!d.keys.length ? <Empty>No coding keys</Empty> : d.keys.map((k) => (
+      <Section title="Access via MCP">
+        {!d.keys.length ? <Empty>No keys</Empty> : d.keys.map((k) => (
           <Row key={k.id}>
             <div className="min-w-0 flex-1">
               <div className="font-medium"><AgentLink id={k.agent?.id ?? null} name={k.agent?.name ?? null} /></div>
-              <div className="text-xs text-muted-foreground">Made <Ago iso={k.created_at} />{k.expires_at ? `, ends ${shortDate(k.expires_at)}` : ""}{k.bound ? ", kept to a channel" : ""}</div>
+              <dl className="mt-0.5 grid grid-cols-[48px_1fr] gap-x-3 text-xs text-muted-foreground">
+                <dt>Tool</dt><dd className="text-foreground">{clientName(k.client) ?? "Unknown"}</dd>
+                <dt>Made</dt><dd><Ago iso={k.created_at} /></dd>
+                {k.expires_at && <><dt>Ends</dt><dd>{shortDate(k.expires_at)}</dd></>}
+                {k.bound && <><dt>Kept</dt><dd>To a channel</dd></>}
+              </dl>
             </div>
             <Button variant="ghost" size="sm" disabled={revoke.isPending} aria-label={`Revoke key for ${k.agent?.name ?? "agent"}`} onClick={async () => {
               if (await confirm({ title: "Revoke this key?", body: "Anything using it stops working.", action: "Revoke", destructive: true })) revoke.mutate(k.id)

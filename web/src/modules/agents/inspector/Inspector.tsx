@@ -24,7 +24,7 @@ import { nodeUi } from "../nodes/registry"
 
 const TITLES: Record<string, string> = {
   agent: "Agent", instructions: "Instructions", model: "Model", skills: "Skills", tools: "Tools", places: "Channels", helpers: "Helpers",
-  history: "History", "mcp:new": "New MCP server", keys: "Keys", coding: "Coding tools", people: "People", knowledge: "Knowledge", github: "GitHub",
+  history: "History", "mcp:new": "New MCP server", keys: "Keys", coding: "Access via MCP", people: "People", knowledge: "Knowledge", github: "GitHub",
 }
 
 export function Inspector(p: Props) {
