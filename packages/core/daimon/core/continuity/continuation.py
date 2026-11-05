@@ -92,13 +92,42 @@ MAX_REQUESTED_WORK: Final[int] = 500
 HANDOFF_PICKUP_SEED: Final[str] = "Pick up where the conversation left off."
 
 
-def can_start_turn(target_ma_agent_id: str) -> bool:
-    """Whether a queued first turn can run for this agent: a self-hosted one needs its runtime."""
-    if not target_ma_agent_id.startswith("sh_agent_"):
-        return True
+def _selfhosted_runtime_ready() -> bool:
     from daimon.core.turn.runtimes import ensure_channel_runtime
 
     return ensure_channel_runtime("selfhosted.loop")
+
+
+async def can_start_turn(
+    session: AsyncSession,
+    *,
+    target_ma_agent_id: str,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+    thread_id: str,
+    caller_id: str | None,
+) -> bool:
+    """Whether a queued first turn for this agent would run here, as the dispatcher sees
+    it: a self-hosted agent needs its runtime, and any other one a thread whose
+    effective backend is not self-hosted (`guard_selfhosted_channel`)."""
+    if target_ma_agent_id.startswith("sh_agent_"):
+        return _selfhosted_runtime_ready()
+    from daimon.core.channel_backend import effective_thread_backend
+    from mux.errors import ScopeViolation
+
+    try:
+        backend = await effective_thread_backend(
+            session,
+            tenant_id=tenant_id,
+            platform=platform,
+            channel_id=channel_id,
+            thread_id=thread_id,
+            caller_id=caller_id,
+        )
+    except ScopeViolation:
+        return False
+    return backend != "selfhosted"
 
 
 def sanitize_requested_work(text: str | None, *, echoes: Sequence[str]) -> str | None:
@@ -446,7 +475,7 @@ async def decide_continuation(
         )
 
     if request.target_ma_agent_id.startswith("sh_agent_"):
-        if not can_start_turn(request.target_ma_agent_id):
+        if not _selfhosted_runtime_ready():
             return ContinuationDecision(
                 action="blocked_preparation_failed",
                 message="Self-hosted follow-up replies are not available yet. "

@@ -61,8 +61,12 @@ async def record_continuation(
     requested_work: str | None = None,
     available_at: datetime | None = None,
     attended: bool = False,
+    counts_from: datetime | None = None,
 ) -> TaskContinuationRow:
     """Queue a continuation as `pending`. Writing it dispatches nothing.
+
+    `counts_from` backdates `created_at`, which a person's newer message is
+    compared with: a hand-off counts from the turn that asked for it.
 
     `target_ma_agent_id` is stored concrete, never a name: a name resolves
     differently later, and a continuation must reach the agent the requester
@@ -91,6 +95,8 @@ async def record_continuation(
         idempotency_key=idempotency_key,
         available_at=available_at,
     )
+    if counts_from is not None:
+        orm.created_at = counts_from
     session.add(orm)
     await session.flush()
     await session.refresh(orm)
@@ -201,32 +207,6 @@ async def list_pending_continuations(
         )
     ).scalars()
     return [TaskContinuationRow.model_validate(row) for row in rows]
-
-
-async def has_running_handoff_turn(
-    session: AsyncSession,
-    *,
-    tenant_id: _uuid.UUID,
-    platform: str,
-    thread_id: str,
-    now: datetime,
-) -> bool:
-    """Whether a hand-off's queued first turn is running in this thread right now:
-    claimed, past its start fence, its lease still live."""
-    running = await session.scalar(
-        select(TaskContinuation.id)
-        .where(
-            TaskContinuation.tenant_id == tenant_id,
-            TaskContinuation.platform == platform,
-            TaskContinuation.thread_id == thread_id,
-            TaskContinuation.reason == "task_handoff",
-            TaskContinuation.status == "claimed",
-            TaskContinuation.started_at.is_not(None),
-            TaskContinuation.lease_expires_at > now,
-        )
-        .limit(1)
-    )
-    return running is not None
 
 
 def _dispatchable(
