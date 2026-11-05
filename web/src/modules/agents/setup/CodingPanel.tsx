@@ -61,31 +61,43 @@ function Connect({ agentId, tab, mint }: { agentId: string; tab: string; mint: M
   const stale = expired && !connected
 
   return (
-    <Section title={clientName(tab) ?? undefined}>
+    <Section>
       <div className="space-y-3">
         {mint.error ? (
-          <>
-            <div className="text-sm text-muted-foreground">{mint.error}</div>
-            <Button variant="outline" size="sm" onClick={() => mint.make()}>New prompt</Button>
-          </>
+          <Field label="Prompt">
+            <div className="space-y-2">
+              <div className="text-muted-foreground">{mint.error}</div>
+              <Button variant="outline" size="sm" onClick={() => mint.make()}>New prompt</Button>
+            </div>
+          </Field>
         ) : !batch ? (
-          <div className="text-sm text-muted-foreground">Loading</div>
+          <Field label="Prompt"><span className="text-muted-foreground">Loading</span></Field>
         ) : (
           <>
             {!connected && !stale && prompt && (
-              <div className="relative">
-                <pre aria-label="Prompt" className="max-h-44 overflow-y-auto rounded-md border bg-muted/50 p-2 pr-9 font-mono text-[11.5px] leading-[17px] whitespace-pre-wrap break-all">{prompt.prompt}</pre>
-                <CopyButton text={prompt.prompt} label="Copy prompt" className="absolute top-1 right-1 size-6 bg-background/80" />
-              </div>
+              <Field label="Prompt" top>
+                <div className="relative min-w-0">
+                  <pre aria-label="Prompt" className="max-h-44 overflow-y-auto rounded-md border bg-muted/50 p-2 pr-9 font-mono text-[11.5px] leading-[17px] whitespace-pre-wrap [overflow-wrap:anywhere]">{prompt.prompt}</pre>
+                  <CopyButton text={prompt.prompt} label="Copy prompt" className="absolute top-1 right-1 size-6 bg-background/80" />
+                </div>
+              </Field>
             )}
             <Field label="Status">
               {connected ? <StatusDot status="healthy" label="Connected" /> : stale ? <StatusDot status="failing" label="Expired" /> : <StatusDot status="setup" label="Waiting" />}
             </Field>
+            {stale && (
+              <Field label="">
+                <Button variant="outline" size="sm" className="w-fit" disabled={mint.loading} onClick={() => mint.make(batch.batch)}>New prompt</Button>
+              </Field>
+            )}
             {connected ? (
-              <Field label="Client"><span>{clientName(status.data?.client ?? null) ?? "Unknown"}</span></Field>
+              <>
+                <Field label="Client"><span>{clientName(status.data?.client ?? null) ?? "Unknown"}</span></Field>
+                <Field label="">
+                  <Button variant="outline" size="sm" className="w-fit" disabled={mint.loading} onClick={() => mint.make()}>Connect another</Button>
+                </Field>
+              </>
             ) : !stale && <Field label="Prompt ends"><Ago iso={batch.expires_at} /></Field>}
-            {connected && <Button variant="outline" size="sm" disabled={mint.loading} onClick={() => mint.make()}>Connect another</Button>}
-            {stale && <Button variant="outline" size="sm" disabled={mint.loading} onClick={() => mint.make(batch.batch)}>New prompt</Button>}
           </>
         )}
       </div>
@@ -123,15 +135,19 @@ export function CodingPanel({ agent }: Props) {
         </Field>
       </Section>
       {tab === "token" ? (
-        <Section title="Token" action={<Button variant="outline" size="xs" disabled={writes.make.isPending} onClick={() => void make()}>Make key</Button>}>
-          {made ? (
-            <div className="space-y-3">
-              <CopyRow label="URL" text={made.url} />
-              <CopyRow label="Token" text={made.token} />
-              <Field label="Ends"><Ago iso={made.expires_at} /></Field>
-              <Button variant="outline" size="sm" onClick={() => setMade(null)}>Done</Button>
-            </div>
-          ) : <div className="text-sm text-muted-foreground">No new key</div>}
+        <Section>
+          <div className="space-y-3">
+            {made ? (
+              <>
+                <CopyRow label="URL" text={made.url} />
+                <CopyRow label="Token" text={made.token} />
+                <Field label="Ends"><Ago iso={made.expires_at} /></Field>
+                <Field label=""><Button variant="outline" size="sm" className="w-fit" onClick={() => setMade(null)}>Done</Button></Field>
+              </>
+            ) : (
+              <Field label="Key"><Button variant="outline" size="sm" className="w-fit" disabled={writes.make.isPending} onClick={() => void make()}>Make key</Button></Field>
+            )}
+          </div>
         </Section>
       ) : <Connect agentId={agent.id} tab={tab} mint={mint} />}
       <Section title="Keys">
