@@ -205,7 +205,7 @@ class TeamsTurnLifecycle(OutputGate):
         # The turn's agent and card intent, for recording its posts; None records none.
         self._ma_agent_id = ma_agent_id
         self._turn_card_intent_id = turn_card_intent_id
-        self._roles: dict[str, PostRole] = {}  # each post's recorded role
+        self._roles: dict[str, PostRole | None] = {}  # each post's recorded role
         # The caller posts the controls after the output sweep (`release_controls`),
         # so they land below every file it posts; only for a turn that may have outputs.
         self._hold_controls = hold_controls
@@ -293,11 +293,12 @@ class TeamsTurnLifecycle(OutputGate):
             self._conversation_id, activity, service_url=self._service_url
         )
         posted = message_id or sent.id
-        if role is not None and self._roles.get(posted) != role:
+        # A fresh post is recorded even unlabelled, so delete_reply finds it.
+        if message_id is None or (role is not None and self._roles.get(posted) != role):
             await self._record(posted, role, fresh=message_id is None)
         return posted
 
-    async def _record(self, message_id: str, role: PostRole, *, fresh: bool) -> None:
+    async def _record(self, message_id: str, role: PostRole | None, *, fresh: bool) -> None:
         """Record a fresh post as the turn's, keyed as the tidy tools look it up,
         or relabel an edited one."""
         self._roles[message_id] = role
@@ -311,6 +312,8 @@ class TeamsTurnLifecycle(OutputGate):
             return
         conversation = conversation_of(self._conversation_id)
         if not fresh:
+            if role is None:
+                return
             await relabel_turn_post(
                 self._sessionmaker,
                 tenant_id=self._tenant_id,

@@ -455,7 +455,7 @@ async def test_a_teams_one_to_one_chat_lists_the_agents_posts_instead_of_its_his
         keys="",
         prefix="",
         history=None,
-        own_posts=[("m-1", "answer", "2026-11-05T09:00:00+00:00")],
+        own_posts=[[("m-1", "answer", "2026-11-05T09:00:00+00:00")]],
     )
     assert '<post message_id="m-1" role="answer"' in message
     for kind, conversation in [

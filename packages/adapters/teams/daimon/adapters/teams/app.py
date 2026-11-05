@@ -1932,8 +1932,11 @@ class TeamsApp:
 
     async def _own_posts(
         self, inbound: TeamsInbound, tenant_id: uuid.UUID, ma_agent_id: str, *, skip: str | None
-    ) -> list[tuple[str, str | None, str]]:
-        """The agent's latest posts in a 1:1 chat, oldest first, but this turn's card."""
+    ) -> list[list[tuple[str, str | None, str]]]:
+        """The agent's latest posts in a 1:1 chat but this turn's card, by reply.
+
+        Newest reply first, each reply's messages oldest first.
+        """
         if inbound.kind != "dm":
             return []
         try:
@@ -1949,14 +1952,17 @@ class TeamsApp:
                     agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id),
                     limit=_OWN_POSTS_SHOWN,
                 )
-        except (SQLAlchemyError, TimeoutError) as exc:  # a convenience; never stall the turn
+        except (*_DB_ERRORS, TimeoutError) as exc:  # a convenience; never stall the turn
             log.warning("teams.own_posts_failed", error_type=type(exc).__name__)
             return []
-        return [
-            (r.message_id, r.role, r.posted_at.isoformat())
-            for r in reversed(rows)
-            if r.message_id != skip
-        ]
+        replies: dict[uuid.UUID | str, list[tuple[str, str | None, str]]] = {}
+        for r in rows:
+            if r.message_id != skip:
+                key = r.turn_card_intent_id or r.delivery_id or r.message_id
+                replies.setdefault(key, []).insert(
+                    0, (r.message_id, r.role, r.posted_at.isoformat())
+                )
+        return list(replies.values())
 
     async def _files_reachable(self, inbound: TeamsInbound) -> bool | None:
         if inbound.kind != "channel":

@@ -656,6 +656,35 @@ async def test_every_fresh_post_of_a_turn_is_recorded_for_tidying(
     assert recorded == [], "a turn without a card intent records nothing"
 
 
+async def test_an_unlabelled_fresh_post_is_recorded_and_an_unlabelled_edit_is_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """delete_reply finds every post of the turn, labelled or not."""
+    recorded: list[dict[str, Any]] = []
+
+    async def record(_sessionmaker: object, **kw: Any) -> None:
+        recorded.append(kw)
+
+    monkeypatch.setattr(lifecycle_module, "record_turn_post", record)
+    lifecycle = TeamsTurnLifecycle(
+        sender=FakeSender(),
+        conversation_id=THREAD_ID,
+        service_url=SERVICE_URL,
+        cancel_key="key-1",
+        clock=Clock(),
+        tenant_id=uuid.uuid4(),
+        sessionmaker=_Sessions(),
+        requester_user_id="u-1",
+        ma_agent_id="ag-1",
+        turn_card_intent_id=uuid.uuid4(),
+    )
+    posted = await lifecycle._send(MessageActivityInput(text="a"), message_id=None)  # pyright: ignore[reportPrivateUsage]
+    await lifecycle._send(MessageActivityInput(text="b"), message_id=posted)  # pyright: ignore[reportPrivateUsage]
+    assert [(r["message_id"], r["role"]) for r in recorded] == [(posted, None)], (
+        "the fresh post is recorded once, without a role"
+    )
+
+
 async def test_a_failed_answer_post_collapses_the_card_and_leaves_no_watermark() -> None:
     sender = FakeSender(fail_on={1})
     lifecycle = await _posted(sender)
