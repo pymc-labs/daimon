@@ -264,6 +264,44 @@ async def test_recorded_pre_watch_cards_preserve_non_watch_actions_only(
     ) is (modern or requested == "request_agent_backend_switch")
 
 
+@pytest.mark.parametrize(
+    ("tool", "proven"),
+    [("add_skill", True), ("add_server_skill", False), ("approve_server_skill_update", False)],
+)
+async def test_a_bind_from_before_server_skills_proves_other_cards_never_theirs(
+    monkeypatch, tool, proven
+):
+    from daimon.core.tool_safety import CARDED_TOOLS, CONFIRMED_DAIMON_TOOLS, WATCH_CONFIRMED_TOOLS
+
+    policy = ToolSafetyPolicy(enabled=True)
+    runtime = _runtime()
+    runtime.settings.tool_safety = policy
+    monkeypatch.setattr(_session_gate, "daimon_rule_tools_for", AsyncMock(return_value=frozenset()))
+    before = {"add_server_skill", "approve_server_skill_update"}
+    recorded = session_tools(
+        AGENT,
+        frozenset(),
+        tool_safety=policy,
+        public_url="https://mcp.example/mcp",
+        confirmed_tools=(WATCH_CONFIRMED_TOOLS | set(CARDED_TOOLS) | {"approve_reach"}) - before,
+    )
+    # Policy on asks on every confirmed tool; the older bind held all but the new two.
+    older = _session_gate._without_configs(recorded, frozenset(before))  # pyright: ignore[reportPrivateUsage]
+    assert before <= set(CONFIRMED_DAIMON_TOOLS)
+    live = SimpleNamespace(effective_config=SimpleNamespace(tools_sha256=hash_tools(older)))
+    assert (
+        await _session_gate._recorded_as_gated(  # pyright: ignore[reportPrivateUsage]
+            runtime,
+            AUTH,
+            live,
+            tool_name=tool,
+            ma_agent_id=AGENT.id,
+            reported_tools_sha256=hash_tools(AGENT.tools),
+        )
+        is proven
+    )
+
+
 @pytest.mark.parametrize("tamper", ["recorded_hash", "reported_tools", "missing_target_gate"])
 async def test_pre_watch_card_compatibility_requires_the_exact_scoped_target_gate(
     monkeypatch, tamper

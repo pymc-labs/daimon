@@ -385,10 +385,10 @@ def register_server_skill_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def add_server_skill(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, skill: _Uri | None = None, origin_context_id: _OriginId | None = None
     ) -> ServerSkills:
-        """Add a skill the connected data server offers to the skill library, by name or
-        skill:// URI; it then stays current with the server. Adding needs a person's
-        confirmation on a card and your ``origin_context_id``. Without ``skill``, list what
-        the server offers you, with each one's library skill_id once added."""
+        """Only for the connected data server: list what it serves, or take one of its offers
+        by name or URI into the library, kept current with that server. A person confirms on
+        a card, and you pass your ``origin_context_id``. Not for any other source, nor for giving
+        an agent what the library already holds."""
         return await _add_impl(runtime, await _auth(ctx), skill, serves, origin_context_id)
 
     @mcp.tool(tags={"admin"})

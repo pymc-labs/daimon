@@ -290,6 +290,7 @@ source_modules = [
     "daimon.core.model_presets",
     "daimon.core.models_catalog",
     "daimon.core.name_mentions",
+    "daimon.core.node_exchange",
     "daimon.core.notebooks",
     "daimon.core.observability",
     "daimon.core.ops_alerts",

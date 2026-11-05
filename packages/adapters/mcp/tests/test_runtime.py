@@ -31,8 +31,10 @@ def test_mcp_runtime_is_frozen_dataclass_with_required_fields() -> None:
         "resource_hosts",
         "gemini_skill_capability",
         "microsoft",
+        "identity_key",
+        "node_held",
     }, (
-        "McpRuntime exposes core collaborators + deployment_default + optional media-tool slots + fernet + Teams client + shared caches + the operator's resource hosts, Gemini skill capability and Microsoft Graph access"
+        "McpRuntime exposes core collaborators + deployment_default + optional media-tool slots + fernet + Teams client + shared caches + the operator's resource hosts, Gemini skill capability, Microsoft Graph access and the connection-node identity key and holds"
     )
     # Frozen: assignment raises FrozenInstanceError
     sf: async_sessionmaker[AsyncSession] = async_sessionmaker()  # type: ignore[call-arg]

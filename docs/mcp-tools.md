@@ -543,7 +543,7 @@ updates.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `add_server_skill` | all callers | Add a skill the connected data server offers to the skill library, by name or skill:// URI; it then stays current with the server. |
+| `add_server_skill` | all callers | Only for the connected data server: list what it serves, or take one of its offers by name or URI into the library, kept current with that server. |
 | `apply_server_skill_update` | all callers | Give an agent the server skill update its model provider check held back. |
 | `approve_server_skill_update` | admin only | Approve the update waiting on a server skill, given as its ``pending_digest``. |
 | `check_server_skill` | admin only | Check a server skill for an update now. |

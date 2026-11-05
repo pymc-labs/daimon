@@ -194,7 +194,7 @@ async def test_add_needs_a_chat_account_and_an_unsuspended_person(
 
     monkeypatch.setattr(tools, "ask_node", never)
     outsider = make_auth(admin=False, account_id=stranger.account_id, tenant_id=tenant.id)
-    with pytest.raises(ToolError, match="only chat accounts of this workspace"):
+    with pytest.raises(ToolError, match="serves only chat accounts"):
         await _add_impl(runtime, outsider, "plots", ServesCache(), "ctx")
 
     auth = await _member(db_session, tenant, "u-1", suspended=True)
@@ -357,7 +357,17 @@ async def test_add_by_a_name_two_skills_share_lists_their_uris(
     tenant = await make_tenant(db_session, workspace_id="g-1")
     auth = await _member(db_session, tenant, "u-1")
     raw = [
-        {"uri": f"skill://{where}/plots/SKILL.md", "name": "plots", "description": "d"}
+        {
+            "uri": f"skill://{where}/plots/SKILL.md",
+            "frontmatter": {"name": "plots", "description": "d"},
+            "resources": [
+                {
+                    "uri": f"skill://{where}/plots/SKILL.md",
+                    "digest": "sha256:" + "a" * 64,
+                    "size": 1,
+                }
+            ],
+        }
         for where in ("a", "b")
     ]
 
