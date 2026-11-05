@@ -275,7 +275,7 @@ async def _slack_delete_reply_impl(  # pyright: ignore[reportUnusedFunction]
     async def delete(part: AgentPostRow) -> None:
         await _delete_one(runtime, ctx, auth, client, part, tool=tool)
 
-    deleted = await delete_parts(parts, delete)
+    deleted = await delete_parts(runtime, parts, delete)
     return TidyResult(
         platform=_PLATFORM,
         channel_id=channel_id,

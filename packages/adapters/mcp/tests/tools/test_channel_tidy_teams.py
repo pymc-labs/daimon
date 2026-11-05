@@ -44,7 +44,7 @@ from daimon.core.config import (
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.agent_posts import PostRole
+from daimon.core.stores.agent_posts import PostRole, get_post
 from daimon.core.stores.domain import Role
 from daimon.core.stores.security_audit import SecurityAuditRow, list_events
 from daimon.core.stores.turn_card_intents import (
@@ -606,6 +606,11 @@ async def test_a_part_already_gone_is_skipped(
 
     assert result.messages_deleted == len(parts) - 1, "the gone part is not counted"
     assert _deleted(world) == parts[::-1], "the rest are still deleted"
+    async with world.sessionmaker() as s:
+        row = await get_post(
+            s, tenant_id=world.tenant_id, platform="teams", channel_id=_CHAT, message_id=parts[2]
+        )
+    assert row is None, "the gone part's row is marked deleted, so it is never listed again"
 
 
 async def test_a_routine_result_is_one_reply_across_its_chunks_threads(

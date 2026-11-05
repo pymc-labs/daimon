@@ -659,18 +659,23 @@ async def reply_parts(runtime: McpRuntime, post: AgentPostRow) -> list[AgentPost
 
 
 async def delete_parts(
-    parts: list[AgentPostRow], delete_one: Callable[[AgentPostRow], Awaitable[None]]
+    runtime: McpRuntime,
+    parts: list[AgentPostRow],
+    delete_one: Callable[[AgentPostRow], Awaitable[None]],
 ) -> int:
     """Delete each part in turn and return how many went.
 
-    A part already gone is skipped. Any other refusal, a limit included, stops
-    the run and says how many were deleted and how many remain.
+    A part already gone is skipped and its row marked deleted, so it stops
+    being listed as part of the reply. Any other refusal, a limit included,
+    stops the run and says how many were deleted and how many remain.
     """
     deleted = gone = 0
     for index, part in enumerate(parts):
         try:
             await delete_one(part)
         except MessageGone:
+            async with runtime.session_factory.begin() as session:
+                await mark_deleted(session, post_ids=[part.id], now=datetime.now(UTC))
             gone += 1
             continue
         except ToolError as exc:

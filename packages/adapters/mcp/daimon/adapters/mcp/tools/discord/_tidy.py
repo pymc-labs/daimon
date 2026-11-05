@@ -437,7 +437,7 @@ async def _delete_reply_impl(  # pyright: ignore[reportUnusedFunction]
         async def delete(part: AgentPostRow) -> None:
             await _delete_one(c, runtime, ctx, auth, target, part, tool=tool)
 
-        deleted = await delete_parts(parts, delete)
+        deleted = await delete_parts(runtime, parts, delete)
     return TidyResult(
         platform=_PLATFORM,
         channel_id=resolved_channel_id,

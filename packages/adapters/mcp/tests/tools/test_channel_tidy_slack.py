@@ -44,6 +44,7 @@ from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.agent_posts import get_post
 from daimon.core.stores.domain import Role
 from daimon.core.stores.security_audit import SecurityAuditRow, list_events
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
@@ -546,3 +547,29 @@ async def test_a_running_turns_reply_is_refused_before_anything_is_deleted(
     assert result.messages_deleted == 1, "a finished turn's reply is still deleted"
     rows = [r for r in await world.audit() if r.tool_name == tool and r.outcome == "denied"]
     assert [r.reason for r in rows] == ["turn_in_progress"], "the refusal is audited as denied"
+
+
+async def test_delete_reply_skips_a_part_slack_no_longer_has_and_retires_its_row(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    world = await _world(committing_sessionmaker)
+    auth, origin = await world.turn()
+    reply = await _turn_reply(world, parts=3, base=1)
+    with aioresponses() as m:
+        _channel_access(m, times=20)
+        # Newest part first: it answers not found once, the rest succeed.
+        m.post(_CHAT_DELETE, payload={"ok": False, "error": "message_not_found"})  # pyright: ignore[reportUnknownMemberType]
+        m.post(_CHAT_DELETE, payload={"ok": True}, repeat=True)  # pyright: ignore[reportUnknownMemberType]
+        result = await _slack_delete_reply_impl(
+            world.runtime, auth, channel_id=_CHANNEL, message_id=reply[0], origin_context_id=origin
+        )
+    assert result.messages_deleted == 2, "the part Slack no longer has is not counted"
+    async with world.sessionmaker() as s:
+        row = await get_post(
+            s,
+            tenant_id=world.tenant_id,
+            platform="slack",
+            channel_id=_CHANNEL,
+            message_id=reply[2],
+        )
+    assert row is None, "its row is marked deleted, so it is never listed again"

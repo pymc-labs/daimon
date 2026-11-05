@@ -658,3 +658,28 @@ async def test_delete_reply_takes_a_routine_results_chunks_and_only_them(
     assert result.messages_deleted == 2, "both chunks of the delivery are reported"
     assert not gone & fake.messages.keys(), "the delivery's chunks are deleted"
     assert last in fake.messages, "another run's result stays"
+
+
+async def test_delete_reply_skips_a_part_already_deleted_by_hand_and_retires_its_row(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], fake: Any
+) -> None:
+    world = await _world(committing_sessionmaker)
+    await _auto_thread(world)
+    reply = await _reply(world, fake, parts=3)
+    del fake.messages[reply[1]]
+    auth, origin = await world.turn(thread=_THREAD)
+
+    result = await _delete_reply_impl(
+        world.runtime, auth, channel_id=_THREAD, message_id=reply[2], origin_context_id=origin
+    )
+
+    assert result.messages_deleted == 2, "the part Discord no longer has is not counted"
+    async with world.sessionmaker() as s:
+        row = await get_post(
+            s,
+            tenant_id=world.tenant_id,
+            platform="discord",
+            channel_id=_THREAD,
+            message_id=reply[1],
+        )
+    assert row is None, "its row is marked deleted, so it is never listed again"
