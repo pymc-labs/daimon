@@ -8906,8 +8906,10 @@
     }),
     'set_agent_helpers': dict({
       'description': '''
-        Set the agents an agent may ask for help to exactly these names or ids. Works on the
-        default agent and on self-hosted agents; the person approves first.
+        Set the agents an agent may ask for help to exactly these names or ids, for any agent
+        you can see; helpers kept to channels you can't see stay. A normal agent gets a new
+        version, so an open draft goes out of date; the default agent and self-hosted agents
+        change in place. The person approves first.
       ''',
       'parameters': dict({
         'additionalProperties': False,

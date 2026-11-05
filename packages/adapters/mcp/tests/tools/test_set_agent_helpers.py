@@ -12,9 +12,11 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import _card
 from daimon.adapters.mcp.tools import agent_edits as edits
+from daimon.core.agent_view import AgentConfigDoc, HelperDoc, ModelChoice
 from daimon.core.anthropic_guard import without_anthropic
 from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
 from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_NAME,
     MA_METADATA_KEY_TENANT,
@@ -42,10 +44,20 @@ class _World:
         self.sessionmaker = sessionmaker
         self.agents: list[dict[str, object]] = []
 
-    def add(self, tenant_id: uuid.UUID, agent_id: str, name: str, *, seeded: bool = False) -> None:
+    def add(
+        self,
+        tenant_id: uuid.UUID,
+        agent_id: str,
+        name: str,
+        *,
+        seeded: bool = False,
+        owned: bool = False,
+    ) -> None:
         metadata = {MA_METADATA_KEY_TENANT: str(tenant_id), MA_METADATA_KEY_NAME: name}
         if seeded:
             metadata[MA_METADATA_KEY_MANAGED] = "true"
+        if owned:
+            metadata[MA_METADATA_KEY_ACCOUNT] = str(uuid.uuid4())
         self.agents.append(
             ma_agent(id=agent_id, name=name, metadata=metadata).model_dump(mode="json")
         )
@@ -213,7 +225,9 @@ async def test_without_a_card_nothing_changes(
 
 
 async def test_a_self_hosted_conversation_reads_its_own_agents(
-    db_session: AsyncSession, committing_sessionmaker: Factory
+    db_session: AsyncSession,
+    committing_sessionmaker: Factory,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     world = _World(committing_sessionmaker)
     auth, origin = await _workspace(db_session, world)
@@ -236,8 +250,13 @@ async def test_a_self_hosted_conversation_reads_its_own_agents(
     ]
     world.agents.clear()
 
+    applied = _Applied()
+    monkeypatch.setattr(edits.agent_changes, "apply_change", applied)
+
     with without_anthropic():
         out = await _set(world, auth, origin, "lead-sh", ["argon-sh"])
+
+    assert applied.changes == [], "a self-hosted agent has no versions to record"
 
     assert [(h.agent_id, h.name) for h in out.helpers] == [(ids[1], "argon-sh")]
     assert await _stored(committing_sessionmaker, auth, ids[0]) == [ids[1]]
@@ -265,3 +284,138 @@ async def test_one_workspaces_edit_never_reaches_another(
         "an admin here cannot touch an agent of another workspace"
     )
     assert auth_b.tenant_id != auth_a.tenant_id and origin_b.tenant_id == auth_b.tenant_id
+
+
+def _config(*helpers: HelperDoc) -> AgentConfigDoc:
+    return AgentConfigDoc(
+        name="argon",
+        purpose="",
+        avatar="",
+        model=ModelChoice(id="claude-opus", backend="anthropic", speed="standard", effort="high"),
+        system=None,
+        skills=[],
+        tools=[],
+        mcp_servers=[],
+        places=None,
+        helpers=list(helpers),
+    )
+
+
+class _Applied:
+    """Stands in for `apply_change`, which the web and chat edit tests cover in full."""
+
+    def __init__(self) -> None:
+        self.changes: list[Any] = []
+        self.notes: list[str] = []
+
+    async def __call__(self, _deps: Any, **kw: Any) -> None:
+        self.changes.append(kw["change"])
+        self.notes.append(kw["note"])
+
+
+async def test_a_helper_homed_where_the_caller_cannot_see_survives_the_edit(
+    db_session: AsyncSession,
+    committing_sessionmaker: Factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = _World(committing_sessionmaker)
+    auth, origin = await _workspace(db_session, world)
+    world.add(auth.tenant_id, "ag_hidden", "hidden")
+
+    class _Sees:
+        def sees_agent(self, agent: Any) -> bool:
+            return agent.id != "ag_hidden"
+
+    async def view(*_a: Any, **_k: Any) -> _Sees:
+        return _Sees()
+
+    monkeypatch.setattr(edits, "load_isolation_view", view)
+    async with committing_sessionmaker.begin() as session:
+        await agent_helpers.set_helpers(
+            session, tenant_id=auth.tenant_id, agent_id="ag_daimon", helper_ids=["ag_hidden"]
+        )
+
+    out = await _set(world, auth, origin, "daimon", ["argon"])
+    assert sorted(await _stored(committing_sessionmaker, auth, "ag_daimon")) == [
+        "ag_argon",
+        "ag_hidden",
+    ], "the hidden helper stays beside the new one"
+    assert [h.agent_id for h in out.helpers] == ["ag_argon"], "and is not shown to the caller"
+
+    out = await _set(world, auth, origin, "daimon", [])
+    assert await _stored(committing_sessionmaker, auth, "ag_daimon") == ["ag_hidden"], (
+        "clearing the visible list leaves it"
+    )
+    assert out.helpers == [], "and the result lists nothing"
+
+
+async def test_a_normal_agent_gets_a_recorded_version(
+    db_session: AsyncSession,
+    committing_sessionmaker: Factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = _World(committing_sessionmaker)
+    auth, origin = await _workspace(db_session, world)
+    world.add(auth.tenant_id, "ag_lead", "lead", owned=True)
+    applied = _Applied()
+    monkeypatch.setattr(edits.agent_changes, "apply_change", applied)
+
+    out = await _set(world, auth, origin, "lead", ["argon"])
+
+    assert applied.notes == ["Changed agent helpers"], "one versioned change, with its note"
+    assert [h.agent_id for h in out.helpers] == ["ag_argon"]
+    assert await _stored(committing_sessionmaker, auth, "ag_lead") == [], (
+        "the list is written by the version, not directly"
+    )
+    config: AgentConfigDoc = applied.changes[0](_config(HelperDoc(id="ag_old", name="Old")))
+    assert [(h.id, h.name) for h in config.helpers or []] == [("ag_argon", "argon")], (
+        "the change sets exactly the wanted helpers"
+    )
+
+
+async def test_an_unchanged_list_writes_no_version(
+    db_session: AsyncSession,
+    committing_sessionmaker: Factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = _World(committing_sessionmaker)
+    auth, origin = await _workspace(db_session, world)
+    world.add(auth.tenant_id, "ag_lead", "lead", owned=True)
+    async with committing_sessionmaker.begin() as session:
+        await agent_helpers.set_helpers(
+            session, tenant_id=auth.tenant_id, agent_id="ag_lead", helper_ids=["ag_argon"]
+        )
+    applied = _Applied()
+    monkeypatch.setattr(edits.agent_changes, "apply_change", applied)
+
+    out = await _set(world, auth, origin, "lead", ["argon"])
+
+    assert applied.changes == [], "nothing to record"
+    assert [h.agent_id for h in out.helpers] == ["ag_argon"]
+
+
+async def test_a_seeded_agent_keeps_the_direct_write(
+    db_session: AsyncSession,
+    committing_sessionmaker: Factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = _World(committing_sessionmaker)
+    auth, origin = await _workspace(db_session, world)
+    applied = _Applied()
+    monkeypatch.setattr(edits.agent_changes, "apply_change", applied)
+
+    await _set(world, auth, origin, "daimon", ["argon"])
+
+    assert applied.changes == [], "a seeded agent has no canvas versions"
+    assert await _stored(committing_sessionmaker, auth, "ag_daimon") == ["ag_argon"]
+
+
+def test_with_helpers_keeps_a_listed_name_and_names_the_rest() -> None:
+    config = edits.with_helpers(
+        _config(HelperDoc(id="ag_a", name="Listed")), ["ag_a", "ag_b", "ag_c"], {"ag_b": "Roster"}
+    )
+    assert [(h.id, h.name) for h in config.helpers or []] == [
+        ("ag_a", "Listed"),
+        ("ag_b", "Roster"),
+        ("ag_c", "ag_c"),
+    ], "a listed name wins, then the roster's, then the id"

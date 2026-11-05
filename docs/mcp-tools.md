@@ -84,7 +84,7 @@ owners and helpers and save a skill's files.
 | `resync_agent_skills` | all callers | Sync an agent's repo skills now from their recorded repos; an unchanged skill is skipped. |
 | `revert_agent` | all callers | Restore a recorded version of an agent's setup as its next version; name, avatar, places and sign-ins stay. |
 | `save_agent_skill_files` | all callers | Edit an agent's skill file: publish text files as a new version of one of its skills, or a new skill when ``skill_id`` is left out, and pin it. |
-| `set_agent_helpers` | admin only | Set the agents an agent may ask for help to exactly these names or ids. |
+| `set_agent_helpers` | admin only | Set the agents an agent may ask for help to exactly these names or ids, for any agent you can see; helpers kept to channels you can't see stay. |
 | `set_agent_owners` | admin only | Set an agent's owner and co-owners to exactly these web person or account ids. |
 
 ## `agent_removal`

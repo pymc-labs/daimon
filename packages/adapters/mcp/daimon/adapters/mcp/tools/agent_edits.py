@@ -22,11 +22,11 @@ from daimon.adapters.mcp.tools.agents import (
     _edit_deps,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.setup_target import refuse_helper, require_turn_origin
-from daimon.core import agent_admin, agent_changes, agent_github, agent_skill_files
+from daimon.core import agent_admin, agent_changes, agent_editing, agent_github, agent_skill_files
 from daimon.core.agent_changes import AgentChangeDeps
-from daimon.core.agent_editing import AgentEditDeps, AgentEditError
+from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError
 from daimon.core.agent_github import SkillResyncDeps
-from daimon.core.agent_view import AgentViewDeps, OwnMcpServer
+from daimon.core.agent_view import AgentConfigDoc, AgentViewDeps, HelperDoc, OwnMcpServer
 from daimon.core.anthropic_guard import anthropic_disabled
 from daimon.core.channel_backend import make_backend_service
 from daimon.core.defaults.loader import load_skill_descriptions
@@ -34,6 +34,7 @@ from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.mcp_tool_listing import McpToolLister
 from daimon.core.skill_library import SyncedSkill
+from daimon.core.stores import agent_helpers
 from daimon.core.stores.selfhosted_resources import list_live_agent_facts
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -217,24 +218,87 @@ async def _helpers_impl(
     )
     visible = [agent for agent in roster if view.sees_agent(agent)]
     target = _agent_named(agent_id, visible)
-    try:
-        saved = await agent_admin.set_helpers(
-            runtime.session_factory,
-            actor=_edit_actor(auth),
-            ma_agent_id=target.id,
-            helper_ids=[_agent_named(ref, visible).id for ref in helpers],
-            roster=visible,
-            audited=audit_to(auth, _HELPERS_ACTION),
+    wanted = [_agent_named(ref, visible).id for ref in helpers]
+    async with runtime.session_factory() as session:
+        before = await agent_helpers.list_helper_ids(
+            session, tenant_id=auth.tenant_id, agent_id=target.id
         )
+    # A helper homed in a channel this one cannot see is not this list's to drop.
+    visible_ids = {agent.id for agent in visible}
+    wanted = list(dict.fromkeys([*wanted, *(i for i in before if i not in visible_ids)]))
+    actor = _edit_actor(auth)
+    names = {a.id: _agent_name(a) for a in roster}
+    try:
+        if _is_versioned(auth, target):
+            saved = await _helpers_versioned(
+                runtime, actor, target, before=before, wanted=wanted, names=names
+            )
+        else:
+            saved = await agent_admin.set_helpers(
+                runtime.session_factory,
+                actor=actor,
+                ma_agent_id=target.id,
+                helper_ids=wanted,
+                roster=visible,
+                audited=audit_to(auth, _HELPERS_ACTION),
+            )
     except AgentEditError as err:
         raise ToolError(str(err)) from err
-    names = {a.id: a.metadata.get(MA_METADATA_KEY_NAME, a.name) for a in visible}
     links = await tenant_links(runtime, auth)
     return AgentHelpersSet(
         agent_id=target.id,
-        helpers=[AgentHelper(agent_id=i, name=names[i]) for i in saved if i in names],
+        helpers=[
+            AgentHelper(agent_id=i, name=names[i]) for i in saved if i in names and i in visible_ids
+        ],
         web_url=links.agent(target.id) if links else None,
     )
+
+
+def _agent_name(agent: BetaManagedAgentsAgent) -> str:
+    return agent.metadata.get(MA_METADATA_KEY_NAME, agent.name)
+
+
+def _is_versioned(auth: AuthIdentity, agent: BetaManagedAgentsAgent) -> bool:
+    """Whether the agent's helpers live in its canvas versions: a normal agent on a provider
+    that keeps them. A seeded agent has no canvas edits and a self-hosted one no versions."""
+    if auth.anthropic_disabled or anthropic_disabled():
+        return False
+    return agent_editing.system_agent_rejection(agent) is None
+
+
+def with_helpers(
+    config: AgentConfigDoc, helper_ids: list[str], names: dict[str, str]
+) -> AgentConfigDoc:
+    """``config`` listing exactly ``helper_ids``; a name is the listed one, else ``names``'."""
+    listed = {helper.id: helper.name for helper in config.helpers or []}
+    return config.model_copy(
+        update={
+            "helpers": [HelperDoc(id=i, name=listed.get(i) or names.get(i, i)) for i in helper_ids]
+        }
+    )
+
+
+async def _helpers_versioned(
+    runtime: McpRuntime,
+    actor: AgentActor,
+    agent: BetaManagedAgentsAgent,
+    *,
+    before: list[str],
+    wanted: list[str],
+    names: dict[str, str],
+) -> list[str]:
+    """The list as the canvas's apply saves it: a recorded version, so a draft begun
+    earlier is refused as out of date instead of silently reverting it."""
+    if set(wanted) == set(before):
+        return before
+    await agent_changes.apply_change(
+        _change_deps(runtime),
+        actor=actor,
+        ma_agent_id=agent.id,
+        change=lambda config: with_helpers(config, wanted, names),
+        note=_HELPERS_ACTION,
+    )
+    return wanted
 
 
 async def _save_skill_impl(
@@ -343,8 +407,10 @@ def register_agent_edit_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         *,
         origin_context_id: str,
     ) -> AgentHelpersSet:
-        """Set the agents an agent may ask for help to exactly these names or ids. Works on the
-        default agent and on self-hosted agents; the person approves first."""
+        """Set the agents an agent may ask for help to exactly these names or ids, for any agent
+        you can see; helpers kept to channels you can't see stay. A normal agent gets a new
+        version, so an open draft goes out of date; the default agent and self-hosted agents
+        change in place. The person approves first."""
         return await _helpers_impl(runtime, await _auth(ctx), agent_id, helpers, origin_context_id)
 
     @mcp.tool
