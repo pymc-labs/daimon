@@ -29,6 +29,7 @@ from daimon.core.coding_key_prompts import (
     CODING_CLIENTS,
     client_name,
     connect_prompt,
+    server_slug,
 )
 from daimon.core.coding_keys import (
     authorize_coding_mint,
@@ -100,6 +101,7 @@ async def mint_connect_batch(
     target, _bound = await authorize_coding_mint(deps, actor=actor, ma_agent_id=ma_agent_id)
     if deps.public_url is None:
         raise AgentEditError("Coding keys aren't set up on this install.", kind="unavailable")
+    slug = server_slug(target.agent.name, ma_agent_id)
     codes = {client: new_code() for client in CODING_CLIENTS}
     batch = new_batch()
     expires_at = now + CODE_TTL
@@ -133,7 +135,7 @@ async def mint_connect_batch(
                 name=client_name(client),
                 prompt=connect_prompt(
                     client,
-                    agent_name=target.agent.name,
+                    slug=slug,
                     public_url=deps.public_url,
                     claim_url=claim_url,
                     code=code,

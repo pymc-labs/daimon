@@ -19,7 +19,8 @@ CODING_CLIENTS: Final = ("claude-code", "codex", "cursor", "pi", "mcp")
 #: How long a code works, for the prompt's own wording; the claim enforces it.
 CODE_TTL_MINUTES: Final = 10
 
-_BARE_TOML_KEY = re.compile(r"[A-Za-z0-9_-]+")
+#: Longest the agent's part of a server key gets.
+_SLUG_MAX = 32
 
 
 @dataclasses.dataclass(frozen=True)
@@ -65,27 +66,39 @@ def _entry(client: str, *, server_name: str, url: str) -> str:
     if client == "pi":
         return f'{name}: {{"url": {json.dumps(url)}, {headers}, "exposure": "direct"}}'
     if client == "codex":
-        key = server_name if _BARE_TOML_KEY.fullmatch(server_name) else name
         return (
-            f"[mcp_servers.{key}]\nurl = {json.dumps(url)}\n"
+            f"[mcp_servers.{server_name}]\nurl = {json.dumps(url)}\n"
             f'http_headers = {{ Authorization = "{auth}" }}'
         )
     return f"name: {server_name}\nurl: {url}\nheader: Authorization: {auth}"
 
 
-def connect_prompt(
-    client: str, *, agent_name: str, public_url: str, claim_url: str, code: str
-) -> str:
-    """The prompt for one tool: add this entry, get the key with one command, never show it."""
+def server_slug(agent_name: str, ma_agent_id: str) -> str:
+    """The agent's part of its server key: lowercase letters, digits and dashes, at most 32.
+
+    An agent's name is free text, so it never reaches a prompt as written: only
+    this slug does. A name with nothing usable in it falls back to the tail of
+    the agent's id.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "-", agent_name.lower())[:_SLUG_MAX].strip("-")
+    return slug or re.sub(r"[^a-z0-9]", "", ma_agent_id.lower())[-8:] or "agent"
+
+
+def connect_prompt(client: str, *, slug: str, public_url: str, claim_url: str, code: str) -> str:
+    """The prompt for one tool: add this entry, get the key with one command, never show it.
+
+    `slug` is `server_slug`'s, the only thing of the agent the prompt carries.
+    """
     spec = _CLIENTS[client]
-    entry = _entry(client, server_name=f"daimon-{agent_name}", url=public_url)
+    entry = _entry(client, server_name=f"daimon-{slug}", url=public_url)
     return (
-        f"Connect yourself to the agent {agent_name} on Daimon as a remote MCP server. "
+        "Connect yourself to a Daimon agent as a remote MCP server. "
         f"Add this to {spec.where}, keeping everything else:\n\n{entry}\n\n"
         f"Get {KEY_PLACEHOLDER} with ONE shell command that runs "
         f"`curl -fsS -X POST {claim_url} -d code={code}` (the response body is the bare key) "
         "and writes it straight into the file, so it never appears in this chat. "
-        "Never print, read back or echo it.\n\n"
+        "Never print, read back or echo it. If the command exits non-zero or prints nothing, "
+        "stop and tell me what it said; do not retry or make up a key.\n\n"
         f"Then tell me to {spec.after}. The code works once, "
         f"within {CODE_TTL_MINUTES} minutes."
     )
