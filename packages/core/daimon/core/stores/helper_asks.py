@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import secrets
 import uuid
-from collections.abc import Collection
-from datetime import datetime
+from collections.abc import Collection, Sequence
+from datetime import datetime, timedelta
 
 from daimon.core._models import HelperAsk
-from daimon.core.stores.domain import HelperAskRow, HelperAskStatus
-from sqlalchemy import func, select, update
+from daimon.core.stores.domain import HelperAskRow, HelperAskStatus, UploadedFile
+from sqlalchemy import func, select, type_coerce, update
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
 OPEN: tuple[HelperAskStatus, ...] = ("queued", "running")
+#: How long an ask's file links work, from the ask: past any turn that can use them.
+FILES_TTL = timedelta(hours=1)
+#: Most files one ask carries each way.
+MAX_FILES = 10
 
 
 async def create_ask(
@@ -23,6 +29,7 @@ async def create_ask(
     helper_name: str,
     message: str,
     now: datetime,
+    files: Sequence[UploadedFile] = (),
 ) -> HelperAskRow:
     ask = HelperAsk(
         id=uuid.uuid4(),
@@ -33,6 +40,9 @@ async def create_ask(
         message=message,
         status="queued",
         created_at=now,
+        files=[file.model_dump() for file in files],
+        reply_files=[],
+        files_token=secrets.token_urlsafe(24),
     )
     session.add(ask)
     await session.flush()
@@ -122,3 +132,36 @@ async def stop_open_asks(session: AsyncSession, *, origin_id: uuid.UUID, now: da
         .where(HelperAsk.origin_id == origin_id, HelperAsk.status.in_(OPEN))
         .values(status="stopped", finished_at=now)
     )
+
+
+async def get_ask_by_files_token(
+    session: AsyncSession, *, token: str, now: datetime
+) -> HelperAskRow | None:
+    """The ask whose file links carry `token`, while they still work."""
+    ask = await session.scalar(
+        select(HelperAsk).where(
+            HelperAsk.files_token == token, HelperAsk.created_at > now - FILES_TTL
+        )
+    )
+    return None if ask is None else HelperAskRow.model_validate(ask)
+
+
+async def add_reply_file(
+    session: AsyncSession, *, ask_id: uuid.UUID, file: UploadedFile, max_files: int
+) -> bool:
+    """Add a file to a running ask's reply; False once it ended or holds `max_files`."""
+    added = await session.scalar(
+        update(HelperAsk)
+        .where(
+            HelperAsk.id == ask_id,
+            HelperAsk.status == "running",
+            func.jsonb_array_length(HelperAsk.reply_files) < max_files,
+        )
+        .values(
+            reply_files=HelperAsk.reply_files.op("||", return_type=JSONB)(
+                type_coerce([file.model_dump()], JSONB)
+            )
+        )
+        .returning(HelperAsk.id)
+    )
+    return added is not None

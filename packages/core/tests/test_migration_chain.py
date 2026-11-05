@@ -143,6 +143,7 @@ TAIL = (
     "0179_reach_tallies",
     "0180_tag_opt_outs",
     "0181_reach_own_threads",
+    "0182_helper_files",
 )
 HEAD = TAIL[-1]
 

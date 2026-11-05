@@ -20,7 +20,7 @@ from datetime import datetime, timedelta
 from typing import Any, cast
 
 from daimon.core._models import FileUpload, WebMessage
-from daimon.core.stores.domain import FileUploadRow
+from daimon.core.stores.domain import FileUploadRow, UploadedFile
 from sqlalchemy import (
     CursorResult,
     Select,
@@ -133,6 +133,22 @@ async def get_upload(
         )
     ).scalar_one_or_none()
     return None if row is None else FileUploadRow.model_validate(row)
+
+
+async def list_landed_uploads(
+    session: AsyncSession, *, tenant_id: uuid.UUID, handle_ids: Collection[str]
+) -> list[UploadedFile]:
+    """The tenant's uploads among `handle_ids` whose bytes landed, without the bytes."""
+    rows = await session.execute(
+        select(FileUpload.id, FileUpload.display_filename, func.octet_length(FileUpload.content))
+        .where(
+            FileUpload.tenant_id == tenant_id,
+            FileUpload.id.in_(list(handle_ids)),
+            FileUpload.content.is_not(None),
+        )
+        .order_by(FileUpload.created_at, FileUpload.id)
+    )
+    return [UploadedFile(id=id_, name=name, size=size) for id_, name, size in rows]
 
 
 async def get_person_upload(

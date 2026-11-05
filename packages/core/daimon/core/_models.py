@@ -2822,6 +2822,7 @@ class HelperAsk(Base):
             name="ck_helper_asks_status",
         ),
         Index("helper_asks_origin_idx", "origin_id", "status"),
+        Index("helper_asks_files_token_idx", "files_token", unique=True),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
@@ -2834,6 +2835,13 @@ class HelperAsk(Base):
     reply: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Files passed to the helper and the files it sends back: `file_uploads` facts
+    # ({id, name, size}). `files_token` is the capability in their download links.
+    files: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    reply_files: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, server_default=text("'[]'::jsonb")
+    )
+    files_token: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class SharedChannel(Base):

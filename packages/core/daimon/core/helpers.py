@@ -6,6 +6,8 @@ each ask is a turn of the helper agent, admitted for the same person in the same
 channel and thread, so every rule, seal, hold, budget and confirmation applies as
 if that person had asked the helper there. A helper keeps its own conversation
 per thread (`helper_thread_key`), posts nothing, and its last message is the reply.
+Files go both ways by link (`helper_message`): the helper downloads the ask's files
+and uploads its own with curl, so any backend whose sandbox reaches Daimon works.
 Everything stops when the asking turn ends; a helper's turn asks no helpers.
 """
 
@@ -96,6 +98,25 @@ class _Quiet(TurnLifecycle):
 
     async def on_terminal_failure(self, state: TurnState, err: Exception) -> None:
         return None
+
+
+def helper_message(asker: str, ask: HelperAskRow, app_root: str | None) -> str:
+    """What a helper reads for one ask: the message, its files and how to send files back.
+
+    Without a public URL there are no links, and `ask_helper` takes no files.
+    """
+    text = f"{asker} asks:\n{ask.message}"
+    if app_root is None or ask.files_token is None:
+        return text
+    base = f"{app_root}/helper-files/{ask.files_token}"
+    if ask.files:
+        fetch = "\n".join(f'  curl -sS -o {f.name} "{base}/{f.id}"' for f in ask.files)
+        text += f"\n\nFiles {asker} gave you; download each with:\n{fetch}"
+    return (
+        f"{text}\n\nTo send files back with your reply, upload each with:\n"
+        f'  curl -sS -T <file> "{base}/"\n'
+        "A file you only save, even under /mnt/session/outputs, is not sent."
+    )
 
 
 @dataclass
@@ -222,7 +243,8 @@ class _Desk:
                 session_state=None if continued else prepared.continuity.session_state(),
                 effective_is_admin=admission.is_admin,
             )
-            message = f"{controls}\n\n{self.asker_name} asks:\n{ask.message}"
+            asks = helper_message(self.asker_name, ask, deps.mcp.app_root_url)
+            message = f"{controls}\n\n{asks}"
 
             async def reseed() -> str:
                 return message

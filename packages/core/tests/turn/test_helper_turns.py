@@ -24,8 +24,8 @@ from daimon.core.config import McpSettings
 from daimon.core.helpers import helper_thread_key
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
-from daimon.core.stores import agent_helpers, helper_asks
-from daimon.core.stores.domain import HelperAskRow, Role, TenantRow
+from daimon.core.stores import agent_helpers, file_uploads, helper_asks
+from daimon.core.stores.domain import HelperAskRow, Role, TenantRow, UploadedFile
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
@@ -49,6 +49,7 @@ from mux.testing.drivers.anthropic.ma import (
     make_fake_memory_store_handler,
 )
 from mux.testing.isolated_sdk import build_async_anthropic
+from pydantic import HttpUrl
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from daimon.testing.factories import (  # isort: skip
@@ -84,7 +85,7 @@ class Scene:
     session_agents: dict[str, str] = field(default_factory=dict[str, str])
     sent: dict[str, list[str]] = field(default_factory=dict[str, list[str]])
 
-    async def ask(self, message: str = QUESTION) -> None:
+    async def ask(self, message: str = QUESTION, files: list[UploadedFile] | None = None) -> None:
         """Insert an ask for the running turn, as the `ask_helper` tool does."""
         assert self.origin_id is not None, "the stream opens inside the turn's origin"
         async with self.sessionmaker.begin() as db:
@@ -96,6 +97,7 @@ class Scene:
                 helper_name="helper",
                 message=message,
                 now=datetime.now(UTC),
+                files=files or [],
             )
         self.ask_id = row.id
 
@@ -132,6 +134,8 @@ async def run_asking_turn(
     on_stream: Callable[[Scene], Awaitable[None]],
     *,
     poll_s: float = 0.02,
+    public_url: str | None = None,
+    on_helper_stream: Callable[[Scene], Awaitable[None]] | None = None,
 ) -> Run:
     """Run one chat turn of agent `daimon` whose stream calls `on_stream` before it answers."""
     monkeypatch.setattr(helpers, "POLL_S", poll_s)
@@ -192,6 +196,8 @@ async def run_asking_turn(
         if stream and owner == PARENT_ID and not scene.streamed:
             scene.streamed = True
             await on_stream(scene)
+        if stream and owner == HELPER_ID and on_helper_stream is not None:
+            await on_helper_stream(scene)
         return turns[owner].dispatch(request)
 
     deps = TurnDeps(
@@ -204,7 +210,7 @@ async def run_asking_turn(
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
         defaults_root=tmp_path,
-        mcp=McpSettings(),
+        mcp=McpSettings(public_url=HttpUrl(public_url) if public_url else None),
         billing_config=None,
         markup=Decimal(1),
         fernet=None,
@@ -393,3 +399,88 @@ async def test_helper_refused_at_admission_fails_its_ask_in_plain_words(
     ), "the asker is told why, without internals"
     assert await run.store.get_binding(run.helper_slot) is None, "a refused helper binds nothing"
     assert set(run.scene.sent) == {run.parent_session}, "only the asker's session saw a message"
+
+
+async def _land(scene: Scene, name: str, data: bytes) -> UploadedFile:
+    """A landed upload in the scene's tenant, as a sandbox's curl PUT leaves one."""
+    now = datetime.now(UTC)
+    async with scene.sessionmaker.begin() as db:
+        row, token = await file_uploads.create_upload(
+            db,
+            tenant_id=scene.tenant.id,
+            title=name,
+            display_filename=name,
+            content_type="application/octet-stream",
+            now=now,
+        )
+        await file_uploads.store_upload_content(db, upload_token=token, data=data, now=now)
+    return UploadedFile(id=row.id, name=name, size=len(data))
+
+
+async def test_files_reach_the_helper_by_link_and_its_files_come_back_with_the_reply(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    db_clean: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The helper is told how to fetch the asker's file and send its own; what it sends lands."""
+    given: list[UploadedFile] = []
+    sent: list[UploadedFile] = []
+
+    async def ask_with_a_file(scene: Scene) -> None:
+        given.append(await _land(scene, "data.csv", b"a,b"))
+        await scene.ask(files=given)
+        await scene.wait_finished()
+
+    async def helper_uploads(scene: Scene) -> None:
+        # What `PUT /helper-files/{token}/chart.png` does while the helper runs.
+        if sent:
+            return
+        sent.append(await _land(scene, "chart.png", b"PNG"))
+        async with scene.sessionmaker.begin() as db:
+            await helper_asks.add_reply_file(
+                db, ask_id=(await scene.current()).id, file=sent[0], max_files=10
+            )
+
+    run = await run_asking_turn(
+        db_session_factory,
+        tmp_path,
+        monkeypatch,
+        ask_with_a_file,
+        public_url="https://daimon.example/mcp",
+        on_helper_stream=helper_uploads,
+    )
+
+    ask = run.final_ask
+    base = f"https://daimon.example/helper-files/{ask.files_token}"
+    helper_session = next(s for s, a in run.scene.session_agents.items() if a == HELPER_ID)
+    [helper_message] = run.scene.sent[helper_session]
+    assert ask.status == "done" and ask.reply == HELPER_TEXT, "the helper still answers in text"
+    assert f'curl -sS -o data.csv \\"{base}/{given[0].id}\\"' in helper_message, (
+        "the helper is told how to download the asker's file"
+    )
+    assert f'curl -sS -T <file> \\"{base}/\\"' in helper_message, (
+        "the helper is told how to send files back"
+    )
+    assert ask.reply_files == sent, "the helper's file comes back with its reply"
+    shown = [str(state.content) for state in run.lifecycle.renders]
+    assert all("chart.png" not in text for text in shown), "the helper's file is posted nowhere"
+
+
+async def test_without_a_public_url_the_helper_gets_no_file_links(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    db_clean: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No base URL, no links: the helper reads the plain ask."""
+
+    async def ask_and_wait(scene: Scene) -> None:
+        await scene.ask()
+        await scene.wait_finished()
+
+    run = await run_asking_turn(db_session_factory, tmp_path, monkeypatch, ask_and_wait)
+
+    helper_session = next(s for s, a in run.scene.session_agents.items() if a == HELPER_ID)
+    [helper_message] = run.scene.sent[helper_session]
+    assert "helper-files" not in helper_message, "no link is offered without a public URL"

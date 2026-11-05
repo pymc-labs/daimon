@@ -17,6 +17,7 @@ from daimon.core.stores.file_uploads import (
     delete_unreferenced_web_uploads,
     get_person_upload,
     get_upload,
+    list_landed_uploads,
     person_upload_bytes,
     store_upload_content,
 )
@@ -221,3 +222,37 @@ async def test_erasing_a_person_erases_their_files(db_session: AsyncSession) -> 
     assert await get_upload(db_session, tenant_id=tenant.id, handle_id=row.id) is None, (
         "the person's files go with them"
     )
+
+
+async def test_landed_uploads_are_listed_for_their_tenant_without_bytes(
+    db_session: AsyncSession,
+) -> None:
+    """Only the tenant's uploads whose bytes landed are listed, with their size."""
+    owner = await make_tenant(db_session, workspace_id="guild-owner")
+    other = await make_tenant(db_session, workspace_id="guild-other")
+    landed, token = await create_upload(
+        db_session,
+        tenant_id=owner.id,
+        title="data",
+        display_filename="data.csv",
+        content_type="text/csv",
+        now=_NOW,
+    )
+    await store_upload_content(db_session, upload_token=token, data=b"a,b\n", now=_NOW)
+    empty, _ = await create_upload(
+        db_session,
+        tenant_id=owner.id,
+        title="x",
+        display_filename="x.txt",
+        content_type="text/plain",
+        now=_NOW,
+    )
+    handles = [landed.id, empty.id, "nope"]
+
+    mine = await list_landed_uploads(db_session, tenant_id=owner.id, handle_ids=handles)
+    theirs = await list_landed_uploads(db_session, tenant_id=other.id, handle_ids=handles)
+
+    assert [(f.id, f.name, f.size) for f in mine] == [(landed.id, "data.csv", 4)], (
+        "only the landed upload is listed, with its byte size"
+    )
+    assert theirs == [], "another tenant lists none of them"
