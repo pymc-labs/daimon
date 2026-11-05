@@ -275,30 +275,54 @@ def test_render_change_confirmation_renders_environment_changed() -> None:
 # --- F. handoff acknowledged -----------------------------------------------------
 
 
-def test_render_handoff_acknowledged_without_requested_work() -> None:
+def test_render_handoff_acknowledged_same_provider_starting_now() -> None:
+    """A person-asked hand-off with no named work: answers now, keeps everything."""
     assert render_handoff_acknowledged(
-        target_name="Ada", from_name="Rex", channel="#data", requested_work=None
+        target_name="Ada", starts_now=True, moved_to=None, readable=True, requested_work=None
+    ) == ("Ada is taking over, starting now.\nIt keeps this conversation and its files.")
+
+
+def test_render_handoff_acknowledged_waits_and_names_the_work() -> None:
+    """Not started by a person's message: waits for their next one; named work is listed."""
+    assert render_handoff_acknowledged(
+        target_name="Ada",
+        starts_now=False,
+        moved_to=None,
+        readable=True,
+        requested_work="finish the report",
     ) == (
-        "Ada will handle your next message.\n"
-        "Send a message to continue.\n"
-        "Your conversation and files carry over while Ada stays on this model provider. "
-        "Ada uses its own connections and memory.\n"
-        "Switching Ada to another provider starts it fresh here: earlier messages and files "
-        "don't carry over."
+        "Ada is taking over from your next message.\n"
+        "It keeps this conversation and its files.\n"
+        "First: finish the report."
     )
 
 
-def test_render_handoff_acknowledged_appends_requested_work_line() -> None:
+def test_render_handoff_acknowledged_after_a_move_has_a_summary_not_files() -> None:
+    """A cross-provider move names the model and says the files stay behind."""
     assert render_handoff_acknowledged(
-        target_name="Ada", from_name="Rex", channel="#data", requested_work="finish the report"
+        target_name="daimon-grove",
+        starts_now=True,
+        moved_to="Gemini 4 Argon",
+        readable=True,
+        requested_work="test the addition agent with 245, 200, 300",
     ) == (
-        "Ada will handle your next message.\n"
-        "Send a message to continue.\n"
-        "Your conversation and files carry over while Ada stays on this model provider. "
-        "Ada uses its own connections and memory.\n"
-        "Switching Ada to another provider starts it fresh here: earlier messages and files "
-        "don't carry over.\n"
-        "Next: finish the report."
+        "daimon-grove is taking over on Gemini 4 Argon, starting now.\n"
+        "It has a summary of this conversation; earlier files stay behind.\n"
+        "First: test the addition agent with 245, 200, 300."
+    )
+
+
+def test_render_handoff_acknowledged_starts_fresh_when_it_cant_read_the_conversation() -> None:
+    """Unreadable: it starts fresh, says what to do, and never lists work it won't get."""
+    assert render_handoff_acknowledged(
+        target_name="Ada",
+        starts_now=False,
+        moved_to=None,
+        readable=False,
+        requested_work="finish the report",
+    ) == (
+        "Ada is taking over from your next message.\n"
+        "It can't read this conversation, so it starts fresh: tell it what you need."
     )
 
 
@@ -832,10 +856,17 @@ def test_other_render_functions_never_contain_forbidden_tokens_or_blank_lines() 
     other_rendered: dict[str, str] = {
         "render_unsaved_work_question": render_unsaved_work_question("acme/widgets"),
         "render_handoff_acknowledged (no work)": render_handoff_acknowledged(
-            target_name="Ada", from_name="Rex", channel="#data", requested_work=None
+            target_name="Ada", starts_now=True, moved_to=None, readable=True, requested_work=None
         ),
         "render_handoff_acknowledged (with work)": render_handoff_acknowledged(
-            target_name="Ada", from_name="Rex", channel="#data", requested_work="finish the report"
+            target_name="Ada",
+            starts_now=False,
+            moved_to="Gemini 4 Argon",
+            readable=True,
+            requested_work="finish the report",
+        ),
+        "render_handoff_acknowledged (unreadable)": render_handoff_acknowledged(
+            target_name="Ada", starts_now=False, moved_to=None, readable=False, requested_work=None
         ),
         "render_fresh_start": render_fresh_start("Ada"),
         "render_preparation_failed": render_preparation_failed("Ada"),
@@ -873,11 +904,12 @@ def test_other_render_functions_never_contain_forbidden_tokens_or_blank_lines() 
 def test_handoff_acknowledged_does_not_double_the_full_stop_when_the_work_ends_a_sentence() -> None:
     rendered = render_handoff_acknowledged(
         target_name="research-bot",
-        from_name="Daimon",
-        channel="#data",
+        starts_now=True,
+        moved_to=None,
+        readable=True,
         requested_work="add a second line and show the file.",
     )
-    assert rendered.endswith("Next: add a second line and show the file."), (
+    assert rendered.endswith("First: add a second line and show the file."), (
         "a trailing period in the person's words must not produce '..'"
     )
     assert ".." not in rendered, "no doubled full stop anywhere in the confirmation"

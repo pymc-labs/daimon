@@ -360,3 +360,41 @@ async def test_apply_refuses_a_draft_when_helpers_moved_under_it(
         await agent_changes.apply_draft(deps, actor=actor, ma_agent_id="ag_d", note=None)
     assert raised.value.kind == "stale", "a draft begun on other helpers is refused (409)"
     assert world.updates == [], "nothing is written"
+
+
+async def test_a_helpers_change_through_apply_change_leaves_an_open_draft_stale(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The chat tool's versioned helper edit is recorded, and refuses a draft begun before it."""
+    world, deps, actor = await _setup(db_session, db_session_factory)
+    _serve(world, ma_agent(id="ag_h", name="Scout", tenant_id=actor.tenant_id))
+    base = await agent_changes.current_config(deps, tenant_id=actor.tenant_id, agent=world.agent)
+    await agent_changes.save_draft(
+        deps,
+        actor=actor,
+        ma_agent_id="ag_d",
+        base_version=3,
+        config=base.model_copy(update={"purpose": "Writes reports"}),
+    )
+    scout = HelperDoc(id="ag_h", name="Scout")
+    await agent_changes.apply_change(
+        deps,
+        actor=actor,
+        ma_agent_id="ag_d",
+        change=lambda config: config.model_copy(update={"helpers": [scout]}),
+        note="Changed agent helpers",
+    )
+    async with db_session_factory() as session:
+        stored = await agent_helpers.list_helper_ids(
+            session, tenant_id=actor.tenant_id, agent_id="ag_d"
+        )
+        (latest, *_) = await agent_drafts.list_versions(
+            session, tenant_id=actor.tenant_id, agent_id="ag_d"
+        )
+    assert stored == ["ag_h"], "the helper list is stored"
+    assert latest.note == "Changed agent helpers", "and recorded as a version"
+    draft = await agent_changes.load_draft(deps, actor=actor, agent=world.agent)
+    assert draft is not None and draft.stale, "the earlier draft shows it went stale"
+    with pytest.raises(AgentEditError) as raised:
+        await agent_changes.apply_draft(deps, actor=actor, ma_agent_id="ag_d", note=None)
+    assert raised.value.kind == "stale", "and is refused rather than reverting the helpers"

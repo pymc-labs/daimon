@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 220 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 221 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -77,13 +77,14 @@ no agent, the caller's own on any agent.
 ## `agent_edits`
 
 Chat tools for the agent page's remaining writes: revert to a recorded version, change
-owners and save a skill's files.
+owners and helpers and save a skill's files.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `resync_agent_skills` | all callers | Sync an agent's repo skills now from their recorded repos; an unchanged skill is skipped. |
 | `revert_agent` | all callers | Restore a recorded version of an agent's setup as its next version; name, avatar, places and sign-ins stay. |
 | `save_agent_skill_files` | all callers | Edit an agent's skill file: publish text files as a new version of one of its skills, or a new skill when ``skill_id`` is left out, and pin it. |
+| `set_agent_helpers` | admin only | Set the agents an agent may ask for help to exactly these names or ids, for any agent you can see; helpers kept to channels you can't see stay. |
 | `set_agent_owners` | admin only | Set an agent's owner and co-owners to exactly these web person or account ids. |
 
 ## `agent_removal`

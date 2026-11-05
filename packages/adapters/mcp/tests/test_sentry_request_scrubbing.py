@@ -16,7 +16,7 @@ import pytest
 import sentry_sdk
 from cryptography.fernet import Fernet, MultiFernet
 from daimon.adapters.mcp.slack_file_proxy import build_slack_file_proxy_route
-from daimon.adapters.mcp.uploads import build_upload_route
+from daimon.adapters.mcp.uploads import build_helper_files_route, build_upload_route
 from daimon.core.observability import capture_exception_with_scope, init_sentry
 from daimon.core.slack_file_token import mint_file_token
 from sentry_sdk.integrations.starlette import StarletteIntegration
@@ -125,6 +125,11 @@ def _routes(database: Callable[[], object], fetch: Callable[..., object]) -> lis
     return [
         Route("/uploads/{token}", build_upload_route(database), methods=["PUT"]),  # pyright: ignore[reportArgumentType]
         Route(
+            "/helper-files/{token}/{name}",
+            build_helper_files_route(database),  # pyright: ignore[reportArgumentType]
+            methods=["GET", "PUT"],
+        ),
+        Route(
             "/slack/file/{token}",
             build_slack_file_proxy_route(
                 sessionmaker=database,  # pyright: ignore[reportArgumentType]
@@ -137,7 +142,7 @@ def _routes(database: Callable[[], object], fetch: Callable[..., object]) -> lis
     ]
 
 
-@pytest.mark.parametrize("route", ["upload", "slack-file"])
+@pytest.mark.parametrize("route", ["upload", "helper-file", "slack-file"])
 def test_capability_tokens_in_paths_never_reach_the_transport_on_errors(
     monkeypatch: pytest.MonkeyPatch, route: str
 ) -> None:
@@ -145,13 +150,17 @@ def test_capability_tokens_in_paths_never_reach_the_transport_on_errors(
     transport = _init_capturing(monkeypatch)
     if route == "upload":
         token, method, path = secrets.token_urlsafe(24), "PUT", "/uploads/"
+    elif route == "helper-file":
+        token, method, path = secrets.token_urlsafe(24), "GET", "/helper-files/"
     else:
         token = mint_file_token(team_id="T1", file_id="F1", exp=2000, secret=_FILE_SECRET)
         method, path = "GET", "/slack/file/"
     app = Starlette(routes=_routes(_broken_database, _no_fetch))
     try:
         with TestClient(app, raise_server_exceptions=False) as client:
-            response = client.request(method, path + token)
+            response = client.request(
+                method, path + token + ("/h1" if route == "helper-file" else "")
+            )
         sentry_sdk.flush()
     finally:
         sentry_sdk.init()

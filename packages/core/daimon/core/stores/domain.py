@@ -1304,6 +1304,16 @@ class TurnOriginRow(BaseModel):
 HelperAskStatus = Literal["queued", "running", "done", "failed", "stopped"]
 
 
+class UploadedFile(BaseModel):
+    """A landed `file_uploads` row's facts, without its bytes."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    name: str
+    size: int
+
+
 class HelperAskRow(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 
@@ -1317,6 +1327,9 @@ class HelperAskRow(BaseModel):
     reply: str | None
     created_at: datetime
     finished_at: datetime | None
+    files: list[UploadedFile] = []
+    reply_files: list[UploadedFile] = []
+    files_token: str | None = None
 
 
 class _Facts(BaseModel):

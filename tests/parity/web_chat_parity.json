@@ -274,6 +274,9 @@
   "PUT /api/agents/{agent_id}/github/working": {
    "tool": "set_working_repo"
   },
+  "PUT /api/agents/{agent_id}/helpers": {
+   "tool": "set_agent_helpers"
+  },
   "PUT /api/agents/{agent_id}/keys/{key}": {
    "tool": "request_agent_key"
   },

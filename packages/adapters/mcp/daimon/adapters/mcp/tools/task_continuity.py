@@ -1,7 +1,7 @@
 """Conversational task handoff and fresh start.
 
-Two tools, both called from inside the mention turn that carries the request,
-so changing who answers costs no extra billed turn. Both are authorized the
+Two tools, both called from inside the mention turn that carries the request;
+the only extra billed turn is the destination's own answer. Both are authorized the
 same way as `set_setup_target`: a trusted `origin_context_id` bound to this
 caller, tenant and platform, and a concrete MA agent id — a recreated namesake
 has a different id and cannot receive a handoff.
@@ -33,8 +33,10 @@ from daimon.adapters.mcp.tools._words import admin_noun
 from daimon.adapters.mcp.tools.setup_target import refuse_helper, require_turn_origin
 from daimon.core.authz import Action, build_agent_ref
 from daimon.core.continuity.continuation import (
+    HANDOFF_PICKUP_SEED,
     MAX_REQUESTED_WORK,
     ContinuationRequest,
+    can_start_turn,
     sanitize_requested_work,
 )
 from daimon.core.continuity.handoff import HandoffRefused, HandoffRefusedInSetupThread
@@ -110,7 +112,7 @@ class TaskHandoffResult:
     previous_responder_name: str
     """Who was answering here until now."""
     continuation_recorded: bool
-    """True when work was queued for the destination's first turn."""
+    """True when the destination's first turn was queued: it answers without another message."""
     confirmation: str
     """Final person-facing copy. Relay it verbatim."""
     instruction: str
@@ -195,7 +197,8 @@ async def _hand_off_task_impl(
     switch: Literal["check", "commit"] | None = None,
     summary: str | None = None,
 ) -> TaskHandoffResult:
-    """Bind this thread's responder to another agent, optionally queueing work.
+    """Bind this thread's responder to another agent, and queue its first turn when the
+    person's own new message asked for the hand-off.
 
     Every check runs before anything is written, so a refused handoff leaves
     the conversation exactly as it was — including the uncommitted-work
@@ -246,9 +249,18 @@ async def _hand_off_task_impl(
             "it, in one step. If the copy should stay on this provider, call "
             "hand_off_task again with keep_provider=true. Nothing was changed."
         )
-    continuation = sanitize_requested_work(continuation, echoes=(destination_name,))
+    named_work = sanitize_requested_work(continuation, echoes=(destination_name,))
     summary = _clean_summary(summary)
-    if continuation is not None and auth.platform_user_id is None:
+    # The destination answers at once only when the person's own new message asked
+    # for this hand-off: never for a resumed or queued turn (a hand-off's own first
+    # turn among them), a wake, a routine, an agent key or a switch card.
+    starts_turn = (
+        switch is None
+        and origin.human_invocation is True
+        and origin.platform_message_id is not None
+        and auth.agent_id is None
+    )
+    if starts_turn and named_work is not None and auth.platform_user_id is None:
         raise ToolError(
             "Continuing work needs the requester's platform identity, which this "
             "connection does not carry. Ask from the conversation itself."
@@ -274,7 +286,8 @@ async def _hand_off_task_impl(
         else None
     )
 
-    queued_work = None if continuation is None else continuation[:MAX_REQUESTED_WORK]
+    work = None if named_work is None else named_work[:MAX_REQUESTED_WORK]
+    queued_work = (work or HANDOFF_PICKUP_SEED) if starts_turn else None
     request = (
         None
         if queued_work is None or auth.platform_user_id is None
@@ -317,8 +330,8 @@ async def _hand_off_task_impl(
         agent=build_agent_ref(destination.name, destination.metadata, destination_name),
         is_daimon_managed=destination.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
     )
-    work_withheld = False
-    summary_withheld = False
+    readable = True
+    queued = False
     moved: str | None = None
 
     try:
@@ -389,8 +402,6 @@ async def _hand_off_task_impl(
                     f"{moved or 'another provider'}. Nothing changed. Ask {destination_name} "
                     "in a new conversation."
                 )
-            # Never silent: a hand-off that goes ahead without its summary says so.
-            summary_withheld = summary is not None and not readable
             if repo is not None and unsaved_work is None:
                 # Raised inside the transaction, so the binding rolls back.
                 raise ToolError(
@@ -422,10 +433,22 @@ async def _hand_off_task_impl(
                     from_name=origin.responder_name,
                     summary=summary,
                 )
-            if request is not None and not readable:
-                # The next bind won't carry this session to the destination,
-                # so the work named in it doesn't go either.
-                request, queued_work, work_withheld = None, None, True
+            if request is not None and not (
+                # The next bind won't carry this session to the destination, so
+                # the work named in it doesn't go either; and a turn the
+                # dispatcher would not run is not promised.
+                readable
+                and await can_start_turn(
+                    session,
+                    target_ma_agent_id=destination.id,
+                    tenant_id=auth.tenant_id,
+                    platform=platform,
+                    channel_id=origin.parent_channel_id,
+                    thread_id=origin.thread_id,
+                    caller_id=auth.platform_user_id,
+                )
+            ):
+                request = None
             if request is not None:
                 await record_continuation(
                     session,
@@ -441,7 +464,10 @@ async def _hand_off_task_impl(
                     attended=request.attended,
                     idempotency_key=request.idempotency_key,
                     requested_work=request.requested_work,
+                    # A message the person posts after the one that asked supersedes it.
+                    counts_from=origin.created_at,
                 )
+                queued = True
     except ThreadHandoffRefused as refused:
         if refused.refusal.authz_reason is not None:
             record_authz_denial(Action.HAND_OFF, refused.refusal.authz_reason)
@@ -459,29 +485,16 @@ async def _hand_off_task_impl(
 
     confirmation = render_handoff_acknowledged(
         target_name=destination_name,
-        from_name=origin.responder_name,
-        channel=_channel_mention(platform, origin.parent_channel_id),
-        requested_work=queued_work,
+        starts_now=queued,
+        moved_to=moved,
+        readable=readable,
+        requested_work=work if queued else None,
     )
-    if moved is not None:
-        confirmation += (
-            f"\nThis conversation continues with {destination_name} on {moved}; "
-            "it has a summary of what we discussed."
-        )
-    elif summary_withheld:
-        confirmation += (
-            f"\n(without the summary: this conversation can't be shared with {destination_name})"
-        )
-    if work_withheld:
-        confirmation += (
-            f"\n{destination_name} can't read this conversation's history, which only "
-            "conversations inside its channel can read, so the work you named was not passed on."
-        )
     return TaskHandoffResult(
         destination_name=destination_name,
         destination_ma_agent_id=destination.id,
         previous_responder_name=origin.responder_name,
-        continuation_recorded=request is not None,
+        continuation_recorded=queued,
         confirmation=confirmation,
         instruction=_REPLY_VERBATIM,
     )
@@ -689,8 +702,9 @@ def register_task_continuity_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             Field(
                 description=(
                     "Null unless the person explicitly asked the destination to continue "
-                    "or finish NAMED work, in their own words. 'Take over' alone, with no "
-                    "named work, is null. Never restate work that already finished."
+                    "or finish NAMED work, in their own words. 'Take over' alone is null. "
+                    "Used only when the destination answers right away. Never restate "
+                    "work that already finished."
                 )
             ),
         ] = None,
@@ -730,10 +744,11 @@ def register_task_continuity_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         this channel (the one it answers with, or one pinned to it); any other
         needs an admin.
 
-        From the next message here, that agent answers, with its own keys,
-        connections and memory; conversation, decisions and files move with the
-        requester. Posted files stay posted. No extra billed turn unless
-        `continuation` is set.
+        That agent answers here from now on, with its own keys, connections and
+        memory; conversation, decisions and files move with the requester. When
+        the person's own message asked for the hand-off, it answers right away (one
+        billed turn); otherwise (a routine, a wake, an agent key, a switch card)
+        from their next message.
 
         `origin_context_id` must name this execution's origin and match the
         calling session's signed grant. Empty IDs and other sessions' origins
@@ -742,10 +757,9 @@ def register_task_continuity_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         `agent_id`: the destination's current id from `list_agents`; a recreated
         namesake is refused. `continuation` is null unless the person asked the
-        destination to continue or finish NAMED work ("let it finish the chart").
-        "Take over" alone is switch-only — null. Never restate finished work. A
-        too-short, empty, or name-only value is auto-nulled — get the wording
-        right regardless.
+        destination to continue or finish NAMED work ("let it finish the chart");
+        "take over" alone is null. Never restate finished work. A
+        too-short, empty, or name-only value is auto-nulled.
 
         A destination on another provider (Gemini, OpenAI) can't read this
         conversation: pass `summary`, and it starts there from that summary

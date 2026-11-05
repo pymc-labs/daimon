@@ -25,6 +25,7 @@ from daimon.core.helpers import MAX_ASKS
 from daimon.core.stores import helper_asks
 from daimon.core.stores.agent_helpers import list_helper_ids
 from daimon.core.stores.domain import HelperAskRow, HelperAskStatus, TurnOriginRow
+from daimon.core.stores.file_uploads import list_landed_uploads
 from daimon.core.stores.selfhosted_resources import list_live_agent_facts
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -48,22 +49,42 @@ class HelperList(BaseModel):
     helpers: list[HelperAgent]
 
 
+class HelperFile(BaseModel):
+    id: str
+    name: str
+    size: int
+    url: str
+
+
 class HelperAnswer(BaseModel):
     ask_id: str
     helper: str
     status: HelperAskStatus
     reply: str | None = None
+    files: list[HelperFile] = []
 
 
 class HelperAnswers(BaseModel):
     answers: list[HelperAnswer]
 
 
-def _answer(ask: HelperAskRow) -> HelperAnswer:
+def _answer(ask: HelperAskRow, app_root: str | None) -> HelperAnswer:
     reply = ask.reply
     if reply is not None and len(reply) > MAX_REPLY_CHARS:
         reply = reply[:MAX_REPLY_CHARS] + "\n[reply cut]"
-    return HelperAnswer(ask_id=str(ask.id), helper=ask.helper_name, status=ask.status, reply=reply)
+    files = [
+        HelperFile(
+            id=f.id,
+            name=f.name,
+            size=f.size,
+            url=f"{app_root}/helper-files/{ask.files_token}/{f.id}",
+        )
+        for f in ask.reply_files
+        if app_root is not None and ask.files_token is not None
+    ]
+    return HelperAnswer(
+        ask_id=str(ask.id), helper=ask.helper_name, status=ask.status, reply=reply, files=files
+    )
 
 
 async def _roster(
@@ -108,7 +129,7 @@ async def _wait(
         if len(asks) < len(set(ids)):
             raise ToolError("Use the ask ids ask_helper gave you for this message.")
         if all(ask.status not in helper_asks.OPEN for ask in asks) or monotonic() >= until:
-            return [_answer(ask) for ask in asks]
+            return [_answer(ask, runtime.settings.mcp.app_root_url) for ask in asks]
         await asyncio.sleep(_POLL_S)
 
 
@@ -127,6 +148,7 @@ async def _ask_helper_impl(
     helper: str,
     message: str,
     wait: bool,
+    files: list[str] | None = None,
 ) -> HelperAnswer:
     origin = refuse_helper(await require_turn_origin(runtime, auth, origin_context_id))
     if not origin.serves_helpers:
@@ -142,9 +164,21 @@ async def _ask_helper_impl(
         )
     if not message.strip():
         raise ToolError("Say what the helper should do.")
+    handles = list(dict.fromkeys(h.strip() for h in files or []))
+    if len(handles) > helper_asks.MAX_FILES:
+        raise ToolError(f"Give a helper at most {helper_asks.MAX_FILES} files per ask.")
+    if handles and runtime.settings.mcp.app_root_url is None:
+        raise ToolError("Files can't be passed to helpers here: Daimon has no public URL.")
     async with runtime.session_factory.begin() as session:
         if await helper_asks.count_asks(session, origin_id=origin.id) >= MAX_ASKS:
             raise ToolError(f"You asked helpers {MAX_ASKS} times for this message. Answer now.")
+        landed = await list_landed_uploads(session, tenant_id=auth.tenant_id, handle_ids=handles)
+        missing = set(handles) - {f.id for f in landed}
+        if missing:
+            raise ToolError(
+                f"No uploaded file with handle id {', '.join(sorted(missing))}. Mint one with "
+                "create_file_upload_url and PUT the file first."
+            )
         ask = await helper_asks.create_ask(
             session,
             tenant_id=auth.tenant_id,
@@ -153,9 +187,10 @@ async def _ask_helper_impl(
             helper_name=chosen.name,
             message=message,
             now=datetime.now(UTC),
+            files=landed,
         )
     if not wait:
-        return _answer(ask)
+        return _answer(ask, runtime.settings.mcp.app_root_url)
     [answer] = await _wait(runtime, auth, origin, [ask.id])
     return answer
 
@@ -194,7 +229,7 @@ def register_helper_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             Field(
                 description=(
                     "Everything the helper needs: the task, the facts and what to send back. "
-                    "It can't see this conversation's history or your files."
+                    "It can't see this conversation's history or files you don't pass."
                 ),
                 max_length=MAX_MESSAGE_CHARS,
             ),
@@ -203,6 +238,10 @@ def register_helper_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             bool,
             Field(description="False to start it and ask other helpers before waiting."),
         ] = True,
+        files: Annotated[
+            list[str] | None,
+            Field(description="Handle ids of files to pass to the helper (see below)."),
+        ] = None,
     ) -> HelperAnswer:
         """Ask one of your helpers (`list_helpers`) to do part of this turn's work, on its own model, and get its reply.
 
@@ -211,6 +250,12 @@ def register_helper_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         conversation in this thread. While `status` is `queued` or `running`, call
         `wait_for_helpers` with the `ask_id`. Helpers stop when your turn ends, so wait
         for their replies before you answer.
+
+        To pass it files: for each, call `create_file_upload_url`, PUT the file with the
+        curl it returns, and pass the handle id in `files`. Files the helper sends back
+        are in the answer's `files`: download one with `curl -sS -o <name> "<url>"`, or
+        pass its `id` to another helper's `files`. Deliver one to the person as you would
+        a file you made. The links expire an hour after the ask.
         """  # noqa: E501
         return await _ask_helper_impl(
             runtime,
@@ -219,6 +264,7 @@ def register_helper_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             helper=helper,
             message=message,
             wait=wait,
+            files=files,
         )
 
     @mcp.tool

@@ -250,6 +250,19 @@ export function useRevert(id: string) {
   })
 }
 
+/** Set a seeded agent's helpers in place; only an admin may, and no draft carries it. */
+export function useSetHelpers(id: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (helpers: string[]) => api.put<Agent>(`/api/agents/${id}/helpers`, { helpers }),
+    onSuccess: (a) => {
+      qc.setQueryData(["agents", id], a)
+      qc.invalidateQueries({ queryKey: ["agents"], exact: true })
+    },
+    onError: (e) => toast.error(e.message),
+  })
+}
+
 /** What an edit to this node does once applied; mirrors the server's tagging. */
 export function nodeEffect(node: string, backend: Backend): Effect {
   // Connection nodes change on their own server, which applies it on the next call.

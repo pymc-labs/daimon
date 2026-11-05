@@ -31,6 +31,7 @@ _TOOLS = {
     "set_agent_web_access",
     "change_workspace_settings",
     "revert_agent",
+    "set_agent_helpers",
     "set_agent_owners",
     "restore_library_skill_version",
     "approve_server_skill_update",

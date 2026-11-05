@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Helpers pass files both ways.** `ask_helper` takes files uploaded with `create_file_upload_url`, and the helper's own files come back with its reply as download links that work for that ask only and expire after an hour. It works on every model provider and needs the public URL set. Migration 0183 adds the columns.
+- **A hand-off the person asked for starts the new agent right away, with a clearer confirmation.** The new agent answers without waiting for another message when the person's own new message asked for it; a routine, timer, agent key, resumed turn or switch-card approval hands over from their next message, as does an agent that can't read the conversation or run here. The confirmation says who takes over, whether it starts now, what it keeps (the conversation and files, or a summary after a provider move) and its first piece of work.
 - **The approval card for a wide request is one short question.** It reads, for example, "Open 10 threads in #launch and tag 3 people?" or "Post in 4 places and tag 6 people?" above Approve, Deny and Details. The "Daimon wants to" lead, the second line and the "(N tags)" count are gone, and the approved card repeats the question without its question mark.
 - **Slack QA bots can be allow-listed with `DAIMON_SLACK__QA_BOT_USER_IDS`.** A listed bot's mention runs as a plain member, never a Slack admin; mentions from any other bot are ignored, as is Daimon's own.
 
@@ -22,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Chat answers and setup panels link to the agent, channel or routine on the web.** Each opens in the right workspace (sign-in or a workspace picker first when needed). Agent setup details, routines, billing and channel settings on Discord, Slack and Teams carry an "Open in web" button. The agent also knows the workspace's main pages to link. Nothing changes with no web app set.
 - **Everything the web admin pages do also works from Discord, Slack and Teams chat.** Admins invite people and send visitor links (sent by direct message), change roles, set agent access and workspace settings, manage spend allowances, read the audit log, spend and feedback, restore agent versions and set owners, edit skill files, resync repo skills, and see their own credits; results link to the page. People can also run a routine on demand, clear a thread's own settings, and remove their own data (memory, sign-ins, coding keys) with one tool. Removing or reconfiguring runs only on a Confirm card in chat, and routines and other unattended runs do not list those tools. Long lists show 25 rows with a total, and people lists page on. A test keeps the web app and chat in step.
+- **Admins set any agent's helpers, built-in Daimon's too.** On the agent's page or in chat with `set_agent_helpers` (on a Confirm card). A seeded agent's helpers apply to that workspace only, and nothing else on it is editable. In chat, a normal agent's change is recorded as a version, so an open draft goes out of date.
 - **The web app's agent editor offers the skills of a connected data server, and
   keeps them current.** **Add skill** lists the server's skills. An added skill joins the library read-only, and new versions move every
   agent that follows it; a pinned agent shows **Update available** and moves at once
@@ -322,7 +325,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   turn (`list_helpers`, `ask_helper`, `wait_for_helpers`). Pick each agent's helpers on its
   canvas in the web app. A helper runs for the same person in the same thread, with that
   person's rules, budget and confirmations; its reply goes back to the asking agent, and it
-  stops when that turn ends. Replies are text. Migration 0170 adds the helper tables.
+  stops when that turn ends. Migration 0170 adds the helper tables.
 - **Web app.** People chat with agents in a browser, signing in with Discord. Shared files
   reach the agent, and files it makes come back as downloads. Key requests show as a form in
   the chat. Admins manage people, invites, credit and settings, and a one-time owner link

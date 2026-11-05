@@ -9,22 +9,24 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import helpers as tool
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
 from daimon.core.anthropic_guard import without_anthropic
-from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
+from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import helper_asks
 from daimon.core.stores.agent_helpers import set_helpers
-from daimon.core.stores.domain import Role, TurnOriginRow
+from daimon.core.stores.domain import Role, TurnOriginRow, UploadedFile
+from daimon.core.stores.file_uploads import create_upload, store_upload_content
 from daimon.core.stores.selfhosted_resources import SelfHostedAgents
+from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.turn_origins import create_origin, mark_serving_helpers
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_account, make_tenant, make_web_person
 from daimon.testing.ma_models import ma_agent
 from fastmcp.exceptions import ToolError
 from mux.contracts.ids import ModelRef, Scope
 from mux.contracts.resources import AgentSpec
 from mux.profiles.selfhosted import LOOP
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
-from pydantic import PostgresDsn, SecretStr
+from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -33,7 +35,7 @@ class _World:
         self.sessionmaker = sessionmaker
         self.agents: list[dict[str, object]] = []
 
-    def runtime(self) -> McpRuntime:
+    def runtime(self, public_url: str | None = None) -> McpRuntime:
         router = MARouter()
         router.add("GET", r"/v1/agents", lambda _r, _m: list_response(self.agents))
         return McpRuntime(
@@ -42,6 +44,7 @@ class _World:
             settings=Settings(
                 database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://test/test")),
                 anthropic=AnthropicSettings(api_key=SecretStr("test")),
+                mcp=McpSettings(public_url=HttpUrl(public_url) if public_url else None),
             ),
             deployment_default=DeploymentDefault(),
         )
@@ -268,4 +271,128 @@ async def test_a_helpers_turn_cannot_change_the_conversation(
     with pytest.raises(ToolError, match="You are helping another agent"):
         await tool._list_helpers_impl(  # pyright: ignore[reportPrivateUsage]
             runtime, auth, origin_context_id=str(origin.id)
+        )
+
+
+async def _landed(
+    sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, *, of_person: bool = False
+) -> str:
+    """A file the asking agent uploaded with create_file_upload_url; its handle id.
+
+    With `of_person`, a web person's own upload instead."""
+    now = datetime.now(UTC)
+    async with sessionmaker.begin() as session:
+        person_id = None
+        if of_person:
+            tenant = await get_tenant(session, tenant_id)
+            assert tenant is not None, "the tenant exists"
+            person_id = (await make_web_person(session, tenant=tenant)).id
+        row, token = await create_upload(
+            session,
+            tenant_id=tenant_id,
+            person_id=person_id,
+            title="data",
+            display_filename="data.csv",
+            content_type="text/csv",
+            now=now,
+        )
+        await store_upload_content(session, upload_token=token, data=b"a,b", now=now)
+    return row.id
+
+
+async def test_files_go_to_a_helper_and_its_files_come_back_as_links(
+    db_session: AsyncSession,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ask records the given files; the answer lists the helper's files with links."""
+    monkeypatch.setattr(tool, "WAIT_S", 0.0)
+    world, auth, origin = await _setup(db_session, committing_sessionmaker)
+    runtime = world.runtime("https://daimon.example/mcp")
+    handle = await _landed(committing_sessionmaker, auth.tenant_id)
+
+    started = await tool._ask_helper_impl(  # pyright: ignore[reportPrivateUsage]
+        runtime,
+        auth,
+        origin_context_id=str(origin.id),
+        helper="argon",
+        message="Chart this",
+        wait=False,
+        files=[handle],
+    )
+    ask_id = uuid.UUID(started.ask_id)
+    async with committing_sessionmaker.begin() as session:
+        await helper_asks.claim_queued(session, origin_id=origin.id, skip_helpers=(), limit=1)
+        await helper_asks.add_reply_file(
+            session,
+            ask_id=ask_id,
+            file=UploadedFile(id="h9", name="chart.png", size=3),
+            max_files=9,
+            max_bytes=100,
+        )
+        await helper_asks.finish_ask(
+            session, ask_id=ask_id, status="done", reply="Done", now=datetime.now(UTC)
+        )
+        [ask] = await helper_asks.list_asks(
+            session, tenant_id=auth.tenant_id, origin_id=origin.id, ids=[ask_id]
+        )
+    [answer] = (
+        await tool._wait_for_helpers_impl(  # pyright: ignore[reportPrivateUsage]
+            runtime, auth, origin_context_id=str(origin.id), ask_ids=[started.ask_id]
+        )
+    ).answers
+
+    assert [f.id for f in ask.files] == [handle], "the ask carries the file it was given"
+    assert [(f.id, f.name, f.url) for f in answer.files] == [
+        ("h9", "chart.png", f"https://daimon.example/helper-files/{ask.files_token}/h9")
+    ], "the helper's file comes back with a download link"
+
+
+async def test_an_ask_refuses_a_web_persons_private_upload(
+    db_session: AsyncSession, committing_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """A person's own upload is not an agent's to hand to a helper, even in the same tenant."""
+    world, auth, origin = await _setup(db_session, committing_sessionmaker)
+    handle = await _landed(committing_sessionmaker, auth.tenant_id, of_person=True)
+
+    with pytest.raises(ToolError, match="No uploaded file with handle id"):
+        await tool._ask_helper_impl(  # pyright: ignore[reportPrivateUsage]
+            world.runtime("https://daimon.example/mcp"),
+            auth,
+            origin_context_id=str(origin.id),
+            helper="argon",
+            message="hi",
+            wait=False,
+            files=[handle],
+        )
+
+
+@pytest.mark.parametrize(
+    ("public_url", "other_tenant", "words"),
+    [
+        ("https://daimon.example/mcp", True, "No uploaded file with handle id"),
+        (None, False, "no public URL"),
+    ],
+)
+async def test_an_ask_refuses_files_it_cannot_pass(
+    db_session: AsyncSession,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    public_url: str | None,
+    other_tenant: bool,
+    words: str,
+) -> None:
+    """Another tenant's handle, or no public URL to fetch from, refuses the ask."""
+    world, auth, origin = await _setup(db_session, committing_sessionmaker)
+    owner = (await _setup(db_session, committing_sessionmaker))[1] if other_tenant else auth
+    handle = await _landed(committing_sessionmaker, owner.tenant_id)
+
+    with pytest.raises(ToolError, match=words):
+        await tool._ask_helper_impl(  # pyright: ignore[reportPrivateUsage]
+            world.runtime(public_url),
+            auth,
+            origin_context_id=str(origin.id),
+            helper="argon",
+            message="hi",
+            wait=False,
+            files=[handle],
         )

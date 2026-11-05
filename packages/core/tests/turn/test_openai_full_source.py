@@ -924,6 +924,7 @@ async def test_native_creation_grant_human_reuse_and_unattended_handoffs(full_op
             attended=True,
             sender_foreign=False,
             shared_channel=False,
+            platform_message_id=f"M{index}" if kind == "human" else None,
         ) as origin:
             with execution_origin(None):
                 prepared = await bind_session_impl(
@@ -988,8 +989,9 @@ async def test_native_creation_grant_human_reuse_and_unattended_handoffs(full_op
                         platform=request.platform,
                         thread_id=thread_id,
                     )
-                assert len(rows) == index + 1, result
-                assert rows[-1].attended is (kind == "human")
+                # Only a person's own message starts the destination's turn.
+                assert len(rows) == (index + 1 if kind == "human" else index), result
+                assert all(row.attended for row in rows)
 
             async def no_recovery():
                 pytest.fail("native session must not recover into another backend")

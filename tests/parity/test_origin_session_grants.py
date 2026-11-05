@@ -24,7 +24,7 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import mint_chat_mcp_token
 from daimon.core.stores.domain import ChatPlatform, Role, TaskContinuationRow, TurnOriginRow
 from daimon.core.stores.task_continuations import list_pending_continuations
-from daimon.core.stores.turn_origins import create_origin, delete_origin
+from daimon.core.stores.turn_origins import bind_origin_session, create_origin, delete_origin
 from daimon.testing import ma_agent
 from daimon.testing.asgi import call_mcp_tool
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
@@ -68,7 +68,7 @@ async def test_registered_handoff_cannot_borrow_human_attendance(
         )
 
         async def origin(thread: str, grant: str, attended: bool) -> TurnOriginRow:
-            return await create_origin(
+            made = await create_origin(
                 session,
                 tenant_id=tenant.id,
                 account_id=account.id,
@@ -86,7 +86,13 @@ async def test_registered_handoff_cannot_borrow_human_attendance(
                 chat_session_id=grant,
                 sender_foreign=False,
                 shared_channel=False,
+                # A person's own message, the only kind whose hand-off starts a turn.
+                platform_message_id="M1" if attended else None,
             )
+            await bind_origin_session(
+                session, origin_id=made.id, chat_session_id=grant, human_invocation=attended
+            )
+            return made
 
         human = await origin("human-thread", human_grant, True)
         own = (
@@ -136,7 +142,9 @@ async def test_registered_handoff_cannot_borrow_human_attendance(
             },
         },
     )
-    allowed = selection == "own" and own is not None
+    own_origin = selection == "own" and own is not None
+    # Only a person's own message queues the destination's first turn.
+    allowed = own_origin and execution == "human"
     async with db() as session:
         human_rows = await list_pending_continuations(
             session, tenant_id=tenant.id, platform=platform, thread_id=human.thread_id
@@ -146,12 +154,11 @@ async def test_registered_handoff_cannot_borrow_human_attendance(
         )
     assert human_rows == [], reply
     assert len(rows) == int(allowed), reply
-    if not allowed:
+    if not own_origin:
         assert "isError" in str(reply) or "origin" in str(reply), reply
     else:
         assert own is not None
-        [row] = rows
-        assert row.attended is (execution == "human")
+        assert all(row.attended for row in rows)
         # The producing turn has ended before the real dispatcher runs.
         async with db.begin() as session:
             await delete_origin(session, origin_id=own.id)

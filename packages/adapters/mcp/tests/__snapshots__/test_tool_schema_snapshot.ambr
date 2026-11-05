@@ -757,16 +757,37 @@
         conversation in this thread. While `status` is `queued` or `running`, call
         `wait_for_helpers` with the `ask_id`. Helpers stop when your turn ends, so wait
         for their replies before you answer.
+        <blank line>
+        To pass it files: for each, call `create_file_upload_url`, PUT the file with the
+        curl it returns, and pass the handle id in `files`. Files the helper sends back
+        are in the answer's `files`: download one with `curl -sS -o <name> "<url>"`, or
+        pass its `id` to another helper's `files`. Deliver one to the person as you would
+        a file you made. The links expire an hour after the ask.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
+          'files': dict({
+            'anyOf': list([
+              dict({
+                'items': dict({
+                  'type': 'string',
+                }),
+                'type': 'array',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+            'description': 'Handle ids of files to pass to the helper (see below).',
+          }),
           'helper': dict({
             'description': "A helper's name or agent id from list_helpers.",
             'type': 'string',
           }),
           'message': dict({
-            'description': "Everything the helper needs: the task, the facts and what to send back. It can't see this conversation's history or your files.",
+            'description': "Everything the helper needs: the task, the facts and what to send back. It can't see this conversation's history or files you don't pass.",
             'maxLength': 20000,
             'type': 'string',
           }),
@@ -2254,7 +2275,8 @@
         turn; posting it into that thread with this tool delivers a duplicate.
         Use this tool for a file you were asked to post to a channel or thread
         you were not invoked from, or from a scheduled routine, which has no
-        reply to attach to.
+        reply to attach to. It is also how you pass a helper a file: pass the
+        handle id in ``ask_helper``'s ``files``.
         <blank line>
         The intent words are in this first line on purpose: an agent looking
         for "post a file" has to find this tool by search and read where the
@@ -4634,10 +4656,11 @@
         this channel (the one it answers with, or one pinned to it); any other
         needs an admin.
         <blank line>
-        From the next message here, that agent answers, with its own keys,
-        connections and memory; conversation, decisions and files move with the
-        requester. Posted files stay posted. No extra billed turn unless
-        `continuation` is set.
+        That agent answers here from now on, with its own keys, connections and
+        memory; conversation, decisions and files move with the requester. When
+        the person's own message asked for the hand-off, it answers right away (one
+        billed turn); otherwise (a routine, a wake, an agent key, a switch card)
+        from their next message.
         <blank line>
         `origin_context_id` must name this execution's origin and match the
         calling session's signed grant. Empty IDs and other sessions' origins
@@ -4646,10 +4669,9 @@
         <blank line>
         `agent_id`: the destination's current id from `list_agents`; a recreated
         namesake is refused. `continuation` is null unless the person asked the
-        destination to continue or finish NAMED work ("let it finish the chart").
-        "Take over" alone is switch-only — null. Never restate finished work. A
-        too-short, empty, or name-only value is auto-nulled — get the wording
-        right regardless.
+        destination to continue or finish NAMED work ("let it finish the chart");
+        "take over" alone is null. Never restate finished work. A
+        too-short, empty, or name-only value is auto-nulled.
         <blank line>
         A destination on another provider (Gemini, OpenAI) can't read this
         conversation: pass `summary`, and it starts there from that summary
@@ -4672,7 +4694,7 @@
               }),
             ]),
             'default': None,
-            'description': "Null unless the person explicitly asked the destination to continue or finish NAMED work, in their own words. 'Take over' alone, with no named work, is null. Never restate work that already finished.",
+            'description': "Null unless the person explicitly asked the destination to continue or finish NAMED work, in their own words. 'Take over' alone is null. Used only when the destination answers right away. Never restate work that already finished.",
           }),
           'keep_provider': dict({
             'default': False,
@@ -9021,6 +9043,37 @@
         }),
         'required': list([
           'agent_name',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'set_agent_helpers': dict({
+      'description': '''
+        Set the agents an agent may ask for help to exactly these names or ids, for any agent
+        you can see; helpers kept to channels you can't see stay. A normal agent gets a new
+        version, so an open draft goes out of date; the default agent and self-hosted agents
+        change in place. The person approves first.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'agent_id': dict({
+            'type': 'string',
+          }),
+          'helpers': dict({
+            'items': dict({
+              'type': 'string',
+            }),
+            'type': 'array',
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'agent_id',
+          'helpers',
+          'origin_context_id',
         ]),
         'type': 'object',
       }),

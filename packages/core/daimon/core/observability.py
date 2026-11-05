@@ -562,7 +562,7 @@ def _redact_secret_keys(mapping: dict[str, object], *, oauth: bool = False) -> N
 # that report to Sentry (MCP uploads and Slack file proxy, Discord webhooks)
 # and the hosts' token routes.
 _CAPABILITY_PATHS = re.compile(
-    r"(/(?:uploads|upload|publish|slack/file|recipients)/|/api/webhooks/\d{1,25}/)"
+    r"(/(?:uploads|upload|helper-files|publish|slack/file|recipients)/|/api/webhooks/\d{1,25}/)"
     r"([^/?#\s'\"<>]{1,4096})"
 )
 # Defence in depth for routes not listed: a long path segment that looks like

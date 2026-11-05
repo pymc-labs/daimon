@@ -17,11 +17,13 @@ from daimon.adapters.web.agent_access import (
     edit_refusal,
     viewer_of,
 )
+from daimon.adapters.web.agent_audit import recorded
 from daimon.adapters.web.caller import WebCaller
 from daimon.adapters.web.channel_names import channel_names
 from daimon.adapters.web.nodes import AgentNode, agent_nodes, build_nodes, tenant_workspace
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core import (
+    agent_admin,
     agent_catalog,
     agent_changes,
     agent_editing,
@@ -43,7 +45,7 @@ from daimon.core.agent_view import (
 )
 from daimon.core.channel_backend import make_backend_service
 from daimon.core.constants import ALLOWED_MODEL_IDS, DEFAULT_AGENT_MODEL, MODEL_DISPLAY_NAMES
-from daimon.core.defaults.ma_index import list_skills_lenient
+from daimon.core.defaults.ma_index import list_agents_by_tenant, list_skills_lenient
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import list_skills_lenient_cached
 from daimon.core.model_presets import ModelSelection
@@ -108,6 +110,12 @@ class DraftBody(BaseModel):
 
 class ApplyBody(BaseModel):
     note: str | None = None
+
+
+class HelpersBody(BaseModel):
+    """The agents that should be the agent's helpers, by agent id."""
+
+    helpers: list[str]
 
 
 class RevertBody(BaseModel):
@@ -418,6 +426,32 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
         try:
             await agent_changes.apply_draft(
                 deps(), actor=actor_of(caller), ma_agent_id=agent_id, note=body.note
+            )
+        except AgentEditError as exc:
+            raise edit_refusal(exc) from exc
+        runtime.agents.forget(caller.person.tenant_id)
+        return await view_of(caller, agent_id)
+
+    @router.put("/{agent_id}/helpers")
+    async def set_helpers(caller: Editor, agent_id: str, body: HelpersBody) -> AgentDetail:  # pyright: ignore[reportUnusedFunction]
+        """A seeded agent's helper list, which no draft can carry; an admin's only."""
+        actor = actor_of(caller)
+        client = deps().edit.client
+        try:
+            agent_admin.require_admin(actor, "Changing helpers")
+            roster = await list_agents_by_tenant(client, tenant_id=actor.tenant_id)
+            agent = next((a for a in roster if a.id == agent_id), None)
+            if agent is not None and agent_editing.system_agent_rejection(agent) is None:
+                raise AgentEditError(
+                    "Change this agent's helpers on its canvas, then apply.", kind="invalid"
+                )
+            await agent_admin.set_helpers(
+                runtime.sessionmaker,
+                actor=actor,
+                ma_agent_id=agent_id,
+                helper_ids=body.helpers,
+                roster=roster,
+                audited=recorded(runtime, caller, "Changed agent helpers"),
             )
         except AgentEditError as exc:
             raise edit_refusal(exc) from exc

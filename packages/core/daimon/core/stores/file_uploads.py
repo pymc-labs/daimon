@@ -20,7 +20,7 @@ from datetime import datetime, timedelta
 from typing import Any, cast
 
 from daimon.core._models import FileUpload, WebMessage
-from daimon.core.stores.domain import FileUploadRow
+from daimon.core.stores.domain import FileUploadRow, UploadedFile
 from sqlalchemy import (
     CursorResult,
     Select,
@@ -85,6 +85,19 @@ async def create_upload(
     return FileUploadRow.model_validate(row), upload_token
 
 
+async def has_usable_upload_token(
+    session: AsyncSession, *, upload_token: str, now: datetime
+) -> bool:
+    """Whether `store_upload_content` would take bytes for the token: known, unburnt, in time.
+
+    Lets a route refuse an unknown caller before it reads their body.
+    """
+    created_at = await session.scalar(
+        select(FileUpload.created_at).where(FileUpload.upload_token == upload_token)
+    )
+    return created_at is not None and created_at >= now - UPLOAD_TTL
+
+
 async def store_upload_content(
     session: AsyncSession,
     *,
@@ -133,6 +146,26 @@ async def get_upload(
         )
     ).scalar_one_or_none()
     return None if row is None else FileUploadRow.model_validate(row)
+
+
+async def list_landed_uploads(
+    session: AsyncSession, *, tenant_id: uuid.UUID, handle_ids: Collection[str]
+) -> list[UploadedFile]:
+    """The tenant's agent uploads among `handle_ids` whose bytes landed, without the bytes.
+
+    A web person's file (`person_id` set) is private to them and never listed here.
+    """
+    rows = await session.execute(
+        select(FileUpload.id, FileUpload.display_filename, func.octet_length(FileUpload.content))
+        .where(
+            FileUpload.tenant_id == tenant_id,
+            FileUpload.person_id.is_(None),
+            FileUpload.id.in_(list(handle_ids)),
+            FileUpload.content.is_not(None),
+        )
+        .order_by(FileUpload.created_at, FileUpload.id)
+    )
+    return [UploadedFile(id=id_, name=name, size=size) for id_, name, size in rows]
 
 
 async def get_person_upload(

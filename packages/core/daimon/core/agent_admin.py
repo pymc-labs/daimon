@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core import agent_ownership
@@ -13,6 +13,7 @@ from daimon.core.agent_editing import (
     AgentActor,
     AgentEditDeps,
     AgentEditError,
+    check_helper,
     reject_name_taken,
     system_agent_rejection,
 )
@@ -26,9 +27,10 @@ from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_compat import archive_agent
 from daimon.core.specs import AgentSpec
-from daimon.core.stores import agent_backends, web_people
+from daimon.core.stores import agent_backends, agent_helpers, web_people
 from mux.contracts.config import DEFAULT_BACKEND
 from pydantic import ValidationError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 def require_admin(actor: AgentActor, what: str) -> None:
@@ -117,6 +119,46 @@ async def set_owners_by_ref(
         co_owner_account_ids=[account_of(c) for c in co_owners],
         audited=audited,
     )
+
+
+async def set_helpers(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    actor: AgentActor,
+    ma_agent_id: str,
+    helper_ids: Iterable[str],
+    roster: Iterable[BetaManagedAgentsAgent],
+    audited: ChangeRecorder | None = None,
+) -> list[str]:
+    """Make ``helper_ids`` the agent's whole helper list, for an admin; the list as saved.
+
+    The list is our own table, never the provider spec, so a seeded agent's helpers can
+    change here without drifting its spec. ``roster`` is the live agents of the workspace
+    the actor may use; the agent and every added helper must be in it. Only an added
+    helper is checked, so one that has since been archived can still be taken off.
+    """
+    require_admin(actor, "Changing helpers")
+    live = {a.id: a for a in roster if a.archived_at is None}
+    agent = live.get(ma_agent_id)
+    if agent is None:
+        raise AgentEditError("No such agent.", kind="not_found")
+    wanted = list(dict.fromkeys(helper_ids))
+    async with session_factory() as session, session.begin():
+        before = await agent_helpers.list_helper_ids(
+            session, tenant_id=actor.tenant_id, agent_id=agent.id
+        )
+        for helper_id in wanted:
+            if helper_id not in before:
+                check_helper(agent.id, helper_id, live=helper_id in live)
+        await agent_helpers.set_helpers(
+            session, tenant_id=actor.tenant_id, agent_id=agent.id, helper_ids=wanted
+        )
+        saved = await agent_helpers.list_helper_ids(
+            session, tenant_id=actor.tenant_id, agent_id=agent.id
+        )
+        if set(saved) != set(before) and audited is not None:
+            await audited(session, _display_name(agent))
+    return saved
 
 
 async def archive(

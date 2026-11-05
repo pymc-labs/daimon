@@ -292,6 +292,7 @@ def test_session_tools_gate_third_party_toolsets_only() -> None:
                 "revert_agent",
                 "revoke_web_link",
                 "rotate_watch_key",
+                "set_agent_helpers",
                 "set_agent_owners",
                 "set_agent_web_access",
                 "start_long_job",

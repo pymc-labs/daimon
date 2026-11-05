@@ -1628,6 +1628,7 @@ class TeamsApp:
                     handoff=handoff,
                     reraise=reraise,
                     attended=continuation is None or continuation_attended(continuation),
+                    continued=continuation is not None,
                 )
             except asyncio.CancelledError:
                 raise
@@ -1703,6 +1704,7 @@ class TeamsApp:
         handoff: HandoffFactory | None,
         reraise: bool,
         attended: bool,
+        continued: bool = False,
     ) -> None:
         deps = self.runtime.turn_deps
         lifecycle = holder[-1]
@@ -1800,7 +1802,8 @@ class TeamsApp:
             sender_foreign=inbound.is_foreign,
             shared_channel=admission.shared_channel,
             platform_channel_id=inbound.conversation_id,
-            platform_message_id=None if inbound.from_form else inbound.activity_id,
+            # A queued turn's id names its row, not a message the person sent.
+            platform_message_id=None if inbound.from_form or continued else inbound.activity_id,
         ) as origin:
             notice = handoff(prepared.continuity) if handoff is not None else None
             quiet = notice is not None or prepared.continuity.state == "continued"

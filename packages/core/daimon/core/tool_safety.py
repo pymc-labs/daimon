@@ -183,6 +183,7 @@ CARDED_TOOLS: Final[Mapping[str, str]] = {
     "change_workspace_settings": "origin_context_id",
     "revert_agent": "agent_id",
     "set_agent_owners": "agent_id",
+    "set_agent_helpers": "agent_id",
     "restore_library_skill_version": "skill_id",
     "approve_server_skill_update": "skill_id",
 }
