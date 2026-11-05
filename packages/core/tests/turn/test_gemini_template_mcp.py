@@ -517,6 +517,29 @@ async def test_the_source_pin_ignores_daimon_gating_but_not_an_agent_edit(templa
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_pin_from_before_the_gating_change_still_holds_but_not_for_an_edit(template):
+    """Consents pinned with Daimon's gating keep holding after the upgrade; an owner
+    edit still breaks them."""
+    from daimon.core.turn import runtime_manifest as manifest
+    from daimon.core.turn.runtime_manifest import capture_preparation_source as capture
+
+    def legacy_pin(source):
+        facts = manifest._source_facts(source)  # pyright: ignore[reportPrivateUsage]
+        facts.pop("ungated_spec", None)
+        return manifest._digest(facts)  # pyright: ignore[reportPrivateUsage]
+
+    request, *_ = template
+    source = await capture(request, fresh=True)
+    legacy = legacy_pin(source)
+    assert legacy != manifest.source_preservation_pin(source)
+    assert manifest.source_pin_matches(source, legacy)
+    agent = request.admission.agent
+    edited = agent.model_validate({**agent.model_dump(mode="json"), "system": "Edited"})
+    changed = replace(request, source=None, admission=replace(request.admission, agent=edited))
+    assert not manifest.source_pin_matches(await capture(changed), legacy)
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
 @pytest.mark.parametrize(
     "tool_name",
     [
