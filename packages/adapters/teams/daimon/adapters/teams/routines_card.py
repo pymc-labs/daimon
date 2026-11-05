@@ -10,7 +10,13 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Literal
 
-from daimon.adapters.teams.card_actions import button, clip, error_text, submitted_fields
+from daimon.adapters.teams.card_actions import (
+    button,
+    clip,
+    error_text,
+    open_in_web,
+    submitted_fields,
+)
 from daimon.core.cron_words import schedule_words
 from daimon.core.routines import can_manage_routine, derive_glyph, routine_label
 from daimon.core.stores.domain import RoutineRow
@@ -105,6 +111,7 @@ def panel_card(
     user_id: str,
     is_admin: bool,
     notice: str | None = None,
+    web_url: str | None = None,
 ) -> AdaptiveCard:
     """The routines the caller passed; buttons show only where the viewer may act."""
     body: list[CardElement] = [TextBlock(text="Routines", weight="Bolder", size="Medium")]
@@ -122,6 +129,8 @@ def panel_card(
     actions: list[Action] = [_button("Refresh", "refresh")]
     if is_admin:
         actions.append(SubmitAction(title="New routine", data=OpenDialogData(CREATE_DIALOG)))
+    if web_url:
+        actions.append(open_in_web(web_url))
     body.append(ActionSet(actions=actions))
     return AdaptiveCard(body=body, fallback_text="Routines")
 

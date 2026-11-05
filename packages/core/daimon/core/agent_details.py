@@ -47,6 +47,7 @@ from daimon.core.setup_conversations import get_setup_agent
 from daimon.core.stores import agent_files, scoped_config_read
 from daimon.core.stores.domain import AgentFileRow, Platform
 from daimon.core.stores.github_access import list_live_grant_repositories
+from daimon.core.web_links import TenantLinks
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -138,6 +139,7 @@ class AgentDetails(BaseModel):
     keys: tuple[KeyEntry, ...] = ()
     applies_note: str
     unrouted_note: str | None = None
+    web_url: str | None = None
 
 
 def build_agent_details(
@@ -231,6 +233,7 @@ async def load_agent_details(
     is_admin: bool,
     channel_label: str | None,
     preloaded_agent: BetaManagedAgentsAgent | None = None,
+    web: TenantLinks | None = None,
 ) -> AgentDetails:
     """Read everything `build_agent_details` needs, then fold it.
 
@@ -292,7 +295,7 @@ async def load_agent_details(
     skill_titles, skills_truncated = await resolve_custom_skill_titles(
         anthropic, agents=[agent], tenant_id=tenant_id
     )
-    return build_agent_details(
+    details = build_agent_details(
         agent=agent,
         tenant_id=tenant_id,
         tenant=tenant_row,
@@ -308,3 +311,6 @@ async def load_agent_details(
         is_admin=is_admin,
         channel_label=channel_label,
     )
+    if web is None:
+        return details
+    return details.model_copy(update={"web_url": web.agent(ma_agent_id)})

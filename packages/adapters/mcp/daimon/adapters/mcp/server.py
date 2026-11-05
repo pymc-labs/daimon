@@ -59,8 +59,12 @@ from daimon.adapters.mcp.tools import (
     vault,
 )
 from daimon.adapters.mcp.tools.admins import register_admin_tools
+from daimon.adapters.mcp.tools.agent_coding_keys import register_agent_coding_key_tools
+from daimon.adapters.mcp.tools.agent_edits import register_agent_edit_tools
 from daimon.adapters.mcp.tools.agent_removal import register_agent_removal_tools
 from daimon.adapters.mcp.tools.agent_tool_rules import register_agent_tool_rule_tools
+from daimon.adapters.mcp.tools.allowances import register_allowance_tools
+from daimon.adapters.mcp.tools.audit_log import register_audit_log_tools
 from daimon.adapters.mcp.tools.channel_budgets import register_channel_budget_tools
 from daimon.adapters.mcp.tools.channel_copies import register_channel_copy_tools
 from daimon.adapters.mcp.tools.channel_environments import register_channel_environment_tools
@@ -70,6 +74,7 @@ from daimon.adapters.mcp.tools.channels import register_channel_tools
 from daimon.adapters.mcp.tools.cli_token import register_cli_token_tool
 from daimon.adapters.mcp.tools.cost_footer import register_cost_footer_tools
 from daimon.adapters.mcp.tools.credential_requests import register_credential_request_tools
+from daimon.adapters.mcp.tools.credit_reports import register_credit_report_tools
 from daimon.adapters.mcp.tools.github_app import register_github_app_tools
 from daimon.adapters.mcp.tools.github_connect import register_github_connect_tools
 from daimon.adapters.mcp.tools.github_remove_repo import register_github_remove_repo_tools
@@ -82,6 +87,7 @@ from daimon.adapters.mcp.tools.media import register_media_tools, register_uploa
 from daimon.adapters.mcp.tools.microsoft._access import MicrosoftGraph
 from daimon.adapters.mcp.tools.microsoft.register import register_microsoft_tools
 from daimon.adapters.mcp.tools.models import register_model_tools
+from daimon.adapters.mcp.tools.my_data import register_my_data_tools
 from daimon.adapters.mcp.tools.never_tag import register_never_tag_tools
 from daimon.adapters.mcp.tools.notebook import register_notebook_tools
 from daimon.adapters.mcp.tools.plain_text_mentions import register_plain_text_mentions_tools
@@ -91,15 +97,23 @@ from daimon.adapters.mcp.tools.promo_issuing import register_promo_issuing_tools
 from daimon.adapters.mcp.tools.propagation import register_propagation_tools
 from daimon.adapters.mcp.tools.publish import register_publish_tools
 from daimon.adapters.mcp.tools.repo_memory import register_repo_memory_tools
+from daimon.adapters.mcp.tools.routine_run import register_routine_run_tool
 from daimon.adapters.mcp.tools.setup_target import register_setup_target_tools
+from daimon.adapters.mcp.tools.skill_library_edits import register_skill_library_edit_tools
 from daimon.adapters.mcp.tools.skill_uploads import register_skill_upload_tools
 from daimon.adapters.mcp.tools.task_continuity import register_task_continuity_tools
 from daimon.adapters.mcp.tools.teams._client import build_teams_client
 from daimon.adapters.mcp.tools.tenant_summary import register_tenant_summary_tools
 from daimon.adapters.mcp.tools.thread_model import register_thread_model_tools
+from daimon.adapters.mcp.tools.thread_overrides import register_thread_override_tools
 from daimon.adapters.mcp.tools.thread_participation import register_thread_participation_tools
 from daimon.adapters.mcp.tools.tidy import register_tidy_tools
 from daimon.adapters.mcp.tools.timers import register_timer_tools
+from daimon.adapters.mcp.tools.web_invites import register_web_invite_tools
+from daimon.adapters.mcp.tools.web_people import register_web_people_tools
+from daimon.adapters.mcp.tools.web_workspace_settings import (
+    register_web_workspace_settings_tool,
+)
 from daimon.adapters.mcp.tools.wizard import register_wizard_tools
 from daimon.adapters.mcp.uploads import build_upload_route
 from daimon.adapters.mcp.web_shell import CSS_SHA256, STATIC_DIR, configure_environment_label
@@ -547,6 +561,18 @@ def create_mcp_app(
     register_thread_participation_tools(mcp, runtime)  # follow/unfollow threads
     register_progress_plan_tools(mcp, runtime)  # the plan on the progress card, and its switch
     register_plain_text_mentions_tools(mcp, runtime)  # typed "@<name>" starts a turn
+    register_agent_coding_key_tools(mcp, runtime)
+    register_my_data_tools(mcp, runtime)
+    register_routine_run_tool(mcp, runtime)
+    register_thread_override_tools(mcp, runtime)
+    register_web_invite_tools(mcp, runtime)  # web invites and visitor links, links by DM
+    register_web_people_tools(mcp, runtime)  # web people, groups, agent access
+    register_web_workspace_settings_tool(mcp, runtime)
+    register_allowance_tools(mcp, runtime)
+    register_audit_log_tools(mcp, runtime)
+    register_agent_edit_tools(mcp, runtime)  # agent revert, owners, skill files
+    register_skill_library_edit_tools(mcp, runtime)  # library skill files and versions
+    register_credit_report_tools(mcp, runtime)  # own credits, overview, spend, feedback
     register_cost_footer_tools(mcp, runtime)  # the line under each finished answer
     register_never_tag_tools(mcp, runtime)  # a person opts out of being tagged
     register_channel_budget_tools(mcp, runtime)  # per-channel spend budgets

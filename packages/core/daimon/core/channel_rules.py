@@ -1025,6 +1025,8 @@ class AgentRuleChange:
     changed: bool
     answers_outside: bool = False
     """It is still set to answer outside its new rule, where every turn is refused."""
+    agent_id: str | None = None
+    """The live agent the rule is for, when there is one."""
 
     @property
     def notes(self) -> tuple[str, ...]:
@@ -1166,7 +1168,13 @@ async def set_agent_rule(
                 default=default,
             )
             answers_outside = not reach.stays_inside(target)
-    return AgentRuleChange(agent_name, target, updated != policy, answers_outside)
+    return AgentRuleChange(
+        agent_name,
+        target,
+        updated != policy,
+        answers_outside,
+        agent_id=None if agent is None else agent.id,
+    )
 
 
 async def set_agent_invoker_roles(

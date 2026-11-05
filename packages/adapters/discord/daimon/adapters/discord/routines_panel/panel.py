@@ -35,6 +35,7 @@ from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import get_routine, update_routine
 from daimon.core.stores.tenants import get_tenant
+from daimon.core.web_links import OPEN_IN_WEB
 from sqlalchemy.exc import SQLAlchemyError
 
 import discord
@@ -352,6 +353,15 @@ class RoutinesPanelView(discord.ui.LayoutView):
         container.add_item(picker_row)
         container.add_item(discord.ui.ActionRow(_DestinationPicker(state)))
         container.add_item(discord.ui.ActionRow(NewButton(), DeleteButton(state)))
+        web_url = (
+            None
+            if state.links is None
+            else state.links.routine(None if state.selected is None else state.selected.routine.id)
+        )
+        if web_url is not None:
+            buttons_row.add_item(
+                discord.ui.Button(label=OPEN_IN_WEB, style=discord.ButtonStyle.link, url=web_url)
+            )
         container.add_item(buttons_row)
         self.add_item(container)
 
@@ -386,6 +396,7 @@ async def _rerender(interaction: discord.Interaction, view: RoutinesPanelView) -
         rows=entries,
         over_cap_count=over_cap_count,
         agent_name_map=agent_name_map,
+        links=view.state.links,
     )
     # Preserve selection across refreshes when the row still exists.
     if view.state.selected is not None:

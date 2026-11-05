@@ -1,0 +1,321 @@
+{
+ "routes": {
+  "DELETE /api/admin/invites/{invite_id}": {
+   "tool": "revoke_web_link"
+  },
+  "DELETE /api/admin/people/{person_id}/link": {
+   "tool": "revoke_web_link"
+  },
+  "DELETE /api/agents/environments/{environment_id}": {
+   "tool": "archive_environment"
+  },
+  "DELETE /api/agents/skills/{skill_id}": {
+   "tool": "delete_skill"
+  },
+  "DELETE /api/agents/{agent_id}/coding-keys/{key_id}": {
+   "panel": {
+    "discord": "daimon.adapters.discord.agent_setup.coding_keys_view",
+    "slack": "daimon.adapters.slack.agent_setup.coding_keys"
+   },
+   "tool": "remove_my_data"
+  },
+  "DELETE /api/agents/{agent_id}/draft": {
+   "tool": "update_agent"
+  },
+  "DELETE /api/agents/{agent_id}/github/repos/{owner}/{name}": {
+   "tool": "remove_repo"
+  },
+  "DELETE /api/agents/{agent_id}/keys/{key}": {
+   "tool": "remove_agent_key"
+  },
+  "DELETE /api/agents/{agent_id}/mcp/{key}/token": {
+   "tool": "detach_mcp_server"
+  },
+  "DELETE /api/agents/{agent_id}/nodes/data_server/tokens/{token_id}": {
+   "gap": "data-server node token revoke; move nodes.data_server to core first"
+  },
+  "DELETE /api/chat/sessions/{session_id}": {
+   "exempt": "web chat"
+  },
+  "DELETE /api/credits/allowances/{allowance_id}": {
+   "tool": "delete_allowance"
+  },
+  "DELETE /api/integrations/tokens/{jti}": {
+   "panel": {
+    "discord": "daimon.adapters.discord.agent_setup.operator_tokens_view",
+    "slack": "daimon.adapters.slack.agent_setup.operator_tokens",
+    "teams": "daimon.adapters.teams.setup_panel"
+   }
+  },
+  "DELETE /api/me/accounts/{key}": {
+   "exempt": "web sign-in and session (linked account)"
+  },
+  "DELETE /api/profile/keys/{key_id}": {
+   "tool": "remove_my_data"
+  },
+  "DELETE /api/profile/sign-ins/{identity_id}": {
+   "exempt": "web sign-in and session (profile sign-ins)"
+  },
+  "DELETE /api/routines/{routine_id}": {
+   "tool": "delete_routine"
+  },
+  "DELETE /{path:path}": {
+   "exempt": "serves the web app's own pages"
+  },
+  "PATCH /api/admin/agent-access/{agent_id}": {
+   "tool": "set_agent_web_access"
+  },
+  "PATCH /api/admin/invites/{invite_id}": {
+   "tool": "set_web_invite_files"
+  },
+  "PATCH /api/admin/people/{person_id}": {
+   "tool": "update_web_person"
+  },
+  "PATCH /api/admin/settings": {
+   "tool": "change_workspace_settings"
+  },
+  "PATCH /api/agents/{agent_id}/draft": {
+   "tool": "update_agent"
+  },
+  "PATCH /api/agents/{agent_id}/nodes/data_server/agent": {
+   "gap": "data-server node agent settings; move nodes.data_server to core first"
+  },
+  "PATCH /api/chat/sessions/{session_id}": {
+   "exempt": "web chat"
+  },
+  "PATCH /api/credits/allowances/{allowance_id}": {
+   "tool": "set_allowance_amount"
+  },
+  "PATCH /api/routines/{routine_id}": {
+   "tool": "update_routine"
+  },
+  "PATCH /{path:path}": {
+   "exempt": "serves the web app's own pages"
+  },
+  "POST /api/admin/invites": {
+   "tool": "create_web_invite"
+  },
+  "POST /api/admin/people/{person_id}/link": {
+   "tool": "issue_visitor_link"
+  },
+  "POST /api/agents": {
+   "tool": "create_agent"
+  },
+  "POST /api/agents/environments": {
+   "tool": "create_environment"
+  },
+  "POST /api/agents/skills": {
+   "tool": "add_skill"
+  },
+  "POST /api/agents/skills/sync": {
+   "tool": "sync_skills"
+  },
+  "POST /api/agents/skills/{skill_id}/restore": {
+   "tool": "restore_library_skill_version"
+  },
+  "POST /api/agents/{agent_id}/apply": {
+   "tool": "update_agent"
+  },
+  "POST /api/agents/{agent_id}/archive": {
+   "tool": "archive_agent"
+  },
+  "POST /api/agents/{agent_id}/coding-keys": {
+   "panel": {
+    "discord": "daimon.adapters.discord.agent_setup.mcp_access",
+    "slack": "daimon.adapters.slack.agent_setup.coding_tools",
+    "teams": "daimon.adapters.teams.setup_panel"
+   }
+  },
+  "POST /api/agents/{agent_id}/copy": {
+   "tool": "fork_agent"
+  },
+  "POST /api/agents/{agent_id}/github/connect": {
+   "tool": "github_connect"
+  },
+  "POST /api/agents/{agent_id}/github/resync": {
+   "tool": "resync_agent_skills"
+  },
+  "POST /api/agents/{agent_id}/nodes/data_server/connect": {
+   "gap": "data-server node connect; logic lives in the web adapter (nodes.data_server), move to core first"
+  },
+  "POST /api/agents/{agent_id}/nodes/data_server/disconnect": {
+   "gap": "data-server node disconnect; logic lives in the web adapter (nodes.data_server), move to core first"
+  },
+  "POST /api/agents/{agent_id}/revert": {
+   "tool": "revert_agent"
+  },
+  "POST /api/agents/{agent_id}/skills": {
+   "tool": "save_agent_skill_files"
+  },
+  "POST /api/channels/{channel_id}/channel-copy/retire": {
+   "tool": "archive_channel_copy"
+  },
+  "POST /api/channels/{channel_id}/kept-agents": {
+   "tool": "set_agent_rule"
+  },
+  "POST /api/channels/{channel_id}/provider-pin/clear": {
+   "tool": "request_channel_pin_clear"
+  },
+  "POST /api/channels/{channel_id}/skills": {
+   "tool": "add_channel_skill"
+  },
+  "POST /api/channels/{channel_id}/threads/clear": {
+   "tool": "clear_thread_override"
+  },
+  "POST /api/chat/messages/{message_id}/feedback": {
+   "exempt": "web chat"
+  },
+  "POST /api/chat/sessions": {
+   "exempt": "web chat"
+  },
+  "POST /api/chat/sessions/{session_id}/cards/{card_id}": {
+   "exempt": "web chat"
+  },
+  "POST /api/chat/sessions/{session_id}/messages": {
+   "exempt": "web chat"
+  },
+  "POST /api/chat/sessions/{session_id}/stop": {
+   "exempt": "web chat"
+  },
+  "POST /api/chat/uploads": {
+   "exempt": "web chat"
+  },
+  "POST /api/credits/allowances": {
+   "tool": "create_allowance"
+  },
+  "POST /api/credits/redeem": {
+   "tool": "redeem_promo_code"
+  },
+  "POST /api/credits/topup": {
+   "panel": {
+    "discord": "daimon.adapters.discord.billing_panel.panel",
+    "slack": "daimon.adapters.slack.billing_panel.actions",
+    "teams": "daimon.adapters.teams.billing_panel"
+   }
+  },
+  "POST /api/integrations/tokens": {
+   "panel": {
+    "discord": "daimon.adapters.discord.agent_setup.operator_tokens_view",
+    "slack": "daimon.adapters.slack.agent_setup.operator_tokens",
+    "teams": "daimon.adapters.teams.setup_panel"
+   }
+  },
+  "POST /api/invites/{token}/accept": {
+   "exempt": "web sign-in and session (invite accept)"
+  },
+  "POST /api/profile/connections/disconnect": {
+   "tool": "remove_my_data"
+  },
+  "POST /api/profile/delete": {
+   "panel": {
+    "discord": "daimon.adapters.discord.privacy_panel.modal",
+    "slack": "daimon.adapters.slack.privacy_panel.submit",
+    "teams": "daimon.adapters.teams.privacy_panel"
+   }
+  },
+  "POST /api/profile/memory/{agent_id}/forget": {
+   "tool": "remove_my_data"
+  },
+  "POST /api/routines": {
+   "tool": "create_routine"
+  },
+  "POST /api/routines/{routine_id}/pause": {
+   "panel": {
+    "discord": "daimon.adapters.discord.routines_panel.write",
+    "slack": "daimon.adapters.slack.routines_panel.actions",
+    "teams": "daimon.adapters.teams.routines_panel"
+   },
+   "tool": "update_routine"
+  },
+  "POST /api/routines/{routine_id}/resume": {
+   "panel": {
+    "discord": "daimon.adapters.discord.routines_panel.write",
+    "slack": "daimon.adapters.slack.routines_panel.actions",
+    "teams": "daimon.adapters.teams.routines_panel"
+   },
+   "tool": "update_routine"
+  },
+  "POST /api/routines/{routine_id}/run": {
+   "tool": "run_routine"
+  },
+  "POST /api/workspaces/switch": {
+   "exempt": "web workspace switch"
+  },
+  "POST /auth/logout": {
+   "exempt": "web sign-in and session"
+  },
+  "POST /auth/{provider_id}/connect": {
+   "exempt": "web sign-in and session"
+  },
+  "POST /{path:path}": {
+   "exempt": "serves the web app's own pages"
+  },
+  "PUT /api/agents/environments/{environment_id}": {
+   "tool": "update_environment"
+  },
+  "PUT /api/agents/skills/{skill_id}/files": {
+   "tool": "save_library_skill_files"
+  },
+  "PUT /api/agents/{agent_id}/github/working": {
+   "tool": "set_working_repo"
+  },
+  "PUT /api/agents/{agent_id}/keys/{key}": {
+   "tool": "request_agent_key"
+  },
+  "PUT /api/agents/{agent_id}/mcp/{key}/token": {
+   "tool": "request_mcp_token"
+  },
+  "PUT /api/agents/{agent_id}/nodes/data_server/tools": {
+   "gap": "data-server node tool switches; move nodes.data_server to core first"
+  },
+  "PUT /api/agents/{agent_id}/owners": {
+   "tool": "set_agent_owners"
+  },
+  "PUT /api/agents/{agent_id}/tool-rules": {
+   "tool": "set_agent_tool_rule"
+  },
+  "PUT /api/channel-defaults/agent": {
+   "tool": "set_agent_default"
+  },
+  "PUT /api/channel-defaults/environment": {
+   "tool": "set_channel_environment"
+  },
+  "PUT /api/channel-defaults/participation": {
+   "tool": "set_thread_participation",
+   "not_on": {
+    "slack": "participation runs on Discord and Teams only"
+   }
+  },
+  "PUT /api/channel-defaults/progress-plans": {
+   "tool": "set_progress_plans"
+  },
+  "PUT /api/channels/{channel_id}/access": {
+   "tool": "set_channel_rule"
+  },
+  "PUT /api/channels/{channel_id}/budget": {
+   "tool": "set_channel_budget"
+  },
+  "PUT /api/channels/{channel_id}/default-agent": {
+   "tool": "set_agent_default"
+  },
+  "PUT /api/channels/{channel_id}/environment": {
+   "tool": "set_channel_environment"
+  },
+  "PUT /api/channels/{channel_id}/participation": {
+   "tool": "set_thread_participation",
+   "not_on": {
+    "slack": "participation runs on Discord and Teams only"
+   }
+  },
+  "PUT /api/channels/{channel_id}/progress-plans": {
+   "tool": "set_progress_plans"
+  },
+  "PUT /api/channels/{channel_id}/tool-rules": {
+   "tool": "set_agent_tool_rule"
+  },
+  "PUT /{path:path}": {
+   "exempt": "serves the web app's own pages"
+  }
+ },
+ "read_gaps": {}
+}

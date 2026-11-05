@@ -12,6 +12,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final, Literal
 
+from daimon.adapters.teams.card_actions import open_in_web
 from daimon.core.channel_environments import (
     ENVIRONMENT_OPTION_INHERIT,
     EnvironmentPicker,
@@ -69,6 +70,8 @@ class ChannelSettings:
     """None for a caller who is not an admin."""
     skills: tuple[ChannelSkillRow, ...] | None = None
     """None for a caller who is not an admin."""
+    web_url: str | None = None
+    """The channel's web page, when the caller may open it."""
 
 
 def _text(
@@ -201,6 +204,8 @@ def channel_settings_form(settings: ChannelSettings, *, notice: str | None = Non
     if settings.skills is not None:
         body += _skills_section(settings.skills)
         actions.append(_submit("Save skills", "skills", channel))
+    if settings.web_url:
+        actions.append(open_in_web(settings.web_url))
     actions.append(_submit("Another channel", "pick"))
     return AdaptiveCard(body=body, actions=actions, fallback_text=settings.label)
 

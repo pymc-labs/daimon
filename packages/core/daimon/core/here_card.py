@@ -50,6 +50,7 @@ from daimon.core.stores.identity import (
 from daimon.core.stores.platform_names import get_user_names
 from daimon.core.stores.selfhosted_resources import list_live_agent_facts
 from daimon.core.stores.thread_agent_bindings import get_binding
+from daimon.core.web_links import TenantLinks
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -97,6 +98,7 @@ class HereCard(BaseModel):
     text: str
     approval_gate_note: str | None = None
     approval_gate_admin: bool = False
+    web_url: str | None = None
 
 
 class HereCardPresentation(BaseModel):
@@ -490,6 +492,7 @@ async def load_here_card(
     bot_can_read_history: bool | None = None,
     caller_can_read_history: bool | None = None,
     category_channels_bot_can_view: Sequence[tuple[str, str]] = (),
+    web: TenantLinks | None = None,
 ) -> HereCard:
     """Load the current routing and credential names for one caller's place."""
     policy = await load_access_policy(session, tenant_id=tenant_id)
@@ -684,6 +687,10 @@ async def load_here_card(
     if is_dm:
         note = "Direct-message write approvals are unchanged; scope overrides do not apply."
     card = card.model_copy(
-        update={"approval_gate_note": note, "approval_gate_admin": is_admin and not is_dm}
+        update={
+            "approval_gate_note": note,
+            "approval_gate_admin": is_admin and not is_dm,
+            "web_url": None if web is None or is_dm else web.channel(channel_id),
+        }
     )
     return card.model_copy(update={"text": render_here_card_text(card)})

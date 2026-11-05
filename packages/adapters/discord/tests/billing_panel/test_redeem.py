@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
@@ -421,6 +422,7 @@ async def test_cli_issued_code_redeems_once_through_the_panel(
     await db_session.commit()
     runtime = MagicMock(spec=DiscordRuntime)
     runtime.sessionmaker = db_session_factory
+    runtime.settings = SimpleNamespace(web=None)  # no web app: the panel offers no link
     now = datetime.now(UTC)
     view = BillingPanelView(
         await _admin_snapshot(db_session, now=now),
@@ -488,6 +490,7 @@ async def test_a_platform_admin_redeems_a_channel_code_into_this_channel_through
     )
     runtime = MagicMock(spec=DiscordRuntime)
     runtime.sessionmaker = db_session_factory
+    runtime.settings = SimpleNamespace(web=None)  # no web app: the panel offers no link
     now = datetime.now(UTC)
     state = await load_billing_snapshot(
         db_session,

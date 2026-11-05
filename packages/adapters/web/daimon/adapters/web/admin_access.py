@@ -6,18 +6,15 @@ import uuid
 from typing import Any
 
 from anthropic.types.beta import BetaManagedAgentsAgent
-from daimon.adapters.web.admin_common import WorkspaceAdmin, listed_agents
-from daimon.adapters.web.audit import audit
+from daimon.adapters.web.admin_common import WorkspaceAdmin, admin_of, listed_agents, refused
 from daimon.adapters.web.channel_names import channel_names
 from daimon.adapters.web.chat_json import agent_json
 from daimon.adapters.web.faces import avatars_of
 from daimon.adapters.web.runtime import WebRuntime
-from daimon.core.authz import build_agent_ref
-from daimon.core.permissions import agent_permissions
+from daimon.core import web_admin
 from daimon.core.platform_names import UNNAMED_CHANNEL
-from daimon.core.stores import web_agent_grants
-from daimon.core.stores.access_policy import load_access_policy
-from daimon.core.stores.domain import WebAgentGrantRow, WebAgentWho
+from daimon.core.stores.domain import WebAgentWho
+from daimon.core.web_admin import WebAdminError
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
@@ -34,28 +31,15 @@ def access_router(runtime: WebRuntime) -> APIRouter:
     async def access_rows(tenant_id: uuid.UUID) -> list[dict[str, Any]]:
         agents = await listed_agents(runtime, tenant_id)
         async with runtime.sessionmaker() as db:
-            policy = await load_access_policy(db, tenant_id=tenant_id)
-            grants = await web_agent_grants.list_grants(db, tenant_id=tenant_id)
+            found = await web_admin.agent_access_rows(db, tenant_id, agents)
         avatars = await avatars_of(runtime, tenant_id, agents)
-        fixed_to: dict[str, str] = {}
-        for agent in agents:
-            permissions = agent_permissions(
-                policy, build_agent_ref(agent.name, agent.metadata).names
-            )
-            channels = sorted(c for rule in permissions.runs_in for c in rule)
-            if fixed := permissions.home or (channels[0] if channels else None):
-                fixed_to[agent.id] = fixed
-        _, found = await channel_names(runtime, tenant_id, set(fixed_to.values()))
-        names = found.labels()
+        _, names_found = await channel_names(
+            runtime, tenant_id, {r.fixed_to for r in found if r.fixed_to}
+        )
+        names = names_found.labels()
+        by_id = {a.id: a for a in agents}
         return [
-            _access_json(
-                agent,
-                grants.get(agent.id),
-                fixed_to.get(agent.id),
-                names,
-                avatars.get(agent.id, ""),
-            )
-            for agent in agents
+            _access_json(by_id[r.agent_id], r, names, avatars.get(r.agent_id, "")) for r in found
         ]
 
     @router.get("/agent-access")
@@ -66,60 +50,49 @@ def access_router(runtime: WebRuntime) -> APIRouter:
     async def change_access(  # pyright: ignore[reportUnusedFunction]
         agent_id: str, body: AccessChange, caller: WorkspaceAdmin
     ) -> dict[str, Any]:
-        tenant_id, now = caller.person.tenant_id, runtime.now()
-        current = next(
-            (r for r in await access_rows(tenant_id) if r["agent"]["id"] == agent_id), None
-        )
-        if current is None:
+        tenant_id = caller.person.tenant_id
+        agents = [a for a in await listed_agents(runtime, tenant_id) if a.id == agent_id]
+        if not agents:
             raise HTTPException(status_code=404, detail="This agent isn't in the workspace.")
-        if current["fixed_to"] is not None:
-            raise HTTPException(status_code=403, detail="This agent is kept to its channel.")
-        web = current["web"] if body.web is None else body.web
-        who: WebAgentWho = current["who"] if body.who is None else body.who
-        groups: list[str] = current["groups"] if body.groups is None else body.groups
-        name = current["agent"]["name"]
-        async with runtime.sessionmaker.begin() as db:
-            await web_agent_grants.set_grant(
-                db, tenant_id=tenant_id, agent_id=agent_id, web=web, who=who, groups=groups, now=now
-            )
-            if web != current["web"]:
-                action = "Turned on web chat" if web else "Turned off web chat"
-                await audit(
+        try:
+            async with runtime.sessionmaker.begin() as db:
+                [current] = await web_admin.agent_access_rows(db, tenant_id, agents)
+                changed = await web_admin.set_agent_access(
                     db,
-                    tenant_id=tenant_id,
-                    actor_account_id=caller.person.account_id,
-                    action=action,
-                    target=name,
-                    at=now,
+                    admin_of(caller),
+                    runtime.now(),
+                    current,
+                    web=body.web,
+                    who=body.who,
+                    groups=body.groups,
                 )
-            if (who, sorted(set(groups))) != (current["who"], sorted(current["groups"])):
-                detail = {"everyone": "Everyone", "invites": "Invited people"}.get(who)
-                await audit(
-                    db,
-                    tenant_id=tenant_id,
-                    actor_account_id=caller.person.account_id,
-                    action="Changed web access",
-                    target=name,
-                    detail=detail or ", ".join(groups) or "No groups",
-                    at=now,
-                )
-        return {**current, "web": web, "who": who, "groups": list(dict.fromkeys(groups))}
+        except WebAdminError as error:
+            raise refused(error) from error
+        return {
+            "agent": agent_json(
+                agents[0], avatar=(await avatars_of(runtime, tenant_id, agents)).get(agent_id, "")
+            ),
+            "web": changed.web,
+            "who": changed.who,
+            "groups": changed.groups,
+            "fixed_to": changed.fixed_to,
+            "fixed_name": None,
+        }
 
     return router
 
 
 def _access_json(
     agent: BetaManagedAgentsAgent,
-    grant: WebAgentGrantRow | None,
-    fixed_to: str | None,
+    row: web_admin.AgentAccess,
     names: dict[str, str],
     avatar: str,
 ) -> dict[str, Any]:
     return {
         "agent": agent_json(agent, avatar=avatar),
-        "web": fixed_to is None and (grant is None or grant.web),
-        "who": "everyone" if grant is None else grant.who,
-        "groups": [] if grant is None else list(grant.groups),
-        "fixed_to": fixed_to,
-        "fixed_name": None if fixed_to is None else names.get(fixed_to, UNNAMED_CHANNEL),
+        "web": row.web,
+        "who": row.who,
+        "groups": row.groups,
+        "fixed_to": row.fixed_to,
+        "fixed_name": None if row.fixed_to is None else names.get(row.fixed_to, UNNAMED_CHANNEL),
     }

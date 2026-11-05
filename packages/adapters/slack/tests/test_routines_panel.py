@@ -295,3 +295,21 @@ def test_build_content_view_escapes_label_and_agent_name_in_mrkdwn() -> None:
     assert "&amp;" in text, "& in label must be mrkdwn-escaped"
     assert "&lt;Test&gt;" in text, "< and > in agent_name must be mrkdwn-escaped"
     assert "<Alert>" not in text, "raw < in label must not appear in the mrkdwn text"
+
+
+def test_open_in_web_url_button_follows_the_state_links() -> None:
+    """With links the panel ends with an `Open in web` url button; without, it is as before."""
+    from daimon.core.web_links import WebLinks
+
+    links = WebLinks("https://app.example.com", frozenset({"routines"})).for_tenant(
+        uuid.uuid4(), admin=False
+    )
+
+    def labels(state: RoutinesPanelState) -> list[tuple[str, str | None]]:
+        actions = build_content_view(state)["blocks"][-1]["elements"]
+        return [(e["text"]["text"], e.get("url")) for e in actions]
+
+    linked = labels(RoutinesPanelState(rows=[], over_cap_count=0, agent_name_map={}, links=links))
+    assert linked[-1] == ("Open in web", links.routine()), "the button opens the routines page"
+    plain = labels(RoutinesPanelState(rows=[], over_cap_count=0, agent_name_map={}))
+    assert [text for text, _ in plain] == ["↻ Refresh", "New routine"], "no links, no button"

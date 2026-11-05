@@ -1,0 +1,18 @@
+{
+  "agent": { "path": "/agents/{id}", "param": "node", "module": "agents", "cap": "agents.view" },
+  "channel": { "path": "/channels", "param": "channel", "module": "channels", "cap": "channels.view" },
+  "routine": { "path": "/routines", "param": "routine", "module": "routines", "cap": "routines.view" },
+  "skill": { "path": "/agents/skills/{id}", "param": null, "module": "agents", "cap": "workspace.manage" },
+  "environment": { "path": "/agents/environments", "param": "env", "module": "agents", "cap": "workspace.manage" },
+  "person": { "path": "/admin", "param": "person", "module": "admin", "cap": "people.manage" },
+  "invites": { "path": "/admin/invites", "param": "invite", "module": "admin", "cap": "people.manage" },
+  "audit": { "path": "/admin/audit", "param": null, "module": "admin", "cap": "audit.view" },
+  "feedback": { "path": "/admin/feedback", "param": null, "module": "admin", "cap": "audit.view" },
+  "credits": { "path": "/credits", "param": null, "module": "credits", "cap": "credits.view_own" },
+  "spend": { "path": "/credits/spend", "param": null, "module": "credits", "cap": "credits.view_own" },
+  "allowance": { "path": "/credits/allowances", "param": "allowance", "module": "credits", "cap": "credits.manage" },
+  "mcp_server": { "path": "/integrations/mcp", "param": "server", "module": "integrations", "cap": "integrations.view" },
+  "integrations": { "path": "/integrations", "param": null, "module": "integrations", "cap": "integrations.view" },
+  "github": { "path": "/integrations/github", "param": null, "module": "integrations", "cap": "integrations.view" },
+  "chat": { "path": "/chat", "param": "agent", "module": "chat", "cap": "chat.use" }
+}

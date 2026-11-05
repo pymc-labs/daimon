@@ -964,3 +964,27 @@ def test_estimate_turns_fallback_when_guild_spend_zero_but_turns_nonzero() -> No
     """estimate_turns falls back when guild_spend==0 even if guild_turns>0."""
     result = estimate_turns(10.0, guild_spend=0.0, guild_turns=50)
     assert result == 100, "zero spend means fallback applies even if turns is nonzero"
+
+
+def test_open_in_web_link_button_follows_the_web_url() -> None:
+    """A web link adds one link button; with none the panel is as before."""
+
+    def buttons(web_url: str | None) -> list[discord.ui.Button[Any]]:
+        view = BillingPanelView(
+            _make_state(is_admin=False),
+            runtime=_make_runtime(),
+            allowed_user_id=42,
+            is_admin=False,
+            account_id=_TEST_ACCOUNT_ID,
+            now=NOW,
+            since=SINCE,
+            web_url=web_url,
+        )
+        return [c for c in view.walk_children() if isinstance(c, discord.ui.Button)]
+
+    url = "https://app.example.com/w/x/credits/spend"
+    linked = buttons(url)
+    assert [b.label for b in linked] == ["Refresh", "Done", "Open in web"], "link button comes last"
+    assert linked[-1].url == url, "the button opens the given page"
+    assert linked[-1].style == discord.ButtonStyle.link, "it is a link button"
+    assert [b.label for b in buttons(None)] == ["Refresh", "Done"], "no web link, no button"

@@ -28,6 +28,7 @@ from daimon.adapters.teams.card_actions import (
     get_or_create_account,
     guarded,
     submitted_fields,
+    web_links,
 )
 from daimon.adapters.teams.deployment_admins import with_admin_team
 from daimon.adapters.teams.identity import DENIED
@@ -225,6 +226,12 @@ class ChannelSettingsDialog:
                 max_value_length=_MAX_OPTION_VALUE,
             )
         name = (await self._listed(tenant_id)).get(channel_id)
+        web = web_links(
+            self._runtime,
+            tenant_id,
+            admin=actor.admin_for(DelegatedAction.CHANNEL_PERMISSIONS),
+            foreign=actor.foreign,
+        )
         settings = cards.ChannelSettings(
             channel_id=channel_id,
             label=cards.channel_label(channel_id, name),
@@ -233,6 +240,7 @@ class ChannelSettingsDialog:
             if actor.admin_for(DelegatedAction.CHANNEL_PERMISSIONS)
             else None,
             skills=tuple(skills) if actor.admin_for(DelegatedAction.CHANNEL_PERMISSIONS) else None,
+            web_url=web.channel(channel_id) if web else None,
         )
         return dialog(TITLE, cards.channel_settings_form(settings, notice=notice))
 

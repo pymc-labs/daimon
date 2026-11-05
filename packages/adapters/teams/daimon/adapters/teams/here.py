@@ -16,7 +16,15 @@ from __future__ import annotations
 import anthropic
 import structlog
 from daimon.adapters.teams.billing_panel import plain_name
-from daimon.adapters.teams.card_actions import button, card_actor, heading, submitted_fields, toast
+from daimon.adapters.teams.card_actions import (
+    button,
+    card_actor,
+    heading,
+    open_in_web,
+    submitted_fields,
+    toast,
+    web_links,
+)
 from daimon.adapters.teams.commands import CommandContext
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.access_policy import Approvals
@@ -73,6 +81,8 @@ def here_card(
                     ]
                 )
             )
+    if card.web_url:
+        body.append(ActionSet(actions=[open_in_web(card.web_url)]))
     return AdaptiveCard(body=body, fallback_text=TITLE)
 
 
@@ -116,6 +126,9 @@ async def _load(context: CommandContext) -> HereCard:
             visible_channel_ids={asked.channel_id},
             bot_can_view=True,
             caller_can_view=True,
+            web=web_links(
+                runtime, context.tenant_id, admin=context.is_admin, foreign=asked.is_foreign
+            ),
         )
     # Someone from another organisation has no 1:1 chat to send `setup` in.
     return for_foreign_sender(card) if asked.is_foreign else card

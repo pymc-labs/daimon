@@ -53,12 +53,12 @@ describe("entity links", () => {
     expect(screen.getByRole("link", { name: /CLV Analyst/ })).toHaveAttribute("href", "/agents/ag_1?node=skill%3As1")
     expect(screen.getByRole("link", { name: "Launch" })).toHaveAttribute("href", "/channels?channel=c1")
   })
-  it("opens skills and sandboxes only for editors, as their endpoints require", () => {
+  it("opens skills and sandboxes only for those who manage the workspace, as their pages require", () => {
     const ui = <><SkillLink id="s1" name="Report" /><EnvLink id="e1" name="Sandbox A" /></>
-    const { unmount } = withMe(["agents.view"], ui)
+    const { unmount } = withMe(["agents.view", "agents.edit"], ui)
     expect(screen.queryByRole("link")).not.toBeInTheDocument()
     unmount()
-    withMe(["agents.edit"], ui)
+    withMe(["workspace.manage"], ui)
     expect(screen.getAllByRole("link")).toHaveLength(2)
   })
   it("reads plain without the capability, and never shows an id for a missing name", () => {

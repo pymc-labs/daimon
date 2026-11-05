@@ -14,6 +14,7 @@ from daimon.core.confirmation import (
     prompt_for_tool_call,
 )
 from daimon.core.tool_safety import (
+    CARDED_TOOLS,
     DAIMON_SERVER_NAME,
     OPEN_TOOL_SAFETY,
     ToolCall,
@@ -28,6 +29,18 @@ from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.posture import PolicyApproval
 
 _TRUSTED = frozenset({DAIMON_SERVER_NAME})
+_STANDING = frozenset(
+    {
+        "approve_reach",
+        "create_watch",
+        "resume_watch",
+        "rotate_watch_key",
+        "update_watch",
+        "start_long_job",
+        "fly_launch_session",
+        "fly_extend_session",
+    }
+)
 _TOOLS: list[dict[str, object]] = [
     {
         "type": "mcp_toolset",
@@ -56,44 +69,22 @@ def _deps(*, configured: bool, tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY)
 
 
 def test_turns_select_microsoft_send_only_when_configured() -> None:
+    # Every turn holds the standing actions and the carded undo/change tools; only the
+    # Microsoft tools below follow the configuration.
+    always = _STANDING | frozenset(CARDED_TOOLS)
     on = confirmed_tools_for_turn(_deps(configured=True))
-    assert on - {
-        "approve_reach",
-        "create_watch",
-        "resume_watch",
-        "rotate_watch_key",
-        "update_watch",
-        "start_long_job",
-        "fly_launch_session",
-        "fly_extend_session",
-    } == {"microsoft_send"}, "configured: sessions ask before Microsoft sends"
+    assert on - always == {"microsoft_send"}, "configured: sessions ask before Microsoft sends"
     safe = confirmed_tools_for_turn(
         _deps(configured=True, tool_safety=ToolSafetyPolicy(enabled=True))
     )
-    assert safe - {
-        "approve_reach",
-        "create_watch",
-        "resume_watch",
-        "rotate_watch_key",
-        "update_watch",
-        "start_long_job",
-        "fly_launch_session",
-        "fly_extend_session",
-    } == {
+    assert safe - always == {
         "microsoft_send",
         "microsoft_write",
     }, "tool safety on: writes ask too"
     off = _deps(configured=False, tool_safety=ToolSafetyPolicy(enabled=True))
-    assert confirmed_tools_for_turn(off) == {
-        "approve_reach",
-        "create_watch",
-        "resume_watch",
-        "rotate_watch_key",
-        "update_watch",
-        "start_long_job",
-        "fly_launch_session",
-        "fly_extend_session",
-    }, "unconfigured Microsoft: only standing watch/job/compute actions are selected"
+    assert confirmed_tools_for_turn(off) == always, (
+        "unconfigured Microsoft: only standing watch/job/compute and carded actions are selected"
+    )
 
 
 def test_selected_microsoft_send_asks_with_tool_safety_off() -> None:

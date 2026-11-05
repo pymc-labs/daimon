@@ -43,6 +43,7 @@ from daimon.adapters.teams.card_actions import (
     replace_card,
     submitted_fields,
     toast,
+    web_links,
 )
 from daimon.adapters.teams.commands import CommandContext
 from daimon.adapters.teams.identity import DENIED
@@ -553,6 +554,12 @@ class SetupPanel:
                 public_mcp_url=str(mcp.public_url) if mcp.public_url is not None else None,
                 is_admin=actor.admin_for(DelegatedAction.AGENT_SETTINGS),
                 channel_label=None,
+                web=web_links(
+                    self._runtime,
+                    actor.tenant_id,
+                    admin=actor.admin_for(DelegatedAction.AGENT_SETTINGS),
+                    foreign=actor.foreign,
+                ),
             )
             details = await self._without_hidden_places(session, actor, details)
             # Only a member's ownership adds anything: an admin already gets every control.

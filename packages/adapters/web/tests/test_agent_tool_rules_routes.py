@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from daimon.adapters.web import access
+from daimon.core import web_roles_rules
 from daimon.core.config import Settings
 from daimon.core.stores import web_audit
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -90,8 +90,8 @@ async def test_a_rule_write_needs_the_edit_capability(
 ) -> None:
     agents, owner, _other = await agent_people(db_session, mcp_servers=_SERVERS)
     await make_admin(db_session_factory, owner)
-    view_only = access._BY_ROLE["owner"] - {"agents.edit"}  # pyright: ignore[reportPrivateUsage]
-    monkeypatch.setitem(access._BY_ROLE, "owner", view_only)  # pyright: ignore[reportPrivateUsage]
+    by_role = web_roles_rules._BY_ROLE  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setitem(by_role, "owner", by_role["owner"] - {"agents.edit"})
     body = {"tool": "notes/write", "rule": "deny", "scope": "chat", "expected_revision": 0}
     token = await sign_in_token(db_session_factory, owner)
     async with agent_client(

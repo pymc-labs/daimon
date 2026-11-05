@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 import pytest
 from daimon.core._models import PendingSkillAdd
+from daimon.core.config import WebSettings
 from daimon.core.stores import github_grant_proposals
 from daimon.core.stores.domain import Role, TurnOriginRow
 from daimon.core.stores.pending_skill_adds import (
@@ -23,6 +24,7 @@ from daimon.core.turn_origin import (
     render_turn_origin,
     turn_origin,
 )
+from daimon.core.web_links import TenantLinks, WebLinks
 from daimon.testing.factories import make_account, make_tenant
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -669,3 +671,47 @@ def test_effective_role_is_separate_from_the_platform_snapshot(
     controls = render_turn_origin(_origin(role=snapshot), effective_is_admin=effective)
     assert f'"current_role": "{snapshot.value}"' in controls
     assert f'"effective_role": "{"admin" if effective else "user"}"' in controls
+
+
+def _web(admin: bool = False) -> TenantLinks:
+    web = WebLinks.from_settings(WebSettings(public_url="https://app.example.com"))  # type: ignore[call-arg]
+    assert web is not None, "a web block yields links"
+    return web.for_tenant(uuid.UUID("22222222-2222-2222-2222-222222222222"), admin=admin)
+
+
+def test_controls_without_web_links_are_what_they_were() -> None:
+    """A deployment with no web app renders byte-for-byte the same controls."""
+    plain = render_turn_origin(_origin(), effective_is_admin=False)
+    assert render_turn_origin(_origin(), effective_is_admin=False, web=None) == plain, (
+        "no web links is the default"
+    )
+    assert '"web"' not in plain and "web_url" not in plain, "nothing about the web is rendered"
+
+
+def test_controls_carry_the_workspace_front_door_and_the_pages_its_caller_may_open() -> None:
+    rendered = render_turn_origin(_origin(), effective_is_admin=False, web=_web())
+
+    web = _controls(rendered)["web"]
+    root = "https://app.example.com/w/22222222-2222-2222-2222-222222222222"
+    assert web["url"] == root, "the workspace root"
+    assert web["pages"] == {  # paths under the root, never the id again
+        "chat": "/chat",
+        "channels": "/channels",
+        "routines": "/routines",
+        "spend": "/credits/spend",
+        "profile": "/profile",
+    }, "a member gets the pages a member may open"
+    assert rendered.count("web_url") == 1, "one sentence says how tool results link out"
+    assert "web.pages" in rendered, "and that the pages may be linked"
+    assert root not in rendered.split("</turn_controls>")[0].split('"pages"')[1], (
+        "the pages never repeat the workspace id"
+    )
+
+
+def test_a_sender_from_another_organisation_gets_no_web_links() -> None:
+    rendered = render_turn_origin(
+        _origin(platform="teams", sender_foreign=True), effective_is_admin=False, web=_web()
+    )
+
+    assert "web" not in _controls(rendered), "a foreign sender has no account to open it with"
+    assert "web_url" not in rendered, "and the sentence about it is left out"

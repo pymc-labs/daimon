@@ -344,7 +344,9 @@ async def test_routine_base_and_new(platform, op, scenario, monkeypatch):
         session = SimpleNamespace(begin=transaction)
         factory = MagicMock(side_effect=transaction)
         factory.begin = transaction
-        runtime = SimpleNamespace(sessionmaker=factory, anthropic=None)
+        runtime = SimpleNamespace(
+            sessionmaker=factory, anthropic=None, settings=SimpleNamespace(web=None)
+        )
 
         async def load(session, routine_id, *, tenant_id):
             trace.append(("load", routine_id, tenant_id))
@@ -434,6 +436,7 @@ async def test_routine_base_and_new(platform, op, scenario, monkeypatch):
                         user_id=USER,
                         is_admin=scenario == "admin",
                         admin_for=lambda _action: scenario == "admin",
+                        foreign=False,
                     )
                 ),
                 store=SimpleNamespace(

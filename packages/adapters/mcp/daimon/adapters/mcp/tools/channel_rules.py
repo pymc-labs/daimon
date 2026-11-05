@@ -9,7 +9,7 @@ absent: only native /here controls may change them.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import cast
 
 import discord
@@ -20,6 +20,7 @@ from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._channel_target import parse_channel_target
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
+from daimon.adapters.mcp.tools._web_url import WebUrl, tenant_links
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     _require_guild_id,  # pyright: ignore[reportPrivateUsage]
@@ -62,6 +63,9 @@ class SetChannelRuleResult:
     released_agents: list[str]
     changed: bool
     note: str
+    web_url: WebUrl = None
+    """The channel's settings on the web, when the workspace has a web app and the caller
+    may open it."""
 
 
 @dataclass(frozen=True)
@@ -72,6 +76,8 @@ class SetAgentRuleResult:
     runs_in: list[str] | None
     changed: bool
     note: str
+    web_url: WebUrl = None
+    """The agent's page on the web, when the workspace has a web app and the caller may open it."""
 
 
 def _platform(auth: AuthIdentity) -> str:
@@ -238,12 +244,24 @@ async def _set_agent_rule_impl(
         and await _has_repos(runtime, tenant_id=auth.tenant_id, agent_name=change.agent_name)
     ):
         notes.append(repos_come_too_line(change.agent_name))
-    return SetAgentRuleResult(
+    result = SetAgentRuleResult(
         agent_name=change.agent_name,
         runs_in=list(change.runs_in) if change.runs_in is not None else None,
         changed=change.changed,
         note=" ".join(notes),
     )
+    return await _with_agent_link(runtime, auth, result, change.agent_id)
+
+
+async def _with_agent_link(
+    runtime: McpRuntime, auth: AuthIdentity, result: SetAgentRuleResult, agent_id: str | None
+) -> SetAgentRuleResult:
+    """`result` with the agent's page on the web, when there is one for this caller."""
+    if agent_id is None:
+        return result
+    links = await tenant_links(runtime, auth)
+    url = None if links is None else links.agent(agent_id)
+    return result if url is None else replace(result, web_url=url)
 
 
 def _widens(before: tuple[str, ...] | None, after: tuple[str, ...] | None) -> bool:
@@ -295,15 +313,19 @@ def register_channel_rule_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Rules are per channel: ``channel_id`` names a channel, never a thread. Pass
         the parent channel's id from turn_controls (``parent_channel_id``).
         """
-        return await _set_channel_rule_impl(
+        auth = await _auth(ctx)
+        result = await _set_channel_rule_impl(
             runtime,
-            await _auth(ctx),
+            auth,
             channel_id=channel_id,
             readers=readers,
             writers=writers,
             copy_from=copy_from,
             release_agents=release_agents,
         )
+        links = await tenant_links(runtime, auth)
+        url = None if links is None else links.channel(result.channel_id)
+        return result if url is None else replace(result, web_url=url)
 
     @mcp.tool(tags={"admin", *scope_tags("channels:write")})
     async def set_agent_rule(  # pyright: ignore[reportUnusedFunction]
@@ -319,6 +341,5 @@ def register_channel_rule_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Naming a channel only its own agents read makes the agent one of them, so name
         that channel alone.
         """
-        return await _set_agent_rule_impl(
-            runtime, await _auth(ctx), agent_name=agent_name, runs_in=runs_in
-        )
+        auth = await _auth(ctx)
+        return await _set_agent_rule_impl(runtime, auth, agent_name=agent_name, runs_in=runs_in)

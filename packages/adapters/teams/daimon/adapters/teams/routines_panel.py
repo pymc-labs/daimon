@@ -24,6 +24,7 @@ from daimon.adapters.teams.card_actions import (
     guarded,
     replace_card,
     toast,
+    web_links,
 )
 from daimon.adapters.teams.commands import CommandContext
 from daimon.adapters.teams.identity import DENIED
@@ -89,7 +90,12 @@ class RoutinesPanel:
     async def command(self, context: CommandContext) -> None:
         user_id, is_admin = context.inbound.user_id, context.is_admin
         await context.send_card(
-            await self._panel(context.tenant_id, user_id=user_id, is_admin=is_admin)
+            await self._panel(
+                context.tenant_id,
+                user_id=user_id,
+                is_admin=is_admin,
+                foreign=context.inbound.is_foreign,
+            )
         )
 
     async def on_action(
@@ -108,7 +114,13 @@ class RoutinesPanel:
         return await guarded(self._submit(ctx), dialog_message(FAILED), _EVENT)
 
     async def _panel(
-        self, tenant_id: uuid.UUID, *, user_id: str, is_admin: bool, notice: str | None = None
+        self,
+        tenant_id: uuid.UUID,
+        *,
+        user_id: str,
+        is_admin: bool,
+        notice: str | None = None,
+        foreign: bool = False,
     ) -> AdaptiveCard:
         async with self._runtime.sessionmaker() as session:
             rows = await store.list_routines_for_tenant(session, tenant_id=tenant_id)
@@ -117,7 +129,15 @@ class RoutinesPanel:
             rows = [row for row in rows if row.created_by_user_id == user_id]
         rows = [routine_for_reader(row, user_id=user_id) for row in rows]
         shown, hidden = panel_rows(rows)
-        return panel_card(shown, hidden, user_id=user_id, is_admin=is_admin, notice=notice)
+        links = web_links(self._runtime, tenant_id, admin=is_admin, foreign=foreign)
+        return panel_card(
+            shown,
+            hidden,
+            user_id=user_id,
+            is_admin=is_admin,
+            notice=notice,
+            web_url=links.routine() if links else None,
+        )
 
     def _service_caller(self, actor: Actor) -> RoutineCaller:
         return RoutineCaller(
@@ -211,6 +231,7 @@ class RoutinesPanel:
             user_id=actor.user_id,
             is_admin=actor.admin_for(DelegatedAction.ROUTINES),
             notice=notice,
+            foreign=actor.foreign,
         )
         return replace_card(card)
 
@@ -241,7 +262,11 @@ class RoutinesPanel:
         created = created_notice(values["agent"], values["cron"], values["timezone"])
         if ctx.activity.reply_to_id:
             panel = await self._panel(
-                actor.tenant_id, user_id=actor.user_id, is_admin=True, notice=created
+                actor.tenant_id,
+                user_id=actor.user_id,
+                is_admin=True,
+                notice=created,
+                foreign=actor.foreign,
             )
             await edit_origin_card(ctx, panel)
         return dialog_message(created)

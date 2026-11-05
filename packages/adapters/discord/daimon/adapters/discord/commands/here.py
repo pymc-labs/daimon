@@ -27,6 +27,7 @@ from daimon.core.here_card import HereCard, load_here_card, render_here_card, re
 from daimon.core.platform_words import DESCRIPTIONS
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.identity import find_platform_principal
+from daimon.core.web_links import OPEN_IN_WEB, panel_links
 
 import discord
 from discord import Interaction, app_commands
@@ -215,6 +216,7 @@ class HereCog(commands.Cog):
                 )
                 policy = await load_access_policy(session, tenant_id=tenant_id)
                 visibility = await channel_outsiders(channel, policy.internal_role_ids)
+                routing_admin = await is_guild_admin(interaction, action=DelegatedAction.ROUTING)
                 card = await load_here_card(
                     session,
                     runtime.anthropic,
@@ -232,7 +234,8 @@ class HereCog(commands.Cog):
                     public_mcp_url=str(runtime.settings.mcp.public_url)
                     if runtime.settings.mcp.public_url is not None
                     else None,
-                    is_admin=await is_guild_admin(interaction, action=DelegatedAction.ROUTING),
+                    is_admin=routing_admin,
+                    web=panel_links(runtime.settings.web, tenant_id, admin=routing_admin),
                     caller_account_id=principal.account_id if principal else None,
                     visible_channel_ids=visible_ids,
                     bot_can_view=bot_view,
@@ -267,6 +270,13 @@ class HereCog(commands.Cog):
                 and await is_guild_admin(interaction, action=DelegatedAction.CHANNEL_PERMISSIONS)
                 else None
             )
+            if card.web_url is not None:
+                view = view or discord.ui.View()
+                view.add_item(
+                    discord.ui.Button(
+                        label=OPEN_IN_WEB, style=discord.ButtonStyle.link, url=card.web_url
+                    )
+                )
             await interaction.edit_original_response(
                 embed=build_here_embed(card),
                 view=view,

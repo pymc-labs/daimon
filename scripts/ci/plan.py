@@ -40,6 +40,8 @@ FILES: dict[str, str] = {
     # Their contract tests are repo tests, but a change deploys everything it can break.
     ".github/workflows/deploy.yml": "deploy-workflow",
     ".github/workflows/promote.yml": "deploy-workflow",
+    # The web adapter's links parity test reads it.
+    "web/src/lib/deep-links.json": "web-links",
 }
 #: Prose no test or image reads; code trees keep their own (skills, fixtures).
 _PROSE = re.compile(r"^(?!defaults/|packages/|tests/|qa/)\S*\.md$")
@@ -113,6 +115,7 @@ SUITES: dict[str, tuple[str, ...]] = {
     # tests/parity reads web/src for the plain-words rules.
     "spa": ("spa", "parity", "parity-mux", "image-daimon"),
     "web": ("web", "parity", "parity-mux", "lint", "shard-check", "image-daimon"),
+    "web-links": ("spa", "web", "parity", "parity-mux", "image-daimon"),
     "parity": ("parity", "parity-mux", "staging-config", "lint", "shard-check"),
     "tests": DAIMON,
     # The mux tests read the golden scenarios, defaults/ (core) and the agent-chat tool (mcp).
