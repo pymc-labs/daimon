@@ -7,7 +7,9 @@ no access log holds it. The answer is the bare key as plain text, so one `curl`
 can write it into a config file and the key never enters a chat.
 
 Every refusal is the same empty 404, so a caller cannot tell an unknown code
-from a used, expired or revoked one. Attempts are counted per client address.
+from a used, expired or revoked one. Attempts are counted per client address:
+the one the trusted proxy appended to X-Forwarded-For, never a value the caller
+sent.
 """
 
 from __future__ import annotations
@@ -34,13 +36,19 @@ def _refused() -> Response:
     return Response(status_code=404)
 
 
-def _client_key(request: Request) -> str:
-    """The caller's address: the first hop a proxy reports, else the socket's peer."""
-    forwarded = request.headers.get("x-forwarded-for", "")
-    first = forwarded.split(",")[0].strip()
-    if first:
-        return first
-    return request.client.host if request.client else "unknown"
+def client_address(forwarded_for: str, peer: str | None, *, trusted_hops: int) -> str:
+    """The caller's address, from the X-Forwarded-For entry the trusted proxies appended.
+
+    Each trusted proxy appends the address it saw, so the entries from the right
+    are theirs and everything left of them is whatever the caller sent. The
+    `trusted_hops`-th from the right is the outermost trusted proxy's, the
+    caller's real address. With none trusted, or fewer entries than proxies (so
+    the header is not what they wrote), the socket peer stands.
+    """
+    entries = [part.strip() for part in forwarded_for.split(",")]
+    if trusted_hops > 0 and len(entries) >= trusted_hops and entries[-trusted_hops]:
+        return entries[-trusted_hops]
+    return peer or "unknown"
 
 
 async def _code_of(request: Request) -> str | None:
@@ -61,12 +69,17 @@ def build_coding_key_claim_route(
     deps: AgentEditDeps,
     jwt_secret: SecretStr | None,
     rate_limiter: RateLimiter,
+    trusted_hops: int,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> Callable[[Request], Awaitable[Response]]:
     """Build the `POST /coding-keys/claim` handler."""
 
     async def claim(request: Request) -> Response:
-        if jwt_secret is None or not rate_limiter.check_and_record(_client_key(request)):
+        peer = request.client.host if request.client else None
+        address = client_address(
+            request.headers.get("x-forwarded-for", ""), peer, trusted_hops=trusted_hops
+        )
+        if jwt_secret is None or not rate_limiter.check_and_record(address):
             return _refused()
         code = await _code_of(request)
         if code is None:

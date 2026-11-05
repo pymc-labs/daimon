@@ -67,3 +67,37 @@ def test_rate_limiter_remaining_decrements() -> None:
     rl.check_and_record("u")
     rl.check_and_record("u")
     assert rl.remaining("u") == 3, "two calls consumed → 3 remaining"
+
+
+def test_rate_limiter_drops_expired_buckets_when_full() -> None:
+    """At the key cap, buckets with nothing in the window are evicted to make room."""
+    fake_now = [datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)]
+    rl = RateLimiter(
+        max_requests=1, window=timedelta(minutes=10), max_keys=2, _now=lambda: fake_now[0]
+    )
+    assert rl.check_and_record("a") and rl.check_and_record("b"), "two keys fill the cap"
+
+    fake_now[0] += timedelta(minutes=11)
+
+    assert rl.check_and_record("c") is True, "a new key fits once the old ones expired"
+    assert set(rl._calls) == {"c"}, "the expired buckets were dropped"  # pyright: ignore[reportPrivateUsage]
+
+
+def test_rate_limiter_denies_a_new_key_when_full_of_live_ones() -> None:
+    """A flood of distinct keys cannot grow the dict past the cap."""
+    rl = RateLimiter(max_requests=5, max_keys=2)
+    assert rl.check_and_record("a") and rl.check_and_record("b"), "two keys fill the cap"
+
+    assert rl.check_and_record("c") is False, "a third live key is denied, not stored"
+    assert rl.check_and_record("a") is True, "a known key still has its allowance"
+    assert len(rl._calls) == 2, "the dict did not grow"  # pyright: ignore[reportPrivateUsage]
+
+
+def test_rate_limiter_refund_drops_an_emptied_bucket() -> None:
+    """Refunding the only call leaves no empty bucket behind."""
+    rl = RateLimiter(max_requests=1)
+    rl.check_and_record("a")
+
+    rl.refund("a")
+
+    assert "a" not in rl._calls, "the empty bucket is gone"  # pyright: ignore[reportPrivateUsage]

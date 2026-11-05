@@ -488,7 +488,10 @@ def create_mcp_app(
     bundle_rate_limiter = RateLimiter(
         max_requests=effective_settings.mcp.bundle_uploads_per_hour,
     )
-    claim_rate_limiter = RateLimiter(max_requests=30, window=timedelta(minutes=10))
+    claim_rate_limiter = RateLimiter(
+        max_requests=effective_settings.mcp.coding_claim_attempts,
+        window=timedelta(minutes=effective_settings.mcp.coding_claim_window_minutes),
+    )
 
     deployment_default = parse_deployment_default(effective_settings.defaults_root)
     artifact_store = (
@@ -661,6 +664,7 @@ def create_mcp_app(
             ),
             jwt_secret=effective_settings.mcp.jwt_secret,
             rate_limiter=claim_rate_limiter,
+            trusted_hops=effective_settings.mcp.trusted_proxy_hops,
         ),
         methods=["POST"],
     )

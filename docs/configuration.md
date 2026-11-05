@@ -448,6 +448,28 @@ Per-token cap on bundle upload route calls per rolling hour. Prevents a compromi
 buggy caller from exhausting the Files API upload path. Set to 0 to disable (not
 recommended in production).
 
+### `DAIMON_MCP__CODING_CLAIM_ATTEMPTS`
+
+`int` · optional · default `30`
+
+Most POST /coding-keys/claim calls one client address may make per window, valid code or
+not. Set to 0 to disable (not recommended in production).
+
+### `DAIMON_MCP__CODING_CLAIM_WINDOW_MINUTES`
+
+`int` · optional · default `10`
+
+The window, in minutes, `coding_claim_attempts` is counted over.
+
+### `DAIMON_MCP__TRUSTED_PROXY_HOPS`
+
+`int` · optional · default `1`
+
+How many reverse proxies in front of the mcp service each append the address they saw to
+X-Forwarded-For. The claim route's rate limit keys on the entry the outermost trusted
+proxy appended, counted from the right; anything to its left is client-supplied and
+ignored. 0 trusts no header and keys on the socket peer.
+
 ### `DAIMON_MCP__BUNDLE_TTL_DAYS`
 
 `int` · optional · default `90`

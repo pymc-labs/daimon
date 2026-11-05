@@ -285,6 +285,30 @@ class McpSettings(BaseModel):
             "production)."
         ),
     )
+    coding_claim_attempts: int = Field(
+        default=30,
+        description=(
+            "Most POST /coding-keys/claim calls one client address may make per "
+            "window, valid code or not. Set to 0 to disable (not recommended in "
+            "production)."
+        ),
+    )
+    coding_claim_window_minutes: int = Field(
+        default=10,
+        ge=1,
+        description="The window, in minutes, `coding_claim_attempts` is counted over.",
+    )
+    trusted_proxy_hops: int = Field(
+        default=1,
+        ge=0,
+        description=(
+            "How many reverse proxies in front of the mcp service each append the "
+            "address they saw to X-Forwarded-For. The claim route's rate limit keys "
+            "on the entry the outermost trusted proxy appended, counted from the "
+            "right; anything to its left is client-supplied and ignored. 0 trusts "
+            "no header and keys on the socket peer."
+        ),
+    )
     bundle_ttl_days: int = Field(
         default=90,
         description=(

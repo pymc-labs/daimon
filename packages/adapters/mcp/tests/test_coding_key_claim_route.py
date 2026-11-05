@@ -6,7 +6,8 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import httpx
-from daimon.adapters.mcp.coding_key_claim import build_coding_key_claim_route
+import pytest
+from daimon.adapters.mcp.coding_key_claim import build_coding_key_claim_route, client_address
 from daimon.core._models import CodingKeyClaim, McpToken
 from daimon.core.agent_editing import AgentEditDeps
 from daimon.core.coding_key_connect import hash_code
@@ -67,6 +68,7 @@ def _client(
     *,
     secret: SecretStr | None = _SECRET,
     limit: int = 100,
+    trusted_hops: int = 1,
 ) -> httpx.AsyncClient:
     route = build_coding_key_claim_route(
         deps=AgentEditDeps(
@@ -76,6 +78,7 @@ def _client(
         ),
         jwt_secret=secret,
         rate_limiter=RateLimiter(max_requests=limit, window=timedelta(minutes=10)),
+        trusted_hops=trusted_hops,
     )
     app = Starlette(routes=[Route("/coding-keys/claim", route, methods=["POST"])])
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t")
@@ -136,12 +139,20 @@ async def test_attempts_are_rate_limited_per_address(
     codes = await _batch(committing_sessionmaker, ttl=timedelta(minutes=10))
     async with _client(committing_sessionmaker, limit=2) as client:
         for _ in range(2):
-            await client.post("/coding-keys/claim", data={"code": "guess"})
-        limited = await client.post("/coding-keys/claim", data={"code": codes["codex"]})
+            await client.post(
+                "/coding-keys/claim",
+                data={"code": "guess"},
+                headers={"x-forwarded-for": "198.51.100.7"},
+            )
+        limited = await client.post(
+            "/coding-keys/claim",
+            data={"code": codes["codex"]},
+            headers={"x-forwarded-for": "198.51.100.7"},
+        )
         other = await client.post(
             "/coding-keys/claim",
             data={"code": codes["codex"]},
-            headers={"x-forwarded-for": "203.0.113.9, 10.0.0.1"},
+            headers={"x-forwarded-for": "10.0.0.1, 203.0.113.9"},
         )
 
     assert limited.status_code == 404, "a right code from a limited address is refused"
@@ -151,3 +162,44 @@ async def test_attempts_are_rate_limited_per_address(
             await session.scalars(select(CodingKeyClaim).where(CodingKeyClaim.jti.is_not(None)))
         ).all()
     assert len(used) == 1, "exactly the one claim from the unlimited address minted"
+
+
+async def test_a_forged_leftmost_forwarded_address_buys_no_fresh_allowance(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    codes = await _batch(committing_sessionmaker, ttl=timedelta(minutes=10))
+    async with _client(committing_sessionmaker, limit=2) as client:
+        for n in range(2):
+            await client.post(
+                "/coding-keys/claim",
+                data={"code": "guess"},
+                headers={"x-forwarded-for": f"192.0.2.{n}, 198.51.100.7"},
+            )
+        forged = await client.post(
+            "/coding-keys/claim",
+            data={"code": codes["codex"]},
+            headers={"x-forwarded-for": "192.0.2.99, 198.51.100.7"},
+        )
+
+    assert forged.status_code == 404, "the proxy-appended address is counted, not the forged one"
+
+
+@pytest.mark.parametrize(
+    ("header", "peer", "hops", "expected"),
+    [
+        ("1.1.1.1, 2.2.2.2, 3.3.3.3", "10.0.0.1", 1, "3.3.3.3"),
+        ("1.1.1.1, 2.2.2.2, 3.3.3.3", "10.0.0.1", 2, "2.2.2.2"),
+        ("9.9.9.9", "10.0.0.1", 1, "9.9.9.9"),
+        ("9.9.9.9", "10.0.0.1", 2, "10.0.0.1"),
+        ("9.9.9.9", "10.0.0.1", 0, "10.0.0.1"),
+        ("", "10.0.0.1", 1, "10.0.0.1"),
+        ("", None, 1, "unknown"),
+        ("1.1.1.1,", "10.0.0.1", 1, "10.0.0.1"),
+    ],
+)
+def test_the_client_address_is_the_hop_a_trusted_proxy_appended(
+    header: str, peer: str | None, hops: int, expected: str
+) -> None:
+    got = client_address(header, peer, trusted_hops=hops)
+
+    assert got == expected, f"{header!r} behind {hops} trusted hop(s) from {peer}"

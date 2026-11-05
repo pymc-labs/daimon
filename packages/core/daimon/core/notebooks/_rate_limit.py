@@ -28,6 +28,9 @@ class RateLimiter:
 
     max_requests: int
     window: timedelta = timedelta(hours=1)
+    #: Most keys held at once. Past it, expired buckets go first; if none are left a
+    #: new key is denied, so a flood of distinct keys cannot grow the dict without bound.
+    max_keys: int = 10_000
     _now: Callable[[], datetime] = field(default=lambda: datetime.now(UTC))
     _calls: dict[str, deque[datetime]] = field(default_factory=dict[str, deque[datetime]])
 
@@ -36,14 +39,25 @@ class RateLimiter:
         if self.max_requests <= 0:
             return True  # disabled — always allow
         now = self._now()
-        bucket = self._calls.setdefault(key, deque())
         cutoff = now - self.window
+        bucket = self._calls.get(key)
+        if bucket is None:
+            if len(self._calls) >= self.max_keys:
+                self._evict_expired(cutoff)
+                if len(self._calls) >= self.max_keys:
+                    return False
+            bucket = self._calls[key] = deque()
         while bucket and bucket[0] < cutoff:
             bucket.popleft()
         if len(bucket) >= self.max_requests:
             return False
         bucket.append(now)
         return True
+
+    def _evict_expired(self, cutoff: datetime) -> None:
+        """Drop every bucket with no call inside the window."""
+        for key in [k for k, bucket in self._calls.items() if not bucket or bucket[-1] < cutoff]:
+            del self._calls[key]
 
     def refund(self, key: str) -> None:
         """Pop the most recent recorded call for ``key``.
@@ -56,6 +70,8 @@ class RateLimiter:
         bucket = self._calls.get(key)
         if bucket:
             bucket.pop()
+            if not bucket:
+                del self._calls[key]
 
     def remaining(self, key: str) -> int:
         """How many more calls fit in the current window for ``key``. Diagnostic only."""
