@@ -237,6 +237,7 @@ async def record_turn_post(
     parent_channel_id: str | None = None,
     thread_ts: str | None = None,
     role: PostRole | None = None,
+    delivery_id: uuid.UUID | None = None,
 ) -> None:
     """Record a message (`turn`) or thread (`auto_thread`) an adapter posted for
     a turn, or a routine's result (`routine`, requested by the routine's creator).
@@ -245,7 +246,7 @@ async def record_turn_post(
     MCP token carries), so only that agent can tidy it. An `auto_thread` row
     is `kind='thread'` with the parent channel as `channel_id` and the thread
     id as `message_id`. A Slack turn post carries its root in `thread_ts`;
-    a Teams one its `role`.
+    a Teams one its `role`; a routine chunk its delivery (`delivery_id`).
     The post has already gone out, so a failure, or a write
     slower than `RECORD_TIMEOUT_S` (it sits between a send and the turn using
     its message), is logged and swallowed; the cost is that this one post
@@ -274,6 +275,7 @@ async def record_turn_post(
                 requester_platform_user_id=requester_platform_user_id,
                 turn_card_intent_id=turn_card_intent_id,
                 role=role,
+                delivery_id=delivery_id,
             )
     except Exception as exc:  # the post is out; never fail the turn over its record
         log.warning(

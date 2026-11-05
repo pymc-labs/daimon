@@ -48,6 +48,7 @@ class AgentPostRow(BaseModel):
     requester_platform_user_id: str | None
     turn_card_intent_id: uuid.UUID | None
     role: PostRole | None = None
+    delivery_id: uuid.UUID | None = None
     posted_at: datetime
     deleted_at: datetime | None
 
@@ -68,6 +69,7 @@ async def record_post(
     requester_platform_user_id: str | None = None,
     turn_card_intent_id: uuid.UUID | None = None,
     role: PostRole | None = None,
+    delivery_id: uuid.UUID | None = None,
 ) -> None:
     """Record one post. A second record of the same target keeps the first owner."""
     await session.execute(
@@ -86,6 +88,7 @@ async def record_post(
             requester_platform_user_id=requester_platform_user_id,
             turn_card_intent_id=turn_card_intent_id,
             role=role,
+            delivery_id=delivery_id,
         )
         .on_conflict_do_nothing(constraint="uq_agent_posted_messages_target")
     )
@@ -160,6 +163,36 @@ async def list_recent_posts(
         )
         .order_by(AgentPostedMessage.posted_at.desc(), AgentPostedMessage.message_id.desc())
         .limit(limit)
+    )
+    return [AgentPostRow.model_validate(row) for row in rows.all()]
+
+
+async def list_reply_posts(session: AsyncSession, *, post: AgentPostRow) -> list[AgentPostRow]:
+    """The live messages of `post`'s reply, newest first.
+
+    A turn's reply is its posts in that channel, a routine's is one delivery's
+    chunks, and any other post is a reply of its own.
+    """
+    if post.turn_card_intent_id is not None:
+        group = (
+            AgentPostedMessage.channel_id == post.channel_id,
+            AgentPostedMessage.turn_card_intent_id == post.turn_card_intent_id,
+        )
+    elif post.delivery_id is not None:
+        group = (AgentPostedMessage.delivery_id == post.delivery_id,)
+    else:
+        group = (AgentPostedMessage.id == post.id,)
+    rows = await session.scalars(
+        select(AgentPostedMessage)
+        .where(
+            AgentPostedMessage.tenant_id == post.tenant_id,
+            AgentPostedMessage.platform == post.platform,
+            AgentPostedMessage.agent_id == post.agent_id,
+            AgentPostedMessage.kind == "message",
+            AgentPostedMessage.deleted_at.is_(None),
+            *group,
+        )
+        .order_by(AgentPostedMessage.posted_at.desc(), AgentPostedMessage.message_id.desc())
     )
     return [AgentPostRow.model_validate(row) for row in rows.all()]
 

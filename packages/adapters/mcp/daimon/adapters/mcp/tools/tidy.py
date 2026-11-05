@@ -1,7 +1,8 @@
-"""Channel tidy tools: edit_message, delete_message, archive_thread, delete_thread.
+"""Channel tidy tools: edit_message, delete_message, delete_reply, archive_thread,
+delete_thread.
 
 Registered beside the channel tools, with the same per-platform dispatch.
-Teams has edit_message and delete_message only. Rules: ``tools/_tidy.py``.
+Teams has edit_message, delete_message and delete_reply only. Rules: ``tools/_tidy.py``.
 """
 
 from __future__ import annotations
@@ -13,16 +14,19 @@ from daimon.adapters.mcp.tools._tidy import TidyResult
 from daimon.adapters.mcp.tools.discord._tidy import (
     _archive_thread_impl,  # pyright: ignore[reportPrivateUsage]
     _delete_message_impl,  # pyright: ignore[reportPrivateUsage]
+    _delete_reply_impl,  # pyright: ignore[reportPrivateUsage]
     _delete_thread_impl,  # pyright: ignore[reportPrivateUsage]
     _edit_message_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.slack._tidy import (
     _slack_delete_message_impl,  # pyright: ignore[reportPrivateUsage]
+    _slack_delete_reply_impl,  # pyright: ignore[reportPrivateUsage]
     _slack_delete_thread_impl,  # pyright: ignore[reportPrivateUsage]
     _slack_edit_message_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.teams._tidy import (
     _teams_delete_message_impl,  # pyright: ignore[reportPrivateUsage]
+    _teams_delete_reply_impl,  # pyright: ignore[reportPrivateUsage]
     _teams_edit_message_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.platform_words import scrub_other_platforms
@@ -94,12 +98,13 @@ def register_tidy_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         message_id: str,
         origin_context_id: str | None = None,
     ) -> TidyResult:
-        """Delete one message you posted, or one of your replies or status cards.
+        """Delete one message you posted: one part of a reply, or one card.
 
-        Use it for your own stale, empty or failed posts, one message per
-        call. The same rules as edit_message: only your own posts and
-        replies, pass origin_context_id, the same limits and the same refused
-        channels.
+        Use it only when asked for a specific message. A reply often spans
+        several messages plus status, notice and controls cards; to remove
+        "your reply" or "your last reply", use delete_reply. The same rules
+        as edit_message: only your own posts and replies, pass
+        origin_context_id, the same limits and the same refused channels.
         """
         auth = await _auth(ctx)
         if auth.platform == "teams":
@@ -119,6 +124,48 @@ def register_tidy_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 origin_context_id=origin_context_id,
             )
         return await _delete_message_impl(
+            runtime,
+            auth,
+            channel_id=channel_id,
+            message_id=message_id,
+            origin_context_id=origin_context_id,
+        )
+
+    @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
+    async def delete_reply(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context,
+        channel_id: str,
+        message_id: str,
+        origin_context_id: str | None = None,
+    ) -> TidyResult:
+        """Delete a whole reply of yours: every message of it and its cards.
+
+        Use it when asked to delete "your reply" or "your last reply". Pass
+        any one message of the reply; its text messages and its status,
+        notice and controls cards all go, or every part of a routine result.
+        A send_message post is a reply of one message. Each deletion takes
+        the rules and limits of delete_message, checked before the first;
+        a limit or failure stops with how many were deleted and how many
+        are left. Pass origin_context_id.
+        """
+        auth = await _auth(ctx)
+        if auth.platform == "teams":
+            return await _teams_delete_reply_impl(
+                runtime,
+                auth,
+                channel_id=channel_id,
+                message_id=message_id,
+                origin_context_id=origin_context_id,
+            )
+        if auth.platform == "slack":
+            return await _slack_delete_reply_impl(
+                runtime,
+                auth,
+                channel_id=channel_id,
+                message_id=message_id,
+                origin_context_id=origin_context_id,
+            )
+        return await _delete_reply_impl(
             runtime,
             auth,
             channel_id=channel_id,

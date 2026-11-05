@@ -3713,6 +3713,11 @@ class AgentPostedMessage(Base):
             "role IN ('status', 'answer', 'notice', 'controls', 'routine')",
             name="ck_agent_posted_messages_role",
         ),
+        Index(
+            "ix_agent_posted_messages_delivery",
+            "delivery_id",
+            postgresql_where=text("delivery_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -3739,6 +3744,9 @@ class AgentPostedMessage(Base):
     # What a Teams turn or routine post is (`PostRole`), so the agent can tell
     # its answer from the cards around it. NULL elsewhere.
     role: Mapped[str | None] = mapped_column(Text)
+    # One routine delivery: its chunks, which in a Teams channel each root
+    # their own thread, so no channel groups them. NULL for other posts.
+    delivery_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     posted_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

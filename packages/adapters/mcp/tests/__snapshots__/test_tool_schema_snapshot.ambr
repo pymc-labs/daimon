@@ -3036,12 +3036,13 @@
     }),
     'delete_message': dict({
       'description': '''
-        Delete one message you posted, or one of your replies or status cards.
+        Delete one message you posted: one part of a reply, or one card.
         <blank line>
-        Use it for your own stale, empty or failed posts, one message per
-        call. The same rules as edit_message: only your own posts and
-        replies, pass origin_context_id, the same limits and the same refused
-        channels.
+        Use it only when asked for a specific message. A reply often spans
+        several messages plus status, notice and controls cards; to remove
+        "your reply" or "your last reply", use delete_reply. The same rules
+        as edit_message: only your own posts and replies, pass
+        origin_context_id, the same limits and the same refused channels.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -3090,6 +3091,46 @@
         }),
         'required': list([
           'slug',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'delete_reply': dict({
+      'description': '''
+        Delete a whole reply of yours: every message of it and its cards.
+        <blank line>
+        Use it when asked to delete "your reply" or "your last reply". Pass
+        any one message of the reply; its text messages and its status,
+        notice and controls cards all go, or every part of a routine result.
+        A send_message post is a reply of one message. Each deletion takes
+        the rules and limits of delete_message, checked before the first;
+        a limit or failure stops with how many were deleted and how many
+        are left. Pass origin_context_id.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'channel_id': dict({
+            'type': 'string',
+          }),
+          'message_id': dict({
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'channel_id',
+          'message_id',
         ]),
         'type': 'object',
       }),

@@ -19,13 +19,16 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._tidy import (
     Check,
+    MessageGone,
     PostRecord,
     TidyContext,
     TidyResult,
     conversation_refusal,
+    delete_parts,
     policy_recheck,
     record_agent_posts,
     refuse,
+    reply_parts,
     require_conversation_rights,
     require_not_escalation_channel,
     require_own_post,
@@ -136,7 +139,7 @@ async def _fetch_own_bot_message(
     try:
         message = await target.channel.fetch_message(int(message_id))
     except discord.NotFound as e:
-        raise ToolError("message not found") from e
+        raise MessageGone("message not found") from e
     if message.webhook_id is not None:
         await ensure_application_id(_client)
     # require_own_post has already checked the durable agent ledger. A deleted
@@ -353,34 +356,94 @@ async def _delete_message_impl(  # pyright: ignore[reportUnusedFunction]
         await _require_message_rights(
             runtime, ctx, target, post, tool_name=tool, operation=operation
         )
-        message = await _fetch_own_bot_message(
-            c, runtime, ctx, target, tool_name=tool, operation=operation, message_id=message_id
-        )
-
-        async def act() -> None:
-            await delete_own_message(c, target.channel, message)
-
-        await run_action(
-            runtime,
-            ctx,
-            tool_name=tool,
-            operation=operation,
-            target=TidyTarget(
-                channel_id=resolved_channel_id,
-                message_id=message_id,
-                content_hmac=post.content_hmac,
-            ),
-            checks=[_recheck(runtime, ctx, auth, target)],
-            act=act,
-            describe_error=_describe("delete"),
-            post=post,
-        )
+        await _delete_one(c, runtime, ctx, auth, target, post, tool=tool)
     return TidyResult(
         platform=_PLATFORM,
         channel_id=resolved_channel_id,
         message_id=message_id,
         action="deleted",
         messages_deleted=1,
+    )
+
+
+async def _delete_one(
+    c: discord.Client,
+    runtime: McpRuntime,
+    ctx: TidyContext,
+    auth: AuthIdentity,
+    target: _Target,
+    post: AgentPostRow,
+    *,
+    tool: str,
+) -> None:
+    """Delete one recorded message after its ownership and rights are checked."""
+    operation: TidyOperation = "message.delete"
+    message = await _fetch_own_bot_message(
+        c, runtime, ctx, target, tool_name=tool, operation=operation, message_id=post.message_id
+    )
+
+    async def act() -> None:
+        await delete_own_message(c, target.channel, message)
+
+    await run_action(
+        runtime,
+        ctx,
+        tool_name=tool,
+        operation=operation,
+        target=TidyTarget(
+            channel_id=post.channel_id,
+            message_id=post.message_id,
+            content_hmac=post.content_hmac,
+        ),
+        checks=[_recheck(runtime, ctx, auth, target)],
+        act=act,
+        describe_error=_describe("delete"),
+        post=post,
+    )
+
+
+async def _delete_reply_impl(  # pyright: ignore[reportUnusedFunction]
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    channel_id: str,
+    message_id: str,
+    origin_context_id: str | None,
+) -> TidyResult:
+    message_id = _message_id(message_id)
+    ctx = await resolve_tidy_context(
+        runtime, auth, platform=_PLATFORM, origin_context_id=origin_context_id
+    )
+    token = _require_bot_token(runtime)
+    tool: str = "delete_reply"
+    operation: TidyOperation = "message.delete"
+    async with rest_client(token) as c:
+        target = await _resolve_target(c, runtime, ctx, auth, channel_id=channel_id)
+        resolved_channel_id = str(target.channel.id)
+        post = await require_own_post(
+            runtime,
+            ctx,
+            tool_name=tool,
+            operation=operation,
+            channel_id=resolved_channel_id,
+            message_id=message_id,
+        )
+        # Every part shares this post's turn or routine, so its rights cover them.
+        await _require_message_rights(
+            runtime, ctx, target, post, tool_name=tool, operation=operation
+        )
+        parts = [p for p in await reply_parts(runtime, post) if p.channel_id == resolved_channel_id]
+
+        async def delete(part: AgentPostRow) -> None:
+            await _delete_one(c, runtime, ctx, auth, target, part, tool=tool)
+
+        deleted = await delete_parts(parts, delete)
+    return TidyResult(
+        platform=_PLATFORM,
+        channel_id=resolved_channel_id,
+        message_id=message_id,
+        action="deleted",
+        messages_deleted=deleted,
     )
 
 

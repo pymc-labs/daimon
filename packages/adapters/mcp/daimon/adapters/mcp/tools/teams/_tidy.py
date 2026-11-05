@@ -1,4 +1,4 @@
-"""Teams edit_message and delete_message: an agent changes only what it posted.
+"""Teams edit_message, delete_message and delete_reply: an agent changes only what it posted.
 
 Ownership, limits and audit rules are the shared ones in tools/_tidy.py.
 Bot Framework also lets the bot update and delete only its own activities.
@@ -20,9 +20,12 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._tidy import (
     Check,
+    MessageGone,
     TidyContext,
     TidyResult,
+    delete_parts,
     policy_recheck,
+    reply_parts,
     require_conversation_rights,
     require_not_escalation_channel,
     require_own_post,
@@ -96,7 +99,7 @@ def _describe(verb: str) -> Callable[[Exception], ToolError | None]:
     def describe(exc: Exception) -> ToolError | None:
         if isinstance(exc, httpx.HTTPStatusError):
             if exc.response.status_code == 404:
-                return ToolError("message not found")
+                return MessageGone("message not found")
             if exc.response.status_code == 403:
                 return ToolError(f"teams does not let daimon {verb} this message")
             return ToolError(f"teams refused to {verb} the message ({exc.response.status_code})")
@@ -123,6 +126,29 @@ async def _prepare(
     )
     conversation_id = await _ledger_key(runtime, ctx, named, message_id)
     client = await _check_place(runtime, ctx, auth, conversation_id)
+    post = await _check_post(
+        runtime,
+        ctx,
+        auth,
+        tool=tool,
+        operation=operation,
+        conversation_id=conversation_id,
+        message_id=message_id,
+    )
+    return ctx, client, conversation_id, post
+
+
+async def _check_post(
+    runtime: McpRuntime,
+    ctx: TidyContext,
+    auth: AuthIdentity,
+    *,
+    tool: str,
+    operation: TidyOperation,
+    conversation_id: str,
+    message_id: str,
+) -> AgentPostRow:
+    """Ownership, the conversation rules and the seal, in a place already checked."""
     post = await require_own_post(
         runtime,
         ctx,
@@ -141,7 +167,7 @@ async def _prepare(
     )
     for channel, parent in _sealed(conversation_id, message_id):
         ctx.read_policy.require(channel, parent)
-    return ctx, client, conversation_id, post
+    return post
 
 
 async def _teams_edit_message_impl(  # pyright: ignore[reportUnusedFunction]
@@ -207,6 +233,26 @@ async def _teams_delete_message_impl(  # pyright: ignore[reportUnusedFunction]
         message_id=message_id,
         origin_context_id=origin_context_id,
     )
+    await _delete_one(runtime, ctx, client, post, tool=tool)
+    return TidyResult(
+        platform=_PLATFORM,
+        channel_id=conversation_id,
+        message_id=message_id,
+        action="deleted",
+        messages_deleted=1,
+    )
+
+
+async def _delete_one(
+    runtime: McpRuntime,
+    ctx: TidyContext,
+    client: TeamsBotClient,
+    post: AgentPostRow,
+    *,
+    tool: str,
+) -> None:
+    """Delete one recorded message after its place, ownership and rights are checked."""
+    conversation_id, message_id = post.channel_id, post.message_id
 
     async def act() -> None:
         await client.delete_activity(conversation_id, message_id)
@@ -215,17 +261,59 @@ async def _teams_delete_message_impl(  # pyright: ignore[reportUnusedFunction]
         runtime,
         ctx,
         tool_name=tool,
-        operation=operation,
+        operation="message.delete",
         target=TidyTarget(conversation_id, message_id, post.content_hmac),
         checks=[_recheck(conversation_id, post)],
         act=act,
         describe_error=_describe("delete"),
         post=post,
     )
+
+
+async def _teams_delete_reply_impl(  # pyright: ignore[reportUnusedFunction]
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    channel_id: str,
+    message_id: str,
+    origin_context_id: str | None,
+) -> TidyResult:
+    tool: str = "delete_reply"
+    operation: TidyOperation = "message.delete"
+    ctx, client, conversation_id, post = await _prepare(
+        runtime,
+        auth,
+        tool=tool,
+        operation=operation,
+        channel_id=channel_id,
+        message_id=message_id,
+        origin_context_id=origin_context_id,
+    )
+    # A routine's chunks in a channel each root their own thread, so every
+    # part's place is checked, and all before the first deletion.
+    clients = {conversation_id: client}
+    parts = await reply_parts(runtime, post)
+    for part in parts:
+        if part.channel_id not in clients:
+            clients[part.channel_id] = await _check_place(runtime, ctx, auth, part.channel_id)
+        await _check_post(
+            runtime,
+            ctx,
+            auth,
+            tool=tool,
+            operation=operation,
+            conversation_id=part.channel_id,
+            message_id=part.message_id,
+        )
+
+    async def delete(part: AgentPostRow) -> None:
+        await _delete_one(runtime, ctx, clients[part.channel_id], part, tool=tool)
+
+    deleted = await delete_parts(parts, delete)
     return TidyResult(
         platform=_PLATFORM,
         channel_id=conversation_id,
         message_id=message_id,
         action="deleted",
-        messages_deleted=1,
+        messages_deleted=deleted,
     )

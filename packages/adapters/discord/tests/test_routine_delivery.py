@@ -635,6 +635,10 @@ async def test_each_delivered_chunk_is_recorded_as_the_routine_agents_post(
         == ("routine", agent, "1", "message")
         for post in posts
     ), "a routine post names the routine's agent and its creator"
+    deliveries = {post.delivery_id for post in posts}
+    assert len(deliveries) == 1 and None not in deliveries, (
+        "the chunks share one delivery, so delete_reply removes them together"
+    )
 
 
 async def test_a_failed_record_does_not_fail_the_delivery(

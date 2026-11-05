@@ -28,6 +28,7 @@ answer, and only the creator or an admin can have the agent tidy it.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
@@ -483,6 +484,7 @@ def make_discord_routine_poster(
             log.info("routine.delivery_refused", routine_id=str(row.id), reason="protected_channel")
             return await fallback("protected_channel")
         assert isinstance(channel, discord.Thread | discord.TextChannel)
+        delivery_id = uuid.uuid4()  # groups the chunks into one reply for delete_reply
 
         async def record(sent: discord.Message) -> None:
             # A reply to the result starts a turn only for a recorded post (a
@@ -497,6 +499,7 @@ def make_discord_routine_poster(
                 requester_platform_user_id=creator,
                 source="routine",
                 parent_channel_id=parent_channel_id,
+                delivery_id=delivery_id,
             )
 
         identity = (

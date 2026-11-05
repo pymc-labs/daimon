@@ -78,6 +78,7 @@ from daimon.core.stores.agent_posts import (
     AgentPostRow,
     PostKind,
     get_post,
+    list_reply_posts,
     mark_deleted,
     record_post,
     set_post_hash,
@@ -617,6 +618,44 @@ async def run_action(
         if mapped is not None:
             raise mapped from exc
         raise
+
+
+class MessageGone(ToolError):
+    """The platform no longer has the message."""
+
+
+async def reply_parts(runtime: McpRuntime, post: AgentPostRow) -> list[AgentPostRow]:
+    """The live messages of `post`'s reply, newest first (`list_reply_posts`)."""
+    async with runtime.session_factory() as session:
+        return await list_reply_posts(session, post=post)
+
+
+async def delete_parts(
+    parts: list[AgentPostRow], delete_one: Callable[[AgentPostRow], Awaitable[None]]
+) -> int:
+    """Delete each part in turn and return how many went.
+
+    A part already gone is skipped. Any other refusal, a limit included, stops
+    the run and says how many were deleted and how many remain.
+    """
+    deleted = gone = 0
+    for index, part in enumerate(parts):
+        try:
+            await delete_one(part)
+        except MessageGone:
+            gone += 1
+            continue
+        except ToolError as exc:
+            if deleted == 0:
+                raise
+            raise ToolError(
+                f"{deleted} of {len(parts)} messages of this reply deleted, "
+                f"{len(parts) - index} left; stopped: {exc}"
+            ) from exc
+        deleted += 1
+    if deleted == 0 and gone:
+        raise MessageGone("message not found")
+    return deleted
 
 
 @dataclass(frozen=True)

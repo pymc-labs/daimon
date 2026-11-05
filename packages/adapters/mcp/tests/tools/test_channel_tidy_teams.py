@@ -23,10 +23,16 @@ from daimon.adapters.mcp.tools.teams._send import (  # pyright: ignore[reportPri
 )
 from daimon.adapters.mcp.tools.teams._tidy import (  # pyright: ignore[reportPrivateUsage]
     _teams_delete_message_impl,
+    _teams_delete_reply_impl,
     _teams_edit_message_impl,
 )
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.channel_tidy import content_hash, derive_content_key, record_turn_post
+from daimon.core.channel_tidy import (
+    PER_TURN_LIMIT,
+    content_hash,
+    derive_content_key,
+    record_turn_post,
+)
 from daimon.core.config import (
     AnthropicSettings,
     CryptoSettings,
@@ -38,6 +44,7 @@ from daimon.core.config import (
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.agent_posts import PostRole
 from daimon.core.stores.domain import Role
 from daimon.core.stores.security_audit import SecurityAuditRow, list_events
 from daimon.core.stores.turn_card_intents import (
@@ -64,10 +71,14 @@ _OTHER_AGENT = "ag_other"
 
 
 class _Teams:
-    """Bot Framework: every roster check passes; posts get ids act-1, act-2, ..."""
+    """Bot Framework: every roster check passes; posts get ids act-1, act-2, ...
+
+    Deleting an activity in `gone` answers 404, as for one deleted by hand.
+    """
 
     def __init__(self) -> None:
         self.writes: list[httpx.Request] = []
+        self.gone: set[str] = set()
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         url = str(request.url)
@@ -76,6 +87,8 @@ class _Teams:
         if "/members/" in url:
             return httpx.Response(200, json={"aadObjectId": _CALLER})
         self.writes.append(request)
+        if request.method == "DELETE" and url.rsplit("/", 1)[-1] in self.gone:
+            return httpx.Response(404, json={})
         return httpx.Response(200, json={"id": f"act-{len(self.writes)}"})
 
     def edits_and_deletes(self) -> list[tuple[str, str]]:
@@ -458,3 +471,187 @@ async def test_a_routines_result_is_tidied_only_for_its_creator(
         with pytest.raises(ToolError, match="only the person who started"):
             await edit()
         assert world.teams.edits_and_deletes() == [], "a refused call never reaches Teams"
+
+
+async def _turn_reply(
+    world: _World,
+    conversation: str,
+    roles: tuple[PostRole, ...] = ("status", "answer", "answer", "controls"),
+    *,
+    running: bool = False,
+    requester: str = _CALLER,
+) -> tuple[uuid.UUID, list[str]]:
+    """One turn's messages in `conversation`, oldest first, as the lifecycle records them."""
+    ids = [f"act-{role}-{uuid.uuid4().hex[:6]}" for role in roles]
+    async with world.sessionmaker.begin() as s:
+        intent = await create_turn_card_intent(
+            s,
+            tenant_id=world.tenant_id,
+            platform="teams",
+            thread_id=conversation,
+            turn_token=uuid.uuid4(),
+        )
+        await record_turn_card_message(s, id=intent.id, message_id=ids[0])
+        if not running:
+            await retire_turn_card_intent(s, id=intent.id, expected_message_id=ids[0])
+    for activity, role in zip(ids, roles, strict=True):
+        await record_turn_post(
+            world.sessionmaker,
+            tenant_id=world.tenant_id,
+            platform="teams",
+            ma_agent_id=_AGENT,
+            channel_id=conversation,
+            message_id=activity,
+            requester_platform_user_id=requester,
+            source="turn",
+            turn_card_intent_id=intent.id,
+            parent_channel_id=None if conversation == _CHAT else _CHANNEL,
+            role=role,
+        )
+    return intent.id, ids
+
+
+def _deleted(world: _World) -> list[str]:
+    return [
+        path.rsplit("/", 1)[-1]
+        for method, path in world.teams.edits_and_deletes()
+        if method == "DELETE"
+    ]
+
+
+@pytest.mark.parametrize("conversation", [_CHAT, _THREAD])
+async def test_delete_reply_removes_every_part_of_one_reply_and_nothing_else(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], conversation: str
+) -> None:
+    """Any part names the reply; its text and cards go, newest first, each audited."""
+    world = await _world(committing_sessionmaker)
+    auth, origin = await world.turn()
+    intent, parts = await _turn_reply(world, conversation)
+    _, other_reply = await _turn_reply(world, conversation, ("answer",))
+    await record_turn_post(  # another agent's post under the same turn stays
+        world.sessionmaker,
+        tenant_id=world.tenant_id,
+        platform="teams",
+        ma_agent_id=_OTHER_AGENT,
+        channel_id=conversation,
+        message_id="act-other-agent",
+        requester_platform_user_id=_CALLER,
+        source="turn",
+        turn_card_intent_id=intent,
+    )
+
+    result = await _teams_delete_reply_impl(
+        world.runtime,
+        auth,
+        channel_id=conversation,
+        message_id=parts[1],
+        origin_context_id=origin,
+    )
+
+    assert (result.action, result.messages_deleted) == ("deleted", len(parts)), (
+        "every part of the reply is reported deleted"
+    )
+    assert _deleted(world) == parts[::-1], "each part is deleted, newest first, and only those"
+    assert other_reply[0] not in _deleted(world), "another reply of the agent stays"
+    rows = [r for r in await world.audit() if r.tool_name == "delete_reply"]
+    assert sorted(r.target_message_id or "" for r in rows if r.outcome == "allowed") == sorted(
+        parts
+    ), "each deletion is audited on its own"
+
+
+@pytest.mark.parametrize("running", [True, False])
+async def test_a_refused_reply_deletes_nothing(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], running: bool
+) -> None:
+    """A running turn, or another person's, is refused before the first deletion."""
+    world = await _world(committing_sessionmaker)
+    auth, origin = await world.turn()
+    _, parts = await _turn_reply(
+        world, _CHAT, running=running, requester=_CALLER if running else "someone-else"
+    )
+
+    with pytest.raises(ToolError, match="still running" if running else "only the person"):
+        await _teams_delete_reply_impl(
+            world.runtime, auth, channel_id=_CHAT, message_id=parts[-1], origin_context_id=origin
+        )
+    assert world.teams.edits_and_deletes() == [], "no part of a refused reply is deleted"
+
+
+async def test_a_limit_hit_mid_reply_says_how_many_went_and_how_many_are_left(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    world = await _world(committing_sessionmaker)
+    auth, origin = await world.turn()
+    _, parts = await _turn_reply(world, _CHAT, ("answer",) * (PER_TURN_LIMIT + 2))
+
+    with pytest.raises(ToolError, match=f"{PER_TURN_LIMIT} of {len(parts)} .* 2 left") as err:
+        await _teams_delete_reply_impl(
+            world.runtime, auth, channel_id=_CHAT, message_id=parts[0], origin_context_id=origin
+        )
+    assert "tidy limit" in str(err.value), "the stop names the limit"
+    assert len(_deleted(world)) == PER_TURN_LIMIT, "deletion stops at the limit"
+
+
+async def test_a_part_already_gone_is_skipped(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    world = await _world(committing_sessionmaker)
+    auth, origin = await world.turn()
+    _, parts = await _turn_reply(world, _CHAT)
+    world.teams.gone.add(parts[2])
+
+    result = await _teams_delete_reply_impl(
+        world.runtime, auth, channel_id=_CHAT, message_id=parts[0], origin_context_id=origin
+    )
+
+    assert result.messages_deleted == len(parts) - 1, "the gone part is not counted"
+    assert _deleted(world) == parts[::-1], "the rest are still deleted"
+
+
+async def test_a_routine_result_is_one_reply_across_its_chunks_threads(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Chunks posted to a channel each root a thread; their delivery groups them."""
+    world = await _world(committing_sessionmaker)
+    auth, origin = await world.turn()
+    delivery, other = uuid.uuid4(), uuid.uuid4()
+    chunks = {"act-chunk-1": delivery, "act-chunk-2": delivery, "act-next-run": other}
+    for activity, group in chunks.items():
+        await record_turn_post(
+            world.sessionmaker,
+            tenant_id=world.tenant_id,
+            platform="teams",
+            ma_agent_id=_AGENT,
+            channel_id=f"{_CHANNEL};messageid={activity}",
+            message_id=activity,
+            requester_platform_user_id=_CALLER,
+            source="routine",
+            parent_channel_id=_CHANNEL,
+            role="routine",
+            delivery_id=group,
+        )
+
+    result = await _teams_delete_reply_impl(
+        world.runtime, auth, channel_id=_CHANNEL, message_id="act-chunk-1", origin_context_id=origin
+    )
+
+    assert result.messages_deleted == 2, "both chunks of the delivery are deleted"
+    assert world.teams.edits_and_deletes() == [
+        ("DELETE", f"/{_CHANNEL};messageid=act-chunk-2/activities/act-chunk-2"),
+        ("DELETE", f"/{_CHANNEL};messageid=act-chunk-1/activities/act-chunk-1"),
+    ], "each chunk is deleted in its own thread; the next run's result stays"
+
+
+async def test_a_send_message_post_is_a_reply_of_one_message(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    world = await _world(committing_sessionmaker)
+    auth, origin = await world.turn()
+    first, second = await world.post(auth), await world.post(auth, "second")
+
+    result = await _teams_delete_reply_impl(
+        world.runtime, auth, channel_id=_THREAD, message_id=first, origin_context_id=origin
+    )
+
+    assert result.messages_deleted == 1, "a tool post is its own reply"
+    assert _deleted(world) == [first], f"{second} stays"

@@ -73,7 +73,12 @@ def make_teams_routine_poster(
     """
 
     async def record(
-        row: RoutineRow, conversation: str, activity_id: str, *, parent: str | None = None
+        row: RoutineRow,
+        conversation: str,
+        activity_id: str,
+        *,
+        delivery: uuid.UUID,
+        parent: str | None = None,
     ) -> None:
         assert row.created_by_user_id is not None
         await record_turn_post(
@@ -87,6 +92,8 @@ def make_teams_routine_poster(
             source="routine",
             parent_channel_id=parent,
             role="routine",
+            # Chunks in a channel each root their own thread; this keeps them one reply.
+            delivery_id=delivery,
         )
 
     async def dm_fallback(row: RoutineRow, reason: str) -> DeliveryOutcome:
@@ -101,13 +108,14 @@ def make_teams_routine_poster(
             if member is None:
                 return DeliveryOutcome(status="skipped", note=reason)
             chat = await teams.open_chat(member)
+            delivery = uuid.uuid4()
             for chunk in split_fenced(
                 render_fallback_dm(row, reason, platform="teams")
                 + unsupported_files_note(payload_for(row)),
                 TEAMS_LIMIT,
                 word_boundary=True,
             ):
-                await record(row, chat, await teams.post(chat, chunk))
+                await record(row, chat, await teams.post(chat, chunk), delivery=delivery)
         except TEAMS_SEND_ERRORS as err:
             log.info("routine.delivery_dm_failed", routine_id=str(row.id), error=type(err).__name__)
             return DeliveryOutcome(status="skipped", note=reason)
@@ -159,12 +167,19 @@ def make_teams_routine_poster(
         ) + unsupported_files_note(payload_for(row))
         conversation = teams_thread_id(target)
         ids: list[str] = []
+        delivery = uuid.uuid4()
         try:
             for chunk in split_fenced(text, TEAMS_LIMIT, word_boundary=True):
                 ids.append(activity_id := await teams.post(conversation, chunk))
                 # A post to the channel roots its own thread.
                 rooted = target if target.thread_ts else replace(target, thread_ts=activity_id)
-                await record(row, teams_thread_id(rooted), activity_id, parent=target.channel_id)
+                await record(
+                    row,
+                    teams_thread_id(rooted),
+                    activity_id,
+                    delivery=delivery,
+                    parent=target.channel_id,
+                )
         except httpx.HTTPStatusError as err:
             if err.response.status_code in (400, 403, 404):
                 return await fallback("destination_unavailable")

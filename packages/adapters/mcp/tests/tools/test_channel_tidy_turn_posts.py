@@ -20,6 +20,7 @@ from daimon.adapters.mcp.tools import _tidy as tidy_module
 from daimon.adapters.mcp.tools.discord._tidy import (
     _archive_thread_impl,  # pyright: ignore[reportPrivateUsage]
     _delete_message_impl,  # pyright: ignore[reportPrivateUsage]
+    _delete_reply_impl,  # pyright: ignore[reportPrivateUsage]
     _delete_thread_impl,  # pyright: ignore[reportPrivateUsage]
     _edit_message_impl,  # pyright: ignore[reportPrivateUsage]
 )
@@ -568,3 +569,92 @@ async def test_opening_a_thread_with_one_agent_gives_no_say_over_another_agents_
             world.runtime, auth, channel_id=_THREAD, message_id=reply, origin_context_id=origin
         )
     assert reply in fake.messages, "the other person's answer stays"
+
+
+async def _reply(world: Any, fake: Any, *, parts: int, running: bool = False) -> list[str]:
+    """One turn's status card and answer messages in the thread, oldest first."""
+    ids = [fake.add(_THREAD, content=f"part {n}") for n in range(parts)]
+    intent_id = await _intent(world, running=running, message_id=ids[0])
+    for message_id in ids:
+        await record_turn_post(
+            world.sessionmaker,
+            tenant_id=world.tenant_id,
+            platform="discord",
+            ma_agent_id=_AGENT,
+            channel_id=_THREAD,
+            message_id=message_id,
+            requester_platform_user_id=_CALLER,
+            source="turn",
+            turn_card_intent_id=intent_id,
+            parent_channel_id=_CHANNEL,
+        )
+    return ids
+
+
+async def test_delete_reply_removes_one_replys_messages_and_keeps_the_thread(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], fake: Any
+) -> None:
+    world = await _world(committing_sessionmaker)
+    await _auto_thread(world)
+    reply = await _reply(world, fake, parts=3)
+    other = await _reply(world, fake, parts=1)
+    auth, origin = await world.turn(thread=_THREAD)
+
+    result = await _delete_reply_impl(
+        world.runtime, auth, channel_id=_THREAD, message_id=reply[1], origin_context_id=origin
+    )
+
+    assert result.messages_deleted == 3, "every part of the reply is reported"
+    assert not set(reply) & fake.messages.keys(), "every part of the reply is deleted"
+    assert other[0] in fake.messages, "another reply stays"
+    assert not fake.thread_deleted, "the thread itself is never touched"
+    rows = [r for r in await world.audit() if r.tool_name == "delete_reply"]
+    assert len([r for r in rows if r.outcome == "allowed"]) == 3, "each deletion is audited"
+
+
+async def test_delete_reply_of_a_running_turn_deletes_nothing(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], fake: Any
+) -> None:
+    world = await _world(committing_sessionmaker)
+    await _auto_thread(world)
+    reply = await _reply(world, fake, parts=2, running=True)
+    auth, origin = await world.turn(thread=_THREAD)
+
+    with pytest.raises(ToolError, match="still running"):
+        await _delete_reply_impl(
+            world.runtime, auth, channel_id=_THREAD, message_id=reply[0], origin_context_id=origin
+        )
+    assert set(reply) <= fake.messages.keys(), "no part of a refused reply is deleted"
+
+
+async def test_delete_reply_takes_a_routine_results_chunks_and_only_them(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], fake: Any
+) -> None:
+    world = await _world(committing_sessionmaker)
+    deliveries: dict[str, uuid.UUID] = {}
+    for delivery in (uuid.uuid4(), uuid.uuid4()):
+        for _ in range(2):
+            message_id = fake.add(_CHANNEL, content="Result from the daily routine")
+            deliveries[message_id] = delivery
+            await record_turn_post(
+                world.sessionmaker,
+                tenant_id=world.tenant_id,
+                platform="discord",
+                ma_agent_id=_AGENT,
+                channel_id=_CHANNEL,
+                message_id=message_id,
+                requester_platform_user_id=_CALLER,
+                source="routine",
+                delivery_id=delivery,
+            )
+    first, *_, last = deliveries
+    auth, origin = await world.turn()
+
+    result = await _delete_reply_impl(
+        world.runtime, auth, channel_id=_CHANNEL, message_id=first, origin_context_id=origin
+    )
+
+    gone = {m for m, d in deliveries.items() if d == deliveries[first]}
+    assert result.messages_deleted == 2, "both chunks of the delivery are reported"
+    assert not gone & fake.messages.keys(), "the delivery's chunks are deleted"
+    assert last in fake.messages, "another run's result stays"
