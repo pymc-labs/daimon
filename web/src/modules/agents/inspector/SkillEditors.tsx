@@ -10,6 +10,7 @@ import { pressProps } from "@/lib/filters"
 import { saveSkillFiles, useSkillFiles } from "../api"
 import { Dot, Pill } from "../bits"
 import { SkillFilesEditor } from "./SkillFilesEditor"
+import { SkillSource, SkillsRelease } from "../setup/SkillSource"
 import type { Skill } from "../types"
 import { Field, Section, type Props } from "./parts"
 
@@ -19,6 +20,7 @@ export function SkillsEditor(p: Props) {
   const add = (s: Skill) => { update((c) => { c.skills.push(structuredClone(s)) }, 0); toast(`Added ${s.title}`) }
   return (
     <>
+      <SkillsRelease agent={p.agent} />
       <Section title={`Attached (${config.skills.length})`}>
         <div className="-mx-2">
           {config.skills.map((s) => (
@@ -138,6 +140,7 @@ function SkillBody({ agent, config, ro, update, select, skill }: Props & { skill
             </Button>
           )}
         </div>
+        <SkillSource agent={agent} skillId={skill.skill_id} />
         <p className="text-sm text-muted-foreground">{skill.description}</p>
         {(servers.length > 0 || skill.platforms) && (
           <div className="flex flex-wrap items-center gap-1.5 pt-2 text-xs text-muted-foreground">
