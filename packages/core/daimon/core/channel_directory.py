@@ -43,6 +43,7 @@ from daimon.core.stores.channel_directory import (
 from daimon.core.stores.direct_messages import list_dm_channel_ids
 from daimon.core.stores.domain import ChannelBudgetRow, ChannelNameRow
 from daimon.core.stores.platform_names import list_channel_names
+from daimon.core.stores.teams_installations import list_teams_installations
 from daimon.core.stores.tenant_ledger import list_window_spend
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.usage_events import ChannelCostTotals, channel_cost_totals
@@ -206,23 +207,36 @@ def channel_kind(
 
 
 def channel_path(
-    platform: str, channel_id: str, name: ChannelNameRow | None, names: Mapping[str, ChannelNameRow]
+    platform: str,
+    channel_id: str,
+    name: ChannelNameRow | None,
+    names: Mapping[str, ChannelNameRow],
+    teams: Mapping[str, str | None] | None = None,
 ) -> tuple[PathNode, ...]:
     """The ancestors of a channel, root first. Pure.
 
     A Discord thread sits under its channel under its category; a Teams channel under its
     team, a Teams reply thread under its channel. An ancestor with no stored row is named
-    by what its child recorded.
+    by what its child recorded. `teams` maps the installed Teams (id to name): it names a
+    team the channel never recorded the name of, and places General, whose id is its team's.
     """
+    if platform == "teams":
+        base = channel_id.split(_TEAMS_REPLY)[0]
+        channel = _named(names.get(base))
+        team_id = (
+            (name.parent_id if name else None)
+            or (channel.parent_id if channel else None)
+            or (base if teams and base in teams else None)
+        )
+        if team_id is None:
+            return ()
+        stored = name.parent_name if name and name.parent_id == team_id else None
+        team = PathNode(team_id, stored or (teams or {}).get(team_id), "team")
+        if base == channel_id:
+            return (team,)
+        return (team, PathNode(base, channel.name if channel else None, "channel"))
     if name is None or name.parent_id is None:
         return ()
-    if platform == "teams":
-        team = PathNode(name.parent_id, name.parent_name, "team")
-        base = channel_id.split(_TEAMS_REPLY)[0] if _TEAMS_REPLY in channel_id else None
-        parent = _named(names.get(base)) if base is not None else None
-        if base is None or base == channel_id:
-            return (team,)
-        return (team, PathNode(base, parent.name if parent else None, "channel"))
     chain: list[PathNode] = []
     current = name
     seen = {channel_id}
@@ -248,6 +262,7 @@ def build_channel_rows(
     shared: Collection[str],
     budgets: Mapping[str, ChannelBudgetStatus],
     spend: Mapping[str, ChannelSpend],
+    teams: Mapping[str, str | None] | None = None,
 ) -> tuple[ChannelRow, ...]:
     """One row per id, web chat first, then by name and id. Pure."""
     rows: list[ChannelRow] = []
@@ -268,7 +283,7 @@ def build_channel_rows(
                 budget=budgets.get(channel_id),
                 spend=spend.get(channel_id, ChannelSpend()),
                 kind=channel_kind(platform, channel_id, names.get(channel_id), names),
-                path=channel_path(platform, channel_id, names.get(channel_id), names),
+                path=channel_path(platform, channel_id, names.get(channel_id), names, teams),
             )
         )
 
@@ -308,6 +323,17 @@ class _Reads:
     budgets: dict[str, ChannelBudgetStatus]
     spend: dict[str, ChannelSpend]
     dms: set[str]
+    teams: dict[str, str | None]
+
+
+async def _installed_teams(
+    session: AsyncSession, tenant_id: uuid.UUID, platform: str
+) -> dict[str, str | None]:
+    """The installed Teams, id to name, which name a team path node and place General."""
+    if platform != "teams":
+        return {}
+    installed = await list_teams_installations(session, tenant_id=tenant_id)
+    return {row.team_id: row.name for row in installed}
 
 
 async def _read(
@@ -349,6 +375,7 @@ async def _read(
         budgets=await _budget_statuses(session, budgets, tenant_id=tenant_id, now=now),
         spend=fold_web_spend(totals, markup),
         dms=await list_dm_channel_ids(session, tenant_id=tenant_id),
+        teams=await _installed_teams(session, tenant_id, platform),
     )
 
 
@@ -367,6 +394,7 @@ def _rows(reads: _Reads, channel_ids: Collection[str]) -> tuple[ChannelRow, ...]
         shared=reads.shared,
         budgets=reads.budgets,
         spend=reads.spend,
+        teams=reads.teams,
     )
 
 

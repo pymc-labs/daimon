@@ -12,7 +12,9 @@ from daimon.core._models import SharedChannel, ThreadParticipationScope
 from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.channel_directory import (
     WEB_ROW_ID,
+    PathNode,
     Sourced,
+    channel_path,
     load_channel_directory,
     load_channel_row,
 )
@@ -22,9 +24,10 @@ from daimon.core.scope_cascade import CascadeMode, CascadeScope
 from daimon.core.stores._scope_modes import set_scope_mode
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.channel_budgets import set_channel_budget
-from daimon.core.stores.domain import TenantRow
+from daimon.core.stores.domain import ChannelNameRow, TenantRow
 from daimon.core.stores.platform_names import upsert_channel_names
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.stores.teams_installations import record_teams_installation
 from daimon.core.stores.tenant_ledger import insert_entry
 from daimon.testing.factories import make_tenant, make_usage_event
 from sqlalchemy import text
@@ -184,3 +187,76 @@ async def test_the_directory_unions_every_channel_source(
         )
         is None
     ), "a DM's channel is not a channel"
+
+
+def _teams_name(channel_id: str, **parent: str) -> ChannelNameRow:
+    return ChannelNameRow.model_validate(
+        {
+            "channel_id": channel_id,
+            "platform": "teams",
+            "name": "Research",
+            "status": "named",
+            **parent,
+        }
+    )
+
+
+def test_a_teams_team_node_takes_the_installed_name_when_the_channel_stored_none() -> None:
+    """Message activities carry the team id but not its name."""
+    row = _teams_name("19:r", parent_id="19:team")
+
+    path = channel_path("teams", "19:r", row, {"19:r": row}, {"19:team": "Platform"})
+
+    assert path == (PathNode("19:team", "Platform", "team"),), "named by the installation"
+    stored = _teams_name("19:r", parent_id="19:team", parent_name="Stored")
+    assert channel_path("teams", "19:r", stored, {}, {"19:team": "Platform"}) == (
+        PathNode("19:team", "Stored", "team"),
+    ), "a stored team name wins"
+
+
+def test_teams_general_sits_under_the_installed_team_it_is_the_id_of() -> None:
+    """General's id is its team's; a row with no stored parent is still placed."""
+    general = _teams_name("19:team")
+
+    path = channel_path("teams", "19:team", general, {"19:team": general}, {"19:team": "Platform"})
+
+    assert path == (PathNode("19:team", "Platform", "team"),)
+    assert channel_path("teams", "19:other", None, {}, {"19:team": "Platform"}) == (), (
+        "a channel of no known team has no path"
+    )
+    reply = "19:team;messageid=7"
+    assert channel_path("teams", reply, None, {"19:team": general}, {"19:team": "Platform"}) == (
+        PathNode("19:team", "Platform", "team"),
+        PathNode("19:team", "Research", "channel"),
+    ), "a reply thread in General sits under General under its team"
+
+
+async def test_a_teams_row_is_placed_under_its_installed_team(db_session: AsyncSession) -> None:
+    tenant = await make_tenant(db_session, platform="teams")
+    await record_teams_installation(
+        db_session, tenant_id=tenant.id, team_id="19:team", group_id="g-1", name="Platform"
+    )
+    await upsert_channel_names(
+        db_session,
+        tenant_id=tenant.id,
+        platform="teams",
+        names={"19:team": "General", "19:r": ChannelSighting("Research", parent_id="19:team")},
+    )
+    await db_session.commit()
+
+    paths = {
+        cid: (
+            await load_channel_row(
+                db_session,
+                tenant_id=tenant.id,
+                channel_id=cid,
+                default=DEFAULT,
+                now=NOW,
+                markup=MARKUP,
+            )
+        )
+        for cid in ("19:team", "19:r")
+    }
+
+    for cid, row in paths.items():
+        assert row is not None and row.path == (PathNode("19:team", "Platform", "team"),), cid

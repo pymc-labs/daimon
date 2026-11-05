@@ -103,12 +103,20 @@ def _clean(value: object) -> str | None:
     return text or None
 
 
+def _has_content(name: _Seen) -> bool:
+    """A name, or for a channel a parent: a nameless sighting with one still fills in a
+    stored row's parent."""
+    if isinstance(name, ChannelSighting):
+        return name.label is not None or bool(name.parent_id or name.parent_name)
+    return name.label is not None
+
+
 def _merge(new: _Seen, old: _Seen | None) -> _Seen:
     if isinstance(new, ChannelSighting):
         if not isinstance(old, ChannelSighting):
             return new
         return ChannelSighting(
-            new.name,
+            new.name or old.name,
             new.kind or old.kind,
             new.parent_id or old.parent_id,
             new.parent_name or old.parent_name,
@@ -142,7 +150,7 @@ def _enqueue(
     added = False
     for item_id, name in names.items():
         given = _cleaned(name)
-        if not item_id or given.label is None:
+        if not item_id or not _has_content(given):
             continue
         key: _Key = (tenant_id, platform, kind, item_id)
         queued = _pending.get(key)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 from daimon.core.stores import web_identities as identities_store
 from daimon.core.web_identity import VerifiedIdentity, WebSignInRefused, resolve_web_people
@@ -44,3 +46,19 @@ async def test_sign_in_reaching_no_workspace_is_refused(
 
     with pytest.raises(WebSignInRefused):
         await resolve_web_people(db_session_factory, identity=_identity(("g-9", "Other")))
+
+
+async def test_sign_in_stores_the_email_it_carries_and_keeps_it_when_a_later_one_has_none(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    await make_tenant(db_session, platform="teams", workspace_id="dir-1")
+    await db_session.commit()
+    with_email = replace(_identity(("dir-1", "Acme")), provider="microsoft", email="ada@acme.test")
+
+    (first,) = await resolve_web_people(db_session_factory, identity=with_email)
+    (again,) = await resolve_web_people(
+        db_session_factory, identity=replace(with_email, email=None)
+    )
+
+    assert first.email == "ada@acme.test", "the sign-in's email lands on the person"
+    assert again.email == "ada@acme.test", "a sign-in without one keeps the stored email"

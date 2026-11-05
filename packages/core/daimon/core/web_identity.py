@@ -53,6 +53,8 @@ class VerifiedIdentity:
     # The chat platform's own id for the person, when `subject` also names the workspace
     # (Slack and Teams ids are only unique within one).
     platform_user_id: str | None = None
+    # Only a sign-in whose provider vouches for one (Microsoft) carries an email.
+    email: str | None = None
 
     @property
     def chat_user_id(self) -> str:
@@ -94,7 +96,7 @@ async def resolve_web_people(
                 account_id=tenant.account_id,
                 display_name=identity.display_name,
                 workspace_name=tenant.workspace_name,
-                email=None,
+                email=identity.email,
                 new_person_id=uuid.uuid4(),
             )
             await identities_store.link_identity(

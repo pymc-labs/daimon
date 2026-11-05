@@ -234,7 +234,7 @@ export function UserMenu() {
             <Avatar name={me.name} />
             <span className="min-w-0 flex-1">
               <span className="block truncate text-sm font-medium">{me.name}</span>
-              <span className="block truncate text-xs text-muted-foreground">{me.email}</span>
+              {me.email && <span className="block truncate text-xs text-muted-foreground">{me.email}</span>}
             </span>
             <ChevronsUpDown className="size-4 text-muted-foreground" />
           </DropdownMenuTrigger>

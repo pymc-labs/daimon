@@ -109,6 +109,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.panel_audit import record_panel_write
 from daimon.core.platform_names import (
+    ChannelSighting,
     KnownName,
     remember_channel_names,
     remember_user_names,
@@ -306,22 +307,24 @@ async def channel_labels(
     channel_ids: Sequence[str],
     stored: Mapping[str, str],
     timeout_s: float = NAME_LOOKUP_TIMEOUT_S,
-) -> tuple[dict[str, str], dict[str, str]]:
-    """Each channel's name, and every name the listings gave, to remember.
+) -> tuple[dict[str, str], dict[str, ChannelSighting]]:
+    """Each channel's name, and every channel the listings named with its team, to remember.
 
     The installed teams' channel listings run concurrently under ``timeout_s``;
     a channel they do not name gets its ``stored`` name, else `General` when
     its id is a team's, else `Channel name unavailable`.
     """
-    listed: dict[str, str] = {}
+    listed: dict[str, ChannelSighting] = {}
 
-    async def listing(team_id: str) -> dict[str, str]:
+    async def listing(team_id: str) -> dict[str, ChannelSighting]:
         assert team_channels is not None
         try:
-            return await team_channels(team_id)
+            names = await team_channels(team_id)
         except TEAMS_SEND_ERRORS as err:
             log.info("teams.billing.channel_listing_failed", error=type(err).__name__)
             return {}
+        # General's id is its team's, so it lands under the same team.
+        return {cid: ChannelSighting(name, parent_id=team_id) for cid, name in names.items()}
 
     if team_channels is not None and team_ids and channel_ids:
         tasks = [asyncio.create_task(listing(team_id)) for team_id in team_ids[:_ROSTER_TEAMS]]
@@ -335,7 +338,7 @@ async def channel_labels(
                 listed |= task.result()
     teams = set(team_ids)
     labels = {
-        channel_id: listed.get(channel_id)
+        channel_id: (listed[channel_id].label if channel_id in listed else None)
         or stored.get(channel_id)
         or (GENERAL if channel_id in teams else CHANNEL_NAME_UNAVAILABLE)
         for channel_id in channel_ids

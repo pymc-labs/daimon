@@ -8,6 +8,7 @@ for; matching those to installed tenants is `hub_identity`'s job.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from typing import Any, cast
 from urllib.parse import urlencode
 
 import httpx
+import structlog
 from daimon.core.config import MicrosoftAccountsSettings
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.microsoft_identity import (
@@ -23,6 +25,9 @@ from daimon.core.microsoft_identity import (
     canonical_uuid,
     id_token_claims,
 )
+from daimon.core.teams_graph import GRAPH_ROOT
+
+log = structlog.get_logger(__name__)
 
 DISCORD_API = "https://discord.com/api/v10"
 DISCORD_AUTHORIZE_URL = "https://discord.com/oauth2/authorize"
@@ -34,9 +39,12 @@ SLACK_TOKEN_URL = "https://slack.com/api/oauth.v2.access"
 SLACK_USERS_INFO_URL = "https://slack.com/api/users.info"
 # A user grant needs one user scope; this one also lets sign-in read the person's name.
 SLACK_SIGN_IN_USER_SCOPES: tuple[str, ...] = ("users:read",)
-# Sign-in reads only name, username, tid, oid and aud. No "email": tenants consent org-wide
-# to openid and profile, and an extra scope would prompt each person for it.
+# No "email" or Graph scope: tenants consent org-wide to openid and profile, and an extra
+# scope would prompt each person for it. The token's own User.Read, where the tenant granted
+# it, lets `fetch_microsoft_profile` read the mailbox address and organization name.
 MICROSOFT_SIGN_IN_SCOPES: tuple[str, ...] = ("openid", "profile")
+# A slow Graph must not hold up the sign-in.
+MICROSOFT_PROFILE_TIMEOUT_S = 5.0
 
 
 def code_challenge_s256(verifier: str) -> str:
@@ -285,3 +293,59 @@ def verify_microsoft_sign_in(
         name=str(claims.get("name") or username or oid),
         username=str(username) if username else None,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class MicrosoftProfile:
+    email: str | None
+    organization: str | None
+
+
+async def fetch_microsoft_profile(
+    http: httpx.AsyncClient, *, access_token: str
+) -> MicrosoftProfile:
+    """The person's address and their directory's name, each None when Graph will not say.
+
+    Best effort: the token reaches Graph only where the tenant consented User.Read, so a
+    403 or a slow answer is expected and never fails the sign-in.
+    """
+    headers = {"Authorization": f"Bearer {access_token}"}
+    me, org = await asyncio.gather(
+        _graph_value(http, f"{GRAPH_ROOT}/me?$select=mail,userPrincipalName", headers),
+        _graph_value(http, f"{GRAPH_ROOT}/organization?$select=displayName", headers),
+    )
+    # `mail` is empty for an account with no mailbox; the UPN is then the sign-in address.
+    email = _text(me, "mail") or _text(me, "userPrincipalName")
+    organizations = org.get("value") if org else None
+    first: object = (
+        cast(list[object], organizations)[0]
+        if isinstance(organizations, list) and organizations
+        else None
+    )
+    return MicrosoftProfile(
+        email=email if email and "@" in email else None,
+        organization=_text(first, "displayName"),
+    )
+
+
+def _text(body: object, key: str) -> str | None:
+    if not isinstance(body, dict):
+        return None
+    value = cast(dict[str, object], body).get(key)
+    return value.strip() or None if isinstance(value, str) else None
+
+
+async def _graph_value(
+    http: httpx.AsyncClient, url: str, headers: dict[str, str]
+) -> dict[str, object] | None:
+    """One Graph GET as a JSON object, or None with the reason logged."""
+    try:
+        response = await http.get(url, headers=headers, timeout=MICROSOFT_PROFILE_TIMEOUT_S)
+        if response.status_code != 200:
+            log.info("microsoft_sign_in.profile_unavailable", status=response.status_code)
+            return None
+        body: object = response.json()
+    except (httpx.HTTPError, ValueError) as err:
+        log.info("microsoft_sign_in.profile_unavailable", error=type(err).__name__)
+        return None
+    return cast(dict[str, object], body) if isinstance(body, dict) else None

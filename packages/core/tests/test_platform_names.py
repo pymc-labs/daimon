@@ -36,6 +36,7 @@ from daimon.core.stores.platform_names import (
     get_channel_names,
     get_user_names,
     list_channel_names,
+    mark_channel_status,
     upsert_channel_names,
     upsert_user_names,
 )
@@ -204,6 +205,62 @@ async def test_a_channel_keeps_its_parent_when_a_later_sighting_lacks_it(
         "a sighting without a parent keeps the stored one"
     )
     assert row.last_seen_at is not None, "every sighting stamps when it was seen"
+
+
+async def test_a_nameless_sighting_only_fills_in_the_parent_of_a_stored_channel(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session, platform="teams")
+    await upsert_channel_names(
+        db_session,
+        tenant_id=tenant.id,
+        platform="teams",
+        names={"c-1": ChannelSighting("Research")},
+    )
+    await mark_channel_status(
+        db_session, tenant_id=tenant.id, platform="teams", statuses={"c-1": "gone"}
+    )
+    parent = ChannelSighting("", parent_id="team-1", parent_name="Platform")
+    await upsert_channel_names(
+        db_session,
+        tenant_id=tenant.id,
+        platform="teams",
+        names={"c-1": parent, "c-2": parent},
+    )
+
+    rows = {
+        row.channel_id: row
+        for row in await list_channel_names(
+            db_session, tenant_id=tenant.id, platform="teams", unnamed=True
+        )
+    }
+
+    assert set(rows) == {"c-1"}, "a channel never stored is not created"
+    row = rows["c-1"]
+    assert (row.name, row.status) == ("Research", "gone"), "name and status are untouched"
+    assert (row.parent_id, row.parent_name) == ("team-1", "Platform"), "the parent is filled in"
+
+
+async def test_a_queued_name_survives_a_nameless_sighting(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session, platform="teams")
+    await db_session.commit()
+
+    remember_channel_names(
+        db_session_factory, tenant_id=tenant.id, platform="teams", names={"c-1": "Research"}
+    )
+    remember_channel_names(
+        db_session_factory,
+        tenant_id=tenant.id,
+        platform="teams",
+        names={"c-1": ChannelSighting("", parent_id="team-1")},
+    )
+    assert platform_names.pending_count() == 1, "one key, merged"
+    await settle()
+
+    [row] = await list_channel_names(db_session, tenant_id=tenant.id, platform="teams")
+    assert (row.name, row.parent_id) == ("Research", "team-1"), "the name is kept, the parent added"
 
 
 async def test_deleting_a_tenant_deletes_its_names(db_session: AsyncSession) -> None:

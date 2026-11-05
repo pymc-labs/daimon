@@ -79,7 +79,7 @@ function columns(agents: AgentRefs, figures: boolean): TreeColumn<Node>[] {
     },
     ...(figures ? [
       { key: "budget", header: "Budget", render: (n: Node) => channelOf(n, (c) => <BudgetCell c={c} />) },
-      { key: "month", header: <span className="block text-right">This month</span>, className: "max-sm:hidden", render: (n: Node) => channelOf(n, (c) => <span className="block text-right text-muted-foreground">{c.spend && <Money usd={c.spend.month_usd} />}</span>) },
+      { key: "days", header: <span className="block text-right">Last 30 days</span>, className: "max-sm:hidden", render: (n: Node) => channelOf(n, (c) => <span className="block text-right text-muted-foreground">{c.spend && <Money usd={c.spend.last_30_days_usd} />}</span>) },
     ] : []),
     { key: "active", header: <span className="block text-right">Last active</span>, className: "max-sm:hidden", render: (n) => channelOf(n, (c) => <span className="block text-right text-muted-foreground"><Ago iso={c.last_active_at} /></span>) },
   ]

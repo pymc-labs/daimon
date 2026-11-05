@@ -53,7 +53,7 @@ function FactsBlock({ c, s }: { c: ChannelDetail; s?: ChannelSettings }) {
       <Facts rows={[
         ["Answers", who && <AgentLink key="w" id={who.id} name={who.name} avatar={who.avatar} />],
         ["Last active", <Ago key="a" iso={c.last_active_at} />],
-        ["This month", c.spend && <Money key="m" usd={c.spend.month_usd} />],
+        ["Last 30 days", c.spend && <Money key="m" usd={c.spend.last_30_days_usd} />],
         ["Subscription", sub && <span key="s" className={sub.status === "active" ? undefined : "text-destructive"}>{subscriptionText(sub)}</span>],
       ]} />
     </PanelSection>
@@ -64,7 +64,7 @@ function SpendTab({ c, s }: { c: ChannelDetail; s?: ChannelSettings }) {
   const spent = s?.spend?.by_day.some((d) => d.usd > 0)
   return (
     <PanelSection className="border-t-0">
-      {c.spend && <Facts rows={[["This month", usd(c.spend.month_usd)], ["Last 30 days", usd(c.spend.last_30_days_usd)]]} />}
+      {c.spend && <Facts rows={[["Last 30 days", usd(c.spend.last_30_days_usd)]]} />}
       {s?.spend && <div className="mt-4"><SpendBreakdown spend={s.spend} /></div>}
       {s && !spent && <div className="mt-3 text-sm text-muted-foreground">No spend yet</div>}
     </PanelSection>
