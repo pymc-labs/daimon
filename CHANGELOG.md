@@ -11,12 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **An agent switched to Gemini or OpenAI no longer gets stuck on "needs to be confirmed
   again".** Daimon's own tool-safety and ask-before-publishing settings no longer make a
-  confirmed switch stale, and Gemini keeps the agent's MCP tools when those settings name
-  tools it doesn't list. When a switch does need confirming again, a new conversation
-  answers on Anthropic instead of showing an error, and the agent offers to switch again;
-  a channel pinned to a provider never falls back. After this upgrade each switched agent
-  asks once for that confirmation; a conversation already on the provider shows the card
-  until someone confirms the switch from a new conversation.
+  confirmed switch stale by themselves; one that changes what the agent would lose still
+  asks again. Gemini keeps the agent's MCP tools when those settings name tools it doesn't
+  list. When a switch does need confirming again, a person's message in a new conversation
+  gets an answer on Anthropic instead of an error, and the agent offers to switch again.
+  Routines and watches still stop until someone confirms, a channel pinned to a provider
+  never falls back, and a conversation already on the provider shows the card until someone
+  confirms the switch from a new conversation.
 
 - **Chat answers and setup panels link to the agent, channel or routine on the web.** Each opens in the right workspace (sign-in or a workspace picker first when needed). Agent setup details, routines, billing and channel settings on Discord, Slack and Teams carry an "Open in web" button. The agent also knows the workspace's main pages to link. Nothing changes with no web app set.
 - **Everything the web admin pages do also works from Discord, Slack and Teams chat.** Admins invite people and send visitor links (sent by direct message), change roles, set agent access and workspace settings, manage spend allowances, read the audit log, spend and feedback, restore agent versions and set owners, edit skill files, resync repo skills, and see their own credits; results link to the page. People can also run a routine on demand, clear a thread's own settings, and remove their own data (memory, sign-ins, coding keys) with one tool. Removing or reconfiguring runs only on a Confirm card in chat, and routines and other unattended runs do not list those tools. Long lists show 25 rows with a total, and people lists page on. A test keeps the web app and chat in step.
