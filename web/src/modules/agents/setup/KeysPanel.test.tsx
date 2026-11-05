@@ -144,6 +144,27 @@ describe("CodingPanel", () => {
     }
   })
 
+  it("reads the status once more when the batch ends, so a claim in the last seconds shows Connected", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      let late = false
+      vi.mocked(api.get).mockImplementation(async (url: string) => {
+        if (url.includes("/connect/")) return (late ? { connected: true, client: "codex" } : { connected: false, client: null }) as never
+        return [] as never
+      })
+      vi.mocked(api.post).mockImplementation(async () => batch(1, 61_000) as never)
+      view(<CodingPanel {...props} node="coding" />)
+      await screen.findByLabelText("Prompt")
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_500) })
+      late = true // used after the last poll (every 3 s), before the codes end
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000) })
+      expect(await screen.findByText("Connected")).toBeInTheDocument()
+      expect(screen.queryByText("Expired"), "a claimed batch never reads as expired").toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it("shows the error, not a stale prompt, when a new prompt fails", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     try {

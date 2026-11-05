@@ -58,7 +58,15 @@ function Connect({ agentId, tab, mint }: { agentId: string; tab: string; mint: M
   const status = useConnectStatus(agentId, batch?.batch, !expired)
   const connected = status.data?.connected === true
   const prompt = batch?.prompts.find((p) => p.id === tab)
-  const stale = expired && !connected
+  // Polling stops with the codes, so a claim in the last seconds is read once more before Expired shows.
+  const [checked, setChecked] = useState<string | null>(null)
+  const id = batch?.batch
+  const refetch = status.refetch
+  useEffect(() => {
+    if (!expired || !id || connected) return
+    void refetch().finally(() => setChecked(id))
+  }, [expired, id, connected, refetch])
+  const stale = expired && !connected && checked === id
 
   return (
     <Section>
