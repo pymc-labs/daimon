@@ -8,7 +8,6 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 from daimon.adapters.mcp.coding_key_claim import build_coding_key_claim_route, client_key
-from daimon.core._models import CodingKeyClaim, McpToken
 from daimon.core.agent_editing import AgentEditDeps
 from daimon.core.coding_key_connect import hash_code
 from daimon.core.ma_identity import derive_agent_uuid
@@ -16,11 +15,11 @@ from daimon.core.mcp_auth import token_jti
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.stores import agent_owners
 from daimon.core.stores import coding_key_claims as claims
+from daimon.core.stores.mcp_tokens import get_mcp_token
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from pydantic import SecretStr
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.applications import Starlette
 from starlette.routing import Route
@@ -98,7 +97,7 @@ async def test_a_code_returns_the_bare_key_once(
     assert first.headers["cache-control"] == "no-store", "the key is never cached"
     assert first.text.count(".") == 2, "the body is the bare token, nothing around it"
     async with committing_sessionmaker() as session:
-        stored = await session.get(McpToken, str(token_jti(first.text)))
+        stored = await get_mcp_token(session, jti=token_jti(first.text))
     assert stored is not None, "the key is on record"
     assert (stored.purpose, stored.client) == ("coding", "codex"), "a coding key for the tool"
     assert (again.status_code, again.content) == (404, b""), "a code works once"
@@ -158,9 +157,11 @@ async def test_attempts_are_rate_limited_per_address(
     assert limited.status_code == 404, "a right code from a limited address is refused"
     assert other.status_code == 200, "another address has its own allowance"
     async with committing_sessionmaker() as session:
-        used = (
-            await session.scalars(select(CodingKeyClaim).where(CodingKeyClaim.jti.is_not(None)))
-        ).all()
+        rows = [
+            await claims.find_claim_by_hash(session, code_hash=hash_code(code))
+            for code in codes.values()
+        ]
+    used = [row for row in rows if row is not None and row.jti is not None]
     assert len(used) == 1, "exactly the one claim from the unlimited address minted"
 
 
