@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { render, screen, waitFor, within } from "@testing-library/react"
+import { act, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -55,14 +55,77 @@ describe("KeysPanel", () => {
   })
 })
 
+const batch = (n: number) => ({
+  batch: `b${n}`, expires_at: "2026-11-05T12:10:00Z",
+  prompts: [{ id: "claude-code", name: "Claude Code", prompt: `claude prompt ${n}` }, { id: "codex", name: "Codex", prompt: `codex prompt ${n}` }],
+})
+
+/** Routes the panel's calls: keys, connect status and the mint calls it makes. */
+function serve(connected = false) {
+  vi.mocked(api.get).mockImplementation(async (url: string) => {
+    if (url.includes("/connect/")) return (connected ? { connected: true, client: "codex" } : { connected: false, client: null }) as never
+    return [{ id: "k9", creator: "Maya", created_at: "2026-11-01T00:00:00Z", expires_at: null, mine: true, client: "codex" }] as never
+  })
+}
+
 describe("CodingPanel", () => {
-  it("shows a new key's token once, and not again after Done", async () => {
-    vi.mocked(api.get).mockResolvedValue([] as never)
-    vi.mocked(api.post).mockResolvedValue({ id: "k1", token: "tok-shown-once", command: "claude mcp add x tok-shown-once", config: "{}", expires_at: "2026-12-01T00:00:00Z" } as never)
+  it("shows the Claude Code prompt first and copies it", async () => {
+    serve()
+    let n = 0
+    vi.mocked(api.post).mockImplementation(async () => batch(++n) as never)
     view(<CodingPanel {...props} node="coding" />)
+    expect(await screen.findByLabelText("Prompt")).toHaveTextContent("claude prompt 1")
+    expect(screen.getByRole("button", { name: "Copy prompt" })).toBeInTheDocument()
+    expect(screen.getByText("Waiting")).toBeInTheDocument()
+    await userEvent.click(screen.getByRole("radio", { name: "Codex" }))
+    expect(screen.getByLabelText("Prompt")).toHaveTextContent("codex prompt 1")
+    expect(api.post).toHaveBeenCalledTimes(1)
+    expect(api.post).toHaveBeenCalledWith("/api/agents/ag_w/coding-keys/connect", {})
+  })
+
+  it("lists each key with its client", async () => {
+    serve()
+    vi.mocked(api.post).mockResolvedValue(batch(1) as never)
+    view(<CodingPanel {...props} node="coding" />)
+    const row = (await screen.findByText("Maya")).closest("div.flex.items-center.gap-2") as HTMLElement
+    expect(within(row).getByText("Codex")).toBeInTheDocument()
+  })
+
+  it("shows connected once the code is used", async () => {
+    serve(true)
+    vi.mocked(api.post).mockResolvedValue(batch(1) as never)
+    view(<CodingPanel {...props} node="coding" />)
+    expect(await screen.findByText("Connected")).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Connect another" })).toBeInTheDocument()
+  })
+
+  it("mints a new batch about every 9 minutes, replacing the last", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      serve()
+      let n = 0
+      vi.mocked(api.post).mockImplementation(async () => batch(++n) as never)
+      view(<CodingPanel {...props} node="coding" />)
+      expect(await screen.findByLabelText("Prompt")).toHaveTextContent("claude prompt 1")
+      await act(async () => { await vi.advanceTimersByTimeAsync(9 * 60_000 + 100) })
+      await waitFor(() => expect(screen.getByLabelText("Prompt")).toHaveTextContent("claude prompt 2"))
+      expect(api.post).toHaveBeenLastCalledWith("/api/agents/ag_w/coding-keys/connect", { replaces: "b1" })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("shows a new key's URL and token once, and not again after Done", async () => {
+    serve()
+    vi.mocked(api.post).mockImplementation(async (url: string) => (
+      url.endsWith("/connect") ? batch(1) : { id: "k1", token: "tok-shown-once", url: "https://x.example/mcp", expires_at: "2026-12-01T00:00:00Z" }
+    ) as never)
+    view(<CodingPanel {...props} node="coding" />)
+    await userEvent.click(await screen.findByRole("radio", { name: "Token" }))
     await userEvent.click(await screen.findByRole("button", { name: "Make key" }))
     await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Make key" }))
     expect(await screen.findByText(/tok-shown-once/)).toBeInTheDocument()
+    expect(screen.getByText("https://x.example/mcp")).toBeInTheDocument()
     await userEvent.click(screen.getByRole("button", { name: "Done" }))
     await waitFor(() => expect(screen.queryByText(/tok-shown-once/)).not.toBeInTheDocument())
   })

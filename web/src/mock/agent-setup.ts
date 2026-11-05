@@ -1,7 +1,8 @@
 // Mock API for what an agent holds beyond its config: keys, coding keys, owners, knowledge, lifecycle.
 import { http, HttpResponse } from "msw"
 
-import type { AgentKey, AgentToolRule, CodingKey, MintedCodingKey } from "@/modules/agents/types"
+import { CODING_CLIENTS } from "@/modules/agents/setup/clients"
+import type { AgentKey, AgentToolRule, CodingKey, ConnectBatch, ConnectStatus, MintedCodingKey } from "@/modules/agents/types"
 import { roster } from "./agents"
 import { forbidden, notFound, unauthorized, wait } from "./util"
 import { PEOPLE } from "./world"
@@ -24,8 +25,12 @@ const KEYS = new Map<string, AgentKey[]>([
   ["ag_sales", [{ key: "HUBSPOT_ACCESS_TOKEN", updated_at: ago(120) }]],
 ])
 const CODING = new Map<string, (CodingKey & { by: string })[]>([
-  ["ag_mmm", [{ id: "ck_1", creator: "Maya Lindqvist", by: "p_maya", created_at: ago(240), expires_at: new Date(Date.now() + 60 * 86_400_000).toISOString(), mine: false }]],
+  ["ag_mmm", [{ id: "ck_1", creator: "Maya Lindqvist", by: "p_maya", created_at: ago(240), expires_at: new Date(Date.now() + 60 * 86_400_000).toISOString(), mine: false, client: "claude-code" }]],
 ])
+/** Connect batches by id: when each was minted. A batch reads as connected about 20 seconds on. */
+const BATCHES = new Map<string, number>()
+const PROMPT_TEXT = (name: string, code: string) =>
+  `Connect to the Daimon agent through MCP for ${name}. Run this once, then restart the tool:\n\ncurl -s -X POST https://daimon.example.com/coding-keys/claim -d '{"code":"${code}"}'`
 
 const isAdmin = () => roster.viewer()?.admin === true
 
@@ -137,13 +142,31 @@ export const agentSetupHandlers = [
     const token = `mock.${Math.random().toString(36).slice(2)}.${Math.random().toString(36).slice(2)}`
     const expires = new Date(Date.now() + (s.v.admin ? 90 : 30) * 86_400_000).toISOString()
     const key = `ck_${Date.now().toString(36)}`
-    CODING.set(id, [{ id: key, creator: nameOf(s.v.id), by: s.v.id, created_at: new Date().toISOString(), expires_at: expires, mine: true }, ...(CODING.get(id) ?? [])])
-    const url = "https://daimon.example.com/mcp"
-    const out: MintedCodingKey = {
-      id: key, token, expires_at: expires,
-      command: `claude mcp add --transport http daimon-${s.r.id} ${url} --header "Authorization: Bearer ${token}"`,
-      config: JSON.stringify({ mcpServers: { [`daimon-${s.r.id}`]: { type: "http", url, headers: { Authorization: `Bearer ${token}` } } } }, null, 2),
+    CODING.set(id, [{ id: key, creator: nameOf(s.v.id), by: s.v.id, created_at: new Date().toISOString(), expires_at: expires, mine: true, client: "token" }, ...(CODING.get(id) ?? [])])
+    const out: MintedCodingKey = { id: key, token, url: "https://daimon.example.com/mcp", expires_at: expires }
+    return HttpResponse.json(out)
+  }),
+  http.post("/api/agents/:id/coding-keys/connect", async ({ params, request }) => {
+    await wait(300)
+    const s = setupOf(String(params.id))
+    if (s.res) return s.res
+    const body = (await request.json().catch(() => ({}))) as { replaces?: string }
+    if (body.replaces) BATCHES.delete(body.replaces)
+    const batch = `cb_${Date.now().toString(36)}`
+    BATCHES.set(batch, Date.now())
+    const out: ConnectBatch = {
+      batch, expires_at: new Date(Date.now() + 10 * 60_000).toISOString(),
+      prompts: CODING_CLIENTS.filter((c) => c.id !== "token").map((c) => ({ id: c.id, name: c.name, prompt: PROMPT_TEXT(c.name, `${batch}_${c.id}_${Math.random().toString(36).slice(2, 10)}`) })),
     }
+    return HttpResponse.json(out)
+  }),
+  http.get("/api/agents/:id/coding-keys/connect/:batch", async ({ params }) => {
+    await wait(150)
+    const s = setupOf(String(params.id))
+    if (s.res) return s.res
+    const at = BATCHES.get(String(params.batch))
+    if (at === undefined) return notFound()
+    const out: ConnectStatus = Date.now() - at > 20_000 ? { connected: true, client: "codex" } : { connected: false, client: null }
     return HttpResponse.json(out)
   }),
   http.delete("/api/agents/:id/coding-keys/:key", async ({ params }) => {

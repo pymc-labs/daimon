@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **"Coding tools" is now "Access via MCP", and connecting a tool is one prompt to copy.**
+  The agent's page has a tab for Claude Code, Codex, Cursor, Pi and Other MCP; copy its
+  prompt into the tool and the tool makes its own key, with nothing to paste by hand. Each
+  prompt holds a single-use code that ends after 10 minutes, and the first tool to use one
+  ends the rest; the page shows when a tool has connected and makes a fresh set about
+  every 9 minutes while open. The code is checked again for the person's access when used,
+  and the key is logged as before. The Token tab keeps the old way of making a key by
+  hand, and keys and the profile page now list each key's tool. Migration 0184 adds the
+  claim codes and a tool column on keys.
+
 - **Helpers pass files both ways.** `ask_helper` takes files uploaded with `create_file_upload_url`, and the helper's own files come back with its reply as download links that work for that ask only and expire after an hour. It works on every model provider and needs the public URL set. Migration 0183 adds the columns.
 - **A hand-off the person asked for starts the new agent right away, with a clearer confirmation.** The new agent answers without waiting for another message when the person's own new message asked for it; a routine, timer, agent key, resumed turn or switch-card approval hands over from their next message, as does an agent that can't read the conversation or run here. The confirmation says who takes over, whether it starts now, what it keeps (the conversation and files, or a summary after a provider move) and its first piece of work.
 - **The approval card for a wide request is one short question.** It reads, for example, "Open 10 threads in #launch and tag 3 people?" or "Post in 4 places and tag 6 people?" above Approve, Deny and Details. The "Daimon wants to" lead, the second line and the "(N tags)" count are gone, and the approved card repeats the question without its question mark.

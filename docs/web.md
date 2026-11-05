@@ -137,9 +137,12 @@ A refused exchange is tried again after five minutes.
 
 On an agent's canvas, its owners and admins also see:
 
-- **Keys** and **Coding tools**: stored key names (values never come back) and
-  coding keys, shown once when made. A coding key can only be made for people
-  who may run the agent.
+- **Keys** and **Access via MCP**: stored key names (values never come back) and
+  the ways to reach the agent from a coding tool. Each tool (Claude Code, Codex,
+  Cursor, Pi, Other MCP) has one prompt to copy into it; its code works once and
+  ends after 10 minutes, and the panel shows when the tool has connected. The
+  Token tab makes a key by hand, shown once. Either way the key lists its tool.
+  A key can only be made for people who may run the agent.
 - **Knowledge**: the agent's shared memory to read. Admins also read each
   channel's memory.
 - **People**: owners and co-owners. Admins change them.
