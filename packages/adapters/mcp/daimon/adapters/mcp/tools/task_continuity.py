@@ -701,9 +701,10 @@ def register_task_continuity_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             str | None,
             Field(
                 description=(
-                    "Only NAMED work the person asked the destination to do, in their own "
-                    "words; otherwise null. 'Take over' alone is null. Used only when the "
-                    "destination answers right away. Never restate work that already finished."
+                    "Null unless the person explicitly asked the destination to continue "
+                    "or finish NAMED work, in their own words. 'Take over' alone is null. "
+                    "Used only when the destination answers right away. Never restate "
+                    "work that already finished."
                 )
             ),
         ] = None,
@@ -755,8 +756,9 @@ def register_task_continuity_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         that verified origin; queueing work does not grant human approval.
 
         `agent_id`: the destination's current id from `list_agents`; a recreated
-        namesake is refused. `continuation` is only for NAMED work ("let it finish
-        the chart"); "take over" alone is null. Never restate finished work. A
+        namesake is refused. `continuation` is null unless the person asked the
+        destination to continue or finish NAMED work ("let it finish the chart");
+        "take over" alone is null. Never restate finished work. A
         too-short, empty, or name-only value is auto-nulled.
 
         A destination on another provider (Gemini, OpenAI) can't read this

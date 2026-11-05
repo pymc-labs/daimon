@@ -279,14 +279,12 @@ and bill against that.
 
 A thread can move to another agent without a new thread. The person asks the
 agent, which calls `hand_off_task`, or, after a channel's agent changes, uses
-the **Switch to agent** button on the stale thread's notice.
+the **Switch to agent** button.
 
 Both call `core/thread_handoff.py`, which checks `authorize` and writes only
-the new binding. When the person's own message asked for the hand-off, the new
-agent answers at once as a queued first turn, superseded by any newer message;
-otherwise (a wake, an agent key, a switch-card approval) from their next message.
-That turn replaces the old session. Its transcript carries across only if the
-new agent could read it from that thread.
+the new binding. The new agent answers at once if the person asked, otherwise
+at their next message, replacing the old session. Its transcript carries over
+only if it could read it.
 
 ## Entry points that are not a chat message
 
