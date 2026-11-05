@@ -647,6 +647,46 @@ async def test_a_routine_result_is_one_reply_across_its_chunks_threads(
     ], "each chunk is deleted in its own thread; the next run's result stays"
 
 
+async def test_a_routine_part_in_a_protected_channel_stops_the_reply_before_any_delete(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Every part's place is checked first: one chunk's channel gone protected spares them all."""
+    world = await _world(committing_sessionmaker)
+    auth, origin = await world.turn()
+    delivery, other_channel = uuid.uuid4(), "19:other@thread.tacv2"
+    for activity, channel in (("act-chunk-1", _CHANNEL), ("act-chunk-2", other_channel)):
+        await record_turn_post(
+            world.sessionmaker,
+            tenant_id=world.tenant_id,
+            platform="teams",
+            ma_agent_id=_AGENT,
+            channel_id=f"{channel};messageid={activity}",
+            message_id=activity,
+            requester_platform_user_id=_CALLER,
+            source="routine",
+            parent_channel_id=channel,
+            role="routine",
+            delivery_id=delivery,
+        )
+    async with committing_sessionmaker.begin() as s:
+        await set_access_policy(
+            s,
+            tenant_id=world.tenant_id,
+            policy=TenantAccessPolicy(protected_channel_ids=(other_channel,)),
+        )
+
+    with pytest.raises(ToolError, match="writers to none"):
+        await _teams_delete_reply_impl(
+            world.runtime,
+            auth,
+            channel_id=_CHANNEL,
+            message_id="act-chunk-1",
+            origin_context_id=origin,
+        )
+
+    assert world.teams.edits_and_deletes() == [], "the unprotected chunk is not deleted either"
+
+
 async def test_a_send_message_post_is_a_reply_of_one_message(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:

@@ -27,7 +27,7 @@ from daimon.adapters.mcp.tools.discord._tidy import (
     _delete_thread_impl,  # pyright: ignore[reportPrivateUsage]
     _edit_message_impl,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.core.channel_tidy import record_turn_post
+from daimon.core.channel_tidy import PER_TURN_LIMIT, record_turn_post
 from daimon.core.stores.agent_posts import AgentPostRow, get_post
 from daimon.core.stores.turn_card_intents import (
     create_turn_card_intent,
@@ -801,3 +801,20 @@ async def test_delete_reply_checks_every_parts_author_before_deleting_any(
     assert [(r.outcome, r.reason) for r in rows] == [("denied", "not_bot_author")], (
         "only the refusal is audited, no deletion was begun"
     )
+
+
+async def test_a_limit_hit_mid_reply_says_how_many_went_and_how_many_are_left(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], fake: Any
+) -> None:
+    world = await _world(committing_sessionmaker)
+    await _auto_thread(world)
+    reply = await _reply(world, fake, parts=PER_TURN_LIMIT + 2)
+    auth, origin = await world.turn(thread=_THREAD)
+
+    with pytest.raises(ToolError, match=f"{PER_TURN_LIMIT} of {len(reply)} .* 2 left") as err:
+        await _delete_reply_impl(
+            world.runtime, auth, channel_id=_THREAD, message_id=reply[0], origin_context_id=origin
+        )
+
+    assert "tidy limit" in str(err.value), "the stop names the limit"
+    assert len(set(reply) - fake.messages.keys()) == PER_TURN_LIMIT, "deletion stops at the limit"

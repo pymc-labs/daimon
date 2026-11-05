@@ -31,7 +31,12 @@ from daimon.adapters.mcp.tools.slack._tidy import (  # pyright: ignore[reportPri
     _slack_edit_message_impl,
 )
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.channel_tidy import content_hash, derive_content_key, record_turn_post
+from daimon.core.channel_tidy import (
+    PER_TURN_LIMIT,
+    content_hash,
+    derive_content_key,
+    record_turn_post,
+)
 from daimon.core.config import (
     AnthropicSettings,
     CryptoSettings,
@@ -442,7 +447,13 @@ async def test_a_policy_change_during_final_identity_io_stops_the_slack_call(
 
 
 async def _turn_reply(
-    world: _World, *, parts: int, base: int, agent: str = _AGENT, running: bool = False
+    world: _World,
+    *,
+    parts: int,
+    base: int,
+    agent: str = _AGENT,
+    running: bool = False,
+    requester: str = _CALLER,
 ) -> list[str]:
     """One turn's messages in a thread under the channel, oldest first.
 
@@ -469,7 +480,7 @@ async def _turn_reply(
             ma_agent_id=agent,
             channel_id=_CHANNEL,
             message_id=ts,
-            requester_platform_user_id=_CALLER,
+            requester_platform_user_id=requester,
             source="turn",
             turn_card_intent_id=intent_id,
             thread_ts="1700000000.000001",
@@ -573,3 +584,45 @@ async def test_delete_reply_skips_a_part_slack_no_longer_has_and_retires_its_row
             message_id=reply[2],
         )
     assert row is None, "its row is marked deleted, so it is never listed again"
+
+
+async def test_anyone_may_delete_a_finished_turns_reply_there_is_no_requester_rule(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The deliberate gap against Discord and Teams, which refuse a reply asked for by someone else."""
+    world = await _world(committing_sessionmaker)
+    auth, origin = await world.turn()
+    theirs = await _turn_reply(world, parts=2, base=1, requester="U_SOMEONE_ELSE")
+    with aioresponses() as m:
+        _channel_access(m, times=20)
+        m.post(_CHAT_DELETE, payload={"ok": True}, repeat=True)  # pyright: ignore[reportUnknownMemberType]
+        result = await _slack_delete_reply_impl(
+            world.runtime, auth, channel_id=_CHANNEL, message_id=theirs[0], origin_context_id=origin
+        )
+        deleted = {d["ts"] for d in _deletes(m)}
+
+    assert result.messages_deleted == 2, "the other person's finished reply is deleted"
+    assert deleted == set(theirs), "every part reaches Slack"
+
+
+async def test_a_limit_hit_mid_reply_says_how_many_went_and_how_many_are_left(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    world = await _world(committing_sessionmaker)
+    auth, origin = await world.turn()
+    reply = await _turn_reply(world, parts=PER_TURN_LIMIT + 2, base=1)
+    with aioresponses() as m:
+        _channel_access(m, times=60)
+        m.post(_CHAT_DELETE, payload={"ok": True}, repeat=True)  # pyright: ignore[reportUnknownMemberType]
+        with pytest.raises(ToolError, match=f"{PER_TURN_LIMIT} of {len(reply)} .* 2 left") as err:
+            await _slack_delete_reply_impl(
+                world.runtime,
+                auth,
+                channel_id=_CHANNEL,
+                message_id=reply[0],
+                origin_context_id=origin,
+            )
+        sent = len(_deletes(m))
+
+    assert "tidy limit" in str(err.value), "the stop names the limit"
+    assert sent == PER_TURN_LIMIT, "deletion stops at the limit"
