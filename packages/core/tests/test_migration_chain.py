@@ -146,6 +146,7 @@ TAIL = (
     "0182_server_skills",
     "0183_helper_files",
     "0184_coding_key_claims",
+    "0185_agent_post_role",
 )
 HEAD = TAIL[-1]
 

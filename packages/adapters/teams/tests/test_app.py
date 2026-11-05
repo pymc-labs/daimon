@@ -29,11 +29,12 @@ from daimon.adapters.teams.identity import INPUT_TOO_LONG, MAX_INBOUND_MESSAGE_B
 from daimon.adapters.teams.lifecycle import TeamsTurnLifecycle
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.errors import DaimonError
-from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.native_admins import GroupLookupFailed
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import get_account, set_role
+from daimon.core.stores.agent_posts import record_post
 from daimon.core.stores.domain import Role, TurnCardIntentRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.teams_installations import record_teams_installation
@@ -1431,3 +1432,35 @@ async def test_queue_notice_delayed_by_policy_is_fenced_to_held_turn(
     ):
         await teams._orchestrate(inbound, TENANT)
         say.assert_not_awaited()
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_a_direct_chat_lists_this_agents_posts_with_their_roles(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Only a 1:1 chat lists posts: this agent's, oldest first, without this turn's card."""
+    teams = _app(db_session_factory, FakeSender())
+    mine = derive_agent_uuid(tenant_id=TENANT, ma_agent_id="ag-1")
+    posts = [
+        ("m-1", "answer", mine),
+        ("m-2", "controls", mine),
+        ("m-3", "status", mine),
+        ("o-1", "answer", derive_agent_uuid(tenant_id=TENANT, ma_agent_id="ag-2")),
+    ]
+    async with db_session_factory.begin() as session:
+        for message_id, role, agent in posts:
+            await record_post(
+                session,
+                tenant_id=TENANT,
+                platform="teams",
+                channel_id=CONVERSATION_ID,
+                message_id=message_id,
+                agent_id=agent,
+                source="turn",
+                turn_card_intent_id=uuid.uuid4(),
+                role=role,  # pyright: ignore[reportArgumentType]
+            )
+    listed = await teams._own_posts(make_inbound(), TENANT, "ag-1", skip="m-3")
+    assert [(id_, role) for id_, role, _ in listed] == [("m-1", "answer"), ("m-2", "controls")]
+    channel = make_inbound(conversation=THREAD_ID, kind="channel")
+    assert await teams._own_posts(channel, TENANT, "ag-1", skip=None) == []

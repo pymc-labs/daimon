@@ -66,8 +66,9 @@ _GROUP_FILES_HINT_FOREIGN = (
 # document needs a page template. The default environment has no office suite.
 _OWN_POSTS_HINT = (
     "Your latest messages in this chat, oldest first. To edit or delete one, pass this "
-    "chat's id and its message_id to edit_message or delete_message. One reply may span "
-    "several messages."
+    "chat's id and its message_id to edit_message or delete_message. Your reply is role "
+    "answer and may span several messages; status is a progress card, notice a notice, "
+    "controls the summary and buttons below a reply."
 )
 _DIRECT_FILES_HINT = (
     "When you deliver a .docx, .pptx, .xlsx or .pdf here, you may also save a PNG of its "
@@ -473,7 +474,7 @@ def render_user_message(
     prefix: str,
     history: HistoryBlock | None,
     channel_files: bool | None = None,
-    own_posts: Sequence[tuple[str, str]] = (),
+    own_posts: Sequence[tuple[str, str | None, str]] = (),
 ) -> str:
     """Host facts and any replayed history, then the person's escaped words.
 
@@ -485,7 +486,7 @@ def render_user_message(
     chat `files_hint` says how to picture a document inline.
     `unprompted="true"` marks a message nobody addressed to the bot (organic
     thread participation). `own_posts` are the agent's latest messages in a
-    1:1 chat, (message id, posted at), oldest first.
+    1:1 chat, (message id, role, posted at), oldest first.
     """
     hint = quoteattr(_DIRECT_FILES_HINT)
     context = [f'<channel platform="teams" id={quoteattr(inbound.channel_id)} files_hint={hint}/>']
@@ -520,8 +521,9 @@ def render_user_message(
         context += [
             f"<your_posts hint={quoteattr(_OWN_POSTS_HINT)}>",
             *(
-                f"<post message_id={quoteattr(id_)} timestamp={quoteattr(at)}/>"
-                for id_, at in own_posts
+                f"<post message_id={quoteattr(id_)}"
+                f"{f' role={quoteattr(role)}' if role else ''} timestamp={quoteattr(at)}/>"
+                for id_, role, at in own_posts
             ),
             "</your_posts>",
         ]

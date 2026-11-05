@@ -37,7 +37,7 @@ from daimon.adapters.teams.image_preview import MAX_PREVIEWS
 from daimon.adapters.teams.progress_receipt import InitialProgressReceipt
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
-from daimon.core.channel_tidy import record_turn_post
+from daimon.core.channel_tidy import record_turn_post, relabel_turn_post
 from daimon.core.cost_footer import cost_footer_shown
 from daimon.core.message_split import split_fenced
 from daimon.core.native_footer_cost import native_footer_text
@@ -45,6 +45,7 @@ from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.outbound.opt_out import tag_opt_outs
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
+from daimon.core.stores.agent_posts import PostRole
 from daimon.core.teams_markdown import has_math
 from daimon.core.teams_threads import conversation_of
 from daimon.core.tenant_balance import debit_amount
@@ -204,6 +205,7 @@ class TeamsTurnLifecycle(OutputGate):
         # The turn's agent and card intent, for recording its posts; None records none.
         self._ma_agent_id = ma_agent_id
         self._turn_card_intent_id = turn_card_intent_id
+        self._roles: dict[str, PostRole] = {}  # each post's recorded role
         # The caller posts the controls after the output sweep (`release_controls`),
         # so they land below every file it posts; only for a turn that may have outputs.
         self._hold_controls = hold_controls
@@ -277,18 +279,28 @@ class TeamsTurnLifecycle(OutputGate):
         """The status card's Teams id, once posted."""
         return self._message_id
 
-    async def _send(self, activity: MessageActivityInput, *, message_id: str | None) -> str:
+    async def _send(
+        self,
+        activity: MessageActivityInput,
+        *,
+        message_id: str | None,
+        role: PostRole | None = None,
+    ) -> str:
+        """Post or edit; `role` labels the message's record, None keeps its label."""
         activity.id = message_id
         await self.check_output()
         sent = await self._sender.send(
             self._conversation_id, activity, service_url=self._service_url
         )
-        if message_id is None:
-            await self._record(sent.id)
-        return message_id or sent.id
+        posted = message_id or sent.id
+        if role is not None and self._roles.get(posted) != role:
+            await self._record(posted, role, fresh=message_id is None)
+        return posted
 
-    async def _record(self, message_id: str) -> None:
-        """Record a fresh post as the turn's, keyed as the tidy tools look it up."""
+    async def _record(self, message_id: str, role: PostRole, *, fresh: bool) -> None:
+        """Record a fresh post as the turn's, keyed as the tidy tools look it up,
+        or relabel an edited one."""
+        self._roles[message_id] = role
         if (
             self._sessionmaker is None
             or self._tenant_id is None
@@ -298,6 +310,16 @@ class TeamsTurnLifecycle(OutputGate):
         ):
             return
         conversation = conversation_of(self._conversation_id)
+        if not fresh:
+            await relabel_turn_post(
+                self._sessionmaker,
+                tenant_id=self._tenant_id,
+                platform="teams",
+                channel_id=conversation,
+                message_id=message_id,
+                role=role,
+            )
+            return
         channel = conversation.split(";", 1)[0]
         await record_turn_post(
             self._sessionmaker,
@@ -310,21 +332,24 @@ class TeamsTurnLifecycle(OutputGate):
             source="turn",
             turn_card_intent_id=self._turn_card_intent_id,
             parent_channel_id=channel if channel != conversation else None,
+            role=role,
         )
 
-    async def _edit(self, activity: MessageActivityInput, message_id: str | None) -> str:
+    async def _edit(
+        self, activity: MessageActivityInput, message_id: str | None, role: PostRole | None = None
+    ) -> str:
         """An edit is idempotent, so one that timed out is sent once more.
 
         Once an attempt has timed out it may have landed, so any failure of
         the retry is raised as a timeout too.
         """
         try:
-            return await self._send(activity, message_id=message_id)
+            return await self._send(activity, message_id=message_id, role=role)
         except _TIMEOUTS:
             if message_id is None:
                 raise
         try:
-            return await self._send(activity, message_id=message_id)
+            return await self._send(activity, message_id=message_id, role=role)
         except TEAMS_SEND_ERRORS as exc:
             raise TimeoutError from exc
 
@@ -334,7 +359,7 @@ class TeamsTurnLifecycle(OutputGate):
             return
         activity = self._status()
         operation = "edit" if self._message_id is not None else "send"
-        self._message_id = await self._send(activity, message_id=self._message_id)
+        self._message_id = await self._send(activity, message_id=self._message_id, role="status")
         self._last_flush = self._clock()
         if self._on_initial_progress is not None:
             self._on_initial_progress(
@@ -388,7 +413,7 @@ class TeamsTurnLifecycle(OutputGate):
             if self._closed or self._message_id is None:
                 return
             try:
-                await self._send(self._status(), message_id=self._message_id)
+                await self._send(self._status(), message_id=self._message_id, role="status")
             except TEAMS_SEND_ERRORS:
                 log.warning("teams.turn.stopping_edit_failed", exc_info=True)
 
@@ -450,7 +475,7 @@ class TeamsTurnLifecycle(OutputGate):
             return
         self._last_flush = now
         async with self._card_edits.lock:
-            await self._send(self._status(), message_id=self._message_id)
+            await self._send(self._status(), message_id=self._message_id, role="status")
 
     def _note_tools(self, state: TurnState) -> None:
         finished = state.finished_tool_ids
@@ -501,7 +526,7 @@ class TeamsTurnLifecycle(OutputGate):
     ) -> None:
         """Replace the card with a final notice; an edit that timed out is sent once more."""
         notice = card.notice_card(text, actions=actions, summary=summary, error=error)
-        self._message_id = message_id = await self._edit(notice, self._message_id)
+        self._message_id = message_id = await self._edit(notice, self._message_id, "notice")
         self.final_message_id = self._answer_id = message_id
         self.card_closed = True
         # A tool-only or failed turn's notice still carries what is edited into it.
@@ -628,10 +653,10 @@ class TeamsTurnLifecycle(OutputGate):
                 mention = self._requester if index == 0 else None
                 message = card.answer_message(chunk, mention=mention)
                 if index == 0 and not fresh:
-                    current = self._message_id = await self._edit(message, current)
+                    current = self._message_id = await self._edit(message, current, "answer")
                     self.card_closed = True
                 else:
-                    current = await self._send(message, message_id=None)
+                    current = await self._send(message, message_id=None, role="answer")
                 if index == 0:
                     self._answer_id, replaced = current, True
                     self._answered = True
@@ -652,7 +677,9 @@ class TeamsTurnLifecycle(OutputGate):
             if replaced:
                 # A later part failed: the answer on screen may stop short.
                 with contextlib.suppress(*TEAMS_SEND_ERRORS):
-                    await self._send(card.notice_card(_ANSWER_CUT_SHORT), message_id=None)
+                    await self._send(
+                        card.notice_card(_ANSWER_CUT_SHORT), message_id=None, role="notice"
+                    )
                 return
             if self._message_id is None:
                 return
@@ -661,13 +688,15 @@ class TeamsTurnLifecycle(OutputGate):
                 # it, so a new message covers the case where it did not.
                 self.card_closed = True
                 with contextlib.suppress(*TEAMS_SEND_ERRORS):
-                    await self._send(card.notice_card(_DELIVERY_UNCERTAIN), message_id=None)
+                    await self._send(
+                        card.notice_card(_DELIVERY_UNCERTAIN), message_id=None, role="notice"
+                    )
                 return
             # Collapse the card so it does not show a live turn forever.
             with contextlib.suppress(*TEAMS_SEND_ERRORS):
                 failed_text = _DELIVERY_FAILED if answer else _FINISH_FAILED
                 failed = card.notice_card(retry_hint(failed_text, direct_chat=self._direct_chat))
-                await self._send(failed, message_id=self._message_id)
+                await self._send(failed, message_id=self._message_id, role="notice")
                 self.card_closed = True
 
     async def _post_controls(
@@ -698,7 +727,7 @@ class TeamsTurnLifecycle(OutputGate):
 
     async def _send_controls(self, controls: MessageActivityInput) -> None:
         try:
-            await self._send(controls, message_id=None)
+            await self._send(controls, message_id=None, role="controls")
         except TEAMS_SEND_ERRORS:
             log.warning("teams.turn.controls_failed", exc_info=True)
 

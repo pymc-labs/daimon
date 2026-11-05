@@ -86,6 +86,7 @@ def make_teams_routine_poster(
             requester_platform_user_id=row.created_by_user_id,
             source="routine",
             parent_channel_id=parent,
+            role="routine",
         )
 
     async def dm_fallback(row: RoutineRow, reason: str) -> DeliveryOutcome:

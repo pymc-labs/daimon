@@ -1931,7 +1931,7 @@ class TeamsApp:
 
     async def _own_posts(
         self, inbound: TeamsInbound, tenant_id: uuid.UUID, ma_agent_id: str, *, skip: str | None
-    ) -> list[tuple[str, str]]:
+    ) -> list[tuple[str, str | None, str]]:
         """The agent's latest posts in a 1:1 chat, oldest first, but this turn's card."""
         if inbound.kind != "dm":
             return []
@@ -1945,7 +1945,9 @@ class TeamsApp:
                 limit=_OWN_POSTS_SHOWN,
             )
         return [
-            (r.message_id, r.posted_at.isoformat()) for r in reversed(rows) if r.message_id != skip
+            (r.message_id, r.role, r.posted_at.isoformat())
+            for r in reversed(rows)
+            if r.message_id != skip
         ]
 
     async def _files_reachable(self, inbound: TeamsInbound) -> bool | None:

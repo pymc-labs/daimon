@@ -601,10 +601,16 @@ async def test_every_fresh_post_of_a_turn_is_recorded_for_tidying(
     async def record(_sessionmaker: object, **kw: Any) -> None:
         recorded.append(kw)
 
+    relabeled: list[dict[str, Any]] = []
+
+    async def relabel(_sessionmaker: object, **kw: Any) -> None:
+        relabeled.append(kw)
+
     async def hidden(session_factory: object, **kw: Any) -> bool:
         return False
 
     monkeypatch.setattr(lifecycle_module, "record_turn_post", record)
+    monkeypatch.setattr(lifecycle_module, "relabel_turn_post", relabel)
     monkeypatch.setattr(lifecycle_module, "cost_footer_shown", hidden)
     tenant, intent = uuid.uuid4(), uuid.uuid4()
     sender = FakeSender()
@@ -635,6 +641,12 @@ async def test_every_fresh_post_of_a_turn_is_recorded_for_tidying(
     assert {(r["ma_agent_id"], r["requester_platform_user_id"]) for r in recorded} == {
         ("ag-1", "u-1")
     }, "the turn's agent and asker"
+    roles = [r["role"] for r in recorded]
+    assert roles[0] == "status" and roles[-1] == "controls", "the card, then the controls"
+    assert set(roles[1:-1]) == {"answer"}, "every overflow part is the answer"
+    assert [(r["channel_id"], r["message_id"], r["role"]) for r in relabeled] == [
+        (THREAD_ID, "m-1", "answer")
+    ], "the card edited into the answer's first part is relabeled once"
 
     recorded.clear()
     unprompted = await _posted(

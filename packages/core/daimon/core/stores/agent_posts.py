@@ -27,6 +27,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 PostKind = Literal["message", "thread"]
 PostSource = Literal["tool", "turn", "auto_thread", "routine"]
+# A turn's progress card, answer, notice or controls card, or a routine result.
+PostRole = Literal["status", "answer", "notice", "controls", "routine"]
 
 
 class AgentPostRow(BaseModel):
@@ -45,6 +47,7 @@ class AgentPostRow(BaseModel):
     source: PostSource
     requester_platform_user_id: str | None
     turn_card_intent_id: uuid.UUID | None
+    role: PostRole | None = None
     posted_at: datetime
     deleted_at: datetime | None
 
@@ -64,6 +67,7 @@ async def record_post(
     source: PostSource = "tool",
     requester_platform_user_id: str | None = None,
     turn_card_intent_id: uuid.UUID | None = None,
+    role: PostRole | None = None,
 ) -> None:
     """Record one post. A second record of the same target keeps the first owner."""
     await session.execute(
@@ -81,6 +85,7 @@ async def record_post(
             source=source,
             requester_platform_user_id=requester_platform_user_id,
             turn_card_intent_id=turn_card_intent_id,
+            role=role,
         )
         .on_conflict_do_nothing(constraint="uq_agent_posted_messages_target")
     )
@@ -167,6 +172,29 @@ async def set_post_hash(
         update(AgentPostedMessage)
         .where(AgentPostedMessage.id == post_id)
         .values(content_hmac=content_hmac)
+    )
+    await session.flush()
+
+
+async def set_post_role(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+    message_id: str,
+    role: PostRole,
+) -> None:
+    """A post edited into another role, such as a status card into the answer."""
+    await session.execute(
+        update(AgentPostedMessage)
+        .where(
+            AgentPostedMessage.tenant_id == tenant_id,
+            AgentPostedMessage.platform == platform,
+            AgentPostedMessage.channel_id == channel_id,
+            AgentPostedMessage.message_id == message_id,
+        )
+        .values(role=role)
     )
     await session.flush()
 

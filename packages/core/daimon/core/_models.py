@@ -3709,6 +3709,10 @@ class AgentPostedMessage(Base):
             "source <> 'turn' OR turn_card_intent_id IS NOT NULL",
             name="ck_agent_posted_messages_turn_intent",
         ),
+        CheckConstraint(
+            "role IN ('status', 'answer', 'notice', 'controls', 'routine')",
+            name="ck_agent_posted_messages_role",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -3732,6 +3736,9 @@ class AgentPostedMessage(Base):
     requester_platform_user_id: Mapped[str | None] = mapped_column(Text)
     # The turn that posted a `turn` row; no FK, intents are pruned once retired.
     turn_card_intent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    # What a Teams turn or routine post is (`PostRole`), so the agent can tell
+    # its answer from the cards around it. NULL elsewhere.
+    role: Mapped[str | None] = mapped_column(Text)
     posted_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

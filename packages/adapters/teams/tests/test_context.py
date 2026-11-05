@@ -480,9 +480,16 @@ def test_a_direct_chat_turn_lists_the_agents_own_posts_with_their_ids() -> None:
         keys="",
         prefix="",
         history=None,
-        own_posts=[("m-1", "2026-11-05T09:00:00+00:00"), ("m-2", "2026-11-05T09:01:00+00:00")],
+        own_posts=[
+            ("m-1", "answer", "2026-11-05T09:00:00+00:00"),
+            ("m-2", None, "2026-11-05T09:01:00+00:00"),
+        ],
     )
-    assert '<post message_id="m-1" timestamp="2026-11-05T09:00:00+00:00"/>' in message
+    assert '<post message_id="m-1" role="answer" timestamp="2026-11-05T09:00:00+00:00"/>' in (
+        message
+    )
+    assert '<post message_id="m-2" timestamp="2026-11-05T09:01:00+00:00"/>' in message
+    assert "Your reply is role answer" in message, "the hint names the reply's role"
     assert message.index('"m-1"') < message.index('"m-2"'), "oldest first"
     assert "delete_message" in message, "the hint names the tools"
     bare = render_user_message(

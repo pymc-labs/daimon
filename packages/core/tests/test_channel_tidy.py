@@ -22,6 +22,7 @@ from daimon.core.stores.agent_posts import (
     list_recent_posts,
     mark_deleted,
     record_post,
+    set_post_role,
 )
 from daimon.core.stores.security_audit import list_events
 from daimon.testing.factories import make_tenant
@@ -205,6 +206,32 @@ async def test_recent_posts_are_one_agents_live_messages_in_one_chat_newest_firs
     assert [r.message_id for r in rows] == ["2", "1"], (
         "newest first; deleted, other agents' and other chats' posts are left out"
     )
+
+
+async def test_a_posts_role_is_kept_and_follows_an_edit(db_session: AsyncSession) -> None:
+    tenant = await make_tenant(db_session)
+    agent = uuid.uuid4()
+    await record_post(
+        db_session,
+        tenant_id=tenant.id,
+        platform="teams",
+        channel_id="a:1",
+        message_id="1",
+        agent_id=agent,
+        role="status",
+    )
+    await set_post_role(
+        db_session,
+        tenant_id=tenant.id,
+        platform="teams",
+        channel_id="a:1",
+        message_id="1",
+        role="answer",
+    )
+    [row] = await list_recent_posts(
+        db_session, tenant_id=tenant.id, platform="teams", channel_id="a:1", agent_id=agent, limit=5
+    )
+    assert row.role == "answer", "a card edited into the answer is listed as the answer"
 
 
 async def test_account_erasure_clears_tidy_hmacs_and_prune_removes_old_posts(

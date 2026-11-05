@@ -29,7 +29,7 @@ from typing import Literal
 
 import structlog
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.stores.agent_posts import PostSource, record_post
+from daimon.core.stores.agent_posts import PostRole, PostSource, record_post, set_post_role
 from daimon.core.stores.security_audit import append_event, count_tidy_events
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -236,6 +236,7 @@ async def record_turn_post(
     turn_card_intent_id: uuid.UUID | None = None,
     parent_channel_id: str | None = None,
     thread_ts: str | None = None,
+    role: PostRole | None = None,
 ) -> None:
     """Record a message (`turn`) or thread (`auto_thread`) an adapter posted for
     a turn, or a routine's result (`routine`, requested by the routine's creator).
@@ -243,7 +244,8 @@ async def record_turn_post(
     The agent is the turn's own (`derive_agent_uuid`, the `chat_agent_id` its
     MCP token carries), so only that agent can tidy it. An `auto_thread` row
     is `kind='thread'` with the parent channel as `channel_id` and the thread
-    id as `message_id`. A Slack turn post carries its root in `thread_ts`.
+    id as `message_id`. A Slack turn post carries its root in `thread_ts`;
+    a Teams one its `role`.
     The post has already gone out, so a failure, or a write
     slower than `RECORD_TIMEOUT_S` (it sits between a send and the turn using
     its message), is logged and swallowed; the cost is that this one post
@@ -271,6 +273,7 @@ async def record_turn_post(
                 source=source,
                 requester_platform_user_id=requester_platform_user_id,
                 turn_card_intent_id=turn_card_intent_id,
+                role=role,
             )
     except Exception as exc:  # the post is out; never fail the turn over its record
         log.warning(
@@ -278,5 +281,34 @@ async def record_turn_post(
             tenant_id=str(tenant_id),
             platform=platform,
             source=source,
+            error_type=type(exc).__name__,
+        )
+
+
+async def relabel_turn_post(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+    message_id: str,
+    role: PostRole,
+) -> None:
+    """Give a recorded post its new role; failures are swallowed as in `record_turn_post`."""
+    try:
+        async with asyncio.timeout(RECORD_TIMEOUT_S), sessionmaker.begin() as session:
+            await set_post_role(
+                session,
+                tenant_id=tenant_id,
+                platform=platform,
+                channel_id=channel_id,
+                message_id=message_id,
+                role=role,
+            )
+    except Exception as exc:  # the edit is out; never fail the turn over its label
+        log.warning(
+            "channel_tidy.turn_relabel_failed",
+            tenant_id=str(tenant_id),
+            platform=platform,
             error_type=type(exc).__name__,
         )
