@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Helpers pass files both ways.** `ask_helper` takes files uploaded with `create_file_upload_url`, and the helper's own files come back with its reply as download links that work for that ask only and expire after an hour. It works on every model provider and needs the public URL set. Migration 0183 adds the columns.
 - **A hand-off the person asked for starts the new agent right away, with a clearer confirmation.** The new agent answers without waiting for another message when the person's own new message asked for it; a routine, timer, agent key, resumed turn or switch-card approval hands over from their next message, as does an agent that can't read the conversation or run here. The confirmation says who takes over, whether it starts now, what it keeps (the conversation and files, or a summary after a provider move) and its first piece of work.
 - **The approval card for a wide request is one short question.** It reads, for example, "Open 10 threads in #launch and tag 3 people?" or "Post in 4 places and tag 6 people?" above Approve, Deny and Details. The "Daimon wants to" lead, the second line and the "(N tags)" count are gone, and the approved card repeats the question without its question mark.
+- **Slack QA bots can be allow-listed with `DAIMON_SLACK__QA_BOT_USER_IDS`.** A listed bot's mention runs as a plain member, never a Slack admin; mentions from any other bot are ignored, as is Daimon's own.
 
 - **An agent switched to Gemini or OpenAI no longer gets stuck on "needs to be confirmed
   again".** Daimon's own tool-safety and ask-before-publishing settings no longer make a
@@ -36,11 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read as the chat account that added the skill, while it stays in the workspace.
 
 - **The agent editor in the web app has a GitHub panel.** It lists the agent's repos with
-  their access, status and which one is the working repo, and where each attached skill
-  comes from: a repo (with branch and path), the library, elsewhere or Anthropic. It shows
-  whether the latest push sync failed, and the release an outside pipeline stamped in the
-  agent's `source_release`, `source_release_at` and `source_release_url` metadata. The
-  agent's owner or a server admin can connect GitHub, pick or clear the working repo, take a repo
+  their access, status, skill count and which one is the working repo, and shows whether the
+  latest push sync failed. The Skills panel shows the release an outside pipeline stamped in
+  the agent's `source_release`, `source_release_at` and `source_release_url` metadata, and each
+  skill shows where it came from: a repo (with branch and path), the library or
+  elsewhere. The agent's owner or a server admin can connect GitHub, pick or clear the working repo, take a repo
   off the agent and resync its repo skills now. Each change is audited like the chat tools.
 
 - **The agent posts for other people more carefully, and anyone can ask never to be tagged.**

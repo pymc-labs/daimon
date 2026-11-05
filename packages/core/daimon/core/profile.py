@@ -68,7 +68,10 @@ async def list_personal_memory(
         session, tenant_id=tenant_id, account_id=account_id
     )
     for agent_id, store_id in stores:
-        records = await list_memory_records(client, store_id, scope=scope)
+        try:
+            records = await list_memory_records(client, store_id, scope=scope)
+        except anthropic.NotFoundError:
+            continue  # the store is gone, so is the memory
         if records:
             found.append(PersonalMemory(agent_id, tuple(r.path for r in records)))
     return found
@@ -98,7 +101,10 @@ async def forget_personal_memory(
     store_id = stores.get(agent_id)
     if store_id is None:
         raise ProfileRefused("You have no memory with this agent.")
-    records = await list_memory_records(client, store_id, scope=scope)
+    try:
+        records = await list_memory_records(client, store_id, scope=scope)
+    except anthropic.NotFoundError:
+        raise ProfileRefused("You have no memory with this agent.") from None
     return await delete_memory_records(client, store_id, records, scope=scope)
 
 

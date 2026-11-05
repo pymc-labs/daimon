@@ -59,6 +59,7 @@ def test_pages_are_the_list_pages_the_caller_may_open() -> None:
     member = _links().for_tenant(TENANT, admin=False).pages()
     assert member == {
         "chat": "/chat",
+        "agents": "/agents",
         "channels": "/channels",
         "routines": "/routines",
         "spend": "/credits/spend",

@@ -52,7 +52,7 @@ from daimon.core.session_snapshot import (
     fingerprint_mutable,
 )
 from daimon.core.stores import tenant_ledger, usage_events
-from daimon.core.stores.domain import ThreadSessionRow
+from daimon.core.stores.domain import Role, ThreadSessionRow
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token, upsert_slack_bot_token
 from daimon.core.stores.tenants import get_tenant, set_plain_text_mentions, set_turn_cap
@@ -950,6 +950,133 @@ async def test_handle_app_mention_slack_connect_external_reaches_orchestration(
         for req in reqs
     ]
     assert ephemeral_calls == [], "no refusal is posted to an external sender"
+
+
+async def _bot_mention_run(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    *,
+    team_id: str,
+    author: str,
+    listed: tuple[str, ...],
+    users_info: dict[str, Any] | None = None,
+) -> tuple[list[str], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Run a bot-authored mention through `_handle_app_mention`.
+
+    Returns (orchestrated event_ts list, captured logs, chat.postMessage bodies).
+    `_orchestrate` is real up to the requester lookup, then stops at `admit`.
+    """
+    from yarl import URL
+
+    fernet_key = Fernet.generate_key().decode()
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+    await upsert_slack_bot_token(
+        db_session,
+        team_id=team_id,
+        encrypted_token=encrypt_token(build_multifernet((fernet_key,)), "xoxb-bot-author"),
+    )
+    await db_session.flush()
+    app = _make_app(db_session_factory, crypto_key=fernet_key)
+    app.runtime.settings.slack.qa_bot_user_ids = listed  # pyright: ignore[reportAttributeAccessIssue]
+    app._bot_user_ids[team_id] = "U_BOT"  # pyright: ignore[reportPrivateUsage]
+    if users_info is not None:
+        fake_slack_web_client.mock.get(
+            re.compile(r"https://slack\.com/api/users\.info.*"),
+            payload={"ok": True, "user": users_info},
+            repeat=True,
+        )
+    reached: list[str] = []
+
+    async def _spy_admit(*args: Any, **kwargs: Any) -> Any:
+        reached.append(str(kwargs.get("role")))
+        raise DaimonError("stop after the requester lookup")
+
+    event: dict[str, Any] = {
+        "type": "app_mention",
+        "channel": "C_TEST",
+        "event_ts": "1000000040.000001",
+        "ts": "1000000040.000001",
+        "user": author,
+        "bot_id": "B_QA",
+        "text": "<@U_BOT> hello",
+    }
+    with (
+        structlog.testing.capture_logs() as captured,
+        patch("daimon.adapters.slack.app.admit", new=_spy_admit),
+    ):
+        await app._handle_app_mention(event, team_id=team_id)  # pyright: ignore[reportPrivateUsage]
+    posts = [
+        req.kwargs["json"]
+        for (_, url), reqs in fake_slack_web_client.mock.requests.items()
+        if url == URL("https://slack.com/api/chat.postMessage")
+        for req in reqs
+    ]
+    return reached, captured, posts
+
+
+@pytest.mark.parametrize(
+    ("author", "listed"),
+    [
+        pytest.param("U_QA", (), id="unlisted"),
+        pytest.param("U_QA", ("U_OTHER",), id="not-in-list"),
+        pytest.param("U_BOT", ("U_BOT",), id="daimons-own-id-listed"),
+    ],
+)
+async def test_handle_app_mention_bot_author_not_allowed_drops_silently(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    author: str,
+    listed: tuple[str, ...],
+) -> None:
+    """An unlisted bot, or Daimon's own id even when listed, posts nothing and runs no turn."""
+    reached, captured, posts = await _bot_mention_run(
+        db_session,
+        db_session_factory,
+        fake_slack_web_client,
+        team_id=f"T_BOT_DROP_{author}_{len(listed)}",
+        author=author,
+        listed=listed,
+    )
+    assert reached == [], "a refused bot must never reach turn admission"
+    assert posts == [], "a refused bot must get no reply or notice"
+    assert [c for c in captured if c.get("event") == "slack.event_dropped.bot_author"], (
+        "the drop must log slack.event_dropped.bot_author"
+    )
+    assert len(fake_slack_web_client.mock.requests) == 0, "no Slack call before the drop"
+
+
+async def test_handle_app_mention_listed_bot_reaches_the_turn_as_a_member(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """A listed bot passes the requester lookup and is admitted as a user, not an admin."""
+    team_id = "T_BOT_LISTED"
+    reached, captured, posts = await _bot_mention_run(
+        db_session,
+        db_session_factory,
+        fake_slack_web_client,
+        team_id=team_id,
+        author="U_QA",
+        listed=("U_QA",),
+        users_info={
+            "id": "U_QA",
+            "deleted": False,
+            "is_bot": True,
+            "is_admin": True,
+            "team_id": team_id,
+            "name": "qa",
+        },
+    )
+    assert not [c for c in captured if c.get("event") == "slack.event_dropped.bot_author"], (
+        "a listed bot must not be dropped"
+    )
+    assert reached == [str(Role.USER)], "a listed bot reaches admission as a plain user"
+    assert not any("Couldn't check your workspace role" in shown_text(p) for p in posts), (
+        "a listed bot must pass the workspace-role lookup"
+    )
 
 
 async def test_handle_app_mention_failure_posts_error_into_thread(

@@ -21,6 +21,7 @@ from daimon.adapters.web.admin_common import listed_agents, names_by_account
 from daimon.adapters.web.audit import audit
 from daimon.adapters.web.caller import WebCaller, requires
 from daimon.adapters.web.channel_agents import AgentRefJson, agent_refs
+from daimon.adapters.web.channel_names import channel_names
 from daimon.adapters.web.channel_visibility import readable_channels
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.access_policy import ChannelReaders, ChannelRule, ChannelWriters
@@ -54,11 +55,12 @@ from daimon.core.channel_directory import (
 )
 from daimon.core.channel_rules import READERS_LABELS, WRITERS_LABELS, ChannelRuleRefused
 from daimon.core.errors import DaimonError, StaleChannelValue
+from daimon.core.platform_names import ChannelStatus
 from daimon.core.stores.access_policy import AccessPolicyUnreadable
 from daimon.core.stores.agent_tool_rules import list_channel_rule_history
 from daimon.core.stores.channel_changes import WORKSPACE_ID, list_changes
 from daimon.core.stores.domain import ChannelSetting
-from daimon.core.stores.platform_names import get_channel_names
+from daimon.core.stores.platform_names import get_channel_names, mark_channel_status
 from daimon.core.stores.tenants import get_tenant
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -265,23 +267,26 @@ def _budget(status: ChannelBudgetStatus | None) -> BudgetJson | None:
     )
 
 
-def channel_json(row: ChannelRow, *, figures: bool) -> ChannelJson:
-    """`figures` adds the channel's budget and spend, which members never read."""
-    name = row.name
+def channel_json(row: ChannelRow, *, figures: bool, name: str | None = None) -> ChannelJson:
+    """`figures` adds the channel's budget and spend, which members never read; `name` is
+    the platform's, for a channel the store has none for."""
+    stored = row.name
     parent = (
-        ParentJson(id=name.parent_id, name=name.parent_name)
-        if name is not None and name.parent_id is not None
+        ParentJson(id=stored.parent_id, name=stored.parent_name)
+        if stored is not None and stored.parent_id is not None
         else None
     )
     return ChannelJson(
         id=row.channel_id,
         platform=row.platform,
-        name="Web chat" if row.channel_id == WEB_ROW_ID else name.name or None if name else None,
+        name="Web chat"
+        if row.channel_id == WEB_ROW_ID
+        else (stored.name if stored else None) or name,
         kind=row.kind,
         status=row.status,
         parent=parent,
         path=[PathNodeJson(id=n.id, name=n.name or None, kind=n.kind) for n in row.path],
-        last_seen_at=_iso(name.last_seen_at) if name else None,
+        last_seen_at=_iso(stored.last_seen_at) if stored else None,
         agent=_sourced(row.agent),
         environment=_sourced(row.environment),
         readers=row.readers,
@@ -482,6 +487,28 @@ def channels_router(runtime: WebRuntime) -> APIRouter:
         if not is_admin(caller.role):
             visible = await member_visible(runtime, caller, rows)
             rows = tuple(r for r in rows if r.channel_id in visible)
+        # A channel the store never named is asked for once: a deleted one leaves the list.
+        unnamed = [
+            r.channel_id
+            for r in rows
+            if not (r.name and r.name.name) and r.channel_id != WEB_ROW_ID
+        ]
+        named: dict[str, str] = {}
+        if unnamed:
+            platform, looked = await channel_names(runtime, caller.person.tenant_id, unnamed)
+            rows = tuple(r for r in rows if r.channel_id not in looked.statuses)
+            named = looked.names
+            if looked.statuses:
+                async with runtime.sessionmaker.begin() as db:
+                    await mark_channel_status(
+                        db,
+                        tenant_id=caller.person.tenant_id,
+                        platform=platform,
+                        statuses={
+                            c: "gone" if s is ChannelStatus.GONE else "direct"
+                            for c, s in looked.statuses.items()
+                        },
+                    )
         refs = await agent_refs(
             runtime,
             caller,
@@ -491,7 +518,10 @@ def channels_router(runtime: WebRuntime) -> APIRouter:
             platform=found.platform,
             default_agent=_sourced(found.default_agent),
             default_environment=_sourced(found.default_environment),
-            channels=[channel_json(r, figures=is_admin(caller.role)) for r in rows],
+            channels=[
+                channel_json(r, figures=is_admin(caller.role), name=named.get(r.channel_id))
+                for r in rows
+            ],
             agents=refs,
         )
 

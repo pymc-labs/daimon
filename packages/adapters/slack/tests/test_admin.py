@@ -222,7 +222,7 @@ async def test_resolve_is_admin_returns_false_and_does_not_raise_on_transport_er
 
 
 async def _requester_for(
-    user: dict[str, object], *, host_team_id: str = "T_HOST"
+    user: dict[str, object], *, host_team_id: str = "T_HOST", allow_bot: bool = False
 ) -> SlackRequester | None:
     from slack_sdk.web.async_client import AsyncWebClient
 
@@ -235,7 +235,9 @@ async def _requester_for(
             },
         )
         client = AsyncWebClient(token="xoxb-test")
-        result = await resolve_requester(client, user_id="U_TEST", host_team_id=host_team_id)
+        result = await resolve_requester(
+            client, user_id="U_TEST", host_team_id=host_team_id, allow_bot=allow_bot
+        )
         requests = sum(len(r) for r in mock.requests.values())  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType, reportUnknownArgumentType]
     assert requests == 1, "resolve_requester must make exactly one users.info call"
     return result
@@ -328,3 +330,30 @@ async def test_resolve_requester_host_plain_member_is_member_not_admin() -> None
     result = await _requester_for({"team_id": "T_HOST"})
     assert result is not None
     assert (result.is_admin, result.is_host_member) == (False, True)
+
+
+@pytest.mark.asyncio
+async def test_resolve_requester_refuses_a_bot_user_by_default() -> None:
+    """A bot cannot be placed as a requester unless the caller opts in."""
+    result = await _requester_for({"team_id": "T_HOST", "is_bot": True})
+    assert result is None, "a bot user must fail the lookup when allow_bot is off"
+
+
+@pytest.mark.asyncio
+async def test_resolve_requester_allowed_bot_is_a_member_never_an_admin() -> None:
+    """An allowed bot passes the lookup as a host member, whatever its admin fields say."""
+    result = await _requester_for(
+        {"team_id": "T_HOST", "is_bot": True, "is_admin": True, "is_owner": True}, allow_bot=True
+    )
+    assert result is not None, "allow_bot must let a bot user through the lookup"
+    assert result.is_host_member is True, "an allowed bot runs as a workspace member"
+    assert result.is_admin is False, "a bot is never an admin"
+
+
+@pytest.mark.asyncio
+async def test_resolve_requester_allow_bot_still_refuses_a_deleted_bot() -> None:
+    """allow_bot relaxes only the bot check; the deleted check stays."""
+    result = await _requester_for(
+        {"team_id": "T_HOST", "is_bot": True, "deleted": True}, allow_bot=True
+    )
+    assert result is None, "a deleted bot must still fail the lookup"

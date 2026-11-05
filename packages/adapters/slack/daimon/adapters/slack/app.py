@@ -1779,6 +1779,7 @@ class SlackApp:
         4. EXPLICIT MENTION GATE: drop events whose text lacks <@bot_user_id>;
            runs before the Connect gate so un-mentioned external senders are
            dropped silently rather than sent a rejection ephemeral.
+        4a. BOT AUTHOR: a bot-authored event drops unless its user is a listed QA bot.
         5. DEDUP: insert_if_new, once the event is known to address the bot.
         6. SLACK CONNECT GATE: ephemeral rejection for external-workspace senders.
         7. TENANT RESOLVE: derive_tenant_uuid.
@@ -1876,6 +1877,20 @@ class SlackApp:
                     event_ts=event_ts,
                 )
                 return
+            # (4a) BOT AUTHOR — a bot cannot be placed by users.info, so only a
+            # listed QA bot starts a turn; others and Daimon's own echo drop
+            # silently, before any dedup row, card or turn slot.
+            if event.get("bot_id"):
+                bot_author = str(event.get("user") or "")
+                if bot_author == bot_user_id or bot_author not in self._qa_bot_user_ids():
+                    log.info(
+                        "slack.event_dropped.bot_author",
+                        team_id=team_id,
+                        channel=channel,
+                        event_ts=event_ts,
+                        author=bot_author,
+                    )
+                    return
             # (4b) DEDUP — only once the event addresses the bot: an app_mention
             # without <@bot> claiming the ts would drop the same message's
             # by-name event.
@@ -1946,6 +1961,10 @@ class SlackApp:
             client, team_id=team_id, channel_id=channel, envelope_flag=envelope_flag
         )
 
+    def _qa_bot_user_ids(self) -> tuple[str, ...]:
+        slack = self.runtime.settings.slack
+        return slack.qa_bot_user_ids if slack is not None else ()
+
     async def _bot_user_id(self, team_id: str, client: AsyncWebClient) -> str:
         """This app's bot user in `team_id`, resolved via auth.test once per workspace.
 
@@ -1999,7 +2018,7 @@ class SlackApp:
         thread_key = (team_id, channel, thread_id)
 
         # Setup instructions mention this bot inside the thread. Its own echoed
-        # app_mention must not run a turn; other bots may still address Daimon.
+        # app_mention must not run a turn; a listed QA bot may still address Daimon.
         if event.get("bot_id"):
             async with self.runtime.sessionmaker() as session:
                 setup_root = await get_setup_binding(
@@ -2395,7 +2414,12 @@ class SlackApp:
         # the local values the context builders also consume — a second lookup
         # would violate the one-call-per-turn constraint.
         author_id = str(event.get("user") or "")
-        requester = await resolve_requester(web_client, user_id=author_id, host_team_id=team_id)
+        requester = await resolve_requester(
+            web_client,
+            user_id=author_id,
+            host_team_id=team_id,
+            allow_bot=bool(event.get("bot_id")),
+        )
         if requester is None:
             await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
                 channel=channel,
@@ -3426,7 +3450,10 @@ class SlackApp:
         # release refunds the attempt count and a wake has no expiry), so the
         # row settles as denied instead.
         requester = await resolve_requester(
-            web_client, user_id=row.requester_external_user_id, host_team_id=team_id
+            web_client,
+            user_id=row.requester_external_user_id,
+            host_team_id=team_id,
+            allow_bot=row.requester_external_user_id in self._qa_bot_user_ids(),
         )
         if requester is None:
             log.info(

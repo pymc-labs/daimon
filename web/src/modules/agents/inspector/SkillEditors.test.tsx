@@ -36,7 +36,9 @@ beforeEach(() => {
   vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} })
   Element.prototype.scrollIntoView = vi.fn()
   vi.mocked(api.get).mockImplementation((url: string) =>
-    Promise.resolve(url.endsWith("/server-skills") ? menu : url.endsWith("/skill-follows") ? follows : { files: [] }) as never)
+    Promise.resolve(url.endsWith("/server-skills") ? menu : url.endsWith("/skill-follows") ? follows
+      : url.endsWith("/github") ? { configured: false, can_manage: false, can_connect: false, repos: [], sync: null, skills: [], release: null }
+      : { files: [] }) as never)
 })
 
 describe("SkillsEditor", () => {
