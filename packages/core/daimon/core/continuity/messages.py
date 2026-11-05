@@ -471,21 +471,33 @@ def render_unsaved_work_question(repo: str) -> str:
 
 
 def render_handoff_acknowledged(
-    *, target_name: str, from_name: str, channel: str, requested_work: str | None
+    *,
+    target_name: str,
+    starts_now: bool,
+    moved_to: str | None,
+    readable: bool,
+    requested_work: str | None,
 ) -> str:
-    """Confirm a task handoff to `target_name`, taking over from `from_name`."""
-    del from_name, channel
-    lines = [
-        f"{target_name} will handle your next message.",
-        "Send a message to continue.",
-        f"Your conversation and files carry over while {target_name} stays on this "
-        f"model provider. {target_name} uses its own connections and memory.",
-        f"Switching {target_name} to another provider starts it fresh here: earlier "
-        "messages and files don't carry over.",
-    ]
+    """Confirm a task handoff to `target_name`: who answers and when, what it starts
+    with, and the work it picks up.
+
+    `moved_to` names the model it now runs on after a cross-provider move (it
+    then has a summary, not the files). `readable` False: it may not read this
+    conversation, so it starts fresh and the named work doesn't go either.
+    """
+    where = "" if moved_to is None else f" on {moved_to}"
+    when = ", starting now." if starts_now else " from your next message."
+    lines = [f"{target_name} is taking over{where}{when}"]
+    if not readable:
+        lines.append("It can't read this conversation, so it starts fresh: tell it what you need.")
+        return "\n".join(lines)
+    if moved_to is not None:
+        lines.append("It has a summary of this conversation; earlier files stay behind.")
+    else:
+        lines.append("It keeps this conversation and its files.")
     if requested_work is not None:
         # The person's own words may already end a sentence; never double the stop.
-        lines.append(f"Next: {requested_work.rstrip().rstrip('.!?')}.")
+        lines.append(f"First: {requested_work.rstrip().rstrip('.!?')}.")
     return "\n".join(lines)
 
 

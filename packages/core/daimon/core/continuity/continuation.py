@@ -1,6 +1,6 @@
 """The contract for dispatching a queued first turn to an agent that just took over.
 
-A handoff that carried work to continue owes the person exactly one turn from
+A handoff a person asked for, or one that carried work, owes the person exactly one turn from
 the new agent. That turn is billed and posted into a thread people are reading,
 so the whole surface here is built around never running it twice and never
 running it when it would be wrong:
@@ -57,6 +57,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = [
+    "HANDOFF_PICKUP_SEED",
     "MAX_REQUESTED_WORK",
     "MIN_REQUESTED_WORK",
     "ContinuationAction",
@@ -65,6 +66,7 @@ __all__ = [
     "ContinuationReasonUnavailable",
     "ResponderChanged",
     "build_input_continuation",
+    "can_start_turn",
     "check_wake_responder",
     "claim_continuation",
     "decide_continuation",
@@ -84,6 +86,19 @@ MIN_REQUESTED_WORK: Final[int] = 8
 #: words, bounded — a continuation is a sentence about what to do next, not a
 #: document, and it is untrusted text that ends up inside turn controls.
 MAX_REQUESTED_WORK: Final[int] = 500
+
+#: The first turn's work when a person asked for a hand-off but named none. The
+#: turn's `HandoffNotice` already says who handed over and what came across.
+HANDOFF_PICKUP_SEED: Final[str] = "Pick up where the conversation left off."
+
+
+def can_start_turn(target_ma_agent_id: str) -> bool:
+    """Whether a queued first turn can run for this agent: a self-hosted one needs its runtime."""
+    if not target_ma_agent_id.startswith("sh_agent_"):
+        return True
+    from daimon.core.turn.runtimes import ensure_channel_runtime
+
+    return ensure_channel_runtime("selfhosted.loop")
 
 
 def sanitize_requested_work(text: str | None, *, echoes: Sequence[str]) -> str | None:
@@ -401,8 +416,8 @@ async def decide_continuation(
 
     The rules, in order, each one a reason not to spend a billed turn:
 
-    1. No work was requested — the handoff only changed who answers. Nothing
-       was ever promised, so the skip is silent.
+    1. No work was requested (a person-asked hand-off carries
+       `HANDOFF_PICKUP_SEED`). Nothing was ever promised, so the skip is silent.
     2. The destination is gone, archived, or no longer this tenant's. Never
        substitute a namesake; say the target changed and stop.
     3. The person has spoken again since. Their newer message supersedes the
@@ -431,9 +446,7 @@ async def decide_continuation(
         )
 
     if request.target_ma_agent_id.startswith("sh_agent_"):
-        from daimon.core.turn.runtimes import ensure_channel_runtime
-
-        if not ensure_channel_runtime("selfhosted.loop"):
+        if not can_start_turn(request.target_ma_agent_id):
             return ContinuationDecision(
                 action="blocked_preparation_failed",
                 message="Self-hosted follow-up replies are not available yet. "

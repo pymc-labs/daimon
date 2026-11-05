@@ -203,6 +203,32 @@ async def list_pending_continuations(
     return [TaskContinuationRow.model_validate(row) for row in rows]
 
 
+async def has_running_handoff_turn(
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    platform: str,
+    thread_id: str,
+    now: datetime,
+) -> bool:
+    """Whether a hand-off's queued first turn is running in this thread right now:
+    claimed, past its start fence, its lease still live."""
+    running = await session.scalar(
+        select(TaskContinuation.id)
+        .where(
+            TaskContinuation.tenant_id == tenant_id,
+            TaskContinuation.platform == platform,
+            TaskContinuation.thread_id == thread_id,
+            TaskContinuation.reason == "task_handoff",
+            TaskContinuation.status == "claimed",
+            TaskContinuation.started_at.is_not(None),
+            TaskContinuation.lease_expires_at > now,
+        )
+        .limit(1)
+    )
+    return running is not None
+
+
 def _dispatchable(
     now: datetime, *, max_attempts: int, reasons: ColumnElement[bool] = _THREAD_REASON
 ) -> ColumnElement[bool]:
