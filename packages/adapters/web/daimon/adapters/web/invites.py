@@ -7,11 +7,9 @@ owner. Reading a link never uses it; accepting does, once.
 
 from __future__ import annotations
 
-import secrets
 import uuid
 from collections.abc import Sequence
-from datetime import datetime, timedelta
-from decimal import Decimal
+from datetime import datetime
 from typing import Any
 
 import structlog
@@ -23,63 +21,24 @@ from daimon.adapters.web.cookies import new_session_token, session_cookie_name, 
 from daimon.adapters.web.cookies import token_sha256 as sha256_of
 from daimon.adapters.web.faces import avatars_of
 from daimon.adapters.web.runtime import WebRuntime
-from daimon.core.config import WebSettings
 from daimon.core.stores import spend_allowances, web_identities, web_invites, web_people
 from daimon.core.stores import web_roles as roles_store
 from daimon.core.stores import web_sessions as sessions_store
 from daimon.core.stores.domain import (
-    WebInviteKind,
-    WebInviteRole,
     WebInviteRow,
     WebPersonRow,
 )
 from daimon.core.stores.identity import get_or_create_platform_principal
+from daimon.core.web_admin import SIGN_IN_LINK_TTL as SIGN_IN_LINK_TTL
+from daimon.core.web_admin import issue_link as issue_link
+from daimon.core.web_admin import link_url as link_url
 from fastapi import APIRouter, HTTPException, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 log = structlog.get_logger(__name__)
 
-#: How long a sign-in link made for a visitor stays usable.
-SIGN_IN_LINK_TTL = timedelta(days=7)
 #: The provider a session opened by a link is recorded under.
 INVITE_PROVIDER = "invite"
-
-
-def link_url(web: WebSettings, token: str) -> str:
-    return f"{str(web.public_url).rstrip('/')}/invite/{token}"
-
-
-async def issue_link(
-    db: AsyncSession,
-    *,
-    tenant_id: uuid.UUID,
-    kind: WebInviteKind,
-    expires_at: datetime,
-    email: str = "",
-    role: WebInviteRole = "visitor",
-    credit_usd: Decimal = Decimal(0),
-    allow_files: bool = False,
-    agent_ids: Sequence[str] = (),
-    person_id: uuid.UUID | None = None,
-    created_by_account_id: uuid.UUID | None = None,
-) -> tuple[WebInviteRow, str]:
-    """Store a new link and return it with its token, which is shown once."""
-    token = secrets.token_urlsafe(24)
-    row = await web_invites.create_invite(
-        db,
-        tenant_id=tenant_id,
-        token_sha256=sha256_of(token),
-        kind=kind,
-        expires_at=expires_at,
-        email=email,
-        role=role,
-        credit_usd=credit_usd,
-        allow_files=allow_files,
-        agent_ids=agent_ids,
-        person_id=person_id,
-        created_by_account_id=created_by_account_id,
-    )
-    return row, token
 
 
 def _gone() -> HTTPException:

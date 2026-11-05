@@ -54,6 +54,7 @@ from daimon.core.mcp_server_url import same_mcp_endpoint
 from daimon.core.session_ports_compat import update_session_record
 from daimon.core.stores.thread_sessions import invalidate_session_tools
 from daimon.core.tool_safety import (
+    CARDED_TOOLS,
     DAIMON_SERVER_NAME,
     SERVER_SEPARATOR,
     WATCH_CONFIRMED_TOOLS,
@@ -159,6 +160,7 @@ def protected_tools(policy: ToolSafetyPolicy) -> frozenset[str]:
     return (
         frozenset({"lead_intake_resolve"})
         | WATCH_CONFIRMED_TOOLS
+        | frozenset(CARDED_TOOLS)
         | backend_switch_tools(enabled=True)
         | microsoft_send_tools(enabled=True, tool_safety_on=policy.enabled)
     )
@@ -512,6 +514,28 @@ def _asking(tool: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _without_carded(tool: dict[str, Any]) -> dict[str, Any]:
+    """Daimon's toolset with each carded tool disabled and still asking.
+
+    No unattended turn can show a person's card, so every call to one is refused:
+    leaving them out of the model's tool list costs nothing. The `always_ask` policy
+    stays, so the session still reads as gated for them.
+    """
+    if tool.get("type") != MCP_TOOLSET or tool.get("mcp_server_name") != DAIMON_SERVER_NAME:
+        return tool
+    carded = frozenset(CARDED_TOOLS)
+    configs = [
+        {**config, "enabled": False} if config.get("name") in carded else config
+        for config in _configs(tool)
+    ]
+    held: set[str] = {n for config in configs if isinstance(n := config.get("name"), str)}
+    ask = {"type": "always_ask"}
+    configs += [
+        {"name": name, "enabled": False, "permission_policy": ask} for name in sorted(carded - held)
+    ]
+    return {**tool, "configs": configs}
+
+
 def _allowlisted(
     tools: list[dict[str, Any]],
     servers: list[dict[str, Any]],
@@ -584,7 +608,8 @@ async def constrain_capabilities(
     `ServerTool` pairs only those MCP tools stay, and every server no kept
     toolset names is dropped. Every MCP toolset left, Daimon's own included and
     with tool safety on or off, asks on its default and on every per-tool
-    config, so each call reaches the unattended decider; Daimon's
+    config, so each call reaches the unattended decider; Daimon's carded tools are
+    disabled (a card cannot be shown here, so they would only refuse); Daimon's
     `protected_tools` and rule tools are listed as `session_tools_for_policy`
     lists them, and a foreign `daimon-mcp` URL is healed.
     """
@@ -629,7 +654,7 @@ async def constrain_capabilities(
     )
     healed = heal_reserved_server(policy, servers, public_url=public_url, confirmed_tools=protected)
     send = SessionToolConfig(
-        tools=[_asking(tool) for tool in (gated if gated is not None else tools)],
+        tools=[_without_carded(_asking(tool)) for tool in (gated if gated is not None else tools)],
         mcp_servers=healed if healed is not None else servers,
     )
     # Fixed confirmation gates may append their own enabled configurations.

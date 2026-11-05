@@ -1,24 +1,17 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query"
 import { ChevronRight } from "lucide-react"
-import { useNavigate, useSearchParams } from "react-router"
+import { useSearchParams } from "react-router"
 
 import { BrandIcon } from "@/components/brand"
 import { QueryState } from "@/components/QueryState"
-import { api } from "@/lib/api"
 import { plural } from "@/lib/format"
-import { useMe } from "@/lib/hooks"
+import { useMe, useSwitchWorkspace } from "@/lib/hooks"
 import { safeNext } from "@/lib/safe-next"
 import { Card } from "./Card"
 
 export function Workspaces() {
   const me = useMe()
   const [params] = useSearchParams()
-  const navigate = useNavigate()
-  const qc = useQueryClient()
-  const pick = useMutation({
-    mutationFn: (id: string) => api.post("/api/workspaces/switch", { id }),
-    onSuccess: () => { qc.clear(); navigate(safeNext(params.get("next"))) },
-  })
+  const pick = useSwitchWorkspace(safeNext(params.get("next")))
   return (
     <Card>
       <h1 className="mt-5 text-lg font-semibold">Choose a workspace</h1>

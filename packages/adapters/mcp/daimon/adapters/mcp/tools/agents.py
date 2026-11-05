@@ -46,6 +46,7 @@ from daimon.adapters.mcp.tools._rule_view import (
     load_isolation_view,
     load_skill_owners,
 )
+from daimon.adapters.mcp.tools._web_url import tenant_links
 from daimon.adapters.mcp.tools._words import admin_noun, space_noun
 from daimon.adapters.mcp.tools.agent_chat import require_outside_chat_turn
 from daimon.adapters.mcp.tools.setup_target import (
@@ -153,6 +154,10 @@ class AgentInfo(BaseModel):
     """Set only by ``fork_agent``: the source's own skills, uploaded again under the
     copy's name. The copy has them even when ``skills`` does not list them yet; do
     not add them again."""
+    web_url: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    """Set by ``get_agent``, ``create_agent``, ``update_agent`` and ``fork_agent`` when the
+    workspace has a web app and the caller may open the page: the agent's page there.
+    Absent means no link, never an error."""
     owned_by_you: bool | None = Field(default=None, exclude_if=lambda value: value is None)
     """Set by ``get_agent`` and ``list_agents``: whether the caller owns this agent
     (created it, or an admin named them), so may change it without an admin."""
@@ -256,6 +261,15 @@ async def _build_agent_info(
         client, agents=[agent], tenant_id=tenant_id
     )
     return AgentInfo.from_ma(agent, sync_warnings=sync_warnings, skill_titles=skill_titles)
+
+
+async def _with_web_url(
+    runtime: McpRuntime, auth: AuthIdentity, info: AgentInfo, node: str | None = None
+) -> AgentInfo:
+    """`info` with its page on the web, when there is one for this caller."""
+    links = await tenant_links(runtime, auth)
+    url = None if links is None else links.agent(info.id, node)
+    return info if url is None else info.model_copy(update={"web_url": url})
 
 
 async def _with_answering_note(
@@ -2369,13 +2383,15 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         For an admin on an editable agent, ``system`` is the full system prompt;
         null means withheld (non-admin caller, or Daimon/defaults-managed agent).
         Pass this turn's ``origin_context_id`` so its channel counts."""
-        return await _get_agent_impl(
+        auth = await _auth(ctx)
+        info = await _get_agent_impl(
             runtime,
-            await _auth(ctx),
+            auth,
             name,
             expected_ma_agent_id=expected_ma_agent_id,
             origin_context_id=origin_context_id,
         )
+        return await _with_web_url(runtime, auth, info)
 
     @mcp.tool
     async def create_agent(  # pyright: ignore[reportUnusedFunction]
@@ -2425,9 +2441,9 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             mcp_servers=mcp_servers,
             skill_repos=skill_repos,
         )
-        return await _create_agent_impl(
-            runtime, await _auth(ctx), spec, origin_context_id, backend=backend
-        )
+        auth = await _auth(ctx)
+        info = await _create_agent_impl(runtime, auth, spec, origin_context_id, backend=backend)
+        return await _with_web_url(runtime, auth, info)
 
     @mcp.tool
     async def update_agent(  # pyright: ignore[reportUnusedFunction]
@@ -2443,8 +2459,9 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         expected_ma_agent_id: str | None = None,
         origin_context_id: str | None = None,
     ) -> AgentInfo:
-        """Change an agent's system prompt or switch its model; add existing skills such as
-        build-models. Scalar ``model``, ``description`` and ``system`` fields replace.
+        """Change an agent's instructions (system prompt), switch its model, or add existing
+        skills such as build-models. Scalar ``model``, ``description`` and ``system`` fields
+        replace.
 
         Prefer current-generation ``claude-sonnet-5-5`` for Sonnet,
         ``claude-opus-5-5`` for Opus and ``claude-haiku-5-5`` for the cheapest
@@ -2460,9 +2477,10 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ``{"type": "custom", "skill_id": "skill_..."}`` entries also work. A model or
         prompt change also returns ``applies``: post it verbatim as part of the reply.
         Pass this turn's ``origin_context_id`` so its channel counts."""
-        return await _update_agent_impl(
+        auth = await _auth(ctx)
+        info = await _update_agent_impl(
             runtime,
-            await _auth(ctx),
+            auth,
             name,
             model=model,
             description=description,
@@ -2473,6 +2491,16 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             expected_ma_agent_id=expected_ma_agent_id,
             origin_context_id=origin_context_id,
         )
+        node = (
+            "instructions"
+            if system is not None
+            else "skills"
+            if skills
+            else "model"
+            if model is not None
+            else None
+        )
+        return await _with_web_url(runtime, auth, info, node)
 
     @mcp.tool
     async def set_agent_builtin_tool(  # pyright: ignore[reportUnusedFunction]
@@ -2570,9 +2598,10 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         model: an unavailable model is refused as unavailable, and a different
         available one is refused; make the copy and then request a backend switch
         for it. Pass this active turn's ``origin_context_id``."""
-        return await _fork_agent_impl(
+        auth = await _auth(ctx)
+        info = await _fork_agent_impl(
             runtime,
-            await _auth(ctx),
+            auth,
             source_name,
             new_name,
             expected_ma_agent_id=expected_ma_agent_id,
@@ -2580,6 +2609,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             origin_context_id=origin_context_id,
             model=model,
         )
+        return await _with_web_url(runtime, auth, info)
 
     @mcp.tool(tags={"admin"})
     async def archive_agent(  # pyright: ignore[reportUnusedFunction]

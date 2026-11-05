@@ -49,6 +49,7 @@ from daimon.adapters.slack.blockkit import notice_fields
 from daimon.adapters.slack.errors import generate_request_id, surface_command_error
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.adapters.slack.web_button import spend_url
 from daimon.core.billing_panel import (
     LOOK_UP,
     TOPUP_AMOUNTS,
@@ -131,7 +132,13 @@ async def handle_billing_command(
 
         await client.views_update(  # pyright: ignore[reportUnknownMemberType]
             view_id=view_id,
-            view=build_billing_view(state, now=now, since=since, channel_id=channel_id),
+            view=build_billing_view(
+                state,
+                now=now,
+                since=since,
+                channel_id=channel_id,
+                web_url=spend_url(runtime.settings.web, tenant_id),
+            ),
         )
 
     except (DaimonError, SlackApiError, InvalidToken, SQLAlchemyError) as exc:
@@ -369,6 +376,7 @@ async def handle_panel_action(runtime: SlackRuntime, payload: dict[str, Any]) ->
             since=since,
             channel_id=channel_id,
             lookup=Lookup(user_id=picked, name=name, line=lookup_line(spend, turns)),
+            web_url=spend_url(runtime.settings.web, tenant_id),
         )
         # The hash makes a slower, earlier lookup lose to a newer one instead of
         # overwriting it.

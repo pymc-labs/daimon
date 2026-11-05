@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 from daimon.core.defaults.mcp_merge import DAIMON_MCP_SERVER_NAME
 from daimon.core.tool_safety import (
+    CARDED_TOOLS,
     CONFIRMED_DAIMON_TOOLS,
     DAIMON_SERVER_NAME,
     OPEN_TOOL_SAFETY,
@@ -278,13 +279,22 @@ def test_session_tools_gate_third_party_toolsets_only() -> None:
             for name in (
                 "add_skill",
                 "approve_reach",
+                "change_workspace_settings",
                 "create_watch",
+                "delete_allowance",
                 "fly_extend_session",
                 "fly_launch_session",
+                "remove_my_data",
+                "restore_library_skill_version",
                 "resume_watch",
+                "revert_agent",
+                "revoke_web_link",
                 "rotate_watch_key",
+                "set_agent_owners",
+                "set_agent_web_access",
                 "start_long_job",
                 "update_watch",
+                "update_web_person",
             )
         ]
     }, "Daimon confirms skill installation and standing watch authority"
@@ -417,16 +427,19 @@ def test_a_disabled_daimon_toolset_keeps_add_skill_disabled() -> None:
     assert out is not None
     assert out[0]["configs"] == [
         {"name": name, "enabled": False, "permission_policy": {"type": "always_ask"}}
-        for name in (
-            "add_skill",
-            "approve_reach",
-            "create_watch",
-            "fly_extend_session",
-            "fly_launch_session",
-            "resume_watch",
-            "rotate_watch_key",
-            "start_long_job",
-            "update_watch",
+        for name in sorted(
+            (
+                "add_skill",
+                "approve_reach",
+                "create_watch",
+                "fly_extend_session",
+                "fly_launch_session",
+                "resume_watch",
+                "rotate_watch_key",
+                "start_long_job",
+                "update_watch",
+                *CARDED_TOOLS,
+            )
         )
     ], "confirmation gates must not enable a disabled toolset"
 
@@ -762,6 +775,7 @@ def test_a_daimon_rule_makes_call_tool_and_the_named_tool_ask() -> None:
         "rotate_watch_key",
         "start_long_job",
         "update_watch",
+        *CARDED_TOOLS,
     }
     assert has_confirmation_gate(out, tool_name="call_tool")
     assert not has_confirmation_gate(out, tool_name="search_tools"), "search never asks"
@@ -778,19 +792,22 @@ def test_a_rule_naming_a_confirmed_tool_does_not_duplicate_its_config() -> None:
     )
     assert out is not None
     names = [c["name"] for c in out[1]["configs"]]
-    assert sorted(names) == [
-        "add_skill",
-        "approve_reach",
-        "call_tool",
-        "create_watch",
-        "fly_extend_session",
-        "fly_launch_session",
-        "publish_report",
-        "resume_watch",
-        "rotate_watch_key",
-        "start_long_job",
-        "update_watch",
-    ]
+    assert sorted(names) == sorted(
+        [
+            "add_skill",
+            "approve_reach",
+            "call_tool",
+            "create_watch",
+            "fly_extend_session",
+            "fly_launch_session",
+            "publish_report",
+            "resume_watch",
+            "rotate_watch_key",
+            "start_long_job",
+            "update_watch",
+            *CARDED_TOOLS,
+        ]
+    )
 
 
 def test_daimon_rules_are_inert_for_session_tools_until_both_switches_are_on() -> None:
@@ -833,18 +850,21 @@ def test_the_daimon_wildcard_gates_the_proxy_but_never_gets_a_config_of_its_own(
         _RULES_ON, _tools(), trusted_servers=_TRUSTED, daimon_rule_tools=frozenset({"*"})
     )
     assert only is not None
-    assert sorted(c["name"] for c in only[1]["configs"]) == [
-        "add_skill",
-        "approve_reach",
-        "call_tool",
-        "create_watch",
-        "fly_extend_session",
-        "fly_launch_session",
-        "resume_watch",
-        "rotate_watch_key",
-        "start_long_job",
-        "update_watch",
-    ]
+    assert sorted(c["name"] for c in only[1]["configs"]) == sorted(
+        [
+            "add_skill",
+            "approve_reach",
+            "call_tool",
+            "create_watch",
+            "fly_extend_session",
+            "fly_launch_session",
+            "resume_watch",
+            "rotate_watch_key",
+            "start_long_job",
+            "update_watch",
+            *CARDED_TOOLS,
+        ]
+    )
     both = session_tools_for_policy(
         _RULES_ON,
         _tools(),
@@ -852,19 +872,22 @@ def test_the_daimon_wildcard_gates_the_proxy_but_never_gets_a_config_of_its_own(
         daimon_rule_tools=frozenset({"*", "get_session"}),
     )
     assert both is not None
-    assert sorted(c["name"] for c in both[1]["configs"]) == [
-        "add_skill",
-        "approve_reach",
-        "call_tool",
-        "create_watch",
-        "fly_extend_session",
-        "fly_launch_session",
-        "get_session",
-        "resume_watch",
-        "rotate_watch_key",
-        "start_long_job",
-        "update_watch",
-    ]
+    assert sorted(c["name"] for c in both[1]["configs"]) == sorted(
+        [
+            "add_skill",
+            "approve_reach",
+            "call_tool",
+            "create_watch",
+            "fly_extend_session",
+            "fly_launch_session",
+            "get_session",
+            "resume_watch",
+            "rotate_watch_key",
+            "start_long_job",
+            "update_watch",
+            *CARDED_TOOLS,
+        ]
+    )
 
 
 @pytest.mark.parametrize(

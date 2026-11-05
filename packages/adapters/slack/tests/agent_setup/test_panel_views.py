@@ -1409,3 +1409,28 @@ def test_current_channel_outsider_warning_and_fix(admin: bool, readers: str) -> 
     assert ("outside your organisation" in str(view)) is (readers != "own")
     assert (SLACK_GUESTS_UNCHECKED in str(view)) is (readers != "own")
     assert ("Make confidential" in str(view)) is (admin and readers != "own")
+
+
+def test_details_offer_an_open_in_web_url_button_only_with_a_web_url() -> None:
+    url = "https://app.example.com/w/x/agents/ag_1"
+
+    def built(details: AgentDetails) -> dict[str, Any]:
+        return build_details_view(
+            details,
+            meta=_meta(),
+            is_admin=False,
+            is_platform_admin=False,
+            coding_tools_available=False,
+            channel_id=_CHANNEL_ID,
+            attribution=None,
+        )
+
+    buttons = [
+        element
+        for block in built(_details().model_copy(update={"web_url": url}))["blocks"]
+        if block["type"] == "actions"
+        for element in block["elements"]
+        if element.get("url") == url
+    ]
+    assert [b["text"]["text"] for b in buttons] == ["Open in web"], "one url button"
+    assert url not in json.dumps(built(_details())), "no web url, no button"

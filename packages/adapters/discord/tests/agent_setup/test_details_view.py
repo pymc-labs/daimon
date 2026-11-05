@@ -1216,3 +1216,21 @@ async def test_the_details_load_records_whether_the_reader_owns_the_agent(
         )
     assert _AGENT_MA_ID not in state.owned_agent_ids
     del runtime
+
+
+def test_open_in_web_link_button_follows_the_details_web_url(account_id: uuid.UUID) -> None:
+    url = "https://app.example.com/w/x/agents/ag_research"
+    linked = DetailsView(
+        _state(_details().model_copy(update={"web_url": url}), account_id=account_id),
+        runtime=_make_runtime(),
+        allowed_user_id=42,
+    )
+    button = _find_button(linked, "Open in web")
+    assert button.url == url, "the button opens the agent's page"
+    assert button.style == discord.ButtonStyle.link, "it is a link button"
+    plain = DetailsView(
+        _state(_details(), account_id=account_id), runtime=_make_runtime(), allowed_user_id=42
+    )
+    assert "Open in web" not in [
+        item.label for item in _walk(plain) if isinstance(item, discord.ui.Button)
+    ], "no web url, no button"

@@ -12,37 +12,13 @@ from daimon.adapters.web.admin_common import AuditViewer, listed_agents
 from daimon.adapters.web.caller import NOT_ALLOWED
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
-from daimon.core.feedback_summary import FeedbackNotAllowed, feedback_summary
-from daimon.core.message_feedback import FEEDBACK_REASONS
+from daimon.core.feedback_summary import (
+    FeedbackNotAllowed,
+    FeedbackOut,
+    feedback_report,
+    feedback_summary,
+)
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
-
-UNKNOWN_AGENT = "Unknown agent"
-MIN_SHOWN = 3
-
-
-def shown(count: int) -> int | None:
-    """The count, or None when one or two votes would point to the voters. Pure."""
-    return None if 0 < count < MIN_SHOWN else count
-
-
-class ReasonCount(BaseModel):
-    code: str
-    label: str
-    count: int | None
-
-
-class AgentFeedbackOut(BaseModel):
-    id: str | None
-    name: str
-    up: int | None
-    down: int | None
-    reasons: list[ReasonCount]
-
-
-class FeedbackOut(BaseModel):
-    days: int
-    agents: list[AgentFeedbackOut]
 
 
 def feedback_router(runtime: WebRuntime) -> APIRouter:
@@ -70,24 +46,6 @@ def feedback_router(runtime: WebRuntime) -> APIRouter:
                 )
             except FeedbackNotAllowed as err:
                 raise HTTPException(status_code=403, detail=NOT_ALLOWED) from err
-        return FeedbackOut(
-            days=days,
-            agents=[
-                AgentFeedbackOut(
-                    id=f.ma_agent_id,
-                    name=names.get(f.ma_agent_id, UNKNOWN_AGENT)
-                    if f.ma_agent_id
-                    else UNKNOWN_AGENT,
-                    up=shown(f.up),
-                    down=shown(f.down),
-                    reasons=[
-                        ReasonCount(code=code, label=label, count=shown(f.reasons[code]))
-                        for code, label in FEEDBACK_REASONS.items()
-                        if code in f.reasons
-                    ],
-                )
-                for f in found
-            ],
-        )
+        return feedback_report(found, names=names, days=days)
 
     return router

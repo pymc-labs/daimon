@@ -30,6 +30,7 @@ from daimon.core.stores.domain import ThreadSessionRow, TurnOriginRow
 from daimon.core.stores.lead_intake import confirmation_tools
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.tool_safety import (
+    CARDED_TOOLS,
     DAIMON_SERVER_NAME,
     REACH_APPROVAL_TOOLS,
     WATCH_CONFIRMED_TOOLS,
@@ -178,7 +179,8 @@ async def _recorded_as_gated(
     the newly added watch gates. The requested action must still ask in that
     exact recorded template. Watch enrollment never uses this compatibility path.
     A session bound before `update_watch` was gated proves every other card it
-    gated, never an edit.
+    gated, never an edit. Likewise one bound before `CARDED_TOOLS` proves the
+    other cards, never a carded tool.
     """
     recorded = live.effective_config
     if recorded is None:
@@ -211,9 +213,13 @@ async def _recorded_as_gated(
         agent_id=agent.id,
     )
     selection = backend_selection_enabled(runtime.settings.turn)
-    confirmed = backend_switch_tools(enabled=selection) | microsoft_send_tools(
-        enabled=runtime.settings.microsoft_accounts.configured,
-        tool_safety_on=runtime.settings.tool_safety.enabled,
+    confirmed = (
+        frozenset(CARDED_TOOLS)
+        | backend_switch_tools(enabled=selection)
+        | microsoft_send_tools(
+            enabled=runtime.settings.microsoft_accounts.configured,
+            tool_safety_on=runtime.settings.tool_safety.enabled,
+        )
     )
     # A bind sent while the retired chat channel switch was also gated holds
     # that one more gated tool; it still proves every card it gated.
@@ -227,11 +233,24 @@ async def _recorded_as_gated(
     )
     before_pin_clear = confirmed - {"request_channel_pin_clear"}
     lead_tools = await confirmation_tools(runtime.session_factory, auth.tenant_id)
-    # A bind made before the reach card holds no approve_reach gate; it proves
-    # every other card it gated, never a reach approval.
-    for confirmed_tools, pre_watch, pre_reach in dict.fromkeys(
-        (candidate | lead_tools | watch_tools | reach_tools, not watch_tools, not reach_tools)
+    # A bind made before the carded tools or the reach card holds neither gated, and
+    # the two vary independently. Such a template proves only a call to some other
+    # tool; no old hash can authorize a carded tool or a reach approval.
+    carded = frozenset(CARDED_TOOLS)
+    pre_carded_ok = tool_name not in carded
+    for confirmed_tools, pre_watch, pre_reach, pre_carded in dict.fromkeys(
+        (
+            (candidate - carded if pre_carded else candidate)
+            | lead_tools
+            | watch_tools
+            | reach_tools,
+            not watch_tools,
+            not reach_tools,
+            pre_carded,
+        )
         for candidate in (confirmed, legacy, before_config, before_config_legacy, before_pin_clear)
+        for pre_carded in (False, True)
+        if pre_carded_ok or not pre_carded
         for watch_tools in (
             WATCH_CONFIRMED_TOOLS,
             WATCH_CONFIRMED_TOOLS - {"update_watch"},
@@ -258,13 +277,16 @@ async def _recorded_as_gated(
                         else ()
                     ),
                 )
-                if pre_reach:
-                    tools = _without_configs(tools, REACH_APPROVAL_TOOLS)
-                if pre_watch:
-                    # Policy-on sessions add watch gates implicitly too. Rebuild
-                    # the exact pre-watch template for non-watch actions only;
-                    # no old hash can authorize watch enrollment or rotation.
-                    tools = _without_configs(tools, WATCH_CONFIRMED_TOOLS)
+                stripped = (
+                    (WATCH_CONFIRMED_TOOLS if pre_watch else frozenset[str]())
+                    | (REACH_APPROVAL_TOOLS if pre_reach else frozenset[str]())
+                    | (carded if pre_carded else frozenset[str]())
+                )
+                if stripped:
+                    # Policy-on sessions add these gates implicitly too. Rebuild the exact
+                    # older template for other actions only; no old hash can authorize
+                    # watch enrollment, rotation, a carded tool or a reach approval.
+                    tools = _without_configs(tools, stripped)
                 if hash_tools(tools) == recorded.tools_sha256 and has_confirmation_gate(
                     [tool.model_dump(mode="json") for tool in tools], tool_name=tool_name
                 ):

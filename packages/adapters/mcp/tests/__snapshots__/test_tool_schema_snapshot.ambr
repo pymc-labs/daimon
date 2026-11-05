@@ -824,6 +824,99 @@
         'type': 'object',
       }),
     }),
+    'change_workspace_settings': dict({
+      'description': '''
+        Change the web modules, web chat agent, who may start turns (everyone or exactly
+        ``invoker_people``) and the direct-message rules.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'default_agent': dict({
+            'default': '',
+            'type': 'string',
+          }),
+          'dm_enabled': dict({
+            'anyOf': list([
+              dict({
+                'type': 'boolean',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'dm_memory_read_only': dict({
+            'anyOf': list([
+              dict({
+                'type': 'boolean',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'everyone_invokes': dict({
+            'anyOf': list([
+              dict({
+                'type': 'boolean',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'invoker_people': dict({
+            'anyOf': list([
+              dict({
+                'items': dict({
+                  'type': 'string',
+                }),
+                'type': 'array',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'modules': dict({
+            'anyOf': list([
+              dict({
+                'additionalProperties': dict({
+                  'type': 'boolean',
+                }),
+                'propertyNames': dict({
+                  'enum': list([
+                    'chat',
+                    'agents',
+                    'channels',
+                    'routines',
+                    'credits',
+                    'integrations',
+                  ]),
+                }),
+                'type': 'object',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'clear_agent_default': dict({
       'description': '''
         Stop an agent answering in a channel by clearing its default routing.
@@ -937,6 +1030,40 @@
             'type': 'boolean',
           }),
         }),
+        'type': 'object',
+      }),
+    }),
+    'clear_thread_override': dict({
+      'description': '''
+        Drop one thread's own setting so it follows its channel again. Admin-only.
+        <blank line>
+        ``kind`` is participation, progress_plans, thread_rule or handoff, as listed.
+        ``cleared`` is false when the thread had no such setting.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'channel_id': dict({
+            'type': 'string',
+          }),
+          'kind': dict({
+            'enum': list([
+              'participation',
+              'progress_plans',
+              'thread_rule',
+              'handoff',
+            ]),
+            'type': 'string',
+          }),
+          'thread_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'channel_id',
+          'thread_id',
+          'kind',
+        ]),
         'type': 'object',
       }),
     }),
@@ -1586,6 +1713,81 @@
         'required': list([
           'name',
           'model',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'create_allowance': dict({
+      'description': '''
+        Set an allowance for a person (web person id), a group (name, or ``everyone``) or
+        an invite (id): a limit in billed dollars, monthly or in total, for every agent
+        or one. A cap is monthly, for everyone or one person, with no agent or end date.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'agent_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'amount_usd': dict({
+            'anyOf': list([
+              dict({
+                'type': 'number',
+              }),
+              dict({
+                'pattern': '^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$',
+                'type': 'string',
+              }),
+            ]),
+          }),
+          'cap': dict({
+            'default': False,
+            'type': 'boolean',
+          }),
+          'expires_at': dict({
+            'anyOf': list([
+              dict({
+                'format': 'date-time',
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'subject': dict({
+            'type': 'string',
+          }),
+          'subject_kind': dict({
+            'enum': list([
+              'person',
+              'group',
+              'invite',
+            ]),
+            'type': 'string',
+          }),
+          'window': dict({
+            'default': 'month',
+            'enum': list([
+              'month',
+              'total',
+            ]),
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'subject_kind',
+          'subject',
+          'amount_usd',
         ]),
         'type': 'object',
       }),
@@ -2602,6 +2804,97 @@
         'type': 'object',
       }),
     }),
+    'create_web_invite': dict({
+      'description': '''
+        Invite someone to the web app by email as a member, or as a visitor of the given
+        agents (at most 50). The link is sent to the caller by direct message, never shown
+        here. Pass this active turn's origin_context_id. Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'agent_ids': dict({
+            'anyOf': list([
+              dict({
+                'items': dict({
+                  'type': 'string',
+                }),
+                'type': 'array',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'allow_files': dict({
+            'default': False,
+            'type': 'boolean',
+          }),
+          'credit_usd': dict({
+            'anyOf': list([
+              dict({
+                'type': 'number',
+              }),
+              dict({
+                'pattern': '^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$',
+                'type': 'string',
+              }),
+            ]),
+            'default': '0',
+          }),
+          'days': dict({
+            'default': 7,
+            'type': 'integer',
+          }),
+          'email': dict({
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'role': dict({
+            'enum': list([
+              'visitor',
+              'member',
+            ]),
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'email',
+          'role',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'delete_allowance': dict({
+      'description': 'Remove an allowance or cap.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'allowance_id': dict({
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'allowance_id',
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'delete_message': dict({
       'description': '''
         Delete one message you posted, or one of your replies or status cards.
@@ -3603,6 +3896,73 @@
         'type': 'object',
       }),
     }),
+    'get_credits_overview': dict({
+      'description': '''
+        The workspace's credit balance, spend over the last 30 days and this month with
+        a projection, daily spend and the credit history. Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+        }),
+        'type': 'object',
+      }),
+    }),
+    'get_credits_spend': dict({
+      'description': '''
+        The workspace's spend in billed dollars over ``period``, one row per ``person``,
+        ``agent`` or ``channel``, biggest first. Person names show only in a direct message
+        with the admin; elsewhere ``private_details`` is ``direct_message`` and they read
+        ``Person 1``, ``Person 2``. Pass this active turn's origin_context_id. Admin-only.
+        ``next_page`` goes back as ``after``.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'after': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'by': dict({
+            'default': 'person',
+            'enum': list([
+              'person',
+              'agent',
+              'channel',
+            ]),
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'period': dict({
+            'default': '30d',
+            'enum': list([
+              '30d',
+              'this',
+              'last',
+            ]),
+            'type': 'string',
+          }),
+        }),
+        'type': 'object',
+      }),
+    }),
     'get_environment': dict({
       'description': 'Return one environment by name.',
       'parameters': dict({
@@ -3615,6 +3975,22 @@
         'required': list([
           'name',
         ]),
+        'type': 'object',
+      }),
+    }),
+    'get_feedback_summary': dict({
+      'description': '''
+        Thumbs and the reasons picked per agent over the last ``days`` days, as counts.
+        A count of one or two is withheld (null), as it could point to a voter. Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'days': dict({
+            'default': 30,
+            'type': 'integer',
+          }),
+        }),
         'type': 'object',
       }),
     }),
@@ -3683,6 +4059,27 @@
           'channel_id',
           'message_id',
         ]),
+        'type': 'object',
+      }),
+    }),
+    'get_my_credits': dict({
+      'description': '''
+        The caller's own use in billed dollars over ``period`` (``30d``, ``this`` month or
+        ``last`` month), by agent, and their latest turns.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'period': dict({
+            'default': '30d',
+            'enum': list([
+              '30d',
+              'this',
+              'last',
+            ]),
+            'type': 'string',
+          }),
+        }),
         'type': 'object',
       }),
     }),
@@ -3940,6 +4337,37 @@
         'type': 'object',
       }),
     }),
+    'get_web_person': dict({
+      'description': '''
+        Show one web person: role, status, groups, sign-ins and, for a visitor, their
+        invite. Email and sign-ins show only in a direct message with the admin; elsewhere
+        ``private_details`` is ``direct_message``. Pass this active turn's origin_context_id.
+        Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'person_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'person_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'github_connect': dict({
       'description': '''
         Give this agent token access to more repos, such as a private GitHub repo.
@@ -4026,12 +4454,11 @@
     }),
     'grant_admin': dict({
       'description': '''
-        Granted admins can change what agents do, including agents platform admins use.
+        Make a user or role a Daimon admin, not a web app role (see update_web_person).
         <blank line>
-        Grant Daimon admin to a user or a supported role (platform admins only).
-        Only live platform admins using a personal CLI credential may grant.
-        Chat, routines and all agent-run credentials are refused. Delegates cannot delegate.
-        Configuration changes only; billing and spend caps remain platform-only.
+        Platform admins only, via a personal CLI credential; chat, routines and agent
+        credentials are refused. Delegates cannot delegate. Billing and spend caps stay
+        platform-only.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -4145,6 +4572,25 @@
         'required': list([
           'origin_context_id',
           'agent_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'issue_visitor_link': dict({
+      'description': '''
+        Issue a one-time sign-in link for a web visitor. The link is sent to the caller by
+        direct message, never shown here. Admin-only; refused for a person at or above the
+        caller's role.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'person_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'person_id',
         ]),
         'type': 'object',
       }),
@@ -4651,6 +5097,30 @@
         'type': 'object',
       }),
     }),
+    'list_agent_web_access': dict({
+      'description': '''
+        List each agent's web chat access: on or off, who may use it and the channel it is
+        kept to, if any. Admin-only.
+        ``next_page`` goes back as ``after``.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'after': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'type': 'object',
+      }),
+    }),
     'list_agents': dict({
       'description': '''
         List agents visible here, including their attached ``mcp_servers`` and ``skills``.
@@ -4701,6 +5171,118 @@
         'type': 'object',
       }),
     }),
+    'list_allowances': dict({
+      'description': '''
+        List the workspace's spend allowances and caps, newest first. Admin-only.
+        ``next_page`` goes back as ``after``.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'after': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'type': 'object',
+      }),
+    }),
+    'list_audit_kinds': dict({
+      'description': '''
+        List the kinds of audit entry the workspace has recorded, for the log's ``kind``
+        filter. Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+        }),
+        'type': 'object',
+      }),
+    }),
+    'list_audit_log': dict({
+      'description': '''
+        List the workspace's audit log, newest first: ``web`` for admin changes in the
+        web app, ``security`` for chat tool calls and panel writes. Filter by acting web
+        person, ``kind`` (see list_audit_kinds) and UTC days ``first`` to ``last``
+        (YYYY-MM-DD). Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'first': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'kind': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'last': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'limit': dict({
+            'default': 50,
+            'type': 'integer',
+          }),
+          'person_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'source': dict({
+            'anyOf': list([
+              dict({
+                'enum': list([
+                  'web',
+                  'security',
+                ]),
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'type': 'object',
+      }),
+    }),
     'list_channel_budgets': dict({
       'description': 'List channel budgets with a personal platform-admin CLI credential.',
       'parameters': dict({
@@ -4738,6 +5320,29 @@
         'additionalProperties': False,
         'properties': dict({
           'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'type': 'object',
+      }),
+    }),
+    'list_coding_keys': dict({
+      'description': '''
+        List live coding keys, never tokens. With agent_id: that agent's (all for an admin,
+        else your own). Without: yours on any agent.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'agent_id': dict({
             'anyOf': list([
               dict({
                 'type': 'string',
@@ -4936,6 +5541,18 @@
         'type': 'object',
       }),
     }),
+    'list_my_data': dict({
+      'description': '''
+        List what is held for you: connected accounts and sign-ins, and personal memory per
+        agent. Ids feed remove_my_data.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+        }),
+        'type': 'object',
+      }),
+    }),
     'list_my_sessions': dict({
       'description': '''
         List the sessions you started with this agent (id, status, title, timestamps).
@@ -5125,6 +5742,36 @@
         'type': 'object',
       }),
     }),
+    'list_thread_overrides': dict({
+      'description': '''
+        List the threads of a channel that keep their own participation, progress plan,
+        access rule or handoff. Admin-only.
+        ``next_page`` goes back as ``after``.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'after': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'channel_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'channel_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'list_threads': dict({
       'description': '''
         List active and archived public threads for a channel.
@@ -5186,6 +5833,91 @@
               'all',
             ]),
             'type': 'string',
+          }),
+        }),
+        'type': 'object',
+      }),
+    }),
+    'list_web_groups': dict({
+      'description': 'List everyone and each group the web sign-ins carry, with head counts. Admin-only.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+        }),
+        'type': 'object',
+      }),
+    }),
+    'list_web_invites': dict({
+      'description': '''
+        List the web app's invites: open, accepted or expired, newest first. Emails show
+        only in a direct message with the admin; elsewhere ``private_details`` is
+        ``direct_message`` and they are null. Pass this active turn's origin_context_id.
+        Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'type': 'object',
+      }),
+    }),
+    'list_web_people': dict({
+      'description': '''
+        List the web app's people, oldest first, with role, status and groups. ``query``
+        keeps those whose name or email contains it. Emails show only in a direct message with
+        the admin; elsewhere ``private_details`` is ``direct_message`` and they are null. Pass
+        this active turn's origin_context_id. ``next_page`` goes back as ``after``.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'after': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'limit': dict({
+            'default': 50,
+            'type': 'integer',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'query': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
         }),
         'type': 'object',
@@ -6164,7 +6896,7 @@
     }),
     'remove_agent_key': dict({
       'description': '''
-        Remove an old API key or token, such as a Toggl key, from an agent's stored keys.
+        Revoke or remove an agent's stored API key or token, such as a Toggl key.
         <blank line>
         Use ``request_agent_key`` to add a key privately and ``list_agent_keys`` to
         inspect stored names. Removing a missing key also succeeds; ``removed`` says
@@ -6230,6 +6962,44 @@
         'required': list([
           'channel_id',
           'skill',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'remove_my_data': dict({
+      'description': '''
+        Remove your own, by ids from list_my_data or list_coding_keys: memory (agent_id), a
+        connected account (its kind, as listed), an mcp sign-in (agent_id, key) or a
+        coding_key (key; an admin adds agent_id for another person's).
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'agent_id': dict({
+            'default': '',
+            'type': 'string',
+          }),
+          'key': dict({
+            'default': '',
+            'type': 'string',
+          }),
+          'kind': dict({
+            'enum': list([
+              'memory',
+              'microsoft',
+              'slack',
+              'mcp',
+              'coding_key',
+            ]),
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'kind',
+          'origin_context_id',
         ]),
         'type': 'object',
       }),
@@ -7179,6 +7949,29 @@
         'type': 'object',
       }),
     }),
+    'restore_library_skill_version': dict({
+      'description': 'Republish an older library skill version as the next one.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'skill_id': dict({
+            'type': 'string',
+          }),
+          'version': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'skill_id',
+          'version',
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'resume_watch': dict({
       'description': '''
         Resume your paused watch from an attended owner turn after fresh access checks.
@@ -7199,6 +7992,50 @@
         }),
         'required': list([
           'watch_id',
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'resync_agent_skills': dict({
+      'description': '''
+        Sync an agent's repo skills now from their recorded repos; an unchanged skill is
+        skipped. Only an owner of the agent or an admin.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'agent_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'agent_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'revert_agent': dict({
+      'description': '''
+        Restore a recorded version of an agent's setup as its next version; name, avatar,
+        places and sign-ins stay.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'agent_id': dict({
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'version': dict({
+            'type': 'integer',
+          }),
+        }),
+        'required': list([
+          'agent_id',
+          'version',
           'origin_context_id',
         ]),
         'type': 'object',
@@ -7252,6 +8089,33 @@
         'type': 'object',
       }),
     }),
+    'revoke_web_link': dict({
+      'description': "Revoke a web invite (id) or a person's sign-in links (id is the person).",
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'id': dict({
+            'type': 'string',
+          }),
+          'kind': dict({
+            'enum': list([
+              'invite',
+              'visitor_link',
+            ]),
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'kind',
+          'id',
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'rotate_watch_key': dict({
       'description': '''
         Rotate a page signing key, revoke the old key and cancel queued wakes. The fresh
@@ -7272,6 +8136,118 @@
         'required': list([
           'watch_id',
           'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'run_routine': dict({
+      'description': '''
+        Run a routine now, ahead of its schedule; its own schedule continues after.
+        <blank line>
+        The routine's owner or an admin. A paused routine is refused: resume it first.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'routine_id': dict({
+            'format': 'uuid',
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'routine_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'save_agent_skill_files': dict({
+      'description': '''
+        Edit an agent's skill file: publish text files as a new version of one of its skills,
+        or a new skill when ``skill_id`` is left out, and pin it. A null file keeps its bytes
+        from ``version`` (the one you read).
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'agent_id': dict({
+            'type': 'string',
+          }),
+          'files': dict({
+            'additionalProperties': dict({
+              'anyOf': list([
+                dict({
+                  'type': 'string',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
+            }),
+            'type': 'object',
+          }),
+          'skill_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'version': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'agent_id',
+          'files',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'save_library_skill_files': dict({
+      'description': '''
+        Publish text files as a library skill's next version. A file whose content is null
+        keeps its bytes from ``expected_version``, the version you read; a later version
+        is refused. Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'expected_version': dict({
+            'type': 'string',
+          }),
+          'files': dict({
+            'additionalProperties': dict({
+              'anyOf': list([
+                dict({
+                  'type': 'string',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
+            }),
+            'type': 'object',
+          }),
+          'skill_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'skill_id',
+          'files',
+          'expected_version',
         ]),
         'type': 'object',
       }),
@@ -7906,6 +8882,50 @@
         'type': 'object',
       }),
     }),
+    'set_agent_owners': dict({
+      'description': "Set an agent's owner and co-owners to exactly these web person or account ids.",
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'agent_id': dict({
+            'type': 'string',
+          }),
+          'co_owners': dict({
+            'anyOf': list([
+              dict({
+                'items': dict({
+                  'type': 'string',
+                }),
+                'type': 'array',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'owner': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+          }),
+        }),
+        'required': list([
+          'agent_id',
+          'owner',
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'set_agent_rule': dict({
       'description': '''
         Set where an agent runs: only in the ``runs_in`` channels and their threads,
@@ -7988,6 +9008,96 @@
           'agent_name',
           'tool_key',
           'rule',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'set_agent_web_access': dict({
+      'description': '''
+        Turn an agent's web chat on or off and set who may use it: everyone or up to 100
+        groups or invitees.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'agent_id': dict({
+            'type': 'string',
+          }),
+          'groups': dict({
+            'anyOf': list([
+              dict({
+                'items': dict({
+                  'type': 'string',
+                }),
+                'type': 'array',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'web': dict({
+            'anyOf': list([
+              dict({
+                'type': 'boolean',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'who': dict({
+            'anyOf': list([
+              dict({
+                'enum': list([
+                  'everyone',
+                  'groups',
+                  'invites',
+                ]),
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'agent_id',
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'set_allowance_amount': dict({
+      'description': 'Change the dollar amount of an existing allowance or cap. Admin-only.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'allowance_id': dict({
+            'type': 'string',
+          }),
+          'amount_usd': dict({
+            'anyOf': list([
+              dict({
+                'type': 'number',
+              }),
+              dict({
+                'pattern': '^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$',
+                'type': 'string',
+              }),
+            ]),
+          }),
+        }),
+        'required': list([
+          'allowance_id',
+          'amount_usd',
         ]),
         'type': 'object',
       }),
@@ -8520,6 +9630,39 @@
         'type': 'object',
       }),
     }),
+    'set_web_invite_files': dict({
+      'description': '''
+        Turn file attachments on or off for a visitor invite, accepted or not. Pass this
+        active turn's origin_context_id. Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'allow': dict({
+            'type': 'boolean',
+          }),
+          'invite_id': dict({
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'invite_id',
+          'allow',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'set_working_repo': dict({
       'description': '''
         Choose the one repo in this agent's filesystem, or pass 'none' to clear it.
@@ -8786,8 +9929,9 @@
     }),
     'update_agent': dict({
       'description': '''
-        Change an agent's system prompt or switch its model; add existing skills such as
-        build-models. Scalar ``model``, ``description`` and ``system`` fields replace.
+        Change an agent's instructions (system prompt), switch its model, or add existing
+        skills such as build-models. Scalar ``model``, ``description`` and ``system`` fields
+        replace.
         <blank line>
         Prefer current-generation ``claude-sonnet-5-5`` for Sonnet,
         ``claude-opus-5-5`` for Opus and ``claude-haiku-5-5`` for the cheapest
@@ -9989,6 +11133,58 @@
           'origin_context_id',
           'expected_revision',
           'before',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'update_web_person': dict({
+      'description': '''
+        Set a web person's role (web app admin or member, not Daimon admin) or suspend or
+        restore them.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'person_id': dict({
+            'type': 'string',
+          }),
+          'role': dict({
+            'anyOf': list([
+              dict({
+                'enum': list([
+                  'admin',
+                  'member',
+                ]),
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'status': dict({
+            'anyOf': list([
+              dict({
+                'enum': list([
+                  'active',
+                  'suspended',
+                ]),
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'person_id',
+          'origin_context_id',
         ]),
         'type': 'object',
       }),

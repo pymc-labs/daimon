@@ -12,7 +12,7 @@ from collections.abc import Collection
 from datetime import datetime
 from typing import Any, cast
 
-from daimon.core._models import WebPerson, WebSession, WebSessionPerson
+from daimon.core._models import PlatformPrincipal, WebPerson, WebSession, WebSessionPerson
 from daimon.core.cursor import Cursor
 from daimon.core.stores.domain import WebPersonKind, WebPersonRow, WebPersonStatus
 from sqlalchemy import CursorResult, delete, func, literal, or_, select, tuple_, update
@@ -38,6 +38,26 @@ async def get_person_for_account(
         await session.execute(
             select(WebPerson).where(
                 WebPerson.tenant_id == tenant_id, WebPerson.account_id == account_id
+            )
+        )
+    ).scalar_one_or_none()
+    return None if orm is None else WebPersonRow.model_validate(orm)
+
+
+async def get_person_for_platform_user(
+    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, platform_user_id: str
+) -> WebPersonRow | None:
+    """The workspace's person for a chat user, by the user's id on `platform`; None when
+    the user has no account here or no person in the web app."""
+    orm = (
+        await session.execute(
+            select(WebPerson)
+            .join(PlatformPrincipal, PlatformPrincipal.account_id == WebPerson.account_id)
+            .where(
+                WebPerson.tenant_id == tenant_id,
+                PlatformPrincipal.tenant_id == tenant_id,
+                PlatformPrincipal.platform == platform,
+                PlatformPrincipal.external_id == platform_user_id,
             )
         )
     ).scalar_one_or_none()

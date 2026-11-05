@@ -7,7 +7,6 @@ the Secure flag, because browsers refuse them there.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import secrets
 from dataclasses import dataclass
@@ -15,6 +14,7 @@ from datetime import timedelta
 
 from cryptography.fernet import InvalidToken, MultiFernet
 from daimon.core.config import WebSettings
+from daimon.core.web_admin import token_sha256 as token_sha256
 from starlette.requests import Request
 from starlette.responses import Response
 
@@ -35,11 +35,6 @@ def flow_cookie_name(web: WebSettings) -> str:
 
 def new_session_token() -> str:
     return secrets.token_urlsafe(32)
-
-
-def token_sha256(token: str) -> bytes:
-    """The only form of a session token the database ever holds."""
-    return hashlib.sha256(token.encode("utf-8")).digest()
 
 
 def set_cookie(

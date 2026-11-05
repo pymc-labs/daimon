@@ -656,7 +656,9 @@ async def _run_admitted_dm_turn(
         ) as turn_origin_row,
     ):
         controls = render_turn_origin(
-            turn_origin_row, effective_is_admin=prepared.admission.is_admin
+            turn_origin_row,
+            effective_is_admin=prepared.admission.is_admin,
+            web=prepared.admission.web,
         )
         user_message = f"{controls}\n{prompt}"
 

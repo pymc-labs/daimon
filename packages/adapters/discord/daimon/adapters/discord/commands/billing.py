@@ -9,7 +9,7 @@ from typing import cast
 
 import anthropic
 import structlog
-from daimon.adapters.discord.billing_panel.panel import BillingPanelView
+from daimon.adapters.discord.billing_panel.panel import BillingPanelView, web_spend_url
 from daimon.adapters.discord.billing_panel.read import (
     invoking_channel_id,
     is_platform_admin,
@@ -94,6 +94,7 @@ class BillingCog(commands.Cog):
                 account_id=account_id,
                 now=now,
                 since=since,
+                web_url=web_spend_url(runtime, interaction.guild_id, is_admin=is_admin),
             )
             await interaction.followup.send(
                 view=view,

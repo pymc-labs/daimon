@@ -57,10 +57,12 @@ from daimon.adapters.teams.card_actions import (
     get_or_create_account,
     guarded,
     heading,
+    open_in_web,
     replace_card,
     text_card,
     text_lines,
     toast,
+    web_links,
 )
 from daimon.adapters.teams.commands import CommandContext
 from daimon.adapters.teams.identity import DENIED, canonical_uuid
@@ -392,7 +394,9 @@ def _sub_card(*items: CardElement) -> AdaptiveCard:
     return AdaptiveCard(body=list(items))
 
 
-def _actions(state: BillingPanelState, place: str | None) -> list[Action]:
+def _actions(
+    state: BillingPanelState, place: str | None, web_url: str | None = None
+) -> list[Action]:
     """`Add credit` for an admin, `Redeem code` while a code the viewer may redeem is
     redeemable, and `Expiry dates` with timed credit."""
     actions: list[Action] = []
@@ -415,6 +419,8 @@ def _actions(state: BillingPanelState, place: str | None) -> list[Action]:
         )
         look = ActionSet(actions=[button(VERB, "Look up", "lookup", place=place or "")])
         actions.append(ShowCardAction(title=LOOK_UP, card=_sub_card(picker, look)))
+    if web_url:
+        actions.append(open_in_web(web_url))
     return actions
 
 
@@ -478,6 +484,7 @@ def _panel_body(
     channel_names: Mapping[str, str],
     place: str | None,
     lookup: Lookup | None,
+    web_url: str | None,
 ) -> list[CardElement]:
     subtext = (
         admin_summary(since, spend=state.guild_spend, people=state.guild_distinct_members)
@@ -504,7 +511,7 @@ def _panel_body(
     if state.timed_credit:
         rows = expiry_rows(state.timed_credit, when=card_date)
         body.append(_titled(EXPIRY_INTRO, *_rows(*rows), element_id=EXPIRY_ID, hidden=True))
-    if actions := _actions(state, place):
+    if actions := _actions(state, place, web_url):
         body.append(ActionSet(actions=actions, separator=True, spacing="Large"))
     if lookup is not None and state.is_admin:
         body.append(_titled(lookup.name, *_rows(lookup.line)))
@@ -520,15 +527,17 @@ def panel_card(
     channel_names: Mapping[str, str] | None = None,
     place: str | None = None,
     lookup: Lookup | None = None,
+    web_url: str | None = None,
 ) -> AdaptiveCard:
     """The member view, or for an admin the tenant view with its admin actions.
 
     ``channel_names`` names the channel budgets by id (`channel_labels`);
     ``place`` is the token every button carries for the channel it was asked in;
-    ``lookup`` is an admin's last "Look up a person" pick, shown under the actions.
+    ``lookup`` is an admin's last "Look up a person" pick, shown under the actions;
+    ``web_url`` is the spend page, offered as a button.
     """
     now = now or datetime.now(UTC)
-    body = _panel_body(state, since, now, channel_names or {}, place, lookup)
+    body = _panel_body(state, since, now, channel_names or {}, place, lookup, web_url)
     if notice is not None:
         body = [*text_lines(notice), *body]
     return AdaptiveCard(body=body, fallback_text=TITLE)
@@ -546,6 +555,13 @@ def checkout_card(url: str, amount: int, place: str | None = None) -> AdaptiveCa
         ActionSet(actions=pay),
     ]
     return AdaptiveCard(body=body, fallback_text="Complete payment")
+
+
+def _spend_url(
+    runtime: TeamsRuntime, tenant_id: uuid.UUID, admin: bool, foreign: bool
+) -> str | None:
+    links = web_links(runtime, tenant_id, admin=admin, foreign=foreign)
+    return links.spend() if links else None
 
 
 class BillingPanel:
@@ -581,7 +597,13 @@ class BillingPanel:
         platform_admin = teams is not None and await is_platform_admin(
             teams, admin_team_owners(self._runtime, fresh=True), user_id=user_id
         )
-        card = await self._panel(context.tenant_id, user_id, platform_admin, place=place)
+        card = await self._panel(
+            context.tenant_id,
+            user_id,
+            platform_admin,
+            place=place,
+            foreign=context.inbound.is_foreign,
+        )
         await context.send_card(card)
 
     async def on_action(
@@ -603,6 +625,7 @@ class BillingPanel:
         notice: str | None = None,
         place: str | None = None,
         lookup: Lookup | None = None,
+        foreign: bool = False,
     ) -> AdaptiveCard:
         now = datetime.now(UTC)
         since = month_start(now)
@@ -637,6 +660,7 @@ class BillingPanel:
             channel_names=channel_names,
             place=place,
             lookup=lookup,
+            web_url=_spend_url(self._runtime, tenant_id, is_admin, foreign),
         )
 
     async def _named(
@@ -691,7 +715,11 @@ class BillingPanel:
             return await self._lookup(actor, cast(object, data.get(PERSON_INPUT)), place)
         if data.get("op") != "topup":
             card = await self._panel(
-                actor.tenant_id, actor.user_id, actor.is_platform_admin, place=place
+                actor.tenant_id,
+                actor.user_id,
+                actor.is_platform_admin,
+                place=place,
+                foreign=actor.foreign,
             )
             return replace_card(card)
         if not actor.is_platform_admin:
@@ -752,7 +780,9 @@ class BillingPanel:
             )
         name = plain_name(labels.get(user_id) or "") or NAME_UNAVAILABLE
         lookup = Lookup(name=name, line=lookup_line(spend, turns))
-        card = await self._panel(tenant_id, actor.user_id, True, place=place, lookup=lookup)
+        card = await self._panel(
+            tenant_id, actor.user_id, True, place=place, lookup=lookup, foreign=actor.foreign
+        )
         return replace_card(card)
 
     async def _redeem(
@@ -802,5 +832,6 @@ class BillingPanel:
             actor.is_platform_admin,
             notice=redeemed_card_text(result),
             place=place,
+            foreign=actor.foreign,
         )
         return replace_card(card)

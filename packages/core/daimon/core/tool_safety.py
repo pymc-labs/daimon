@@ -61,6 +61,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
     "APPROVAL_TOOLS",
+    "CARDED_TOOLS",
     "CONFIRMED_DAIMON_TOOLS",
     "REACH_APPROVAL_TOOLS",
     "WATCH_CONFIRMED_TOOLS",
@@ -170,10 +171,26 @@ ANY_KEY: Final[str] = "*"
 #: refusal) matches no key reliably, and `decide_tool_call` never allows it.
 SERVER_SEPARATOR: Final[str] = "/"
 
+#: Tools that undo or change something for a person or the workspace, and run only on
+#: the person's card in chat, keyed to the input field every call carries.
+#: Each is a write whatever it is given, so every call asks.
+CARDED_TOOLS: Final[Mapping[str, str]] = {
+    "remove_my_data": "kind",
+    "revoke_web_link": "kind",
+    "delete_allowance": "allowance_id",
+    "update_web_person": "person_id",
+    "set_agent_web_access": "agent_id",
+    "change_workspace_settings": "origin_context_id",
+    "revert_agent": "agent_id",
+    "set_agent_owners": "agent_id",
+    "restore_library_skill_version": "skill_id",
+}
+
 #: Daimon's own tools that wait for the card like a third-party write, keyed
 #: to the input field whose presence makes the call the write. Without it the
 #: call only previews, and runs. With it, an unattended run is always refused.
 CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
+    **CARDED_TOOLS,
     "fly_launch_session": "template",
     "fly_extend_session": "hours",
     "start_long_job": "command",

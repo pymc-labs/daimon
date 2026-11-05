@@ -102,6 +102,7 @@ async def test_tenant_read_token_lists_exactly_its_tools(
         "list_channel_skills",
         "list_agent_tool_rules",
         "list_environments",
+        "list_thread_overrides",
     }
 
 
@@ -123,6 +124,7 @@ async def test_channels_write_token_lists_exactly_its_tools(
         "remove_channel_skill",
         "set_agent_tool_rule",
         "clear_agent_tool_rule",
+        "clear_thread_override",
     }
 
 

@@ -117,6 +117,9 @@ from daimon.core.turn.errors import (
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.slots import register_spend_recheck
 from daimon.core.turn_hold import RequesterOrg, TurnHold
+from daimon.core.web_links import TenantLinks
+from daimon.core.web_roles_rules import is_admin as is_web_admin
+from daimon.core.web_roles_rules import role_of_account
 from mux.contracts.admission import Admission as BackendAdmission
 from mux.contracts.config import BackendConfig, ConfigRevision, ResolvedBackend, resolve_default
 from mux.contracts.ids import ChannelRef, Provider, Scope, ThreadRef
@@ -398,6 +401,8 @@ class Admission:
     model_fell_back: bool = False
     # What `admit` was called with; a helper's turn is admitted on the same.
     request: AdmitRequest | None = field(default=None, compare=False, repr=False)
+    # This workspace's links into the web app for the admitted role; None with no web app.
+    web: TenantLinks | None = field(default=None, compare=False, repr=False)
 
     @property
     def is_admin(self) -> bool:
@@ -1660,6 +1665,7 @@ async def _admit_gates(
         grant=grant,
         model_override=thread_model.model_override,
         model_fell_back=thread_model.fell_back,
+        web=await _web_links(deps, tenant_id, principal.account_id, chat_admin=effective_admin),
     )
     if follow_generation is not None:
         # Admitted: this conversation follows its agent (M03), only if its slot is
@@ -2354,6 +2360,9 @@ async def capture_backend_source(
                 private_dm_id=(private_dm_id or context.thread_id or context.channel_id)
                 if is_dm
                 else private_dm_id,
+                web=await _web_links(
+                    deps, context.tenant_id, context.account_id, chat_admin=grant.subject.is_admin
+                ),
             )
             request = ProviderPreparationRequest(
                 deps,
@@ -2463,10 +2472,25 @@ def running_on(admission: Admission) -> dict[str, str]:
     return {"provider": provider, "model": model}
 
 
+async def _web_links(
+    deps: TurnDeps, tenant_id: uuid.UUID, account_id: uuid.UUID, *, chat_admin: bool
+) -> TenantLinks | None:
+    """The tenant's web links for the web role the account holds; None with no web app or
+    for a suspended person."""
+    if deps.web_links is None:
+        return None
+    async with deps.sessionmaker() as session:
+        role = await role_of_account(
+            session, tenant_id=tenant_id, account_id=account_id, chat_admin=chat_admin
+        )
+    return None if role is None else deps.web_links.for_tenant(tenant_id, admin=is_web_admin(role))
+
+
 def backend_facts(admission: Admission) -> dict[str, Any]:
-    """`render_turn_origin`'s backend facts for this admitted message (M03)."""
+    """`render_turn_origin`'s backend facts for this admitted message (M03), and its web links."""
     follow = admission.backend_follow
     return {
+        "web": admission.web,
         "running_on": running_on(admission),
         # A later hand-off summary (#1434) slots in here beside the move.
         "moved": None

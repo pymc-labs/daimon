@@ -12,6 +12,7 @@ import uuid
 from daimon.adapters.discord import theme
 from daimon.core.routines import Glyph, derive_glyph
 from daimon.core.stores.domain import RoutineRow
+from daimon.core.web_links import TenantLinks
 
 __all__ = [
     "Glyph",
@@ -69,6 +70,7 @@ class RoutinesPanelState:
     selected: RoutineEntry | None
     over_cap_count: int
     agent_name_map: dict[str, str]
+    links: TenantLinks | None = None
 
     @classmethod
     def initial(
@@ -77,12 +79,14 @@ class RoutinesPanelState:
         rows: list[RoutineEntry],
         over_cap_count: int,
         agent_name_map: dict[str, str],
+        links: TenantLinks | None = None,
     ) -> RoutinesPanelState:
         return cls(
             rows=rows,
             selected=(rows[0] if rows else None),
             over_cap_count=over_cap_count,
             agent_name_map=agent_name_map,
+            links=links,
         )
 
     def select(self, routine_id: uuid.UUID) -> None:

@@ -26,7 +26,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_compat import archive_agent
 from daimon.core.specs import AgentSpec
-from daimon.core.stores import agent_backends
+from daimon.core.stores import agent_backends, web_people
 from mux.contracts.config import DEFAULT_BACKEND
 from pydantic import ValidationError
 
@@ -85,6 +85,38 @@ async def set_owners(
     except agent_ownership.InactiveOwnerError as exc:
         raise AgentEditError("That person is not an active member.", kind="invalid") from exc
     return changed
+
+
+async def set_owners_by_ref(
+    deps: AgentEditDeps,
+    *,
+    actor: AgentActor,
+    ma_agent_id: str,
+    owner: str | None,
+    co_owners: Sequence[str],
+    audited: ChangeRecorder | None = None,
+) -> bool:
+    """`set_owners` for people named as a web person's id or, else, an account's id."""
+    async with deps.session_factory() as session:
+        people = await web_people.list_people(session, tenant_id=actor.tenant_id)
+    accounts = {str(p.id): p.account_id for p in people}
+
+    def account_of(ref: str) -> uuid.UUID:
+        if ref in accounts:
+            return accounts[ref]
+        try:
+            return uuid.UUID(ref)
+        except ValueError:
+            raise AgentEditError("That person is not in this workspace.", kind="invalid") from None
+
+    return await set_owners(
+        deps,
+        actor=actor,
+        ma_agent_id=ma_agent_id,
+        owner_account_id=None if owner is None else account_of(owner),
+        co_owner_account_ids=[account_of(c) for c in co_owners],
+        audited=audited,
+    )
 
 
 async def archive(

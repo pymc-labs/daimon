@@ -1,10 +1,21 @@
-import { keepPreviousData, useInfiniteQuery, useQuery } from "@tanstack/react-query"
+import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useEffect, useMemo } from "react"
+import { useNavigate } from "react-router"
 
 import { api } from "./api"
 import type { AgentRef, Capability, ChatSession, Group, Me, Person, Provider } from "./types"
 
 export const useMe = () => useQuery({ queryKey: ["me"], queryFn: () => api.get<Me>("/api/me"), staleTime: 60_000, refetchOnWindowFocus: true })
+/** Move to another of the person's workspaces, then to `next` with nothing from the old one cached. */
+export function useSwitchWorkspace(next: string, { replace = false, onError }: { replace?: boolean; onError?: () => void } = {}) {
+  const qc = useQueryClient()
+  const navigate = useNavigate()
+  return useMutation({
+    mutationFn: (id: string) => api.post("/api/workspaces/switch", { id }),
+    onSuccess: () => { qc.clear(); navigate(next, { replace }) },
+    onError,
+  })
+}
 export const useProviders = () => useQuery({ queryKey: ["auth", "providers"], queryFn: () => api.get<Provider[]>("/auth/providers") })
 
 /** A list the server pages: `data` is every row loaded so far, `loadMore` fetches the next page. */

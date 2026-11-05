@@ -7,7 +7,7 @@ Money crosses this boundary as decimal strings in both directions.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Literal, cast
 
@@ -21,6 +21,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _require_platform_admin,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
+from daimon.adapters.mcp.tools._web_url import WebUrl, tenant_links
 from daimon.adapters.mcp.tools._words import admin_noun
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
 from daimon.core.authz import Action
@@ -68,6 +69,8 @@ class ChannelBudgetResult:
     """False before a total or fixed window's start, or after a fixed one ends: it gates nothing."""
     summary: str
     """The line to read back, e.g. '$1.20 of $5.00 (monthly)'."""
+    web_url: WebUrl = None
+    """Set by ``set_channel_budget``: the channel's settings on the web, when there is one."""
 
 
 @dataclass(frozen=True)
@@ -401,15 +404,19 @@ def register_channel_budget_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         nothing outside them. Dates are ISO 8601, read as UTC without an
         offset. A thread id resolves to its parent channel.
         """
-        return await _set_channel_budget_impl(
+        auth = await _auth(ctx)
+        result = await _set_channel_budget_impl(
             runtime,
-            await _auth(ctx),
+            auth,
             channel_id=channel_id,
             limit_usd=limit_usd,
             window=window,
             starts_at=starts_at,
             ends_at=ends_at,
         )
+        links = await tenant_links(runtime, auth)
+        url = None if links is None else links.channel(result.channel_id)
+        return result if url is None else replace(result, web_url=url)
 
     @mcp.tool(tags={"admin", *scope_tags("channels:write")})
     async def clear_channel_budget(  # pyright: ignore[reportUnusedFunction]

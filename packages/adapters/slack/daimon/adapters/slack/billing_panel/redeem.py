@@ -27,6 +27,7 @@ from daimon.adapters.slack.billing_panel.views import build_billing_view, slack_
 from daimon.adapters.slack.errors import generate_request_id, surface_command_error
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.adapters.slack.web_button import spend_url
 from daimon.core.billing_panel import load_billing_snapshot, month_start, redeemed_text
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -239,7 +240,13 @@ async def _refresh_panel(
         )
         await client.views_update(  # pyright: ignore[reportUnknownMemberType]
             view_id=root_view_id,
-            view=build_billing_view(state, now=now, since=since, channel_id=channel_id),
+            view=build_billing_view(
+                state,
+                now=now,
+                since=since,
+                channel_id=channel_id,
+                web_url=spend_url(runtime.settings.web, tenant_id),
+            ),
         )
     except (DaimonError, SlackApiError, SQLAlchemyError) as exc:
         log.warning("slack.billing_redeem_refresh_failed", team_id=team_id, exc_info=exc)

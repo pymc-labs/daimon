@@ -21,6 +21,7 @@ from daimon.adapters.discord.routines_panel.state import RoutinesPanelState
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.errors import DaimonError
 from daimon.core.platform_words import DESCRIPTIONS
+from daimon.core.web_links import panel_links
 from sqlalchemy.exc import SQLAlchemyError
 
 import discord
@@ -69,6 +70,7 @@ class RoutinesCog(commands.Cog):
                 rows=entries,
                 over_cap_count=over_cap_count,
                 agent_name_map=agent_name_map,
+                links=panel_links(runtime.settings.web, tenant_id, admin=True),
             )
             view = RoutinesPanelView(
                 state,

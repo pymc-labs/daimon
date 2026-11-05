@@ -84,6 +84,7 @@ from daimon.core.stores.usage_events import (
     cost_for_user_in_tenant_since,
     turn_count_for_user_in_tenant_since,
 )
+from daimon.core.web_links import OPEN_IN_WEB, panel_links
 
 import discord
 from discord import Interaction
@@ -408,6 +409,13 @@ class _InvokerOnly(discord.ui.LayoutView):
         return True
 
 
+def web_spend_url(runtime: DiscordRuntime, guild_id: int | str, *, is_admin: bool) -> str | None:
+    """The web page of this server's spend, or None with no web app."""
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(guild_id))
+    links = panel_links(runtime.settings.web, tenant_id, admin=is_admin)
+    return None if links is None else links.spend()
+
+
 class BillingPanelView(_InvokerOnly):
     def __init__(
         self,
@@ -419,6 +427,7 @@ class BillingPanelView(_InvokerOnly):
         account_id: uuid.UUID,
         now: datetime,
         since: datetime,
+        web_url: str | None = None,
     ) -> None:
         super().__init__(timeout=600)
         self.state = state
@@ -441,7 +450,12 @@ class BillingPanelView(_InvokerOnly):
             rows.append(discord.ui.ActionRow(*actions))
         if is_admin:
             rows.append(discord.ui.ActionRow(_MemberLookupSelect()))
-        rows.append(discord.ui.ActionRow(_RefreshButton(), _DoneButton()))
+        footer: list[discord.ui.Button[BillingPanelView]] = [_RefreshButton(), _DoneButton()]
+        if web_url is not None:
+            footer.append(
+                discord.ui.Button(label=OPEN_IN_WEB, style=discord.ButtonStyle.link, url=web_url)
+            )
+        rows.append(discord.ui.ActionRow(*footer))
         self.add_item(build_billing_container(state, now=now, since=since, controls=rows))
 
 
@@ -574,6 +588,7 @@ async def _rerender(
         account_id=view.account_id,
         now=now,
         since=since,
+        web_url=web_spend_url(runtime, interaction.guild_id, is_admin=is_admin),
     )
     await interaction.edit_original_response(
         view=new_view,

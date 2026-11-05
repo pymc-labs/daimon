@@ -40,6 +40,7 @@ from daimon.core.agent_configuration import (
 from daimon.core.microsoft_write_paths import write_kind
 from daimon.core.outbound.reach import ReachPlan, card_consequence, card_title
 from daimon.core.tool_safety import (
+    CARDED_TOOLS,
     DAIMON_SERVER_NAME,
     PUBLISH_TOOLS,
     REACH_APPROVAL_TOOLS,
@@ -808,6 +809,7 @@ def confirmed_tools_for_turn(deps: TurnDeps) -> frozenset[str]:
     """Daimon's tools this turn's session asks before, from already-injected selectors."""
     return (
         WATCH_CONFIRMED_TOOLS
+        | frozenset(CARDED_TOOLS)
         | REACH_APPROVAL_TOOLS
         | backend_switch_tools(enabled=deps.backend_selection_enabled)
         | microsoft_send_tools(enabled=deps.microsoft_send, tool_safety_on=deps.tool_safety.enabled)

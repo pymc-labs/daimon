@@ -23,6 +23,7 @@ from typing import Any
 
 from daimon.adapters.slack.billing_panel.names import is_user_id
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
+from daimon.adapters.slack.web_button import open_in_web_button
 from daimon.core.billing_panel import (
     ADD_CREDIT,
     ASK_ADMIN,
@@ -201,6 +202,7 @@ def build_billing_container(
     now: datetime,
     since: datetime,
     lookup: Lookup | None = None,
+    web_url: str | None = None,
 ) -> list[dict[str, Any]]:
     """Block Kit blocks for the /billing modal, its sections set apart by dividers.
 
@@ -247,6 +249,8 @@ def build_billing_container(
         elements.append(_button(REDEEM_CODE, REDEEM_OPEN_ACTION_ID))
     if state.timed_credit:
         elements.append(_button(EXPIRY_DATES, EXPIRY_OPEN_ACTION_ID))
+    if web_url is not None:
+        elements.append(open_in_web_button(web_url))
     if elements:
         blocks += [_divider(), {"type": "actions", "elements": elements}]
     if state.is_admin:
@@ -270,13 +274,14 @@ def build_billing_view(
     since: datetime,
     channel_id: str | None = None,
     lookup: Lookup | None = None,
+    web_url: str | None = None,
 ) -> dict[str, Any]:
     """The /billing modal around ``build_billing_container``.
 
     ``channel_id`` is the channel /billing ran in, kept in the view so a
     refresh from the redeem form or a lookup still shows that channel's budget.
     """
-    blocks = build_billing_container(state, now=now, since=since, lookup=lookup)
+    blocks = build_billing_container(state, now=now, since=since, lookup=lookup, web_url=web_url)
     view = _modal(TITLE, blocks)
     view["private_metadata"] = json.dumps({"channel_id": channel_id or ""})
     return view

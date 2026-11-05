@@ -16,6 +16,7 @@ from typing import Any
 from daimon.adapters.slack.agent_setup.state import encode_private_metadata
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.routines_panel.state import RoutineEntry, RoutinesPanelState
+from daimon.adapters.slack.web_button import open_in_web_button
 from daimon.core.cron_words import schedule_words
 
 __all__ = [
@@ -134,23 +135,22 @@ def build_content_view(state: RoutinesPanelState, *, channel_id: str = "") -> di
             }
         )
 
-    blocks.append(
+    elements: list[dict[str, Any]] = [
         {
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "action_id": "routines_refresh",
-                    "text": {"type": "plain_text", "text": "↻ Refresh"},
-                },
-                {
-                    "type": "button",
-                    "action_id": "routines_create",
-                    "text": {"type": "plain_text", "text": "New routine"},
-                },
-            ],
-        }
-    )
+            "type": "button",
+            "action_id": "routines_refresh",
+            "text": {"type": "plain_text", "text": "↻ Refresh"},
+        },
+        {
+            "type": "button",
+            "action_id": "routines_create",
+            "text": {"type": "plain_text", "text": "New routine"},
+        },
+    ]
+    web_url = None if state.links is None else state.links.routine()
+    if web_url is not None:
+        elements.append(open_in_web_button(web_url))
+    blocks.append({"type": "actions", "elements": elements})
 
     return {
         "type": "modal",

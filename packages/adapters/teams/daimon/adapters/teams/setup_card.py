@@ -13,7 +13,7 @@ from typing import Any, Literal
 
 from daimon.adapters.teams.billing_panel import channel_name_text
 from daimon.adapters.teams.card import notice_adaptive_card
-from daimon.adapters.teams.card_actions import button, clip, heading
+from daimon.adapters.teams.card_actions import button, clip, heading, open_in_web
 from daimon.adapters.teams.channel_settings_card import CHANNEL_DIALOG
 from daimon.core import channel_backend
 from daimon.core.agent_detail_lists import (
@@ -299,6 +299,8 @@ def details_card(
         actions.append(SubmitAction(title="🧰 Use from your coding tools", data=data))
     elif is_admin:
         body.append(_text("Coding-tool access isn't set up yet.", subtle=True))
+    if details.web_url:
+        actions.append(open_in_web(details.web_url))
     actions.append(_button("Back", "agents", page=page))
     return _card(details.name, body, actions)
 

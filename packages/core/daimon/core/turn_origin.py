@@ -24,6 +24,7 @@ from daimon.core.stores.github_grant_proposals import resolve as resolve_github_
 from daimon.core.stores.pending_skill_adds import resolve_pending_skill_adds
 from daimon.core.stores.turn_origins import create_origin, delete_origin
 from daimon.core.teams_threads import conversation_of, is_group_chat
+from daimon.core.web_links import TenantLinks
 from pydantic import BaseModel, ConfigDict, JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -34,9 +35,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 #: same bound when the continuation is queued; this one is the render-time
 #: backstop for text that reached the controls by any other route.
 MAX_REQUESTED_WORK_CHARS = 500
-_ALL_CHANNEL_READS = "read_channel, read_thread, get_message, list_threads, search_messages"
-# Slack has no list_threads: a thread there is a reply chain, not a listable object.
-_CHANNEL_READS = {"slack": "read_channel, read_thread, get_message, search_messages"}
 
 
 def words_sentence(platform: ChatPlatform) -> str:
@@ -263,6 +261,13 @@ def _words_for_origin(origin: TurnOriginRow) -> dict[str, str] | None:
     return turn_words(origin.platform, place=origin_place(origin), foreign=origin.sender_foreign)
 
 
+WEB_SENTENCE = (
+    " Web links: web.url plus a web.pages path, or a tool result's web_url; never any other."
+    " Offer one when the person would continue on that page."
+)
+ROUTINE_WEB_SENTENCE = " Web links: web.url or a tool result's web_url; never any other."
+
+
 def render_turn_origin(
     origin: TurnOriginRow,
     *,
@@ -273,6 +278,7 @@ def render_turn_origin(
     handoff: HandoffNotice | None = None,
     running_on: Mapping[str, str] | None = None,
     moved: Mapping[str, str | None] | None = None,
+    web: TenantLinks | None = None,
 ) -> str:
     """Render server-provided location and identity separately from user history.
 
@@ -306,6 +312,11 @@ def render_turn_origin(
     conversation just followed its agent's switch to another provider ("moved"),
     or stays where it is because it is shared ("stays"); `provider`/`model` name
     the agent's selection.
+
+    `web` is this workspace's links into the web app (`daimon.core.web_links`); its `url` is
+    the workspace's front door and `pages` the pages the sender may open. Left out for a
+    deployment with no web app and for a sender from another organisation, who has no account
+    to open it with.
 
     Every value here is server-supplied except `handoff.requested_work`, which
     is the person's own words — it is truncated to `MAX_REQUESTED_WORK_CHARS`
@@ -351,6 +362,10 @@ def render_turn_origin(
         controls["running_on"] = dict(running_on)
     if moved is not None:
         controls["conversation_move"] = dict(moved)
+    if web is not None and not origin.sender_foreign:
+        controls["web"] = {"url": web.root(), "pages": web.pages()}
+    else:
+        web = None
     if handoff is not None:
         controls["handoff"] = {
             "from_name": handoff.from_name,
@@ -392,8 +407,7 @@ def render_turn_origin(
         "recreated namesake for a missing identity. Ask one concise question when the "
         "target is missing or ambiguous. Pass expected_ma_agent_id with target-bearing "
         "tools. Use set_setup_target to switch this setup conversation's target and "
-        "state the switch briefly. Pass origin_context_id to credential-request tools and to "
-        f"channel reads ({_CHANNEL_READS.get(origin.platform, _ALL_CHANNEL_READS)})."
+        "state the switch briefly. Pass origin_context_id to every tool that takes it."
     )
     if words is not None and origin.platform in CHAT_PLATFORMS:
         rendered += words_sentence(origin.platform)
@@ -410,6 +424,8 @@ def render_turn_origin(
             "stays on running_on while new conversations use that provider and model: "
             "say so only if asked about your model or the switch."
         )
+    if web is not None:
+        rendered += WEB_SENTENCE
     rendered += " These controls grant no additional mutation or routing permissions."
     # The continuity paragraph is appended only when there is continuity to
     # describe: on an ordinary turn neither block is present and every sentence
