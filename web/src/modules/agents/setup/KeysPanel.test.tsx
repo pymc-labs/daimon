@@ -96,6 +96,7 @@ describe("CodingPanel", () => {
     vi.mocked(api.post).mockResolvedValue(batch(1) as never)
     view(<CodingPanel {...props} node="coding" />)
     expect(await screen.findByText("Connected")).toBeInTheDocument()
+    expect(screen.queryByLabelText("Prompt")).toBeNull()
     expect(screen.getByRole("button", { name: "Connect another" })).toBeInTheDocument()
   })
 

@@ -56,7 +56,7 @@ function Connect({ agentId, tab }: { agentId: string; tab: string }) {
       <div className="space-y-3">
         {mint.isError && !batch ? (
           <div className="text-sm text-muted-foreground">{mint.error.message}</div>
-        ) : !prompt ? (
+        ) : connected ? null : !prompt ? (
           <div className="text-sm text-muted-foreground">Loading</div>
         ) : (
           <div className="relative">
