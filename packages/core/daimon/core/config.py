@@ -924,7 +924,7 @@ class SlackSettings(BaseModel):
         description=(
             "Slack user ids of automated QA bots allowed to start turns by "
             "mention. Bot-authored mentions are ignored by default; an "
-            "allow-listed bot runs as a plain workspace member, never an "
+            "allow-listed bot runs as a plain workspace member, never a Slack "
             "admin, so a harness can drive addressed turns end-to-end without "
             "a human. Leave empty outside test deployments -- an allow-listed "
             "bot spends real credit. As a tuple field this must be set as a "

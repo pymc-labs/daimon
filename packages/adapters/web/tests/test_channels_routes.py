@@ -18,7 +18,11 @@ from daimon.core.config import DiscordSettings, Settings
 from daimon.core.platform_names import ChannelSighting
 from daimon.core.scope_cascade import CascadeMode, CascadeScope
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.platform_names import mark_channel_status, upsert_channel_names
+from daimon.core.stores.platform_names import (
+    get_channel_statuses,
+    mark_channel_status,
+    upsert_channel_names,
+)
 from daimon.core.stores.switch_modes import set_switch_mode
 from daimon.core.stores.tenants import get_tenant
 from pydantic import SecretStr
@@ -134,9 +138,14 @@ async def test_unnamed_channels_are_asked_of_discord_and_a_deleted_one_leaves_th
                 ),
             )
         listed = (await admin.client.get("/api/channels")).json()
+        async with db_session_factory() as db:
+            stored = await get_channel_statuses(
+                db, tenant_id=admin.ws.tenant_id, platform="discord", channel_ids=["9001"]
+            )
 
     names = {row["id"]: row["name"] for row in listed["channels"]}
     assert "9001" not in names, "a channel Discord calls gone leaves the list"
+    assert stored == {"9001": "gone"}, "the answer is kept, so Discord is not asked again"
     assert names["9002"] == "fresh", "an unnamed channel carries the name Discord gives"
 
 

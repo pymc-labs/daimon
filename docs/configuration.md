@@ -970,9 +970,9 @@ Slack OAuth app client secret, used during the 'Add to Slack' install flow.
 
 Slack user ids of automated QA bots allowed to start turns by mention. Bot-authored
 mentions are ignored by default; an allow-listed bot runs as a plain workspace member,
-never an admin, so a harness can drive addressed turns end-to-end without a human. Leave
-empty outside test deployments -- an allow-listed bot spends real credit. As a tuple
-field this must be set as a JSON array, e.g. '["U123","U456"]'. Daimon's own id is
+never a Slack admin, so a harness can drive addressed turns end-to-end without a human.
+Leave empty outside test deployments -- an allow-listed bot spends real credit. As a
+tuple field this must be set as a JSON array, e.g. '["U123","U456"]'. Daimon's own id is
 refused even if listed.
 
 ### `DAIMON_SLACK__MAX_CONCURRENT_TURNS_PER_TENANT`

@@ -55,11 +55,12 @@ from daimon.core.channel_directory import (
 )
 from daimon.core.channel_rules import READERS_LABELS, WRITERS_LABELS, ChannelRuleRefused
 from daimon.core.errors import DaimonError, StaleChannelValue
+from daimon.core.platform_names import ChannelStatus
 from daimon.core.stores.access_policy import AccessPolicyUnreadable
 from daimon.core.stores.agent_tool_rules import list_channel_rule_history
 from daimon.core.stores.channel_changes import WORKSPACE_ID, list_changes
 from daimon.core.stores.domain import ChannelSetting
-from daimon.core.stores.platform_names import get_channel_names
+from daimon.core.stores.platform_names import get_channel_names, mark_channel_status
 from daimon.core.stores.tenants import get_tenant
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -494,9 +495,20 @@ def channels_router(runtime: WebRuntime) -> APIRouter:
         ]
         named: dict[str, str] = {}
         if unnamed:
-            _, looked = await channel_names(runtime, caller.person.tenant_id, unnamed)
+            platform, looked = await channel_names(runtime, caller.person.tenant_id, unnamed)
             rows = tuple(r for r in rows if r.channel_id not in looked.statuses)
             named = looked.names
+            if looked.statuses:
+                async with runtime.sessionmaker.begin() as db:
+                    await mark_channel_status(
+                        db,
+                        tenant_id=caller.person.tenant_id,
+                        platform=platform,
+                        statuses={
+                            c: "gone" if s is ChannelStatus.GONE else "direct"
+                            for c, s in looked.statuses.items()
+                        },
+                    )
         refs = await agent_refs(
             runtime,
             caller,
