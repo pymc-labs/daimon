@@ -14,9 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one ends the rest. The prompt never carries the agent's name, only a `daimon-` server key.
   The page shows when a tool has connected; when the codes end it says Expired and New prompt
   makes a fresh set. The person's access is checked again when a code is used, and the key is
-  logged as before. Claim attempts are limited per address (`DAIMON_MCP__CODING_CLAIM_ATTEMPTS`,
-  `..._WINDOW_MINUTES`, `..._TRUSTED_PROXY_HOPS`). The Token option keeps the old way of making
-  a key by hand, and keys and the profile page now list each key's tool. Migration 0184
+  logged as before. Claim attempts are limited per client, keyed on the rightmost
+  `X-Forwarded-For` entries and IPv6 by /64 (`DAIMON_MCP__CODING_CLAIM_ATTEMPTS`,
+  `..._WINDOW_MINUTES`, `..._CLAIM_FORWARDED_ENTRIES`). The Token option keeps the old way of
+  making a key by hand, and keys and the profile page now list each key's tool. Migration 0184
   adds the claim codes and a tool column on keys.
 
 - **Helpers pass files both ways.** `ask_helper` takes files uploaded with `create_file_upload_url`, and the helper's own files come back with its reply as download links that work for that ask only and expire after an hour. It works on every model provider and needs the public URL set. Migration 0183 adds the columns.

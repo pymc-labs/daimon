@@ -664,7 +664,7 @@ def create_mcp_app(
             ),
             jwt_secret=effective_settings.mcp.jwt_secret,
             rate_limiter=claim_rate_limiter,
-            trusted_hops=effective_settings.mcp.trusted_proxy_hops,
+            forwarded_entries=effective_settings.mcp.claim_forwarded_entries,
         ),
         methods=["POST"],
     )

@@ -461,14 +461,15 @@ not. Set to 0 to disable (not recommended in production).
 
 The window, in minutes, `coding_claim_attempts` is counted over.
 
-### `DAIMON_MCP__TRUSTED_PROXY_HOPS`
+### `DAIMON_MCP__CLAIM_FORWARDED_ENTRIES`
 
-`int` · optional · default `1`
+`int` · optional · default `2`
 
-How many reverse proxies in front of the mcp service each append the address they saw to
-X-Forwarded-For. The claim route's rate limit keys on the entry the outermost trusted
-proxy appended, counted from the right; anything to its left is client-supplied and
-ignored. 0 trusts no header and keys on the socket peer.
+How many of the rightmost X-Forwarded-For entries the claim route's rate limit keys on,
+joined. A proxy appends to the right, so these cannot be forged into another caller's
+key. 2 suits a load balancer that appends `&lt;client&gt;, &lt;balancer&gt;` and also
+direct calls; 0 ignores the header and keys on the socket peer. IPv6 addresses count by
+/64.
 
 ### `DAIMON_MCP__BUNDLE_TTL_DAYS`
 

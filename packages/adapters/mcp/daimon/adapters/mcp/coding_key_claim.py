@@ -7,13 +7,13 @@ no access log holds it. The answer is the bare key as plain text, so one `curl`
 can write it into a config file and the key never enters a chat.
 
 Every refusal is the same empty 404, so a caller cannot tell an unknown code
-from a used, expired or revoked one. Attempts are counted per client address:
-the one the trusted proxy appended to X-Forwarded-For, never a value the caller
-sent.
+from a used, expired or revoked one. Attempts are counted per client key: the
+rightmost entries of X-Forwarded-For, joined (see `client_key`).
 """
 
 from __future__ import annotations
 
+import ipaddress
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from urllib.parse import parse_qs
@@ -36,19 +36,37 @@ def _refused() -> Response:
     return Response(status_code=404)
 
 
-def client_address(forwarded_for: str, peer: str | None, *, trusted_hops: int) -> str:
-    """The caller's address, from the X-Forwarded-For entry the trusted proxies appended.
+def _normalised(address: str) -> str:
+    """The address as one rate-limit identity: an IPv6 address is its /64, as one
+    subscriber holds a whole /64 and could otherwise rotate through 2^64 of them;
+    an IPv4-mapped IPv6 address is the IPv4 one. Anything else is kept as sent."""
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return address
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None:
+            return str(ip.ipv4_mapped)
+        return str(ipaddress.ip_network(f"{ip}/64", strict=False).network_address) + "/64"
+    return str(ip)
 
-    Each trusted proxy appends the address it saw, so the entries from the right
-    are theirs and everything left of them is whatever the caller sent. The
-    `trusted_hops`-th from the right is the outermost trusted proxy's, the
-    caller's real address. With none trusted, or fewer entries than proxies (so
-    the header is not what they wrote), the socket peer stands.
+
+def client_key(forwarded_for: str, peer: str | None, *, entries: int) -> str:
+    """What the claim route counts attempts against.
+
+    The rightmost `entries` of X-Forwarded-For, each normalised and joined. What a
+    proxy appended sits at the right and a caller can only add to the left, so
+    nobody can forge a way into another caller's key. The service may be reached
+    both behind a load balancer, which appends `<client>, <lb>`, and directly,
+    where the host appends `<client>`; taking both entries keeps the two apart,
+    and at worst a direct caller rotates its own key, which gains nothing against
+    a code that cannot be guessed. With none counted, or fewer entries than that
+    (so the header is not what a proxy wrote), the normalised socket peer stands.
     """
-    entries = [part.strip() for part in forwarded_for.split(",")]
-    if trusted_hops > 0 and len(entries) >= trusted_hops and entries[-trusted_hops]:
-        return entries[-trusted_hops]
-    return peer or "unknown"
+    parts = [part.strip() for part in forwarded_for.split(",")]
+    if entries > 0 and len(parts) >= entries and all(parts[-entries:]):
+        return ",".join(_normalised(part) for part in parts[-entries:])
+    return _normalised(peer) if peer else "unknown"
 
 
 async def _code_of(request: Request) -> str | None:
@@ -69,17 +87,17 @@ def build_coding_key_claim_route(
     deps: AgentEditDeps,
     jwt_secret: SecretStr | None,
     rate_limiter: RateLimiter,
-    trusted_hops: int,
+    forwarded_entries: int,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> Callable[[Request], Awaitable[Response]]:
     """Build the `POST /coding-keys/claim` handler."""
 
     async def claim(request: Request) -> Response:
         peer = request.client.host if request.client else None
-        address = client_address(
-            request.headers.get("x-forwarded-for", ""), peer, trusted_hops=trusted_hops
+        key = client_key(
+            request.headers.get("x-forwarded-for", ""), peer, entries=forwarded_entries
         )
-        if jwt_secret is None or not rate_limiter.check_and_record(address):
+        if jwt_secret is None or not rate_limiter.check_and_record(key):
             return _refused()
         code = await _code_of(request)
         if code is None:

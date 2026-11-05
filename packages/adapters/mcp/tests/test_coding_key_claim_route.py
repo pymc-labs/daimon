@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
-from daimon.adapters.mcp.coding_key_claim import build_coding_key_claim_route, client_address
+from daimon.adapters.mcp.coding_key_claim import build_coding_key_claim_route, client_key
 from daimon.core._models import CodingKeyClaim, McpToken
 from daimon.core.agent_editing import AgentEditDeps
 from daimon.core.coding_key_connect import hash_code
@@ -68,7 +68,7 @@ def _client(
     *,
     secret: SecretStr | None = _SECRET,
     limit: int = 100,
-    trusted_hops: int = 1,
+    forwarded_entries: int = 2,
 ) -> httpx.AsyncClient:
     route = build_coding_key_claim_route(
         deps=AgentEditDeps(
@@ -78,7 +78,7 @@ def _client(
         ),
         jwt_secret=secret,
         rate_limiter=RateLimiter(max_requests=limit, window=timedelta(minutes=10)),
-        trusted_hops=trusted_hops,
+        forwarded_entries=forwarded_entries,
     )
     app = Starlette(routes=[Route("/coding-keys/claim", route, methods=["POST"])])
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t")
@@ -142,17 +142,17 @@ async def test_attempts_are_rate_limited_per_address(
             await client.post(
                 "/coding-keys/claim",
                 data={"code": "guess"},
-                headers={"x-forwarded-for": "198.51.100.7"},
+                headers={"x-forwarded-for": "203.0.113.5, 198.51.100.7"},
             )
         limited = await client.post(
             "/coding-keys/claim",
             data={"code": codes["codex"]},
-            headers={"x-forwarded-for": "198.51.100.7"},
+            headers={"x-forwarded-for": "203.0.113.5, 198.51.100.7"},
         )
         other = await client.post(
             "/coding-keys/claim",
             data={"code": codes["codex"]},
-            headers={"x-forwarded-for": "10.0.0.1, 203.0.113.9"},
+            headers={"x-forwarded-for": "203.0.113.6, 198.51.100.7"},
         )
 
     assert limited.status_code == 404, "a right code from a limited address is refused"
@@ -173,33 +173,37 @@ async def test_a_forged_leftmost_forwarded_address_buys_no_fresh_allowance(
             await client.post(
                 "/coding-keys/claim",
                 data={"code": "guess"},
-                headers={"x-forwarded-for": f"192.0.2.{n}, 198.51.100.7"},
+                headers={"x-forwarded-for": f"192.0.2.{n}, 203.0.113.5, 198.51.100.7"},
             )
         forged = await client.post(
             "/coding-keys/claim",
             data={"code": codes["codex"]},
-            headers={"x-forwarded-for": "192.0.2.99, 198.51.100.7"},
+            headers={"x-forwarded-for": "192.0.2.99, 203.0.113.5, 198.51.100.7"},
         )
 
-    assert forged.status_code == 404, "the proxy-appended address is counted, not the forged one"
+    assert forged.status_code == 404, "the proxy-appended entries are counted, not the forged one"
 
 
 @pytest.mark.parametrize(
-    ("header", "peer", "hops", "expected"),
+    ("header", "peer", "entries", "expected"),
     [
+        ("1.1.1.1, 2.2.2.2, 3.3.3.3", "10.0.0.1", 2, "2.2.2.2,3.3.3.3"),
         ("1.1.1.1, 2.2.2.2, 3.3.3.3", "10.0.0.1", 1, "3.3.3.3"),
-        ("1.1.1.1, 2.2.2.2, 3.3.3.3", "10.0.0.1", 2, "2.2.2.2"),
-        ("9.9.9.9", "10.0.0.1", 1, "9.9.9.9"),
+        ("9.9.9.9, 8.8.8.8", "10.0.0.1", 2, "9.9.9.9,8.8.8.8"),
         ("9.9.9.9", "10.0.0.1", 2, "10.0.0.1"),
-        ("9.9.9.9", "10.0.0.1", 0, "10.0.0.1"),
-        ("", "10.0.0.1", 1, "10.0.0.1"),
-        ("", None, 1, "unknown"),
-        ("1.1.1.1,", "10.0.0.1", 1, "10.0.0.1"),
+        ("9.9.9.9, 8.8.8.8", "10.0.0.1", 0, "10.0.0.1"),
+        ("", "10.0.0.1", 2, "10.0.0.1"),
+        ("", None, 2, "unknown"),
+        ("1.1.1.1,", "10.0.0.1", 2, "10.0.0.1"),
+        ("2001:db8:1:2:aaaa::1, 8.8.8.8", None, 2, "2001:db8:1:2::/64,8.8.8.8"),
+        ("2001:db8:1:2:bbbb::9, 8.8.8.8", None, 2, "2001:db8:1:2::/64,8.8.8.8"),
+        ("::ffff:1.2.3.4, 8.8.8.8", None, 2, "1.2.3.4,8.8.8.8"),
+        ("", "2001:db8:1:2:cccc::5", 2, "2001:db8:1:2::/64"),
     ],
 )
-def test_the_client_address_is_the_hop_a_trusted_proxy_appended(
-    header: str, peer: str | None, hops: int, expected: str
+def test_the_client_key_is_the_rightmost_forwarded_entries_normalised(
+    header: str, peer: str | None, entries: int, expected: str
 ) -> None:
-    got = client_address(header, peer, trusted_hops=hops)
+    got = client_key(header, peer, entries=entries)
 
-    assert got == expected, f"{header!r} behind {hops} trusted hop(s) from {peer}"
+    assert got == expected, f"{header!r} with {entries} entries from {peer}"

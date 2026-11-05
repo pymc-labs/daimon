@@ -298,15 +298,15 @@ class McpSettings(BaseModel):
         ge=1,
         description="The window, in minutes, `coding_claim_attempts` is counted over.",
     )
-    trusted_proxy_hops: int = Field(
-        default=1,
+    claim_forwarded_entries: int = Field(
+        default=2,
         ge=0,
         description=(
-            "How many reverse proxies in front of the mcp service each append the "
-            "address they saw to X-Forwarded-For. The claim route's rate limit keys "
-            "on the entry the outermost trusted proxy appended, counted from the "
-            "right; anything to its left is client-supplied and ignored. 0 trusts "
-            "no header and keys on the socket peer."
+            "How many of the rightmost X-Forwarded-For entries the claim route's rate "
+            "limit keys on, joined. A proxy appends to the right, so these cannot be "
+            "forged into another caller's key. 2 suits a load balancer that appends "
+            "`<client>, <balancer>` and also direct calls; 0 ignores the header and "
+            "keys on the socket peer. IPv6 addresses count by /64."
         ),
     )
     bundle_ttl_days: int = Field(
