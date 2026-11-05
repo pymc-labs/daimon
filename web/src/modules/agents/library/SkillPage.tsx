@@ -1,6 +1,7 @@
-import { ExternalLink, Trash2 } from "lucide-react"
+import { Copy, ExternalLink, RefreshCw, Trash2 } from "lucide-react"
 import { useState } from "react"
 import { useNavigate, useParams } from "react-router"
+import { toast } from "sonner"
 
 import { QueryState } from "@/components/QueryState"
 import { Ago } from "@/components/common"
@@ -8,6 +9,8 @@ import { AgentLink, ChannelLink } from "@/components/links"
 import { PanelMenu, PanelSection, SettingRow, Tag, type MenuAction } from "@/components/panel"
 import { Page } from "@/components/shell/Page"
 import { Button } from "@/components/ui/button"
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { ApiError } from "@/lib/api"
 import { useConfirm } from "@/lib/confirm"
@@ -15,9 +18,9 @@ import { useParam } from "@/lib/filters"
 import { cn } from "@/lib/utils"
 import { SkillFilesView } from "../inspector/SkillFilesEditor"
 import { useSkillFilesDraft } from "../inspector/useSkillFilesDraft"
-import type { SkillDetail, SkillFiles, SkillVersion } from "../types"
-import { useLibraryFiles, useSkill, useSkillVersions, useSkillWrites } from "./api"
-import { descriptionField, sourceLabel, withDescription } from "./skill-meta"
+import type { MirrorCheck, MirrorDoc, SkillDetail, SkillFiles, SkillVersion } from "../types"
+import { useLibraryFiles, useLibrarySkills, useSkill, useSkillVersions, useSkillWrites } from "./api"
+import { descriptionField, slugOf, sourceLabel, withDescription } from "./skill-meta"
 
 export function SkillPage() {
   const { id = "" } = useParams()
@@ -50,8 +53,11 @@ function Loaded({ skill, custom, files, filesLoading, versions, viewing }: {
   const navigate = useNavigate()
   const confirm = useConfirm()
   const [, setVersion] = useParam("version")
-  const { save, restore, remove } = useSkillWrites()
-  const readOnly = !custom || skill.default || viewing !== null
+  const { save, restore, remove, check, approve } = useSkillWrites()
+  const [forking, setForking] = useState(false)
+  const mirror = skill.server ?? null
+  const waiting = mirror?.status === "pending" ? mirror.pending_digest : null
+  const readOnly = !custom || skill.default || viewing !== null || !!mirror
   // The draft outlives refetches. `base` is the version it sits on; if the skill moves past it, or a
   // save is refused, they pick Reload or Overwrite, so a newer version is never replaced unasked.
   const [base, setBase] = useState(skill.version)
@@ -75,7 +81,12 @@ function Loaded({ skill, custom, files, filesLoading, versions, viewing }: {
     if (!(await confirm({ title: `Delete ${skill.title}?`, action: "Delete", destructive: true }))) return
     remove.mutate(skill.id, { onSuccess: () => navigate("/agents/skills") })
   }
+  const checked = ({ result }: MirrorCheck) => (result === "failed" ? toast.error("Check failed") : toast(CHECKED[result]))
   const menu: MenuAction[] = [
+    ...(mirror ? [
+      { label: "Check now", icon: <RefreshCw />, disabled: check.isPending, onSelect: () => check.mutate(skill.id, { onSuccess: checked }) },
+      { label: "Fork", icon: <Copy />, onSelect: () => setForking(true) },
+    ] : []),
     ...(skill.source_url ? [{ label: "Open source", icon: <ExternalLink />, onSelect: () => window.open(skill.source_url!, "_blank", "noopener") }] : []),
     ...(custom && !skill.default ? [{ label: "Delete", icon: <Trash2 />, destructive: true, onSelect: () => void drop() }] : []),
   ]
@@ -91,6 +102,9 @@ function Loaded({ skill, custom, files, filesLoading, versions, viewing }: {
         <>
           {showDirty && <Button size="sm" variant="ghost" disabled={draft.busy} onClick={draft.discard}>Discard</Button>}
           {showDirty && !changed && <Button size="sm" disabled={draft.busy} onClick={() => void submit()}>Save version</Button>}
+          {waiting && (
+            <Button size="sm" disabled={approve.isPending} onClick={() => approve.mutate({ id: skill.id, digest: waiting }, { onSuccess: checked })}>Approve update</Button>
+          )}
           <PanelMenu items={menu} />
         </>
       }
@@ -107,9 +121,11 @@ function Loaded({ skill, custom, files, filesLoading, versions, viewing }: {
           {viewing && (
             <div className="flex h-10 shrink-0 items-center gap-2 border-b bg-muted/40 px-4 text-sm lg:px-6">
               <span>Viewing version {viewing}</span>
-              <Button size="xs" className="ml-auto" disabled={restore.isPending}
-                onClick={() => restore.mutate({ id: skill.id, version: viewing }, { onSuccess: () => setVersion(null) })}>Restore</Button>
-              <Button size="xs" variant="ghost" onClick={() => setVersion(null)}>Back to latest</Button>
+              {!mirror && (
+                <Button size="xs" className="ml-auto" disabled={restore.isPending}
+                  onClick={() => restore.mutate({ id: skill.id, version: viewing }, { onSuccess: () => setVersion(null) })}>Restore</Button>
+              )}
+              <Button size="xs" variant="ghost" className={cn(mirror && "ml-auto")} onClick={() => setVersion(null)}>Back to latest</Button>
             </div>
           )}
           {files ? <SkillFilesView draft={draft} readOnly={readOnly} /> : (
@@ -132,6 +148,7 @@ function Loaded({ skill, custom, files, filesLoading, versions, viewing }: {
               </SettingRow>
             </div>
           </PanelSection>
+          {mirror && <ServerSection mirror={mirror} />}
           <PanelSection title={`Used by${skill.used_by.length ? ` (${skill.used_by.length})` : ""}`}>
             {!skill.used_by.length ? <div className="text-sm text-muted-foreground">Nothing</div> : (
               <ul className="space-y-1.5 text-sm">
@@ -170,6 +187,63 @@ function Loaded({ skill, custom, files, filesLoading, versions, viewing }: {
           )}
         </aside>
       </div>
+      {forking && <ForkSkill skill={skill} onClose={() => setForking(false)} />}
     </Page>
+  )
+}
+
+function ForkSkill({ skill, onClose }: { skill: SkillDetail; onClose: () => void }) {
+  const navigate = useNavigate()
+  const { fork } = useSkillWrites()
+  const library = useLibrarySkills()
+  const [name, setName] = useState(`${skill.name}-copy`)
+  const slug = slugOf(name)
+  const taken = !!slug && (library.data ?? []).some((s) => s.name === slug)
+  const go = () => slug && !taken && fork.mutate({ id: skill.id, name: slug }, {
+    onSuccess: (r) => { onClose(); navigate(`/agents/skills/${encodeURIComponent(r.id)}`) },
+  })
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader><DialogTitle>Fork {skill.title}</DialogTitle></DialogHeader>
+        <form id="fork-skill" className="space-y-1" onSubmit={(e) => { e.preventDefault(); go() }}>
+          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Name" aria-label="Name" aria-invalid={taken} className="h-8" autoFocus />
+          {taken && <p className="text-xs text-destructive">{slug} is taken</p>}
+        </form>
+        <DialogFooter>
+          <Button variant="ghost" onClick={onClose}>Cancel</Button>
+          <Button type="submit" form="fork-skill" disabled={!slug || taken || fork.isPending || library.isPending}>Fork</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+const CHECKED: Record<Exclude<MirrorCheck["result"], "failed">, string> = {
+  unchanged: "Up to date", updated: "Updated", pending: "Needs approval", unavailable: "Unavailable",
+}
+const STATUS: Record<MirrorDoc["status"], string> = { current: "Up to date", pending: "Needs approval", unavailable: "Unavailable" }
+
+/** Where a mirrored skill comes from, and the update waiting for approval. */
+export function ServerSection({ mirror }: { mirror: MirrorDoc }) {
+  const changes = mirror.pending_changes
+  return (
+    <PanelSection title="Server">
+      <div className="space-y-2.5">
+        <SettingRow label="Status"><span className={cn(mirror.status === "unavailable" && "text-destructive")}>{STATUS[mirror.status]}</span></SettingRow>
+        {mirror.version_label && <SettingRow label="Version"><span>{mirror.version_label}</span></SettingRow>}
+        {mirror.status === "pending" && mirror.pending_label && <SettingRow label="New version"><span>{mirror.pending_label}</span></SettingRow>}
+        <SettingRow label="Checked"><Ago iso={mirror.last_checked_at} /></SettingRow>
+        {mirror.status === "pending" && changes && (
+          <SettingRow label="Changes" top>
+            <ul className="space-y-0.5 font-mono text-xs">
+              {(["added", "changed", "removed"] as const).flatMap((k) => changes[k].map((path) => (
+                <li key={`${k}:${path}`}><span className="text-muted-foreground">{k === "added" ? "+" : k === "removed" ? "−" : "~"}</span> {path}</li>
+              )))}
+            </ul>
+          </SettingRow>
+        )}
+      </div>
+    </PanelSection>
   )
 }

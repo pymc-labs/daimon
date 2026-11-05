@@ -5448,6 +5448,93 @@ class WebNodeToken(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class ServerSkill(Base):
+    """A library skill mirrored from a skills server, one per (tenant, server, upstream skill).
+
+    The sync owns its library skill. `digest` names the accepted files; an update that
+    needs approval waits in the `pending_*` columns. `added_by_account_id` is whom the
+    server is asked as; once that account is gone the mirror is unavailable.
+    """
+
+    __tablename__ = "server_skills"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('current', 'pending', 'unavailable')", name="ck_server_skills_status"
+        ),
+        UniqueConstraint("tenant_id", "server", "uri", name="uq_server_skills_upstream"),
+        UniqueConstraint("tenant_id", "skill_id", name="uq_server_skills_skill"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    server: Mapped[str] = mapped_column(Text, nullable=False)
+    uri: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    skill_id: Mapped[str] = mapped_column(Text, nullable=False)
+    version_label: Mapped[str | None] = mapped_column(Text, nullable=True)
+    digest: Mapped[str] = mapped_column(Text, nullable=False)
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    allowed_tools: Mapped[Any] = mapped_column(JSONB, nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="current")
+    pending_digest: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pending_label: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pending_changes: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    added_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class ServerSkillDeployment(Base):
+    """The concrete version one provider holds of a mirrored skill's files (`digest`)."""
+
+    __tablename__ = "server_skill_deployments"
+    __table_args__ = (
+        CheckConstraint("version <> 'latest'", name="ck_server_skill_deployments_concrete"),
+    )
+
+    mirror_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("server_skills.id", ondelete="CASCADE"), primary_key=True
+    )
+    provider: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    digest: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class AgentSkillFollow(Base):
+    """Whether an agent follows a mirrored skill's updates; no row means it does."""
+
+    __tablename__ = "agent_skill_follows"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    agent_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    skill_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    follow: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    # The update the agent's backend consent held back: it waits for the owner's re-confirm.
+    held_digest: Mapped[str | None] = mapped_column(Text, nullable=True)
+    held_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class WorkspaceMember(Base):
     """Who is a member of a chat workspace Daimon is installed in, as its platform says.
 

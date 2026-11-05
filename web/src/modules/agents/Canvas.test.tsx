@@ -14,7 +14,7 @@ vi.mock("@/lib/api", () => ({ api: { get: vi.fn() } }))
 
 const AT = "2026-11-01T00:00:00Z"
 const github: AgentGithub = {
-  configured: true, can_manage: true, can_connect: true, skills: [], release: { name: "v2.4.1", at: AT, url: null }, sync: null,
+  configured: true, can_manage: true, can_connect: true, skills: [], release: { name: "v2.4.1", at: AT, url: null }, sync: { state: "done", at: AT, error: null },
   repos: [{ name: "acme/data", url: "https://github.com/acme/data", access: "write", working: true, shared: false, status: "active", installation: "active", granted_at: AT, granted_by: "Ada" }],
 }
 
@@ -39,11 +39,12 @@ beforeEach(() => {
 })
 
 describe("Canvas GitHub card", () => {
-  it("shows the working repo and the release to someone who sees setup", async () => {
+  it("shows the working repo and the sync to someone who sees setup", async () => {
     show(true)
     const card = await screen.findByLabelText("GitHub")
     expect(await screen.findByText("acme/data")).toBeInTheDocument()
-    expect(card).toHaveTextContent("v2.4.1")
+    expect(card).toHaveTextContent(/Synced/)
+    expect(card).not.toHaveTextContent("v2.4.1")
   })
 
   it("is absent for someone who does not", async () => {

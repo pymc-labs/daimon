@@ -9,7 +9,7 @@ import { ApiError, api } from "@/lib/api"
 import type { SkillDetail } from "../types"
 import { SkillPage } from "./SkillPage"
 
-vi.mock("sonner", () => ({ toast: { error: vi.fn() } }))
+vi.mock("sonner", () => ({ toast: Object.assign(vi.fn(), { error: vi.fn() }) }))
 vi.mock("@/lib/api", async (orig) => ({ ...(await orig<typeof import("@/lib/api")>()), api: { get: vi.fn(), put: vi.fn(), post: vi.fn(), del: vi.fn() } }))
 
 const skill = (version: string, source: SkillDetail["source"] = "custom"): SkillDetail => ({
@@ -19,11 +19,13 @@ const skill = (version: string, source: SkillDetail["source"] = "custom"): Skill
 
 let latest = "1"
 let source: SkillDetail["source"] = "custom"
+let server: SkillDetail["server"] = null
 const serve = () => vi.mocked(api.get).mockImplementation((url: string) => {
   if (url === "/api/me") return Promise.resolve({ capabilities: [], workspace: { name: "Workspace" } }) as never
+  if (url === "/api/agents/skills") return Promise.resolve([skill(latest), { ...skill("1"), id: "sk_2", name: "review-copy" }]) as never
   if (url.endsWith("/versions")) return Promise.resolve([]) as never
   if (url.includes("/files")) return Promise.resolve({ skill_id: "sk_1", version: latest, files: [{ path: "SKILL.md", size: 5, content: `v${latest}` }] }) as never
-  return Promise.resolve(skill(latest, source)) as never
+  return Promise.resolve({ ...skill(latest, source), server }) as never
 })
 
 const show = () => render(
@@ -38,6 +40,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   latest = "1"
   source = "custom"
+  server = null
   vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} })
   serve()
 })
@@ -79,5 +82,40 @@ describe("SkillPage", () => {
     show()
     expect(await screen.findByLabelText("SKILL.md")).toHaveValue("v1")
     expect(vi.mocked(api.get).mock.calls.some(([url]) => String(url).includes("/files"))).toBe(true)
+  })
+
+  it("keeps a server skill read-only and approves its waiting update", async () => {
+    server = {
+      server: "data", uri: "skill://review", version_label: "1.0", status: "pending", pending_digest: "d2", pending_label: "1.1",
+      pending_changes: { added: ["run.py"], removed: [], changed: ["SKILL.md"] }, last_checked_at: null,
+    }
+    vi.mocked(api.post).mockResolvedValueOnce({ result: "updated", server: { ...server, status: "current" } } as never)
+    show()
+    expect(await screen.findByText("Needs approval")).toBeInTheDocument()
+    expect(screen.getByText("run.py")).toBeInTheDocument()
+    expect(screen.getByText("Skills server")).toBeInTheDocument()
+    await userEvent.type(await screen.findByLabelText("SKILL.md"), " mine")
+    expect(screen.queryByRole("button", { name: "Save version" })).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole("button", { name: "Approve update" }))
+    expect(api.post).toHaveBeenCalledWith("/api/agents/skills/sk_1/approve", { digest: "d2" })
+  })
+
+  it("forks a server skill under a name no other skill holds", async () => {
+    server = {
+      server: "data", uri: "skill://review", version_label: "1.0", status: "current", pending_digest: null, pending_label: null,
+      pending_changes: null, last_checked_at: null,
+    }
+    vi.mocked(api.post).mockResolvedValueOnce({ id: "sk_3", name: "review-mine", version: "1" } as never)
+    show()
+    await userEvent.click(await screen.findByRole("button", { name: "More" }))
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Fork" }))
+    const name = await screen.findByLabelText("Name")
+    expect(name).toHaveValue("review-copy")
+    expect(await screen.findByText("review-copy is taken")).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Fork" })).toBeDisabled()
+    await userEvent.clear(name)
+    await userEvent.type(name, "Review mine")
+    await userEvent.click(screen.getByRole("button", { name: "Fork" }))
+    expect(api.post).toHaveBeenCalledWith("/api/agents/skills/sk_1/fork", { name: "review-mine" })
   })
 })

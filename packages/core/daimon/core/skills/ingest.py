@@ -41,6 +41,7 @@ __all__ = [
     "bundle_from_markdown",
     "bundle_from_upload",
     "confirmation_hash",
+    "is_script",
     "require_upload_suffix",
 ]
 
@@ -168,7 +169,7 @@ def bundle_from_files(files: dict[str, bytes]) -> SkillBundle:
             name=name,
             description=description,
             files=ordered,
-            scripts=[path for path in ordered if _is_script(path, files[path])],
+            scripts=[path for path in ordered if is_script(path, files[path])],
             total_bytes=total,
             content_hash=hashlib.sha256(zip_bytes).hexdigest(),
         ),
@@ -256,7 +257,7 @@ def bundle_from_retained_archive(
             name=spec.name,
             description=spec.description.strip(),
             files=ordered,
-            scripts=[path for path in ordered if _is_script(path, files[path])],
+            scripts=[path for path in ordered if is_script(path, files[path])],
             total_bytes=sum(len(body) for body in files.values()),
             content_hash=hashlib.sha256(data).hexdigest(),
         ),
@@ -340,7 +341,8 @@ def _strip_wrapper(files: dict[str, bytes]) -> dict[str, bytes]:
     return {path.removeprefix(prefix): body for path, body in files.items()}
 
 
-def _is_script(path: str, body: bytes) -> bool:
+def is_script(path: str, body: bytes) -> bool:
+    """Whether a skill file runs: a script suffix or a `#!` first line."""
     return PurePosixPath(path).suffix.lower() in _SCRIPT_SUFFIXES or body.startswith(b"#!")
 
 

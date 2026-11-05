@@ -399,6 +399,9 @@ class Admission:
     # A choice was kept but can't run here, so this turn runs the agent's own
     # model and says so.
     model_fell_back: bool = False
+    # The agent's switch to this provider needs confirming again, so this turn runs
+    # on its source (Anthropic) and the agent is told (`agent_notices`).
+    backend_switch_stale: Provider | None = None
     # What `admit` was called with; a helper's turn is admitted on the same.
     request: AdmitRequest | None = field(default=None, compare=False, repr=False)
     # This workspace's links into the web app for the admitted role; None with no web app.
@@ -1315,6 +1318,9 @@ async def _admit_gates(
     backend_counterpart: AgentRevision | None = None
     backend_agent_revision: AgentBackendRevision | None = None
     source_agent: BackendAgent | None = None
+    # Set when the agent's own switch refused re_confirm; a channel pin never sets it.
+    stale_switch: Provider | None = None
+    backend_switch_stale: Provider | None = None
 
     async def verify_origin(
         selection: ResolvedBackend,
@@ -1323,7 +1329,7 @@ async def _admit_gates(
         *,
         agent_revision: AgentBackendRevision | None = None,
     ) -> None:
-        nonlocal backend_counterpart, backend_agent_revision
+        nonlocal backend_counterpart, backend_agent_revision, stale_switch
         _require_backend_origin(selection, origin, agent_backends=deps.agent_backends)
         if revision is None or selection.profile == MANAGED_AGENTS.profile_id:
             return
@@ -1391,6 +1397,8 @@ async def _admit_gates(
                 ):
                     # The copy names the provider the switch went to (J6g); a busy
                     # or failed preparation is never "not set up".
+                    if error.cause == "re_confirm" and origin == "agent":
+                        stale_switch = revision.backend
                     raise AdmissionDenied(
                         reason="backend_unsupported",
                         cause=error.cause,
@@ -1402,10 +1410,11 @@ async def _admit_gates(
 
     async def resolve_preference() -> None:
         nonlocal backend_revision, backend_ever_shared, backend, backend_revision_origin
-        nonlocal backend_footer_profile, source_agent
+        nonlocal backend_footer_profile, source_agent, backend_switch_stale
         nonlocal retained_revision, backend_follow, follow_generation
         if selfhosted:
             return
+        bound_before = retained_revision if backend_revision is None else None
         if follow_eligible and channel is not None and retained_revision is not None:
             # M03: the conversation follows its (Anthropic source) agent's switch.
             async with deps.sessionmaker() as follow_session:
@@ -1475,6 +1484,7 @@ async def _admit_gates(
                         return selected
 
                 source: Literal["channel", "agent", "default"] = "agent"
+                stale: Provider | None = None
                 try:
                     # The shared policy fence is a try-lock: a turn admitted while an
                     # admin's policy write holds it waits (bounded) instead of failing
@@ -1492,6 +1502,31 @@ async def _admit_gates(
                     raise _backend_refusal(
                         backend_revision, source, policy.enabled_backends, error
                     ) from error
+                except AdmissionDenied:
+                    stale, follow_kept = stale_switch, follow_generation is None
+                    # A stale switch runs on the agent's source instead of locking
+                    # it out, where a later message still re-checks the switch: only
+                    # a person's chat turn (the agent can offer a new card there), not
+                    # a setup thread, and not a move away from another provider.
+                    if (
+                        stale is None
+                        or origin not in ("chat", "handoff")
+                        or attended is False
+                        or not follow_switch
+                        or config.thread_binding_kind == "setup"
+                        or not (follow_kept or bound_before == 0)
+                    ):
+                        raise
+                if stale is not None:
+                    _log.info("turn.stale_switch_fallback", provider=stale)
+                    backend_revision, backend, source = None, None, "default"
+                    backend_switch_stale = stale
+                    if follow_generation is not None:
+                        # Already on Anthropic: stay in that session, move nothing.
+                        retained_revision, follow_generation, backend_follow = 0, None, None
+                        if followed is not None and own_slot in followed:
+                            followed.remove(own_slot)
+                    backend_footer_profile = resolve_default(BackendConfig()).profile
                 backend_revision_origin = source if source != "default" else None
                 if backend_revision is not None:
                     backend_footer_profile = backend_revision.profile
@@ -1665,6 +1700,7 @@ async def _admit_gates(
         grant=grant,
         model_override=thread_model.model_override,
         model_fell_back=thread_model.fell_back,
+        backend_switch_stale=backend_switch_stale,
         web=await _web_links(deps, tenant_id, principal.account_id, chat_admin=effective_admin),
     )
     if follow_generation is not None:

@@ -3,6 +3,7 @@ import { http, HttpResponse } from "msw"
 
 import { ECOSYSTEMS, type EnvironmentDoc, type EnvironmentInput, type LibrarySkill, type Skill, type SkillDetail, type SkillUse, type SyncedSkill } from "@/modules/agents/types"
 import { roster } from "./agents"
+import { mirrorOf } from "./agent-server-skills"
 import { forbidden, notFound, unauthorized, wait } from "./util"
 
 const ago = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString()
@@ -54,6 +55,7 @@ function library(): LibrarySkill[] {
         }),
         ...(CHANNEL_USES[s.skill_id] ?? []),
       ],
+      server: mirrorOf(s.skill_id),
     }
   })
 }
@@ -165,6 +167,21 @@ export const agentLibraryHandlers = [
     const title = name.trim()
     made.push({ type: "custom", skill_id: id, title, description: description.trim(), version: "1" })
     history.set(id, [{ version: "1", at: new Date().toISOString(), author: PEOPLE[0]!, files: { "SKILL.md": `---\nname: ${id}\ndescription: ${description.trim()}\n---\n\n# ${title}\n` } }])
+    return HttpResponse.json({ id, name: id, version: "1" }, { status: 201 })
+  }),
+  http.post("/api/agents/skills/:id/fork", async ({ params, request }) => {
+    await wait(400)
+    const a = admin()
+    if (a.res) return a.res
+    const s = detail(String(params.id))
+    if (!s?.server) return notFound()
+    const id = slug(((await request.json()) as { name: string }).name)
+    if (!id) return HttpResponse.json({ detail: "Give the copy a name." }, { status: 422 })
+    if (skills().some((x) => x.skill_id === id)) return HttpResponse.json({ detail: `A skill named ${id} already exists.` }, { status: 409 })
+    const files = { ...versionsOf(s.id).at(-1)!.files }
+    files["SKILL.md"] = files["SKILL.md"]!.replace(/^name: .*$/m, `name: ${id}`)
+    made.push({ type: "custom", skill_id: id, title: s.title, description: s.description, version: "1" })
+    history.set(id, [{ version: "1", at: new Date().toISOString(), author: PEOPLE[0]!, files }])
     return HttpResponse.json({ id, name: id, version: "1" }, { status: 201 })
   }),
   http.post("/api/agents/skills/sync", async ({ request }) => {

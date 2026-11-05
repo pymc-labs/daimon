@@ -1150,6 +1150,9 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # A workspace's invite links: the only accounts.id FK is the admin who made
             # one, ON DELETE SET NULL. An accepted invite cascades with its person.
             "web_invites",
+            # A workspace's server skill mirrors: the only accounts.id FK is who added
+            # one, ON DELETE SET NULL; the mirror is the workspace's, not theirs.
+            "server_skills",
         }
     )
 
