@@ -3,7 +3,7 @@
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from daimon.core.stores import helper_asks
+from daimon.core.stores import file_uploads, helper_asks
 from daimon.core.stores.domain import HelperAskRow, Role, TurnOriginRow, UploadedFile
 from daimon.core.stores.turn_origins import create_origin, get_active_origin, mark_serving_helpers
 from daimon.testing.factories import make_account, make_tenant
@@ -159,15 +159,17 @@ async def test_reply_files_are_added_only_while_running_and_up_to_the_cap(
     def file(n: int) -> UploadedFile:
         return UploadedFile(id=f"h{n}", name=f"f{n}.txt", size=n)
 
-    queued = await helper_asks.add_reply_file(db_session, ask_id=ask.id, file=file(0), max_files=2)
+    async def add(n: int, *, max_files: int = 2) -> bool:
+        return await helper_asks.add_reply_file(
+            db_session, ask_id=ask.id, file=file(n), max_files=max_files, max_bytes=1000
+        )
+
+    queued = await add(0)
     await helper_asks.claim_queued(db_session, origin_id=origin.id, skip_helpers=(), limit=1)
-    added = [
-        await helper_asks.add_reply_file(db_session, ask_id=ask.id, file=file(n), max_files=2)
-        for n in (1, 2, 3)
-    ]
+    added = [await add(n) for n in (1, 2, 3)]
     now = datetime.now(UTC)
     await helper_asks.finish_ask(db_session, ask_id=ask.id, status="done", reply="ok", now=now)
-    after = await helper_asks.add_reply_file(db_session, ask_id=ask.id, file=file(4), max_files=9)
+    after = await add(4, max_files=9)
 
     [read] = await helper_asks.list_asks(
         db_session, tenant_id=origin.tenant_id, origin_id=origin.id
@@ -176,3 +178,75 @@ async def test_reply_files_are_added_only_while_running_and_up_to_the_cap(
     assert added == [True, True, False], "the cap holds"
     assert not after, "a finished ask takes no more files"
     assert read.reply_files == [file(1), file(2)], "the reply keeps the files in order"
+
+
+async def test_reply_files_stop_at_the_total_bytes_cap(db_session: AsyncSession) -> None:
+    """The byte cap counts what the reply already holds, so the last file that fits is the
+    one that fits exactly; the files cap and the bytes cap are one check."""
+    origin = await _origin(db_session)
+    ask = await _ask(db_session, origin, "agent_a", 0)
+    await helper_asks.claim_queued(db_session, origin_id=origin.id, skip_helpers=(), limit=1)
+
+    async def add(n: int, size: int) -> bool:
+        return await helper_asks.add_reply_file(
+            db_session,
+            ask_id=ask.id,
+            file=UploadedFile(id=f"h{n}", name=f"f{n}", size=size),
+            max_files=10,
+            max_bytes=100,
+        )
+
+    results = [await add(0, 60), await add(1, 41), await add(2, 40), await add(3, 1)]
+
+    assert results == [True, False, True, False], "60 + 40 fills the cap; one more byte is over"
+    [read] = await helper_asks.list_asks(
+        db_session, tenant_id=origin.tenant_id, origin_id=origin.id
+    )
+    assert [f.id for f in read.reply_files] == ["h0", "h2"], "a refused file is not recorded"
+
+
+async def test_reply_uploads_go_once_their_asks_links_expire(db_session: AsyncSession) -> None:
+    """The sweep deletes the files helpers sent back on an expired ask, and only those."""
+    origin = await _origin(db_session)
+    now = datetime.now(UTC)
+
+    async def land(name: str) -> UploadedFile:
+        row, token = await file_uploads.create_upload(
+            db_session,
+            tenant_id=origin.tenant_id,
+            title=name,
+            display_filename=name,
+            content_type="text/plain",
+            now=now,
+        )
+        await file_uploads.store_upload_content(db_session, upload_token=token, data=b"x", now=now)
+        return UploadedFile(id=row.id, name=name, size=1)
+
+    async def ask_with_reply(name: str, created: datetime) -> UploadedFile:
+        ask = await helper_asks.create_ask(
+            db_session,
+            tenant_id=origin.tenant_id,
+            origin_id=origin.id,
+            helper_agent_id=f"agent_{name}",
+            helper_name=name,
+            message="m",
+            now=created,
+        )
+        await helper_asks.claim_queued(db_session, origin_id=origin.id, skip_helpers=(), limit=9)
+        file = await land(name)
+        assert await helper_asks.add_reply_file(
+            db_session, ask_id=ask.id, file=file, max_files=10, max_bytes=100
+        ), "the reply takes the file"
+        return file
+
+    old = await ask_with_reply("old", now - helper_asks.FILES_TTL - timedelta(minutes=1))
+    fresh = await ask_with_reply("fresh", now)
+    unrelated = await land("unrelated")
+
+    removed = await helper_asks.delete_expired_reply_uploads(db_session, now=now)
+
+    kept = await file_uploads.list_landed_uploads(
+        db_session, tenant_id=origin.tenant_id, handle_ids=[old.id, fresh.id, unrelated.id]
+    )
+    assert removed == 1, "one expired reply file"
+    assert {f.id for f in kept} == {fresh.id, unrelated.id}, "a live ask's file and others stay"

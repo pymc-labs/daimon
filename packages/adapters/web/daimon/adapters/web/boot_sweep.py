@@ -16,7 +16,7 @@ import structlog
 from anthropic import AsyncAnthropic
 from daimon.adapters.web.files import UNREFERENCED_UPLOAD_TTL
 from daimon.core.ma import interrupt_orphaned_session
-from daimon.core.stores import file_uploads
+from daimon.core.stores import file_uploads, helper_asks
 from daimon.core.stores import web_chat as chat_store
 from daimon.core.stores import web_sessions as sessions_store
 from daimon.core.stores.thread_sessions import (
@@ -112,11 +112,13 @@ async def sweep_stale_web_uploads(
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> int:
     """Delete the web files no message carries after `UNREFERENCED_UPLOAD_TTL`: a file
-    uploaded and never sent, or kept for a reply that was never saved."""
+    uploaded and never sent, or kept for a reply that was never saved. Also the files
+    helpers sent back, once their ask's links have expired."""
     async with sessionmaker.begin() as session:
         removed = await file_uploads.delete_unreferenced_web_uploads(
             session, created_before=now() - UNREFERENCED_UPLOAD_TTL
         )
+        removed += await helper_asks.delete_expired_reply_uploads(session, now=now())
     if removed:
         log.info("web.upload.stale_swept", files=removed)
     return removed

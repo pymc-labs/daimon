@@ -439,7 +439,7 @@ async def test_files_reach_the_helper_by_link_and_its_files_come_back_with_the_r
         sent.append(await _land(scene, "chart.png", b"PNG"))
         async with scene.sessionmaker.begin() as db:
             await helper_asks.add_reply_file(
-                db, ask_id=(await scene.current()).id, file=sent[0], max_files=10
+                db, ask_id=(await scene.current()).id, file=sent[0], max_files=10, max_bytes=100
             )
 
     run = await run_asking_turn(

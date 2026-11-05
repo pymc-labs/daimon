@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import mimetypes
 import re
+from urllib.parse import quote
 
 _TITLE_SLUG = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -83,3 +84,14 @@ def display_filename_for(title: str, mime_type: str) -> str:
     if uninformative and _HAS_EXTENSION.search(cleaned):
         return cleaned
     return f"{cleaned}{ext}"
+
+
+def attachment_disposition(name: str) -> str:
+    """A `Content-Disposition` value that downloads ``name`` whatever characters it holds.
+
+    The quoted `filename` is an ASCII fallback with the characters that would end the
+    quoted string replaced; `filename*` carries the real name for clients that read it.
+    A non-Latin-1 name in the plain parameter would fail the header's encoding.
+    """
+    plain = name.encode("ascii", "replace").decode().replace("\\", "_").replace('"', "_")
+    return f"attachment; filename=\"{plain}\"; filename*=UTF-8''{quote(name, safe='')}"

@@ -12,11 +12,11 @@ import uuid
 from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta
 from typing import Literal
-from urllib.parse import quote
 
 from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
 from cryptography.fernet import InvalidToken, MultiFernet
 from daimon.core.media.attachments import AttachedFile, attachment_lines
+from daimon.core.media.filenames import attachment_disposition
 from daimon.core.media.vision import (
     MAX_VISION_IMAGE_BYTES,
     MAX_VISION_IMAGES,
@@ -95,14 +95,11 @@ async def keep_output(
 
 def download(name: str, data: bytes) -> Response:
     """The bytes as a download: never sniffed or rendered on this origin."""
-    plain = name.encode("ascii", "replace").decode().replace("\\", "_").replace('"', "_")
     return Response(
         content=data,
         media_type="application/octet-stream",
         headers={
-            "Content-Disposition": (
-                f"attachment; filename=\"{plain}\"; filename*=UTF-8''{quote(name, safe='')}"
-            ),
+            "Content-Disposition": attachment_disposition(name),
             "Content-Security-Policy": "sandbox",
             "Cache-Control": "private, no-store",
         },

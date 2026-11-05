@@ -17,8 +17,9 @@ from daimon.core.stores.agent_helpers import set_helpers
 from daimon.core.stores.domain import Role, TurnOriginRow, UploadedFile
 from daimon.core.stores.file_uploads import create_upload, store_upload_content
 from daimon.core.stores.selfhosted_resources import SelfHostedAgents
+from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.turn_origins import create_origin, mark_serving_helpers
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_account, make_tenant, make_web_person
 from daimon.testing.ma_models import ma_agent
 from fastmcp.exceptions import ToolError
 from mux.contracts.ids import ModelRef, Scope
@@ -273,13 +274,23 @@ async def test_a_helpers_turn_cannot_change_the_conversation(
         )
 
 
-async def _landed(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID) -> str:
-    """A file the asking agent uploaded with create_file_upload_url; its handle id."""
+async def _landed(
+    sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, *, of_person: bool = False
+) -> str:
+    """A file the asking agent uploaded with create_file_upload_url; its handle id.
+
+    With `of_person`, a web person's own upload instead."""
     now = datetime.now(UTC)
     async with sessionmaker.begin() as session:
+        person_id = None
+        if of_person:
+            tenant = await get_tenant(session, tenant_id)
+            assert tenant is not None, "the tenant exists"
+            person_id = (await make_web_person(session, tenant=tenant)).id
         row, token = await create_upload(
             session,
             tenant_id=tenant_id,
+            person_id=person_id,
             title="data",
             display_filename="data.csv",
             content_type="text/csv",
@@ -317,6 +328,7 @@ async def test_files_go_to_a_helper_and_its_files_come_back_as_links(
             ask_id=ask_id,
             file=UploadedFile(id="h9", name="chart.png", size=3),
             max_files=9,
+            max_bytes=100,
         )
         await helper_asks.finish_ask(
             session, ask_id=ask_id, status="done", reply="Done", now=datetime.now(UTC)
@@ -334,6 +346,25 @@ async def test_files_go_to_a_helper_and_its_files_come_back_as_links(
     assert [(f.id, f.name, f.url) for f in answer.files] == [
         ("h9", "chart.png", f"https://daimon.example/helper-files/{ask.files_token}/h9")
     ], "the helper's file comes back with a download link"
+
+
+async def test_an_ask_refuses_a_web_persons_private_upload(
+    db_session: AsyncSession, committing_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """A person's own upload is not an agent's to hand to a helper, even in the same tenant."""
+    world, auth, origin = await _setup(db_session, committing_sessionmaker)
+    handle = await _landed(committing_sessionmaker, auth.tenant_id, of_person=True)
+
+    with pytest.raises(ToolError, match="No uploaded file with handle id"):
+        await tool._ask_helper_impl(  # pyright: ignore[reportPrivateUsage]
+            world.runtime("https://daimon.example/mcp"),
+            auth,
+            origin_context_id=str(origin.id),
+            helper="argon",
+            message="hi",
+            wait=False,
+            files=[handle],
+        )
 
 
 @pytest.mark.parametrize(

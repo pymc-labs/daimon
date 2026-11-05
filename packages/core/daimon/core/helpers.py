@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import shlex
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field, replace
@@ -26,6 +27,7 @@ from daimon.core.confirmation import ConfirmationHook
 from daimon.core.context_prompt import TurnContext
 from daimon.core.errors import UserFacingError
 from daimon.core.ma_resolver import MAResolverMissError
+from daimon.core.media.filenames import sanitize_title
 from daimon.core.scope import HelperTarget
 from daimon.core.stores import agent_helpers, helper_asks
 from daimon.core.stores.domain import (
@@ -110,7 +112,9 @@ def helper_message(asker: str, ask: HelperAskRow, app_root: str | None) -> str:
         return text
     base = f"{app_root}/helper-files/{ask.files_token}"
     if ask.files:
-        fetch = "\n".join(f'  curl -sS -o {f.name} "{base}/{f.id}"' for f in ask.files)
+        # The name is a person's or an agent's; the helper pastes this line into a shell.
+        saved_as = {f.id: shlex.quote(sanitize_title(f.name)) for f in ask.files}
+        fetch = "\n".join(f'  curl -sS -o {name} "{base}/{id_}"' for id_, name in saved_as.items())
         text += f"\n\nFiles {asker} gave you; download each with:\n{fetch}"
     return (
         f"{text}\n\nTo send files back with your reply, upload each with:\n"

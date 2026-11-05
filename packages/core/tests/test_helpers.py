@@ -1,5 +1,6 @@
 """Helper turns: their conversation key and the words a refused helper sends back."""
 
+import shlex
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -8,13 +9,14 @@ import pytest
 from daimon.core.errors import UserFacingError
 from daimon.core.helpers import (
     _in_thread,  # pyright: ignore[reportPrivateUsage]
+    helper_message,
     helper_thread_key,
     refusal_words,
     serve_helpers,
 )
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_identity import matching_turn
-from daimon.core.stores.domain import Role, TurnOriginRow
+from daimon.core.stores.domain import HelperAskRow, Role, TurnOriginRow, UploadedFile
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied
@@ -112,3 +114,32 @@ async def test_a_helpers_provider_prompts_go_to_the_asking_thread() -> None:
     await placed(ProviderActionPrompt(cast(Any, None), context, cast(Any, None)))
     [prompt] = seen
     assert prompt.context.requester == ProviderActionRequester("slack", "1.2", "U1")
+
+
+def test_a_hostile_file_name_cannot_inject_into_the_helpers_curl_line() -> None:
+    """The helper pastes the download line into a shell, so a name never reaches it as code."""
+    name = '報告 "x" $(id); `id`.pdf'
+    ask = HelperAskRow(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        origin_id=uuid.uuid4(),
+        helper_agent_id="ag_argon",
+        helper_name="argon",
+        message="look",
+        status="running",
+        reply=None,
+        created_at=NOW,
+        finished_at=None,
+        files=[UploadedFile(id="h1", name=name, size=1)],
+        files_token="tok",
+    )
+
+    text = helper_message("lead", ask, "https://daimon.example")
+
+    [line] = [ln.strip() for ln in text.splitlines() if ln.strip().startswith("curl -sS -o")]
+    words = shlex.split(line)
+    assert words[:3] == ["curl", "-sS", "-o"], "the line is one curl command"
+    assert len(words) == 5 and words[4] == "https://daimon.example/helper-files/tok/h1", (
+        "the name is a single word to the shell, so nothing in it runs"
+    )
+    assert not set(words[3]) & set('$`"; '), "and it holds no shell characters"

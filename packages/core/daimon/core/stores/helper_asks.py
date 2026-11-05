@@ -6,10 +6,12 @@ import secrets
 import uuid
 from collections.abc import Collection, Sequence
 from datetime import datetime, timedelta
+from typing import Any, cast
 
-from daimon.core._models import HelperAsk
+from daimon.core._models import FileUpload, HelperAsk
 from daimon.core.stores.domain import HelperAskRow, HelperAskStatus, UploadedFile
-from sqlalchemy import func, select, type_coerce, update
+from sqlalchemy import BigInteger, CursorResult, delete, func, select, true, type_coerce, update
+from sqlalchemy import cast as sa_cast
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,6 +20,8 @@ OPEN: tuple[HelperAskStatus, ...] = ("queued", "running")
 FILES_TTL = timedelta(hours=1)
 #: Most files one ask carries each way.
 MAX_FILES = 10
+#: Most bytes of files a helper may send back on one ask, in all.
+MAX_REPLY_BYTES = 50_000_000
 
 
 async def create_ask(
@@ -147,15 +151,29 @@ async def get_ask_by_files_token(
 
 
 async def add_reply_file(
-    session: AsyncSession, *, ask_id: uuid.UUID, file: UploadedFile, max_files: int
+    session: AsyncSession,
+    *,
+    ask_id: uuid.UUID,
+    file: UploadedFile,
+    max_files: int,
+    max_bytes: int,
 ) -> bool:
-    """Add a file to a running ask's reply; False once it ended or holds `max_files`."""
+    """Add a file to a running ask's reply; False once it ended, holds `max_files`, or
+    would hold more than `max_bytes`. The checks and the add are one statement, so
+    parallel uploads cannot both squeeze in past a cap."""
+    sent = func.jsonb_array_elements(HelperAsk.reply_files).column_valued("sent")
+    held = (
+        select(func.coalesce(func.sum(sa_cast(sent.op("->>")("size"), BigInteger)), 0))
+        .correlate(HelperAsk)
+        .scalar_subquery()
+    )
     added = await session.scalar(
         update(HelperAsk)
         .where(
             HelperAsk.id == ask_id,
             HelperAsk.status == "running",
             func.jsonb_array_length(HelperAsk.reply_files) < max_files,
+            held + file.size <= max_bytes,
         )
         .values(
             reply_files=HelperAsk.reply_files.op("||", return_type=JSONB)(
@@ -165,3 +183,20 @@ async def add_reply_file(
         .returning(HelperAsk.id)
     )
     return added is not None
+
+
+async def delete_expired_reply_uploads(session: AsyncSession, *, now: datetime) -> int:
+    """Delete the files helpers sent back on asks whose links have expired; returns how many.
+
+    A reply file is the asking agent's to use within the turn; nothing else references
+    it, so past `FILES_TTL` it is only stored bytes.
+    """
+    sent = func.jsonb_array_elements(HelperAsk.reply_files).table_valued("value")
+    expired = (
+        select(sent.c.value.op("->>")("id"))
+        .select_from(HelperAsk)
+        .join(sent, true())
+        .where(HelperAsk.created_at <= now - FILES_TTL)
+    )
+    result = await session.execute(delete(FileUpload).where(FileUpload.id.in_(expired)))
+    return cast(CursorResult[Any], result).rowcount

@@ -256,3 +256,26 @@ async def test_landed_uploads_are_listed_for_their_tenant_without_bytes(
         "only the landed upload is listed, with its byte size"
     )
     assert theirs == [], "another tenant lists none of them"
+
+
+async def test_a_web_persons_upload_is_not_listed_as_an_agents(db_session: AsyncSession) -> None:
+    """A person's own file is private to them: the agents' listing skips it."""
+    tenant = await make_tenant(db_session)
+    person = await make_web_person(db_session, tenant=tenant)
+    ids: list[str] = []
+    for person_id in (None, person.id):
+        row, token = await create_upload(
+            db_session,
+            tenant_id=tenant.id,
+            person_id=person_id,
+            title="data",
+            display_filename="data.csv",
+            content_type="text/csv",
+            now=_NOW,
+        )
+        await store_upload_content(db_session, upload_token=token, data=b"a", now=_NOW)
+        ids.append(row.id)
+
+    listed = await list_landed_uploads(db_session, tenant_id=tenant.id, handle_ids=ids)
+
+    assert [f.id for f in listed] == [ids[0]], "only the agent's upload is listed"
