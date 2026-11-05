@@ -73,7 +73,8 @@ function serve(connected = false) {
 
 /** Picks a tool in the Tool select. */
 async function pick(name: string) {
-  await userEvent.click(screen.getByRole("radio", { name }))
+  await userEvent.click(screen.getByRole("combobox", { name: "Tool" }))
+  await userEvent.click(await screen.findByRole("option", { name }))
 }
 
 describe("CodingPanel", () => {

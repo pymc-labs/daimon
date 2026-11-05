@@ -3,8 +3,7 @@ import { useEffect, useRef, useState } from "react"
 
 import { Ago, CopyButton, Mono, StatusDot } from "@/components/common"
 import { Button } from "@/components/ui/button"
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { useConfirm } from "@/lib/confirm"
 import { Pill } from "../bits"
 import { Field, Section, type Props } from "../inspector/parts"
@@ -113,17 +112,15 @@ export function CodingPanel({ agent }: Props) {
 
   return (
     <>
-      <Section title="Tool">
-        <ToggleGroup type="single" value={tab} onValueChange={(v) => v && setTab(v)} variant="segmented" size="sm" className="w-full">
-          {CODING_CLIENTS.map(({ id, name, icon: Icon }) => (
-            <Tooltip key={id}>
-              <TooltipTrigger asChild>
-                <ToggleGroupItem value={id} aria-label={name} className="flex-1"><Icon /></ToggleGroupItem>
-              </TooltipTrigger>
-              <TooltipContent>{name}</TooltipContent>
-            </Tooltip>
-          ))}
-        </ToggleGroup>
+      <Section>
+        <Field label="Tool">
+          <Select value={tab} onValueChange={setTab}>
+            <SelectTrigger size="sm" className="h-8 w-full" aria-label="Tool"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              {CODING_CLIENTS.map(({ id, name, icon: Icon }) => <SelectItem key={id} value={id}><Icon />{name}</SelectItem>)}
+            </SelectContent>
+          </Select>
+        </Field>
       </Section>
       {tab === "token" ? (
         <Section title="Token" action={<Button variant="outline" size="xs" disabled={writes.make.isPending} onClick={() => void make()}>Make key</Button>}>
