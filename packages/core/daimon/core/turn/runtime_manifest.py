@@ -572,7 +572,24 @@ async def _capture_source_capabilities(
                     ]
                     if len(mcps) != 1 or mcps[0].mcp_server_name != DAIMON_SERVER_NAME:
                         raise ValueError("unrepresented MCP toolset")
-                    permissions = mcp_permissions(mcps[0], catalogue)
+                    # Daimon's gating (tool safety, asking before publishing) adds an
+                    # ask or off config per gated tool, listed or not. One the
+                    # catalogue lacks restricts nothing; an unlisted grant still fails.
+                    configs = [
+                        config
+                        for config in mcps[0].configs or ()
+                        if config.name in catalogue
+                        or not (
+                            config.enabled is False
+                            or (
+                                config.permission_policy is not None
+                                and config.permission_policy.type == "always_ask"
+                            )
+                        )
+                    ]
+                    permissions = mcp_permissions(
+                        mcps[0].model_copy(update={"configs": configs}), catalogue
+                    )
                     tools = (
                         *AgentToolsConfig(
                             tools=[

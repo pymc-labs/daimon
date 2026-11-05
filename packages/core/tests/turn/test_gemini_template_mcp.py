@@ -434,6 +434,51 @@ async def test_gated_and_publishing_tools_stay_unavailable_in_a_template(templat
     assert represented_source(captured, representation.target) == representation
 
 
+def _gated(request, gating):
+    from daimon.core.tool_safety import ToolSafetyPolicy
+
+    if gating == "tool_safety":
+        deps = replace(request.deps, tool_safety=ToolSafetyPolicy(enabled=True))
+        return replace(request, deps=deps)
+    return replace(request, admission=replace(request.admission, asks_before_publishing=True))
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("gating", ["tool_safety", "asks_before_publishing"])
+async def test_daimon_gating_of_unlisted_tools_keeps_the_mcp_representation(template, gating):
+    """Gating writes an ask config for gated tools the provider-turn catalogue
+    never lists (approve_reach, publish_report). That once dropped the whole MCP
+    representation, so a switch confirmed with MCP was asked again every turn."""
+    from daimon.core.turn.runtime_manifest import capture_preparation_source
+
+    request, *_ = template
+    plain = await capture_preparation_source(request, fresh=True)
+    gated = await capture_preparation_source(_gated(request, gating), fresh=True)
+    (representation,) = [r for r in gated.representations if r.target.mcp_servers]
+    assert [r.target for r in gated.representations] == [r.target for r in plain.representations]
+    (connection,) = representation.target.mcp_servers
+    allowed = set(connection.tool_policy["allowed_tools"])  # pyright: ignore[reportArgumentType]
+    assert allowed and not allowed & {"approve_reach", "publish_report"}
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_an_unlisted_grant_still_represents_no_mcp(template, monkeypatch):
+    from daimon.core import tool_safety
+    from daimon.core.turn.runtime_manifest import capture_preparation_source
+
+    def grant(configs, names, *, enabled):
+        allow = {"type": "always_allow"}
+        return [
+            *configs,
+            *({"name": n, "enabled": enabled, "permission_policy": allow} for n in names),
+        ], True
+
+    monkeypatch.setattr(tool_safety, "_ask_for", grant)
+    request, *_ = template
+    captured = await capture_preparation_source(_gated(request, "tool_safety"), fresh=True)
+    assert not [r for r in captured.representations if r.target.mcp_servers]
+
+
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
 @pytest.mark.parametrize(
     "tool_name",
