@@ -1464,3 +1464,18 @@ async def test_a_direct_chat_lists_this_agents_posts_with_their_roles(
     assert [(id_, role) for id_, role, _ in listed] == [("m-1", "answer"), ("m-2", "controls")]
     channel = make_inbound(conversation=THREAD_ID, kind="channel")
     assert await teams._own_posts(channel, TENANT, "ag-1", skip=None) == []
+
+
+async def test_a_failed_own_posts_lookup_lists_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The list is a convenience: a database failure never stalls or fails the turn."""
+
+    async def broken(*_: object, **__: object) -> None:
+        raise SQLAlchemyError("down")
+
+    monkeypatch.setattr(app_module, "list_recent_posts", broken)
+    teams = _app(db_session_factory, FakeSender())
+    with structlog.testing.capture_logs() as logs:
+        assert await teams._own_posts(make_inbound(), TENANT, "ag-1", skip=None) == []
+    assert [e["event"] for e in logs] == ["teams.own_posts_failed"]

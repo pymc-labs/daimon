@@ -207,6 +207,7 @@ log = structlog.get_logger()
 _SEEN_ACTIVITY_CAP = 10_000
 # The agent's own posts a 1:1 chat turn lists, so it can name them to tidy.
 _OWN_POSTS_SHOWN = 10
+_OWN_POSTS_TIMEOUT_S = 2.0
 _RECOVERY_RETRY_DELAY_S = 1.0
 # A turn's output sweep polls the listing for up to 14 s, then uploads: 15 s cut a
 # sweep that began 14 s before a deploy's SIGTERM. Within the documented 90 s grace.
@@ -1935,15 +1936,22 @@ class TeamsApp:
         """The agent's latest posts in a 1:1 chat, oldest first, but this turn's card."""
         if inbound.kind != "dm":
             return []
-        async with self.runtime.sessionmaker() as session:
-            rows = await list_recent_posts(
-                session,
-                tenant_id=tenant_id,
-                platform="teams",
-                channel_id=conversation_of(inbound.conversation_id),
-                agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id),
-                limit=_OWN_POSTS_SHOWN,
-            )
+        try:
+            async with (
+                asyncio.timeout(_OWN_POSTS_TIMEOUT_S),
+                self.runtime.sessionmaker() as session,
+            ):
+                rows = await list_recent_posts(
+                    session,
+                    tenant_id=tenant_id,
+                    platform="teams",
+                    channel_id=conversation_of(inbound.conversation_id),
+                    agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id),
+                    limit=_OWN_POSTS_SHOWN,
+                )
+        except (SQLAlchemyError, TimeoutError) as exc:  # a convenience; never stall the turn
+            log.warning("teams.own_posts_failed", error_type=type(exc).__name__)
+            return []
         return [
             (r.message_id, r.role, r.posted_at.isoformat())
             for r in reversed(rows)
