@@ -20,6 +20,7 @@ __all__ = [
     "LOST_WORKSPACE_NOTICE",
     "mcp_failure_notices",
     "render_agent_notices",
+    "stale_switch_notice",
 ]
 
 _REASON = {
@@ -56,6 +57,17 @@ def mcp_failure_notices(failures: Sequence[McpServerFailure]) -> tuple[str, ...]
         f"The `{_server(f.server_name)}` connection {_REASON[f.error_type]} during your last "
         "reply, so its tools were missing. The person can ask you to reconnect or disconnect it."
         for f in failures
+    )
+
+
+def stale_switch_notice(provider: str) -> str:
+    """This turn runs on the agent's source: its switch's consent went stale."""
+    from daimon.core.turn.notices import provider_name
+
+    return (
+        f"Your switch to {provider_name(provider)} needs to be confirmed again, so this reply "
+        "runs on Anthropic. Offer to switch again (request_agent_backend_switch), so the "
+        "person can confirm it on the new card."
     )
 
 

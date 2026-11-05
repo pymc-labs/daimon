@@ -341,7 +341,7 @@ def test_dm_refusal_keeps_the_pinned_agent_separate_from_the_bot_name() -> None:
             "re_confirm",
             "gemini",
             "churn-explorer's model-provider switch needs to be confirmed again.",
-            "Ask again to preview the switch to Gemini, then Confirm on the new card.",
+            "In a new conversation, ask churn-explorer to switch to Gemini again, then Confirm.",
         ),
     ],
 )

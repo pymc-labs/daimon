@@ -85,6 +85,7 @@ from daimon.core.turn.agent_notices import (
     LOST_WORKSPACE_NOTICE,
     mcp_failure_notices,
     render_agent_notices,
+    stale_switch_notice,
 )
 from daimon.core.turn.approvals import (
     agent_rule_lookup,
@@ -1011,9 +1012,12 @@ async def _with_agent_notices(
     """The message and its recovery reseed after what Daimon has to tell the agent.
 
     Queued notices are failures of this agent's earlier turns in the thread; a
-    GitHub key restart is this turn's own. Also returns the notices, so a turn
-    that never sent its message can queue them again.
+    GitHub key restart and a stale switch are this turn's own. Also returns the
+    queued and restart notices, so a turn that never sent its message can queue
+    them again.
     """
+    stale = prepared.admission.backend_switch_stale
+    own = [stale_switch_notice(stale)] if stale is not None else []
     try:
         async with deps.sessionmaker.begin() as db:
             taken = await take_agent_notices(
@@ -1031,12 +1035,12 @@ async def _with_agent_notices(
             )
     except SQLAlchemyError as error:  # notices are advisory; never block the turn
         log.warning("turn.agent_notices_take_failed", error=type(error).__name__)
+        taken, restarted = [], False
+    notices = [*taken, GITHUB_KEY_RESTART_NOTICE] if restarted else list(taken)
+    if not notices and not own:
         return user_message, reseed_user_message, []
-    notices = [*taken, GITHUB_KEY_RESTART_NOTICE] if restarted else taken
-    if not notices:
-        return user_message, reseed_user_message, []
-    log.info("turn.agent_notices_sent", count=len(notices))
-    block = render_agent_notices(notices)
+    log.info("turn.agent_notices_sent", count=len(notices) + len(own))
+    block = render_agent_notices([*notices, *own])
 
     async def reseed() -> str:  # a recovered session is told too
         return f"{block}\n\n{await reseed_user_message()}"
