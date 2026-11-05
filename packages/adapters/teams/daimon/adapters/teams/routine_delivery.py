@@ -16,14 +16,17 @@ to invoke the agent gets nothing.
 A result posted in a channel also sends the creator an activity feed notice
 linking to it (`activity_feed`), one entry per routine that each run
 replaces; a 1:1 chat notifies on its own, so the fallback sends none.
-Each message of a result posted there is recorded (`source='routine'`, the
-creator as requester), so the routine's agent can tidy it.
+Each message of a result is recorded as it is posted (`source='routine'`, the
+creator as requester), so the routine's agent can tidy it. A post to a bare
+channel roots its own thread and is keyed as that thread, as the tidy tools
+and the agent's context name it.
 """
 
 from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import replace
 
 import httpx
 import structlog
@@ -69,6 +72,22 @@ def make_teams_routine_poster(
     `feed` sends the creator a notice for a result posted in a channel; None sends none.
     """
 
+    async def record(
+        row: RoutineRow, conversation: str, activity_id: str, *, parent: str | None = None
+    ) -> None:
+        assert row.created_by_user_id is not None
+        await record_turn_post(
+            sessionmaker,
+            tenant_id=row.tenant_id,
+            platform="teams",
+            ma_agent_id=row.agent_id,
+            channel_id=conversation,
+            message_id=activity_id,
+            requester_platform_user_id=row.created_by_user_id,
+            source="routine",
+            parent_channel_id=parent,
+        )
+
     async def dm_fallback(row: RoutineRow, reason: str) -> DeliveryOutcome:
         creator = row.created_by_user_id
         policy = dm_policies.get(row.tenant_id, DirectMessagePolicy())
@@ -87,7 +106,7 @@ def make_teams_routine_poster(
                 TEAMS_LIMIT,
                 word_boundary=True,
             ):
-                await teams.post(chat, chunk)
+                await record(row, chat, await teams.post(chat, chunk))
         except TEAMS_SEND_ERRORS as err:
             log.info("routine.delivery_dm_failed", routine_id=str(row.id), error=type(err).__name__)
             return DeliveryOutcome(status="skipped", note=reason)
@@ -138,27 +157,17 @@ def make_teams_routine_poster(
             row, platform="teams", requester_name=name
         ) + unsupported_files_note(payload_for(row))
         conversation = teams_thread_id(target)
+        ids: list[str] = []
         try:
-            ids = [
-                await teams.post(conversation, chunk)
-                for chunk in split_fenced(text, TEAMS_LIMIT, word_boundary=True)
-            ]
+            for chunk in split_fenced(text, TEAMS_LIMIT, word_boundary=True):
+                ids.append(activity_id := await teams.post(conversation, chunk))
+                # A post to the channel roots its own thread.
+                rooted = target if target.thread_ts else replace(target, thread_ts=activity_id)
+                await record(row, teams_thread_id(rooted), activity_id, parent=target.channel_id)
         except httpx.HTTPStatusError as err:
             if err.response.status_code in (400, 403, 404):
                 return await fallback("destination_unavailable")
             raise
-        for activity_id in ids if creator is not None else ():
-            await record_turn_post(
-                sessionmaker,
-                tenant_id=row.tenant_id,
-                platform="teams",
-                ma_agent_id=row.agent_id,
-                channel_id=conversation,
-                message_id=activity_id,
-                requester_platform_user_id=creator,
-                source="routine",
-                parent_channel_id=target.channel_id if conversation != target.channel_id else None,
-            )
         # The activity-feed notice quotes the result to the creator outside the channel.
         if feed is not None and creator is not None and ids and not held:
             headline, _, body = text.partition("\n\n")

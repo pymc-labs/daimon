@@ -286,17 +286,64 @@ async def test_a_shared_channels_result_is_not_quoted_in_the_creators_activity_f
     assert feed.calls == [], "the notice would carry the result outside the channel"
 
 
+@pytest.mark.parametrize(
+    ("destination", "teams", "key", "parent"),
+    [
+        (f"{CHANNEL};messageid=17", _Teams(), f"{CHANNEL};messageid=17", CHANNEL),
+        (CHANNEL, _Teams(), f"{CHANNEL};messageid=m-1", CHANNEL),
+        (f"{CHANNEL};messageid=17", _Teams(post_status=404), f"a:dm-29:{CREATOR}", None),
+    ],
+    ids=["thread", "channel", "dm_fallback"],
+)
 async def test_a_posted_result_is_recorded_so_its_agent_can_tidy_it(
     db_session_factory: async_sessionmaker[AsyncSession],
+    destination: str,
+    teams: _Teams,
+    key: str,
+    parent: str | None,
 ) -> None:
-    """Each posted message is the routine's agent's, requested by its creator."""
+    """Each posted message is the routine's agent's, requested by its creator,
+    keyed by the thread it is in (a channel post roots its own) or the 1:1 chat."""
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session)
-    teams = _Teams()
+    kind = "thread" if ";" in destination else "channel"
+    row = _row(tenant_id=tenant.id, destination_kind=kind, destination_id=destination)
     poster = make_teams_routine_poster(
         db_session_factory, teams, tenant_id=tenant.id, dm_policies={}
     )
-    await poster(_row(tenant_id=tenant.id))
+    await poster(row)
+
+    async with db_session_factory() as session:
+        post = await get_post(
+            session, tenant_id=tenant.id, platform="teams", channel_id=key, message_id="m-1"
+        )
+    assert post is not None, "the result's message is recorded where the agent sees it"
+    assert (post.source, post.requester_platform_user_id, post.parent_channel_id) == (
+        "routine",
+        CREATOR,
+        parent,
+    )
+
+
+class _FailsSecond(_Teams):
+    async def post(self, conversation_id: str, text: str) -> str:
+        if self.posts and not conversation_id.startswith("a:"):
+            request = httpx.Request("POST", "https://smba.example")
+            raise httpx.HTTPStatusError("refused", request=request, response=httpx.Response(404))
+        return await super().post(conversation_id, text)
+
+
+async def test_a_part_posted_before_a_failure_stays_recorded(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+    long = "word " * 1_000
+    row = _row(tenant_id=tenant.id, delivery_payload=long, last_result_tail=long)
+    poster = make_teams_routine_poster(
+        db_session_factory, _FailsSecond(), tenant_id=tenant.id, dm_policies={}
+    )
+    await poster(row)
 
     async with db_session_factory() as session:
         post = await get_post(
@@ -306,9 +353,4 @@ async def test_a_posted_result_is_recorded_so_its_agent_can_tidy_it(
             channel_id=f"{CHANNEL};messageid=17",
             message_id="m-1",
         )
-    assert post is not None, "the result's message is recorded under its thread"
-    assert (post.source, post.requester_platform_user_id, post.parent_channel_id) == (
-        "routine",
-        CREATOR,
-        CHANNEL,
-    )
+    assert post is not None, "the part already in the thread can still be tidied"
