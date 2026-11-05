@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **On Teams the agent can edit and delete its own replies, cards and routine results.**
+  Each message a turn or routine posts is recorded as the agent's, so `edit_message`
+  and `delete_message` accept it once the turn is over, when the person who started it
+  or a Teams admin asks. In a 1:1 chat the agent sees the ids of its own recent
+  messages, and replayed channel history carries each message's id. Messages posted
+  before this release stay out of reach.
 - **The Channels list and panel show spend for the last 30 days.** The list column and the panel facts no longer mix "This month" with "Last 30 days".
 - **Signing in to the web app with Microsoft shows your email and your organization's name.** The Teams workspace is named after the organization instead of "Microsoft Teams", and the sidebar shows the email under your name. Where the organization hasn't allowed Daimon to read profiles, the sign-in address is used and the workspace keeps its old name. Slack and Discord sign-ins have no email, so the sidebar shows the name alone.
 - **Teams channels in the web app's Channels tab are grouped under their team.** A channel is filed under its team once Daimon has seen a message in it or listed it in billing, and a team shows the name it was installed with.
