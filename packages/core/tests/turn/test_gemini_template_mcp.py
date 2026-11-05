@@ -434,6 +434,111 @@ async def test_gated_and_publishing_tools_stay_unavailable_in_a_template(templat
     assert represented_source(captured, representation.target) == representation
 
 
+def _gated(request, gating):
+    from daimon.core.tool_safety import ToolSafetyPolicy
+
+    if gating == "tool_safety":
+        deps = replace(request.deps, tool_safety=ToolSafetyPolicy(enabled=True))
+        return replace(request, deps=deps)
+    return replace(request, admission=replace(request.admission, asks_before_publishing=True))
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("gating", ["tool_safety", "asks_before_publishing"])
+async def test_daimon_gating_of_unlisted_tools_keeps_the_mcp_representation(template, gating):
+    """Gating writes an ask config for gated tools the provider-turn catalogue
+    never lists (approve_reach, publish_report). That once dropped the whole MCP
+    representation, so a switch confirmed with MCP was asked again every turn."""
+    from daimon.core.turn.runtime_manifest import capture_preparation_source
+
+    request, *_ = template
+    plain = await capture_preparation_source(request, fresh=True)
+    gated = await capture_preparation_source(_gated(request, gating), fresh=True)
+    (representation,) = [r for r in gated.representations if r.target.mcp_servers]
+    assert [r.target for r in gated.representations] == [r.target for r in plain.representations]
+    (connection,) = representation.target.mcp_servers
+    allowed = set(connection.tool_policy["allowed_tools"])  # pyright: ignore[reportArgumentType]
+    assert allowed and not allowed & {"approve_reach", "publish_report"}
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_an_unlisted_grant_still_represents_no_mcp(template, monkeypatch):
+    from daimon.core import tool_safety
+    from daimon.core.turn.runtime_manifest import capture_preparation_source
+
+    def grant(configs, names, *, enabled):
+        allow = {"type": "always_allow"}
+        return [
+            *configs,
+            *({"name": n, "enabled": enabled, "permission_policy": allow} for n in names),
+        ], True
+
+    monkeypatch.setattr(tool_safety, "_ask_for", grant)
+    request, *_ = template
+    captured = await capture_preparation_source(_gated(request, "tool_safety"), fresh=True)
+    assert not [r for r in captured.representations if r.target.mcp_servers], "a grant fails closed"
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_the_source_pin_ignores_daimon_gating_but_not_an_agent_edit(template, monkeypatch):
+    """A release that gates one more tool, or a place that asks before publishing,
+    is not a change to the agent: its confirmed switch must not be asked again."""
+    from daimon.core import tool_safety
+    from daimon.core.turn.runtime_manifest import capture_preparation_source as capture
+    from daimon.core.turn.runtime_manifest import source_preservation_pin as pin
+
+    request, *_ = template
+    plain = pin(await capture(request, fresh=True))
+    for gating in ("tool_safety", "asks_before_publishing"):
+        assert pin(await capture(_gated(request, gating), fresh=True)) == plain, gating
+    gates = tool_safety._always_confirmed_tools()  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(tool_safety, "_always_confirmed_tools", lambda: gates | {"new_gate"})
+    assert pin(await capture(_gated(request, "tool_safety"), fresh=True)) == plain, "release"
+    agent = request.admission.agent
+    tools = [
+        {
+            **tool,
+            "configs": [
+                {
+                    "name": "call_tool",
+                    "enabled": False,
+                    "permission_policy": {"type": "always_allow"},
+                }
+            ],
+        }
+        if tool.get("type") == "mcp_toolset"
+        else tool
+        for tool in (t.model_dump(mode="json") for t in agent.tools)
+    ]
+    for edit in ({"system": "Edited instructions"}, {"tools": tools}):
+        edited = agent.model_validate({**agent.model_dump(mode="json"), **edit})
+        changed = replace(request, source=None, admission=replace(request.admission, agent=edited))
+        assert pin(await capture(changed)) != plain, f"an owner edit re-pins: {sorted(edit)}"
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_pin_from_before_the_gating_change_still_holds_but_not_for_an_edit(template):
+    """Consents pinned with Daimon's gating keep holding after the upgrade; an owner
+    edit still breaks them."""
+    from daimon.core.turn import runtime_manifest as manifest
+    from daimon.core.turn.runtime_manifest import capture_preparation_source as capture
+
+    def legacy_pin(source):
+        facts = manifest._source_facts(source)  # pyright: ignore[reportPrivateUsage]
+        facts.pop("ungated_spec", None)
+        return manifest._digest(facts)  # pyright: ignore[reportPrivateUsage]
+
+    request, *_ = template
+    source = await capture(request, fresh=True)
+    legacy = legacy_pin(source)
+    assert legacy != manifest.source_preservation_pin(source)
+    assert manifest.source_pin_matches(source, legacy)
+    agent = request.admission.agent
+    edited = agent.model_validate({**agent.model_dump(mode="json"), "system": "Edited"})
+    changed = replace(request, source=None, admission=replace(request.admission, agent=edited))
+    assert not manifest.source_pin_matches(await capture(changed), legacy)
+
+
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
 @pytest.mark.parametrize(
     "tool_name",

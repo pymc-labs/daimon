@@ -39,6 +39,7 @@ from daimon.core.turn.runtime_manifest import (
     represented_source,
     root_counterpart_catalog_id,
     select_runtime_manifest,
+    source_pin_matches,
     validate_counterpart_pins,
     validate_counterpart_request,
 )
@@ -156,7 +157,7 @@ class OpenAIDeployment(BaseModel):
             proof = represented_source(source, request.target_spec)
             if (
                 proof is None
-                or proof.source_pin != self.source_capabilities.source_pin
+                or not source_pin_matches(source, self.source_capabilities.source_pin)
                 or proof.target.model != self.source_capabilities.model
                 or proof.target.skills
                 != tuple(item.target for item in self.source_capabilities.skills)

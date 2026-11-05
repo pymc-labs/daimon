@@ -120,6 +120,10 @@ async def test_a_skipped_mcp_representation_is_logged_without_content(
     assert entry["log_level"] == "warning" and entry["error"] == "ValueError"
     assert entry["agent_id"] == str(source.agent_id)
     assert entry["tenant_id"] == str(source.tenant_id)
+    # Where it was raised, as a code label: the deeper raise has no Daimon frame of its own.
+    assert entry["site"].startswith(
+        "daimon.core.turn.runtime_manifest:_capture_source_capabilities:"
+    )
     if failure == "own":
         assert entry["reason"] == "MCP catalogue requires the captured caller"
     else:

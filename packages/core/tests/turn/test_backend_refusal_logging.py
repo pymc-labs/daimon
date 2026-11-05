@@ -97,6 +97,23 @@ def test_nested_private_errors_log_only_closed_reason_and_capability_labels():
     assert private not in json.dumps(logs)
 
 
+def test_a_refusal_detail_is_logged_only_from_the_closed_set():
+    stale = AgentBackendRefused("re_confirm", detail="source_pin")
+    stale.__cause__ = AgentBackendRefused("re_confirm", detail="private-PRIVATE")
+    with capture_logs() as logs:
+        _log_backend_unsupported("preparation_counterpart", stale)
+    assert logs[0]["causes"] == [
+        {"type": "AgentBackendRefused", "reason": "re_confirm", "detail": "source_pin"},
+        {"type": "AgentBackendRefused", "reason": "re_confirm"},
+    ]
+
+
+def test_capture_sentences_include_its_nested_helpers():
+    from daimon.core.turn.runtime_manifest import _OWN_CODE
+
+    assert {"resolve_latest", "verify_skill"} <= {code.co_name for code in _OWN_CODE}
+
+
 def test_cyclic_exception_context_cannot_block_a_denial_log():
     error = RuntimeError("private")
     error.__context__ = error

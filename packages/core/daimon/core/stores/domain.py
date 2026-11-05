@@ -1358,6 +1358,8 @@ class BackendAgent(_Facts):
     # Owner-loaded preparation inputs are kept in memory, never in settings or logs.
     source: Agent | None = Field(default=None, exclude=True, repr=False)
     effective_spec: AgentSpec | None = Field(default=None, exclude=True, repr=False)
+    # `effective_spec` before Daimon's own gating: what the consent pin hashes.
+    ungated_spec: AgentSpec | None = Field(default=None, exclude=True, repr=False)
     environment: Environment | None = Field(default=None, exclude=True, repr=False)
     resource_scope: Scope | None = Field(default=None, exclude=True, repr=False)
     resource_requirements: tuple[ResourceBinding, ...] = Field(default=(), exclude=True, repr=False)

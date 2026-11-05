@@ -231,10 +231,10 @@ async def selector_host(db_preflight, db_session_factory, db_clean, request, ini
         )
         admitted = []
 
-        async def admit_thread(thread, **options):
+        async def admit_thread(thread, origin="chat", **options):
             current = await admit_impl(
                 deps,
-                origin="chat",
+                origin=origin,
                 tenant_id=TENANT,
                 requester_org=RequesterOrg.HOST,
                 platform="slack",
