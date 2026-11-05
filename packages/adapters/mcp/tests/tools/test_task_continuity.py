@@ -161,9 +161,10 @@ async def test_handoff_binds_the_thread_and_writes_no_channel_or_workspace_routi
     assert result.destination_ma_agent_id == _DESTINATION_ID, "the concrete identity is bound"
     assert result.previous_responder_name == "daimon", "the result names who was answering"
     assert result.continuation_recorded is False, "a switch alone queues no work"
-    assert "research-bot will handle your next message." in result.confirmation, (
-        "the tool returns final copy the model can relay without a model turn"
-    )
+    assert result.confirmation == (
+        "research-bot is taking over from your next message.\n"
+        "It keeps this conversation and its files."
+    ), "the tool returns final copy the model can relay without a model turn"
     async with committing_sessionmaker() as session:
         binding = await get_binding(
             session,
@@ -304,7 +305,7 @@ async def test_handoff_nulls_a_fabricated_or_switch_only_continuation(
     assert result.continuation_recorded is False, (
         f"continuation={continuation!r} must be nulled, not queued as work"
     )
-    assert "It will pick up with:" not in result.confirmation, (
+    assert "First:" not in result.confirmation, (
         "a nulled continuation must not surface in the person-facing confirmation"
     )
     async with committing_sessionmaker() as session:
@@ -361,7 +362,7 @@ async def test_handoff_confirmation_omits_the_raw_channel_id(
             runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
         )
 
-    assert result.confirmation.startswith("research-bot will handle your next message.")
+    assert result.confirmation.startswith("research-bot is taking over from your next message.")
     assert parent not in result.confirmation, "the raw channel id stays out of person-facing copy"
 
 
@@ -1669,10 +1670,10 @@ async def test_a_hand_off_to_another_provider_moves_only_with_a_summary(
                 agent_id=_DESTINATION_ID,
                 summary=summary,
             )
-            assert "research-bot will handle your next message." in result.confirmation
-            assert ("it has a summary of what we discussed." in result.confirmation) == moves
+            assert "research-bot is taking over" in result.confirmation
+            assert ("It has a summary of this conversation" in result.confirmation) == moves
             if moves:
-                assert "continues with research-bot on Gemini 3.8 Flash" in result.confirmation
+                assert "taking over on Gemini 3.8 Flash" in result.confirmation
         else:
             match = "shared on Anthropic" if pinned == "shared_binding" else "with `summary`"
             with pytest.raises(ToolError, match=f"runs on Gemini.*{match}"):
@@ -1990,10 +1991,9 @@ async def test_a_same_provider_hand_off_says_when_its_summary_cant_go(
             agent_id=_DESTINATION_ID,
             summary=_SUMMARY,
         )
-    assert "research-bot will handle your next message." in result.confirmation
     assert result.confirmation.endswith(
-        "(without the summary: this conversation can't be shared with research-bot)"
-    )
+        "It can't read this conversation, so it starts fresh: tell it what you need."
+    ), "an unreadable destination starts fresh, and the summary doesn't go"
     async with committing_sessionmaker.begin() as session:
         assert (
             await take_handoff_summary(
@@ -2102,3 +2102,121 @@ async def test_handoff_uses_calling_principal_before_binding_or_queueing(
             thread_id="T_THREAD",
         )
         assert bool(queued) is bool(human)
+
+
+@pytest.mark.parametrize(
+    "case", ["person", "wake", "legacy", "agent_key", "handoff_turn", "unreadable"]
+)
+async def test_only_a_person_asked_hand_off_starts_the_destination_now(
+    case: str,
+    db_session: AsyncSession,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A person's own message asking for the hand-off queues the destination's
+    first turn even with no named work; a wake, an unverified origin, an agent
+    key, a hand-off made by a queued hand-off turn, or a destination that can't
+    read this conversation never does."""
+    from daimon.core.continuity.continuation import HANDOFF_PICKUP_SEED
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores.task_continuations import (
+        claim_wake_row,
+        record_continuation,
+        start_wake_row,
+    )
+    from daimon.core.stores.turn_origins import bind_origin_session
+    from daimon.testing.factories import make_thread_session
+
+    tenant = await make_tenant(db_session)
+    caller = await make_account(db_session, tenant=tenant)
+    if case == "unreadable":
+        await make_thread_session(  # seal_ids NULL: reads as sealed
+            db_session,
+            tenant=tenant,
+            account=caller,
+            thread_id="T_THREAD",
+            channel_id="C_PARENT",
+            ma_session_id="sess_old",
+            ma_agent_id=_RESPONDER_ID,
+        )
+    await db_session.commit()
+    now = datetime.now(UTC)
+    if case == "handoff_turn":
+        key = uuid.uuid4()
+        async with committing_sessionmaker.begin() as session:
+            await record_continuation(
+                session,
+                tenant_id=tenant.id,
+                platform="discord",
+                parent_channel_id="C_PARENT",
+                thread_id="T_THREAD",
+                requester_account_id=caller.id,
+                requester_external_user_id="42",
+                target_ma_agent_id=_RESPONDER_ID,
+                target_name="daimon",
+                reason="task_handoff",
+                idempotency_key=key,
+                requested_work=HANDOFF_PICKUP_SEED,
+            )
+            claimed = await claim_wake_row(
+                session,
+                idempotency_key=key,
+                owner="w",
+                now=now,
+                lease=timedelta(minutes=5),
+                max_attempts=3,
+            )
+            assert claimed is not None
+            assert await start_wake_row(
+                session, idempotency_key=key, owner="w", now=now, lease=timedelta(minutes=5)
+            )
+    runtime = _runtime(committing_sessionmaker, _client([_destination(tenant.id)]))
+    auth = AuthIdentity(
+        account_id=caller.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        platform="discord",
+        platform_user_id="42",
+        chat_session_id="test-session",
+        agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_RESPONDER_ID)
+        if case == "agent_key"
+        else None,
+    )
+    human = {"wake": False, "legacy": None}.get(case, True)
+    async with turn_origin(
+        committing_sessionmaker,
+        tenant_id=tenant.id,
+        account_id=caller.id,
+        platform="discord",
+        parent_channel_id="C_PARENT",
+        thread_id="T_THREAD",
+        responder_ma_agent_id=_RESPONDER_ID,
+        responder_name="daimon",
+        role=Role.USER,
+        attended=True,
+        chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
+    ) as origin:
+        async with committing_sessionmaker() as db:
+            await bind_origin_session(
+                db, origin_id=origin.id, chat_session_id="test-session", human_invocation=human
+            )
+            await db.commit()
+        result = await _hand_off_task_impl(
+            runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
+        )
+    async with committing_sessionmaker() as session:
+        pending = await list_pending_continuations(
+            session, tenant_id=tenant.id, platform="discord", thread_id="T_THREAD"
+        )
+    queued = [row for row in pending if row.target_ma_agent_id == _DESTINATION_ID]
+    assert "First:" not in result.confirmation, "the neutral seed is never shown as work"
+    if case == "person":
+        assert result.continuation_recorded is True
+        assert [row.requested_work for row in queued] == [HANDOFF_PICKUP_SEED]
+        assert result.confirmation == (
+            "research-bot is taking over, starting now.\nIt keeps this conversation and its files."
+        )
+    else:
+        assert result.continuation_recorded is False and queued == []
+        assert "from your next message." in result.confirmation
