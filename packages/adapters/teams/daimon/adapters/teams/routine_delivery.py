@@ -16,6 +16,8 @@ to invoke the agent gets nothing.
 A result posted in a channel also sends the creator an activity feed notice
 linking to it (`activity_feed`), one entry per routine that each run
 replaces; a 1:1 chat notifies on its own, so the fallback sends none.
+Each message of a result posted there is recorded (`source='routine'`, the
+creator as requester), so the routine's agent can tidy it.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ from daimon.adapters.teams.direct_chats import DirectChats
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, Surface, authorize
+from daimon.core.channel_tidy import record_turn_post
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.message_split import split_fenced
 from daimon.core.routine_delivery import (
@@ -144,6 +147,18 @@ def make_teams_routine_poster(
             if err.response.status_code in (400, 403, 404):
                 return await fallback("destination_unavailable")
             raise
+        for activity_id in ids if creator is not None else ():
+            await record_turn_post(
+                sessionmaker,
+                tenant_id=row.tenant_id,
+                platform="teams",
+                ma_agent_id=row.agent_id,
+                channel_id=conversation,
+                message_id=activity_id,
+                requester_platform_user_id=creator,
+                source="routine",
+                parent_channel_id=target.channel_id if conversation != target.channel_id else None,
+            )
         # The activity-feed notice quotes the result to the creator outside the channel.
         if feed is not None and creator is not None and ids and not held:
             headline, _, body = text.partition("\n\n")

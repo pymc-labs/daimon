@@ -1549,6 +1549,8 @@ class TeamsApp:
                 budget_channel_id=admission.budget_channel_id,
                 acknowledge=None if continuation else self._reactions.acknowledger(inbound),
                 hold_controls=True,
+                ma_agent_id=admission.agent.id,
+                turn_card_intent_id=intent_id,
             )
             holder.append(attempt)
             self._cancel_registry[cancel_key] = _CancelEntry(cancel, inbound.user_id, attempt)

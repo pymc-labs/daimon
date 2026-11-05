@@ -46,7 +46,7 @@ from microsoft_teams.api import (
 )
 from sqlalchemy.exc import OperationalError
 
-from .conftest import CONVERSATION_ID, SERVICE_URL, FakeSender
+from .conftest import CHANNEL_ID, CONVERSATION_ID, SERVICE_URL, THREAD_ID, FakeSender
 
 
 class Clock:
@@ -590,6 +590,58 @@ async def test_a_long_answer_overflows_into_new_messages_then_the_controls() -> 
     assert edit.id == lifecycle.final_message_id, "links and previews go in the last part only"
     assert (edit.text or "").startswith(chunks[-1].text or "-") and _names(edit) == ["a.png"]
     assert sender.activities[1:-1] == [*chunks, controls], "nothing is posted below the controls"
+
+
+async def test_every_fresh_post_of_a_turn_is_recorded_for_tidying(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Card, overflow and controls are each recorded once, keyed as the tidy tools look them up."""
+    recorded: list[dict[str, Any]] = []
+
+    async def record(_sessionmaker: object, **kw: Any) -> None:
+        recorded.append(kw)
+
+    async def hidden(session_factory: object, **kw: Any) -> bool:
+        return False
+
+    monkeypatch.setattr(lifecycle_module, "record_turn_post", record)
+    monkeypatch.setattr(lifecycle_module, "cost_footer_shown", hidden)
+    tenant, intent = uuid.uuid4(), uuid.uuid4()
+    sender = FakeSender()
+    lifecycle = TeamsTurnLifecycle(
+        sender=sender,
+        conversation_id=THREAD_ID,
+        service_url=SERVICE_URL,
+        cancel_key="key-1",
+        clock=Clock(),
+        tenant_id=tenant,
+        sessionmaker=_Sessions(),
+        requester_user_id="u-1",
+        ma_agent_id="ag-1",
+        turn_card_intent_id=intent,
+    )
+    await lifecycle.post_initial()
+    paragraph = "word " * 1000
+    await lifecycle.on_terminal_success(_answer("\n\n".join([paragraph] * 4)))
+
+    fresh = [f"m-{i + 1}" for i, (_, sent, _) in enumerate(sender.sent) if sent.id is None]
+    assert len(fresh) >= 4 and [r["message_id"] for r in recorded] == fresh, (
+        "each fresh post is recorded once; edits in place are not"
+    )
+    assert {
+        (r["channel_id"], r["parent_channel_id"], r["source"], r["turn_card_intent_id"])
+        for r in recorded
+    } == {(THREAD_ID, CHANNEL_ID, "turn", intent)}, "keyed by the thread, naming the turn"
+    assert {(r["ma_agent_id"], r["requester_platform_user_id"]) for r in recorded} == {
+        ("ag-1", "u-1")
+    }, "the turn's agent and asker"
+
+    recorded.clear()
+    unprompted = await _posted(
+        FakeSender(), tenant_id=tenant, sessionmaker=_Sessions(), ma_agent_id="ag-1"
+    )
+    await unprompted.on_terminal_success(_answer("Done."))
+    assert recorded == [], "a turn without a card intent records nothing"
 
 
 async def test_a_failed_answer_post_collapses_the_card_and_leaves_no_watermark() -> None:

@@ -13,6 +13,7 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.routine_delivery import DeliveryOutcome
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.agent_posts import get_post
 from daimon.core.stores.domain import RoutineRow
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -283,3 +284,31 @@ async def test_a_shared_channels_result_is_not_quoted_in_the_creators_activity_f
     assert outcome == DeliveryOutcome(status="delivered")
     assert [where for where, _ in teams.posts] == [f"{CHANNEL};messageid=17"]
     assert feed.calls == [], "the notice would carry the result outside the channel"
+
+
+async def test_a_posted_result_is_recorded_so_its_agent_can_tidy_it(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Each posted message is the routine's agent's, requested by its creator."""
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+    teams = _Teams()
+    poster = make_teams_routine_poster(
+        db_session_factory, teams, tenant_id=tenant.id, dm_policies={}
+    )
+    await poster(_row(tenant_id=tenant.id))
+
+    async with db_session_factory() as session:
+        post = await get_post(
+            session,
+            tenant_id=tenant.id,
+            platform="teams",
+            channel_id=f"{CHANNEL};messageid=17",
+            message_id="m-1",
+        )
+    assert post is not None, "the result's message is recorded under its thread"
+    assert (post.source, post.requester_platform_user_id, post.parent_channel_id) == (
+        "routine",
+        CREATOR,
+        CHANNEL,
+    )

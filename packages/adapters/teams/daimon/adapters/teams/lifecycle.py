@@ -12,6 +12,8 @@ An `unprompted` turn (organic thread participation) posts no card: it stays
 invisible until it has an answer, and posts nothing if it has none or fails.
 With a completion ping the asker's message also gets 👀 once the turn is
 accepted and ✅ in its place once answered, as on Discord (`acknowledge`).
+Each message a turn posts gets an `agent_posted_messages` row (`source='turn'`)
+naming its agent and asker, so the agent can tidy it once the turn is over.
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ from daimon.adapters.teams.image_preview import MAX_PREVIEWS
 from daimon.adapters.teams.progress_receipt import InitialProgressReceipt
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
+from daimon.core.channel_tidy import record_turn_post
 from daimon.core.cost_footer import cost_footer_shown
 from daimon.core.message_split import split_fenced
 from daimon.core.native_footer_cost import native_footer_text
@@ -43,6 +46,7 @@ from daimon.core.ops_alerts import alert_ops
 from daimon.core.outbound.opt_out import tag_opt_outs
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
 from daimon.core.teams_markdown import has_math
+from daimon.core.teams_threads import conversation_of
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
 from daimon.core.turn.notices import RefusalNouns, render_termination_notice
@@ -193,8 +197,13 @@ class TeamsTurnLifecycle(OutputGate):
         on_initial_progress: Callable[[InitialProgressReceipt], None] | None = None,
         acknowledge: Callable[[Acknowledgment], None] | None = None,
         hold_controls: bool = False,
+        ma_agent_id: str | None = None,
+        turn_card_intent_id: uuid.UUID | None = None,
     ) -> None:
         self._sender = sender
+        # The turn's agent and card intent, for recording its posts; None records none.
+        self._ma_agent_id = ma_agent_id
+        self._turn_card_intent_id = turn_card_intent_id
         # The caller posts the controls after the output sweep (`release_controls`),
         # so they land below every file it posts; only for a turn that may have outputs.
         self._hold_controls = hold_controls
@@ -274,7 +283,34 @@ class TeamsTurnLifecycle(OutputGate):
         sent = await self._sender.send(
             self._conversation_id, activity, service_url=self._service_url
         )
+        if message_id is None:
+            await self._record(sent.id)
         return message_id or sent.id
+
+    async def _record(self, message_id: str) -> None:
+        """Record a fresh post as the turn's, keyed as the tidy tools look it up."""
+        if (
+            self._sessionmaker is None
+            or self._tenant_id is None
+            or self._ma_agent_id is None
+            or self._turn_card_intent_id is None
+            or self._requester_user_id is None
+        ):
+            return
+        conversation = conversation_of(self._conversation_id)
+        channel = conversation.split(";", 1)[0]
+        await record_turn_post(
+            self._sessionmaker,
+            tenant_id=self._tenant_id,
+            platform="teams",
+            ma_agent_id=self._ma_agent_id,
+            channel_id=conversation,
+            message_id=message_id,
+            requester_platform_user_id=self._requester_user_id,
+            source="turn",
+            turn_card_intent_id=self._turn_card_intent_id,
+            parent_channel_id=channel if channel != conversation else None,
+        )
 
     async def _edit(self, activity: MessageActivityInput, message_id: str | None) -> str:
         """An edit is idempotent, so one that timed out is sent once more.
