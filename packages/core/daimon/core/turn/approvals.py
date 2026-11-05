@@ -575,6 +575,7 @@ def unattended_decider(
 
 
 CARD_TURN_MARGIN = timedelta(seconds=5)
+SKILL_UPDATE_UNREADABLE = "Couldn't load this update. Check the skill again."
 #: Too little time left to show a card someone could answer: refuse instead.
 NO_TIME_TO_ASK_MESSAGE = (
     "There isn't enough time left to ask for approval here. Ask again to redo it."
@@ -697,12 +698,15 @@ def interactive_decider(
             log.info("tool_safety.no_time_to_ask", tool=call.key)
             return ToolConfirmationResult(allow=False, deny_message=NO_TIME_TO_ASK_MESSAGE)
         skill_update: ServerSkillUpdateCard | None = None
-        if call.tool_name == "approve_server_skill_update" and skill_update_for is not None:
+        if call.tool_name == "approve_server_skill_update" and call.server_name in trusted_servers:
             try:
-                skill_update = await skill_update_for(call)
+                skill_update = None if skill_update_for is None else await skill_update_for(call)
             except Exception:
-                # Named boundary: a failed read only costs the card its detail.
+                # Named boundary: a failed read means no card, so the call is denied below.
                 log.warning("tool_safety.skill_update_read_failed", tool=call.key)
+            if skill_update is None:
+                # Approving what the card cannot show would be approving unseen changes.
+                return ToolConfirmationResult(allow=False, deny_message=SKILL_UPDATE_UNREADABLE)
         try:
             prompt = prompt_for_tool_call(
                 call,

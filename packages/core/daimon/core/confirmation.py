@@ -39,6 +39,7 @@ from daimon.core.agent_configuration import (
 )
 from daimon.core.microsoft_write_paths import write_kind
 from daimon.core.outbound.reach import ReachPlan, card_consequence, card_title
+from daimon.core.server_skills.gate import may_run
 from daimon.core.tool_safety import (
     CARDED_TOOLS,
     DAIMON_SERVER_NAME,
@@ -306,6 +307,7 @@ class ServerSkillUpdateCard:
 
 #: How many paths of each kind the card names before it says how many more.
 _UPDATE_PATHS: Final[int] = 5
+_UPDATE_PATH_WIDTH: Final[int] = 60
 _UPDATE_KINDS: Final[tuple[tuple[str, str], ...]] = (
     ("added", "Added"),
     ("changed", "Changed"),
@@ -319,7 +321,10 @@ def _update_lines(update: ServerSkillUpdateCard) -> tuple[str, ...]:
     new = _one_line(update.new_version or "none", limit=40)
     lines = [f"Version: {old} → {new}"]
     for key, label in _UPDATE_KINDS:
-        paths = [_one_line(path, limit=60) for path in update.changes.get(key, ())]
+        # What the approval gate counts as runnable leads, so "and N more" hides only
+        # files that could not run. Each path is cut in the middle to keep its extension.
+        raw = sorted(update.changes.get(key, ()), key=lambda path: not may_run(path, b""))
+        paths = [_clip_middle(_one_line(path), _UPDATE_PATH_WIDTH) for path in raw]
         if not paths:
             continue
         more = len(paths) - _UPDATE_PATHS

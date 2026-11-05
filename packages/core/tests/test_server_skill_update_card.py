@@ -121,14 +121,7 @@ async def test_lookup_when_the_call_lacks_a_skill_then_misses() -> None:
     assert await skill_update_lookup(_Factory(), tenant_id=__import__("uuid").uuid4())(bare) is None  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize(
-    "lookup",
-    [AsyncMock(return_value=UPDATE), AsyncMock(return_value=None), AsyncMock(side_effect=OSError)],
-    ids=["found", "miss", "read_fails"],
-)
-async def test_decider_when_asking_then_the_card_shows_what_the_lookup_found(
-    lookup: AsyncMock,
-) -> None:
+async def _decide(lookup: AsyncMock | None) -> tuple[bool, str | None, AsyncMock]:
     card = AsyncMock(return_value="denied")
     result = await interactive_decider(
         ToolSafetyPolicy(enabled=True),
@@ -138,8 +131,61 @@ async def test_decider_when_asking_then_the_card_shows_what_the_lookup_found(
         confirmed_tools=frozenset({"approve_server_skill_update"}),
         skill_update_for=lookup,
     )(CALL)
-    assert not result.allow
+    return result.allow, result.deny_message, card
+
+
+async def test_decider_when_the_update_is_found_then_the_card_shows_it() -> None:
+    lookup = AsyncMock(return_value=UPDATE)
+    allow, _, card = await _decide(lookup)
+    assert not allow
+    lookup.assert_awaited_once_with(CALL)
     assert card.await_args is not None
     prompt: ConfirmationPrompt = card.await_args.args[0]
-    lookup.assert_awaited_once_with(CALL)
-    assert ("Deploy helper" in prompt.title) == (lookup.return_value is UPDATE)
+    assert "Deploy helper" in prompt.title
+
+
+@pytest.mark.parametrize(
+    "lookup",
+    [AsyncMock(return_value=None), AsyncMock(side_effect=OSError), None],
+    ids=["miss", "read_fails", "no_lookup"],
+)
+async def test_decider_when_the_update_cannot_be_loaded_then_it_denies_without_a_card(
+    lookup: AsyncMock | None,
+) -> None:
+    allow, message, card = await _decide(lookup)
+    assert not allow
+    assert message == "Couldn't load this update. Check the skill again."
+    card.assert_not_awaited()
+
+
+def test_prompt_when_runnable_files_come_after_many_others_then_they_are_listed_first() -> None:
+    update = ServerSkillUpdateCard(
+        name="S",
+        version="1",
+        new_version="2",
+        changes={
+            "added": [
+                *(f"docs/n{i}.md" for i in range(6)),
+                "bin/run.sh",
+                "tools/setup.py",
+                "Makefile",
+            ],
+        },
+    )
+    shown = "\n".join(_prompt(update).detail_lines)
+    line = next(row for row in shown.splitlines() if row.startswith("Added:"))
+    for runnable in ("Makefile", "bin/run.sh", "tools/setup.py"):
+        assert runnable in line
+    assert "and 4 more" in line
+
+
+def test_prompt_when_a_path_is_long_then_it_is_cut_in_the_middle_keeping_its_extension() -> None:
+    path = "scripts/" + "very_long_directory_name/" * 6 + "install_everything.sh"
+    update = ServerSkillUpdateCard(
+        name="S", version="1", new_version="2", changes={"added": [path]}
+    )
+    line = next(row for row in _prompt(update).detail_lines if row.startswith("Added:"))
+    shown = line.removeprefix("Added: ")
+    assert len(shown) <= 60
+    assert shown.startswith("scripts/") and shown.endswith("install_everything.sh")
+    assert "…" in shown
