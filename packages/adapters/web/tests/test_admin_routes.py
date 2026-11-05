@@ -43,7 +43,7 @@ from .chat_support import (
     signed_in,
     visitor_of,
 )
-from .conftest import PUBLIC_URL, WebClientFactory, web_settings
+from .conftest import PUBLIC_URL, FakeUpstream, WebClientFactory, web_settings
 
 _OWN = {"X-Daimon-Web": "1", "Origin": PUBLIC_URL}
 COOKIE = "__Host-daimon_web"
@@ -123,7 +123,12 @@ async def _member(
 
 @asynccontextmanager
 async def signed_in_admin(
-    web_client: WebClientFactory, factory: async_sessionmaker[AsyncSession], tmp_path: Path
+    web_client: WebClientFactory,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    *,
+    settings: Settings = _SETTINGS,
+    provider: FakeUpstream | None = None,
 ) -> AsyncIterator[Admin]:
     """Ada, the owner, signed in; Mia, a member, ready to sign in."""
     ws = await funded_workspace(factory)
@@ -140,7 +145,7 @@ async def signed_in_admin(
     member_token = await signed_in(factory, member)
     turns = build_turns(factory, build_turn_router(str(ws.tenant_id)), tmp_path)
     async with web_client(
-        web_settings(), sessionmaker=factory, turns=turns, settings=_SETTINGS
+        web_settings(), sessionmaker=factory, turns=turns, settings=settings, provider=provider
     ) as client:
         client.headers.update(_OWN)
         client.cookies.set(COOKIE, owner_token, domain="web.example.com")

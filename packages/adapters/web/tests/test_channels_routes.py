@@ -12,17 +12,20 @@ from typing import cast
 import httpx
 from daimon.adapters.web import channel_visibility
 from daimon.adapters.web.runtime import WebRuntime
+from daimon.core import platform_names
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
+from daimon.core.config import DiscordSettings, Settings
 from daimon.core.platform_names import ChannelSighting
 from daimon.core.scope_cascade import CascadeMode, CascadeScope
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.platform_names import mark_channel_status, upsert_channel_names
 from daimon.core.stores.switch_modes import set_switch_mode
+from daimon.core.stores.tenants import get_tenant
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .chat_support import shown_trail, signed_in, visitor_of
-from .conftest import WebClientFactory
+from .conftest import FakeUpstream, WebClientFactory
 from .test_admin_routes import COOKIE, Admin, signed_in_admin
 
 _ROUTES: list[tuple[str, str, dict[str, object] | None]] = [
@@ -89,6 +92,52 @@ async def test_admins_list_every_channel_and_members_only_what_they_can_read(
     )
     assert hidden.status_code == 404
     assert set(refused.values()) == {403}, refused
+
+
+async def test_unnamed_channels_are_asked_of_discord_and_a_deleted_one_leaves_the_list(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    platform_names.forget_all()
+    guild: list[str] = []
+
+    def discord(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/channels/9002"):
+            return httpx.Response(200, json={"id": "9002", "name": "fresh", "guild_id": guild[0]})
+        return httpx.Response(404, json={"message": "Unknown Channel", "code": 10003})
+
+    settings = Settings(
+        _env_file=None,  # pyright: ignore[reportCallIssue]
+        database={"url": "postgresql+asyncpg://u:p@h/db"},  # pyright: ignore[reportArgumentType]
+        discord=DiscordSettings(bot_token=SecretStr("token")),
+    )
+    async with signed_in_admin(
+        web_client,
+        db_session_factory,
+        tmp_path,
+        settings=settings,
+        provider=FakeUpstream(discord),
+    ) as admin:
+        async with db_session_factory.begin() as db:
+            tenant = await get_tenant(db, admin.ws.tenant_id)
+            assert tenant is not None
+            guild.append(tenant.external_id)
+            await set_access_policy(
+                db,
+                tenant_id=admin.ws.tenant_id,
+                policy=TenantAccessPolicy(
+                    channel_rules={
+                        "9001": ChannelRule(readers="own", writers="own"),
+                        "9002": ChannelRule(readers="own", writers="own"),
+                    }
+                ),
+            )
+        listed = (await admin.client.get("/api/channels")).json()
+
+    names = {row["id"]: row["name"] for row in listed["channels"]}
+    assert "9001" not in names, "a channel Discord calls gone leaves the list"
+    assert names["9002"] == "fresh", "an unnamed channel carries the name Discord gives"
 
 
 async def test_visitors_are_refused(
@@ -203,11 +252,11 @@ async def test_rows_carry_kind_path_and_agents_and_gone_rows_stay_out(
                 platform="discord",
                 names={
                     "t9": ChannelSighting("Launch", kind="thread", parent_id="c1"),
-                    "gone1": ChannelSighting("old"),
+                    "9001": ChannelSighting("old"),
                 },
             )
             await mark_channel_status(
-                db, tenant_id=admin.ws.tenant_id, platform="discord", statuses={"gone1": "gone"}
+                db, tenant_id=admin.ws.tenant_id, platform="discord", statuses={"9001": "gone"}
             )
         async with db_session_factory.begin() as db:
             await set_switch_mode(
@@ -225,7 +274,7 @@ async def test_rows_carry_kind_path_and_agents_and_gone_rows_stay_out(
         history = (await admin.client.get("/api/channels/c1/history")).json()
 
     by_id = {row["id"]: row for row in listed["channels"]}
-    assert "gone1" not in by_id, "a deleted channel is not listed"
+    assert "9001" not in by_id, "a deleted channel is not listed"
     assert by_id["c1"]["kind"] == "channel" and by_id["c1"]["status"] == "active"
     assert by_id["t9"]["kind"] == "thread"
     assert [node["name"] for node in by_id["t9"]["path"]] == ["general"]
