@@ -32,8 +32,8 @@ from daimon.core.defaults.loader import (
 )
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_resolver import ResolverCache, new_resolver_cache
-from daimon.core.mcp_identity import load_signing_key
 from daimon.core.mcp_tool_listing import McpToolLister
+from daimon.core.node_exchange import node_identity_key
 from daimon.core.scope import DeploymentDefault
 from daimon.core.specs import AgentSpec
 from daimon.core.turn.deps import build_turn_deps
@@ -41,7 +41,7 @@ from daimon.core.turn.outcomes import drain_outcomes
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
-    from daimon.adapters.web.nodes.exchange import NodeAccessProblem
+    from daimon.core.node_exchange import NodeAccessProblem
     from stripe import StripeClient
 
 log = structlog.get_logger(__name__)
@@ -90,15 +90,6 @@ class WebRuntime:
     exchange_held: dict[tuple[uuid.UUID, str], tuple[datetime, NodeAccessProblem]] = field(
         default_factory=_no_holds
     )
-
-
-def identity_key_of(settings: Settings) -> Ed25519PrivateKey | None:
-    """The caller-identity key, when a connection node exchanges tokens with it."""
-    key = settings.mcp_identity.signing_key
-    web = settings.web
-    if key is None or web is None or not web.nodes.configured():
-        return None
-    return load_signing_key(key.get_secret_value())
 
 
 def _stripe_client(config: BillingConfig | None) -> StripeClient | None:
@@ -171,7 +162,7 @@ async def build_runtime(settings: Settings) -> AsyncIterator[WebRuntime]:
                     deployment_default=deployment_default,
                     skill_descriptions=load_skill_descriptions(settings.defaults_root / "skills"),
                     agent_templates=load_agent_templates(settings.defaults_root / "agents"),
-                    identity_key=identity_key_of(settings),
+                    identity_key=node_identity_key(settings),
                 )
             finally:
                 listener.cancel()

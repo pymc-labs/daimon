@@ -10,7 +10,7 @@ from __future__ import annotations
 import datetime as dt
 import functools
 import uuid
-from collections.abc import Awaitable, Callable, Collection, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from typing import TYPE_CHECKING, cast
 
 import anthropic as anthropic_pkg
@@ -136,6 +136,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
     from daimon.core.turn.posture import ExemptReason
+    from mux.contracts.resources import AgentSpec
 
 _log = structlog.get_logger(__name__)
 
@@ -418,7 +419,7 @@ async def project_session_resources(
     ):
         # Opaque carry resources and private credentials are not absent obligations.
         requirements.append(ResourceBinding(id=CALLER_RESOURCES_ID, kind="native"))
-    effective = agent_spec(payload)
+    unclassified = ()
     if source.source is not None:
         # Classify the complete session skill list before neutral projection loses
         # native fields. The driver owns unknown-source detection for both paths.
@@ -427,21 +428,35 @@ async def project_session_resources(
             source.source.ref.account_scope_id,
             scope,
         )
-        effective = effective.model_copy(
-            update={
-                "extensions": (
-                    *(effective.extensions or ()),
-                    *(
-                        extension
-                        for extension in session_source.spec.extensions or ()
-                        if extension.namespace == UNCLASSIFIED_SOURCE_NAMESPACE
-                    ),
-                )
-            }
+        unclassified = tuple(
+            extension
+            for extension in session_source.spec.extensions or ()
+            if extension.namespace == UNCLASSIFIED_SOURCE_NAMESPACE
         )
+
+    def project(payload: Mapping[str, object]) -> AgentSpec:
+        spec = agent_spec(payload)
+        if not unclassified:
+            return spec
+        return spec.model_copy(update={"extensions": (*(spec.extensions or ()), *unclassified)})
+
+    effective = project(payload)
+    # The consent pin's view: Daimon's own gating (tool safety, asking before
+    # publishing) changes with a release or a place, never with the agent.
+    ungated_tools = session_tools(
+        agent,
+        hidden,
+        tool_safety=ToolSafetyPolicy(),
+        public_url=public_url,
+        legacy_memory_servers=legacy_memory_servers,
+    )
+    ungated = project(
+        {**payload, "tools": [t.model_dump(mode="json", exclude_none=True) for t in ungated_tools]}
+    )
     return source.model_copy(
         update={
             "effective_spec": effective,
+            "ungated_spec": ungated,
             "environment": source_environment_record(environment, scope),
             "resource_scope": scope,
             "resource_requirements": tuple(requirements),

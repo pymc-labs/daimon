@@ -279,6 +279,46 @@
         'type': 'object',
       }),
     }),
+    'add_server_skill': dict({
+      'description': '''
+        Only for the connected data server: list what it serves, or take one of its offers
+        by name or URI into the library, kept current with that server. A person confirms on
+        a card, and you pass your ``origin_context_id``. Not for any other source, nor for giving
+        an agent what the library already holds.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'maxLength': 200,
+                'minLength': 1,
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'skill': dict({
+            'anyOf': list([
+              dict({
+                'maxLength': 2048,
+                'minLength': 1,
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'type': 'object',
+      }),
+    }),
     'add_skill': dict({
       'description': '''
         Add a skill to one agent from a pasted SKILL.md, a .md or .zip attached in
@@ -417,6 +457,29 @@
         'type': 'object',
       }),
     }),
+    'apply_server_skill_update': dict({
+      'description': 'Give an agent the server skill update its model provider check held back.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'agent_id': dict({
+            'maxLength': 200,
+            'minLength': 1,
+            'type': 'string',
+          }),
+          'skill_id': dict({
+            'maxLength': 200,
+            'minLength': 1,
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'agent_id',
+          'skill_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'approve_reach': dict({
       'description': '''
         Ask the person on a card before posting more widely than the turn's limit.
@@ -448,6 +511,39 @@
           'places',
           'people',
           'where',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'approve_server_skill_update': dict({
+      'description': '''
+        Approve the update waiting on a server skill, given as its ``pending_digest``.
+        Its new scripts and allowed tools reach every agent that uses the skill, so a
+        person confirms on a card first. Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'digest': dict({
+            'maxLength': 128,
+            'minLength': 1,
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'maxLength': 200,
+            'minLength': 1,
+            'type': 'string',
+          }),
+          'skill_id': dict({
+            'maxLength': 200,
+            'minLength': 1,
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'skill_id',
+          'digest',
+          'origin_context_id',
         ]),
         'type': 'object',
       }),
@@ -662,7 +758,7 @@
         `wait_for_helpers` with the `ask_id`. Helpers stop when your turn ends, so wait
         for their replies before you answer.
         <blank line>
-        To give it files: for each, call `create_file_upload_url`, PUT the file with the
+        To pass it files: for each, call `create_file_upload_url`, PUT the file with the
         curl it returns, and pass the handle id in `files`. Files the helper sends back
         are in the answer's `files`: download one with `curl -sS -o <name> "<url>"`, or
         pass its `id` to another helper's `files`. Deliver one to the person as you would
@@ -684,7 +780,7 @@
               }),
             ]),
             'default': None,
-            'description': 'Handle ids of files to give the helper (see below).',
+            'description': 'Handle ids of files to pass to the helper (see below).',
           }),
           'helper': dict({
             'description': "A helper's name or agent id from list_helpers.",
@@ -934,6 +1030,27 @@
         }),
         'required': list([
           'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'check_server_skill': dict({
+      'description': '''
+        Check a server skill for an update now. An update that needs review waits as
+        ``pending_digest``; a person approves it with ``approve_server_skill_update``.
+        Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'skill_id': dict({
+            'maxLength': 200,
+            'minLength': 1,
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'skill_id',
         ]),
         'type': 'object',
       }),
@@ -2158,7 +2275,7 @@
         turn; posting it into that thread with this tool delivers a duplicate.
         Use this tool for a file you were asked to post to a channel or thread
         you were not invoked from, or from a scheduled routine, which has no
-        reply to attach to. It is also how you give a helper a file: pass the
+        reply to attach to. It is also how you pass a helper a file: pass the
         handle id in ``ask_helper``'s ``files``.
         <blank line>
         The intent words are in this first line on purpose: an agent looking
@@ -3792,6 +3909,32 @@
         'required': list([
           'source_name',
           'new_name',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'fork_server_skill': dict({
+      'description': '''
+        Copy a server skill's latest version into an editable library skill named
+        ``name``, which follows no updates. Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'name': dict({
+            'maxLength': 64,
+            'minLength': 1,
+            'type': 'string',
+          }),
+          'skill_id': dict({
+            'maxLength': 200,
+            'minLength': 1,
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'skill_id',
+          'name',
         ]),
         'type': 'object',
       }),
@@ -9560,6 +9703,36 @@
         'required': list([
           'routine_id',
           'enabled',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'set_server_skill_follow': dict({
+      'description': '''
+        Choose whether an agent takes a server skill's new versions as they come
+        (``follow``) or keeps the version it pins.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'agent_id': dict({
+            'maxLength': 200,
+            'minLength': 1,
+            'type': 'string',
+          }),
+          'follow': dict({
+            'type': 'boolean',
+          }),
+          'skill_id': dict({
+            'maxLength': 200,
+            'minLength': 1,
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'agent_id',
+          'skill_id',
+          'follow',
         ]),
         'type': 'object',
       }),

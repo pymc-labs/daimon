@@ -240,7 +240,7 @@ def register_helper_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ] = True,
         files: Annotated[
             list[str] | None,
-            Field(description="Handle ids of files to give the helper (see below)."),
+            Field(description="Handle ids of files to pass to the helper (see below)."),
         ] = None,
     ) -> HelperAnswer:
         """Ask one of your helpers (`list_helpers`) to do part of this turn's work, on its own model, and get its reply.
@@ -251,7 +251,7 @@ def register_helper_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         `wait_for_helpers` with the `ask_id`. Helpers stop when your turn ends, so wait
         for their replies before you answer.
 
-        To give it files: for each, call `create_file_upload_url`, PUT the file with the
+        To pass it files: for each, call `create_file_upload_url`, PUT the file with the
         curl it returns, and pass the handle id in `files`. Files the helper sends back
         are in the answer's `files`: download one with `curl -sS -o <name> "<url>"`, or
         pass its `id` to another helper's `files`. Deliver one to the person as you would

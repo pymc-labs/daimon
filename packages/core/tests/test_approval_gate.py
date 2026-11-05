@@ -10,6 +10,7 @@ import structlog.testing
 from daimon.core.access_policy import Approvals, ChannelRule, TenantAccessPolicy
 from daimon.core.approval_gate import ApprovalGate, resolve_approval_gate, set_approval_gate
 from daimon.core.authz import Action, Subject, authorize
+from daimon.core.confirmation import ServerSkillUpdateCard
 from daimon.core.errors import DaimonError
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.security_audit import list_events
@@ -85,6 +86,9 @@ async def test_every_fixed_daimon_gate_still_asks(tool: str) -> None:
         confirmed_tools=frozenset(CONFIRMED_DAIMON_TOOLS),
         approval_gate_for=AsyncMock(return_value=OFF),
         server_urls={"third-party": "https://third.example/mcp"},
+        skill_update_for=AsyncMock(
+            return_value=ServerSkillUpdateCard(name="S", version="1", new_version="2", changes={})
+        ),
     )(
         ToolCall(
             tool_use_id="t1",

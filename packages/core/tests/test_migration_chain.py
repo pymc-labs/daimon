@@ -1,7 +1,7 @@
 """Exercise the canonical migration chain through real Alembic and PostgreSQL.
 
 Main's branch (0132..0158) and the preview branch (0134..0167) both descend from
-0131_usage_obs_tenant_idx; 0168 joins them and the last of the linear tail 0169..0178 is the
+0131_usage_obs_tenant_idx; 0168 joins them and the last of the linear tail 0169..0179 is the
 single head. The ORM describes the head, so below the merge the preview branch is compared
 without the objects main's branch changes.
 """
@@ -143,7 +143,8 @@ TAIL = (
     "0179_reach_tallies",
     "0180_tag_opt_outs",
     "0181_reach_own_threads",
-    "0182_helper_files",
+    "0182_server_skills",
+    "0183_helper_files",
 )
 HEAD = TAIL[-1]
 
@@ -293,7 +294,7 @@ TABLES = {
     "long_job_policy",
     "long_job_policy_history",
     "long_job_cancel_audit",
-    # Added by the web logins migration (0178), the head.
+    # Added by the web logins migration (0178).
     "web_logins",
     "web_login_accounts",
 }
@@ -403,7 +404,14 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             and getattr(getattr(obj, "table", None), "name", None) == "routines"
         ):
             return False
-        # Added by the web logins migration (0178), the head.
+        # Added by the server skills migration (0179), the head.
+        if (
+            expected != HEAD
+            and kind == "table"
+            and name in {"server_skills", "server_skill_deployments", "agent_skill_follows"}
+        ):
+            return False
+        # Added by the web logins migration (0178).
         if expected != HEAD and (
             (kind == "index" and name in {"ix_web_sessions_login", "ix_web_sessions_account"})
             or (

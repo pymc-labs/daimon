@@ -34,6 +34,7 @@ _TOOLS = {
     "set_agent_helpers",
     "set_agent_owners",
     "restore_library_skill_version",
+    "approve_server_skill_update",
 }
 
 
@@ -74,6 +75,27 @@ async def test_require_card_when_a_person_confirmed_then_returns(card: dict[str,
         fake_runtime(), make_auth(admin=False, agent_id=None), tool_name="x", origin_context_id="o"
     )
     assert card["asked"] == ["x"], "the live session was checked for the card"
+
+
+@pytest.mark.parametrize(
+    ("tool", "refused"), [("add_server_skill", True), ("approve_server_skill_update", False)]
+)
+async def test_require_card_when_cards_are_off_then_only_always_carded_tools_get_one(
+    card: dict[str, Any], tool: str, refused: bool
+) -> None:
+    call = _card.require_card(
+        fake_runtime(tool_safety=False),
+        make_auth(),
+        tool_name=tool,
+        origin_context_id="o",
+    )
+    if refused:
+        with pytest.raises(ToolError, match="approval cards are turned off"):
+            await call
+        assert not card["asked"], "no card can show, so the session is never asked"
+    else:
+        await call
+        assert card["asked"] == [tool]
 
 
 @pytest.mark.parametrize(

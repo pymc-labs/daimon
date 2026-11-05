@@ -648,6 +648,48 @@ ASK_PARAMS = {
 }
 
 
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("edited", [False, True])
+async def test_an_operator_row_pinned_before_the_gating_change_still_serves(full_openai, edited):
+    """A row pinned by the older formula (which also covered Daimon's gating, so it
+    is stricter) keeps serving its agent; a row pinned before an owner edit refuses."""
+    from anthropic.types.beta import BetaManagedAgentsAgent
+    from daimon.core.turn import runtime_manifest
+
+    request, plan, _, wire, *_, manifest = full_openai
+    source = await capture_preparation_source(request, fresh=True)
+    assert source_preservation_pin(source) == plan.source_capabilities.source_pin
+    if edited:
+        # The row was pinned to the agent before its owner changed the instructions.
+        payload = {**request.admission.agent.model_dump(mode="json"), "system": "Older"}
+        older = BetaManagedAgentsAgent.model_validate(payload)
+        admission = replace(request.admission, agent=older)
+        source = await capture_preparation_source(replace(request, admission=admission))
+    facts = runtime_manifest._source_facts(source)  # pyright: ignore[reportPrivateUsage]
+    facts.pop("ungated_spec", None)
+    legacy = runtime_manifest._digest(facts)  # pyright: ignore[reportPrivateUsage]
+    assert legacy != plan.source_capabilities.source_pin
+    rows = json.loads(manifest.read_text())
+    rows[0]["source_capabilities"]["source_pin"] = legacy
+    manifest.write_text(json.dumps(rows))
+    bind = bind_session_impl(
+        request.deps,
+        request.admission,
+        tenant_id=request.tenant_id,
+        platform=request.platform,
+        external_user_id=request.external_user_id,
+        thread_id=request.thread_id,
+        session_account_id=request.session_account_id,
+        reuse_existing=False,
+    )
+    if edited:
+        with pytest.raises(AdmissionDenied):
+            await bind
+        assert wire.posts == []
+    else:
+        assert (await bind).session_ref.provider == "openai"
+
+
 @pytest.mark.parametrize("consent_request", [ASK_PARAMS], indirect=True)
 @pytest.mark.parametrize("full_openai", [True], indirect=True)
 async def test_confirmation_gated_mcp_tool_is_declared_without_losing_siblings(full_openai):

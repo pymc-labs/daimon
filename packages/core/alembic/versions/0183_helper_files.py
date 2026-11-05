@@ -1,7 +1,7 @@
 """helper_asks: files passed to a helper and the files it sends back
 
-Revision ID: 0182_helper_files
-Revises: 0181_reach_own_threads
+Revision ID: 0183_helper_files
+Revises: 0182_server_skills
 
 downgrade: destructive
 """
@@ -12,8 +12,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0182_helper_files"
-down_revision: str | None = "0181_reach_own_threads"
+revision: str = "0183_helper_files"
+down_revision: str | None = "0182_server_skills"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

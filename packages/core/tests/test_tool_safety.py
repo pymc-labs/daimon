@@ -277,8 +277,10 @@ def test_session_tools_gate_third_party_toolsets_only() -> None:
         "configs": [
             {"name": name, "enabled": True, "permission_policy": {"type": "always_ask"}}
             for name in (
+                "add_server_skill",
                 "add_skill",
                 "approve_reach",
+                "approve_server_skill_update",
                 "change_workspace_settings",
                 "create_watch",
                 "delete_allowance",
@@ -430,6 +432,7 @@ def test_a_disabled_daimon_toolset_keeps_add_skill_disabled() -> None:
         {"name": name, "enabled": False, "permission_policy": {"type": "always_ask"}}
         for name in sorted(
             (
+                "add_server_skill",
                 "add_skill",
                 "approve_reach",
                 "create_watch",
@@ -765,6 +768,7 @@ def test_a_daimon_rule_makes_call_tool_and_the_named_tool_ask() -> None:
     assert daimon["default_config"] == {"permission_policy": {"type": "always_allow"}}
     asked = {c["name"] for c in daimon["configs"] if c["permission_policy"]["type"] == "always_ask"}
     assert asked == {
+        "add_server_skill",
         "add_skill",
         "approve_reach",
         "call_tool",
@@ -795,6 +799,7 @@ def test_a_rule_naming_a_confirmed_tool_does_not_duplicate_its_config() -> None:
     names = [c["name"] for c in out[1]["configs"]]
     assert sorted(names) == sorted(
         [
+            "add_server_skill",
             "add_skill",
             "approve_reach",
             "call_tool",
@@ -853,6 +858,7 @@ def test_the_daimon_wildcard_gates_the_proxy_but_never_gets_a_config_of_its_own(
     assert only is not None
     assert sorted(c["name"] for c in only[1]["configs"]) == sorted(
         [
+            "add_server_skill",
             "add_skill",
             "approve_reach",
             "call_tool",
@@ -875,6 +881,7 @@ def test_the_daimon_wildcard_gates_the_proxy_but_never_gets_a_config_of_its_own(
     assert both is not None
     assert sorted(c["name"] for c in both[1]["configs"]) == sorted(
         [
+            "add_server_skill",
             "add_skill",
             "approve_reach",
             "call_tool",

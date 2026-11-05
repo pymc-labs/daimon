@@ -98,6 +98,7 @@ from daimon.adapters.mcp.tools.propagation import register_propagation_tools
 from daimon.adapters.mcp.tools.publish import register_publish_tools
 from daimon.adapters.mcp.tools.repo_memory import register_repo_memory_tools
 from daimon.adapters.mcp.tools.routine_run import register_routine_run_tool
+from daimon.adapters.mcp.tools.server_skills import register_server_skill_tools
 from daimon.adapters.mcp.tools.setup_target import register_setup_target_tools
 from daimon.adapters.mcp.tools.skill_library_edits import register_skill_library_edit_tools
 from daimon.adapters.mcp.tools.skill_uploads import register_skill_upload_tools
@@ -126,6 +127,7 @@ from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.errors import BootstrapError
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.logging_setup import configure_logging, mark_shutting_down
+from daimon.core.node_exchange import node_identity_key
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.observability import init_sentry
 from daimon.core.operator_tokens import scope_tag
@@ -505,6 +507,7 @@ def create_mcp_app(
         teams_client=teams_client,
         slack_http=slack_http,
         microsoft=microsoft,
+        identity_key=node_identity_key(effective_settings),
     )
     agents.register_agent_tools(mcp, runtime)
     register_agent_removal_tools(mcp, runtime)
@@ -572,6 +575,7 @@ def create_mcp_app(
     register_audit_log_tools(mcp, runtime)
     register_agent_edit_tools(mcp, runtime)  # agent revert, owners, skill files
     register_skill_library_edit_tools(mcp, runtime)  # library skill files and versions
+    register_server_skill_tools(mcp, runtime)  # the data server node's skills
     register_credit_report_tools(mcp, runtime)  # own credits, overview, spend, feedback
     register_cost_footer_tools(mcp, runtime)  # the line under each finished answer
     register_never_tag_tools(mcp, runtime)  # a person opts out of being tagged

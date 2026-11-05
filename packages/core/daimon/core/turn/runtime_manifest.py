@@ -10,6 +10,7 @@ import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import CodeType
 from typing import TYPE_CHECKING, Annotated, Final, Literal, Protocol, Self, cast, get_type_hints
 from uuid import UUID
 
@@ -460,7 +461,7 @@ async def _capture_source_capabilities(
                 raise ValueError("missing representation profile")
             profile = get_profile(profile_id)
             if (
-                inputs.source_pin != pin
+                not source_pin_matches(source, inputs.source_pin)
                 or profile.provider != inputs.model.provider
                 or profile.skill_digest not in ("version", "content")
                 or not template
@@ -572,7 +573,24 @@ async def _capture_source_capabilities(
                     ]
                     if len(mcps) != 1 or mcps[0].mcp_server_name != DAIMON_SERVER_NAME:
                         raise ValueError("unrepresented MCP toolset")
-                    permissions = mcp_permissions(mcps[0], catalogue)
+                    # Daimon's gating (tool safety, asking before publishing) adds an
+                    # ask or off config per gated tool, listed or not. One the
+                    # catalogue lacks restricts nothing; an unlisted grant still fails.
+                    configs = [
+                        config
+                        for config in mcps[0].configs or ()
+                        if config.name in catalogue
+                        or not (
+                            config.enabled is False
+                            or (
+                                config.permission_policy is not None
+                                and config.permission_policy.type == "always_ask"
+                            )
+                        )
+                    ]
+                    permissions = mcp_permissions(
+                        mcps[0].model_copy(update={"configs": configs}), catalogue
+                    )
                     tools = (
                         *AgentToolsConfig(
                             tools=[
@@ -817,11 +835,14 @@ async def _capture_source_capabilities(
         # this evidence independently and refuse before any provider exposure.
         # Said once here, though: without it the agent silently loses its MCP
         # on the new provider (J2's Argon preview). Only our own fixed
-        # sentences are logged, never a provider's or a validator's text.
+        # sentences and code labels are logged, never a provider's or a validator's text.
+        from daimon.core.channel_backend import exception_labels
+
         log.warning(
             "source_capture.representation_skipped",
             error=type(error).__name__,
             reason=_own_sentence(error),
+            site=exception_labels(error).get("frame"),
             tenant_id=str(source.tenant_id),
             agent_id=str(source.agent_id),
             profile=revision.profile if revision is not None else None,
@@ -832,20 +853,25 @@ async def _capture_source_capabilities(
 
 
 def _own_sentence(error: BaseException) -> str | None:
-    """The fixed sentence of a ValueError raised by the capture itself, else None.
+    """The fixed sentence of a ValueError raised by the capture or its nested
+    helpers, else None.
 
     Anything raised deeper (a catalogue read, a validator) may carry content.
     """
     frame = error.__traceback__
     while frame is not None and frame.tb_next is not None:
         frame = frame.tb_next
-    if (
-        type(error) is not ValueError
-        or frame is None
-        or frame.tb_frame.f_code is not _capture_source_capabilities.__code__
-    ):
+    if type(error) is not ValueError or frame is None or frame.tb_frame.f_code not in _OWN_CODE:
         return None
     return str(error)
+
+
+def _own_code(code: CodeType) -> frozenset[CodeType]:
+    nested = (c for c in code.co_consts if isinstance(c, CodeType))
+    return frozenset({code}).union(*(_own_code(c) for c in nested))
+
+
+_OWN_CODE: Final = _own_code(_capture_source_capabilities.__code__)
 
 
 def source_instructions_preserved(required: str | None, system: str | None) -> bool:
@@ -1238,8 +1264,8 @@ def preview_source_drops(source: BackendAgent, model: ModelRef) -> AgentSpec:
     )
     representations = [item for item in source.representations if item.target.model == model]
     if representations:
-        if len(representations) != 1 or representations[0].source_pin != source_preservation_pin(
-            source
+        if len(representations) != 1 or not source_pin_matches(
+            source, representations[0].source_pin
         ):
             raise UnsupportedCapability(("source_representation",), profile)
         target = representations[0].target
@@ -1437,8 +1463,7 @@ def _consented_before(
     return any(_consented(candidate, consent) for candidate in candidates)
 
 
-def source_preservation_pin(source: BackendAgent) -> str:
-    """Pin complete owner-captured intent independently of the current caller address."""
+def _source_facts(source: BackendAgent) -> dict[str, object]:
     updates: dict[str, object] = {"resource_scope": None}
     for name in ("source", "environment"):
         resource = getattr(source, name)
@@ -1452,7 +1477,36 @@ def source_preservation_pin(source: BackendAgent) -> str:
     # Derived representation evidence must not change old consent pins, nor
     # recursively become part of the source it attests.
     facts.pop("representations", None)
+    return facts
+
+
+def _digest(facts: dict[str, object]) -> str:
     return request_digest(cast(JsonValue, TypeAdapter(object).dump_python(facts, mode="json")))
+
+
+def source_preservation_pin(source: BackendAgent) -> str:
+    """Pin complete owner-captured intent independently of the current caller address."""
+    facts = _source_facts(source)
+    # Daimon's own gating changes with a release or a place, not with the agent:
+    # pin the source before it, so gating alone never asks to confirm a switch again.
+    facts.pop("asks_before_publishing", None)
+    ungated = facts.pop("ungated_spec", None)
+    if ungated is not None:
+        facts["effective_spec"] = ungated
+    return _digest(facts)
+
+
+def source_pin_matches(source: BackendAgent, pin: str) -> bool:
+    """Whether `pin` pins this source, by the current formula or the one before it.
+
+    Consents and operator rows stored before Daimon's gating left the pin still
+    hold: the older pin also covers that gating, so it is stricter and safe to accept.
+    """
+    if pin == source_preservation_pin(source):
+        return True
+    legacy = _source_facts(source)
+    legacy.pop("ungated_spec", None)
+    return pin == _digest(legacy)
 
 
 def represented_source(
@@ -1463,7 +1517,7 @@ def represented_source(
     matches = [
         item
         for item in source.representations
-        if item.source_pin == source_preservation_pin(source)
+        if source_pin_matches(source, item.source_pin)
         and item.target.model == target.model
         and item.target.tools == target.tools
         and item.target.skills == target.skills
@@ -1534,7 +1588,7 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
                             session, request.tenant_id, agent_id, persisted=True
                         )
                     if setting != provisional or setting is None or setting.drop_consent is None:
-                        raise AgentBackendRefused("re_confirm")
+                        raise AgentBackendRefused("re_confirm", detail="provisional_mismatch")
     timeout = remaining_s(request.deadline, now=request.now(), refuse_expired=True)
     source = await asyncio.wait_for(
         capture_preparation_source(request, fresh=True)
@@ -1554,7 +1608,7 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
         or source.source.revision.local != request.admission.agent.version
     ):
         if setting is not None:
-            raise AgentBackendRefused("re_confirm")
+            raise AgentBackendRefused("re_confirm", detail="source_identity")
         raise UnsupportedCapability(("source_context",), revision.profile)
     # Capture is evidence of source intent, not evidence that a target preserved it.
     spec = source.effective_spec
@@ -1563,12 +1617,14 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
     target = None
     if setting is not None:
         consent = setting.drop_consent
-        if consent is None or setting.backend != revision.backend:
-            raise AgentBackendRefused("re_confirm")
+        if consent is None:
+            raise AgentBackendRefused("re_confirm", detail="no_consent")
+        if setting.backend != revision.backend:
+            raise AgentBackendRefused("re_confirm", detail="backend_mismatch")
         if revision.model is None and revision.backend != spec.model.provider:
-            raise AgentBackendRefused("re_confirm")
-        if source_preservation_pin(source) != consent.source_pin:
-            raise AgentBackendRefused("re_confirm")
+            raise AgentBackendRefused("re_confirm", detail="model_unpinned")
+        if not source_pin_matches(source, consent.source_pin):
+            raise AgentBackendRefused("re_confirm", detail="source_pin")
         target = preview_source_drops(
             source, ModelRef(provider=revision.backend, id=revision.model or spec.model.id)
         )
@@ -1580,7 +1636,7 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
             )
             or _consented_before(target, spec.system, consent)
         ):
-            raise AgentBackendRefused("re_confirm")
+            raise AgentBackendRefused("re_confirm", detail="losses_differ")
     retain_native = (
         (setting is not None)
         and not setting.declared_drops
@@ -1647,7 +1703,7 @@ async def read_preparation_counterpart(
         )
         remaining_s(request.deadline, now=request.now(), refuse_expired=True)
         if (target is not None) and current_source != source:
-            raise AgentBackendRefused("re_confirm")
+            raise AgentBackendRefused("re_confirm", detail="source_drift")
         if target is None or counterpart.agent.spec != target or current_source != source:
             raise UnsupportedCapability(("source_drift",), revision.profile)
         return replace(selected, counterpart=counterpart, verified_counterpart=counterpart)

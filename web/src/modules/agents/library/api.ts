@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
 
 import { ApiError, api } from "@/lib/api"
-import type { EnvironmentDoc, EnvironmentInput, LibrarySkill, SkillDetail, SkillFiles, SkillVersion, SyncedSkill } from "../types"
+import type { EnvironmentDoc, EnvironmentInput, LibrarySkill, MirrorCheck, SkillDetail, SkillFiles, SkillVersion, SyncedSkill } from "../types"
 
 const fail = (e: Error) => toast.error(e.message)
 
@@ -44,6 +44,9 @@ export function useSkillWrites() {
       onError: (e) => (e instanceof ApiError && e.status === 409 ? done() : fail(e)),
     }),
     restore: useMutation({ mutationFn: (b: { id: string; version: string }) => api.post<Ref>(`/api/agents/skills/${b.id}/restore`, { version: b.version }), onSuccess: done, onError: fail }),
+    check: useMutation({ mutationFn: (id: string) => api.post<MirrorCheck>(`/api/agents/skills/${id}/check`), onSuccess: done, onError: fail }),
+    approve: useMutation({ mutationFn: (b: { id: string; digest: string }) => api.post<MirrorCheck>(`/api/agents/skills/${b.id}/approve`, { digest: b.digest }), onSuccess: done, onError: fail }),
+    fork: useMutation({ mutationFn: (b: { id: string; name: string }) => api.post<Ref>(`/api/agents/skills/${b.id}/fork`, { name: b.name }), onSuccess: done, onError: fail }),
   }
 }
 

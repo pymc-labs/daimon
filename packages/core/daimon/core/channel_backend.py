@@ -27,7 +27,7 @@ from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
-from typing import Literal, Protocol, cast, get_args
+from typing import Final, Literal, Protocol, cast, get_args
 
 import structlog
 from anthropic import AsyncAnthropic
@@ -413,9 +413,30 @@ class AgentBackendRefused(DaimonError):
         self.provider = provider
         # `source_unsupported`: what the target can't carry (closed obligation labels).
         self.missing = missing
-        # `source_unavailable`: which permanent cause, if not a transient read failure.
+        # `source_unavailable`: which permanent cause, if not a transient read failure;
+        # `re_confirm`: which check refused the consent. Logged only from REFUSAL_DETAILS.
         self.detail = detail
         super().__init__(reason.replace("_", " "))
+
+
+#: Closed `AgentBackendRefused.detail` labels a refusal log may carry.
+REFUSAL_DETAILS: Final = frozenset(
+    {
+        "environment",
+        "identity",
+        "place",
+        "source",
+        "backend_mismatch",
+        "losses_differ",
+        "model_unpinned",
+        "no_consent",
+        "provisional_mismatch",
+        "revert_differs",
+        "source_drift",
+        "source_identity",
+        "source_pin",
+    }
+)
 
 
 type BackendRefusalStage = Literal[
@@ -797,6 +818,8 @@ def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object
             cause.update({k: v for k, v in exception_labels(error).items() if k != "class"})
         if isinstance(error, (AgentBackendRefused, AdmissionDenied)):
             cause["reason"] = error.reason if error.reason in safe_reasons else "redacted"
+        if isinstance(error, AgentBackendRefused) and error.detail in REFUSAL_DETAILS:
+            cause["detail"] = error.detail
         if isinstance(error, AdmissionDenied) and error.site is not None:
             cause["site"] = error.site  # Our own module.function:line, never request data.
         if isinstance(error, UnsupportedCapability):
@@ -1102,6 +1125,7 @@ class AgentBackendService:
         target: Provider | None,
         model: str | None = None,
         settings: AgentSettings | None = None,
+        captured: BackendAgent | None = None,
     ) -> CompatibilityPreview:
         capture = self._capture_source if target is not None else None
         current = await agent_backends.current(session, agent.tenant_id, agent.agent_id)
@@ -1113,7 +1137,7 @@ class AgentBackendService:
             raise AgentBackendRefused("selfhosted_requires_channel_configuration")
         original = agent
         if capture is not None:
-            agent = await capture(agent)
+            agent = captured if captured is not None else await capture(agent)
             if (agent.tenant_id, agent.agent_id) != (original.tenant_id, original.agent_id):
                 raise AgentBackendRefused("tenant_mismatch")
         preview = compatibility_preview(
@@ -1288,7 +1312,7 @@ class AgentBackendService:
                 operation == "revert"
                 and (previous.drop_consent if previous is not None else None) != consent
             ):
-                raise AgentBackendRefused("re_confirm")
+                raise AgentBackendRefused("re_confirm", detail="revert_differs")
             if consent is not None:
                 if operation != "revert":
                     if accepted_drops is None and consent.declared_drops:
@@ -1437,6 +1461,128 @@ class AgentBackendService:
         return await self._change(
             agent, None, expected_revision, actor, "revert", expected_preview_digest
         )
+
+    async def source_keeping_drops(
+        self,
+        agent: BackendAgent,
+        revision: AgentBackendRevision,
+        change: Callable[[BackendAgent], BackendAgent],
+    ) -> BackendAgent | None:
+        """The captured source when `revision`'s consent holds for it and would after `change`.
+
+        The changed source must declare exactly the drops the owner accepted. A
+        consent that no longer matches the source is never vouched for here.
+        """
+        from daimon.core.turn.runtime_manifest import preview_source_drops, source_preservation_pin
+
+        consent = revision.drop_consent
+        if consent is None or self._capture_source is None:
+            return None
+        captured = await self._capture_source(agent)
+        if (captured.tenant_id, captured.agent_id) != (agent.tenant_id, agent.agent_id) or (
+            source_preservation_pin(captured) != consent.source_pin
+        ):
+            return None
+        changed = change(captured)
+        selection = agent_selection(
+            revision.backend or DEFAULT_BACKEND, revision.model, AgentSettings.of(revision)
+        )
+        try:
+            proposed = preview_source_drops(
+                changed,
+                ModelRef(provider=selection.backend, id=selection.model or changed.model or ""),
+            )
+        except UnsupportedCapability:
+            return None
+        return captured if proposed.declared_drops == consent.declared_drops else None
+
+    async def renew_consent(
+        self,
+        agent: BackendAgent,
+        *,
+        expected: AgentBackendRevision,
+        account_id: uuid.UUID | None,
+        reason: str,
+        vouch: Callable[[BackendAgent], bool],
+    ) -> AgentBackendRevision | None:
+        """Renew `expected`'s drop consent for the agent's changed source, as a new revision.
+
+        Only while the revision is still current, `vouch` accepts the captured source
+        as the consented one plus the expected change, and it declares exactly the
+        drops the owner accepted; otherwise None, and the owner re-confirms. Revert
+        skips the renewal: it returns to what the owner chose before.
+        """
+        consent = expected.drop_consent
+        if not self.enabled or consent is None or self._capture_source is None:
+            return None
+        async with policy_store.policy_write_transaction(
+            self._sessions, tenant_id=agent.tenant_id
+        ) as session:
+            current = await agent_backends.current(session, agent.tenant_id, agent.agent_id)
+            if (
+                current is None
+                or current.local != expected.local
+                or current.drop_consent != consent
+            ):
+                return None
+            settings = AgentSettings.of(current)
+            captured = await self._capture_source(agent)
+            if not vouch(captured):
+                return None
+            try:
+                preview = await self._preview(
+                    session, agent, current.backend, current.model, settings, captured
+                )
+            except AgentBackendRefused:
+                return None
+            renewed = preview.drop_consent
+            if (
+                not preview.allowed
+                or renewed is None
+                or renewed.declared_drops != consent.declared_drops
+            ):
+                return None
+            consent_json = renewed.model_dump(mode="json")
+            try:
+                revision = await agent_backends.put_revision(
+                    session,
+                    tenant_id=agent.tenant_id,
+                    agent_id=agent.agent_id,
+                    agent_name=agent.name,
+                    local=current.local + 1,
+                    backend=current.backend,
+                    previous_local=current.previous_local,
+                    digest=_revision_digest(
+                        agent, current.backend, consent_json, current.model, settings
+                    ),
+                    preview_digest=preview.digest,
+                    drop_consent=consent_json,
+                    model=current.model,
+                    profile=settings.profile,
+                    requires=cast(JsonValue, settings.facts().get("requires")),
+                    thread_mode=settings.thread_mode,
+                )
+            except IntegrityError:
+                return None
+            await security_audit.append_event(
+                session,
+                tenant_id=agent.tenant_id,
+                account_id=account_id,
+                agent_id=agent.agent_id,
+                platform=None,
+                platform_user_id=None,
+                tool_name="agent_backend",
+                operation="renew",
+                outcome="allowed",
+                reason=f"{reason}; source_pin={consent.source_pin}->{renewed.source_pin}"
+                + (
+                    "; declared_drops=" + ",".join(revision.declared_drops)
+                    if revision.declared_drops
+                    else ""
+                ),
+                scope=f"agent_backend:{agent.agent_id}:{revision.local}",
+            )
+            return revision
 
     async def audit(
         self,

@@ -12,7 +12,7 @@ import pytest
 from daimon.core.errors import TurnError
 from daimon.core.stores.agent_notices import record_agent_notices
 from daimon.core.turn import run as run_module
-from daimon.core.turn.agent_notices import LOST_WORKSPACE_NOTICE
+from daimon.core.turn.agent_notices import LOST_WORKSPACE_NOTICE, stale_switch_notice
 from daimon.core.turn.driver import SEND_ATTEMPTED
 from daimon.core.turn.prepare import ContinuityOutcome
 from daimon.core.turn.state import McpServerFailure, TurnState
@@ -43,7 +43,7 @@ async def test_the_next_turn_takes_queued_notices_in_front_of_its_message(
         )
     deps = SimpleNamespace(sessionmaker=db_session_factory)
     prepared = SimpleNamespace(
-        admission=SimpleNamespace(agent=SimpleNamespace(id="agt")),
+        admission=SimpleNamespace(agent=SimpleNamespace(id="agt"), backend_switch_stale=None),
         continuity=ContinuityOutcome(),
         mapping_id=None,
     )
@@ -80,6 +80,35 @@ async def test_the_next_turn_takes_queued_notices_in_front_of_its_message(
     )
     assert again == "still there?", "a notice is told once"
     assert again_reseed is reseed, "and the reseed is untouched"
+
+
+async def test_a_stale_switch_is_told_on_every_turn_it_runs_on_the_source(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The turn's own notice: never queued, so it never repeats once the switch is fixed."""
+    async with db_session_factory.begin() as db:
+        tenant = await make_tenant(db)
+    prepared = SimpleNamespace(
+        admission=SimpleNamespace(agent=SimpleNamespace(id="agt"), backend_switch_stale="gemini"),
+        continuity=ContinuityOutcome(),
+        mapping_id=None,
+    )
+
+    async def reseed() -> str:
+        return "hi again"
+
+    told, _, taken = await run_module._with_agent_notices(  # pyright: ignore[reportPrivateUsage]
+        SimpleNamespace(sessionmaker=db_session_factory),  # pyright: ignore[reportArgumentType]
+        prepared,  # pyright: ignore[reportArgumentType]
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="T",
+        user_message="hi",
+        reseed_user_message=reseed,
+        now=datetime.now(UTC),
+    )
+    assert stale_switch_notice("gemini") in told and told.endswith("\n\nhi")
+    assert taken == []
 
 
 def _outcome(
