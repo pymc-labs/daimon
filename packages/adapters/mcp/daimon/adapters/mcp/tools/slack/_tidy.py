@@ -14,11 +14,15 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import require_channel_writable
 from daimon.adapters.mcp.tools._tidy import (
     Check,
+    MessageGone,
     TidyContext,
     TidyResult,
+    delete_parts,
     policy_recheck,
+    reply_parts,
     require_not_escalation_channel,
     require_own_post,
+    require_turns_over,
     resolve_tidy_context,
     run_action,
 )
@@ -107,7 +111,7 @@ def _describe(verb: str) -> Callable[[Exception], ToolError | None]:
 def _platform_error(err: SlackApiError, verb: str) -> ToolError:
     code = _slack_error_code(err)
     if code == "message_not_found":
-        return ToolError("message not found")
+        return MessageGone("message not found")
     if code in ("cant_update_message", "cant_delete_message"):
         return ToolError(f"slack does not let daimon {verb} this message")
     if code == "edit_window_closed":
@@ -198,6 +202,28 @@ async def _slack_delete_message_impl(  # pyright: ignore[reportUnusedFunction]
         channel_id=channel_id,
         message_id=message_id,
     )
+    await require_turns_over(runtime, ctx, [post], tool_name=tool, operation=operation)
+    await _delete_one(runtime, ctx, auth, client, post, tool=tool)
+    return TidyResult(
+        platform=_PLATFORM,
+        channel_id=channel_id,
+        message_id=message_id,
+        action="deleted",
+        messages_deleted=1,
+    )
+
+
+async def _delete_one(
+    runtime: McpRuntime,
+    ctx: TidyContext,
+    auth: AuthIdentity,
+    client: AsyncWebClient,
+    post: AgentPostRow,
+    *,
+    tool: str,
+) -> None:
+    """Delete one recorded message in a channel `_check_place` cleared."""
+    channel_id, message_id = post.channel_id, post.message_id
     _require_thread_unsealed(ctx, channel_id, post)
 
     async def act() -> None:
@@ -207,7 +233,7 @@ async def _slack_delete_message_impl(  # pyright: ignore[reportUnusedFunction]
         runtime,
         ctx,
         tool_name=tool,
-        operation=operation,
+        operation="message.delete",
         target=TidyTarget(
             channel_id=channel_id, message_id=message_id, content_hmac=post.content_hmac
         ),
@@ -216,12 +242,46 @@ async def _slack_delete_message_impl(  # pyright: ignore[reportUnusedFunction]
         describe_error=_describe("delete"),
         post=post,
     )
+
+
+async def _slack_delete_reply_impl(  # pyright: ignore[reportUnusedFunction]
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    channel_id: str,
+    message_id: str,
+    origin_context_id: str | None,
+) -> TidyResult:
+    # As delete_message here: a running turn's posts are refused; no requester rule.
+    ctx = await resolve_tidy_context(
+        runtime, auth, platform=_PLATFORM, origin_context_id=origin_context_id
+    )
+    client = await slack_web_client(runtime, team_id=_require_team_id(auth))
+    tool: str = "delete_reply"
+    await _check_place(runtime, ctx, auth, client, channel_id=channel_id)
+    post = await require_own_post(
+        runtime,
+        ctx,
+        tool_name=tool,
+        operation="message.delete",
+        channel_id=channel_id,
+        message_id=message_id,
+    )
+    parts = [p for p in await reply_parts(runtime, post) if p.channel_id == channel_id]
+    for part in parts:  # every seal before the first deletion
+        _require_thread_unsealed(ctx, channel_id, part)
+    await require_turns_over(runtime, ctx, parts, tool_name=tool, operation="message.delete")
+
+    async def delete(part: AgentPostRow) -> None:
+        await _delete_one(runtime, ctx, auth, client, part, tool=tool)
+
+    deleted = await delete_parts(runtime, parts, delete)
     return TidyResult(
         platform=_PLATFORM,
         channel_id=channel_id,
         message_id=message_id,
         action="deleted",
-        messages_deleted=1,
+        messages_deleted=deleted,
     )
 
 

@@ -15,9 +15,12 @@ tools refuse them.
   second copy.
 - A status or progress post you sent earlier: edit it as the work moves, and
   delete it when it no longer helps anyone.
-- An empty status card, a failed attempt, a duplicate or a post in the wrong
-  place: delete it with `delete_message`, then post once in the right place
-  if needed.
+- "Delete your reply" or "your last reply": a reply spans several messages
+  plus its status, notice and controls cards. Call `delete_reply` with any
+  one of them; it removes them all.
+- One specific message, an empty status card, a failed attempt, a duplicate
+  or a post in the wrong place: delete just it with `delete_message`, then
+  post once in the right place if needed.
 - "Tidy this thread": read the thread, delete your own empty cards and stale
   or duplicated replies one by one, and keep answers people relied on.
   `delete_thread` removes all your posts in it at once. The status card of

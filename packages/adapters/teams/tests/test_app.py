@@ -29,11 +29,12 @@ from daimon.adapters.teams.identity import INPUT_TOO_LONG, MAX_INBOUND_MESSAGE_B
 from daimon.adapters.teams.lifecycle import TeamsTurnLifecycle
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.errors import DaimonError
-from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.native_admins import GroupLookupFailed
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import get_account, set_role
+from daimon.core.stores.agent_posts import PostRole, record_post
 from daimon.core.stores.domain import Role, TurnCardIntentRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.teams_installations import record_teams_installation
@@ -1431,3 +1432,68 @@ async def test_queue_notice_delayed_by_policy_is_fenced_to_held_turn(
     ):
         await teams._orchestrate(inbound, TENANT)
         say.assert_not_awaited()
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_a_direct_chat_lists_this_agents_posts_with_their_roles(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Only a 1:1 chat lists posts: this agent's, by reply, without this turn's card."""
+    teams = _app(db_session_factory, FakeSender())
+    mine = derive_agent_uuid(tenant_id=TENANT, ma_agent_id="ag-1")
+    theirs = derive_agent_uuid(tenant_id=TENANT, ma_agent_id="ag-2")
+    older, newer, delivery = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    # One transaction per reply, so each reply has its own posted_at.
+    replies: list[list[tuple[str, PostRole | None, uuid.UUID, dict[str, Any]]]] = [
+        [
+            ("m-1", "answer", mine, {"turn_card_intent_id": older}),
+            ("m-2", "controls", mine, {"turn_card_intent_id": older}),
+            ("o-1", "answer", theirs, {"turn_card_intent_id": uuid.uuid4()}),
+        ],
+        [
+            ("r-1", "routine", mine, {"source": "routine", "delivery_id": delivery}),
+            ("r-2", "routine", mine, {"source": "routine", "delivery_id": delivery}),
+        ],
+        [
+            ("m-3", "answer", mine, {"turn_card_intent_id": newer}),
+            ("m-4", "status", mine, {"turn_card_intent_id": newer}),
+        ],
+        [("t-1", None, mine, {"source": "tool"})],
+    ]
+    for reply in replies:
+        async with db_session_factory.begin() as session:
+            for message_id, role, agent, extra in reply:
+                await record_post(
+                    session,
+                    tenant_id=TENANT,
+                    platform="teams",
+                    channel_id=CONVERSATION_ID,
+                    message_id=message_id,
+                    agent_id=agent,
+                    role=role,
+                    **{"source": "turn", **extra},
+                )
+    listed = await teams._own_posts(make_inbound(), TENANT, "ag-1", skip="m-4")
+    assert [[(id_, role) for id_, role, _ in reply] for reply in listed] == [
+        [("t-1", None)],
+        [("m-3", "answer")],
+        [("r-1", "routine"), ("r-2", "routine")],
+        [("m-1", "answer"), ("m-2", "controls")],
+    ], "newest reply first, grouped by turn or delivery, a tool post alone"
+    channel = make_inbound(conversation=THREAD_ID, kind="channel")
+    assert await teams._own_posts(channel, TENANT, "ag-1", skip=None) == [], "a channel lists none"
+
+
+async def test_a_failed_own_posts_lookup_lists_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The list is a convenience: a database failure never stalls or fails the turn."""
+
+    async def broken(*_: object, **__: object) -> None:
+        raise SQLAlchemyError("down")
+
+    monkeypatch.setattr(app_module, "list_recent_posts", broken)
+    teams = _app(db_session_factory, FakeSender())
+    with structlog.testing.capture_logs() as logs:
+        assert await teams._own_posts(make_inbound(), TENANT, "ag-1", skip=None) == []
+    assert [e["event"] for e in logs] == ["teams.own_posts_failed"]

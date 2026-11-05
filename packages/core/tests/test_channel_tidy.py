@@ -6,6 +6,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from daimon.core._models import AgentPostedMessage
 from daimon.core.channel_tidy import (
     PER_HOUR_LIMIT,
     PER_TURN_LIMIT,
@@ -15,9 +16,18 @@ from daimon.core.channel_tidy import (
     record_tidy_actions,
     record_tidy_outcome,
 )
-from daimon.core.stores.agent_posts import get_post, list_posts_in, mark_deleted, record_post
+from daimon.core.stores.agent_posts import (
+    get_post,
+    list_posts_in,
+    list_recent_posts,
+    list_reply_posts,
+    mark_deleted,
+    record_post,
+    set_post_role,
+)
 from daimon.core.stores.security_audit import list_events
 from daimon.testing.factories import make_tenant
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -157,6 +167,72 @@ async def test_the_ledger_keeps_the_first_owner_and_hides_deleted_posts(
         )
         == []
     ), "a deleted post is not listed"
+
+
+async def test_recent_posts_are_one_agents_live_messages_in_one_chat_newest_first(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    mine, other = uuid.uuid4(), uuid.uuid4()
+    for channel, message, agent in [
+        ("a:1", "1", mine),
+        ("a:1", "2", mine),
+        ("a:1", "3", mine),
+        ("a:1", "4", other),
+        ("a:2", "5", mine),
+    ]:
+        await record_post(
+            db_session,
+            tenant_id=tenant.id,
+            platform="teams",
+            channel_id=channel,
+            message_id=message,
+            agent_id=agent,
+        )
+    start = datetime.now(UTC)
+    for i in range(1, 4):
+        await db_session.execute(
+            update(AgentPostedMessage)
+            .where(AgentPostedMessage.message_id == str(i))
+            .values(posted_at=start + timedelta(seconds=i))
+        )
+    [deleted] = await list_posts_in(
+        db_session, tenant_id=tenant.id, platform="teams", channel_id="a:1", message_ids=["3"]
+    )
+    await mark_deleted(db_session, post_ids=[deleted.id], now=start)
+
+    rows = await list_recent_posts(
+        db_session, tenant_id=tenant.id, platform="teams", channel_id="a:1", agent_id=mine, limit=5
+    )
+    assert [r.message_id for r in rows] == ["2", "1"], (
+        "newest first; deleted, other agents' and other chats' posts are left out"
+    )
+
+
+async def test_a_posts_role_is_kept_and_follows_an_edit(db_session: AsyncSession) -> None:
+    tenant = await make_tenant(db_session)
+    agent = uuid.uuid4()
+    await record_post(
+        db_session,
+        tenant_id=tenant.id,
+        platform="teams",
+        channel_id="a:1",
+        message_id="1",
+        agent_id=agent,
+        role="status",
+    )
+    await set_post_role(
+        db_session,
+        tenant_id=tenant.id,
+        platform="teams",
+        channel_id="a:1",
+        message_id="1",
+        role="answer",
+    )
+    [row] = await list_recent_posts(
+        db_session, tenant_id=tenant.id, platform="teams", channel_id="a:1", agent_id=agent, limit=5
+    )
+    assert row.role == "answer", "a card edited into the answer is listed as the answer"
 
 
 async def test_account_erasure_clears_tidy_hmacs_and_prune_removes_old_posts(
@@ -342,3 +418,57 @@ async def test_a_turn_post_must_name_its_turn(
             requester_platform_user_id="42",
             source="turn",
         )
+
+
+async def test_a_reply_is_a_turns_posts_in_one_channel_or_a_deliveries_chunks_or_one_post(
+    db_session: AsyncSession,
+) -> None:
+    """The group `list_reply_posts` returns, and what each scope of it leaves out."""
+    tenant, other_tenant = await make_tenant(db_session), await make_tenant(db_session)
+    agent, other_agent = uuid.uuid4(), uuid.uuid4()
+    turn, delivery = uuid.uuid4(), uuid.uuid4()
+
+    async def post(message_id: str, **fields: object) -> None:
+        values: dict[str, object] = {
+            "tenant_id": tenant.id,
+            "platform": "teams",
+            "channel_id": "c1",
+            "agent_id": agent,
+        } | fields
+        await record_post(db_session, message_id=message_id, **values)  # pyright: ignore[reportArgumentType]
+
+    await post("t1", source="turn", turn_card_intent_id=turn)
+    await post("t2", source="turn", turn_card_intent_id=turn)
+    await post("t-deleted", source="turn", turn_card_intent_id=turn)
+    await post("t-thread", source="turn", turn_card_intent_id=turn, kind="thread")
+    await post("t-elsewhere", source="turn", turn_card_intent_id=turn, channel_id="c2")
+    await post("t-platform", source="turn", turn_card_intent_id=turn, platform="discord")
+    await post("t-agent", source="turn", turn_card_intent_id=turn, agent_id=other_agent)
+    await post("t-tenant", source="turn", turn_card_intent_id=turn, tenant_id=other_tenant.id)
+    await post("r1", source="routine", delivery_id=delivery, channel_id="c1;1")
+    await post("r2", source="routine", delivery_id=delivery, channel_id="c1;2")
+    await post("solo")
+    await post("solo-neighbour")
+    gone = await get_post(
+        db_session, tenant_id=tenant.id, platform="teams", channel_id="c1", message_id="t-deleted"
+    )
+    assert gone is not None
+    await mark_deleted(db_session, post_ids=[gone.id], now=datetime.now(UTC))
+
+    async def reply_of(message_id: str, channel_id: str = "c1") -> list[str]:
+        row = await get_post(
+            db_session,
+            tenant_id=tenant.id,
+            platform="teams",
+            channel_id=channel_id,
+            message_id=message_id,
+        )
+        assert row is not None
+        return sorted(p.message_id for p in await list_reply_posts(db_session, post=row))
+
+    assert await reply_of("t1") == ["t1", "t2"], (
+        "a turn's reply is its live messages in that channel, for this tenant, platform and agent"
+        " alone, without its thread rows or deleted ones"
+    )
+    assert await reply_of("r1", "c1;1") == ["r1", "r2"], "a delivery spans its chunks' threads"
+    assert await reply_of("solo") == ["solo"], "a post with neither is a reply of its own"

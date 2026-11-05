@@ -44,6 +44,7 @@ HELD_TOOL_ALLOWLIST: Final[Mapping[str, str]] = MappingProxyType(
         "approve_reach": "asks the requester on a card; posts nothing itself",
         "set_never_tag": "sets only the caller's own never-tag choice; touches nothing else",
         "delete_message": "deletes only a message the agent itself posted",
+        "delete_reply": "deletes only messages the agent itself posted, one at a time",
         "archive_thread": "archives only a thread the agent opened",
         "delete_thread": "removes only the agent's own messages from a thread it opened",
         # The conversation itself.

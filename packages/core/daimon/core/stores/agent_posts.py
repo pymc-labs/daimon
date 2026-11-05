@@ -27,6 +27,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 PostKind = Literal["message", "thread"]
 PostSource = Literal["tool", "turn", "auto_thread", "routine"]
+# A turn's progress card, answer, notice or controls card, or a routine result.
+PostRole = Literal["status", "answer", "notice", "controls", "routine"]
 
 
 class AgentPostRow(BaseModel):
@@ -45,6 +47,8 @@ class AgentPostRow(BaseModel):
     source: PostSource
     requester_platform_user_id: str | None
     turn_card_intent_id: uuid.UUID | None
+    role: PostRole | None = None
+    delivery_id: uuid.UUID | None = None
     posted_at: datetime
     deleted_at: datetime | None
 
@@ -64,6 +68,8 @@ async def record_post(
     source: PostSource = "tool",
     requester_platform_user_id: str | None = None,
     turn_card_intent_id: uuid.UUID | None = None,
+    role: PostRole | None = None,
+    delivery_id: uuid.UUID | None = None,
 ) -> None:
     """Record one post. A second record of the same target keeps the first owner."""
     await session.execute(
@@ -81,6 +87,8 @@ async def record_post(
             source=source,
             requester_platform_user_id=requester_platform_user_id,
             turn_card_intent_id=turn_card_intent_id,
+            role=role,
+            delivery_id=delivery_id,
         )
         .on_conflict_do_nothing(constraint="uq_agent_posted_messages_target")
     )
@@ -133,6 +141,62 @@ async def list_posts_in(
     return [AgentPostRow.model_validate(row) for row in rows.all()]
 
 
+async def list_recent_posts(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+    agent_id: uuid.UUID,
+    limit: int,
+) -> list[AgentPostRow]:
+    """`agent_id`'s newest live messages in one channel, newest first."""
+    rows = await session.scalars(
+        select(AgentPostedMessage)
+        .where(
+            AgentPostedMessage.tenant_id == tenant_id,
+            AgentPostedMessage.platform == platform,
+            AgentPostedMessage.channel_id == channel_id,
+            AgentPostedMessage.agent_id == agent_id,
+            AgentPostedMessage.kind == "message",
+            AgentPostedMessage.deleted_at.is_(None),
+        )
+        .order_by(AgentPostedMessage.posted_at.desc(), AgentPostedMessage.message_id.desc())
+        .limit(limit)
+    )
+    return [AgentPostRow.model_validate(row) for row in rows.all()]
+
+
+async def list_reply_posts(session: AsyncSession, *, post: AgentPostRow) -> list[AgentPostRow]:
+    """The live messages of `post`'s reply, newest first.
+
+    A turn's reply is its posts in that channel, a routine's is one delivery's
+    chunks, and any other post is a reply of its own.
+    """
+    if post.turn_card_intent_id is not None:
+        group = (
+            AgentPostedMessage.channel_id == post.channel_id,
+            AgentPostedMessage.turn_card_intent_id == post.turn_card_intent_id,
+        )
+    elif post.delivery_id is not None:
+        group = (AgentPostedMessage.delivery_id == post.delivery_id,)
+    else:
+        group = (AgentPostedMessage.id == post.id,)
+    rows = await session.scalars(
+        select(AgentPostedMessage)
+        .where(
+            AgentPostedMessage.tenant_id == post.tenant_id,
+            AgentPostedMessage.platform == post.platform,
+            AgentPostedMessage.agent_id == post.agent_id,
+            AgentPostedMessage.kind == "message",
+            AgentPostedMessage.deleted_at.is_(None),
+            *group,
+        )
+        .order_by(AgentPostedMessage.posted_at.desc(), AgentPostedMessage.message_id.desc())
+    )
+    return [AgentPostRow.model_validate(row) for row in rows.all()]
+
+
 async def set_post_hash(
     session: AsyncSession, *, post_id: uuid.UUID, content_hmac: str | None
 ) -> None:
@@ -141,6 +205,29 @@ async def set_post_hash(
         update(AgentPostedMessage)
         .where(AgentPostedMessage.id == post_id)
         .values(content_hmac=content_hmac)
+    )
+    await session.flush()
+
+
+async def set_post_role(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+    message_id: str,
+    role: PostRole,
+) -> None:
+    """A post edited into another role, such as a status card into the answer."""
+    await session.execute(
+        update(AgentPostedMessage)
+        .where(
+            AgentPostedMessage.tenant_id == tenant_id,
+            AgentPostedMessage.platform == platform,
+            AgentPostedMessage.channel_id == channel_id,
+            AgentPostedMessage.message_id == message_id,
+        )
+        .values(role=role)
     )
     await session.flush()
 

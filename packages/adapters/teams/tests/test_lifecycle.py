@@ -46,7 +46,7 @@ from microsoft_teams.api import (
 )
 from sqlalchemy.exc import OperationalError
 
-from .conftest import CONVERSATION_ID, SERVICE_URL, FakeSender
+from .conftest import CHANNEL_ID, CONVERSATION_ID, SERVICE_URL, THREAD_ID, FakeSender
 
 
 class Clock:
@@ -590,6 +590,99 @@ async def test_a_long_answer_overflows_into_new_messages_then_the_controls() -> 
     assert edit.id == lifecycle.final_message_id, "links and previews go in the last part only"
     assert (edit.text or "").startswith(chunks[-1].text or "-") and _names(edit) == ["a.png"]
     assert sender.activities[1:-1] == [*chunks, controls], "nothing is posted below the controls"
+
+
+async def test_every_fresh_post_of_a_turn_is_recorded_for_tidying(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Card, overflow and controls are each recorded once, keyed as the tidy tools look them up."""
+    recorded: list[dict[str, Any]] = []
+
+    async def record(_sessionmaker: object, **kw: Any) -> None:
+        recorded.append(kw)
+
+    relabeled: list[dict[str, Any]] = []
+
+    async def relabel(_sessionmaker: object, **kw: Any) -> None:
+        relabeled.append(kw)
+
+    async def hidden(session_factory: object, **kw: Any) -> bool:
+        return False
+
+    monkeypatch.setattr(lifecycle_module, "record_turn_post", record)
+    monkeypatch.setattr(lifecycle_module, "relabel_turn_post", relabel)
+    monkeypatch.setattr(lifecycle_module, "cost_footer_shown", hidden)
+    tenant, intent = uuid.uuid4(), uuid.uuid4()
+    sender = FakeSender()
+    lifecycle = TeamsTurnLifecycle(
+        sender=sender,
+        conversation_id=THREAD_ID,
+        service_url=SERVICE_URL,
+        cancel_key="key-1",
+        clock=Clock(),
+        tenant_id=tenant,
+        sessionmaker=_Sessions(),
+        requester_user_id="u-1",
+        ma_agent_id="ag-1",
+        turn_card_intent_id=intent,
+    )
+    await lifecycle.post_initial()
+    paragraph = "word " * 1000
+    await lifecycle.on_terminal_success(_answer("\n\n".join([paragraph] * 4)))
+
+    fresh = [f"m-{i + 1}" for i, (_, sent, _) in enumerate(sender.sent) if sent.id is None]
+    assert len(fresh) >= 4 and [r["message_id"] for r in recorded] == fresh, (
+        "each fresh post is recorded once; edits in place are not"
+    )
+    assert {
+        (r["channel_id"], r["parent_channel_id"], r["source"], r["turn_card_intent_id"])
+        for r in recorded
+    } == {(THREAD_ID, CHANNEL_ID, "turn", intent)}, "keyed by the thread, naming the turn"
+    assert {(r["ma_agent_id"], r["requester_platform_user_id"]) for r in recorded} == {
+        ("ag-1", "u-1")
+    }, "the turn's agent and asker"
+    roles = [r["role"] for r in recorded]
+    assert roles[0] == "status" and roles[-1] == "controls", "the card, then the controls"
+    assert set(roles[1:-1]) == {"answer"}, "every overflow part is the answer"
+    assert [(r["channel_id"], r["message_id"], r["role"]) for r in relabeled] == [
+        (THREAD_ID, "m-1", "answer")
+    ], "the card edited into the answer's first part is relabeled once"
+
+    recorded.clear()
+    unprompted = await _posted(
+        FakeSender(), tenant_id=tenant, sessionmaker=_Sessions(), ma_agent_id="ag-1"
+    )
+    await unprompted.on_terminal_success(_answer("Done."))
+    assert recorded == [], "a turn without a card intent records nothing"
+
+
+async def test_an_unlabelled_fresh_post_is_recorded_and_an_unlabelled_edit_is_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """delete_reply finds every post of the turn, labelled or not."""
+    recorded: list[dict[str, Any]] = []
+
+    async def record(_sessionmaker: object, **kw: Any) -> None:
+        recorded.append(kw)
+
+    monkeypatch.setattr(lifecycle_module, "record_turn_post", record)
+    lifecycle = TeamsTurnLifecycle(
+        sender=FakeSender(),
+        conversation_id=THREAD_ID,
+        service_url=SERVICE_URL,
+        cancel_key="key-1",
+        clock=Clock(),
+        tenant_id=uuid.uuid4(),
+        sessionmaker=_Sessions(),
+        requester_user_id="u-1",
+        ma_agent_id="ag-1",
+        turn_card_intent_id=uuid.uuid4(),
+    )
+    posted = await lifecycle._send(MessageActivityInput(text="a"), message_id=None)  # pyright: ignore[reportPrivateUsage]
+    await lifecycle._send(MessageActivityInput(text="b"), message_id=posted)  # pyright: ignore[reportPrivateUsage]
+    assert [(r["message_id"], r["role"]) for r in recorded] == [(posted, None)], (
+        "the fresh post is recorded once, without a role"
+    )
 
 
 async def test_a_failed_answer_post_collapses_the_card_and_leaves_no_watermark() -> None:

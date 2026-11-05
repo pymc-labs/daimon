@@ -1,13 +1,13 @@
 """Shared rules for the channel tidy tools (edit_message, delete_message,
-archive_thread, delete_thread) on Discord and Slack.
+delete_reply, archive_thread, delete_thread) on Discord, Slack and Teams.
 
 Ownership: a message is the calling agent's own only when
 `agent_posted_messages` says this agent posted it. `send_message` and
 `create_thread` write that row at send time (`record_agent_posts`), keyed by
 the executing agent (`chat_agent_id` for a chat turn, `agent_id` for an
-agent key). On Discord the adapter also writes one for each status card,
+agent key). On Discord and Teams the adapter also writes one for each status card,
 answer and notice a turn posts (`source='turn'`), for the thread it opens
-from a mention (`source='auto_thread'`), keyed by the turn's agent, and for
+from a mention (`source='auto_thread'`, Discord only), keyed by the turn's agent, and for
 a routine's delivered result (`source='routine'`), keyed by the routine's
 agent with its creator as requester. Anything
 else in a channel — a person's message, another agent's post, another
@@ -77,7 +77,10 @@ from daimon.core.stores.access_policy import (
 from daimon.core.stores.agent_posts import (
     AgentPostRow,
     PostKind,
+    PostRole,
+    PostSource,
     get_post,
+    list_reply_posts,
     mark_deleted,
     record_post,
     set_post_hash,
@@ -327,6 +330,40 @@ async def require_own_post(
     return post
 
 
+async def turn_is_running(runtime: McpRuntime, post: AgentPostRow) -> bool:
+    """Whether `post` is a turn's and that turn is still running.
+
+    A turn row without its turn cannot prove the turn is over: it counts as running.
+    """
+    if post.source != "turn":
+        return False
+    if post.turn_card_intent_id is None:
+        return True
+    async with runtime.session_factory() as session:
+        return await turn_card_intent_is_active(session, id=post.turn_card_intent_id)
+
+
+async def require_turns_over(
+    runtime: McpRuntime,
+    ctx: TidyContext,
+    posts: list[AgentPostRow],
+    *,
+    tool_name: str,
+    operation: TidyOperation,
+) -> None:
+    """Refuse `turn_in_progress`, before anything is changed, if any post's turn still runs."""
+    for post in posts:
+        if await turn_is_running(runtime, post):
+            raise await refuse(
+                runtime,
+                ctx,
+                tool_name=tool_name,
+                operation=operation,
+                reason="turn_in_progress",
+                target=TidyTarget(channel_id=post.channel_id, message_id=post.message_id),
+            )
+
+
 async def conversation_refusal(
     runtime: McpRuntime,
     ctx: TidyContext,
@@ -346,14 +383,8 @@ async def conversation_refusal(
     """
     if post.source == "tool":
         return None
-    if post.source == "turn":
-        # A turn row without its turn cannot prove the turn is over: refuse.
-        if post.turn_card_intent_id is None:
-            return "turn_in_progress"
-        async with runtime.session_factory() as session:
-            running = await turn_card_intent_is_active(session, id=post.turn_card_intent_id)
-        if running:
-            return "turn_in_progress"
+    if await turn_is_running(runtime, post):
+        return "turn_in_progress"
     if requester_is_admin:
         return None
     requester = ctx.actor.platform_user_id
@@ -619,6 +650,54 @@ async def run_action(
         raise
 
 
+class MessageGone(ToolError):
+    """The platform no longer has the message."""
+
+
+async def reply_parts(runtime: McpRuntime, post: AgentPostRow) -> list[AgentPostRow]:
+    """The live messages of `post`'s reply, newest first (`list_reply_posts`)."""
+    async with runtime.session_factory() as session:
+        return await list_reply_posts(session, post=post)
+
+
+async def delete_parts(
+    runtime: McpRuntime,
+    parts: list[AgentPostRow],
+    delete_one: Callable[[AgentPostRow], Awaitable[None]],
+) -> int:
+    """Delete each part in turn and return how many went.
+
+    A part already gone is skipped and its row marked deleted, so it stops
+    being listed as part of the reply. Any other failure, a limit included,
+    stops the run and says how many were deleted and how many remain.
+    """
+    deleted = gone = 0
+    for index, part in enumerate(parts):
+        try:
+            await delete_one(part)
+        except MessageGone:
+            async with runtime.session_factory.begin() as session:
+                await mark_deleted(session, post_ids=[part.id], now=datetime.now(UTC))
+            gone += 1
+            continue
+        except ToolError as exc:
+            if deleted == 0:
+                raise
+            raise ToolError(
+                f"{deleted} of {len(parts)} messages of this reply deleted, "
+                f"{len(parts) - index} left; stopped: {exc}"
+            ) from exc
+        except Exception as exc:  # a platform client error must not hide the count
+            raise ToolError(
+                f"{deleted} of {len(parts)} messages of this reply deleted, "
+                f"{len(parts) - index} left; stopped: {type(exc).__name__}"
+            ) from exc
+        deleted += 1
+    if deleted == 0 and gone:
+        raise MessageGone("message not found")
+    return deleted
+
+
 @dataclass(frozen=True)
 class PostRecord:
     """One post to record at send time."""
@@ -629,6 +708,13 @@ class PostRecord:
     parent_channel_id: str | None = None
     thread_ts: str | None = None
     content: str | None = None
+    # What a replacement carries over from the post it stands in for, so it stays
+    # in its reply group and under the same rules.
+    source: PostSource = "tool"
+    requester_platform_user_id: str | None = None
+    turn_card_intent_id: uuid.UUID | None = None
+    role: PostRole | None = None
+    delivery_id: uuid.UUID | None = None
 
 
 async def record_agent_posts(
@@ -660,6 +746,11 @@ async def record_agent_posts(
                     content_hmac=(
                         hash_content(runtime, post.content) if post.content is not None else None
                     ),
+                    source=post.source,
+                    requester_platform_user_id=post.requester_platform_user_id,
+                    turn_card_intent_id=post.turn_card_intent_id,
+                    role=post.role,
+                    delivery_id=post.delivery_id,
                 )
     except Exception as exc:  # the post is out; never fail the send over its record
         log.warning(

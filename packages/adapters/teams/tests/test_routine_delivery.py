@@ -13,6 +13,7 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.routine_delivery import DeliveryOutcome
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.agent_posts import get_post, list_reply_posts
 from daimon.core.stores.domain import RoutineRow
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -283,3 +284,107 @@ async def test_a_shared_channels_result_is_not_quoted_in_the_creators_activity_f
     assert outcome == DeliveryOutcome(status="delivered")
     assert [where for where, _ in teams.posts] == [f"{CHANNEL};messageid=17"]
     assert feed.calls == [], "the notice would carry the result outside the channel"
+
+
+@pytest.mark.parametrize(
+    ("destination", "teams", "key", "parent"),
+    [
+        (f"{CHANNEL};messageid=17", _Teams(), f"{CHANNEL};messageid=17", CHANNEL),
+        (CHANNEL, _Teams(), f"{CHANNEL};messageid=m-1", CHANNEL),
+        (f"{CHANNEL};messageid=17", _Teams(post_status=404), f"a:dm-29:{CREATOR}", None),
+    ],
+    ids=["thread", "channel", "dm_fallback"],
+)
+async def test_a_posted_result_is_recorded_so_its_agent_can_tidy_it(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    destination: str,
+    teams: _Teams,
+    key: str,
+    parent: str | None,
+) -> None:
+    """Each posted message is the routine's agent's, requested by its creator,
+    keyed by the thread it is in (a channel post roots its own) or the 1:1 chat."""
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+    kind = "thread" if ";" in destination else "channel"
+    row = _row(tenant_id=tenant.id, destination_kind=kind, destination_id=destination)
+    poster = make_teams_routine_poster(
+        db_session_factory, teams, tenant_id=tenant.id, dm_policies={}
+    )
+    await poster(row)
+
+    async with db_session_factory() as session:
+        post = await get_post(
+            session, tenant_id=tenant.id, platform="teams", channel_id=key, message_id="m-1"
+        )
+    assert post is not None, "the result's message is recorded where the agent sees it"
+    assert (post.source, post.requester_platform_user_id, post.parent_channel_id) == (
+        "routine",
+        CREATOR,
+        parent,
+    )
+
+
+async def test_a_long_channel_results_chunks_are_one_reply(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Each chunk roots its own thread, so the delivery groups them for delete_reply."""
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+    teams = _Teams()
+    payload = " ".join(f"word{i}" for i in range(1200))
+    row = _row(
+        tenant_id=tenant.id,
+        destination_kind="channel",
+        destination_id=CHANNEL,
+        delivery_payload=payload,
+    )
+    poster = make_teams_routine_poster(
+        db_session_factory, teams, tenant_id=tenant.id, dm_policies={}
+    )
+    await poster(row)
+
+    ids = [f"m-{n + 1}" for n in range(len(teams.posts))]
+    async with db_session_factory() as session:
+        first = await get_post(
+            session,
+            tenant_id=tenant.id,
+            platform="teams",
+            channel_id=f"{CHANNEL};messageid=m-1",
+            message_id="m-1",
+        )
+        assert first is not None and first.delivery_id is not None, "the chunk names its delivery"
+        reply = await list_reply_posts(session, post=first)
+    assert len(ids) > 1, "the result spans several chunks"
+    assert sorted(p.message_id for p in reply) == ids, "every chunk is one reply"
+
+
+class _FailsSecond(_Teams):
+    async def post(self, conversation_id: str, text: str) -> str:
+        if self.posts and not conversation_id.startswith("a:"):
+            request = httpx.Request("POST", "https://smba.example")
+            raise httpx.HTTPStatusError("refused", request=request, response=httpx.Response(404))
+        return await super().post(conversation_id, text)
+
+
+async def test_a_part_posted_before_a_failure_stays_recorded(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+    long = "word " * 1_000
+    row = _row(tenant_id=tenant.id, delivery_payload=long, last_result_tail=long)
+    poster = make_teams_routine_poster(
+        db_session_factory, _FailsSecond(), tenant_id=tenant.id, dm_policies={}
+    )
+    await poster(row)
+
+    async with db_session_factory() as session:
+        post = await get_post(
+            session,
+            tenant_id=tenant.id,
+            platform="teams",
+            channel_id=f"{CHANNEL};messageid=17",
+            message_id="m-1",
+        )
+    assert post is not None, "the part already in the thread can still be tidied"

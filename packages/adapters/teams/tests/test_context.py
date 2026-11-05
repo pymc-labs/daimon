@@ -116,6 +116,7 @@ def test_thread_block_orders_drops_noise_and_marks_truncation() -> None:
     assert block.lines[0].startswith('<message author_name="Ada" user_id="u-1" is_bot="false"')
     assert block.lines[0].endswith(">root post</message>"), "oldest first"
     assert 'is_bot="true" is_self="true"' in block.lines[1], "the bot's own answer is marked"
+    assert 'message_id="105"' in block.lines[1], "its id, to pass to edit_message"
 
 
 def test_delta_block_keeps_replies_after_the_watermark_and_truncates_only_a_full_page() -> None:
@@ -468,3 +469,39 @@ def test_another_bots_footer_stays_in_its_text() -> None:
     )
     assert "Saved to this channel" in "\n".join(block.lines), "not daimon's: kept"
     assert '<attachment name="x.csv" fetchable="false"/>' in block.lines, "its link is listed"
+
+
+def test_a_direct_chat_turn_lists_the_agents_own_posts_with_their_ids() -> None:
+    """A 1:1 chat replays nothing, so the agent learns its posts' ids, reply by reply."""
+    message = render_user_message(
+        "<controls/>",
+        make_inbound("delete that"),
+        is_admin=False,
+        keys="",
+        prefix="",
+        history=None,
+        own_posts=[
+            [
+                ("m-3", "answer", "2026-11-05T09:05:00+00:00"),
+                ("m-4", "controls", "2026-11-05T09:05:01+00:00"),
+            ],
+            [("m-1", "answer", "2026-11-05T09:00:00+00:00")],
+            [("m-2", None, "2026-11-05T09:01:00+00:00")],
+        ],
+    )
+    assert '<post message_id="m-1" role="answer" timestamp="2026-11-05T09:00:00+00:00"/>' in (
+        message
+    ), "a post carries its id, role and time"
+    assert '<post message_id="m-2" timestamp="2026-11-05T09:01:00+00:00"/>' in message, (
+        "a post without a role has none"
+    )
+    newest = message[message.index("<reply>") : message.index("</reply>")]
+    assert '"m-3"' in newest and '"m-4"' in newest, "one reply's messages share a <reply>"
+    assert message.count("<reply>") == 3, "one element per reply"
+    assert message.index('"m-3"') < message.index('"m-1"'), "newest reply first"
+    assert "role answer" in message, "the hint names the reply's role"
+    assert "delete_reply" in message and "delete_message" in message, "the hint names the tools"
+    bare = render_user_message(
+        "<controls/>", make_inbound("hi"), is_admin=False, keys="", prefix="", history=None
+    )
+    assert "<your_posts" not in bare, "no list without posts"

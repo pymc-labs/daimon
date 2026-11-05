@@ -125,6 +125,7 @@ from daimon.core.observability import capture_exception_with_scope
 from daimon.core.participation_gates import ParticipationGates
 from daimon.core.routine_delivery import RoutinePoster, run_delivery_poller
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
+from daimon.core.stores.agent_posts import list_recent_posts
 from daimon.core.stores.domain import (
     Role,
     TaskContinuationRow,
@@ -207,6 +208,9 @@ from sqlalchemy.exc import SQLAlchemyError
 log = structlog.get_logger()
 
 _SEEN_ACTIVITY_CAP = 10_000
+# The agent's own posts a 1:1 chat turn lists, so it can name them to tidy.
+_OWN_POSTS_SHOWN = 10
+_OWN_POSTS_TIMEOUT_S = 2.0
 _RECOVERY_RETRY_DELAY_S = 1.0
 # A turn's output sweep polls the listing for up to 14 s, then uploads: 15 s cut a
 # sweep that began 14 s before a deploy's SIGTERM. Within the documented 90 s grace.
@@ -1573,6 +1577,8 @@ class TeamsApp:
                 budget_channel_id=admission.budget_channel_id,
                 acknowledge=None if continuation else self._reactions.acknowledger(inbound),
                 hold_controls=True,
+                ma_agent_id=admission.agent.id,
+                turn_card_intent_id=intent_id,
             )
             holder.append(attempt)
             self._cancel_registry[cancel_key] = _CancelEntry(cancel, inbound.user_id, attempt)
@@ -1847,6 +1853,9 @@ class TeamsApp:
                 keys=render_keys_element(await self._key_names(tenant_id, inbound, admission)),
                 prefix=attachments.prefix,
                 channel_files=await self._files_reachable(inbound),
+                own_posts=await self._own_posts(
+                    inbound, tenant_id, admission.agent.id, skip=lifecycle.message_id
+                ),
             )
             message = render(history=history)
 
@@ -1944,6 +1953,40 @@ class TeamsApp:
     ) -> None:
         if self._held_controls.get(conversation_id) is lifecycle:
             del self._held_controls[conversation_id]
+
+    async def _own_posts(
+        self, inbound: TeamsInbound, tenant_id: uuid.UUID, ma_agent_id: str, *, skip: str | None
+    ) -> list[list[tuple[str, str | None, str]]]:
+        """The agent's latest posts in a 1:1 chat but this turn's card, by reply.
+
+        Newest reply first, each reply's messages oldest first.
+        """
+        if inbound.kind != "dm":
+            return []
+        try:
+            async with (
+                asyncio.timeout(_OWN_POSTS_TIMEOUT_S),
+                self.runtime.sessionmaker() as session,
+            ):
+                rows = await list_recent_posts(
+                    session,
+                    tenant_id=tenant_id,
+                    platform="teams",
+                    channel_id=conversation_of(inbound.conversation_id),
+                    agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id),
+                    limit=_OWN_POSTS_SHOWN,
+                )
+        except (*_DB_ERRORS, TimeoutError) as exc:  # a convenience; never stall the turn
+            log.warning("teams.own_posts_failed", error_type=type(exc).__name__)
+            return []
+        replies: dict[uuid.UUID | str, list[tuple[str, str | None, str]]] = {}
+        for r in rows:
+            if r.message_id != skip:
+                key = r.turn_card_intent_id or r.delivery_id or r.message_id
+                replies.setdefault(key, []).insert(
+                    0, (r.message_id, r.role, r.posted_at.isoformat())
+                )
+        return list(replies.values())
 
     async def _files_reachable(self, inbound: TeamsInbound) -> bool | None:
         if inbound.kind != "channel":
