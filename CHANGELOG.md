@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Helpers pass files both ways.** `ask_helper` takes files uploaded with `create_file_upload_url`, and the helper's own files come back with its reply as download links that work for that ask only and expire after an hour. It works on every model provider and needs the public URL set. Migration 0182 adds the columns.
 - **Chat answers and setup panels link to the agent, channel or routine on the web.** Each opens in the right workspace (sign-in or a workspace picker first when needed). Agent setup details, routines, billing and channel settings on Discord, Slack and Teams carry an "Open in web" button. The agent also knows the workspace's main pages to link. Nothing changes with no web app set.
 - **Everything the web admin pages do also works from Discord, Slack and Teams chat.** Admins invite people and send visitor links (sent by direct message), change roles, set agent access and workspace settings, manage spend allowances, read the audit log, spend and feedback, restore agent versions and set owners, edit skill files, resync repo skills, and see their own credits; results link to the page. People can also run a routine on demand, clear a thread's own settings, and remove their own data (memory, sign-ins, coding keys) with one tool. Removing or reconfiguring runs only on a Confirm card in chat, and routines and other unattended runs do not list those tools. Long lists show 25 rows with a total, and people lists page on. A test keeps the web app and chat in step.
 
@@ -299,7 +300,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   turn (`list_helpers`, `ask_helper`, `wait_for_helpers`). Pick each agent's helpers on its
   canvas in the web app. A helper runs for the same person in the same thread, with that
   person's rules, budget and confirmations; its reply goes back to the asking agent, and it
-  stops when that turn ends. Replies are text. Migration 0170 adds the helper tables.
+  stops when that turn ends. Migration 0170 adds the helper tables.
 - **Web app.** People chat with agents in a browser, signing in with Discord. Shared files
   reach the agent, and files it makes come back as downloads. Key requests show as a form in
   the chat. Admins manage people, invites, credit and settings, and a one-time owner link
