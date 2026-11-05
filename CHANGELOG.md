@@ -10,12 +10,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **In Teams channels and 1:1 chats the agent can edit and delete its own replies, cards and routine results.**
   Each message a turn or routine posts is recorded as the agent's, so `edit_message`
   and `delete_message` accept it once the turn is over, when the person who started it
-  or a Teams admin asks. A new `delete_reply` tool, on Discord, Slack and Teams, deletes
-  a whole reply: every message and status, notice and controls card of a turn, or every
-  part of a routine result. `delete_message` still deletes one message. In a 1:1 chat
-  the agent sees its recent messages grouped by reply, and replayed channel history
-  carries each message's id. Group chats stay out of reach, as do messages posted
-  before this release. Adds a database migration.
+  or a Teams admin asks. In a 1:1 chat the agent sees its recent messages grouped by
+  reply, and replayed channel history carries each message's id. Group chats stay out
+  of reach, as do messages posted before this release. Adds a database migration.
+- **The agent can delete a whole reply of its own with `delete_reply`, on Discord, Slack and Teams.**
+  Pass any one message of the reply and every message of it goes: its text messages and
+  its status, notice and controls cards, or every chunk of a routine result on Discord
+  and Teams (Slack does not record routine results). A message sent with `send_message`
+  is a reply of one message, and `delete_message` still deletes just one. Each deletion
+  takes the rules and limits of `delete_message`, all checked before the first, so a
+  reply whose turn is still running, or that another person asked for where that
+  matters, is refused whole. A message already gone is skipped, and a limit or failure
+  stops with how many were deleted and how many are left.
 - **"Coding tools" is now "Access via MCP", and connecting a tool is one prompt to copy.**
   The agent's page has a Tool select for Claude Code, Codex, Cursor, Pi, Other MCP and Token;
   copy a tool's prompt into it and the tool makes its own key, with nothing to paste by hand.

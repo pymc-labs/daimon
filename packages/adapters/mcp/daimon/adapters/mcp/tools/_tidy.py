@@ -1,5 +1,5 @@
 """Shared rules for the channel tidy tools (edit_message, delete_message,
-archive_thread, delete_thread) on Discord, Slack and Teams.
+delete_reply, archive_thread, delete_thread) on Discord, Slack and Teams.
 
 Ownership: a message is the calling agent's own only when
 `agent_posted_messages` says this agent posted it. `send_message` and

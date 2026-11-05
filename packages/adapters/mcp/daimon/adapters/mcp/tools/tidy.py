@@ -142,11 +142,11 @@ def register_tidy_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         Use it when asked to delete "your reply" or "your last reply". Pass
         any one message of the reply; its text messages and its status,
-        notice and controls cards all go, or every part of a routine result.
-        A send_message post is a reply of one message. Each deletion takes
-        the rules and limits of delete_message, checked before the first;
-        a limit or failure stops with how many were deleted and how many
-        are left. Pass origin_context_id.
+        notice and controls cards all go, or every part of a routine result
+        on Discord and Teams. A send_message post is a reply of one message.
+        Each deletion takes the rules and limits of delete_message, checked
+        before the first; a limit or failure stops with how many were
+        deleted and how many are left. Pass origin_context_id.
         """
         auth = await _auth(ctx)
         if auth.platform == "teams":
