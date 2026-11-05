@@ -9,6 +9,7 @@ against the same faked Discord REST surface as the #383 tests.
 
 from __future__ import annotations
 
+import datetime as dt
 import importlib.util
 import sys
 import uuid
@@ -27,7 +28,7 @@ from daimon.adapters.mcp.tools.discord._tidy import (
     _edit_message_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.channel_tidy import record_turn_post
-from daimon.core.stores.agent_posts import get_post
+from daimon.core.stores.agent_posts import AgentPostRow, get_post
 from daimon.core.stores.turn_card_intents import (
     create_turn_card_intent,
     record_turn_card_message,
@@ -235,6 +236,42 @@ async def test_an_edit_that_replaces_a_turn_post_keeps_it_in_its_reply_group(
         origin_context_id=origin,
     )
     assert result.message_id not in fake.messages, "delete_reply finds and removes the replacement"
+
+
+async def test_an_unexpected_failure_mid_reply_still_says_how_many_went_and_are_left() -> None:
+    """A platform client's own error type is reported with the count, not leaked raw."""
+    parts = [
+        AgentPostRow(
+            id=uuid.uuid4(),
+            tenant_id=uuid.uuid4(),
+            platform="discord",
+            channel_id=_THREAD,
+            message_id=str(n),
+            parent_channel_id=None,
+            thread_ts=None,
+            kind="message",
+            agent_id=uuid.uuid4(),
+            content_hmac=None,
+            source="turn",
+            requester_platform_user_id=None,
+            turn_card_intent_id=None,
+            posted_at=dt.datetime.now(dt.UTC),
+            deleted_at=None,
+        )
+        for n in range(4)
+    ]
+    sent: list[str] = []
+
+    async def delete_one(part: AgentPostRow) -> None:
+        if len(sent) == 2:
+            raise RuntimeError("client broke")
+        sent.append(part.message_id)
+
+    with pytest.raises(ToolError, match=r"2 of 4 .* 2 left") as err:
+        await tidy_module.delete_parts(None, parts, delete_one)  # pyright: ignore[reportArgumentType]
+
+    assert isinstance(err.value.__cause__, RuntimeError), "the original error is chained"
+    assert sent == ["0", "1"], "nothing past the failure was attempted"
 
 
 async def test_the_person_who_opened_the_thread_may_tidy_replies_given_to_others_in_it(

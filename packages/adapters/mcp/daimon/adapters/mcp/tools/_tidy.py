@@ -668,7 +668,7 @@ async def delete_parts(
     """Delete each part in turn and return how many went.
 
     A part already gone is skipped and its row marked deleted, so it stops
-    being listed as part of the reply. Any other refusal, a limit included,
+    being listed as part of the reply. Any other failure, a limit included,
     stops the run and says how many were deleted and how many remain.
     """
     deleted = gone = 0
@@ -686,6 +686,11 @@ async def delete_parts(
             raise ToolError(
                 f"{deleted} of {len(parts)} messages of this reply deleted, "
                 f"{len(parts) - index} left; stopped: {exc}"
+            ) from exc
+        except Exception as exc:  # a platform client error must not hide the count
+            raise ToolError(
+                f"{deleted} of {len(parts)} messages of this reply deleted, "
+                f"{len(parts) - index} left; stopped: {type(exc).__name__}"
             ) from exc
         deleted += 1
     if deleted == 0 and gone:
