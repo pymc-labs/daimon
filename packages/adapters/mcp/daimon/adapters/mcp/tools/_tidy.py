@@ -1,13 +1,13 @@
 """Shared rules for the channel tidy tools (edit_message, delete_message,
-archive_thread, delete_thread) on Discord and Slack.
+archive_thread, delete_thread) on Discord, Slack and Teams.
 
 Ownership: a message is the calling agent's own only when
 `agent_posted_messages` says this agent posted it. `send_message` and
 `create_thread` write that row at send time (`record_agent_posts`), keyed by
 the executing agent (`chat_agent_id` for a chat turn, `agent_id` for an
-agent key). On Discord the adapter also writes one for each status card,
+agent key). On Discord and Teams the adapter also writes one for each status card,
 answer and notice a turn posts (`source='turn'`), for the thread it opens
-from a mention (`source='auto_thread'`), keyed by the turn's agent, and for
+from a mention (`source='auto_thread'`, Discord only), keyed by the turn's agent, and for
 a routine's delivered result (`source='routine'`), keyed by the routine's
 agent with its creator as requester. Anything
 else in a channel — a person's message, another agent's post, another

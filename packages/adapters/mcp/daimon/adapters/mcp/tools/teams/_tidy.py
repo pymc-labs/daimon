@@ -2,8 +2,11 @@
 
 Ownership, limits and audit rules are the shared ones in tools/_tidy.py.
 Bot Framework also lets the bot update and delete only its own activities.
-A post is keyed by the conversation ``send_message`` or ``create_thread``
-returned and its activity id.
+A post is keyed by its conversation (what ``send_message`` or
+``create_thread`` returned, or the chat or thread a turn or routine posted
+in) and its activity id. A turn's or routine's post also takes the
+conversation rules: the turn is over, and the caller asked for it or is a
+Teams admin (an owner of the admin team).
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ from daimon.adapters.mcp.tools._tidy import (
     TidyContext,
     TidyResult,
     policy_recheck,
+    require_conversation_rights,
     require_not_escalation_channel,
     require_own_post,
     resolve_tidy_context,
@@ -101,6 +105,14 @@ async def _prepare(
         operation=operation,
         channel_id=conversation_id,
         message_id=message_id,
+    )
+    await require_conversation_rights(
+        runtime,
+        ctx,
+        post,
+        tool_name=tool,
+        operation=operation,
+        requester_is_admin=auth.admin_for(),
     )
     for channel, parent in _sealed(conversation_id, message_id):
         ctx.read_policy.require(channel, parent)

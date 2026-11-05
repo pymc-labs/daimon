@@ -26,7 +26,7 @@ from daimon.adapters.mcp.tools.teams._tidy import (  # pyright: ignore[reportPri
     _teams_edit_message_impl,
 )
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.channel_tidy import content_hash, derive_content_key
+from daimon.core.channel_tidy import content_hash, derive_content_key, record_turn_post
 from daimon.core.config import (
     AnthropicSettings,
     CryptoSettings,
@@ -40,6 +40,11 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Role
 from daimon.core.stores.security_audit import SecurityAuditRow, list_events
+from daimon.core.stores.turn_card_intents import (
+    create_turn_card_intent,
+    record_turn_card_message,
+    retire_turn_card_intent,
+)
 from daimon.core.stores.turn_origins import create_origin
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent
@@ -53,6 +58,7 @@ _CALLER = "11111111-2222-3333-4444-555555555555"
 _CHANNEL = "19:abc@thread.tacv2"
 _THREAD = f"{_CHANNEL};messageid=1700000000000"
 _BASE = "https://smba.trafficmanager.net/teams/v3/conversations"
+_CHAT = "a:1on1-chat"
 _AGENT = "ag_acme"
 _OTHER_AGENT = "ag_other"
 
@@ -279,3 +285,80 @@ async def test_the_teams_escalation_channel_and_its_threads_are_never_tidied(
             world.runtime, auth, channel_id=_THREAD, message_id=activity, origin_context_id=origin
         )
     assert world.teams.edits_and_deletes() == [], "nothing reaches Teams"
+
+
+async def _turn_post(
+    world: _World, conversation: str, *, running: bool, requester: str = _CALLER
+) -> str:
+    """A turn's answer in `conversation`, recorded as the Teams lifecycle does."""
+    activity = f"act-turn-{uuid.uuid4().hex[:6]}"
+    async with world.sessionmaker.begin() as s:
+        intent = await create_turn_card_intent(
+            s,
+            tenant_id=world.tenant_id,
+            platform="teams",
+            thread_id=conversation,
+            turn_token=uuid.uuid4(),
+        )
+        await record_turn_card_message(s, id=intent.id, message_id=activity)
+        if not running:
+            await retire_turn_card_intent(s, id=intent.id, expected_message_id=activity)
+    await record_turn_post(
+        world.sessionmaker,
+        tenant_id=world.tenant_id,
+        platform="teams",
+        ma_agent_id=_AGENT,
+        channel_id=conversation,
+        message_id=activity,
+        requester_platform_user_id=requester,
+        source="turn",
+        turn_card_intent_id=intent.id,
+        parent_channel_id=None if conversation == _CHAT else _CHANNEL,
+    )
+    return activity
+
+
+@pytest.mark.parametrize("conversation", [_CHAT, _THREAD])
+async def test_the_requester_tidies_a_finished_turns_reply(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], conversation: str
+) -> None:
+    """A turn's reply, in a 1:1 chat or a thread, is the agent's to tidy once the turn is over."""
+    world = await _world(committing_sessionmaker)
+    auth, origin = await world.turn()
+    activity = await _turn_post(world, conversation, running=False)
+
+    deleted = await _teams_delete_message_impl(
+        world.runtime, auth, channel_id=conversation, message_id=activity, origin_context_id=origin
+    )
+
+    assert deleted.action == "deleted", "the requester's finished turn reply is deleted"
+    assert world.teams.edits_and_deletes() == [
+        ("DELETE", f"/{conversation}/activities/{activity}")
+    ], "the delete reaches the turn's activity"
+
+
+async def test_a_running_turn_or_another_persons_turn_is_not_tidied(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The turn must be over, and the caller must be who asked for it (or a Teams admin)."""
+    world = await _world(committing_sessionmaker)
+    auth, origin = await world.turn()
+    running = await _turn_post(world, _CHAT, running=True)
+    theirs = await _turn_post(world, _CHAT, running=False, requester="someone-else")
+
+    with pytest.raises(ToolError, match="still running"):
+        await _teams_delete_message_impl(
+            world.runtime, auth, channel_id=_CHAT, message_id=running, origin_context_id=origin
+        )
+    with pytest.raises(ToolError, match="only the person who started"):
+        await _teams_edit_message_impl(
+            world.runtime,
+            auth,
+            channel_id=_CHAT,
+            message_id=theirs,
+            content="rewritten",
+            origin_context_id=origin,
+        )
+    assert world.teams.edits_and_deletes() == [], "a refused call never reaches Teams"
+    reasons = {r.reason for r in await world.audit() if r.outcome == "denied"}
+    assert reasons == {"turn_in_progress", "not_conversation_owner"}, "each refusal is audited"
