@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 from daimon.adapters.teams.channel_listing import list_all_once
 from daimon.core.stores.domain import TenantRow
@@ -56,6 +58,26 @@ async def test_a_team_that_fails_is_skipped_and_the_others_are_stored(
     rows = await list_channel_names(db_session, tenant_id=tenant.id, platform="teams")
     assert stored == 1, "only the working team is stored"
     assert [(r.channel_id, r.parent_id) for r in rows] == [("c2", "t2")], "the failure is skipped"
+
+
+async def test_a_team_that_hangs_is_skipped_and_the_round_finishes(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await _tenant_with_teams(db_session, {"t1": "Stalled", "t2": "Working"})
+    never = asyncio.Event()
+
+    async def team_channels(team_id: str) -> dict[str, str]:
+        if team_id == "t1":
+            await never.wait()
+        return {"c2": "Plans"}
+
+    stored = await asyncio.wait_for(
+        list_all_once(db_session_factory, team_channels, team_gap_s=0, team_timeout_s=0.05),
+        timeout=5,
+    )
+    rows = await list_channel_names(db_session, tenant_id=tenant.id, platform="teams")
+    assert stored == 1, "only the team that answered is stored"
+    assert [(r.channel_id, r.parent_id) for r in rows] == [("c2", "t2")], "the stall is skipped"
 
 
 async def test_nothing_is_listed_without_installed_teams(

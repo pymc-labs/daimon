@@ -22,6 +22,9 @@ log = structlog.get_logger(__name__)
 
 #: Seconds between teams, so a tenant with many teams never bursts the Bot Framework API.
 TEAM_GAP_S = 1.0
+#: Seconds one team's listing may take: the Bot Framework client has no timeout of its own,
+#: and one stalled call would otherwise freeze the round until a restart.
+TEAM_TIMEOUT_S = 30.0
 
 
 async def list_all_once(
@@ -29,11 +32,12 @@ async def list_all_once(
     team_channels: TeamChannels,
     *,
     team_gap_s: float = TEAM_GAP_S,
+    team_timeout_s: float = TEAM_TIMEOUT_S,
 ) -> int:
     """One round: every installed team of every Teams tenant, one after another.
 
-    A team whose listing fails is skipped until the next round. Returns how many channels
-    were stored.
+    A team whose listing fails or takes over `team_timeout_s` is skipped until the next
+    round. Returns how many channels were stored.
     """
     stored = 0
     for tenant in await list_tenants_by_platform(sessionmaker, platform="teams"):
@@ -43,7 +47,8 @@ async def list_all_once(
             if position:
                 await asyncio.sleep(team_gap_s)
             try:
-                names = await team_channels(team.team_id)
+                async with asyncio.timeout(team_timeout_s):  # a TimeoutError is an OSError
+                    names = await team_channels(team.team_id)
             except TEAMS_SEND_ERRORS as err:
                 log.info("teams.channel_listing.team_failed", error=type(err).__name__)
                 continue
