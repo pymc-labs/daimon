@@ -206,6 +206,9 @@ class AgentView(AgentConfigDoc):
     last_used_at: datetime | None
     spend_usd: float
     can_edit: bool
+    # An admin changes a seeded agent's helpers in place (`agent_admin.set_helpers`); the rest
+    # of its canvas stays read-only.
+    can_edit_helpers: bool = False
     can_view_details: bool
 
 
@@ -435,6 +438,7 @@ def build_agent_view(facts: AgentFacts, viewer: AgentViewer) -> AgentView:
         last_used_at=facts.last_used_at,
         spend_usd=facts.spend_usd,
         can_edit=details and viewer.may_edit and not seeded,
+        can_edit_helpers=seeded and viewer.is_admin and viewer.may_edit,
         can_view_details=details,
     )
     return redact_for(view, details=details, is_admin=viewer.is_admin)
