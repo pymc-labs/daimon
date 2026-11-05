@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -406,3 +406,55 @@ async def test_a_threads_root_is_found_under_either_form_of_its_channel(
             "DELETE",
             f"/{recorded}/activities/{activity}",
         ), "the delete acts on the form the post is recorded under"
+
+
+@pytest.mark.parametrize("admin", [True, False])
+async def test_a_teams_admin_tidies_another_persons_finished_turn(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], admin: bool
+) -> None:
+    """A Teams admin may tidy anyone's finished turn post; a member only their own."""
+    world = await _world(committing_sessionmaker)
+    auth, origin = await world.turn()
+    auth = replace(auth, is_platform_admin=admin)
+    theirs = await _turn_post(world, _THREAD, running=False, requester="someone-else")
+
+    async def delete() -> str:
+        result = await _teams_delete_message_impl(
+            world.runtime, auth, channel_id=_THREAD, message_id=theirs, origin_context_id=origin
+        )
+        return result.action
+
+    if admin:
+        assert await delete() == "deleted", "an admin tidies another person's turn"
+    else:
+        with pytest.raises(ToolError, match="only the person who started"):
+            await delete()
+        assert world.teams.edits_and_deletes() == [], "a refused call never reaches Teams"
+
+
+@pytest.mark.parametrize("creator", [True, False])
+async def test_a_routines_result_is_tidied_only_for_its_creator(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], creator: bool
+) -> None:
+    world = await _world(committing_sessionmaker)
+    auth, origin = await world.turn()
+    routine = await _routine_post(world, requester=_CALLER if creator else "someone-else")
+    thread = f"{_CHANNEL};messageid={routine}"
+
+    async def edit() -> str:
+        result = await _teams_edit_message_impl(
+            world.runtime,
+            auth,
+            channel_id=thread,
+            message_id=routine,
+            content="rewritten",
+            origin_context_id=origin,
+        )
+        return result.action
+
+    if creator:
+        assert await edit() == "edited", "the routine's creator tidies its result"
+    else:
+        with pytest.raises(ToolError, match="only the person who started"):
+            await edit()
+        assert world.teams.edits_and_deletes() == [], "a refused call never reaches Teams"
