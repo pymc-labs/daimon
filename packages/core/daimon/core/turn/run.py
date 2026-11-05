@@ -90,6 +90,7 @@ from daimon.core.turn.approvals import (
     agent_rule_lookup,
     channel_for_tool_rules,
     chat_tool_confirmation,
+    skill_update_lookup,
     unattended_decider,
 )
 from daimon.core.turn.binding import prepared_persistence
@@ -1943,6 +1944,7 @@ async def run_prepared_turn_impl(
                 asks_before_publishing=prepared.admission.asks_before_publishing,
                 approval_gate_for=lambda: refresh_approval_gate(deps, prepared.admission),
                 server_urls=server_urls,
+                skill_update_for=skill_update_lookup(deps.sessionmaker, tenant_id=tenant_id),
                 confirmed_tools=confirmed_tools,
                 daimon_rules=bool(prepared.admission.daimon_rule_tools),
                 rules_for=(

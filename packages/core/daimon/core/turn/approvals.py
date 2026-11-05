@@ -34,13 +34,14 @@ from daimon.core.confirmation import (
     ApprovedConfirmation,
     CardRefusal,
     ConfirmationHook,
+    ServerSkillUpdateCard,
     StalePreview,
     ToolRuleCardReference,
     no_confirmation_surface,
     prompt_for_tool_call,
 )
 from daimon.core.defaults.metadata import is_private_routine_stamp
-from daimon.core.stores import agent_tool_rules
+from daimon.core.stores import agent_tool_rules, server_skills
 from daimon.core.stores.agent_tool_rules import DaimonRuleSet
 from daimon.core.tool_safety import (
     DAIMON_SERVER_NAME,
@@ -74,6 +75,9 @@ RuleLookup = Callable[[ToolCall], Awaitable[ResolvedAgentToolRule | None]]
 AnnotationLookup = Callable[[ToolCall], Awaitable[ToolAnnotations | None]]
 RuleCardFor = Callable[[ToolCall], ToolRuleCardReference | None]
 
+SkillUpdateLookup = Callable[[ToolCall], Awaitable[ServerSkillUpdateCard | None]]
+"""The waiting update a skill-approval call names, read from the mirror."""
+
 
 def channel_for_tool_rules(
     *, platform: str, channel_id: str | None, private_dm_id: str | None
@@ -83,6 +87,31 @@ def channel_for_tool_rules(
     if genuine_dm or channel_id is None:
         return None
     return channel_id.partition(":")[0] if platform == "slack" else channel_id
+
+
+def skill_update_lookup(
+    factory: async_sessionmaker[AsyncSession], *, tenant_id: uuid.UUID
+) -> SkillUpdateLookup:
+    """Read the mirror a skill-approval call names; `None` when it is gone or moved on."""
+
+    async def _lookup(call: ToolCall) -> ServerSkillUpdateCard | None:
+        skill_id, digest = call.input.get("skill_id"), call.input.get("digest")
+        if not isinstance(skill_id, str) or not isinstance(digest, str):
+            return None
+        async with factory() as session:
+            mirror = await server_skills.mirror_of_skill(
+                session, tenant_id=tenant_id, skill_id=skill_id
+            )
+        if mirror is None or mirror.pending_digest != digest:
+            return None
+        return ServerSkillUpdateCard(
+            name=mirror.name,
+            version=mirror.version_label,
+            new_version=mirror.pending_label,
+            changes=mirror.pending_changes or {},
+        )
+
+    return _lookup
 
 
 def agent_rule_lookup(
@@ -582,6 +611,7 @@ def interactive_decider(
     annotations_for: AnnotationLookup | None = None,
     approval_gate_for: Callable[[], Awaitable[ApprovalGate | None]] | None = None,
     server_urls: Mapping[str, str] | None = None,
+    skill_update_for: SkillUpdateLookup | None = None,
 ) -> ToolCallDecider:
     """Decider for chat: reads run, writes wait for `confirm`.
 
@@ -666,6 +696,13 @@ def interactive_decider(
             # Never post a card that is already as good as expired.
             log.info("tool_safety.no_time_to_ask", tool=call.key)
             return ToolConfirmationResult(allow=False, deny_message=NO_TIME_TO_ASK_MESSAGE)
+        skill_update: ServerSkillUpdateCard | None = None
+        if call.tool_name == "approve_server_skill_update" and skill_update_for is not None:
+            try:
+                skill_update = await skill_update_for(call)
+            except Exception:
+                # Named boundary: a failed read only costs the card its detail.
+                log.warning("tool_safety.skill_update_read_failed", tool=call.key)
         try:
             prompt = prompt_for_tool_call(
                 call,
@@ -673,6 +710,7 @@ def interactive_decider(
                 now=asked,
                 timeout=timeout,
                 trusted_servers=trusted_servers,
+                server_skill_update=skill_update,
             )
             if policy.enabled and policy.agent_rules:
                 prompt = prompt.model_copy(update={"tool_rules_enabled": True})
@@ -753,6 +791,7 @@ def chat_tool_confirmation(
     provider_permissions: bool = False,
     approval_gate_for: Callable[[], Awaitable[ApprovalGate | None]] | None = None,
     server_urls: Mapping[str, str] | None = None,
+    skill_update_for: SkillUpdateLookup | None = None,
 ) -> ToolConfirmation:
     """Posture for a chat turn.
 
@@ -781,6 +820,7 @@ def chat_tool_confirmation(
             daimon_rules=daimon_rules,
             approval_gate_for=approval_gate_for,
             server_urls=server_urls,
+            skill_update_for=skill_update_for,
         )
         if attended
         else unattended_decider(
