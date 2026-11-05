@@ -6,11 +6,12 @@ the account that added the skill, so the server's own visibility rules decide.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import httpx
 from daimon.core.agent_editing import AgentActor, AgentEditDeps
@@ -51,8 +52,10 @@ if TYPE_CHECKING:
     from daimon.core.turn.deps import TurnDeps
 
 __all__ = [
+    "SERVES_TTL_S",
     "NodeUpstream",
     "ServerSkillOption",
+    "ServesCache",
     "SkillsNode",
     "active_adder",
     "ask_node",
@@ -64,6 +67,28 @@ __all__ = [
 ]
 
 _GONE = frozenset({403, 404})
+
+#: Seconds a server's "offers skills" answer is remembered.
+SERVES_TTL_S: Final = 300
+
+
+class ServesCache:
+    """Whether each node's server offers skills, remembered so an editor load or a chat
+    call doesn't repeat the token exchange and the request."""
+
+    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._seen: dict[str, tuple[float, bool]] = {}
+
+    async def serves(self, server: str, ask: Callable[[], Awaitable[bool]]) -> bool:
+        """The remembered answer for `server`, else `ask()`; a failed ask is not kept."""
+        seen = self._seen.get(server)
+        if seen is not None and self._clock() - seen[0] < SERVES_TTL_S:
+            return seen[1]
+        answer = await ask()
+        self._seen[server] = (self._clock(), answer)
+        return answer
+
 
 type NodeCall[T] = Callable[[httpx.AsyncClient, Endpoint], Awaitable[T]]
 

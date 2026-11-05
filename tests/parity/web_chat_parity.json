@@ -114,7 +114,7 @@
    "tool": "sync_skills"
   },
   "POST /api/agents/skills/{skill_id}/approve": {
-   "tool": "check_server_skill"
+   "tool": "approve_server_skill_update"
   },
   "POST /api/agents/skills/{skill_id}/check": {
    "tool": "check_server_skill"

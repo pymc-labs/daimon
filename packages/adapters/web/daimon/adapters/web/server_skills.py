@@ -7,7 +7,6 @@ sync asks as the account that added the skill, so the server's own visibility ru
 from __future__ import annotations
 
 import asyncio
-import time
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Final
@@ -36,6 +35,7 @@ from daimon.core.server_skills.mirror import add_server_skill
 from daimon.core.server_skills.node import (
     NodeCall,
     ServerSkillOption,
+    ServesCache,
     SkillsNode,
     ask_node,
     list_server_skills,
@@ -67,7 +67,6 @@ __all__ = [
 log = structlog.get_logger(__name__)
 
 CHECK_INTERVAL_S: Final = 900
-SERVES_TTL_S: Final = 300
 """Seconds between checks of each added skill for a new version."""
 
 
@@ -144,7 +143,7 @@ class MirrorCheck(BaseModel):
 
 def server_skills_router(runtime: WebRuntime) -> APIRouter:
     router = APIRouter(prefix="/api/agents")
-    served: dict[str, tuple[float, bool]] = {}
+    served = ServesCache()
 
     def node_or_404() -> DataServerNode:
         node = server_skills_node(runtime)
@@ -193,12 +192,9 @@ def server_skills_router(runtime: WebRuntime) -> APIRouter:
 
     async def _serves(node: DataServerNode, person: WebPersonRow) -> bool:
         """Whether the node's server offers skills; remembered, so editor loads don't ask."""
-        seen = served.get(node.server.name)
-        if seen is not None and time.monotonic() - seen[0] < SERVES_TTL_S:
-            return seen[1]
-        answer = await _ask(node, person, fetch_serves_skills)
-        served[node.server.name] = (time.monotonic(), answer)
-        return answer
+        return await served.serves(
+            node.server.name, lambda: _ask(node, person, fetch_serves_skills)
+        )
 
     @router.get("/server-skills")
     async def menu(caller: Editor) -> ServerSkillMenu:  # pyright: ignore[reportUnusedFunction]

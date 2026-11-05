@@ -6,11 +6,12 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated
 
 import httpx
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._card import require_card
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._web_admin import audit_to
 from daimon.adapters.mcp.tools._web_url import WebUrl, tenant_links
@@ -29,6 +30,7 @@ from daimon.core.server_skills.mirror import add_server_skill
 from daimon.core.server_skills.node import (
     NodeCall,
     ServerSkillOption,
+    ServesCache,
     SkillsNode,
     ask_node,
     list_server_skills,
@@ -51,17 +53,27 @@ from daimon.core.stores import web_people
 from daimon.core.stores.domain import ServerSkillRow
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
+from pydantic import Field
 
 if TYPE_CHECKING:
     from daimon.core.turn.deps import TurnDeps
 
 _ACCESS: dict[str, str] = {
-    "no_account": "{label} serves only chat accounts of this workspace.",
-    "not_served": "{label} doesn't serve this workspace.",
+    "no_account": "{label} serves only chat accounts here.",
+    "not_served": "{label} doesn't serve this team.",
     "refused": "{label} refused access. Ask your {label} admin.",
     "unconfigured": "{label} isn't set up here.",
     "unreachable": "{label} didn't answer. Try again soon.",
 }
+
+
+# The web routes' caps on the same fields.
+_Uri = Annotated[str, Field(min_length=1, max_length=2048)]
+_Digest = Annotated[str, Field(min_length=1, max_length=128)]
+_SkillId = Annotated[str, Field(min_length=1, max_length=200)]
+_AgentId = Annotated[str, Field(min_length=1, max_length=200)]
+_Name = Annotated[str, Field(min_length=1, max_length=64)]
+_OriginId = Annotated[str, Field(min_length=1, max_length=200)]
 
 
 @dataclass(frozen=True)
@@ -198,10 +210,23 @@ async def _shown(runtime: McpRuntime, auth: AuthIdentity, ref: SkillRef) -> Libr
     )
 
 
-async def _add_impl(runtime: McpRuntime, auth: AuthIdentity, skill: str | None) -> ServerSkills:
+async def _add_impl(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    skill: str | None,
+    serves: ServesCache,
+    origin_context_id: str | None = None,
+) -> ServerSkills:
     await _require_editor(runtime, auth)
+    if skill is not None:
+        # Adding reaches the whole library, so a person confirms it; listing changes nothing.
+        await require_card(
+            runtime, auth, tool_name="add_server_skill", origin_context_id=origin_context_id
+        )
     node = _node(runtime)
-    if not await _asked(runtime, auth, node, fetch_serves_skills):
+    if not await serves.serves(
+        node.server.name, lambda: _asked(runtime, auth, node, fetch_serves_skills)
+    ):
         raise ToolError(f"{node.label} offers no skills.")
     if skill is None:
         edit, actor = _edit_deps(runtime), _edit_actor(auth)
@@ -217,11 +242,16 @@ async def _add_impl(runtime: McpRuntime, auth: AuthIdentity, skill: str | None) 
 
     async def fetch(http: httpx.AsyncClient, endpoint: Endpoint) -> ServerSkill:
         raw = await fetch_skill_listing(http, endpoint, keep=lambda _raw: True)
-        found = next(
-            (o for o in skill_options(raw, {}, frozenset()) if skill in (o.name, o.uri)), None
-        )
-        if found is None:
+        matches = [o for o in skill_options(raw, {}, frozenset()) if skill in (o.name, o.uri)]
+        if not matches:
             raise ToolError(f"{node.label} offers you no skill named {skill}.")
+        if len(matches) > 1:
+            uris = ", ".join(o.uri for o in matches)
+            raise ToolError(
+                f"{node.label} offers more than one skill named {skill}. "
+                f"Add one by its URI: {uris}."
+            )
+        found = matches[0]
         try:
             return await fetch_server_skill(http, endpoint, server=node.label, skill=found.uri)
         except SkillIngestError as err:
@@ -242,20 +272,41 @@ async def _add_impl(runtime: McpRuntime, auth: AuthIdentity, skill: str | None) 
     return ServerSkills(server=node.label, added=await _shown(runtime, auth, ref))
 
 
-async def _check_impl(
-    runtime: McpRuntime, auth: AuthIdentity, skill_id: str, approve_update_digest: str | None
-) -> ServerSkillCheck:
+async def _check_impl(runtime: McpRuntime, auth: AuthIdentity, skill_id: str) -> ServerSkillCheck:
     await _require_editor(runtime, auth)
     _require_library_admin(auth)
     node = _node(runtime)
     mirror = await _mirror(runtime, auth, skill_id)
-    deps = _sync_deps(runtime, node)
-    if approve_update_digest is None:
-        result = await check_mirror(deps, mirror.id)
-    elif mirror.pending_digest is None:
+    return await _checked(
+        runtime, auth, mirror, await check_mirror(_sync_deps(runtime, node), mirror.id)
+    )
+
+
+async def _approve_impl(
+    runtime: McpRuntime, auth: AuthIdentity, skill_id: str, digest: str, origin_context_id: str
+) -> ServerSkillCheck:
+    await _require_editor(runtime, auth)
+    _require_library_admin(auth)
+    # An approved update puts new scripts and allowed tools in front of everyone.
+    await require_card(
+        runtime, auth, tool_name="approve_server_skill_update", origin_context_id=origin_context_id
+    )
+    node = _node(runtime)
+    mirror = await _mirror(runtime, auth, skill_id)
+    if mirror.pending_digest is None:
         raise ToolError("No update is waiting.")
-    else:
-        result = await approve_update(deps, mirror.id, digest=approve_update_digest)
+    return await _checked(
+        runtime,
+        auth,
+        mirror,
+        await approve_update(_sync_deps(runtime, node), mirror.id, digest=digest),
+    )
+
+
+async def _checked(
+    runtime: McpRuntime, auth: AuthIdentity, mirror: ServerSkillRow, result: CheckResult
+) -> ServerSkillCheck:
+    skill_id = mirror.skill_id
     async with runtime.session_factory() as db:
         fresh = await store.get_mirror(db, mirror.id)
     links = await tenant_links(runtime, auth)
@@ -328,27 +379,39 @@ async def _apply_impl(runtime: McpRuntime, auth: AuthIdentity, agent_id: str, sk
 
 
 def register_server_skill_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
+    serves = ServesCache()
+
     @mcp.tool
     async def add_server_skill(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, skill: str | None = None
+        ctx: Context, skill: _Uri | None = None, origin_context_id: _OriginId | None = None
     ) -> ServerSkills:
         """Add a skill the connected data server offers to the skill library, by name or
-        skill:// URI; it then stays current with the server. Without ``skill``, list what
+        skill:// URI; it then stays current with the server. Adding needs a person's
+        confirmation on a card and your ``origin_context_id``. Without ``skill``, list what
         the server offers you, with each one's library skill_id once added."""
-        return await _add_impl(runtime, await _auth(ctx), skill)
+        return await _add_impl(runtime, await _auth(ctx), skill, serves, origin_context_id)
 
     @mcp.tool(tags={"admin"})
     async def check_server_skill(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, skill_id: str, approve_update_digest: str | None = None
+        ctx: Context, skill_id: _SkillId
     ) -> ServerSkillCheck:
         """Check a server skill for an update now. An update that needs review waits as
-        ``pending_digest``; pass it as ``approve_update_digest`` to approve that update.
+        ``pending_digest``; a person approves it with ``approve_server_skill_update``.
         Admin-only."""
-        return await _check_impl(runtime, await _auth(ctx), skill_id, approve_update_digest)
+        return await _check_impl(runtime, await _auth(ctx), skill_id)
+
+    @mcp.tool(tags={"admin"})
+    async def approve_server_skill_update(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, skill_id: _SkillId, digest: _Digest, origin_context_id: _OriginId
+    ) -> ServerSkillCheck:
+        """Approve the update waiting on a server skill, given as its ``pending_digest``.
+        Its new scripts and allowed tools reach every agent that uses the skill, so a
+        person confirms on a card first. Admin-only."""
+        return await _approve_impl(runtime, await _auth(ctx), skill_id, digest, origin_context_id)
 
     @mcp.tool(tags={"admin"})
     async def fork_server_skill(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, skill_id: str, name: str
+        ctx: Context, skill_id: _SkillId, name: _Name
     ) -> LibrarySkill:
         """Copy a server skill's latest version into an editable library skill named
         ``name``, which follows no updates. Admin-only."""
@@ -356,7 +419,7 @@ def register_server_skill_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool
     async def set_server_skill_follow(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, agent_id: str, skill_id: str, follow: bool
+        ctx: Context, agent_id: _AgentId, skill_id: _SkillId, follow: bool
     ) -> str:
         """Choose whether an agent takes a server skill's new versions as they come
         (``follow``) or keeps the version it pins."""
@@ -364,7 +427,7 @@ def register_server_skill_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool
     async def apply_server_skill_update(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, agent_id: str, skill_id: str
+        ctx: Context, agent_id: _AgentId, skill_id: _SkillId
     ) -> str:
         """Give an agent the server skill update its model provider check held back."""
         return await _apply_impl(runtime, await _auth(ctx), agent_id, skill_id)

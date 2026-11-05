@@ -33,6 +33,7 @@ _TOOLS = {
     "revert_agent",
     "set_agent_owners",
     "restore_library_skill_version",
+    "approve_server_skill_update",
 }
 
 

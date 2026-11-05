@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 219 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 220 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -545,6 +545,7 @@ updates.
 | --- | --- | --- |
 | `add_server_skill` | all callers | Add a skill the connected data server offers to the skill library, by name or skill:// URI; it then stays current with the server. |
 | `apply_server_skill_update` | all callers | Give an agent the server skill update its model provider check held back. |
+| `approve_server_skill_update` | admin only | Approve the update waiting on a server skill, given as its ``pending_digest``. |
 | `check_server_skill` | admin only | Check a server skill for an update now. |
 | `fork_server_skill` | admin only | Copy a server skill's latest version into an editable library skill named ``name``, which follows no updates. |
 | `set_server_skill_follow` | all callers | Choose whether an agent takes a server skill's new versions as they come (``follow``) or keeps the version it pins. |

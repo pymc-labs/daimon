@@ -282,15 +282,31 @@
     'add_server_skill': dict({
       'description': '''
         Add a skill the connected data server offers to the skill library, by name or
-        skill:// URI; it then stays current with the server. Without ``skill``, list what
+        skill:// URI; it then stays current with the server. Adding needs a person's
+        confirmation on a card and your ``origin_context_id``. Without ``skill``, list what
         the server offers you, with each one's library skill_id once added.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'maxLength': 200,
+                'minLength': 1,
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
           'skill': dict({
             'anyOf': list([
               dict({
+                'maxLength': 2048,
+                'minLength': 1,
                 'type': 'string',
               }),
               dict({
@@ -447,9 +463,13 @@
         'additionalProperties': False,
         'properties': dict({
           'agent_id': dict({
+            'maxLength': 200,
+            'minLength': 1,
             'type': 'string',
           }),
           'skill_id': dict({
+            'maxLength': 200,
+            'minLength': 1,
             'type': 'string',
           }),
         }),
@@ -491,6 +511,39 @@
           'places',
           'people',
           'where',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'approve_server_skill_update': dict({
+      'description': '''
+        Approve the update waiting on a server skill, given as its ``pending_digest``.
+        Its new scripts and allowed tools reach every agent that uses the skill, so a
+        person confirms on a card first. Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'digest': dict({
+            'maxLength': 128,
+            'minLength': 1,
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'maxLength': 200,
+            'minLength': 1,
+            'type': 'string',
+          }),
+          'skill_id': dict({
+            'maxLength': 200,
+            'minLength': 1,
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'skill_id',
+          'digest',
+          'origin_context_id',
         ]),
         'type': 'object',
       }),
@@ -963,24 +1016,15 @@
     'check_server_skill': dict({
       'description': '''
         Check a server skill for an update now. An update that needs review waits as
-        ``pending_digest``; pass it as ``approve_update_digest`` to approve that update.
+        ``pending_digest``; a person approves it with ``approve_server_skill_update``.
         Admin-only.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
-          'approve_update_digest': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-          }),
           'skill_id': dict({
+            'maxLength': 200,
+            'minLength': 1,
             'type': 'string',
           }),
         }),
@@ -3856,9 +3900,13 @@
         'additionalProperties': False,
         'properties': dict({
           'name': dict({
+            'maxLength': 64,
+            'minLength': 1,
             'type': 'string',
           }),
           'skill_id': dict({
+            'maxLength': 200,
+            'minLength': 1,
             'type': 'string',
           }),
         }),
@@ -9615,12 +9663,16 @@
         'additionalProperties': False,
         'properties': dict({
           'agent_id': dict({
+            'maxLength': 200,
+            'minLength': 1,
             'type': 'string',
           }),
           'follow': dict({
             'type': 'boolean',
           }),
           'skill_id': dict({
+            'maxLength': 200,
+            'minLength': 1,
             'type': 'string',
           }),
         }),
