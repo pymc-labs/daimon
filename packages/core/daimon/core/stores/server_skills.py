@@ -30,7 +30,7 @@ async def create_mirror(
     digest: str,
     manifest: Mapping[str, str],
     allowed_tools: JsonValue,
-    added_by_person_id: uuid.UUID | None,
+    added_by_account_id: uuid.UUID | None,
     now: datetime,
 ) -> ServerSkillRow:
     row = ServerSkill(
@@ -45,7 +45,7 @@ async def create_mirror(
         manifest=dict(manifest),
         allowed_tools=allowed_tools,
         status="current",
-        added_by_person_id=added_by_person_id,
+        added_by_account_id=added_by_account_id,
         last_checked_at=now,
         created_at=now,
         updated_at=now,

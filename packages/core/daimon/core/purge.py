@@ -90,7 +90,7 @@ Deliberate carve-outs:
   A skill added by hand is keyed by its agent, not the person who added it;
   erasure only nulls its `added_by_account_id`, through ON DELETE SET NULL.
 - A skill mirrored from a skills server stays with the tenant; erasure nulls its
-  `added_by_person_id` (ON DELETE SET NULL) and the mirror stops updating.
+  `added_by_account_id` (ON DELETE SET NULL) and the mirror stops updating.
 - `workspace_members` rows are kept: they mirror who the chat platform lists as a
   member (platform user id and admin flag, no content), and the next reload would
   restore a deleted row. They go when the install ends.

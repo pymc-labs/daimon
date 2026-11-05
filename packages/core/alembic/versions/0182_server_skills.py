@@ -56,9 +56,9 @@ def upgrade() -> None:
         sa.Column("pending_label", sa.Text(), nullable=True),
         sa.Column("pending_changes", JSONB(), nullable=True),
         sa.Column(
-            "added_by_person_id",
+            "added_by_account_id",
             UUID(as_uuid=True),
-            sa.ForeignKey("web_people.id", ondelete="SET NULL"),
+            sa.ForeignKey("accounts.id", ondelete="SET NULL"),
             nullable=True,
         ),
         sa.Column("last_checked_at", sa.DateTime(timezone=True), nullable=True),

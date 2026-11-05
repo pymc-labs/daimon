@@ -5452,8 +5452,8 @@ class ServerSkill(Base):
     """A library skill mirrored from a skills server, one per (tenant, server, upstream skill).
 
     The sync owns its library skill. `digest` names the accepted files; an update that
-    needs approval waits in the `pending_*` columns. `added_by_person_id` is whom the
-    server is asked as; once that person is gone the mirror is unavailable.
+    needs approval waits in the `pending_*` columns. `added_by_account_id` is whom the
+    server is asked as; once that account is gone the mirror is unavailable.
     """
 
     __tablename__ = "server_skills"
@@ -5481,8 +5481,8 @@ class ServerSkill(Base):
     pending_digest: Mapped[str | None] = mapped_column(Text, nullable=True)
     pending_label: Mapped[str | None] = mapped_column(Text, nullable=True)
     pending_changes: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
-    added_by_person_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("web_people.id", ondelete="SET NULL"), nullable=True
+    added_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
     )
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)

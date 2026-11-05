@@ -20,7 +20,6 @@ from typing import cast
 import httpx
 import pytest
 from cryptography.fernet import Fernet
-from daimon.adapters.web.nodes.data_server import DataServerNode
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.adapters.web.server_skills import sync_deps
 from daimon.core.channel_backend import AgentBackendRefused, compatibility_preview
@@ -28,6 +27,7 @@ from daimon.core.config import Settings, WebSettings
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.server_skills.anthropic import ManagedAgentsTarget
 from daimon.core.server_skills.consent import ConsentKeeper, with_skill_version
+from daimon.core.server_skills.node import SkillsNode
 from daimon.core.stores.domain import BackendAgent, SourceRepresentation, TenantBackendPolicy
 from daimon.core.turn.runtime_manifest import preview_source_drops, source_preservation_pin
 from mux.contracts.ids import ModelRef, ResourceRef, Revision, Scope, SkillRef
@@ -91,7 +91,7 @@ async def test_the_managed_agents_record_is_the_one_target_and_checks_every_cons
             anthropic=build_fake_anthropic(MARouter().dispatch),
         )
         node = SimpleNamespace(server=SimpleNamespace(name="data"))
-        deps = sync_deps(runtime, cast(DataServerNode, node))
+        deps = sync_deps(runtime, cast(SkillsNode, node))
     assert [type(t) for t in deps.targets] == [ManagedAgentsTarget]
     target = cast(ManagedAgentsTarget, deps.targets[0])
     assert isinstance(target.consents, ConsentKeeper), "no follower skips its consent check"

@@ -22,7 +22,6 @@ from daimon.core.mcp_skills.install import ServerSkill
 from daimon.core.mcp_skills.manifest import parse_entry
 from daimon.core.server_skills.mirror import add_server_skill
 from daimon.core.stores import server_skills, web_audit
-from daimon.core.stores.web_people import get_person_for_account
 from daimon.testing.factories import make_account, make_tenant, make_web_person
 from daimon.testing.mcp_skills import SkillsServer, skill_md
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
@@ -338,7 +337,7 @@ async def _mirror_sk_1(deps: AgentEditDeps, actor: AgentActor) -> None:
             digest="d",
             manifest={},
             allowed_tools=None,
-            added_by_person_id=None,
+            added_by_account_id=None,
             now=datetime(2030, 1, 1, tzinfo=UTC),
         )
 
@@ -382,18 +381,8 @@ async def test_adding_a_server_skill_mirrors_it_once(
     entry = parse_entry(server.entries()[0])
     assert entry is not None
     fetched = ServerSkill(entry=entry, files=dict(server.skills["plots"]))
-    async with db_session_factory() as session:
-        row = await get_person_for_account(
-            session, tenant_id=actor.tenant_id, account_id=actor.account_id
-        )
-    assert row is not None
-    person = row.id
-    first = await add_server_skill(
-        deps, actor=actor, person_id=person, server="data", fetched=fetched, now=_NOW
-    )
-    again = await add_server_skill(
-        deps, actor=actor, person_id=person, server="data", fetched=fetched, now=_NOW
-    )
+    first = await add_server_skill(deps, actor=actor, server="data", fetched=fetched, now=_NOW)
+    again = await add_server_skill(deps, actor=actor, server="data", fetched=fetched, now=_NOW)
 
     assert (first.id, first.name) == ("sk_new", "plots") and again == first
     assert len(library.created) == 1
@@ -401,6 +390,7 @@ async def test_adding_a_server_skill_mirrors_it_once(
         mirror = await server_skills.mirror_of_skill(
             session, tenant_id=actor.tenant_id, skill_id="sk_new"
         )
-        assert mirror is not None and mirror.uri == entry.uri
+        assert mirror is not None and mirror.uri == entry.uri, "the mirror keeps its source"
+        assert mirror.added_by_account_id == actor.account_id, "the sync asks as the adder"
         held = await server_skills.list_deployments(session, mirror.id)
     assert {p: d.version for p, d in held.items()} == {"managed_agents": "1"}

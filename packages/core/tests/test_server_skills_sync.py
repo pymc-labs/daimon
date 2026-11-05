@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from daimon.core._models import WebPerson
+from daimon.core._models import Account
 from daimon.core.mcp_skills.install import ServerSkill
 from daimon.core.mcp_skills.manifest import SkillEntry, parse_entry
 from daimon.core.server_skills import follows as follows_module
@@ -32,7 +32,7 @@ from daimon.core.skill_library_files import skill_lock
 from daimon.core.skills.ingest import SkillBundle
 from daimon.core.stores import server_skills as store
 from daimon.core.stores.domain import ServerSkillRow
-from daimon.testing.factories import make_tenant, make_web_person
+from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.mcp_skills import SkillsServer, skill_md
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -115,7 +115,7 @@ async def _world(db_session: AsyncSession, factory: async_sessionmaker[AsyncSess
     server = SkillsServer(skills={NAME: {"SKILL.md": skill_md(NAME)}})
     upstream = FakeUpstream(server)
     tenant = await make_tenant(db_session)
-    added_by = (await make_web_person(db_session, tenant=tenant)).id
+    added_by = (await make_account(db_session, tenant=tenant)).id
     manifest = manifest_of(upstream.current())
     mirror = await store.create_mirror(
         db_session,
@@ -128,7 +128,7 @@ async def _world(db_session: AsyncSession, factory: async_sessionmaker[AsyncSess
         digest=manifest_digest(manifest),
         manifest=manifest,
         allowed_tools=None,
-        added_by_person_id=added_by,
+        added_by_account_id=added_by,
         now=NOW,
     )
     first = FakeTarget("first", {"follows": "1", "pins": "1"})
@@ -407,14 +407,12 @@ async def test_gone_skill_keeps_its_version_and_resumes(
     assert (await _row(world)).status == "current"
 
 
-async def test_skill_of_a_purged_person_is_unavailable(
+async def test_skill_of_a_purged_account_is_unavailable(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     world = await _world(db_session, db_session_factory)
-    await db_session.execute(
-        delete(WebPerson).where(WebPerson.id == world.mirror.added_by_person_id)
-    )
-    assert (await _row(world)).added_by_person_id is None
+    await db_session.execute(delete(Account).where(Account.id == world.mirror.added_by_account_id))
+    assert (await _row(world)).added_by_account_id is None
     assert await check_mirror(world.deps, world.mirror.id) == "unavailable"
 
 

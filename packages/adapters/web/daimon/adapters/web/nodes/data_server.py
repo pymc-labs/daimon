@@ -43,6 +43,8 @@ from daimon.core.config import DataServerNodeSettings, Settings, SignedIdentityS
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_identity import relay_url
 from daimon.core.mcp_server_url import canonical_mcp_url
+from daimon.core.node_exchange import exchange_client
+from daimon.core.server_skills.node import SkillsNode
 from daimon.core.token_exchange import ExchangeClient
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, SecretStr
@@ -155,11 +157,17 @@ class DataServerNode:
         return self.relay is not None and serves(self.server, workspace)
 
     def exchange_client(self) -> ExchangeClient:
-        return ExchangeClient(
-            token_url=f"{server_base(self.server)}/oauth/token",
+        return exchange_client(
+            self.server,
             client_id=self.client_id,
             client_secret=self.client_secret.get_secret_value(),
             scope=self.scope,
+        )
+
+    def skills_node(self) -> SkillsNode:
+        """The node as server skills reach it."""
+        return SkillsNode(
+            label=self.label, server=self.server, client=self.exchange_client(), kind=self.kind
         )
 
     def access_refusal(self, err: NodeAccessError) -> HTTPException:

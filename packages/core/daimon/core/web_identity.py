@@ -282,13 +282,21 @@ async def linked_identity(session: AsyncSession, person: WebPersonRow) -> tuple[
     """
     if person.kind == "visitor":
         return "web", str(person.id)
+    linked = await chat_identity(session, tenant_id=person.tenant_id, account_id=person.account_id)
+    return linked or ("web", str(person.id))
+
+
+async def chat_identity(
+    session: AsyncSession, *, tenant_id: uuid.UUID, account_id: uuid.UUID
+) -> tuple[str, str] | None:
+    """`(platform, user id)` of the account's first chat principal in the tenant, if any."""
     linked = [
         p
-        for p in await list_platform_principals_for_account(session, account_id=person.account_id)
-        if p.platform in _LINKABLE and p.tenant_id == person.tenant_id
+        for p in await list_platform_principals_for_account(session, account_id=account_id)
+        if p.platform in _LINKABLE and p.tenant_id == tenant_id
     ]
     if not linked:
-        return "web", str(person.id)
+        return None
     first = min(linked, key=lambda p: (_LINKABLE.index(p.platform), p.created_at))
     return first.platform, first.external_id
 

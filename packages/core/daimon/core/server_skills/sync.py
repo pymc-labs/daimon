@@ -313,7 +313,7 @@ async def _check_locked(
     try:
         if mirror.server != deps.server:
             raise UpstreamGone("its server is no longer configured")
-        if mirror.added_by_person_id is None:
+        if mirror.added_by_account_id is None:
             raise UpstreamGone("the person who added it is gone")
         entry = await deps.upstream(mirror).entry(mirror)
         if entry is None:

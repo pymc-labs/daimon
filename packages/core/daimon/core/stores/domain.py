@@ -1638,7 +1638,7 @@ class ServerSkillRow(BaseModel):
     pending_label: str | None
     pending_changes: dict[str, list[str]] | None
     """`added`, `removed` and `changed` paths of the update awaiting approval."""
-    added_by_person_id: uuid.UUID | None
+    added_by_account_id: uuid.UUID | None
     last_checked_at: datetime | None
     last_error: str | None
     created_at: datetime

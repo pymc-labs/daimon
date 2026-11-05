@@ -6,9 +6,9 @@ import re
 
 import httpx
 from anthropic.types.beta import SkillListResponse
-from daimon.adapters.web.server_skills import active_adder
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.mcp_identity import generate_signing_key
+from daimon.core.server_skills.node import active_adder
 from daimon.core.stores import server_skills as server_skills_store
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores import workspace_members as members_store
@@ -185,16 +185,16 @@ async def test_the_update_check_asks_only_as_an_adder_who_could_sign_in(
         digest="d",
         manifest={},
         allowed_tools=None,
-        added_by_person_id=person.id,
+        added_by_account_id=account.id,
         now=_NOW,
     )
     await db_session.commit()
 
     async def adder() -> object:
         found = await active_adder(db_session_factory, mirror)
-        return None if found is None else found.id
+        return None if found is None else found.account_id
 
-    assert await adder() == person.id
+    assert await adder() == account.id, "the adder can still use it"
     await members_store.replace_members(
         db_session, tenant_id=tenant.id, members={"u-2": False}, workspace_name="w", now=_NOW
     )

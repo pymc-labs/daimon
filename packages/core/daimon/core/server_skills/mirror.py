@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import uuid
 from datetime import datetime
 
 from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError
@@ -21,7 +20,6 @@ async def add_server_skill(
     deps: AgentEditDeps,
     *,
     actor: AgentActor,
-    person_id: uuid.UUID,
     server: str,
     fetched: ServerSkill,
     now: datetime,
@@ -59,7 +57,7 @@ async def add_server_skill(
                 digest=manifest_digest(manifest),
                 manifest=manifest,
                 allowed_tools=allowed_tools_of(entry.frontmatter),
-                added_by_person_id=person_id,
+                added_by_account_id=actor.account_id,
                 now=now,
             )
             await store.put_deployment(
