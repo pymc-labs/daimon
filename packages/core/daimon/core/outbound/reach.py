@@ -122,23 +122,18 @@ def describe(plan: ReachPlan) -> str:
 
 
 def card_title(plan: ReachPlan, where: str) -> str:
-    """One line for what is happening: "Daimon wants to open 3 threads in #x and tag 4 people." """
+    """The one question above the buttons: "Open 3 threads in #x and tag 4 people?" """
+    where = where.strip()
     parts: list[str] = []
     if plan.threads:
-        parts.append(f"open {_count(plan.threads, 'thread')}")
-    if plan.places and not plan.threads:
-        parts.append(f"post in {_count(plan.places, 'place')}")
-    place = f" in {where.strip()}" if where.strip() else ""
-    what = " and ".join(parts) or "post"
-    tags = f" and tag {_count(plan.people, 'person', 'people')}" if plan.people else ""
-    return f"Daimon wants to {what}{place}{tags}."
-
-
-def card_consequence(plan: ReachPlan) -> str:
-    only_threads = plan.threads and not plan.places and not plan.people
-    return (
-        "Approve to open them, or cancel." if only_threads else "Approve to post them, or cancel."
-    )
+        parts.append(f"open {_count(plan.threads, 'thread')}" + (f" in {where}" if where else ""))
+    elif plan.places or where:
+        place = where or _count(plan.places, "place")
+        parts.append(f"post in {place}")
+    if plan.people:
+        parts.append(f"tag {_count(plan.people, 'person', 'people')}")
+    phrase = " and ".join(parts) or "post"
+    return f"{phrase[0].upper()}{phrase[1:]}?"
 
 
 def _count(n: int, one: str, many: str | None = None) -> str:

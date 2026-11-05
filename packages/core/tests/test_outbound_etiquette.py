@@ -21,6 +21,7 @@ from daimon.core.outbound.reach import (
     check_reach,
     client_tally_key,
 )
+from daimon.core.posted_controls.confirmation import build_confirmation_card
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall, ToolSafetyPolicy, decide_tool_call
 from daimon.core.turn.deps import TurnDeps
 
@@ -134,9 +135,39 @@ def test_check_reach_when_approved_then_ok_until_past_approval():
     assert (ok, again) == ("ok", "needs_approval"), "past the approved plan it asks again"
 
 
-def test_card_title_when_threads_and_people_then_one_plain_line():
-    title = card_title(ReachPlan(threads=10, places=0, people=3), "#x")
-    assert title == "Daimon wants to open 10 threads in #x and tag 3 people.", "spec wording"
+@pytest.mark.parametrize(
+    ("plan", "where", "expected"),
+    [
+        (
+            ReachPlan(threads=10, people=3),
+            "#launch",
+            "Open 10 threads in #launch and tag 3 people?",
+        ),
+        (ReachPlan(threads=8), "", "Open 8 threads?"),
+        (ReachPlan(threads=1, people=1), "", "Open 1 thread and tag 1 person?"),
+        (ReachPlan(places=4, people=6), "", "Post in 4 places and tag 6 people?"),
+        (ReachPlan(places=2), "#a, #b", "Post in #a, #b?"),
+        (
+            ReachPlan(threads=5, places=3, people=2),
+            "#a, #b and a DM",
+            "Open 5 threads in #a, #b and a DM and tag 2 people?",
+        ),
+        (ReachPlan(people=3), "", "Tag 3 people?"),
+    ],
+    ids=[
+        "threads_where_people",
+        "own_threads",
+        "singulars",
+        "posts_places",
+        "posts_where",
+        "several_places",
+        "people_only",
+    ],
+)
+def test_card_title_when_plan_given_then_one_short_question(plan, where, expected):
+    title = card_title(plan, where)
+    assert title == expected, "one phrase from the plan, capitalised, ending in a question mark"
+    assert "Daimon" not in title and "(" not in title and "across" not in title, "plain words only"
 
 
 def _reach_call() -> ToolCall:
@@ -175,9 +206,10 @@ def test_approve_reach_prompt_when_built_then_neutral_card_text():
     prompt = prompt_for_tool_call(
         _reach_call(), requester_platform_user_id="owner", now=datetime.now(UTC)
     )
-    assert prompt.title == "Daimon wants to open 10 threads in #x and tag 3 people.", "title"
-    assert prompt.consequence == "Approve to post them, or cancel.", "one line on what to do"
-    assert prompt.action == "Approve", "button label"
+    assert prompt.title == "Open 10 threads in #x and tag 3 people?", "the question is the title"
+    assert prompt.consequence is None, "no second line under the question"
+    assert prompt.action is None, "the approved card reads the question without its mark"
+    assert prompt.denied_action == "Nothing posted", "denied says nothing went out"
 
 
 @pytest.mark.parametrize(
@@ -216,3 +248,19 @@ def test_client_tally_key_when_window_turns_then_budget_renews() -> None:
 
     assert client_tally_key("jti", start) == same, "one window shares a tally"
     assert later != same, "the next window starts a fresh tally"
+
+
+def test_approve_reach_card_when_settled_then_states_read_the_question():
+    prompt = prompt_for_tool_call(
+        _reach_call(), requester_platform_user_id="owner", now=datetime.now(UTC)
+    )
+    pending = build_confirmation_card(prompt, state="pending", token="token-12345")
+    approved = build_confirmation_card(prompt, state="approved")
+    denied = build_confirmation_card(prompt, state="denied")
+    assert (pending.headline, pending.consequence, pending.body) == (
+        "Open 10 threads in #x and tag 3 people?",
+        None,
+        None,
+    ), "pending is one question above the buttons"
+    assert approved.body == "Open 10 threads in #x and tag 3 people", "approved repeats it plainly"
+    assert denied.body == "Nothing posted", "denied says nothing went out"
