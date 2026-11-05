@@ -26,8 +26,8 @@ const state: Profile = {
   sign_ins: [],
   chat_accounts: [{ platform: "discord", name: "maya.l" }],
   keys: [
-    { id: "k1", agent: mmm, created_at: ago(30), expires_at: ahead(9), bound: false },
-    { id: "k2", agent: daimon, created_at: ago(200), expires_at: ahead(2), bound: true },
+    { id: "k1", agent: mmm, client: "claude-code", created_at: ago(30), expires_at: ahead(9), bound: false },
+    { id: "k2", agent: daimon, client: "token", created_at: ago(200), expires_at: ahead(2), bound: true },
   ],
 }
 

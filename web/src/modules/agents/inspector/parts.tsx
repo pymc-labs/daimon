@@ -27,10 +27,10 @@ export function Section({ title, action, children, className, flush }: { title?:
   )
 }
 
-export function Field({ label, children, changed }: { label: string; children: React.ReactNode; changed?: boolean }) {
+export function Field({ label, children, changed, top }: { label: string; children: React.ReactNode; changed?: boolean; /** Align the label with the top of a tall value. */ top?: boolean }) {
   return (
-    <div className="grid grid-cols-[112px_1fr] items-center gap-3 text-sm">
-      <Label className="flex items-center gap-1.5 font-normal text-muted-foreground">{label}{changed && <Dot />}</Label>
+    <div className={cn("grid grid-cols-[112px_1fr] gap-3 text-sm", top ? "items-start" : "items-center")}>
+      <Label className={cn("flex items-center gap-1.5 font-normal text-muted-foreground", top && "min-h-8")}>{label}{changed && <Dot />}</Label>
       {children}
     </div>
   )

@@ -67,3 +67,35 @@ def test_rate_limiter_remaining_decrements() -> None:
     rl.check_and_record("u")
     rl.check_and_record("u")
     assert rl.remaining("u") == 3, "two calls consumed → 3 remaining"
+
+
+def test_rate_limiter_evicts_the_oldest_key_when_full() -> None:
+    """At the key cap a new key is admitted and the least recently used one is forgotten."""
+    rl = RateLimiter(max_requests=1, max_keys=2)
+    assert rl.check_and_record("a") and rl.check_and_record("b"), "two keys fill the cap"
+
+    assert rl.check_and_record("c") is True, "a new key is never denied for the cap"
+    assert list(rl._calls) == ["b", "c"], "the oldest key made room"  # pyright: ignore[reportPrivateUsage]
+    assert len(rl._calls) == 2, "the dict did not grow"  # pyright: ignore[reportPrivateUsage]
+
+
+def test_rate_limiter_use_keeps_a_key_from_being_the_oldest() -> None:
+    """A key in use is the last to go: touching it moves it to the newest end."""
+    rl = RateLimiter(max_requests=5, max_keys=2)
+    rl.check_and_record("a")
+    rl.check_and_record("b")
+    rl.check_and_record("a")
+
+    rl.check_and_record("c")
+
+    assert list(rl._calls) == ["a", "c"], "b was the least recently used"  # pyright: ignore[reportPrivateUsage]
+
+
+def test_rate_limiter_refund_drops_an_emptied_bucket() -> None:
+    """Refunding the only call leaves no empty bucket behind."""
+    rl = RateLimiter(max_requests=1)
+    rl.check_and_record("a")
+
+    rl.refund("a")
+
+    assert "a" not in rl._calls, "the empty bucket is gone"  # pyright: ignore[reportPrivateUsage]

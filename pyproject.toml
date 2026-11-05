@@ -208,6 +208,8 @@ source_modules = [
     "daimon.core.channel_skills",
     "daimon.core.channel_tidy",
     "daimon.core.checkpoint_prompt",
+    "daimon.core.coding_key_connect",
+    "daimon.core.coding_key_prompts",
     "daimon.core.coding_keys",
     "daimon.core.config",
     "daimon.core.confirmation",

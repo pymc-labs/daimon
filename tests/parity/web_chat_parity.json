@@ -138,6 +138,13 @@
     "teams": "daimon.adapters.teams.setup_panel"
    }
   },
+  "POST /api/agents/{agent_id}/coding-keys/connect": {
+   "panel": {
+    "discord": "daimon.adapters.discord.agent_setup.mcp_access",
+    "slack": "daimon.adapters.slack.agent_setup.coding_tools",
+    "teams": "daimon.adapters.teams.setup_panel"
+   }
+  },
   "POST /api/agents/{agent_id}/copy": {
    "tool": "fork_agent"
   },

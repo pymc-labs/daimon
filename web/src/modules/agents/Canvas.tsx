@@ -4,7 +4,7 @@ import {
   Background, BackgroundVariant, BaseEdge, type Edge, type EdgeProps, Handle, type Node, Position, ReactFlow, useEdgesState, useNodesState, useReactFlow,
   useStore,
 } from "@xyflow/react"
-import { Blocks, Brain, Cpu, KeyRound, Maximize, Minus, Plug, Plus, ScrollText, Sparkles, SquareTerminal, Users, Wrench } from "lucide-react"
+import { Blocks, Brain, Cpu, KeyRound, Maximize, Minus, Plug, Plus, ScrollText, Sparkles, Users, Wrench } from "lucide-react"
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react"
 
 import { BrandIcon } from "@/components/brand"
@@ -286,7 +286,7 @@ function CodingNode() {
   const { agent } = useCanvas()
   const keys = useCodingKeys(agent.id, agent.can_view_details)
   return (
-    <Card id="coding" icon={<SquareTerminal />} title="Coding tools" count={keys.data?.length}>
+    <Card id="coding" icon={<Plug />} title="Access via MCP" count={keys.data?.length}>
       <div className="p-3 text-xs text-faint">{keys.data?.length ? "Keys in use" : keys.data ? "No keys" : ""}</div>
     </Card>
   )

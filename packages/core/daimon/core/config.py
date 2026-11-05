@@ -285,6 +285,30 @@ class McpSettings(BaseModel):
             "production)."
         ),
     )
+    coding_claim_attempts: int = Field(
+        default=30,
+        description=(
+            "Most POST /coding-keys/claim calls one client address may make per "
+            "window, valid code or not. Set to 0 to disable (not recommended in "
+            "production)."
+        ),
+    )
+    coding_claim_window_minutes: int = Field(
+        default=10,
+        ge=1,
+        description="The window, in minutes, `coding_claim_attempts` is counted over.",
+    )
+    claim_forwarded_entries: int = Field(
+        default=2,
+        ge=0,
+        description=(
+            "How many of the rightmost X-Forwarded-For entries the claim route's rate "
+            "limit keys on, joined. A proxy appends to the right, so these cannot be "
+            "forged into another caller's key. 2 suits a load balancer that appends "
+            "`<client>, <balancer>` and also direct calls; 0 ignores the header and "
+            "keys on the socket peer. IPv6 addresses count by /64."
+        ),
+    )
     bundle_ttl_days: int = Field(
         default=90,
         description=(

@@ -13,6 +13,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or a Teams admin asks. In a 1:1 chat the agent sees the ids of its own recent
   messages, and replayed channel history carries each message's id. Messages posted
   before this release stay out of reach.
+- **"Coding tools" is now "Access via MCP", and connecting a tool is one prompt to copy.**
+  The agent's page has a Tool select for Claude Code, Codex, Cursor, Pi, Other MCP and Token;
+  copy a tool's prompt into it and the tool makes its own key, with nothing to paste by hand.
+  Each prompt holds a single-use code that ends after 10 minutes, and the first tool to use
+  one ends the rest. The prompt never carries the agent's name, only a `daimon-` server key.
+  The page shows when a tool has connected; when the codes end it says Expired and New prompt
+  makes a fresh set. The person's access is checked again when a code is used, and the key is
+  logged as before. Claim attempts are limited per client, keyed on the rightmost
+  `X-Forwarded-For` entries and IPv6 by /64 (`DAIMON_MCP__CODING_CLAIM_ATTEMPTS`,
+  `..._WINDOW_MINUTES`, `..._CLAIM_FORWARDED_ENTRIES`). The Token option keeps the old way of
+  making a key by hand, and keys and the profile page now list each key's tool. Migration 0184
+  adds the claim codes and a tool column on keys.
+
 - **The Channels list and panel show spend for the last 30 days.** The list column and the panel facts no longer mix "This month" with "Last 30 days".
 - **Signing in to the web app with Microsoft shows your email and your organization's name.** The Teams workspace is named after the organization instead of "Microsoft Teams", and the sidebar shows the email under your name. Where the organization hasn't allowed Daimon to read profiles, the sign-in address is used and the workspace keeps its old name. Slack and Discord sign-ins have no email, so the sidebar shows the name alone.
 - **Teams channels in the web app's Channels tab are grouped under their team.** A channel is filed under its team once Daimon has seen a message in it or listed it in billing, and a team shows the name it was installed with.

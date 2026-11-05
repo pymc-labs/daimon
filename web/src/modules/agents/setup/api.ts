@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
 
 import { api } from "@/lib/api"
-import type { AgentKey, AgentToolRule, AgentToolRules, CodingKey, GoogleBinding, KnowledgeStores, MintedCodingKey, PersonRef } from "../types"
+import type { AgentKey, AgentToolRule, AgentToolRules, CodingKey, ConnectBatch, ConnectStatus, GoogleBinding, KnowledgeStores, MintedCodingKey, PersonRef } from "../types"
 
 const fail = (e: Error) => toast.error(e.message)
 
@@ -99,3 +99,23 @@ export function useSetAgentToolRule(id: string) {
 
 export const useGoogleBinding = (id: string, enabled: boolean) =>
   useQuery({ queryKey: ["agents", id, "google"], queryFn: () => api.get<GoogleBinding | null>(`/api/agents/${id}/google`), enabled, retry: false })
+
+/** One batch of connect prompts. A new batch can name the one it replaces, whose unused codes then die. */
+export const useConnectBatch = (id: string) =>
+  useMutation({ mutationFn: (replaces?: string) => api.post<ConnectBatch>(`/api/agents/${id}/coding-keys/connect`, replaces ? { replaces } : {}) })
+
+/** Whether the batch was used, polled until it is or `live` ends (its codes expired). */
+export function useConnectStatus(id: string, batch: string | undefined, live = true) {
+  const qc = useQueryClient()
+  return useQuery({
+    queryKey: [...codingKey(id), "connect", batch],
+    queryFn: async () => {
+      const s = await api.get<ConnectStatus>(`/api/agents/${id}/coding-keys/connect/${batch}`)
+      if (s.connected) void qc.invalidateQueries({ queryKey: codingKey(id), exact: true })
+      return s
+    },
+    enabled: !!batch && live,
+    refetchInterval: (q) => (q.state.data?.connected ? false : 3000),
+    retry: false,
+  })
+}

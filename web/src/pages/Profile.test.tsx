@@ -19,7 +19,7 @@ const data: Profile = {
   connections: [{ kind: "mcp", label: "Linear", agent: daimon, key: "https://mcp.linear.app/sse" }],
   sign_ins: [{ id: "i1", provider: "microsoft", label: "maya@fernhill.example" }],
   chat_accounts: [],
-  keys: [{ id: "k1", agent: daimon, created_at: "2026-11-01T00:00:00Z", expires_at: null, bound: false }],
+  keys: [{ id: "k1", agent: daimon, client: "codex", created_at: "2026-11-01T00:00:00Z", expires_at: null, bound: false }],
 }
 const accounts: ConnectedAccount[] = [
   { id: "a1", provider: "discord", provider_label: "Discord", label: "maya.l", last_used: "2026-11-04T08:00:00Z", current: true },

@@ -1840,6 +1840,50 @@ class McpToken(Base):
     # CLI tokens, and for an agent row an older process wrote (read as 'coding' unless
     # it is plainly internal; see the verifier).
     purpose: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Which coding tool a coding key was made for ('claude-code', 'codex', ..., or
+    # 'token' for a key shown once on screen). Display only; NULL for older keys and
+    # for every other kind of credential.
+    client: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class CodingKeyClaim(Base):
+    """A single-use code a person pastes to a coding agent, which trades it for a coding key.
+
+    The code itself is never stored, only its hash. A batch holds one code per
+    coding tool: the first one claimed kills the rest. A code that is claimed, or
+    killed by a sibling or a newer batch, has `used_at` set; only a claimed one
+    carries the `jti` of the key it made.
+
+    Private to `daimon.core.stores.**` per the import-linter contract.
+    """
+
+    __tablename__ = "coding_key_claims"
+    __table_args__ = (
+        Index("ix_coding_key_claims_batch", "batch"),
+        Index("ix_coding_key_claims_account_id", "account_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    # The agent's Managed Agents id, to load it live when the code is claimed.
+    ma_agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # The agent's name when the code was made: the label its key will carry.
+    agent_name: Mapped[str] = mapped_column(Text, nullable=False)
+    client: Mapped[str] = mapped_column(Text, nullable=False)
+    batch: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    code_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    jti: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("mcp_tokens.jti", ondelete="SET NULL"), nullable=True
+    )
 
 
 class SlackBotToken(Base):

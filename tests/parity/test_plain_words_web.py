@@ -21,6 +21,7 @@ _ALLOWED_FILES: dict[str, str] = {}
 #: Terms a part of the app may use, and why: (path prefix, term).
 _ALLOWED_TERMS: dict[tuple[str, str], str] = {
     ("web/src/modules/agents/", "MCP"): "the agent builder's own word for a tool server",
+    ("web/src/pages/Profile.tsx", "MCP"): "names the Access via MCP node its keys come from",
 }
 
 _COMMENT = re.compile(r"/\*.*?\*/|(?<![:\w\"'`])//[^\n]*", re.DOTALL)
