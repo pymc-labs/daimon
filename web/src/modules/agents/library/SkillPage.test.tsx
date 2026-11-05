@@ -12,17 +12,18 @@ import { SkillPage } from "./SkillPage"
 vi.mock("sonner", () => ({ toast: { error: vi.fn() } }))
 vi.mock("@/lib/api", async (orig) => ({ ...(await orig<typeof import("@/lib/api")>()), api: { get: vi.fn(), put: vi.fn(), post: vi.fn(), del: vi.fn() } }))
 
-const skill = (version: string): SkillDetail => ({
-  id: "sk_1", name: "review", title: "Review", description: "Reviews", source: "custom", source_url: null, default: false,
+const skill = (version: string, source: SkillDetail["source"] = "custom"): SkillDetail => ({
+  id: "sk_1", name: "review", title: "Review", description: "Reviews", source, source_url: null, default: false,
   version, created_at: "2030-01-01T00:00:00Z", updated_at: "2030-01-01T00:00:00Z", used_by: [],
 })
 
 let latest = "1"
+let source: SkillDetail["source"] = "custom"
 const serve = () => vi.mocked(api.get).mockImplementation((url: string) => {
   if (url === "/api/me") return Promise.resolve({ capabilities: [], workspace: { name: "Workspace" } }) as never
   if (url.endsWith("/versions")) return Promise.resolve([]) as never
   if (url.includes("/files")) return Promise.resolve({ skill_id: "sk_1", version: latest, files: [{ path: "SKILL.md", size: 5, content: `v${latest}` }] }) as never
-  return Promise.resolve(skill(latest)) as never
+  return Promise.resolve(skill(latest, source)) as never
 })
 
 const show = () => render(
@@ -36,6 +37,7 @@ const show = () => render(
 beforeEach(() => {
   vi.clearAllMocks()
   latest = "1"
+  source = "custom"
   vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} })
   serve()
 })
@@ -65,5 +67,17 @@ describe("SkillPage", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Reload" }))
     await waitFor(() => expect(screen.getByLabelText("SKILL.md")).toHaveValue("v2"))
     expect(screen.queryByText(/This skill changed/)).not.toBeInTheDocument()
+  })
+
+  it("reads files only for a custom skill", async () => {
+    source = "anthropic"
+    const { unmount } = show()
+    expect(await screen.findByText("The files of this skill are not available.")).toBeInTheDocument()
+    expect(vi.mocked(api.get).mock.calls.some(([url]) => String(url).includes("/files"))).toBe(false)
+    unmount()
+    source = "custom"
+    show()
+    expect(await screen.findByLabelText("SKILL.md")).toHaveValue("v1")
+    expect(vi.mocked(api.get).mock.calls.some(([url]) => String(url).includes("/files"))).toBe(true)
   })
 })

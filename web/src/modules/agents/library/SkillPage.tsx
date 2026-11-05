@@ -26,7 +26,7 @@ export function SkillPage() {
   const latest = skill.data?.version ?? null
   const version = held && held !== latest ? held : null
   const custom = skill.data?.source === "custom"
-  const files = useLibraryFiles(id, version)
+  const files = useLibraryFiles(id, version, custom)
   const versions = useSkillVersions(id)
   return (
     <QueryState

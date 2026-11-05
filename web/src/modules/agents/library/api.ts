@@ -16,11 +16,13 @@ export const useSkill = (id: string) =>
   useQuery({ queryKey: ["agents", "library", "skills", id], queryFn: () => api.get<SkillDetail>(`/api/agents/skills/${id}`), retry: false })
 
 /** The files of one version of a library skill, the latest when `version` is null. */
-export const useLibraryFiles = (id: string, version: string | null) =>
+/** Only a custom skill's files can be read; Anthropic's own skills have none to show. */
+export const useLibraryFiles = (id: string, version: string | null, enabled: boolean) =>
   useQuery({
     queryKey: ["agents", "library", "skills", id, "files", version],
     queryFn: () => api.get<SkillFiles>(`/api/agents/skills/${id}/files${version ? `?version=${encodeURIComponent(version)}` : ""}`),
     retry: false,
+    enabled,
   })
 
 type Ref = { id: string; name: string; version: string }
