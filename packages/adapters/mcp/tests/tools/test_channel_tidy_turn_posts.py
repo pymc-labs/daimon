@@ -14,7 +14,9 @@ import sys
 import uuid
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
+import discord
 import pytest
 from daimon.adapters.mcp.tools import _tidy as tidy_module
 from daimon.adapters.mcp.tools.discord._tidy import (
@@ -49,6 +51,7 @@ _user = _base._user  # pyright: ignore[reportPrivateUsage]
 patch_discord_http = _base.patch_discord_http
 _CHANNEL: str = _base._CHANNEL  # pyright: ignore[reportPrivateUsage]
 _THREAD: str = _base._THREAD  # pyright: ignore[reportPrivateUsage]
+_BOT: str = _base._BOT  # pyright: ignore[reportPrivateUsage]
 _CALLER: str = _base._CALLER  # pyright: ignore[reportPrivateUsage]
 _AGENT: str = _base._AGENT  # pyright: ignore[reportPrivateUsage]
 _OTHER_AGENT: str = _base._OTHER_AGENT  # pyright: ignore[reportPrivateUsage]
@@ -177,6 +180,61 @@ async def test_editing_a_turn_reply_replaces_the_text_and_clears_the_card(
 
     assert fake.messages[card]["content"] == "Summary: all items closed.", "the new text is set"
     assert fake.messages[card]["embeds"] == [], "the stale card embed does not linger under it"
+
+
+async def test_an_edit_that_replaces_a_turn_post_keeps_it_in_its_reply_group(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    fake: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deleted webhook makes the edit post anew; the new post still belongs to the turn."""
+    from daimon.adapters.mcp.tools.discord import _post_transport
+
+    world = await _world(committing_sessionmaker)
+    await _auto_thread(world)
+    old_id = await _turn_post(world, fake)
+    fake.messages[old_id].update(
+        webhook_id="900", application_id=_BOT, author=_user("900", bot=True)
+    )
+    hook = MagicMock(spec=discord.Webhook)
+    hook.id = 900
+    hook.edit_message = AsyncMock(
+        side_effect=discord.NotFound(
+            MagicMock(status=404), {"code": 10015, "message": "Unknown Webhook"}
+        )
+    )
+    monkeypatch.setattr(_post_transport, "own_webhook", AsyncMock(side_effect=[hook, None]))
+    auth, origin = await world.turn(thread=_THREAD)
+
+    result = await _edit_message_impl(
+        world.runtime,
+        auth,
+        channel_id=_THREAD,
+        message_id=old_id,
+        content="fixed",
+        origin_context_id=origin,
+    )
+
+    assert result.message_id != old_id, "the edit went out as a new message"
+    async with committing_sessionmaker() as session:
+        new = await get_post(
+            session,
+            tenant_id=world.tenant_id,
+            platform="discord",
+            channel_id=_THREAD,
+            message_id=result.message_id,
+        )
+    assert new is not None and new.source == "turn", "the replacement is still a turn's post"
+    assert new.turn_card_intent_id is not None, "it keeps the turn's intent, so it stays grouped"
+    assert new.requester_platform_user_id == _CALLER, "the requester rule still applies to it"
+    await _delete_reply_impl(
+        world.runtime,
+        auth,
+        channel_id=_THREAD,
+        message_id=result.message_id,
+        origin_context_id=origin,
+    )
+    assert result.message_id not in fake.messages, "delete_reply finds and removes the replacement"
 
 
 async def test_the_person_who_opened_the_thread_may_tidy_replies_given_to_others_in_it(

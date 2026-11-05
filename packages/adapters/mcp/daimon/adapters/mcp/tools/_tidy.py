@@ -77,6 +77,8 @@ from daimon.core.stores.access_policy import (
 from daimon.core.stores.agent_posts import (
     AgentPostRow,
     PostKind,
+    PostRole,
+    PostSource,
     get_post,
     list_reply_posts,
     mark_deleted,
@@ -701,6 +703,13 @@ class PostRecord:
     parent_channel_id: str | None = None
     thread_ts: str | None = None
     content: str | None = None
+    # What a replacement carries over from the post it stands in for, so it stays
+    # in its reply group and under the same rules.
+    source: PostSource = "tool"
+    requester_platform_user_id: str | None = None
+    turn_card_intent_id: uuid.UUID | None = None
+    role: PostRole | None = None
+    delivery_id: uuid.UUID | None = None
 
 
 async def record_agent_posts(
@@ -732,6 +741,11 @@ async def record_agent_posts(
                     content_hmac=(
                         hash_content(runtime, post.content) if post.content is not None else None
                     ),
+                    source=post.source,
+                    requester_platform_user_id=post.requester_platform_user_id,
+                    turn_card_intent_id=post.turn_card_intent_id,
+                    role=post.role,
+                    delivery_id=post.delivery_id,
                 )
     except Exception as exc:  # the post is out; never fail the send over its record
         log.warning(

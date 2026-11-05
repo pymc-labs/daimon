@@ -315,6 +315,11 @@ async def _edit_message_impl(  # pyright: ignore[reportUnusedFunction]
                         message_id=str(sent.id),
                         parent_channel_id=target.parent_id,
                         content=sent.content,
+                        source=post.source,
+                        requester_platform_user_id=post.requester_platform_user_id,
+                        turn_card_intent_id=post.turn_card_intent_id,
+                        role=post.role,
+                        delivery_id=post.delivery_id,
                     )
                     for sent in [replacement, *extra_messages]
                 ],
