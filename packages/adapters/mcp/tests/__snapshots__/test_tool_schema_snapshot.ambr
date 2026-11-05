@@ -279,6 +279,30 @@
         'type': 'object',
       }),
     }),
+    'add_server_skill': dict({
+      'description': '''
+        Add a skill the connected data server offers to the skill library, by name or
+        skill:// URI; it then stays current with the server. Without ``skill``, list what
+        the server offers you, with each one's library skill_id once added.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'skill': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'type': 'object',
+      }),
+    }),
     'add_skill': dict({
       'description': '''
         Add a skill to one agent from a pasted SKILL.md, a .md or .zip attached in
@@ -413,6 +437,25 @@
         }),
         'required': list([
           'agent_name',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'apply_server_skill_update': dict({
+      'description': 'Give an agent the server skill update its model provider check held back.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'agent_id': dict({
+            'type': 'string',
+          }),
+          'skill_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'agent_id',
+          'skill_id',
         ]),
         'type': 'object',
       }),
@@ -913,6 +956,36 @@
         }),
         'required': list([
           'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'check_server_skill': dict({
+      'description': '''
+        Check a server skill for an update now. An update that needs review waits as
+        ``pending_digest``; pass it as ``approve_update_digest`` to approve that update.
+        Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'approve_update_digest': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'skill_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'skill_id',
         ]),
         'type': 'object',
       }),
@@ -3770,6 +3843,28 @@
         'required': list([
           'source_name',
           'new_name',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'fork_server_skill': dict({
+      'description': '''
+        Copy a server skill's latest version into an editable library skill named
+        ``name``, which follows no updates. Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'name': dict({
+            'type': 'string',
+          }),
+          'skill_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'skill_id',
+          'name',
         ]),
         'type': 'object',
       }),
@@ -9507,6 +9602,32 @@
         'required': list([
           'routine_id',
           'enabled',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'set_server_skill_follow': dict({
+      'description': '''
+        Choose whether an agent takes a server skill's new versions as they come
+        (``follow``) or keeps the version it pins.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'agent_id': dict({
+            'type': 'string',
+          }),
+          'follow': dict({
+            'type': 'boolean',
+          }),
+          'skill_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'agent_id',
+          'skill_id',
+          'follow',
         ]),
         'type': 'object',
       }),

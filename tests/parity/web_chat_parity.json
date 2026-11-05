@@ -104,11 +104,23 @@
   "POST /api/agents/environments": {
    "tool": "create_environment"
   },
+  "POST /api/agents/server-skills": {
+   "tool": "add_server_skill"
+  },
   "POST /api/agents/skills": {
    "tool": "add_skill"
   },
   "POST /api/agents/skills/sync": {
    "tool": "sync_skills"
+  },
+  "POST /api/agents/skills/{skill_id}/approve": {
+   "tool": "check_server_skill"
+  },
+  "POST /api/agents/skills/{skill_id}/check": {
+   "tool": "check_server_skill"
+  },
+  "POST /api/agents/skills/{skill_id}/fork": {
+   "tool": "fork_server_skill"
   },
   "POST /api/agents/skills/{skill_id}/restore": {
    "tool": "restore_library_skill_version"
@@ -143,6 +155,9 @@
   },
   "POST /api/agents/{agent_id}/revert": {
    "tool": "revert_agent"
+  },
+  "POST /api/agents/{agent_id}/skill-follows/{skill_id}/apply": {
+   "tool": "apply_server_skill_update"
   },
   "POST /api/agents/{agent_id}/skills": {
    "tool": "save_agent_skill_files"
@@ -270,6 +285,9 @@
   },
   "PUT /api/agents/{agent_id}/owners": {
    "tool": "set_agent_owners"
+  },
+  "PUT /api/agents/{agent_id}/skill-follows": {
+   "tool": "set_server_skill_follow"
   },
   "PUT /api/agents/{agent_id}/tool-rules": {
    "tool": "set_agent_tool_rule"
