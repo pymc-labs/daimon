@@ -1505,10 +1505,13 @@ async def _admit_gates(
                 except AdmissionDenied:
                     stale, follow_kept = stale_switch, follow_generation is None
                     # A stale switch runs on the agent's source instead of locking
-                    # it out, where a later message still re-checks the switch: not
+                    # it out, where a later message still re-checks the switch: only
+                    # a person's chat turn (the agent can offer a new card there), not
                     # a setup thread, and not a move away from another provider.
                     if (
                         stale is None
+                        or origin not in ("chat", "handoff")
+                        or attended is False
                         or not follow_switch
                         or config.thread_binding_kind == "setup"
                         or not (follow_kept or bound_before == 0)
