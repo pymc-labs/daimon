@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Needs re-confirm**. Script and `allowed-tools` changes wait for an admin's approval;
   other files apply at once. A skill the server stops offering keeps its last version and
   shows as unavailable. **Fork** makes an editable copy under a name you choose.
+  Chat does the same: add, check and approve, fork, follow and apply updates. Updates are
+  read as the chat account that added the skill, while it stays in the workspace.
 
 - **The agent editor in the web app has a GitHub panel.** It lists the agent's repos with
   their access, status and which one is the working repo, and where each attached skill
