@@ -84,6 +84,8 @@ export type Agent = AgentConfig & {
   last_used_at: string | null
   spend_usd: number
   can_edit: boolean
+  /** An admin changes a seeded agent's helper list in place, though nothing else of it. */
+  can_edit_helpers: boolean
   /** Prompt, credentials and reach detail: owners, co-owners and admins. */
   can_view_details: boolean
   nodes: AgentNode[]

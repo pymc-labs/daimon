@@ -362,7 +362,7 @@ function view(r: Rec, v: Viewer): Agent {
   return {
     id: r.id, version: cur.version, ...redact(cur.config, full), owner: ref(r.owner), recorded_owner: ref(r.owner), co_owners: r.co_owners.map(ref),
     updated_at: cur.at, updated_by: ref(cur.by), last_used_at: r.last_used_at, spend_usd: r.spend_usd,
-    can_edit: full && v.edit, can_view_details: full, nodes: full ? [{ kind: "data_server", label: "Data server", server: attached.has(r.id) ? "data" : null }] : [],
+    can_edit: full && v.edit, can_edit_helpers: false, can_view_details: full, nodes: full ? [{ kind: "data_server", label: "Data server", server: attached.has(r.id) ? "data" : null }] : [],
   }
 }
 
