@@ -27,6 +27,7 @@ from daimon.adapters.web.profile import profile_router
 from daimon.adapters.web.routines import routines_router
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.adapters.web.security import SecurityMiddleware
+from daimon.adapters.web.server_skills import server_skills_router
 from daimon.adapters.web.static import spa_router
 from daimon.adapters.web.upload_limit import UploadLimitMiddleware
 from fastapi import APIRouter, FastAPI, Request, Response
@@ -112,6 +113,8 @@ def create_app(runtime: WebRuntime) -> FastAPI:
     app.include_router(agent_people_router(runtime))
     app.include_router(agent_tool_rules_router(runtime))
     app.include_router(agent_lifecycle_router(runtime))
+    # Before the library and agent routes, whose `{skill_id}` and `{agent_id}` match its paths.
+    app.include_router(server_skills_router(runtime))
     app.include_router(agent_library_router(runtime))
     app.include_router(agents_router(runtime))
     app.include_router(channels_router(runtime))

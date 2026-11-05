@@ -9,6 +9,7 @@ from typing import Any, cast
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.core.stores.domain import Role
+from daimon.core.tool_safety import ToolSafetyPolicy
 
 
 class _Session:
@@ -27,8 +28,12 @@ class _Factory:
         return _Session()
 
 
-def fake_runtime() -> McpRuntime:
-    return cast(McpRuntime, SimpleNamespace(session_factory=_Factory(), client=object()))
+def fake_runtime(*, tool_safety: bool = True) -> McpRuntime:
+    settings = SimpleNamespace(tool_safety=ToolSafetyPolicy(enabled=tool_safety))
+    return cast(
+        McpRuntime,
+        SimpleNamespace(session_factory=_Factory(), client=object(), settings=settings),
+    )
 
 
 def make_auth(*, admin: bool = True, platform: str = "discord", **extra: Any) -> AuthIdentity:

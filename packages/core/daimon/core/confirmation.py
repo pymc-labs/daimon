@@ -39,6 +39,7 @@ from daimon.core.agent_configuration import (
 )
 from daimon.core.microsoft_write_paths import write_kind
 from daimon.core.outbound.reach import ReachPlan, card_title
+from daimon.core.server_skills.gate import may_run
 from daimon.core.tool_safety import (
     CARDED_TOOLS,
     DAIMON_SERVER_NAME,
@@ -72,6 +73,7 @@ __all__ = [
     "ConfirmationPrompt",
     "BackendSwitchReference",
     "ToolRuleCardReference",
+    "ServerSkillUpdateCard",
     "PendingConfirmations",
     "no_confirmation_surface",
     "prompt_for_tool_call",
@@ -289,6 +291,46 @@ async def no_confirmation_surface(prompt: ConfirmationPrompt) -> ConfirmationAns
 
 def _in_days(days: object) -> str:
     return f"in {days} day" if days == 1 else f"in {days} days"
+
+
+@dataclass(frozen=True)
+class ServerSkillUpdateCard:
+    """A server skill's waiting update, read from the mirror so the card never shows what
+    the call claims: the skill, its versions and the file paths the update changes."""
+
+    name: str
+    version: str | None
+    new_version: str | None
+    changes: Mapping[str, Sequence[str]]
+    """`added`, `removed` and `changed` paths."""
+
+
+#: How many paths of each kind the card names before it says how many more.
+_UPDATE_PATHS: Final[int] = 5
+_UPDATE_PATH_WIDTH: Final[int] = 60
+_UPDATE_KINDS: Final[tuple[tuple[str, str], ...]] = (
+    ("added", "Added"),
+    ("changed", "Changed"),
+    ("removed", "Removed"),
+)
+
+
+def _update_lines(update: ServerSkillUpdateCard) -> tuple[str, ...]:
+    """The version move, then each kind of change, as one line each."""
+    old = _one_line(update.version or "none", limit=40)
+    new = _one_line(update.new_version or "none", limit=40)
+    lines = [f"Version: {old} → {new}"]
+    for key, label in _UPDATE_KINDS:
+        # What the approval gate counts as runnable leads, so "and N more" hides only
+        # files that could not run. Each path is cut in the middle to keep its extension.
+        raw = sorted(update.changes.get(key, ()), key=lambda path: not may_run(path, b""))
+        paths = [_clip_middle(_one_line(path), _UPDATE_PATH_WIDTH) for path in raw]
+        if not paths:
+            continue
+        more = len(paths) - _UPDATE_PATHS
+        shown = ", ".join(paths[:_UPDATE_PATHS])
+        lines.append(f"{label}: {shown}" + (f" and {more} more" if more > 0 else ""))
+    return tuple(lines)
 
 
 def _short(value: object, *, limit: int = 80) -> str:
@@ -523,8 +565,12 @@ def prompt_for_tool_call(
     now: datetime,
     timeout: timedelta = CONFIRMATION_TIMEOUT,
     trusted_servers: frozenset[str] = frozenset({DAIMON_SERVER_NAME}),
+    server_skill_update: ServerSkillUpdateCard | None = None,
 ) -> ConfirmationPrompt:
-    """The card for one gated write, with short product-facing details."""
+    """The card for one gated write, with short product-facing details.
+
+    `server_skill_update` is what `approve_server_skill_update` shows, read from the
+    mirror; without it that call gets the generic card."""
     own_server = call.server_name in trusted_servers
     publishing = call.tool_name in PUBLISH_TOOLS and own_server
     data = call.input
@@ -744,6 +790,20 @@ def prompt_for_tool_call(
             f"Agent: {_short(agent)}",
             f"Source: {source_label}",
         )
+    elif (
+        call.tool_name == "approve_server_skill_update"
+        and own_server
+        and server_skill_update is not None
+    ):
+        skill = _one_line(server_skill_update.name, limit=64)
+        action = f'Approve update to skill "{skill}"'
+        title = f"{action}?"
+        denied_action = f'Skill "{skill}" not updated'
+        lines = _update_lines(server_skill_update)
+        consequence = "\n".join(
+            ("Its files and allowed tools change for every agent that uses it.", *lines)
+        )
+        detail_lines = (f"Skill: {skill}", *lines)
     elif call.tool_name == "create_watch" and own_server:
         action = "Create watch"
         title = "Create this watch?"

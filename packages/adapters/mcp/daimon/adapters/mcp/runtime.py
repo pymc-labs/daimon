@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from daimon.adapters.mcp.slack_http import SlackHttpSession
 from daimon.adapters.mcp.tools.microsoft._access import MicrosoftGraph
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
@@ -22,6 +23,7 @@ from daimon.core.config import DiscordSettings, Settings
 from daimon.core.discord_membership import DiscordRestMembershipResolver
 from daimon.core.ma_resolver import ResolverCache, new_resolver_cache
 from daimon.core.membership import MembershipResolver
+from daimon.core.node_exchange import NodeHolds
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from google import genai
@@ -47,6 +49,10 @@ class McpResourceHostFactory(Protocol):
         authorization_id: str,
         operation_key: str,
     ) -> NeutralResourceHost: ...
+
+
+def _no_holds() -> NodeHolds:
+    return {}
 
 
 @dataclass(frozen=True)
@@ -77,6 +83,9 @@ class McpRuntime:
 
     membership_resolver: MembershipResolver | None = None
     compute_provider: ComputeProvider | None = None
+    # Signs who a chat account is for a connection node's token exchange; None: no node.
+    identity_key: Ed25519PrivateKey | None = None
+    node_held: NodeHolds = field(default_factory=_no_holds)
 
     def __post_init__(self) -> None:
         if self.membership_resolver is None and isinstance(self.settings.discord, DiscordSettings):

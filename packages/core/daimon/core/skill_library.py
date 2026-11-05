@@ -24,8 +24,10 @@ from daimon.core.platform_names import known_channel_label
 from daimon.core.skills.attachments import delete_skill_unless_attached
 from daimon.core.skills.fetch import GitHubFetchError
 from daimon.core.skills.pipeline import run_skill_sync
+from daimon.core.stores import server_skills as server_skills_store
 from daimon.core.stores import web_audit
 from daimon.core.stores.channel_skills import list_tenant_channel_skills
+from daimon.core.stores.domain import ServerSkillRow
 from daimon.core.stores.platform_names import get_channel_names, get_channel_statuses
 from daimon.core.stores.seeded_skills import list_seeded_skill_names
 from daimon.core.stores.user_skills import list_user_skills_for_tenant
@@ -50,6 +52,35 @@ class SkillUse(BaseModel):
     """The version pinned there, or None for the latest."""
 
 
+class MirrorDoc(BaseModel):
+    """Where a mirrored skill comes from, and how far it is behind."""
+
+    server: str
+    uri: str
+    version_label: str | None
+    status: Literal["current", "pending", "unavailable"]
+    pending_digest: str | None
+    """Names the waiting update; approving sends it back so only that update applies."""
+    pending_label: str | None
+    pending_changes: dict[str, list[str]] | None
+    last_checked_at: str | None
+
+
+def mirror_doc(row: ServerSkillRow | None) -> MirrorDoc | None:
+    if row is None:
+        return None
+    return MirrorDoc(
+        server=row.server,
+        uri=row.uri,
+        version_label=row.version_label,
+        status=row.status,
+        pending_digest=row.pending_digest,
+        pending_label=row.pending_label,
+        pending_changes=row.pending_changes,
+        last_checked_at=None if row.last_checked_at is None else row.last_checked_at.isoformat(),
+    )
+
+
 class LibrarySkill(BaseModel):
     id: str
     name: str
@@ -65,6 +96,8 @@ class LibrarySkill(BaseModel):
     default: bool
     """A skill the server ships; it can't be deleted here."""
     used_by: list[SkillUse]
+    server: MirrorDoc | None = None
+    """Set for a skill mirrored from a skills server, which only the sync changes."""
 
 
 class SkillDetail(LibrarySkill):
@@ -123,6 +156,10 @@ async def _library(
     async with deps.session_factory() as session:
         seeded = await list_seeded_skill_names(session, tenant_id=actor.tenant_id)
         rules = await list_tenant_channel_skills(session, tenant_id=actor.tenant_id)
+        mirrors = {
+            m.skill_id: m
+            for m in await server_skills_store.list_mirrors(session, tenant_id=actor.tenant_id)
+        }
         names: dict[tuple[str, str], str] = {}
         statuses: dict[tuple[str, str], str] = {}
         for platform in {r.platform for r in rules}:
@@ -161,6 +198,7 @@ async def _library(
                 updated_at=row.updated_at,
                 default=name in seeded,
                 used_by=sorted(uses.get(row.id, []), key=lambda u: (u.kind, u.name.casefold())),
+                server=mirror_doc(mirrors.get(row.id)),
             )
             for row, name in own_skills(actor, rows)
         ),
@@ -380,6 +418,9 @@ async def delete_library_skill(
                 + ". Remove it there first.",
                 kind="conflict",
             )
+        await server_skills_store.forget_mirror(
+            session, tenant_id=actor.tenant_id, skill_id=skill_id
+        )
         if audited is not None:
             await audited(session, name)
     return name

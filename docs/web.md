@@ -120,6 +120,8 @@ DAIMON_WEB__NODES__DATA_SERVER__CLIENT_ID=daimon-web
 DAIMON_WEB__NODES__DATA_SERVER__CLIENT_SECRET=...
 ```
 
+The MCP service reads the same settings, so chat can add the server's skills.
+
 Connecting an agent links its agent on the server and attaches the server's
 MCP relay to it. Linking fails when another person manages that agent. Disconnecting removes the relay and keeps the server's agent.
 Only people who may edit the agent connect or disconnect it.

@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 214 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 220 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -534,6 +534,21 @@ MCP tools for an agent to edit its own ``agent_files`` from inside an MA turn.
 | `self_list_files` | agent tokens only | List all keys + metadata (no values) in your private agent_files namespace. |
 | `self_read_file` | agent tokens only | Check a per-agent file by `key`. |
 | `self_write_file` | agent tokens only | Add a per-agent key under `key`. |
+
+## `server_skills`
+
+Chat tools for the skills the data server node's server serves, as in the web app's
+agent editor: add one to the library, check or approve its update, fork it, follow its
+updates.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `add_server_skill` | all callers | Only for the connected data server: list what it serves, or take one of its offers by name or URI into the library, kept current with that server. |
+| `apply_server_skill_update` | all callers | Give an agent the server skill update its model provider check held back. |
+| `approve_server_skill_update` | admin only | Approve the update waiting on a server skill, given as its ``pending_digest``. |
+| `check_server_skill` | admin only | Check a server skill for an update now. |
+| `fork_server_skill` | admin only | Copy a server skill's latest version into an editable library skill named ``name``, which follows no updates. |
+| `set_server_skill_follow` | all callers | Choose whether an agent takes a server skill's new versions as they come (``follow``) or keeps the version it pins. |
 
 ## `sessions`
 
