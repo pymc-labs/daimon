@@ -93,5 +93,8 @@ def attachment_disposition(name: str) -> str:
     quoted string replaced; `filename*` carries the real name for clients that read it.
     A non-Latin-1 name in the plain parameter would fail the header's encoding.
     """
-    plain = name.encode("ascii", "replace").decode().replace("\\", "_").replace('"', "_")
+    plain = "".join(
+        "_" if c in '\\"' or not c.isprintable() else c
+        for c in name.encode("ascii", "replace").decode()
+    )
     return f"attachment; filename=\"{plain}\"; filename*=UTF-8''{quote(name, safe='')}"

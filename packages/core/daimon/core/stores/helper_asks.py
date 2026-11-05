@@ -188,8 +188,8 @@ async def add_reply_file(
 async def delete_expired_reply_uploads(session: AsyncSession, *, now: datetime) -> int:
     """Delete the files helpers sent back on asks whose links have expired; returns how many.
 
-    A reply file is the asking agent's to use within the turn; nothing else references
-    it, so past `FILES_TTL` it is only stored bytes.
+    A reply file is the asking agent's to use within the turn, so past `FILES_TTL` it is
+    only stored bytes, unless the agent passed it on to an ask whose links still work.
     """
     sent = func.jsonb_array_elements(HelperAsk.reply_files).table_valued("value")
     expired = (
@@ -198,5 +198,15 @@ async def delete_expired_reply_uploads(session: AsyncSession, *, now: datetime) 
         .join(sent, true())
         .where(HelperAsk.created_at <= now - FILES_TTL)
     )
-    result = await session.execute(delete(FileUpload).where(FileUpload.id.in_(expired)))
+    passed = func.jsonb_array_elements(HelperAsk.files).table_valued("value")
+    passed_id = passed.c.value.op("->>")("id")
+    live = (
+        select(passed_id)
+        .select_from(HelperAsk)
+        .join(passed, true())
+        .where(HelperAsk.created_at > now - FILES_TTL, passed_id.is_not(None))
+    )
+    result = await session.execute(
+        delete(FileUpload).where(FileUpload.id.in_(expired), FileUpload.id.not_in(live))
+    )
     return cast(CursorResult[Any], result).rowcount

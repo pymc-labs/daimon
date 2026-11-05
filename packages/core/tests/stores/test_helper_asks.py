@@ -240,13 +240,28 @@ async def test_reply_uploads_go_once_their_asks_links_expire(db_session: AsyncSe
         return file
 
     old = await ask_with_reply("old", now - helper_asks.FILES_TTL - timedelta(minutes=1))
+    passed_on = await ask_with_reply("passed", now - helper_asks.FILES_TTL - timedelta(minutes=1))
+    await helper_asks.create_ask(
+        db_session,
+        tenant_id=origin.tenant_id,
+        origin_id=origin.id,
+        helper_agent_id="agent_next",
+        helper_name="next",
+        message="m",
+        now=now,
+        files=[passed_on],
+    )
     fresh = await ask_with_reply("fresh", now)
     unrelated = await land("unrelated")
 
     removed = await helper_asks.delete_expired_reply_uploads(db_session, now=now)
 
     kept = await file_uploads.list_landed_uploads(
-        db_session, tenant_id=origin.tenant_id, handle_ids=[old.id, fresh.id, unrelated.id]
+        db_session,
+        tenant_id=origin.tenant_id,
+        handle_ids=[old.id, passed_on.id, fresh.id, unrelated.id],
     )
     assert removed == 1, "one expired reply file"
-    assert {f.id for f in kept} == {fresh.id, unrelated.id}, "a live ask's file and others stay"
+    assert {f.id for f in kept} == {passed_on.id, fresh.id, unrelated.id}, (
+        "a live ask's file, one passed on to a live ask, and others stay"
+    )
