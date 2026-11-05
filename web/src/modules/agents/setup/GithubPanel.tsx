@@ -9,42 +9,30 @@ import { cn } from "@/lib/utils"
 import { Pill } from "../bits"
 import { Section, type Props } from "../inspector/parts"
 import type { Agent, SyncedSkill } from "../types"
-import { hasTrouble, repoTrouble, useAgentGithub, useGithubWrites, type AgentGithub, type GithubRepo, type GithubSkill } from "./github"
+import { hasTrouble, repoTrouble, useAgentGithub, useGithubWrites, type GithubRepo } from "./github"
+import { Out } from "./Out"
 
-const ORIGIN: Record<GithubSkill["origin"], string> = { repo: "GitHub", library: "Library", external: "Published outside Daimon", built_in: "Built-in" }
 const SYNC = { pending: "Waiting", running: "Syncing", done: "Synced" } as const
 const MARK: Record<SyncedSkill["action"], string> = { created: "Added", updated: "Updated", skipped: "Skipped", failed: "Failed" }
 
-const link = "text-link hover:underline"
-// Links come from repo metadata and release tags, so only https ones become links.
-const https = (url: string | null): url is string => !!url && url.startsWith("https:")
-const Out = ({ href, children, className }: { href: string | null; children: React.ReactNode; className?: string }) =>
-  https(href)
-    ? <a href={href} target="_blank" rel="noreferrer" className={cn(link, className)}>{children}</a>
-    : <span className={className}>{children}</span>
-
-/** The newest change among the agent's skills. */
-const lastChange = (g: AgentGithub) => g.skills.map((s) => s.updated_at).filter((t): t is string => !!t).sort().at(-1) ?? null
-
-/** The canvas card's body: the working repo, then the release or the last skill change. */
+/** The canvas card's body: the working repo, then the sync. */
 export function GithubFacts({ agent }: { agent: Agent }) {
   const q = useAgentGithub(agent.id, agent.can_view_details)
   const g = q.data
   if (!g) return <div className="p-3 text-xs text-faint">{q.isError ? "Unavailable" : ""}</div>
   const repo = g.repos.find((r) => r.working)?.name
-  const changed = lastChange(g)
   return (
     <div className="space-y-1 p-3 text-xs">
       <div className="flex items-center gap-1.5">
         {repo ? <Mono className="truncate text-foreground/80">{repo}</Mono> : <span className="text-faint">Not connected</span>}
         {hasTrouble(g) && <span className="ml-auto" role="img" aria-label="Needs a look"><StatusDot status="failing" /></span>}
       </div>
-      {g.release ? <div className="truncate text-faint">{g.release.name}</div> : changed && <div className="text-faint">Skills changed <Ago iso={changed} className="text-faint" /></div>}
+      {g.sync && <div className="text-faint">{g.sync.error ? "Sync failed" : g.sync.state === "done" ? <>Synced <Ago iso={g.sync.at} className="text-faint" /></> : SYNC[g.sync.state]}</div>}
     </div>
   )
 }
 
-function RepoRow({ repo, manage, busy, onWork, onRemove }: { repo: GithubRepo; manage: boolean; busy: boolean; onWork: () => void; onRemove: () => void }) {
+function RepoRow({ repo, skills, manage, busy, onWork, onRemove, onSkills }: { repo: GithubRepo; skills: number; manage: boolean; busy: boolean; onWork: () => void; onRemove: () => void; onSkills: () => void }) {
   const trouble = repoTrouble(repo)
   return (
     <div className="px-3 py-2 text-sm">
@@ -53,14 +41,15 @@ function RepoRow({ repo, manage, busy, onWork, onRemove }: { repo: GithubRepo; m
         <Out href={repo.url} className="truncate font-medium">{repo.name}</Out>
         <Pill>{repo.access === "write" ? "Can change" : "Read only"}</Pill>
         {repo.shared && <Pill>Shared</Pill>}
-        {manage && (
-          <span className="-mr-1.5 ml-auto">
+        <span className="-mr-1.5 ml-auto flex items-center gap-1">
+          {skills > 0 && <button type="button" className={"rounded px-1.5 text-xs text-link hover:underline"} onClick={onSkills}>{skills === 1 ? "1 skill" : `${skills} skills`}</button>}
+          {manage && (
             <PanelMenu label={`Actions for ${repo.name}`} items={[
               ...(repo.working ? [] : [{ label: "Set as working repo", onSelect: onWork, disabled: busy }]),
               { label: "Remove", onSelect: onRemove, destructive: true, disabled: busy },
             ]} />
-          </span>
-        )}
+          )}
+        </span>
       </div>
       {(trouble.length > 0 || repo.granted_by || repo.granted_at) && (
         <div className="mt-0.5 flex flex-wrap items-center gap-x-3 text-xs text-muted-foreground">
@@ -72,25 +61,8 @@ function RepoRow({ repo, manage, busy, onWork, onRemove }: { repo: GithubRepo; m
   )
 }
 
-function SkillRow({ skill }: { skill: GithubSkill }) {
-  const where = skill.repo ? `${skill.repo}${skill.branch ? `@${skill.branch}` : ""}${skill.path ? `/${skill.path.replace(/^\//, "")}` : ""}` : null
-  return (
-    <div className="px-3 py-2 text-sm">
-      <div className="flex min-h-6 items-center gap-2">
-        <span className="truncate font-medium">{skill.title}</span>
-        {skill.version && <Mono className="text-xs text-faint">{skill.version}</Mono>}
-        {skill.updated_at && <Ago iso={skill.updated_at} className="ml-auto text-xs text-muted-foreground" />}
-      </div>
-      <div className="mt-0.5 flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
-        <span className="shrink-0">{ORIGIN[skill.origin]}</span>
-        {skill.origin === "repo" && where && (https(skill.url) ? <Out href={skill.url} className="truncate font-mono">{where}</Out> : <Mono className="truncate">{where}</Mono>)}
-      </div>
-    </div>
-  )
-}
-
-/** The agent's GitHub link: repos, where each skill came from, the last sync, a release label. */
-export function GithubPanel({ agent }: Props) {
+/** The agent's GitHub link: repos, how many skills each holds, and the last sync. */
+export function GithubPanel({ agent, select }: Props) {
   const confirm = useConfirm()
   const q = useAgentGithub(agent.id, agent.can_view_details)
   const w = useGithubWrites(agent.id)
@@ -116,22 +88,11 @@ export function GithubPanel({ agent }: Props) {
         {g.repos.length ? (
           <div className="divide-y rounded-lg border">
             {g.repos.map((r) => (
-              <RepoRow key={r.name} repo={r} manage={manage} busy={busy} onWork={() => w.setWorking.mutate(r.name)} onRemove={() => void remove(r.name)} />
+              <RepoRow key={r.name} repo={r} skills={g.skills.filter((s) => s.origin === "repo" && s.repo?.toLowerCase() === r.name.toLowerCase()).length} manage={manage} busy={busy} onWork={() => w.setWorking.mutate(r.name)} onRemove={() => void remove(r.name)} onSkills={() => select("skills")} />
             ))}
           </div>
         ) : <div className="text-sm text-muted-foreground">{g.configured ? "None" : "GitHub isn't set up on this server"}</div>}
       </Section>
-      <Section title="Skills">
-        {g.skills.length ? <div className="divide-y rounded-lg border">{g.skills.map((s) => <SkillRow key={s.skill_id} skill={s} />)}</div> : <div className="text-sm text-muted-foreground">None</div>}
-      </Section>
-      {g.release && (
-        <Section title="Release">
-          <div className="flex items-center gap-2 text-sm">
-            <Out href={g.release.url} className="truncate font-medium">{g.release.name}</Out>
-            {g.release.at && <Ago iso={g.release.at} className="ml-auto text-xs text-muted-foreground" />}
-          </div>
-        </Section>
-      )}
       {showSync && (
         <Section
           title="Sync"
