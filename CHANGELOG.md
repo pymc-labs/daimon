@@ -16,8 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   their access, status, skill count and which one is the working repo, and shows whether the
   latest push sync failed. The Skills panel shows the release an outside pipeline stamped in
   the agent's `source_release`, `source_release_at` and `source_release_url` metadata, and each
-  skill shows where it came from: a repo (with branch and path), the library, elsewhere or
-  Anthropic. The agent's owner or a server admin can connect GitHub, pick or clear the working repo, take a repo
+  skill shows where it came from: a repo (with branch and path), the library or
+  elsewhere. The agent's owner or a server admin can connect GitHub, pick or clear the working repo, take a repo
   off the agent and resync its repo skills now. Each change is audited like the chat tools.
 
 - **The agent posts for other people more carefully, and anyone can ask never to be tagged.**

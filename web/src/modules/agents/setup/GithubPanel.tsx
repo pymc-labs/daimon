@@ -42,7 +42,7 @@ function RepoRow({ repo, skills, manage, busy, onWork, onRemove, onSkills }: { r
         <Pill>{repo.access === "write" ? "Can change" : "Read only"}</Pill>
         {repo.shared && <Pill>Shared</Pill>}
         <span className="-mr-1.5 ml-auto flex items-center gap-1">
-          {skills > 0 && <button type="button" className={"rounded px-1.5 text-xs text-link hover:underline"} onClick={onSkills}>{skills === 1 ? "1 skill" : `${skills} skills`}</button>}
+          {skills > 0 && <button type="button" className="rounded px-1.5 text-xs text-link hover:underline" onClick={onSkills}>{skills === 1 ? "1 skill" : `${skills} skills`}</button>}
           {manage && (
             <PanelMenu label={`Actions for ${repo.name}`} items={[
               ...(repo.working ? [] : [{ label: "Set as working repo", onSelect: onWork, disabled: busy }]),
