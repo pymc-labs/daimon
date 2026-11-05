@@ -17,10 +17,10 @@ from datetime import UTC, datetime
 from urllib.parse import parse_qs
 
 import structlog
+from daimon.core.agent_editing import AgentEditDeps
 from daimon.core.coding_key_connect import claim_coding_key
 from daimon.core.notebooks._rate_limit import RateLimiter
 from pydantic import SecretStr
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse, Response
 
@@ -58,7 +58,7 @@ async def _code_of(request: Request) -> str | None:
 
 def build_coding_key_claim_route(
     *,
-    session_factory: async_sessionmaker[AsyncSession],
+    deps: AgentEditDeps,
     jwt_secret: SecretStr | None,
     rate_limiter: RateLimiter,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -72,7 +72,7 @@ def build_coding_key_claim_route(
         if code is None:
             return _refused()
         token = await claim_coding_key(
-            session_factory,
+            deps,
             code=code,
             secret=jwt_secret.get_secret_value().encode(),
             now=clock(),

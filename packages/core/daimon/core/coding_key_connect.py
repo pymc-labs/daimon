@@ -7,10 +7,11 @@ command that writes it into its config, so the key never enters the chat. The
 code works once, within ten minutes, and the first one used kills the rest of
 its batch. A new batch can replace the previous one the same person made.
 
-A claim has no signed-in person, only the code, so it re-reads the standing of
-the person who made it, as the verifier does on every request. A code that is
-unknown, used, expired or whose maker has lost standing is refused alike, and
-the caller cannot tell which.
+A claim has no signed-in person, only the code, so it re-runs what a key made on
+screen needs for the person who made it: the agent live and not archived, its
+setup theirs to see, the access policy and their standing, as the verifier does
+on every request. A code that is unknown, used, expired or whose maker has lost
+any of that is refused alike, and the caller cannot tell which.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from collections.abc import Callable
 
 from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError
 from daimon.core.agent_target import load_target, require_setup
-from daimon.core.authz import Subject
+from daimon.core.authz import Subject, Surface
 from daimon.core.coding_key_prompts import (
     CODE_TTL_MINUTES,
     CODING_CLIENTS,
@@ -34,7 +35,6 @@ from daimon.core.coding_key_prompts import (
 from daimon.core.coding_keys import (
     authorize_coding_mint,
     coding_key_access,
-    holds_coding_key_standing,
 )
 from daimon.core.mcp_auth import coding_key_ttl_days, mint_agent_mcp_token, token_jti
 from daimon.core.stores import coding_key_claims as claims_store
@@ -42,7 +42,6 @@ from daimon.core.stores import web_audit
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.domain import Role
 from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 CODE_TTL = dt.timedelta(minutes=CODE_TTL_MINUTES)
 
@@ -107,6 +106,9 @@ async def mint_connect_batch(
     expires_at = now + CODE_TTL
     async with deps.session_factory() as session, session.begin():
         if replaces is not None:
+            # Lock before killing, as a claim does, so the two take the batch's rows in
+            # one order and cannot deadlock.
+            await claims_store.lock_batch(session, batch=replaces)
             await claims_store.kill_unused_batch(
                 session,
                 batch=replaces,
@@ -120,6 +122,7 @@ async def mint_connect_batch(
             tenant_id=actor.tenant_id,
             account_id=actor.account_id,
             agent_id=target.agent_id,
+            ma_agent_id=ma_agent_id,
             agent_name=target.agent.name,
             batch=batch,
             created_at=now,
@@ -171,35 +174,45 @@ async def connect_status(
 
 
 async def claim_coding_key(
-    session_factory: async_sessionmaker[AsyncSession],
-    *,
-    code: str,
-    secret: bytes,
-    now: dt.datetime,
+    deps: AgentEditDeps, *, code: str, secret: bytes, now: dt.datetime
 ) -> str | None:
     """Trade a code for the coding key it stands for; None when it cannot be traded.
 
-    The code's whole batch is row-locked before anything is decided, so two claims
-    racing in one batch cannot both mint: the second waits, then finds its code
-    killed. The key is made as `mint_coding_key` makes it (purpose "coding", a
-    lifetime by the maker's role) once the maker's standing on the agent holds now.
+    What made the code is checked again now, as a key made on screen is: the maker
+    must still be allowed to make one for this agent (`authorize_coding_mint`). That
+    reads the live agent, so it runs before the batch is locked and no row lock is
+    held across it. The code's whole batch is then row-locked before anything is
+    decided, so two claims racing in one batch cannot both mint: the second waits,
+    then finds its code killed. The key is made as `mint_coding_key` makes it
+    (purpose "coding", a lifetime by the maker's role).
     """
-    async with session_factory() as session, session.begin():
+    async with deps.session_factory() as session:
         seen = await claims_store.find_claim_by_hash(session, code_hash=hash_code(code))
-        if seen is None:
+        if seen is None or seen.used_at is not None or seen.expires_at <= now:
             return None
+        identity = await get_account_with_tenant(session, account_id=seen.account_id)
+    if identity is None or identity.tenant_id != seen.tenant_id:
+        return None
+    is_admin = identity.role is Role.ADMIN
+    actor = AgentActor(
+        tenant_id=seen.tenant_id,
+        account_id=seen.account_id,
+        subject=Subject(is_admin=is_admin, platform_user_id=str(seen.account_id)),
+        surface=Surface.WEB,
+    )
+    try:
+        # `_bound` is None on web (no channel binding), as for a key made on screen.
+        target, _bound = await authorize_coding_mint(
+            deps, actor=actor, ma_agent_id=seen.ma_agent_id
+        )
+    except AgentEditError:
+        return None
+    if target.agent_id != seen.agent_id:
+        return None
+    async with deps.session_factory() as session, session.begin():
         locked = await claims_store.lock_batch(session, batch=seen.batch)
         claim = next((row for row in locked if row.id == seen.id), None)
         if claim is None or claim.used_at is not None or claim.expires_at <= now:
-            return None
-        identity = await get_account_with_tenant(session, account_id=claim.account_id)
-        if identity is None or not await holds_coding_key_standing(
-            session,
-            tenant_id=claim.tenant_id,
-            account_id=claim.account_id,
-            agent_id=claim.agent_id,
-            identity=identity,
-        ):
             return None
         token = await mint_agent_mcp_token(
             session,
@@ -209,7 +222,7 @@ async def claim_coding_key(
             label=claim.agent_name,
             secret=secret,
             now=now,
-            ttl_days=coding_key_ttl_days(Subject(is_admin=identity.role is Role.ADMIN)),
+            ttl_days=coding_key_ttl_days(Subject(is_admin=is_admin)),
             purpose="coding",
             client=claim.client,
         )

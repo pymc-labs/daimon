@@ -36,6 +36,7 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("agent_id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("ma_agent_id", sa.Text(), nullable=False),
         sa.Column("agent_name", sa.Text(), nullable=False),
         sa.Column("client", sa.Text(), nullable=False),
         sa.Column("batch", postgresql.UUID(as_uuid=True), nullable=False),
@@ -51,9 +52,11 @@ def upgrade() -> None:
         ),
     )
     op.create_index("ix_coding_key_claims_batch", "coding_key_claims", ["batch"])
+    op.create_index("ix_coding_key_claims_account_id", "coding_key_claims", ["account_id"])
 
 
 def downgrade() -> None:
+    op.drop_index("ix_coding_key_claims_account_id", table_name="coding_key_claims")
     op.drop_index("ix_coding_key_claims_batch", table_name="coding_key_claims")
     op.drop_table("coding_key_claims")
     op.drop_column("mcp_tokens", "client")

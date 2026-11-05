@@ -1,6 +1,7 @@
 """Coding key claim codes: single-use codes a coding agent trades for a coding key.
 
 - insert_claims: add a batch of codes, one per coding tool; only hashes are stored.
+  It first deletes codes that expired over an hour ago, so the table stays small.
 - find_claim_by_hash: the code a hash belongs to, read without a lock.
 - lock_batch: row-lock every code of a batch in id order, so two claims in one
   batch take the locks in the same order and the second waits for the first.
@@ -14,13 +15,16 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, cast
 
 from daimon.core._models import CodingKeyClaim
 from daimon.core.stores.domain import CodingKeyClaimRow
 from sqlalchemy import CursorResult, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+
+#: How long an expired code's row stays, so a panel polling its batch still finds it.
+PRUNE_AFTER = timedelta(hours=1)
 
 
 async def insert_claims(
@@ -29,6 +33,7 @@ async def insert_claims(
     tenant_id: uuid.UUID,
     account_id: uuid.UUID,
     agent_id: uuid.UUID,
+    ma_agent_id: str,
     agent_name: str,
     batch: uuid.UUID,
     created_at: datetime,
@@ -36,12 +41,16 @@ async def insert_claims(
     code_hashes: dict[str, str],
 ) -> None:
     """Insert one unused code per client; `code_hashes` maps a client id to its code's hash."""
+    await session.execute(
+        delete(CodingKeyClaim).where(CodingKeyClaim.expires_at < created_at - PRUNE_AFTER)
+    )
     session.add_all(
         CodingKeyClaim(
             id=uuid.uuid4(),
             tenant_id=tenant_id,
             account_id=account_id,
             agent_id=agent_id,
+            ma_agent_id=ma_agent_id,
             agent_name=agent_name,
             client=client,
             batch=batch,

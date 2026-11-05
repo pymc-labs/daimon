@@ -1858,7 +1858,10 @@ class CodingKeyClaim(Base):
     """
 
     __tablename__ = "coding_key_claims"
-    __table_args__ = (Index("ix_coding_key_claims_batch", "batch"),)
+    __table_args__ = (
+        Index("ix_coding_key_claims_batch", "batch"),
+        Index("ix_coding_key_claims_account_id", "account_id"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     tenant_id: Mapped[uuid.UUID] = mapped_column(
@@ -1868,6 +1871,8 @@ class CodingKeyClaim(Base):
         UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
     )
     agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    # The agent's Managed Agents id, to load it live when the code is claimed.
+    ma_agent_id: Mapped[str] = mapped_column(Text, nullable=False)
     # The agent's name when the code was made: the label its key will carry.
     agent_name: Mapped[str] = mapped_column(Text, nullable=False)
     client: Mapped[str] = mapped_column(Text, nullable=False)

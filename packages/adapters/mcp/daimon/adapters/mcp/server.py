@@ -120,6 +120,7 @@ from daimon.adapters.mcp.tools.wizard import register_wizard_tools
 from daimon.adapters.mcp.uploads import build_helper_files_route, build_upload_route
 from daimon.adapters.mcp.web_shell import CSS_SHA256, STATIC_DIR, configure_environment_label
 from daimon.adapters.mcp.webhooks import build_github_webhook, build_stripe_webhook
+from daimon.core.agent_editing import AgentEditDeps
 from daimon.core.billing import BillingConfig, load_billing_config
 from daimon.core.config import Settings, load_settings
 from daimon.core.constants import MA_MAX_RETRIES
@@ -646,7 +647,18 @@ def create_mcp_app(
     app.add_route(
         "/coding-keys/claim",
         build_coding_key_claim_route(
-            session_factory=effective_sessionmaker,
+            deps=AgentEditDeps(
+                client=effective_anthropic,
+                session_factory=effective_sessionmaker,
+                public_url=(
+                    str(effective_settings.mcp.public_url)
+                    if effective_settings.mcp.public_url is not None
+                    else None
+                ),
+                denied_tools=effective_settings.tool_safety.denied,
+                resolver_cache=runtime.resolver_cache,
+                deployment_default=deployment_default,
+            ),
             jwt_secret=effective_settings.mcp.jwt_secret,
             rate_limiter=claim_rate_limiter,
         ),

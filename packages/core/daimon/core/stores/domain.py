@@ -1195,6 +1195,7 @@ class CodingKeyClaimRow(BaseModel):
     tenant_id: uuid.UUID
     account_id: uuid.UUID
     agent_id: uuid.UUID
+    ma_agent_id: str
     agent_name: str
     client: str
     batch: uuid.UUID

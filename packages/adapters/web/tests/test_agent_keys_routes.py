@@ -5,16 +5,18 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 
+from daimon.core.agent_editing import AgentEditDeps
 from daimon.core.coding_key_connect import claim_coding_key
 from daimon.core.config import Settings
 from daimon.core.defaults.metadata import MA_METADATA_KEY_SETUP_HIDDEN
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores import web_audit
 from daimon.core.stores.agent_files import list_agent_files
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .agent_support import OWN, agent_client, agent_people, make_admin, sign_in_token
+from .agent_support import OWN, Agents, agent_client, agent_people, make_admin, sign_in_token
 
 _VALUE = "s3cret-value-123"
 _MCP = {
@@ -235,6 +237,15 @@ async def test_an_owner_of_a_hidden_setup_copy_cannot_make_or_list_coding_keys(
     assert (minted.status_code, listed.status_code) == (403, 403), "the setup is hidden from them"
 
 
+def _edit_deps(agents: Agents, factory: async_sessionmaker[AsyncSession]) -> AgentEditDeps:
+    """What the claim route holds, over the same fake agents the web app sees."""
+    return AgentEditDeps(
+        client=build_fake_anthropic(agents.router.dispatch),
+        session_factory=factory,
+        public_url="https://mcp.example.com/mcp",
+    )
+
+
 def _code(prompt: str) -> str:
     return prompt.split("code=")[1].split()[0].strip("`'\"")
 
@@ -252,7 +263,7 @@ async def test_an_owner_connects_a_coding_tool_with_a_prompt_and_sees_it_connect
         waiting = await client.get(f"/api/agents/ag_w/coding-keys/connect/{batch}")
         prompts = {p["id"]: p for p in made.json()["prompts"]}
         key = await claim_coding_key(
-            db_session_factory,
+            _edit_deps(agents, db_session_factory),
             code=_code(prompts["cursor"]["prompt"]),
             secret=("x" * 40).encode(),
             now=dt.datetime.fromisoformat(made.json()["expires_at"]) - dt.timedelta(minutes=5),
@@ -260,12 +271,14 @@ async def test_an_owner_connects_a_coding_tool_with_a_prompt_and_sees_it_connect
         done = await client.get(f"/api/agents/ag_w/coding-keys/connect/{batch}")
         listed = await client.get("/api/agents/ag_w/coding-keys")
     assert made.status_code == 200, made.text
-    assert list(prompts) == ["claude-code", "codex", "cursor", "pi", "mcp"]
-    assert prompts["mcp"]["name"] == "Other MCP"
-    assert "https://mcp.example.com/coding-keys/claim" in prompts["codex"]["prompt"]
+    assert list(prompts) == ["claude-code", "codex", "cursor", "pi", "mcp"], "one prompt per tool"
+    assert prompts["mcp"]["name"] == "Other MCP", "the generic tool's name"
+    assert "https://mcp.example.com/coding-keys/claim" in prompts["codex"]["prompt"], (
+        "the prompt points at the claim route"
+    )
     assert key is not None and key not in made.text, "a prompt never holds a key"
-    assert waiting.json() == {"connected": False, "client": None}
-    assert done.json() == {"connected": True, "client": "cursor"}
+    assert waiting.json() == {"connected": False, "client": None}, "nothing claimed yet"
+    assert done.json() == {"connected": True, "client": "cursor"}, "the claim shows with its tool"
     assert [k["client"] for k in listed.json()] == ["cursor"], "the list shows the tool"
 
 
@@ -287,7 +300,7 @@ async def test_connecting_refuses_a_non_owner_and_a_batch_that_is_not_the_caller
         refused = await client.post("/api/agents/ag_w/coding-keys/connect", headers=OWN)
         peek = await client.get(f"/api/agents/ag_w/coding-keys/connect/{batch}")
     assert refused.status_code == 403, "a member who is not an owner cannot make codes"
-    assert peek.status_code in {403, 404}, "someone else's batch is not theirs to read"
+    assert peek.status_code == 403, "someone else's batch is not theirs to read"
 
 
 async def test_a_new_prompt_batch_can_replace_the_previous_one(
@@ -307,7 +320,7 @@ async def test_a_new_prompt_batch_can_replace_the_previous_one(
         gone = await client.get(f"/api/agents/ag_w/coding-keys/connect/{first['batch']}")
     assert second.status_code == 200, second.text
     stale = await claim_coding_key(
-        db_session_factory,
+        _edit_deps(agents, db_session_factory),
         code=_code(first["prompts"][0]["prompt"]),
         secret=("x" * 40).encode(),
         now=dt.datetime.fromisoformat(first["expires_at"]) - dt.timedelta(minutes=5),

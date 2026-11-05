@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 import httpx
 from daimon.adapters.mcp.coding_key_claim import build_coding_key_claim_route
 from daimon.core._models import CodingKeyClaim, McpToken
+from daimon.core.agent_editing import AgentEditDeps
 from daimon.core.coding_key_connect import hash_code
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import token_jti
@@ -15,6 +16,8 @@ from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.stores import agent_owners
 from daimon.core.stores import coding_key_claims as claims
 from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from pydantic import SecretStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -23,6 +26,7 @@ from starlette.routing import Route
 
 SECRET = "s" * 40
 _SECRET = SecretStr(SECRET)
+_ROUTER = MARouter()
 
 
 async def _batch(
@@ -31,11 +35,12 @@ async def _batch(
     """One batch for an agent, with codes `code-<client>`; returns client -> code."""
     now = datetime.now(UTC)
     salt = uuid.uuid4().hex
+    ma_agent_id = f"ag_{salt}"
     codes = {client: f"code-{client}-{salt}" for client in ("codex", "cursor")}
     async with sessions.begin() as session:
         tenant = await make_tenant(session)
         account = await make_account(session, tenant=tenant)
-        agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_x")
+        agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=ma_agent_id)
         if owned:
             await agent_owners.record_creator(
                 session, tenant_id=tenant.id, agent_id=agent_id, account_id=account.id
@@ -45,12 +50,15 @@ async def _batch(
             tenant_id=tenant.id,
             account_id=account.id,
             agent_id=agent_id,
+            ma_agent_id=ma_agent_id,
             agent_name="helper",
             batch=uuid.uuid4(),
             created_at=now,
             expires_at=now + ttl,
             code_hashes={client: hash_code(code) for client, code in codes.items()},
         )
+    body = ma_agent(id=ma_agent_id, name="helper", tenant_id=tenant.id).model_dump(mode="json")
+    _ROUTER.add("GET", rf"/v1/agents/{ma_agent_id}", lambda _r, _m: httpx.Response(200, json=body))
     return codes
 
 
@@ -61,7 +69,11 @@ def _client(
     limit: int = 100,
 ) -> httpx.AsyncClient:
     route = build_coding_key_claim_route(
-        session_factory=sessions,
+        deps=AgentEditDeps(
+            client=build_fake_anthropic(_ROUTER.dispatch),
+            session_factory=sessions,
+            public_url="https://daimon.example.com/mcp",
+        ),
         jwt_secret=secret,
         rate_limiter=RateLimiter(max_requests=limit, window=timedelta(minutes=10)),
     )
@@ -78,13 +90,14 @@ async def test_a_code_returns_the_bare_key_once(
         again = await client.post("/coding-keys/claim", data={"code": codes["codex"]})
         sibling = await client.post("/coding-keys/claim", data={"code": codes["cursor"]})
 
-    assert first.status_code == 200
-    assert first.headers["content-type"].startswith("text/plain")
-    assert first.headers["cache-control"] == "no-store"
+    assert first.status_code == 200, "the code trades"
+    assert first.headers["content-type"].startswith("text/plain"), "the key is plain text"
+    assert first.headers["cache-control"] == "no-store", "the key is never cached"
     assert first.text.count(".") == 2, "the body is the bare token, nothing around it"
     async with committing_sessionmaker() as session:
         stored = await session.get(McpToken, str(token_jti(first.text)))
-    assert stored is not None and (stored.purpose, stored.client) == ("coding", "codex")
+    assert stored is not None, "the key is on record"
+    assert (stored.purpose, stored.client) == ("coding", "codex"), "a coding key for the tool"
     assert (again.status_code, again.content) == (404, b""), "a code works once"
     assert (sibling.status_code, sibling.content) == (404, b""), "its siblings died with it"
 
@@ -104,7 +117,7 @@ async def test_every_failure_is_the_same_empty_404(
             await client.post("/coding-keys/claim", content=b"x" * 5000),
         ]
 
-    assert {(a.status_code, a.content) for a in answers} == {(404, b"")}
+    assert {(a.status_code, a.content) for a in answers} == {(404, b"")}, "all empty 404s"
     assert len({tuple(sorted(a.headers.items())) for a in answers}) == 1, "headers match too"
 
 
@@ -114,7 +127,7 @@ async def test_the_route_refuses_without_a_signing_secret(
     codes = await _batch(committing_sessionmaker, ttl=timedelta(minutes=10))
     async with _client(committing_sessionmaker, secret=None) as client:
         response = await client.post("/coding-keys/claim", data={"code": codes["codex"]})
-    assert response.status_code == 404
+    assert response.status_code == 404, "no secret, no key"
 
 
 async def test_attempts_are_rate_limited_per_address(
@@ -137,4 +150,4 @@ async def test_attempts_are_rate_limited_per_address(
         used = (
             await session.scalars(select(CodingKeyClaim).where(CodingKeyClaim.jti.is_not(None)))
         ).all()
-    assert len(used) == 1
+    assert len(used) == 1, "exactly the one claim from the unlimited address minted"
