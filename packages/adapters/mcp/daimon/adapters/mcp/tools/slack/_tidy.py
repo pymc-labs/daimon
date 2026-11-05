@@ -22,6 +22,7 @@ from daimon.adapters.mcp.tools._tidy import (
     reply_parts,
     require_not_escalation_channel,
     require_own_post,
+    require_turns_over,
     resolve_tidy_context,
     run_action,
 )
@@ -201,6 +202,7 @@ async def _slack_delete_message_impl(  # pyright: ignore[reportUnusedFunction]
         channel_id=channel_id,
         message_id=message_id,
     )
+    await require_turns_over(runtime, ctx, [post], tool_name=tool, operation=operation)
     await _delete_one(runtime, ctx, auth, client, post, tool=tool)
     return TidyResult(
         platform=_PLATFORM,
@@ -250,7 +252,7 @@ async def _slack_delete_reply_impl(  # pyright: ignore[reportUnusedFunction]
     message_id: str,
     origin_context_id: str | None,
 ) -> TidyResult:
-    # As delete_message here: Slack tidy has no turn-running or requester rule.
+    # As delete_message here: a running turn's posts are refused; no requester rule.
     ctx = await resolve_tidy_context(
         runtime, auth, platform=_PLATFORM, origin_context_id=origin_context_id
     )
@@ -268,6 +270,7 @@ async def _slack_delete_reply_impl(  # pyright: ignore[reportUnusedFunction]
     parts = [p for p in await reply_parts(runtime, post) if p.channel_id == channel_id]
     for part in parts:  # every seal before the first deletion
         _require_thread_unsealed(ctx, channel_id, part)
+    await require_turns_over(runtime, ctx, parts, tool_name=tool, operation="message.delete")
 
     async def delete(part: AgentPostRow) -> None:
         await _delete_one(runtime, ctx, auth, client, part, tool=tool)

@@ -47,6 +47,7 @@ from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Role
 from daimon.core.stores.security_audit import SecurityAuditRow, list_events
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
+from daimon.core.stores.turn_card_intents import create_turn_card_intent
 from daimon.core.stores.turn_origins import create_origin
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent
@@ -439,9 +440,25 @@ async def test_a_policy_change_during_final_identity_io_stops_the_slack_call(
     ], "the begun action is closed with a denied row"
 
 
-async def _turn_reply(world: _World, *, parts: int, base: int, agent: str = _AGENT) -> list[str]:
-    """One turn's messages in a thread under the channel, oldest first."""
+async def _turn_reply(
+    world: _World, *, parts: int, base: int, agent: str = _AGENT, running: bool = False
+) -> list[str]:
+    """One turn's messages in a thread under the channel, oldest first.
+
+    A finished turn's intent is gone from the table; a running one is still active.
+    """
     intent_id = uuid.uuid4()
+    if running:
+        async with world.sessionmaker.begin() as s:
+            intent_id = (
+                await create_turn_card_intent(
+                    s,
+                    tenant_id=world.tenant_id,
+                    platform="slack",
+                    thread_id="1700000000.000001",
+                    turn_token=uuid.uuid4(),
+                )
+            ).id
     ids = [f"17000001{base:02d}.{n:06d}" for n in range(parts)]
     for ts in ids:
         await record_turn_post(
@@ -496,3 +513,36 @@ async def test_delete_reply_on_a_tool_post_deletes_just_it(
         )
         deleted = [d["ts"] for d in _deletes(m)]
     assert (result.messages_deleted, deleted) == (1, [first]), "a send_message post is one message"
+
+
+@pytest.mark.parametrize("tool", ["delete_reply", "delete_message"])
+async def test_a_running_turns_reply_is_refused_before_anything_is_deleted(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], tool: str
+) -> None:
+    world = await _world(committing_sessionmaker)
+    auth, origin = await world.turn()
+    finished = await _turn_reply(world, parts=1, base=1)
+    running = await _turn_reply(world, parts=2, base=2, running=True)
+    impl = _slack_delete_reply_impl if tool == "delete_reply" else _slack_delete_message_impl
+    with aioresponses() as m:
+        _channel_access(m, times=20)
+        m.post(_CHAT_DELETE, payload={"ok": True}, repeat=True)  # pyright: ignore[reportUnknownMemberType]
+        with pytest.raises(ToolError, match="still running"):
+            await impl(
+                world.runtime,
+                auth,
+                channel_id=_CHANNEL,
+                message_id=running[1],
+                origin_context_id=origin,
+            )
+        assert _deletes(m) == [], "no part of a running turn's reply reaches Slack"
+        result = await impl(
+            world.runtime,
+            auth,
+            channel_id=_CHANNEL,
+            message_id=finished[0],
+            origin_context_id=origin,
+        )
+    assert result.messages_deleted == 1, "a finished turn's reply is still deleted"
+    rows = [r for r in await world.audit() if r.tool_name == tool and r.outcome == "denied"]
+    assert [r.reason for r in rows] == ["turn_in_progress"], "the refusal is audited as denied"

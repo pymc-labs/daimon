@@ -2,8 +2,8 @@
 
 Discord and Teams refuse a turn's reply while the turn runs, or unless the
 person asking started it or is an admin (on Discord also whoever opened the
-thread). Slack tidy has no such conversation rule, for one message or a
-whole reply alike. No database: this is a scope check.
+thread). Slack refuses a running turn's reply but has no requester rule, for
+one message or a whole reply alike. No database: this is a scope check.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ def test_slack_delete_reply_has_no_conversation_rule() -> None:
             f"{module.__name__} checks who may tidy a turn's reply"
         )
     assert "require_conversation_rights" not in inspect.getsource(slack_tidy), (
-        "Slack tidy applies no turn-running or requester rule"
+        "Slack tidy applies no requester rule"
     )
 
 

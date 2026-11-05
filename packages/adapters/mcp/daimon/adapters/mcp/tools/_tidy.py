@@ -328,6 +328,40 @@ async def require_own_post(
     return post
 
 
+async def turn_is_running(runtime: McpRuntime, post: AgentPostRow) -> bool:
+    """Whether `post` is a turn's and that turn is still running.
+
+    A turn row without its turn cannot prove the turn is over: it counts as running.
+    """
+    if post.source != "turn":
+        return False
+    if post.turn_card_intent_id is None:
+        return True
+    async with runtime.session_factory() as session:
+        return await turn_card_intent_is_active(session, id=post.turn_card_intent_id)
+
+
+async def require_turns_over(
+    runtime: McpRuntime,
+    ctx: TidyContext,
+    posts: list[AgentPostRow],
+    *,
+    tool_name: str,
+    operation: TidyOperation,
+) -> None:
+    """Refuse `turn_in_progress`, before anything is changed, if any post's turn still runs."""
+    for post in posts:
+        if await turn_is_running(runtime, post):
+            raise await refuse(
+                runtime,
+                ctx,
+                tool_name=tool_name,
+                operation=operation,
+                reason="turn_in_progress",
+                target=TidyTarget(channel_id=post.channel_id, message_id=post.message_id),
+            )
+
+
 async def conversation_refusal(
     runtime: McpRuntime,
     ctx: TidyContext,
@@ -347,14 +381,8 @@ async def conversation_refusal(
     """
     if post.source == "tool":
         return None
-    if post.source == "turn":
-        # A turn row without its turn cannot prove the turn is over: refuse.
-        if post.turn_card_intent_id is None:
-            return "turn_in_progress"
-        async with runtime.session_factory() as session:
-            running = await turn_card_intent_is_active(session, id=post.turn_card_intent_id)
-        if running:
-            return "turn_in_progress"
+    if await turn_is_running(runtime, post):
+        return "turn_in_progress"
     if requester_is_admin:
         return None
     requester = ctx.actor.platform_user_id
