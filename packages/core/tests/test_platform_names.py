@@ -220,7 +220,7 @@ async def test_a_nameless_sighting_only_fills_in_the_parent_of_a_stored_channel(
     await mark_channel_status(
         db_session, tenant_id=tenant.id, platform="teams", statuses={"c-1": "gone"}
     )
-    parent = ChannelSighting("", parent_id="team-1", parent_name="Platform")
+    parent = ChannelSighting("", kind="channel", parent_id="team-1", parent_name="Platform")
     await upsert_channel_names(
         db_session,
         tenant_id=tenant.id,
@@ -239,6 +239,7 @@ async def test_a_nameless_sighting_only_fills_in_the_parent_of_a_stored_channel(
     row = rows["c-1"]
     assert (row.name, row.status) == ("Research", "gone"), "name and status are untouched"
     assert (row.parent_id, row.parent_name) == ("team-1", "Platform"), "the parent is filled in"
+    assert row.kind == "channel", "so is the kind"
 
 
 async def test_a_queued_name_survives_a_nameless_sighting(
@@ -261,6 +262,32 @@ async def test_a_queued_name_survives_a_nameless_sighting(
 
     [row] = await list_channel_names(db_session, tenant_id=tenant.id, platform="teams")
     assert (row.name, row.parent_id) == ("Research", "team-1"), "the name is kept, the parent added"
+
+
+async def test_a_nameless_sighting_never_carries_the_remembered_name(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session, platform="teams")
+    await db_session.commit()
+    remember_channel_names(
+        db_session_factory, tenant_id=tenant.id, platform="teams", names={"c-1": "Research"}
+    )
+    await settle()
+    async with db_session_factory() as session, session.begin():
+        await upsert_channel_names(
+            session, tenant_id=tenant.id, platform="teams", names={"c-1": "Renamed"}
+        )
+
+    remember_channel_names(
+        db_session_factory,
+        tenant_id=tenant.id,
+        platform="teams",
+        names={"c-1": ChannelSighting("", parent_id="team-1")},
+    )
+    await settle()
+
+    [row] = await list_channel_names(db_session, tenant_id=tenant.id, platform="teams")
+    assert (row.name, row.parent_id) == ("Renamed", "team-1"), "the memo's name is not written back"
 
 
 async def test_deleting_a_tenant_deletes_its_names(db_session: AsyncSession) -> None:

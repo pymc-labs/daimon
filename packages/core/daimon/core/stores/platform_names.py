@@ -261,8 +261,9 @@ async def _fill_parent(
     channel_id: str,
     sighting: ChannelSighting,
 ) -> None:
-    """Give a stored channel the parent a nameless sighting carries, leaving its name,
-    status and any other part as they are. A channel not stored is not created."""
+    """Give a stored channel the kind and parent a nameless sighting carries, leaving its
+    name and status as they are. A channel not stored is not created."""
+    kind = _clean(sighting.kind)
     parent_id, parent_name = _clean(sighting.parent_id), _clean(sighting.parent_name)
     if parent_id is None and parent_name is None:
         return
@@ -274,6 +275,7 @@ async def _fill_parent(
             PlatformChannelName.channel_id == channel_id,
         )
         .values(
+            kind=func.coalesce(kind, PlatformChannelName.kind),
             parent_id=func.coalesce(parent_id, PlatformChannelName.parent_id),
             parent_name=func.coalesce(parent_name, PlatformChannelName.parent_name),
         )

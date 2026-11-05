@@ -194,6 +194,7 @@ class MicrosoftSignIn:
             workspaces=((signed.tenant_id, profile.organization or "Microsoft Teams"),),
             platform_user_id=signed.object_id,
             email=email,
+            workspace_names_proven=profile.organization is not None,
         )
 
 

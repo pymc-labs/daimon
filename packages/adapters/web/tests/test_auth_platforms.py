@@ -554,6 +554,32 @@ async def test_microsoft_sign_in_falls_back_to_the_username_when_graph_refuses(
     assert (person.email, person.workspace_name) == ("ines@acme.test", "Microsoft Teams"), person
 
 
+async def test_microsoft_sign_in_without_an_organization_keeps_the_stored_workspace_name(
+    web_client: WebClientFactory,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    teams = await make_tenant(db_session, platform="teams", workspace_id=MICROSOFT_TENANT)
+    await db_session.commit()
+    claims = {
+        "tid": MICROSOFT_TENANT,
+        "oid": "22222222-2222-2222-2222-222222222222",
+        "aud": MICROSOFT_APP,
+        "name": "Ines",
+    }
+
+    async def walk(client: httpx.AsyncClient) -> httpx.Response:
+        return (await _walk(client, provider="microsoft"))[1]
+
+    await _chat_rig(
+        web_client, db_session_factory, fake_microsoft(organization="Contoso", **claims), walk
+    )
+    await _chat_rig(web_client, db_session_factory, fake_microsoft(**claims), walk)
+    async with db_session_factory() as db:
+        (person,) = await people_store.list_people(db, tenant_id=teams.id)
+    assert person.workspace_name == "Contoso", person
+
+
 async def test_microsoft_sign_in_from_another_directory_is_refused(
     web_client: WebClientFactory,
     db_session: AsyncSession,

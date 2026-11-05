@@ -310,10 +310,16 @@ async def fetch_microsoft_profile(
     403 or a slow answer is expected and never fails the sign-in.
     """
     headers = {"Authorization": f"Bearer {access_token}"}
-    me, org = await asyncio.gather(
-        _graph_value(http, f"{GRAPH_ROOT}/me?$select=mail,userPrincipalName", headers),
-        _graph_value(http, f"{GRAPH_ROOT}/organization?$select=displayName", headers),
-    )
+    try:
+        # httpx times each phase of a request; this bounds the whole lookup.
+        async with asyncio.timeout(MICROSOFT_PROFILE_TIMEOUT_S):
+            me, org = await asyncio.gather(
+                _graph_value(http, f"{GRAPH_ROOT}/me?$select=mail,userPrincipalName", headers),
+                _graph_value(http, f"{GRAPH_ROOT}/organization?$select=displayName", headers),
+            )
+    except TimeoutError:
+        log.info("microsoft_sign_in.profile_unavailable", error="TimeoutError")
+        return MicrosoftProfile(email=None, organization=None)
     # `mail` is empty for an account with no mailbox; the UPN is then the sign-in address.
     email = _text(me, "mail") or _text(me, "userPrincipalName")
     organizations = org.get("value") if org else None

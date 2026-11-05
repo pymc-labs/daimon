@@ -231,6 +231,14 @@ def test_teams_general_sits_under_the_installed_team_it_is_the_id_of() -> None:
     ), "a reply thread in General sits under General under its team"
 
 
+def test_a_teams_reply_thread_takes_the_team_name_its_channel_stored() -> None:
+    channel = _teams_name("19:r", parent_id="19:team", parent_name="Stored")
+
+    path = channel_path("teams", "19:r;messageid=7", None, {"19:r": channel}, {"19:team": "Other"})
+
+    assert path == (PathNode("19:team", "Stored", "team"), PathNode("19:r", "Research", "channel"))
+
+
 async def test_a_teams_row_is_placed_under_its_installed_team(db_session: AsyncSession) -> None:
     tenant = await make_tenant(db_session, platform="teams")
     await record_teams_installation(

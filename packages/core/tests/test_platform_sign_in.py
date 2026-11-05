@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from urllib.parse import parse_qs, urlsplit
@@ -280,3 +281,18 @@ async def test_fetch_microsoft_profile_keeps_one_answer_when_the_other_fails() -
     )
     profile = await fetch_microsoft_profile(http, access_token="at")
     assert profile == MicrosoftProfile(email=None, organization="Acme Corp"), profile
+
+
+async def test_fetch_microsoft_profile_bounds_the_whole_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """httpx times each phase of a request; a Graph that trickles still ends the lookup."""
+    monkeypatch.setattr("daimon.core.platform_sign_in.MICROSOFT_PROFILE_TIMEOUT_S", 0.05)
+
+    async def slow(_: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(5)
+        return httpx.Response(200, json={"mail": "ada@acme.test"})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(slow))
+    profile = await fetch_microsoft_profile(http, access_token="at")
+    assert profile == MicrosoftProfile(email=None, organization=None), profile

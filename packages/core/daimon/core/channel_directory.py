@@ -230,7 +230,14 @@ def channel_path(
         )
         if team_id is None:
             return ()
-        stored = name.parent_name if name and name.parent_id == team_id else None
+        stored = next(
+            (
+                n.parent_name
+                for n in (name, channel)
+                if n and n.parent_id == team_id and n.parent_name
+            ),
+            None,
+        )
         team = PathNode(team_id, stored or (teams or {}).get(team_id), "team")
         if base == channel_id:
             return (team,)

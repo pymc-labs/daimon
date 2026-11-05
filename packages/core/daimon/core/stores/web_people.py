@@ -93,10 +93,13 @@ async def upsert_member(
     workspace_name: str,
     email: str | None,
     new_person_id: uuid.UUID,
+    rename_workspace: bool = True,
 ) -> WebPersonRow:
     """Create the member row for `(tenant, account)`, or refresh its name and email.
 
-    A sign-in that carries no email (a chat provider) leaves the stored one alone.
+    A sign-in that carries no email (a chat provider) leaves the stored one alone. One
+    that only guesses the workspace name (`rename_workspace=False`) names a new row but
+    keeps the name a stored row has.
 
     `new_person_id` is used only when the row is new, so a caller can name the person
     in advance (a `web` principal's external id is its person id). A visitor who later
@@ -115,7 +118,7 @@ async def upsert_member(
         constraint="uq_web_people_tenant_account",
         set_={
             "display_name": display_name,
-            "workspace_name": workspace_name,
+            **({"workspace_name": workspace_name} if rename_workspace else {}),
             "email": func.coalesce(new.excluded.email, WebPerson.email),
         },
     ).returning(WebPerson)
