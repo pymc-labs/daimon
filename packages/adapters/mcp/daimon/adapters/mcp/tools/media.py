@@ -233,7 +233,8 @@ def register_upload_tool(mcp: FastMCP, *, runtime: McpRuntime) -> None:
         turn; posting it into that thread with this tool delivers a duplicate.
         Use this tool for a file you were asked to post to a channel or thread
         you were not invoked from, or from a scheduled routine, which has no
-        reply to attach to.
+        reply to attach to. It is also how you give a helper a file: pass the
+        handle id in ``ask_helper``'s ``files``.
 
         The intent words are in this first line on purpose: an agent looking
         for "post a file" has to find this tool by search and read where the
@@ -287,5 +288,6 @@ def register_upload_tool(mcp: FastMCP, *, runtime: McpRuntime) -> None:
             f"`file_handles` argument, in the channel the user named — never one "
             f"they did not name, and never the thread you were invoked from: a "
             f"file for that chat goes in /mnt/session/outputs instead. Max "
-            f"{MAX_UPLOAD_BYTES // 1_000_000} MB; the URL is single-use."
+            f"{MAX_UPLOAD_BYTES // 1_000_000} MB; the URL is single-use. To give "
+            f"it to a helper instead, pass the handle id in `ask_helper`'s `files`."
         )

@@ -103,7 +103,7 @@ def test_uvicorn_lines_in_the_production_mcp_app_are_single_line_json(
 def test_production_mcp_app_logs_no_upload_token_or_oauth_query_values(
     capfd: pytest.CaptureFixture[str],
 ) -> None:
-    upload_token = secrets.token_urlsafe(24)
+    upload_token, files_token = secrets.token_urlsafe(24), secrets.token_urlsafe(24)
     code, state = secrets.token_urlsafe(16), secrets.token_urlsafe(16)
 
     with _serve(_production_mcp_app) as base:
@@ -111,6 +111,8 @@ def test_production_mcp_app_logs_no_upload_token_or_oauth_query_values(
             status = httpx.put(f"{base}/uploads/{upload_token}", content=b"data").status_code
         except httpx.HTTPError:
             status = 500  # the server dropped the connection after the handler failed
+        with contextlib.suppress(httpx.HTTPError):
+            httpx.get(f"{base}/helper-files/{files_token}/h1", timeout=20)
         for path in ("/oauth/mcp/callback", "/oauth/slack/callback"):
             with contextlib.suppress(httpx.HTTPError):
                 httpx.get(f"{base}{path}", params={"code": code, "state": state}, timeout=20)
@@ -119,7 +121,8 @@ def test_production_mcp_app_logs_no_upload_token_or_oauth_query_values(
     logged = out.out + out.err
     assert status >= 500
     assert "/uploads/" in logged, "the access log line was written"
-    for canary in (upload_token, code, state):
+    assert "/helper-files/" in logged, "the helper-files access line was written"
+    for canary in (upload_token, files_token, code, state):
         assert canary not in logged
 
 

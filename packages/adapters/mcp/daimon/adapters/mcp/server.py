@@ -115,7 +115,7 @@ from daimon.adapters.mcp.tools.web_workspace_settings import (
     register_web_workspace_settings_tool,
 )
 from daimon.adapters.mcp.tools.wizard import register_wizard_tools
-from daimon.adapters.mcp.uploads import build_upload_route
+from daimon.adapters.mcp.uploads import build_helper_files_route, build_upload_route
 from daimon.adapters.mcp.web_shell import CSS_SHA256, STATIC_DIR, configure_environment_label
 from daimon.adapters.mcp.webhooks import build_github_webhook, build_stripe_webhook
 from daimon.core.billing import BillingConfig, load_billing_config
@@ -617,6 +617,11 @@ def create_mcp_app(
         "/uploads/{token}",
         build_upload_route(effective_sessionmaker),
         methods=["PUT"],
+    )
+    app.add_route(
+        "/helper-files/{token}/{name}",
+        build_helper_files_route(effective_sessionmaker),
+        methods=["GET", "PUT"],
     )
     # No token path segment (unlike /uploads/{token}): the bearer IS the
     # credential here, so there is nothing else to put in the path.

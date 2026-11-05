@@ -661,16 +661,37 @@
         conversation in this thread. While `status` is `queued` or `running`, call
         `wait_for_helpers` with the `ask_id`. Helpers stop when your turn ends, so wait
         for their replies before you answer.
+        <blank line>
+        To give it files: for each, call `create_file_upload_url`, PUT the file with the
+        curl it returns, and pass the handle id in `files`. Files the helper sends back
+        are in the answer's `files`: download one with `curl -sS -o <name> "<url>"`, or
+        pass its `id` to another helper's `files`. Deliver one to the person as you would
+        a file you made. The links expire an hour after the ask.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
+          'files': dict({
+            'anyOf': list([
+              dict({
+                'items': dict({
+                  'type': 'string',
+                }),
+                'type': 'array',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+            'description': 'Handle ids of files to give the helper (see below).',
+          }),
           'helper': dict({
             'description': "A helper's name or agent id from list_helpers.",
             'type': 'string',
           }),
           'message': dict({
-            'description': "Everything the helper needs: the task, the facts and what to send back. It can't see this conversation's history or your files.",
+            'description': "Everything the helper needs: the task, the facts and what to send back. It can't see this conversation's history or files you don't pass.",
             'maxLength': 20000,
             'type': 'string',
           }),
@@ -2137,7 +2158,8 @@
         turn; posting it into that thread with this tool delivers a duplicate.
         Use this tool for a file you were asked to post to a channel or thread
         you were not invoked from, or from a scheduled routine, which has no
-        reply to attach to.
+        reply to attach to. It is also how you give a helper a file: pass the
+        handle id in ``ask_helper``'s ``files``.
         <blank line>
         The intent words are in this first line on purpose: an agent looking
         for "post a file" has to find this tool by search and read where the
