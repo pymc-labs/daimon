@@ -1,13 +1,14 @@
 """One agent's coding keys: who may see and revoke them, and what a listing shows.
 
-A coding key is an agent key made from the agent's "Access via MCP" panel, with a button or a pasted prompt. A server
-admin sees and revokes every live coding key of the agent; the agent's owner sees
-and revokes only the keys they made themselves; anyone else sees nothing. The
-caller reads the two facts live (the platform's admin status, `owns_agent`) and
-passes them in: this module never trusts a panel snapshot.
+A coding key is an agent key made from the agent's "Access via MCP" panel, with a
+button or a pasted prompt. A server admin sees and revokes every live coding key of
+the agent; the agent's owner sees and revokes only the keys they made themselves;
+anyone else sees nothing. The caller reads the two facts live (the platform's admin
+status, `owns_agent`) and passes them in: this module never trusts a panel snapshot.
 
-A listing carries who made the key, when, when it ends, which tool it was made for and
-whether it is held to a channel. It never carries the token, which exists only once, on screen, at mint.
+A listing carries who made the key, when, when it ends, which tool it was made for
+and whether it is held to a channel. It never carries the token, which exists only
+once, on screen, at mint.
 """
 
 from __future__ import annotations
