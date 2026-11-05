@@ -133,6 +133,32 @@ async def list_posts_in(
     return [AgentPostRow.model_validate(row) for row in rows.all()]
 
 
+async def list_recent_posts(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+    agent_id: uuid.UUID,
+    limit: int,
+) -> list[AgentPostRow]:
+    """`agent_id`'s newest live messages in one channel, newest first."""
+    rows = await session.scalars(
+        select(AgentPostedMessage)
+        .where(
+            AgentPostedMessage.tenant_id == tenant_id,
+            AgentPostedMessage.platform == platform,
+            AgentPostedMessage.channel_id == channel_id,
+            AgentPostedMessage.agent_id == agent_id,
+            AgentPostedMessage.kind == "message",
+            AgentPostedMessage.deleted_at.is_(None),
+        )
+        .order_by(AgentPostedMessage.posted_at.desc(), AgentPostedMessage.message_id.desc())
+        .limit(limit)
+    )
+    return [AgentPostRow.model_validate(row) for row in rows.all()]
+
+
 async def set_post_hash(
     session: AsyncSession, *, post_id: uuid.UUID, content_hmac: str | None
 ) -> None:

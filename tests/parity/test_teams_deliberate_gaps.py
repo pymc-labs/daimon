@@ -5,7 +5,9 @@ files, not even image previews, and routines and agent tools do not reach it.
 Neither Bot Framework nor
 app-only Graph reads a 1:1 chat back, so the boot sweep finds a card whose post
 lost its id only in a channel thread; in a 1:1 chat that intent retires
-untouched (`packages/adapters/teams/tests/test_boot_sweep.py`).
+untouched (`packages/adapters/teams/tests/test_boot_sweep.py`). For the same
+reason a 1:1 chat turn replays no history: it lists the agent's own recent
+posts with their ids instead, so it can still edit or delete them.
 
 The rest follows from what a Teams bot can do (see `docs/teams.md`): a
 private message in a channel expires after 24 hours, so `setup` and `support`,

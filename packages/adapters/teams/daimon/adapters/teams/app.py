@@ -122,6 +122,7 @@ from daimon.core.observability import capture_exception_with_scope
 from daimon.core.participation_gates import ParticipationGates
 from daimon.core.routine_delivery import RoutinePoster, run_delivery_poller
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
+from daimon.core.stores.agent_posts import list_recent_posts
 from daimon.core.stores.domain import (
     Role,
     TaskContinuationRow,
@@ -204,6 +205,8 @@ from sqlalchemy.exc import SQLAlchemyError
 log = structlog.get_logger()
 
 _SEEN_ACTIVITY_CAP = 10_000
+# The agent's own posts a 1:1 chat turn lists, so it can name them to tidy.
+_OWN_POSTS_SHOWN = 10
 _RECOVERY_RETRY_DELAY_S = 1.0
 # A turn's output sweep polls the listing for up to 14 s, then uploads: 15 s cut a
 # sweep that began 14 s before a deploy's SIGTERM. Within the documented 90 s grace.
@@ -1825,6 +1828,9 @@ class TeamsApp:
                 keys=render_keys_element(await self._key_names(tenant_id, inbound, admission)),
                 prefix=attachments.prefix,
                 channel_files=await self._files_reachable(inbound),
+                own_posts=await self._own_posts(
+                    inbound, tenant_id, admission.agent.id, skip=lifecycle.message_id
+                ),
             )
             message = render(history=history)
 
@@ -1922,6 +1928,25 @@ class TeamsApp:
     ) -> None:
         if self._held_controls.get(conversation_id) is lifecycle:
             del self._held_controls[conversation_id]
+
+    async def _own_posts(
+        self, inbound: TeamsInbound, tenant_id: uuid.UUID, ma_agent_id: str, *, skip: str | None
+    ) -> list[tuple[str, str]]:
+        """The agent's latest posts in a 1:1 chat, oldest first, but this turn's card."""
+        if inbound.kind != "dm":
+            return []
+        async with self.runtime.sessionmaker() as session:
+            rows = await list_recent_posts(
+                session,
+                tenant_id=tenant_id,
+                platform="teams",
+                channel_id=conversation_of(inbound.conversation_id),
+                agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id),
+                limit=_OWN_POSTS_SHOWN,
+            )
+        return [
+            (r.message_id, r.posted_at.isoformat()) for r in reversed(rows) if r.message_id != skip
+        ]
 
     async def _files_reachable(self, inbound: TeamsInbound) -> bool | None:
         if inbound.kind != "channel":
