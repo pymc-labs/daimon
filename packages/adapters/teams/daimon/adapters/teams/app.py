@@ -39,11 +39,13 @@ from daimon.adapters.teams.admissions import (
     too_old_to_replay,
 )
 from daimon.adapters.teams.attachments import BotToken, prepare_attachments
+from daimon.adapters.teams.billing_panel import TeamChannels
 from daimon.adapters.teams.boot_sweep import retire_orphaned_turns
 from daimon.adapters.teams.budget_notice import with_budget_notifier
 from daimon.adapters.teams.card import CANCELLED_NOTICE, notice_card
 from daimon.adapters.teams.card_actions import replace_card, toast
 from daimon.adapters.teams.channel_files import ChannelFiles
+from daimon.adapters.teams.channel_listing import list_all_once
 from daimon.adapters.teams.channel_subscriptions import ChannelSubscriptions, SeenChannel
 from daimon.adapters.teams.commands import CommandHandler
 from daimon.adapters.teams.context import (
@@ -101,6 +103,7 @@ from daimon.adapters.teams.turn_hooks import turn_hooks
 from daimon.core.agent_identity import identity_enabled_for, is_builtin_agent
 from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.authz import Action, authorize, build_subject, build_turn_place
+from daimon.core.channel_listing import run_channel_listing
 from daimon.core.continuity.continuation import (
     check_wake_responder,
     continuation_attended,
@@ -407,6 +410,7 @@ class TeamsApp:
         catch_up: RestartCatchUp | None = None,
         react: React | None = None,
         feed: ActivityFeed | None = None,
+        team_channels: TeamChannels | None = None,
     ) -> None:
         teams = runtime.settings.teams
         if teams is None:
@@ -442,6 +446,9 @@ class TeamsApp:
         # Reads back what a restart's gap lost; None leaves it lost.
         self._catch_up = catch_up
         self._renewals: asyncio.Task[None] | None = None
+        # Lists each team's channels under it every few hours; None lists nothing.
+        self._team_channels = team_channels
+        self._channel_listing: asyncio.Task[None] | None = None
         self.outputs = TeamsOutputDelivery(
             runtime=runtime, sender=self._sender, spawn=self.spawn, files=channel_files
         )
@@ -533,6 +540,17 @@ class TeamsApp:
                     )
                     self._delivery_poller = asyncio.create_task(
                         deliveries, name="teams.routine-delivery"
+                    )
+                if self._team_channels is not None:
+                    listing = run_channel_listing(
+                        functools.partial(
+                            list_all_once, self.runtime.sessionmaker, self._team_channels
+                        ),
+                        platform="teams",
+                        should_stop=lambda: self.draining,
+                    )
+                    self._channel_listing = asyncio.create_task(
+                        listing, name="teams.channel-listing"
                     )
                 if self._subscriptions is not None:
                     self._renewals = asyncio.create_task(
@@ -834,7 +852,13 @@ class TeamsApp:
         self.draining = True
         if self._participation is not None:
             self._participation.cancel_all()
-        pollers = (self._wake_poller, self._delivery_poller, self._reclaimer, self._renewals)
+        pollers = (
+            self._wake_poller,
+            self._delivery_poller,
+            self._reclaimer,
+            self._renewals,
+            self._channel_listing,
+        )
         for poller in pollers:
             if poller is not None:
                 # Wake dispatches drain with the turns; due rows wait for the next boot, and

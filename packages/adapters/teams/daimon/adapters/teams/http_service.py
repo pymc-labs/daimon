@@ -405,6 +405,7 @@ def create_teams_http_service(
         catch_up=catch_up,
         react=react,
         feed=feed,
+        team_channels=billing_panel.sdk_team_channels(teams_app),
         routine_poster=make_teams_routine_poster(
             runtime.sessionmaker,
             direct,

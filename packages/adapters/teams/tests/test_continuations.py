@@ -447,6 +447,39 @@ async def test_start_runs_the_teams_wake_poller_until_drain(
     assert kwargs["should_stop"]() is True, "drain stops the poller"
 
 
+@pytest.mark.parametrize(
+    ("enabled", "listed"), [(True, True), (True, False), (False, True)], ids=["on", "no-sdk", "off"]
+)
+async def test_start_runs_the_channel_listing_only_when_enabled_and_able_until_drain(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    no_channel_listing: AsyncMock,
+    no_boot_provisioning: AsyncMock,
+    enabled: bool,
+    listed: bool,
+) -> None:
+    async def team_channels(_team_id: str) -> dict[str, str]:
+        return {}
+
+    teams = TeamsApp(
+        runtime=build_teams_runtime(db_session_factory, teams=teams_settings(enabled=enabled)),
+        sender=FakeSender(),
+        commands={},
+        bot_token=bot_token,
+        team_channels=team_channels if listed else None,
+    )
+    await teams.start()
+    if not (enabled and listed):
+        no_channel_listing.assert_not_called()
+        await teams.drain(timeout=1.0)
+        return
+    kwargs = no_channel_listing.call_args.kwargs
+    assert kwargs["platform"] == "teams", "the round files Teams channels"
+    assert kwargs["should_stop"]() is False, "the loop runs while the app admits turns"
+    await teams.drain(timeout=1.0)
+    assert kwargs["should_stop"]() is True, "drain stops the loop"
+    assert teams._channel_listing is not None and teams._channel_listing.done(), "and ends its task"
+
+
 @pytest.mark.parametrize("miss", ["queue_full", "timed_out"])
 async def test_a_handoff_refused_at_re_admission_is_not_marked_delivered(
     db_session_factory: async_sessionmaker[AsyncSession], miss: str
