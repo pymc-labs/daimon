@@ -27,14 +27,16 @@ def remember_inbound(
         user_id=inbound.user_id,
         display_name=inbound.user_name,
     )
-    if inbound.kind != "dm" and inbound.channel_name:
+    if inbound.kind != "dm" and (inbound.channel_name or inbound.team_id):
+        # Only General carries a name; for any other channel the team alone is recorded,
+        # onto a row a listing already named.
         remember_channel_names(
             sessionmaker,
             tenant_id=tenant_id,
             platform="teams",
             names={
                 inbound.channel_id: ChannelSighting(
-                    inbound.channel_name,
+                    inbound.channel_name or "",
                     kind=inbound.channel_type,
                     parent_id=inbound.team_id,
                     parent_name=inbound.team_name,

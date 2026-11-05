@@ -121,14 +121,21 @@ def fake_slack(
     return FakeUpstream(handler)
 
 
-def fake_microsoft(**claims: object) -> FakeUpstream:
-    """The Entra token endpoint answering with an id_token that carries `claims`."""
+def fake_microsoft(
+    *, mail: str | None = None, organization: str | None = None, **claims: object
+) -> FakeUpstream:
+    """The Entra token endpoint answering with an id_token that carries `claims`, and Graph
+    answering `/me` with `mail` and `/organization` with `organization` (403 when None)."""
     body = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == f"/{MICROSOFT_TENANT}/oauth2/v2.0/token":
             return httpx.Response(200, json={"access_token": "at", "id_token": f"e30.{body}.s"})
-        return httpx.Response(404)
+        if request.url.path == "/v1.0/me" and mail is not None:
+            return httpx.Response(200, json={"mail": mail})
+        if request.url.path == "/v1.0/organization" and organization is not None:
+            return httpx.Response(200, json={"value": [{"displayName": organization}]})
+        return httpx.Response(403 if request.url.path.startswith("/v1.0/") else 404)
 
     return FakeUpstream(handler)
 

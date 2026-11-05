@@ -103,12 +103,20 @@ def _clean(value: object) -> str | None:
     return text or None
 
 
+def _has_content(name: _Seen) -> bool:
+    """A name, or for a channel a parent: a nameless sighting with one still fills in a
+    stored row's parent."""
+    if isinstance(name, ChannelSighting):
+        return name.label is not None or bool(name.parent_id or name.parent_name)
+    return name.label is not None
+
+
 def _merge(new: _Seen, old: _Seen | None) -> _Seen:
     if isinstance(new, ChannelSighting):
         if not isinstance(old, ChannelSighting):
             return new
         return ChannelSighting(
-            new.name,
+            new.name or old.name,
             new.kind or old.kind,
             new.parent_id or old.parent_id,
             new.parent_name or old.parent_name,
@@ -117,6 +125,20 @@ def _merge(new: _Seen, old: _Seen | None) -> _Seen:
     if not isinstance(old, KnownName):
         return new
     return KnownName(new.display_name or old.display_name, new.handle or old.handle)
+
+
+def _adds_nothing(nameless: ChannelSighting, written: _Seen | None) -> bool:
+    """Whether the memo already holds every part a nameless sighting carries."""
+    if not isinstance(written, ChannelSighting):
+        return False
+    return all(
+        new in (None, old)
+        for new, old in (
+            (nameless.parent_id, written.parent_id),
+            (nameless.parent_name, written.parent_name),
+            (nameless.kind, written.kind),
+        )
+    )
 
 
 def _cleaned(name: _Seen) -> _Seen:
@@ -142,7 +164,7 @@ def _enqueue(
     added = False
     for item_id, name in names.items():
         given = _cleaned(name)
-        if not item_id or given.label is None:
+        if not item_id or not _has_content(given):
             continue
         key: _Key = (tenant_id, platform, kind, item_id)
         queued = _pending.get(key)
@@ -152,10 +174,17 @@ def _enqueue(
             added = True
             continue
         written = _memo.get(key)
-        merged = _merge(given, written)
-        if merged == written:
-            _memo.move_to_end(key)
-            continue
+        # A nameless sighting never carries the memo's name: it only fills in a parent.
+        if isinstance(given, ChannelSighting) and given.label is None:
+            merged: _Seen = given
+            if _adds_nothing(given, written):
+                _memo.move_to_end(key)
+                continue
+        else:
+            merged = _merge(given, written)
+            if merged == written:
+                _memo.move_to_end(key)
+                continue
         if len(_pending) >= MAX_PENDING:
             _dropped += 1
             log.warning("platform_names.queue_full", dropped=_dropped, pending=len(_pending))

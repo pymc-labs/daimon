@@ -38,6 +38,7 @@ from daimon.core import platform_names
 from daimon.core.billing_panel import BillingPanelState, MemberRow
 from daimon.core.channel_budget import ChannelBudgetStatus
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.platform_names import ChannelSighting
 from daimon.core.promo_codes import (
     build_promo_code_terms,
     describe_refusal,
@@ -54,6 +55,7 @@ from daimon.core.stores.platform_names import (
     KnownName,
     get_channel_names,
     get_user_names,
+    list_channel_names,
     upsert_channel_names,
     upsert_user_names,
 )
@@ -350,7 +352,10 @@ async def test_channel_labels_list_live_then_stored_then_general() -> None:
         TEAM_B: "General",
         "19:gone": "Channel name unavailable",
     }, "live, else stored, else General for a team's own id; never the id"
-    assert found == {TEAM_A: "General", "19:research": "Research"}, "what was listed, to remember"
+    assert found == {
+        TEAM_A: ChannelSighting("General", parent_id=TEAM_A),
+        "19:research": ChannelSighting("Research", parent_id=TEAM_A),
+    }, "what was listed, each under the team whose listing named it, General included"
     assert sorted(listed) == sorted([TEAM_A, TEAM_B]), "every installed team, side by side"
 
 
@@ -423,6 +428,10 @@ async def test_the_admin_card_names_top_spenders_and_channels(
         )
     assert stored == {OTHER_AAD_OBJECT_ID: KnownName("Maya *Chen*")}, "a roster name is stored"
     assert channels == {"19:research@thread.tacv2": "Research"}, "a listed channel name is stored"
+    async with service_session_factory() as session:
+        rows = await list_channel_names(session, tenant_id=tenant_id, platform="teams")
+    parents = {r.channel_id: r.parent_id for r in rows}
+    assert parents["19:research@thread.tacv2"] == TEAM_A, "and the team whose listing named it"
 
 
 async def test_billing_typed_in_a_channel_shows_its_budget_on_every_click_of_its_typer(
@@ -588,6 +597,43 @@ async def test_a_channel_message_remembers_the_channels_name(
             session, tenant_id=tenant_id, platform="teams", channel_ids=[inbound.channel_id]
         )
     assert channels == {inbound.channel_id: "Research"}
+
+
+async def test_a_message_in_an_unnamed_channel_records_its_team_on_a_listed_row(
+    service_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
+    inbound = TeamsInbound(
+        kind="channel",
+        entra_tenant_id=ENTRA_TENANT_ID,
+        user_id=AAD_OBJECT_ID,
+        conversation_id="19:research@thread.tacv2;messageid=1",
+        channel_id="19:research@thread.tacv2",
+        activity_id="1",
+        text="hi",
+        service_url=None,
+        user_name="Maya Chen",
+        team_id=TEAM_A,
+        team_name="Platform",
+    )
+    other = dataclasses.replace(inbound, channel_id="19:other@thread.tacv2")
+    async with service_session_factory() as session, session.begin():
+        await upsert_channel_names(
+            session,
+            tenant_id=tenant_id,
+            platform="teams",
+            names={"19:research@thread.tacv2": "Research"},
+        )
+
+    remember_inbound(service_session_factory, tenant_id, inbound)
+    remember_inbound(service_session_factory, tenant_id, other)
+    await platform_names.settle()
+
+    async with service_session_factory() as session:
+        rows = await list_channel_names(session, tenant_id=tenant_id, platform="teams")
+    assert [(r.channel_id, r.name, r.parent_id, r.parent_name) for r in rows] == [
+        ("19:research@thread.tacv2", "Research", TEAM_A, "Platform")
+    ], "the listed row gets its team; a channel never listed is not created"
 
 
 async def test_roster_names_tries_each_team_then_the_stored_name() -> None:

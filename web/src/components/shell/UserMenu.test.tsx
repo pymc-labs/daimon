@@ -23,8 +23,9 @@ const open = async (m: Me) => {
     { id: "slack", label: "Slack", kind: "redirect" },
     { id: "microsoft", label: "Microsoft", kind: "redirect" },
   ]) as never)
-  render(<QueryClientProvider client={new QueryClient()}><MemoryRouter><UserMenu /></MemoryRouter></QueryClientProvider>)
+  const view = render(<QueryClientProvider client={new QueryClient()}><MemoryRouter><UserMenu /></MemoryRouter></QueryClientProvider>)
   await userEvent.click(await screen.findByText("Maya Lindqvist"))
+  return view
 }
 
 beforeEach(() => {
@@ -47,6 +48,14 @@ describe("UserMenu", () => {
     const all = ["discord", "slack", "microsoft"].map((p) => ({ id: p, provider: p, provider_label: p, label: p, last_used: "", current: p === "discord" }))
     await open(me({ accounts: all }))
     expect(screen.queryByText("Connect account")).toBeNull()
+  })
+
+  it("shows the email under the name, and nothing when there is none", async () => {
+    const { unmount } = await open(me())
+    expect(screen.getByText("maya@fernhill.example")).toBeTruthy()
+    unmount()
+    const { container } = await open(me({ email: "" }))
+    expect(container.querySelectorAll("span.text-xs")).toHaveLength(0)
   })
 
   it("hides the menu from guests", async () => {

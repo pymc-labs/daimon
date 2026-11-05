@@ -23,6 +23,7 @@ from daimon.core.platform_sign_in import (
     exchange_discord_code,
     exchange_slack_user_code,
     fetch_discord_user,
+    fetch_microsoft_profile,
     fetch_slack_user_name,
     slack_authorize_url,
     verify_microsoft_sign_in,
@@ -182,12 +183,18 @@ class MicrosoftSignIn:
             scopes=MICROSOFT_SIGN_IN_SCOPES,
         )
         signed = verify_microsoft_sign_in(tokens, self._config)
+        profile = await fetch_microsoft_profile(self._http, access_token=tokens.access_token)
+        email = profile.email or (
+            signed.username if signed.username and "@" in signed.username else None
+        )
         return VerifiedIdentity(
             provider="microsoft",
             subject=f"{signed.tenant_id}:{signed.object_id}",
             display_name=signed.name,
-            workspaces=((signed.tenant_id, "Microsoft Teams"),),
+            workspaces=((signed.tenant_id, profile.organization or "Microsoft Teams"),),
             platform_user_id=signed.object_id,
+            email=email,
+            workspace_names_proven=profile.organization is not None,
         )
 
 
