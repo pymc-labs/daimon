@@ -84,6 +84,30 @@ async def test_forgetting_with_an_agent_the_person_has_no_memory_with_refuses(
         )
 
 
+async def test_a_memory_store_the_provider_no_longer_has_lists_and_forgets_as_none(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session, platform="discord")
+    me = await make_account(db_session, tenant=tenant)
+    client = build_fake_anthropic(make_fake_memory_store_handler(FakeMemoryStoreState()))
+    agent = uuid.uuid4()
+    await insert_personal_memory_store(
+        db_session,
+        tenant_id=tenant.id,
+        agent_id=agent,
+        account_id=me.id,
+        memory_store_id="memstore_gone",
+    )
+    listed = await list_personal_memory(
+        db_session, client, subject=ME, tenant_id=tenant.id, account_id=me.id
+    )
+    assert listed == [], "a deleted store holds no memory"
+    with pytest.raises(ProfileRefused):
+        await forget_personal_memory(
+            db_session, client, subject=ME, tenant_id=tenant.id, account_id=me.id, agent_id=agent
+        )
+
+
 async def test_an_agent_key_manages_no_personal_data(db_session: AsyncSession) -> None:
     tenant = await make_tenant(db_session, platform="discord")
     me = await make_account(db_session, tenant=tenant)
