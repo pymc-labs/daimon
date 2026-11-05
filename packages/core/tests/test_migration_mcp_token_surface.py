@@ -42,9 +42,9 @@ async def test_mcp_token_surface_migration_down_up_matches_the_model(
             assert "surface" not in columns
             module.upgrade()
             columns = [c["name"] for c in inspect(sync).get_columns(table, schema=here)]
-            # Later columns (`purpose`, 0143) were added after `surface` was dropped and
-            # re-added here, so the order is checked without them.
-            later = {"purpose"}
+            # Later columns (`purpose`, 0143; `client`, 0184) were added after `surface` was
+            # dropped and re-added here, so the order is checked without them.
+            later = {"purpose", "client"}
             assert [c for c in columns if c not in later] == [
                 c.name for c in Base.metadata.tables[table].columns if c.name not in later
             ], "column order"
