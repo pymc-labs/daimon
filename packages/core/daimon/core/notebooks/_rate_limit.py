@@ -11,7 +11,7 @@ when that changes, swap in a Redis-backed implementation. The public
 
 from __future__ import annotations
 
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -28,11 +28,14 @@ class RateLimiter:
 
     max_requests: int
     window: timedelta = timedelta(hours=1)
-    #: Most keys held at once. Past it, expired buckets go first; if none are left a
-    #: new key is denied, so a flood of distinct keys cannot grow the dict without bound.
+    #: Most keys held at once. Past it the least recently used bucket is dropped to make
+    #: room, so a flood of distinct keys cannot grow the dict without bound and never
+    #: locks out a new key; at worst it forgets the oldest one's count.
     max_keys: int = 10_000
     _now: Callable[[], datetime] = field(default=lambda: datetime.now(UTC))
-    _calls: dict[str, deque[datetime]] = field(default_factory=dict[str, deque[datetime]])
+    _calls: OrderedDict[str, deque[datetime]] = field(
+        default_factory=OrderedDict[str, deque[datetime]]
+    )
 
     def check_and_record(self, key: str) -> bool:
         """Return True if the call is permitted (and record it). False = deny."""
@@ -43,21 +46,16 @@ class RateLimiter:
         bucket = self._calls.get(key)
         if bucket is None:
             if len(self._calls) >= self.max_keys:
-                self._evict_expired(cutoff)
-                if len(self._calls) >= self.max_keys:
-                    return False
+                self._calls.popitem(last=False)
             bucket = self._calls[key] = deque()
+        else:
+            self._calls.move_to_end(key)
         while bucket and bucket[0] < cutoff:
             bucket.popleft()
         if len(bucket) >= self.max_requests:
             return False
         bucket.append(now)
         return True
-
-    def _evict_expired(self, cutoff: datetime) -> None:
-        """Drop every bucket with no call inside the window."""
-        for key in [k for k, bucket in self._calls.items() if not bucket or bucket[-1] < cutoff]:
-            del self._calls[key]
 
     def refund(self, key: str) -> None:
         """Pop the most recent recorded call for ``key``.
