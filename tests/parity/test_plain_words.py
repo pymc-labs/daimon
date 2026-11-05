@@ -65,6 +65,7 @@ _SHOWN_ERRORS = frozenset(
 _ALLOWED_FILES: dict[str, str] = {
     "packages/core/daimon/core/agent_guidance.py": "the agent's instructions; the model reads them",
     "packages/core/daimon/core/checkpoint_prompt.py": "an instruction to the model; never shown",
+    "packages/core/daimon/core/coding_key_prompts.py": "prompts a coding tool reads, in its own MCP words",
     "packages/core/daimon/core/handoff_context.py": "an instruction to the model; never shown",
     "packages/core/daimon/core/platform_system.py": "the system prompt; the model reads it",
     "packages/core/daimon/core/platform_words.py": "the per-platform table: Slack's own words",
