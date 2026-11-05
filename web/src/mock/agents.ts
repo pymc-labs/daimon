@@ -75,10 +75,25 @@ const SKILLS: Skill[] = [
     "Sections: who they are, open deals, last three touches, risks. Pull deals from HubSpot.", { requires: ["hubspot"] }),
   SKILL("triage", "Ticket triage", "Label, prioritise and route support tickets.",
     "Label by product area. P1 if a customer is blocked. Route to the owning team's Linear project.", { requires: ["linear"] }),
+  // Mirrored from the data server (see ./server-skills).
+  SKILL("churn-model", "Churn model", "Fit and check a hierarchical churn model per cohort.",
+    "Fit per cohort with partial pooling. Check calibration on the last three months."),
+  SKILL("cohort-retention", "Cohort retention", "Retention curves by signup cohort with credible bands.",
+    "One curve per cohort; shade the 94% HDI."),
+  SKILL("forecast-baseline", "Forecast baseline", "A seasonal baseline forecast to beat before any model.",
+    "Seasonal naive first. Report its error before fitting anything else."),
+  SKILL("segment-profiles", "Segment profiles", "Profile customer segments from the warehouse tables.",
+    "One table per segment: size, spend, tenure."),
+  SKILL("survey-weighting", "Survey weighting", "Rake survey responses to population margins.",
+    "Rake on age, region and gender. Cap weights at 5."),
+  SKILL("geo-lift", "Geo lift", "Design and read geo holdout tests.",
+    "Match markets on pre-period sales. Read lift with a synthetic control."),
   { type: "anthropic", skill_id: "xlsx", title: "Excel", description: "Edit Excel files, keeping formulas and formatting.", version: "latest" },
   { type: "anthropic", skill_id: "pptx", title: "PowerPoint", description: "Edit PowerPoint decks, keeping layouts.", version: "latest" },
   { type: "anthropic", skill_id: "docx", title: "Word", description: "Edit Word documents with tracked changes.", version: "latest" },
 ]
+FILES.set("survey-weighting@2", { "SKILL.md": md("survey-weighting", "Survey weighting", "Rake survey responses to population margins.", "Rake on age and region.") })
+FILES.set("segment-profiles@2", { "SKILL.md": md("segment-profiles", "Segment profiles", "Profile customer segments from the warehouse tables.", "One table per segment.") })
 const skill = (id: string) => clone(SKILLS.find((s) => s.skill_id === id)!)
 
 const SERVERS: Record<string, McpServer> = {
@@ -290,6 +305,7 @@ function seed(): Rec[] {
     tools: toolset(...CODE_TOOLS), mcp_servers: [server("almanac")], places: [place("general", { default: true }), clone(DM), clone(WEB)],
   }, "p_maya", 2400, [
     [1200, "p_jonas", null, (c) => { c.skills.push(skill("report-publish")) }],
+    [600, "p_maya", null, (c) => { c.skills.push(skill("churn-model")) }],
     [400, "p_maya", "Web search", (c) => { c.tools = toolset(...CODE_TOOLS, "web_fetch", "web_search") }],
   ])
   const pricing = history({
@@ -297,7 +313,13 @@ function seed(): Rec[] {
     system: "# Pricing Analyst\n\nYou estimate price elasticity and promotion lift with hierarchical Bayesian models.\n\n- Use the client's transaction tables in Almanac.\n- Report elasticities with 94% HDI per segment.",
     skills: ["data-validation", "data-cleaning", "pymc-artifact-style"].map(skill), tools: toolset(...CODE_TOOLS),
     mcp_servers: [server("almanac")], places: [place("pricing", { default: true }), clone(WEB)],
-  }, "p_priya", 1300, [[160, "p_priya", null, (c) => { c.skills.push(skill("eda-storytelling")) }]])
+  }, "p_priya", 1300, [
+    [160, "p_priya", null, (c) => { c.skills.push(skill("eda-storytelling")) }],
+    [40, "p_priya", "Server skills", (c) => {
+      c.skills.push(...["churn-model", "cohort-retention", "forecast-baseline", "segment-profiles", "geo-lift"].filter((id) => id !== "segment-profiles").map(skill),
+        ...["segment-profiles", "survey-weighting"].map((id) => ({ ...skill(id), version: "2" })))
+    }],
+  ])
   const review = history({
     name: "Code Reviewer", purpose: "Reviews pull requests", avatar: face(33), model: m("claude-sonnet-5-5", "medium"),
     system: "# Code Reviewer\n\nReview pull requests in Fernhill's repositories.\n\n- Bugs first, then missing tests, then style.\n- Never approve with failing CI.\n- Never merge.",

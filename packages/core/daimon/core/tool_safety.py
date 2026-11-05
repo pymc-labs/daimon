@@ -184,6 +184,7 @@ CARDED_TOOLS: Final[Mapping[str, str]] = {
     "revert_agent": "agent_id",
     "set_agent_owners": "agent_id",
     "restore_library_skill_version": "skill_id",
+    "approve_server_skill_update": "skill_id",
 }
 
 #: Daimon's own tools that wait for the card like a third-party write, keyed
@@ -199,6 +200,8 @@ CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
     "rotate_watch_key": "watch_id",
     "update_watch": "expected_revision",
     "add_skill": "content_hash",
+    # Listing names no skill and changes nothing; adding one reaches the whole library.
+    "add_server_skill": "skill",
     "lead_intake_resolve": "resolution",
     "request_agent_backend_switch": "preview_digest",
     "request_provider_allowlist": "preview_digest",

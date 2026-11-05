@@ -123,6 +123,29 @@ A server with a shared token is asked with it. A relay server is asked with a
 signed token naming the person asking and the channel. A server that signs
 each person in separately cannot serve skills to Daimon.
 
+### Follow a server's skills in the web app
+
+The agent editor's **Add skill** list offers the skills of the web app's
+[data server](web.md#connect-agents-to-a-data-server). An added skill joins the
+library read-only and follows the server.
+
+Daimon checks the server every 15 minutes, or on **Check now** in the library.
+A new version moves every agent that follows the skill. An agent that pins it
+shows **Update available** instead; following again moves it at once. A skill
+the server no longer offers keeps its last version. **Fork** makes an editable
+copy, under a name you choose, that no longer follows. Agents fixed by the
+server's settings show **Managed by settings** and never move.
+
+An update that adds or changes a script, or changes `allowed-tools`, waits
+until an admin approves it. Other changes, such as `.md` and `.txt` files,
+apply without approval.
+
+An agent switched to OpenAI or Gemini moves only when its dropped capabilities
+stay the same. Otherwise it keeps its version and shows **Needs re-confirm**.
+Its update button moves it, and its owner then confirms the new drops. Those
+providers run custom skills only through an operator representation, which a
+new version outdates. Self-hosted channels use their deployment's own skills.
+
 ## Give an agent Google Workspace access
 
 An agent can act as one Workspace user, with scopes you choose. Set

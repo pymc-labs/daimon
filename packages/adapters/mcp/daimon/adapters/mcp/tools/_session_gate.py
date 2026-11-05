@@ -146,6 +146,11 @@ async def session_card_gap(
         return "session_unreadable"
 
 
+#: Gated by sessions bound after server skills reached chat. A bind from before holds
+#: neither, yet it still proves every other card it gated.
+_SERVER_SKILL_TOOLS = frozenset({"add_server_skill", "approve_server_skill_update"})
+
+
 def _without_configs(tools: Sequence[MaTool], names: frozenset[str]) -> list[MaTool]:
     """`tools` with Daimon's per-tool configs for `names` left out (an older template)."""
     return [
@@ -180,7 +185,8 @@ async def _recorded_as_gated(
     exact recorded template. Watch enrollment never uses this compatibility path.
     A session bound before `update_watch` was gated proves every other card it
     gated, never an edit. Likewise one bound before `CARDED_TOOLS` proves the
-    other cards, never a carded tool.
+    other cards, never a carded tool, and one bound before the server skill
+    tools were gated proves every card but theirs.
     """
     recorded = live.effective_config
     if recorded is None:
@@ -238,7 +244,7 @@ async def _recorded_as_gated(
     # tool; no old hash can authorize a carded tool or a reach approval.
     carded = frozenset(CARDED_TOOLS)
     pre_carded_ok = tool_name not in carded
-    for confirmed_tools, pre_watch, pre_reach, pre_carded in dict.fromkeys(
+    for confirmed_tools, pre_watch, pre_reach, pre_carded, pre_skills in dict.fromkeys(
         (
             (candidate - carded if pre_carded else candidate)
             | lead_tools
@@ -247,10 +253,13 @@ async def _recorded_as_gated(
             not watch_tools,
             not reach_tools,
             pre_carded,
+            pre_skills,
         )
         for candidate in (confirmed, legacy, before_config, before_config_legacy, before_pin_clear)
         for pre_carded in (False, True)
         if pre_carded_ok or not pre_carded
+        for pre_skills in (False, True)
+        if tool_name not in _SERVER_SKILL_TOOLS or not pre_skills
         for watch_tools in (
             WATCH_CONFIRMED_TOOLS,
             WATCH_CONFIRMED_TOOLS - {"update_watch"},
@@ -281,6 +290,7 @@ async def _recorded_as_gated(
                     (WATCH_CONFIRMED_TOOLS if pre_watch else frozenset[str]())
                     | (REACH_APPROVAL_TOOLS if pre_reach else frozenset[str]())
                     | (carded if pre_carded else frozenset[str]())
+                    | (_SERVER_SKILL_TOOLS if pre_skills else frozenset[str]())
                 )
                 if stripped:
                     # Policy-on sessions add these gates implicitly too. Rebuild the exact

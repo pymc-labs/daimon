@@ -106,6 +106,11 @@ CASES = [
         "add this pasted SKILL.md to research-bot", "add_skill", frozenset(["remove_skill"])
     ),
     SearchCase(
+        "what skills does the data server offer",
+        "add_server_skill",
+        frozenset(),
+    ),
+    SearchCase(
         "stop research-bot using the eda skill", "remove_skill", frozenset(["delete_skill"])
     ),
     SearchCase(

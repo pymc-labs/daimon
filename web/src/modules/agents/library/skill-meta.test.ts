@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { descriptionField, withDescription } from "./skill-meta"
+import { descriptionField, slugOf, withDescription } from "./skill-meta"
 
 const md = "---\nname: pr-review\ndescription: Review a pull request.\n---\n\n# Review\n"
 const read = (m: string) => descriptionField(m).value
@@ -40,5 +40,12 @@ describe("skill description", () => {
 
   it("keeps CRLF line endings", () => {
     expect(withDescription("---\r\nname: x\r\ndescription: a\r\n---\r\nBody", "b")).toBe('---\r\nname: x\r\ndescription: "b"\r\n---\r\nBody')
+  })
+})
+
+describe("skill names", () => {
+  it("saves a name as the server does", () => {
+    expect(slugOf("  Data validation! ")).toBe("data-validation")
+    expect(slugOf("--")).toBe("")
   })
 })

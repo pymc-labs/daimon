@@ -11,6 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Chat answers and setup panels link to the agent, channel or routine on the web.** Each opens in the right workspace (sign-in or a workspace picker first when needed). Agent setup details, routines, billing and channel settings on Discord, Slack and Teams carry an "Open in web" button. The agent also knows the workspace's main pages to link. Nothing changes with no web app set.
 - **Everything the web admin pages do also works from Discord, Slack and Teams chat.** Admins invite people and send visitor links (sent by direct message), change roles, set agent access and workspace settings, manage spend allowances, read the audit log, spend and feedback, restore agent versions and set owners, edit skill files, resync repo skills, and see their own credits; results link to the page. People can also run a routine on demand, clear a thread's own settings, and remove their own data (memory, sign-ins, coding keys) with one tool. Removing or reconfiguring runs only on a Confirm card in chat, and routines and other unattended runs do not list those tools. Long lists show 25 rows with a total, and people lists page on. A test keeps the web app and chat in step.
+- **The web app's agent editor offers the skills of a connected data server, and
+  keeps them current.** **Add skill** lists the server's skills. An added skill joins the library read-only, and new versions move every
+  agent that follows it; a pinned agent shows **Update available** and moves at once
+  when it follows again. Agents fixed by settings show **Managed by settings**. An agent switched to
+  OpenAI or Gemini moves only when its dropped capabilities stay the same, else it shows
+  **Needs re-confirm**. Script and `allowed-tools` changes wait for an admin's approval;
+  other files apply at once. A skill the server stops offering keeps its last version and
+  shows as unavailable. **Fork** makes an editable copy under a name you choose.
+  Chat does the same: add, check and approve, fork, follow and apply updates. Updates are
+  read as the chat account that added the skill, while it stays in the workspace.
 
 - **The agent editor in the web app has a GitHub panel.** It lists the agent's repos with
   their access, status and which one is the working repo, and where each attached skill
