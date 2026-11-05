@@ -104,8 +104,8 @@ export const useGoogleBinding = (id: string, enabled: boolean) =>
 export const useConnectBatch = (id: string) =>
   useMutation({ mutationFn: (replaces?: string) => api.post<ConnectBatch>(`/api/agents/${id}/coding-keys/connect`, replaces ? { replaces } : {}) })
 
-/** Whether the batch was used, polled until it is. */
-export function useConnectStatus(id: string, batch: string | undefined) {
+/** Whether the batch was used, polled until it is or `live` ends (its codes expired). */
+export function useConnectStatus(id: string, batch: string | undefined, live = true) {
   const qc = useQueryClient()
   return useQuery({
     queryKey: [...codingKey(id), "connect", batch],
@@ -114,7 +114,7 @@ export function useConnectStatus(id: string, batch: string | undefined) {
       if (s.connected) void qc.invalidateQueries({ queryKey: codingKey(id), exact: true })
       return s
     },
-    enabled: !!batch,
+    enabled: !!batch && live,
     refetchInterval: (q) => (q.state.data?.connected ? false : 3000),
     retry: false,
   })

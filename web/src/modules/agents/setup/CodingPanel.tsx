@@ -12,9 +12,6 @@ import type { ConnectBatch, MintedCodingKey } from "../types"
 import { useCodingKeys, useCodingKeyWrites, useConnectBatch, useConnectStatus } from "./api"
 import { clientName, CODING_CLIENTS } from "./clients"
 
-/** A code lives 10 minutes; a new one replaces it a minute before. */
-const REMINT_MS = 9 * 60_000
-
 function CopyRow({ label, text }: { label: string; text: string }) {
   return (
     <Field label={label}>
@@ -26,53 +23,72 @@ function CopyRow({ label, text }: { label: string; text: string }) {
   )
 }
 
-/** One tool's prompt in a copy box, and whether the tool has used it yet. */
-function Connect({ agentId, tab }: { agentId: string; tab: string }) {
-  const [batch, setBatch] = useState<ConnectBatch | null>(null)
-  const current = useRef<string | undefined>(undefined)
-  const mint = useConnectBatch(agentId)
-  const status = useConnectStatus(agentId, batch?.batch)
-  const connected = status.data?.connected === true
+/** True once the clock passes `iso`; one timer, no polling. */
+function usePassed(iso: string | undefined) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const ms = iso ? Date.parse(iso) - Date.now() : 0
+    if (!(ms > 0)) return
+    const t = setTimeout(() => setNow(Date.now()), Math.min(ms, 2 ** 31 - 1) + 5)
+    return () => clearTimeout(t)
+  }, [iso])
+  return !!iso && Date.parse(iso) <= now
+}
 
-  const refresh = () => mint.mutate(current.current, { onSuccess: (b) => { current.current = b.batch; setBatch(b) } })
+type Mint = { batch: ConnectBatch | null; loading: boolean; error: string | null; make: (replaces?: string) => void }
+
+/** The agent's connect batch, kept above the tool choice so switching tools never mints. One batch when the panel opens; a new one only on request. */
+function useBatch(agentId: string): Mint {
+  const [batch, setBatch] = useState<ConnectBatch | null>(null)
+  const mint = useConnectBatch(agentId)
+  const make = (replaces?: string) => mint.mutate(replaces, { onSuccess: setBatch, onError: () => setBatch(null) })
   const started = useRef(false)
   useEffect(() => {
     if (started.current) return
     started.current = true
-    refresh()
+    make()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
-  useEffect(() => {
-    if (!batch || connected) return
-    const t = setInterval(refresh, REMINT_MS)
-    return () => clearInterval(t)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [batch?.batch, connected])
+  return { batch, loading: mint.isPending, error: mint.isError ? mint.error.message : null, make }
+}
 
+/** One tool's prompt in a copy box, and whether the tool has used it yet. */
+function Connect({ agentId, tab, mint }: { agentId: string; tab: string; mint: Mint }) {
+  const { batch } = mint
+  const expired = usePassed(batch?.expires_at)
+  const status = useConnectStatus(agentId, batch?.batch, !expired)
+  const connected = status.data?.connected === true
   const prompt = batch?.prompts.find((p) => p.id === tab)
+  const stale = expired && !connected
 
   return (
     <Section title={clientName(tab) ?? undefined}>
       <div className="space-y-3">
-        {mint.isError && !batch ? (
-          <div className="text-sm text-muted-foreground">{mint.error.message}</div>
-        ) : connected ? null : !prompt ? (
+        {mint.error ? (
+          <>
+            <div className="text-sm text-muted-foreground">{mint.error}</div>
+            <Button variant="outline" size="sm" onClick={() => mint.make()}>New prompt</Button>
+          </>
+        ) : !batch ? (
           <div className="text-sm text-muted-foreground">Loading</div>
         ) : (
-          <div className="relative">
-            <pre aria-label="Prompt" className="max-h-44 overflow-y-auto rounded-md border bg-muted/50 p-2 pr-9 font-mono text-[11.5px] leading-[17px] whitespace-pre-wrap break-all">{prompt.prompt}</pre>
-            <CopyButton text={prompt.prompt} label="Copy prompt" className="absolute top-1 right-1 size-6 bg-background/80" />
-          </div>
+          <>
+            {!connected && !stale && prompt && (
+              <div className="relative">
+                <pre aria-label="Prompt" className="max-h-44 overflow-y-auto rounded-md border bg-muted/50 p-2 pr-9 font-mono text-[11.5px] leading-[17px] whitespace-pre-wrap break-all">{prompt.prompt}</pre>
+                <CopyButton text={prompt.prompt} label="Copy prompt" className="absolute top-1 right-1 size-6 bg-background/80" />
+              </div>
+            )}
+            <Field label="Status">
+              {connected ? <StatusDot status="healthy" label="Connected" /> : stale ? <StatusDot status="failing" label="Expired" /> : <StatusDot status="setup" label="Waiting" />}
+            </Field>
+            {connected ? (
+              <Field label="Client"><span>{clientName(status.data?.client ?? null) ?? "Unknown"}</span></Field>
+            ) : !stale && <Field label="Prompt ends"><Ago iso={batch.expires_at} /></Field>}
+            {connected && <Button variant="outline" size="sm" disabled={mint.loading} onClick={() => mint.make()}>Connect another</Button>}
+            {stale && <Button variant="outline" size="sm" disabled={mint.loading} onClick={() => mint.make(batch.batch)}>New prompt</Button>}
+          </>
         )}
-        <Field label="Status">
-          {connected ? <StatusDot status="healthy" label="Connected" /> : <StatusDot status="setup" label="Waiting" />}
-        </Field>
-        {connected ? (
-          <Field label="Client"><span>{clientName(status.data?.client ?? null) ?? "Unknown"}</span></Field>
-        ) : batch && (
-          <Field label="Prompt ends"><Ago iso={batch.expires_at} /></Field>
-        )}
-        {connected && <Button variant="outline" size="sm" onClick={() => { current.current = undefined; setBatch(null); refresh() }}>Connect another</Button>}
       </div>
     </Section>
   )
@@ -84,6 +100,7 @@ export function CodingPanel({ agent }: Props) {
   const keys = useCodingKeys(agent.id, agent.can_view_details)
   const writes = useCodingKeyWrites(agent.id)
   const [tab, setTab] = useState<string>(CODING_CLIENTS[0].id)
+  const mint = useBatch(agent.id)
   const [made, setMade] = useState<MintedCodingKey | null>(null)
 
   const make = async () => {
@@ -119,7 +136,7 @@ export function CodingPanel({ agent }: Props) {
             </div>
           ) : <div className="text-sm text-muted-foreground">No new key</div>}
         </Section>
-      ) : <Connect agentId={agent.id} tab={tab} />}
+      ) : <Connect agentId={agent.id} tab={tab} mint={mint} />}
       <Section title="Keys">
         {keys.isError ? <div className="text-sm text-muted-foreground">{keys.error.message}</div> : !keys.data?.length ? (
           <div className="text-sm text-muted-foreground">{keys.isPending ? "Loading" : "None"}</div>
