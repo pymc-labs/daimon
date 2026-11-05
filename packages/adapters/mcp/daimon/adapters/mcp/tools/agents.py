@@ -2374,7 +2374,8 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         expected_ma_agent_id: str | None = None,
         origin_context_id: str | None = None,
     ) -> AgentInfo:
-        """Show what an agent can access: attached MCP servers and skills.
+        """Show what an agent can access: attached MCP servers and skills. ``web_url`` opens
+        its editor on the web.
 
         Use ``list_agent_keys`` for stored key names. Configuration does not prove
         the answering session's access. Returns server names/URLs and skills; custom

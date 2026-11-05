@@ -1,5 +1,6 @@
 {
   "agent": { "path": "/agents/{id}", "param": "node", "module": "agents", "cap": "agents.view" },
+  "agents": { "path": "/agents", "param": null, "module": "agents", "cap": "agents.view" },
   "channel": { "path": "/channels", "param": "channel", "module": "channels", "cap": "channels.view" },
   "routine": { "path": "/routines", "param": "routine", "module": "routines", "cap": "routines.view" },
   "skill": { "path": "/agents/skills/{id}", "param": null, "module": "agents", "cap": "workspace.manage" },
