@@ -24,6 +24,7 @@ from daimon.adapters.mcp.artifacts import build_artifact_store
 from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
 from daimon.adapters.mcp.bundles import build_bundles_route
 from daimon.adapters.mcp.checkout import billing_cancel, billing_success, build_checkout_route
+from daimon.adapters.mcp.coding_key_claim import build_coding_key_claim_route
 from daimon.adapters.mcp.hub.app import mount_hub_apps
 from daimon.adapters.mcp.middleware.ma_errors import MaErrorMiddleware
 from daimon.adapters.mcp.middleware.mcp_identity import (
@@ -486,6 +487,7 @@ def create_mcp_app(
     bundle_rate_limiter = RateLimiter(
         max_requests=effective_settings.mcp.bundle_uploads_per_hour,
     )
+    claim_rate_limiter = RateLimiter(max_requests=30, window=timedelta(minutes=10))
 
     deployment_default = parse_deployment_default(effective_settings.defaults_root)
     artifact_store = (
@@ -639,6 +641,16 @@ def create_mcp_app(
             rate_limiter=bundle_rate_limiter,
         ),
         methods=["PUT"],
+    )
+    # The code in the form body IS the credential, as with /uploads.
+    app.add_route(
+        "/coding-keys/claim",
+        build_coding_key_claim_route(
+            session_factory=effective_sessionmaker,
+            jwt_secret=effective_settings.mcp.jwt_secret,
+            rate_limiter=claim_rate_limiter,
+        ),
+        methods=["POST"],
     )
     app.add_route("/healthz", _healthz, methods=["GET"])
     if relay_clients:

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import uuid
 
+from daimon.core.coding_key_connect import claim_coding_key
 from daimon.core.config import Settings
 from daimon.core.defaults.metadata import MA_METADATA_KEY_SETUP_HIDDEN
 from daimon.core.ma_identity import derive_agent_uuid
@@ -146,14 +148,13 @@ async def test_an_owner_makes_lists_and_revokes_a_coding_key_and_sees_the_token_
         again = await client.delete(f"/api/agents/ag_w/coding-keys/{key_id}", headers=OWN)
     body = minted.json()
     assert minted.status_code == 200, minted.text
-    assert body["token"] in body["command"] and body["token"] in body["config"], (
-        "the token is in the setup text it was made for"
-    )
+    assert body["url"] == "https://mcp.example.com/mcp", "the answer names the server"
     assert body["token"] not in listed.text, "a listing never carries the token"
     assert [k["id"] for k in listed.json()] == [key_id], "the key is listed"
     assert listed.json()[0]["creator"] == "Test Person" and listed.json()[0]["mine"] is True, (
         "the maker is named"
     )
+    assert listed.json()[0]["client"] == "token", "a key made on screen is a token key"
     assert revoked.status_code == 204 and after.json() == [], "revoking removes it"
     assert again.status_code == 404, "a revoked key is gone"
     async with db_session_factory() as session:
@@ -232,3 +233,84 @@ async def test_an_owner_of_a_hidden_setup_copy_cannot_make_or_list_coding_keys(
         minted = await client.post("/api/agents/ag_w/coding-keys", headers=OWN)
         listed = await client.get("/api/agents/ag_w/coding-keys")
     assert (minted.status_code, listed.status_code) == (403, 403), "the setup is hidden from them"
+
+
+def _code(prompt: str) -> str:
+    return prompt.split("code=")[1].split()[0].strip("`'\"")
+
+
+async def test_an_owner_connects_a_coding_tool_with_a_prompt_and_sees_it_connect(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    agents, owner, _other = await agent_people(db_session)
+    token = await sign_in_token(db_session_factory, owner)
+    async with agent_client(
+        agents, owner.tenant_id, db_session_factory, token, settings=_settings()
+    ) as client:
+        made = await client.post("/api/agents/ag_w/coding-keys/connect", headers=OWN)
+        batch = made.json()["batch"]
+        waiting = await client.get(f"/api/agents/ag_w/coding-keys/connect/{batch}")
+        prompts = {p["id"]: p for p in made.json()["prompts"]}
+        key = await claim_coding_key(
+            db_session_factory,
+            code=_code(prompts["cursor"]["prompt"]),
+            secret=("x" * 40).encode(),
+            now=dt.datetime.fromisoformat(made.json()["expires_at"]) - dt.timedelta(minutes=5),
+        )
+        done = await client.get(f"/api/agents/ag_w/coding-keys/connect/{batch}")
+        listed = await client.get("/api/agents/ag_w/coding-keys")
+    assert made.status_code == 200, made.text
+    assert list(prompts) == ["claude-code", "codex", "cursor", "pi", "mcp"]
+    assert prompts["mcp"]["name"] == "Other MCP"
+    assert "https://mcp.example.com/coding-keys/claim" in prompts["codex"]["prompt"]
+    assert key is not None and key not in made.text, "a prompt never holds a key"
+    assert waiting.json() == {"connected": False, "client": None}
+    assert done.json() == {"connected": True, "client": "cursor"}
+    assert [k["client"] for k in listed.json()] == ["cursor"], "the list shows the tool"
+
+
+async def test_connecting_refuses_a_non_owner_and_a_batch_that_is_not_the_callers(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    agents, owner, other = await agent_people(db_session)
+    owner_token = await sign_in_token(db_session_factory, owner)
+    other_token = await sign_in_token(db_session_factory, other)
+    async with agent_client(
+        agents, owner.tenant_id, db_session_factory, owner_token, settings=_settings()
+    ) as client:
+        batch = (await client.post("/api/agents/ag_w/coding-keys/connect", headers=OWN)).json()[
+            "batch"
+        ]
+    async with agent_client(
+        agents, owner.tenant_id, db_session_factory, other_token, settings=_settings()
+    ) as client:
+        refused = await client.post("/api/agents/ag_w/coding-keys/connect", headers=OWN)
+        peek = await client.get(f"/api/agents/ag_w/coding-keys/connect/{batch}")
+    assert refused.status_code == 403, "a member who is not an owner cannot make codes"
+    assert peek.status_code in {403, 404}, "someone else's batch is not theirs to read"
+
+
+async def test_a_new_prompt_batch_can_replace_the_previous_one(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    agents, owner, _other = await agent_people(db_session)
+    token = await sign_in_token(db_session_factory, owner)
+    async with agent_client(
+        agents, owner.tenant_id, db_session_factory, token, settings=_settings()
+    ) as client:
+        first = (await client.post("/api/agents/ag_w/coding-keys/connect", headers=OWN)).json()
+        second = await client.post(
+            "/api/agents/ag_w/coding-keys/connect",
+            json={"replaces": first["batch"]},
+            headers=OWN,
+        )
+        gone = await client.get(f"/api/agents/ag_w/coding-keys/connect/{first['batch']}")
+    assert second.status_code == 200, second.text
+    stale = await claim_coding_key(
+        db_session_factory,
+        code=_code(first["prompts"][0]["prompt"]),
+        secret=("x" * 40).encode(),
+        now=dt.datetime.fromisoformat(first["expires_at"]) - dt.timedelta(minutes=5),
+    )
+    assert stale is None, "the replaced batch's codes are dead"
+    assert gone.json() == {"connected": False, "client": None}, "a dead batch is not connected"
