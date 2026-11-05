@@ -61,7 +61,7 @@ from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores import agent_backends
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import ChatPlatform, TurnOriginRow
-from daimon.core.stores.task_continuations import has_running_handoff_turn, record_continuation
+from daimon.core.stores.task_continuations import record_continuation
 from daimon.core.stores.thread_agent_bindings import set_handoff_summary
 from daimon.core.stores.thread_session_lineage import request_fresh_start
 from daimon.core.stores.thread_sessions import (
@@ -197,8 +197,8 @@ async def _hand_off_task_impl(
     switch: Literal["check", "commit"] | None = None,
     summary: str | None = None,
 ) -> TaskHandoffResult:
-    """Bind this thread's responder to another agent, and queue its first turn when a
-    person asked for the hand-off or named work.
+    """Bind this thread's responder to another agent, and queue its first turn when the
+    person's own new message asked for the hand-off.
 
     Every check runs before anything is written, so a refused handoff leaves
     the conversation exactly as it was — including the uncommitted-work
@@ -251,7 +251,16 @@ async def _hand_off_task_impl(
         )
     named_work = sanitize_requested_work(continuation, echoes=(destination_name,))
     summary = _clean_summary(summary)
-    if named_work is not None and auth.platform_user_id is None:
+    # The destination answers at once only when the person's own new message asked
+    # for this hand-off: never for a resumed or queued turn (a hand-off's own first
+    # turn among them), a wake, a routine, an agent key or a switch card.
+    starts_turn = (
+        switch is None
+        and origin.human_invocation is True
+        and origin.platform_message_id is not None
+        and auth.agent_id is None
+    )
+    if starts_turn and named_work is not None and auth.platform_user_id is None:
         raise ToolError(
             "Continuing work needs the requester's platform identity, which this "
             "connection does not carry. Ask from the conversation itself."
@@ -264,16 +273,6 @@ async def _hand_off_task_impl(
             platform=platform,
             thread_id=origin.thread_id,
             account_id=auth.account_id,
-        )
-        # A turn this thread's last hand-off started is not a person's message,
-        # though it runs as them: it must not start another, or two agents
-        # could hand the thread back and forth, billing each turn.
-        handoff_turn = await has_running_handoff_turn(
-            session,
-            tenant_id=auth.tenant_id,
-            platform=platform,
-            thread_id=origin.thread_id,
-            now=datetime.now(UTC),
         )
 
     # We cannot know whether the checkout is dirty without spending a turn in
@@ -288,16 +287,7 @@ async def _hand_off_task_impl(
     )
 
     work = None if named_work is None else named_work[:MAX_REQUESTED_WORK]
-    # The destination answers at once when the person's own message asked for
-    # this hand-off; never for a wake, a routine or an agent key.
-    person_asked = (
-        switch is None
-        and origin.human_invocation is True
-        and auth.agent_id is None
-        and not handoff_turn
-        and can_start_turn(destination.id)
-    )
-    queued_work = work if work is not None else HANDOFF_PICKUP_SEED if person_asked else None
+    queued_work = (work or HANDOFF_PICKUP_SEED) if starts_turn else None
     request = (
         None
         if queued_work is None or auth.platform_user_id is None
@@ -341,6 +331,7 @@ async def _hand_off_task_impl(
         is_daimon_managed=destination.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
     )
     readable = True
+    queued = False
     moved: str | None = None
 
     try:
@@ -442,9 +433,21 @@ async def _hand_off_task_impl(
                     from_name=origin.responder_name,
                     summary=summary,
                 )
-            if request is not None and not readable:
-                # The next bind won't carry this session to the destination,
-                # so the work named in it doesn't go either.
+            if request is not None and not (
+                # The next bind won't carry this session to the destination, so
+                # the work named in it doesn't go either; and a turn the
+                # dispatcher would not run is not promised.
+                readable
+                and await can_start_turn(
+                    session,
+                    target_ma_agent_id=destination.id,
+                    tenant_id=auth.tenant_id,
+                    platform=platform,
+                    channel_id=origin.parent_channel_id,
+                    thread_id=origin.thread_id,
+                    caller_id=auth.platform_user_id,
+                )
+            ):
                 request = None
             if request is not None:
                 await record_continuation(
@@ -461,7 +464,10 @@ async def _hand_off_task_impl(
                     attended=request.attended,
                     idempotency_key=request.idempotency_key,
                     requested_work=request.requested_work,
+                    # A message the person posts after the one that asked supersedes it.
+                    counts_from=origin.created_at,
                 )
+                queued = True
     except ThreadHandoffRefused as refused:
         if refused.refusal.authz_reason is not None:
             record_authz_denial(Action.HAND_OFF, refused.refusal.authz_reason)
@@ -479,16 +485,16 @@ async def _hand_off_task_impl(
 
     confirmation = render_handoff_acknowledged(
         target_name=destination_name,
-        starts_now=request is not None and can_start_turn(destination.id),
+        starts_now=queued,
         moved_to=moved,
         readable=readable,
-        requested_work=work,
+        requested_work=work if queued else None,
     )
     return TaskHandoffResult(
         destination_name=destination_name,
         destination_ma_agent_id=destination.id,
         previous_responder_name=origin.responder_name,
-        continuation_recorded=request is not None,
+        continuation_recorded=queued,
         confirmation=confirmation,
         instruction=_REPLY_VERBATIM,
     )
@@ -696,8 +702,8 @@ def register_task_continuity_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             Field(
                 description=(
                     "Only NAMED work the person asked the destination to do, in their own "
-                    "words; otherwise null. 'Take over' alone is null: the destination "
-                    "still answers right away. Never restate work that already finished."
+                    "words; otherwise null. 'Take over' alone is null. Used only when the "
+                    "destination answers right away. Never restate work that already finished."
                 )
             ),
         ] = None,
@@ -739,8 +745,9 @@ def register_task_continuity_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         That agent answers here from now on, with its own keys, connections and
         memory; conversation, decisions and files move with the requester. When
-        the person's message asked for the hand-off, it answers right away (one
-        billed turn); otherwise from their next message.
+        the person's own message asked for the hand-off, it answers right away (one
+        billed turn); otherwise (a routine, a wake, an agent key, a switch card)
+        from their next message.
 
         `origin_context_id` must name this execution's origin and match the
         calling session's signed grant. Empty IDs and other sessions' origins

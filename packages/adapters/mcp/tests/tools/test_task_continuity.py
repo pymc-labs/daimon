@@ -122,6 +122,23 @@ async def _count_routing_rows(session: AsyncSession, tenant_id: uuid.UUID) -> tu
     return len(channel_rows), 0 if tenant_row is None else 1
 
 
+async def _asked_by_person(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    origin_id: uuid.UUID,
+    human: bool | None = True,
+    *,
+    chat_session_id: str = "test-session",
+) -> None:
+    """Record whether a person's own message started this turn (`human_invocation`)."""
+    from daimon.core.stores.turn_origins import bind_origin_session
+
+    async with sessionmaker() as db:
+        await bind_origin_session(
+            db, origin_id=origin_id, chat_session_id=chat_session_id, human_invocation=human
+        )
+        await db.commit()
+
+
 async def test_handoff_binds_the_thread_and_writes_no_channel_or_workspace_routing(
     db_session: AsyncSession,
     committing_sessionmaker: async_sessionmaker[AsyncSession],
@@ -221,7 +238,9 @@ async def test_handoff_with_a_continuation_queues_the_work_bounded_to_its_limit(
         chat_session_id="test-session",
         sender_foreign=False,
         shared_channel=False,
+        platform_message_id="M1",
     ) as origin:
+        await _asked_by_person(committing_sessionmaker, origin.id)
         result = await _hand_off_task_impl(
             runtime,
             auth,
@@ -1477,7 +1496,9 @@ async def test_queued_work_follows_the_carry_rule_for_the_callers_old_session(
         chat_session_id="test-session",
         sender_foreign=False,
         shared_channel=False,
+        platform_message_id="M1",
     ) as origin:
+        await _asked_by_person(committing_sessionmaker, origin.id)
         result = await _hand_off_task_impl(
             runtime,
             auth,
@@ -1660,7 +1681,11 @@ async def test_a_hand_off_to_another_provider_moves_only_with_a_summary(
         sender_foreign=False,
         shared_channel=False,
         chat_session_id="provider-handoff-grant",
+        platform_message_id="M1",
     ) as origin:
+        await _asked_by_person(
+            committing_sessionmaker, origin.id, chat_session_id="provider-handoff-grant"
+        )
         moves = pinned == "older_session" and summary is not None
         if pinned == "unpinned" or moves:
             result = await _hand_off_task_impl(
@@ -1670,10 +1695,13 @@ async def test_a_hand_off_to_another_provider_moves_only_with_a_summary(
                 agent_id=_DESTINATION_ID,
                 summary=summary,
             )
-            assert "research-bot is taking over" in result.confirmation
-            assert ("It has a summary of this conversation" in result.confirmation) == moves
-            if moves:
-                assert "taking over on Gemini 3.8 Flash" in result.confirmation
+            assert result.confirmation == (
+                "research-bot is taking over on Gemini 3.8 Flash, starting now.\n"
+                "It has a summary of this conversation; earlier files stay behind."
+                if moves
+                else "research-bot is taking over, starting now.\n"
+                "It keeps this conversation and its files."
+            ), "a person-asked move starts the destination on its provider, with the summary"
         else:
             match = "shared on Anthropic" if pinned == "shared_binding" else "with `summary`"
             with pytest.raises(ToolError, match=f"runs on Gemini.*{match}"):
@@ -2066,14 +2094,9 @@ async def test_handoff_uses_calling_principal_before_binding_or_queueing(
         chat_session_id="test-session",
         sender_foreign=False,
         shared_channel=False,
+        platform_message_id="M1",
     ) as origin:
-        from daimon.core.stores.turn_origins import bind_origin_session
-
-        async with committing_sessionmaker() as db:
-            await bind_origin_session(
-                db, origin_id=origin.id, chat_session_id="test-session", human_invocation=human
-            )
-            await db.commit()
+        await _asked_by_person(committing_sessionmaker, origin.id, human)
         call = _hand_off_task_impl(
             runtime,
             auth,
@@ -2104,71 +2127,30 @@ async def test_handoff_uses_calling_principal_before_binding_or_queueing(
         assert bool(queued) is bool(human)
 
 
+@pytest.mark.parametrize("work", [None, "finish the churn writeup"], ids=["seed", "named"])
 @pytest.mark.parametrize(
-    "case", ["person", "wake", "legacy", "agent_key", "handoff_turn", "unreadable"]
+    "gate",
+    ["person", "wake", "legacy", "resumed", "agent_key", "cannot_start", "switch_check", "switch"],
 )
-async def test_only_a_person_asked_hand_off_starts_the_destination_now(
-    case: str,
+async def test_only_a_persons_own_message_starts_the_destination_now(
+    gate: str,
+    work: str | None,
     db_session: AsyncSession,
     committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A person's own message asking for the hand-off queues the destination's
-    first turn even with no named work; a wake, an unverified origin, an agent
-    key, a hand-off made by a queued hand-off turn, or a destination that can't
-    read this conversation never does."""
     from daimon.core.continuity.continuation import HANDOFF_PICKUP_SEED
     from daimon.core.ma_identity import derive_agent_uuid
-    from daimon.core.stores.task_continuations import (
-        claim_wake_row,
-        record_continuation,
-        start_wake_row,
-    )
-    from daimon.core.stores.turn_origins import bind_origin_session
-    from daimon.testing.factories import make_thread_session
 
+    if gate == "cannot_start":
+
+        async def _selfhosted(*_args: object, **_kwargs: object) -> str:
+            return "selfhosted"
+
+        monkeypatch.setattr("daimon.core.channel_backend.effective_thread_backend", _selfhosted)
     tenant = await make_tenant(db_session)
     caller = await make_account(db_session, tenant=tenant)
-    if case == "unreadable":
-        await make_thread_session(  # seal_ids NULL: reads as sealed
-            db_session,
-            tenant=tenant,
-            account=caller,
-            thread_id="T_THREAD",
-            channel_id="C_PARENT",
-            ma_session_id="sess_old",
-            ma_agent_id=_RESPONDER_ID,
-        )
     await db_session.commit()
-    now = datetime.now(UTC)
-    if case == "handoff_turn":
-        key = uuid.uuid4()
-        async with committing_sessionmaker.begin() as session:
-            await record_continuation(
-                session,
-                tenant_id=tenant.id,
-                platform="discord",
-                parent_channel_id="C_PARENT",
-                thread_id="T_THREAD",
-                requester_account_id=caller.id,
-                requester_external_user_id="42",
-                target_ma_agent_id=_RESPONDER_ID,
-                target_name="daimon",
-                reason="task_handoff",
-                idempotency_key=key,
-                requested_work=HANDOFF_PICKUP_SEED,
-            )
-            claimed = await claim_wake_row(
-                session,
-                idempotency_key=key,
-                owner="w",
-                now=now,
-                lease=timedelta(minutes=5),
-                max_attempts=3,
-            )
-            assert claimed is not None
-            assert await start_wake_row(
-                session, idempotency_key=key, owner="w", now=now, lease=timedelta(minutes=5)
-            )
     runtime = _runtime(committing_sessionmaker, _client([_destination(tenant.id)]))
     auth = AuthIdentity(
         account_id=caller.id,
@@ -2177,11 +2159,12 @@ async def test_only_a_person_asked_hand_off_starts_the_destination_now(
         platform="discord",
         platform_user_id="42",
         chat_session_id="test-session",
-        agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_RESPONDER_ID)
-        if case == "agent_key"
-        else None,
+        agent_id=(
+            derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_RESPONDER_ID)
+            if gate == "agent_key"
+            else None
+        ),
     )
-    human = {"wake": False, "legacy": None}.get(case, True)
     async with turn_origin(
         committing_sessionmaker,
         tenant_id=tenant.id,
@@ -2196,27 +2179,32 @@ async def test_only_a_person_asked_hand_off_starts_the_destination_now(
         chat_session_id="test-session",
         sender_foreign=False,
         shared_channel=False,
+        platform_message_id=None if gate == "resumed" else "M1",
     ) as origin:
-        async with committing_sessionmaker() as db:
-            await bind_origin_session(
-                db, origin_id=origin.id, chat_session_id="test-session", human_invocation=human
-            )
-            await db.commit()
+        human = {"wake": False, "legacy": None}.get(gate, True)
+        await _asked_by_person(committing_sessionmaker, origin.id, human)
         result = await _hand_off_task_impl(
-            runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
+            runtime,
+            auth,
+            origin_context_id=str(origin.id),
+            agent_id=_DESTINATION_ID,
+            continuation=work,
+            switch={"switch_check": "check", "switch": "commit"}.get(gate),  # type: ignore[arg-type]
         )
     async with committing_sessionmaker() as session:
         pending = await list_pending_continuations(
             session, tenant_id=tenant.id, platform="discord", thread_id="T_THREAD"
         )
-    queued = [row for row in pending if row.target_ma_agent_id == _DESTINATION_ID]
-    assert "First:" not in result.confirmation, "the neutral seed is never shown as work"
-    if case == "person":
+    first = "" if work is None else "\nFirst: finish the churn writeup."
+    if gate == "person":
+        assert [(p.requested_work, p.created_at) for p in pending] == [
+            (work or HANDOFF_PICKUP_SEED, origin.created_at)
+        ], "one turn, superseded by any message newer than the one that asked"
         assert result.continuation_recorded is True
-        assert [row.requested_work for row in queued] == [HANDOFF_PICKUP_SEED]
-        assert result.confirmation == (
-            "research-bot is taking over, starting now.\nIt keeps this conversation and its files."
-        )
+        assert result.confirmation.startswith("research-bot is taking over, starting now.")
+        assert result.confirmation.endswith(first or "its files.")
     else:
-        assert result.continuation_recorded is False and queued == []
-        assert "from your next message." in result.confirmation
+        assert pending == [], f"{gate}: nothing is queued"
+        assert result.continuation_recorded is False
+        assert result.confirmation.startswith("research-bot is taking over from your next message.")
+        assert "First:" not in result.confirmation

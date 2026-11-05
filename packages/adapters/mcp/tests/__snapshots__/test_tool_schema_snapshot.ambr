@@ -4493,8 +4493,9 @@
         <blank line>
         That agent answers here from now on, with its own keys, connections and
         memory; conversation, decisions and files move with the requester. When
-        the person's message asked for the hand-off, it answers right away (one
-        billed turn); otherwise from their next message.
+        the person's own message asked for the hand-off, it answers right away (one
+        billed turn); otherwise (a routine, a wake, an agent key, a switch card)
+        from their next message.
         <blank line>
         `origin_context_id` must name this execution's origin and match the
         calling session's signed grant. Empty IDs and other sessions' origins
@@ -4527,7 +4528,7 @@
               }),
             ]),
             'default': None,
-            'description': "Only NAMED work the person asked the destination to do, in their own words; otherwise null. 'Take over' alone is null: the destination still answers right away. Never restate work that already finished.",
+            'description': "Only NAMED work the person asked the destination to do, in their own words; otherwise null. 'Take over' alone is null. Used only when the destination answers right away. Never restate work that already finished.",
           }),
           'keep_provider': dict({
             'default': False,

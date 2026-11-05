@@ -3995,8 +3995,8 @@ async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_r
         turn_path="legacy" if runtime == "legacy" else "mux",
         tool_safety=ToolSafetyPolicy(enabled=gateable),
     )
-    # A timer's genuine chat origin can call MCP hand_off_task. Queueing that
-    # tool's continuation must retain attendance through the destination run.
+    # A timer's genuine chat origin can call MCP hand_off_task, which queues
+    # nothing; an unattended continuation keeps its attendance through the run.
     from daimon.adapters.mcp.auth.resolver import AuthIdentity
     from daimon.adapters.mcp.runtime import McpRuntime
     from daimon.adapters.mcp.tools.task_continuity import (
@@ -4005,7 +4005,10 @@ async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_r
     from daimon.core.config import DatabaseSettings, Settings
     from daimon.core.continuity.continuation import continuation_attended
     from daimon.core.stores.domain import Role
-    from daimon.core.stores.task_continuations import list_pending_continuations
+    from daimon.core.stores.task_continuations import (
+        list_pending_continuations,
+        record_continuation,
+    )
     from daimon.core.turn_origin import turn_origin
     from pydantic import PostgresDsn
 
@@ -4047,9 +4050,23 @@ async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_r
             agent_id=agent.id,
             continuation="continue the timer's work",
         )
-    async with db_session_factory() as session:
-        [queued] = await list_pending_continuations(
+    async with db_session_factory.begin() as session:
+        assert not await list_pending_continuations(
             session, tenant_id=tenant.id, platform=platform, thread_id="wake-gate"
+        ), "a timer's hand-off starts no turn"
+        queued = await record_continuation(
+            session,
+            tenant_id=tenant.id,
+            platform=platform,
+            parent_channel_id="C1",
+            thread_id="wake-gate",
+            requester_account_id=account.id,
+            requester_external_user_id="user-1",
+            target_ma_agent_id=agent.id,
+            target_name=agent.name,
+            reason="task_handoff",
+            idempotency_key=uuid.uuid4(),
+            requested_work="continue the timer's work",
         )
     assert queued.reason == "task_handoff" and not queued.attended
     row = await make_thread_session(
