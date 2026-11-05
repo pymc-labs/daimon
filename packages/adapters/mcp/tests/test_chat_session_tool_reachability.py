@@ -65,6 +65,7 @@ _ADMIN_CARDED_TOOLS = frozenset(
         "delete_allowance",
         "restore_library_skill_version",
         "revoke_web_link",
+        "set_agent_helpers",
         "set_agent_owners",
         "set_agent_web_access",
         "update_web_person",

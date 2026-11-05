@@ -918,13 +918,10 @@ async def _check_added_helpers(
     for helper in target.helpers or []:
         if helper.id in known:
             continue
-        if helper.id == agent.id:
-            raise AgentEditError("An agent can't be its own helper.", kind="invalid")
         found = await fetch_tenant_agent(
             deps.view, tenant_id=actor.tenant_id, ma_agent_id=helper.id
         )
-        if found is None:
-            raise AgentEditError("That helper isn't available here.", kind="invalid")
+        agent_editing.check_helper(agent.id, helper.id, live=found is not None)
 
 
 async def _write(

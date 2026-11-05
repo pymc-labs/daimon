@@ -305,6 +305,17 @@ def forbidden_builtins_off(denied: frozenset[str], tools: list[Tool]) -> list[To
     return tools
 
 
+def check_helper(agent_id: str, helper_id: str, *, live: bool) -> None:
+    """Refuse ``helper_id`` as a helper of ``agent_id``: itself, or not a live agent here.
+
+    The one rule for a helper added from the web draft and for a list set by an admin.
+    """
+    if helper_id == agent_id:
+        raise AgentEditError("An agent can't be its own helper.", kind="invalid")
+    if not live:
+        raise AgentEditError("That helper isn't available here.", kind="invalid")
+
+
 def system_agent_rejection(agent: BetaManagedAgentsAgent) -> str | None:
     """Why chat and web edits cannot modify ``agent``, or ``None`` if they can.
 
