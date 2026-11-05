@@ -8882,6 +8882,35 @@
         'type': 'object',
       }),
     }),
+    'set_agent_helpers': dict({
+      'description': '''
+        Set the agents an agent may ask for help to exactly these names or ids. Works on the
+        default agent and on self-hosted agents; the person approves first.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'agent_id': dict({
+            'type': 'string',
+          }),
+          'helpers': dict({
+            'items': dict({
+              'type': 'string',
+            }),
+            'type': 'array',
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'agent_id',
+          'helpers',
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'set_agent_owners': dict({
       'description': "Set an agent's owner and co-owners to exactly these web person or account ids.",
       'parameters': dict({

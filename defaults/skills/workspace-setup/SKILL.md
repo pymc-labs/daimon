@@ -168,7 +168,8 @@ An agent answering in a channel or as the workspace default is admin-managed
 for direct prompt, model, skill, and MCP-spec edits. Direct edits to the built-in
 Daimon's spec require an editable copy even for admins. Offer `fork_agent` for
 those direct edits; a member asks an admin to make the copy, or uses
-`create_agent` for a fresh one. Members can add a new key to any agent,
+`create_agent` for a fresh one. An admin sets any agent's helpers, built-in
+Daimon's too, with `set_agent_helpers`. Members can add a new key to any agent,
 built-in Daimon included, with `request_agent_key`, and sign in to a server an
 agent already has with `request_mcp_oauth`. Adding or replacing an MCP server
 on an agent other people use needs an admin, through `request_mcp_token` or
