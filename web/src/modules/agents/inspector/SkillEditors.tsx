@@ -12,6 +12,7 @@ import { pressProps } from "@/lib/filters"
 import { addServerSkill, saveSkillFiles, useApplyUpdate, useServerSkills, useSetFollow, useSkillFiles, useSkillFollows } from "../api"
 import { Dot, Pill } from "../bits"
 import { SkillFilesEditor } from "./SkillFilesEditor"
+import { SkillSource, SkillsRelease } from "../setup/SkillSource"
 import type { ServerSkillOption, Skill, SkillFollow } from "../types"
 import { Field, Section, type Props } from "./parts"
 import { menuEntries, skillBadge, titleOf } from "./server-skills"
@@ -49,6 +50,7 @@ export function SkillsEditor(p: Props) {
   }
   return (
     <>
+      <SkillsRelease agent={p.agent} />
       <Section title={`Attached (${config.skills.length})`}>
         <div className="-mx-2">
           {config.skills.map((s) => (
@@ -189,6 +191,7 @@ function SkillBody({ agent, config, ro, update, select, skill }: Props & { skill
             </Button>
           )}
         </div>
+        <SkillSource agent={agent} skillId={skill.skill_id} />
         <p className="text-sm text-muted-foreground">{skill.description}</p>
         {follow && follow.status !== "managed" && (
           <div className="flex items-center gap-2 pt-2 text-sm">

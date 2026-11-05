@@ -33,11 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read as the chat account that added the skill, while it stays in the workspace.
 
 - **The agent editor in the web app has a GitHub panel.** It lists the agent's repos with
-  their access, status and which one is the working repo, and where each attached skill
-  comes from: a repo (with branch and path), the library, elsewhere or Anthropic. It shows
-  whether the latest push sync failed, and the release an outside pipeline stamped in the
-  agent's `source_release`, `source_release_at` and `source_release_url` metadata. The
-  agent's owner or a server admin can connect GitHub, pick or clear the working repo, take a repo
+  their access, status, skill count and which one is the working repo, and shows whether the
+  latest push sync failed. The Skills panel shows the release an outside pipeline stamped in
+  the agent's `source_release`, `source_release_at` and `source_release_url` metadata, and each
+  skill shows where it came from: a repo (with branch and path), the library or
+  elsewhere. The agent's owner or a server admin can connect GitHub, pick or clear the working repo, take a repo
   off the agent and resync its repo skills now. Each change is audited like the chat tools.
 
 - **The agent posts for other people more carefully, and anyone can ask never to be tagged.**
