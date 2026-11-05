@@ -10,6 +10,7 @@ import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import CodeType
 from typing import TYPE_CHECKING, Annotated, Final, Literal, Protocol, Self, cast, get_type_hints
 from uuid import UUID
 
@@ -834,11 +835,14 @@ async def _capture_source_capabilities(
         # this evidence independently and refuse before any provider exposure.
         # Said once here, though: without it the agent silently loses its MCP
         # on the new provider (J2's Argon preview). Only our own fixed
-        # sentences are logged, never a provider's or a validator's text.
+        # sentences and code labels are logged, never a provider's or a validator's text.
+        from daimon.core.channel_backend import exception_labels
+
         log.warning(
             "source_capture.representation_skipped",
             error=type(error).__name__,
             reason=_own_sentence(error),
+            site=exception_labels(error).get("frame"),
             tenant_id=str(source.tenant_id),
             agent_id=str(source.agent_id),
             profile=revision.profile if revision is not None else None,
@@ -849,20 +853,25 @@ async def _capture_source_capabilities(
 
 
 def _own_sentence(error: BaseException) -> str | None:
-    """The fixed sentence of a ValueError raised by the capture itself, else None.
+    """The fixed sentence of a ValueError raised by the capture or its nested
+    helpers, else None.
 
     Anything raised deeper (a catalogue read, a validator) may carry content.
     """
     frame = error.__traceback__
     while frame is not None and frame.tb_next is not None:
         frame = frame.tb_next
-    if (
-        type(error) is not ValueError
-        or frame is None
-        or frame.tb_frame.f_code is not _capture_source_capabilities.__code__
-    ):
+    if type(error) is not ValueError or frame is None or frame.tb_frame.f_code not in _OWN_CODE:
         return None
     return str(error)
+
+
+def _own_code(code: CodeType) -> frozenset[CodeType]:
+    nested = (c for c in code.co_consts if isinstance(c, CodeType))
+    return frozenset({code}).union(*(_own_code(c) for c in nested))
+
+
+_OWN_CODE: Final = _own_code(_capture_source_capabilities.__code__)
 
 
 def source_instructions_preserved(required: str | None, system: str | None) -> bool:
@@ -1551,7 +1560,7 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
                             session, request.tenant_id, agent_id, persisted=True
                         )
                     if setting != provisional or setting is None or setting.drop_consent is None:
-                        raise AgentBackendRefused("re_confirm")
+                        raise AgentBackendRefused("re_confirm", detail="provisional_mismatch")
     timeout = remaining_s(request.deadline, now=request.now(), refuse_expired=True)
     source = await asyncio.wait_for(
         capture_preparation_source(request, fresh=True)
@@ -1571,7 +1580,7 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
         or source.source.revision.local != request.admission.agent.version
     ):
         if setting is not None:
-            raise AgentBackendRefused("re_confirm")
+            raise AgentBackendRefused("re_confirm", detail="source_identity")
         raise UnsupportedCapability(("source_context",), revision.profile)
     # Capture is evidence of source intent, not evidence that a target preserved it.
     spec = source.effective_spec
@@ -1580,12 +1589,14 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
     target = None
     if setting is not None:
         consent = setting.drop_consent
-        if consent is None or setting.backend != revision.backend:
-            raise AgentBackendRefused("re_confirm")
+        if consent is None:
+            raise AgentBackendRefused("re_confirm", detail="no_consent")
+        if setting.backend != revision.backend:
+            raise AgentBackendRefused("re_confirm", detail="backend_mismatch")
         if revision.model is None and revision.backend != spec.model.provider:
-            raise AgentBackendRefused("re_confirm")
+            raise AgentBackendRefused("re_confirm", detail="model_unpinned")
         if source_preservation_pin(source) != consent.source_pin:
-            raise AgentBackendRefused("re_confirm")
+            raise AgentBackendRefused("re_confirm", detail="source_pin")
         target = preview_source_drops(
             source, ModelRef(provider=revision.backend, id=revision.model or spec.model.id)
         )
@@ -1597,7 +1608,7 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
             )
             or _consented_before(target, spec.system, consent)
         ):
-            raise AgentBackendRefused("re_confirm")
+            raise AgentBackendRefused("re_confirm", detail="losses_differ")
     retain_native = (
         (setting is not None)
         and not setting.declared_drops
@@ -1664,7 +1675,7 @@ async def read_preparation_counterpart(
         )
         remaining_s(request.deadline, now=request.now(), refuse_expired=True)
         if (target is not None) and current_source != source:
-            raise AgentBackendRefused("re_confirm")
+            raise AgentBackendRefused("re_confirm", detail="source_drift")
         if target is None or counterpart.agent.spec != target or current_source != source:
             raise UnsupportedCapability(("source_drift",), revision.profile)
         return replace(selected, counterpart=counterpart, verified_counterpart=counterpart)

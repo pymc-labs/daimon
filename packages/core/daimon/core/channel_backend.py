@@ -27,7 +27,7 @@ from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
-from typing import Literal, Protocol, cast, get_args
+from typing import Final, Literal, Protocol, cast, get_args
 
 import structlog
 from anthropic import AsyncAnthropic
@@ -413,9 +413,30 @@ class AgentBackendRefused(DaimonError):
         self.provider = provider
         # `source_unsupported`: what the target can't carry (closed obligation labels).
         self.missing = missing
-        # `source_unavailable`: which permanent cause, if not a transient read failure.
+        # `source_unavailable`: which permanent cause, if not a transient read failure;
+        # `re_confirm`: which check refused the consent. Logged only from REFUSAL_DETAILS.
         self.detail = detail
         super().__init__(reason.replace("_", " "))
+
+
+#: Closed `AgentBackendRefused.detail` labels a refusal log may carry.
+REFUSAL_DETAILS: Final = frozenset(
+    {
+        "environment",
+        "identity",
+        "place",
+        "source",
+        "backend_mismatch",
+        "losses_differ",
+        "model_unpinned",
+        "no_consent",
+        "provisional_mismatch",
+        "revert_differs",
+        "source_drift",
+        "source_identity",
+        "source_pin",
+    }
+)
 
 
 type BackendRefusalStage = Literal[
@@ -797,6 +818,8 @@ def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object
             cause.update({k: v for k, v in exception_labels(error).items() if k != "class"})
         if isinstance(error, (AgentBackendRefused, AdmissionDenied)):
             cause["reason"] = error.reason if error.reason in safe_reasons else "redacted"
+        if isinstance(error, AgentBackendRefused) and error.detail in REFUSAL_DETAILS:
+            cause["detail"] = error.detail
         if isinstance(error, AdmissionDenied) and error.site is not None:
             cause["site"] = error.site  # Our own module.function:line, never request data.
         if isinstance(error, UnsupportedCapability):
@@ -1288,7 +1311,7 @@ class AgentBackendService:
                 operation == "revert"
                 and (previous.drop_consent if previous is not None else None) != consent
             ):
-                raise AgentBackendRefused("re_confirm")
+                raise AgentBackendRefused("re_confirm", detail="revert_differs")
             if consent is not None:
                 if operation != "revert":
                     if accepted_drops is None and consent.declared_drops:
