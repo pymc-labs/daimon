@@ -45,6 +45,7 @@ _spec.loader.exec_module(_base)
 _FakeDiscord: Any = _base._FakeDiscord  # pyright: ignore[reportPrivateUsage]
 _World: Any = _base._World  # pyright: ignore[reportPrivateUsage]
 _world = _base._world  # pyright: ignore[reportPrivateUsage]
+_user = _base._user  # pyright: ignore[reportPrivateUsage]
 patch_discord_http = _base.patch_discord_http
 _CHANNEL: str = _base._CHANNEL  # pyright: ignore[reportPrivateUsage]
 _THREAD: str = _base._THREAD  # pyright: ignore[reportPrivateUsage]
@@ -683,3 +684,25 @@ async def test_delete_reply_skips_a_part_already_deleted_by_hand_and_retires_its
             message_id=reply[1],
         )
     assert row is None, "its row is marked deleted, so it is never listed again"
+
+
+async def test_delete_reply_checks_every_parts_author_before_deleting_any(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], fake: Any
+) -> None:
+    """The oldest part, deleted last, is not daimon's: nothing goes, not even the newer parts."""
+    world = await _world(committing_sessionmaker)
+    await _auto_thread(world)
+    reply = await _reply(world, fake, parts=3)
+    fake.messages[reply[0]]["author"] = _user("77", bot=True)
+    auth, origin = await world.turn(thread=_THREAD)
+
+    with pytest.raises(ToolError, match="not daimon's own post"):
+        await _delete_reply_impl(
+            world.runtime, auth, channel_id=_THREAD, message_id=reply[2], origin_context_id=origin
+        )
+
+    assert set(reply) <= fake.messages.keys(), "no part is deleted when one fails the author check"
+    rows = [r for r in await world.audit() if r.tool_name == "delete_reply"]
+    assert [(r.outcome, r.reason) for r in rows] == [("denied", "not_bot_author")], (
+        "only the refusal is audited, no deletion was begun"
+    )

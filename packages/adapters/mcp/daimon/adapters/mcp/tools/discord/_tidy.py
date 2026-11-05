@@ -375,15 +375,21 @@ async def _delete_one(
     post: AgentPostRow,
     *,
     tool: str,
+    message: discord.Message | None = None,
 ) -> None:
-    """Delete one recorded message after its ownership and rights are checked."""
+    """Delete one recorded message after its ownership and rights are checked.
+
+    `message` is the already fetched and author-checked message, if the caller has it.
+    """
     operation: TidyOperation = "message.delete"
-    message = await _fetch_own_bot_message(
-        c, runtime, ctx, target, tool_name=tool, operation=operation, message_id=post.message_id
-    )
+    if message is None:
+        message = await _fetch_own_bot_message(
+            c, runtime, ctx, target, tool_name=tool, operation=operation, message_id=post.message_id
+        )
+    found = message
 
     async def act() -> None:
-        await delete_own_message(c, target.channel, message)
+        await delete_own_message(c, target.channel, found)
 
     await run_action(
         runtime,
@@ -434,8 +440,29 @@ async def _delete_reply_impl(  # pyright: ignore[reportUnusedFunction]
         )
         parts = [p for p in await reply_parts(runtime, post) if p.channel_id == resolved_channel_id]
 
+        # Every part is fetched and its author checked before the first deletion,
+        # so a refusal never leaves a reply half deleted. A part already gone is
+        # left for delete_parts to skip.
+        fetched: dict[str, discord.Message | None] = {}
+        for part in parts:
+            try:
+                fetched[part.message_id] = await _fetch_own_bot_message(
+                    c,
+                    runtime,
+                    ctx,
+                    target,
+                    tool_name=tool,
+                    operation=operation,
+                    message_id=part.message_id,
+                )
+            except MessageGone:
+                fetched[part.message_id] = None
+
         async def delete(part: AgentPostRow) -> None:
-            await _delete_one(c, runtime, ctx, auth, target, part, tool=tool)
+            message = fetched[part.message_id]
+            if message is None:
+                raise MessageGone("message not found")
+            await _delete_one(c, runtime, ctx, auth, target, part, tool=tool, message=message)
 
         deleted = await delete_parts(runtime, parts, delete)
     return TidyResult(
