@@ -25,7 +25,7 @@ describe("channelTree", () => {
       channel("g", "general", inCategory("Projects")),
       channel("t", "ideas", { kind: "thread", path: [category("Projects"), { id: "g", name: "general", kind: "channel" }] }),
     ]
-    expect(ids(rows)).toEqual([["g", "g:discord:k_Projects"], ["t", "g"], ["g:discord:k_Projects", null]])
+    expect(ids(rows)).toEqual([["g", "g:discord:category:k_Projects"], ["t", "g"], ["g:discord:category:k_Projects", null]])
   })
 
   it("puts web chat first, then channels before categories, each by name", () => {
@@ -34,13 +34,13 @@ describe("channelTree", () => {
       channel("z", "zed"), channel("a", "alpha"), channel("l", "board", inCategory("Leadership")),
     ]
     const top = channelTree(rows).filter((n) => n.parentId === null).map((n) => n.id)
-    expect(top).toEqual(["w", "a", "z", "g:discord:k_Leadership", "g:discord:k_Projects"])
+    expect(top).toEqual(["w", "a", "z", "g:discord:category:k_Leadership", "g:discord:category:k_Projects"])
   })
 
   it("keeps a category and a team of the same id apart and orders roots by platform", () => {
     const rows = [channel("a", "a", { platform: "teams", ...inCategory("X", "teams") }), channel("b", "b", inCategory("X"))]
     const groups = channelTree(rows).filter((n) => n.kind === "group")
-    expect(groups.map((g) => g.id)).toEqual(["g:discord:k_X", "g:teams:k_X"])
+    expect(groups.map((g) => g.id)).toEqual(["g:discord:category:k_X", "g:teams:team:k_X"])
   })
 
   it("lets Slack channels stand at the root with threads below", () => {
@@ -51,17 +51,22 @@ describe("channelTree", () => {
   it("holds a thread whose channel is not listed under a group for that channel", () => {
     const rows = [channel("t", "ideas", { kind: "thread", path: [category("Projects"), { id: "gone", name: "lost", kind: "channel" }] })]
     const tree = channelTree(rows)
-    const group = tree.find((n) => n.id === "g:discord:gone")
-    expect(group).toMatchObject({ kind: "group", parentId: "g:discord:k_Projects", row: { type: "group", name: "lost" } })
-    expect(tree.find((n) => n.id === "t")?.parentId).toBe("g:discord:gone")
+    const group = tree.find((n) => n.id === "g:discord:channel:gone")
+    expect(group).toMatchObject({ kind: "group", parentId: "g:discord:category:k_Projects", row: { type: "group", name: "lost" } })
+    expect(tree.find((n) => n.id === "t")?.parentId).toBe("g:discord:channel:gone")
+  })
+
+  it("keeps a team and its General channel, which share an id, as two groups", () => {
+    const rows = [channel("19:team;messageid=7", "reply", { platform: "teams", kind: "thread", path: [{ id: "19:team", name: "Platform", kind: "team" }, { id: "19:team", name: null, kind: "channel" }] })]
+    expect(ids(rows)).toEqual([["19:team;messageid=7", "g:teams:channel:19:team"], ["g:teams:channel:19:team", "g:teams:team:19:team"], ["g:teams:team:19:team", null]])
   })
 
   it("opens ancestors of a match and a group that matches a plain search keeps its rows", () => {
     const rows = [channel("g", "general", inCategory("Projects")), channel("o", "other", inCategory("Leadership"))]
     const tree = channelTree(rows)
     const seen = (f: Partial<Filters>) => flatten(tree, {}, treeFilter({ ...none, ...f })).map((x) => x.node.id)
-    expect(seen({ q: "gener" })).toEqual(["g:discord:k_Projects", "g"])
-    expect(seen({ q: "leader" })).toEqual(["g:discord:k_Leadership", "o"])
+    expect(seen({ q: "gener" })).toEqual(["g:discord:category:k_Projects", "g"])
+    expect(seen({ q: "leader" })).toEqual(["g:discord:category:k_Leadership", "o"])
     expect(treeFilter(none)).toBeNull()
   })
 })

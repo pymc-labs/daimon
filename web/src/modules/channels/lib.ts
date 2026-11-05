@@ -37,7 +37,7 @@ export function channelTree(rows: Channel[]): ChannelNode[] {
     if (!node) return null
     const row = listed.get(`${platform}:${node.id}`)
     if (row && node.kind !== "category" && node.kind !== "team") return row.id
-    const id = `g:${platform}:${node.id}`
+    const id = `g:${platform}:${node.kind}:${node.id}`
     if (!groups.has(id)) groups.set(id, { id, parentId: refer(platform, path.slice(0, -1)), kind: "group", row: { type: "group", id, name: node.name, kind: node.kind, platform } })
     return id
   }

@@ -53,6 +53,11 @@ class VerifiedIdentity:
     # The chat platform's own id for the person, when `subject` also names the workspace
     # (Slack and Teams ids are only unique within one).
     platform_user_id: str | None = None
+    # Only a sign-in whose provider vouches for one (Microsoft) carries an email.
+    email: str | None = None
+    # False when a workspace name is only a stand-in the sign-in could not look up: it
+    # names a new person's row but never replaces a stored name.
+    workspace_names_proven: bool = True
 
     @property
     def chat_user_id(self) -> str:
@@ -94,8 +99,9 @@ async def resolve_web_people(
                 account_id=tenant.account_id,
                 display_name=identity.display_name,
                 workspace_name=tenant.workspace_name,
-                email=None,
+                email=identity.email,
                 new_person_id=uuid.uuid4(),
+                rename_workspace=identity.workspace_names_proven,
             )
             await identities_store.link_identity(
                 session,

@@ -22,7 +22,7 @@ from typing import Any, Literal, cast
 
 from daimon.core._models import PlatformChannelName, PlatformPrincipal, PlatformUserName
 from daimon.core.stores.domain import ChannelNameRow
-from sqlalchemy import CursorResult, delete, func, select
+from sqlalchemy import CursorResult, delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -198,16 +198,20 @@ async def upsert_channel_names(
     platform: str,
     names: Mapping[str, str | ChannelSighting],
 ) -> None:
-    """Store each channel's name and when it was seen; blank names are skipped.
+    """Store each channel's name and when it was seen.
 
-    A part a sighting lacks (kind, parent) keeps the stored one.
+    A part a sighting lacks (kind, parent) keeps the stored one. A sighting with no name
+    stores nothing new: it only fills in the parent of a channel already stored.
     """
     now = datetime.now(UTC)
     values: list[dict[str, object]] = []
     for channel_id, given in sorted(names.items()):
         sighting = given if isinstance(given, ChannelSighting) else ChannelSighting(given)
         clean = sighting.label
-        if not channel_id or clean is None:
+        if not channel_id:
+            continue
+        if clean is None:
+            await _fill_parent(session, tenant_id, platform, channel_id, sighting)
             continue
         values.append(
             {
@@ -247,6 +251,35 @@ async def upsert_channel_names(
         },
     )
     await session.execute(stmt)
+    await session.flush()
+
+
+async def _fill_parent(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+    sighting: ChannelSighting,
+) -> None:
+    """Give a stored channel the kind and parent a nameless sighting carries, leaving its
+    name and status as they are. A channel not stored is not created."""
+    kind = _clean(sighting.kind)
+    parent_id, parent_name = _clean(sighting.parent_id), _clean(sighting.parent_name)
+    if parent_id is None and parent_name is None:
+        return
+    await session.execute(
+        update(PlatformChannelName)
+        .where(
+            PlatformChannelName.tenant_id == tenant_id,
+            PlatformChannelName.platform == platform,
+            PlatformChannelName.channel_id == channel_id,
+        )
+        .values(
+            kind=func.coalesce(kind, PlatformChannelName.kind),
+            parent_id=func.coalesce(parent_id, PlatformChannelName.parent_id),
+            parent_name=func.coalesce(parent_name, PlatformChannelName.parent_name),
+        )
+    )
     await session.flush()
 
 

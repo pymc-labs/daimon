@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from urllib.parse import parse_qs, urlsplit
@@ -12,10 +13,12 @@ from daimon.core.config import MicrosoftAccountsSettings
 from daimon.core.microsoft_identity import MicrosoftIdentityMismatch, MicrosoftTokens
 from daimon.core.platform_sign_in import (
     MicrosoftGuestRefused,
+    MicrosoftProfile,
     PlatformSignInError,
     exchange_slack_user_code,
     fetch_discord_user,
     fetch_discord_workspaces,
+    fetch_microsoft_profile,
     fetch_slack_user_name,
     slack_authorize_url,
     verify_microsoft_sign_in,
@@ -216,3 +219,80 @@ def test_microsoft_sign_in_accepts_a_member_whose_idp_is_the_directory_itself() 
     assert verify_microsoft_sign_in(tokens, MICROSOFT).object_id == OID, (
         "idp equal to iss is no guest"
     )
+
+
+def _graph_http(
+    *, me: httpx.Response | Exception, organization: httpx.Response | Exception
+) -> httpx.AsyncClient:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Authorization"] == "Bearer at", request.headers
+        answer = me if request.url.path == "/v1.0/me" else organization
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+async def test_fetch_microsoft_profile_reads_the_address_and_organization() -> None:
+    """Both Graph answers feed the profile."""
+    http = _graph_http(
+        me=httpx.Response(200, json={"mail": "ada@acme.test", "userPrincipalName": "a@x.test"}),
+        organization=httpx.Response(200, json={"value": [{"displayName": "Acme Corp"}]}),
+    )
+    profile = await fetch_microsoft_profile(http, access_token="at")
+    assert profile == MicrosoftProfile(email="ada@acme.test", organization="Acme Corp"), profile
+
+
+async def test_fetch_microsoft_profile_falls_back_to_the_principal_name_without_a_mailbox() -> None:
+    """`mail` is null for an account with no mailbox."""
+    http = _graph_http(
+        me=httpx.Response(200, json={"mail": None, "userPrincipalName": "ada@acme.test"}),
+        organization=httpx.Response(200, json={"value": []}),
+    )
+    profile = await fetch_microsoft_profile(http, access_token="at")
+    assert profile == MicrosoftProfile(email="ada@acme.test", organization=None), profile
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        httpx.Response(403, json={"error": {"code": "Authorization_RequestDenied"}}),
+        httpx.Response(200, content=b"not json"),
+        httpx.Response(200, json=["unexpected"]),
+        httpx.ReadTimeout("slow"),
+    ],
+    ids=["forbidden", "bad-json", "bad-shape", "timeout"],
+)
+async def test_fetch_microsoft_profile_is_empty_when_graph_fails(
+    failure: httpx.Response | Exception,
+) -> None:
+    """A tenant that never consented User.Read, or a slow Graph, costs the profile only."""
+    http = _graph_http(me=failure, organization=failure)
+    profile = await fetch_microsoft_profile(http, access_token="at")
+    assert profile == MicrosoftProfile(email=None, organization=None), profile
+
+
+async def test_fetch_microsoft_profile_keeps_one_answer_when_the_other_fails() -> None:
+    """The two calls fail independently."""
+    http = _graph_http(
+        me=httpx.Response(403),
+        organization=httpx.Response(200, json={"value": [{"displayName": "Acme Corp"}]}),
+    )
+    profile = await fetch_microsoft_profile(http, access_token="at")
+    assert profile == MicrosoftProfile(email=None, organization="Acme Corp"), profile
+
+
+async def test_fetch_microsoft_profile_bounds_the_whole_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """httpx times each phase of a request; a Graph that trickles still ends the lookup."""
+    monkeypatch.setattr("daimon.core.platform_sign_in.MICROSOFT_PROFILE_TIMEOUT_S", 0.05)
+
+    async def slow(_: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(5)
+        return httpx.Response(200, json={"mail": "ada@acme.test"})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(slow))
+    profile = await fetch_microsoft_profile(http, access_token="at")
+    assert profile == MicrosoftProfile(email=None, organization=None), profile
