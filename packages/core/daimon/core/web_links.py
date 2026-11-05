@@ -20,6 +20,7 @@ OPEN_IN_WEB: Final = "Open in web"
 
 LinkKey = Literal[
     "agent",
+    "agents",
     "channel",
     "routine",
     "skill",
@@ -50,6 +51,7 @@ class DeepLink(NamedTuple):
 
 DEEP_LINKS: Final[Mapping[LinkKey, DeepLink]] = {
     "agent": DeepLink("/agents/{id}", "node", "agents", "agents.view"),
+    "agents": DeepLink("/agents", None, "agents", "agents.view"),
     "channel": DeepLink("/channels", "channel", "channels", "channels.view"),
     "routine": DeepLink("/routines", "routine", "routines", "routines.view"),
     "skill": DeepLink("/agents/skills/{id}", None, "agents", "workspace.manage"),
@@ -180,6 +182,7 @@ class TenantLinks:
         pages of the modules that are on, plus the profile every signed-in person has."""
         found = {
             "chat": self._path("chat"),
+            "agents": self._path("agents"),
             "channels": self._path("channel"),
             "routines": self._path("routine"),
             "spend": self._path("spend"),

@@ -696,6 +696,7 @@ def test_controls_carry_the_workspace_front_door_and_the_pages_its_caller_may_op
     assert web["url"] == root, "the workspace root"
     assert web["pages"] == {  # paths under the root, never the id again
         "chat": "/chat",
+        "agents": "/agents",
         "channels": "/channels",
         "routines": "/routines",
         "spend": "/credits/spend",

@@ -91,7 +91,9 @@ def _display_name(user: dict[str, Any]) -> str | None:
     return None
 
 
-async def _lookup_user(client: AsyncWebClient, *, user_id: str) -> dict[str, Any] | None:
+async def _lookup_user(
+    client: AsyncWebClient, *, user_id: str, allow_bot: bool = False
+) -> dict[str, Any] | None:
     """Call ``users.info`` and return the user dict, or ``None`` if the lookup failed.
 
     The one network call and the one catch site: ``resolve_requester`` and
@@ -114,14 +116,18 @@ async def _lookup_user(client: AsyncWebClient, *, user_id: str) -> dict[str, Any
     if (
         user.get("id") != user_id
         or user.get("deleted") is not False
-        or user.get("is_bot") is not False
+        or (user.get("is_bot") is not False and not allow_bot)
     ):
         return None
     return user
 
 
 async def resolve_requester(
-    client: AsyncWebClient, *, user_id: str, host_team_id: str | None = None
+    client: AsyncWebClient,
+    *,
+    user_id: str,
+    host_team_id: str | None = None,
+    allow_bot: bool = False,
 ) -> SlackRequester | None:
     """Return what ``users.info`` says about the requester, or ``None`` if the lookup failed.
 
@@ -131,12 +137,14 @@ async def resolve_requester(
     them apart.
 
     ``is_admin`` is True only when the user is a verified member of
-    ``host_team_id`` and carries an admin signal.
+    ``host_team_id`` and carries an admin signal. An ``allow_bot`` bot passes
+    the lookup but is never an admin, whatever its fields say.
 
     Args:
         client:       Per-event ``AsyncWebClient`` (injected; never cached).
         user_id:      Slack user ID from the verified Socket Mode payload.
         host_team_id: The workspace that hosts the app.
+        allow_bot:    Let a bot user through (the allow-listed QA mention path only).
     """
     bound_team = client.team_id if isinstance(client, WorkspaceWebClient) else None
     if bound_team is not None and host_team_id is not None and bound_team != host_team_id:
@@ -144,7 +152,7 @@ async def resolve_requester(
     host_team_id = host_team_id or bound_team
     if not host_team_id:
         return None
-    u = await _lookup_user(client, user_id=user_id)
+    u = await _lookup_user(client, user_id=user_id, allow_bot=allow_bot)
     if u is None:
         return None
     raw_team = u.get("team_id")
@@ -155,7 +163,10 @@ async def resolve_requester(
         is_stranger=bool(u.get("is_stranger")),
         host_team_id=host_team_id,
     )
-    return replace(requester, is_admin=requester.is_host_member and _is_admin_signal(u))
+    is_bot = u.get("is_bot") is not False
+    return replace(
+        requester, is_admin=requester.is_host_member and not is_bot and _is_admin_signal(u)
+    )
 
 
 async def resolve_admin_status(

@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - **The approval card for a wide request is one short question.** It reads, for example, "Open 10 threads in #launch and tag 3 people?" or "Post in 4 places and tag 6 people?" above Approve, Deny and Details. The "Daimon wants to" lead, the second line and the "(N tags)" count are gone, and the approved card repeats the question without its question mark.
+- **Slack QA bots can be allow-listed with `DAIMON_SLACK__QA_BOT_USER_IDS`.** A listed bot's mention runs as a plain member, never a Slack admin; mentions from any other bot are ignored, as is Daimon's own.
 
 - **An agent switched to Gemini or OpenAI no longer gets stuck on "needs to be confirmed
   again".** Daimon's own tool-safety and ask-before-publishing settings no longer make a
