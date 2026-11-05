@@ -149,6 +149,7 @@ async def test_a_listing_never_carries_the_token_and_hides_revoked_and_expired_k
         "expires_at",
         "bound",
         "mine",
+        "client",
     }, "only what tells keys apart: no token field"
 
 

@@ -1014,6 +1014,7 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         "github_connect_requests": "requester_account_id FK -> accounts.id",
         "github_connect_click_intents": "requester_account_id FK -> accounts.id",
         "mcp_tokens": "account_id FK -> accounts.id",
+        "coding_key_claims": "account_id FK -> accounts.id; counted and deleted with mcp_tokens",
         "wizard_session": "account_id FK -> accounts.id",
         "message_feedback": "account_id FK -> accounts.id",
         "support_escalations": "account_id FK -> accounts.id",

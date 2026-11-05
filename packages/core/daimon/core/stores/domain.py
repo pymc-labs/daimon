@@ -1182,6 +1182,26 @@ class McpTokenRow(BaseModel):
     surface: McpTokenSurface | None = None
     # What the credential was made for (see `McpToken.purpose`); None for operator and CLI tokens.
     purpose: McpTokenPurpose | None = None
+    # The coding tool a coding key was made for, when it was made for one.
+    client: str | None = None
+
+
+class CodingKeyClaimRow(BaseModel):
+    """Pydantic row for CodingKeyClaim: one single-use code, never the code itself."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    account_id: uuid.UUID
+    agent_id: uuid.UUID
+    agent_name: str
+    client: str
+    batch: uuid.UUID
+    created_at: datetime
+    expires_at: datetime
+    used_at: datetime | None
+    jti: uuid.UUID | None
 
 
 class FileUploadRow(BaseModel):

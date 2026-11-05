@@ -50,6 +50,7 @@ async def create_mcp_token_row(
     channel_id: str | None = None,
     surface: McpTokenSurface | None = None,
     purpose: McpTokenPurpose | None = None,
+    client: str | None = None,
 ) -> None:
     """Insert a new mcp_tokens row.
 
@@ -74,6 +75,7 @@ async def create_mcp_token_row(
         channel_id=channel_id,
         surface=surface,
         purpose=purpose,
+        client=client,
     )
     session.add(orm)
     await session.flush()

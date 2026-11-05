@@ -393,6 +393,7 @@ async def mint_agent_mcp_token(
     surface: McpTokenSurface | None = None,
     purpose: McpTokenPurpose | None = None,
     jti: uuid.UUID | None = None,
+    client: str | None = None,
 ) -> str:
     """Mint a long-lived, revocable, agent-scoped MCP JWT.
 
@@ -429,6 +430,8 @@ async def mint_agent_mcp_token(
     (a chat-execution or provider-turn credential is always ``internal``).
 
     ``jti`` lets a caller name the token in its label (`internal_token_label`).
+
+    ``client`` names the coding tool a coding key is for (row only, for listings).
     """
     # Registered chat execution retains the ordinary chat surface. External
     # agent keys keep their existing restricted agent-chat surface. The signed
@@ -460,6 +463,7 @@ async def mint_agent_mcp_token(
         channel_id=channel_id,
         surface=surface,
         purpose=purpose,
+        client=client,
     )
     return pyjwt.encode(
         {

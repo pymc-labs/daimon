@@ -1,13 +1,13 @@
 """One agent's coding keys: who may see and revoke them, and what a listing shows.
 
-A coding key is an agent key made from the agent's "coding tools" button. A server
+A coding key is an agent key made from the agent's "Access via MCP" panel, with a button or a pasted prompt. A server
 admin sees and revokes every live coding key of the agent; the agent's owner sees
 and revokes only the keys they made themselves; anyone else sees nothing. The
 caller reads the two facts live (the platform's admin status, `owns_agent`) and
 passes them in: this module never trusts a panel snapshot.
 
-A listing carries who made the key, when, when it ends and whether it is held to a
-channel. It never carries the token, which exists only once, on screen, at mint.
+A listing carries who made the key, when, when it ends, which tool it was made for and
+whether it is held to a channel. It never carries the token, which exists only once, on screen, at mint.
 """
 
 from __future__ import annotations
@@ -19,13 +19,12 @@ from typing import Literal
 
 from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError
 from daimon.core.agent_ownership import account_owns_agent
-from daimon.core.agent_target import ChangeRecorder, load_target, require_setup
+from daimon.core.agent_target import AgentTarget, ChangeRecorder, load_target, require_setup
 from daimon.core.agent_view import people_by_account
 from daimon.core.authz import build_agent_ref
 from daimon.core.mcp_auth import (
     authorize_coding_token,
     coding_key_ttl_days,
-    coding_tool_config,
     mint_agent_mcp_token,
     token_jti,
 )
@@ -38,6 +37,9 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 type CodingKeyAccess = Literal["admin", "owner"]
+
+#: The client of a key shown once on screen, made for no particular coding tool.
+TOKEN_CLIENT = "token"
 
 
 def coding_key_access(*, is_admin: bool, owns_agent: bool) -> CodingKeyAccess | None:
@@ -84,6 +86,7 @@ class CodingKeyEntry:
     expires_at: dt.datetime | None
     bound: bool
     mine: bool
+    client: str | None
 
 
 async def list_coding_keys(
@@ -113,6 +116,7 @@ async def list_coding_keys(
             expires_at=row.expires_at,
             bound=row.channel_id is not None,
             mine=row.account_id == viewer_account_id,
+            client=row.client,
         )
         for row in rows
     ]
@@ -179,6 +183,7 @@ class MyCodingKey:
     created_at: dt.datetime
     expires_at: dt.datetime | None
     bound: bool
+    client: str | None
 
 
 async def list_my_coding_keys(
@@ -195,6 +200,7 @@ async def list_my_coding_keys(
             created_at=row.created_at,
             expires_at=row.expires_at,
             bound=row.channel_id is not None,
+            client=row.client,
         )
         for row in rows
     ]
@@ -220,26 +226,19 @@ class MintedCodingKey(BaseModel):
 
     jti: uuid.UUID
     token: str
+    url: str
     expires_at: dt.datetime
-    command: str
-    config: str
 
 
-async def mint_coding_key(
-    deps: AgentEditDeps,
-    *,
-    actor: AgentActor,
-    ma_agent_id: str,
-    public_url: str,
-    secret: bytes,
-    now: dt.datetime,
-    audited: ChangeRecorder | None = None,
-) -> MintedCodingKey:
-    """Make a coding key for the actor on this agent: an admin, or the agent's owner.
+async def authorize_coding_mint(
+    deps: AgentEditDeps, *, actor: AgentActor, ma_agent_id: str
+) -> tuple[AgentTarget, str | None]:
+    """The agent and the channel binding a coding key made by the actor would carry.
 
     Refused unless the key would pass the verifier's rule for the actor (stored
     admin, CLI operator or owner), since one that would be turned away on its
-    first call is not worth showing. The key acts as the actor.
+    first call is not worth making or offering. Shared by the key made on screen
+    and the codes that trade for one.
     """
     target = await load_target(deps, actor=actor, ma_agent_id=ma_agent_id)
     require_setup(target, "Coding keys")
@@ -262,6 +261,26 @@ async def mint_coding_key(
         raise AgentEditError(
             "Only an admin or this agent's owner can make a coding key.", kind="forbidden"
         )
+    return target, bound
+
+
+async def mint_coding_key(
+    deps: AgentEditDeps,
+    *,
+    actor: AgentActor,
+    ma_agent_id: str,
+    public_url: str,
+    secret: bytes,
+    now: dt.datetime,
+    audited: ChangeRecorder | None = None,
+) -> MintedCodingKey:
+    """Make a coding key for the actor on this agent: an admin, or the agent's owner.
+
+    Refused unless the key would pass the verifier's rule for the actor (stored
+    admin, CLI operator or owner), since one that would be turned away on its
+    first call is not worth showing. The key acts as the actor.
+    """
+    target, bound = await authorize_coding_mint(deps, actor=actor, ma_agent_id=ma_agent_id)
     ttl_days = coding_key_ttl_days(actor.subject)
     async with deps.session_factory() as session, session.begin():
         token = await mint_agent_mcp_token(
@@ -276,18 +295,15 @@ async def mint_coding_key(
             platform=None,
             channel_id=bound,
             purpose="coding",
+            client=TOKEN_CLIENT,
         )
         if audited is not None:
             await audited(session, target.agent.name)
-    command, config = coding_tool_config(
-        agent_name=target.agent.name, public_url=public_url, jwt=token
-    )
     return MintedCodingKey(
         jti=token_jti(token),
         token=token,
+        url=public_url,
         expires_at=now + dt.timedelta(days=ttl_days),
-        command=command,
-        config=config,
     )
 
 
