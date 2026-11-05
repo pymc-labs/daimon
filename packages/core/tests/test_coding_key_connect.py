@@ -10,6 +10,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 import httpx
+import jwt
 import pytest
 from daimon.core._models import Account, CodingKeyClaim, McpToken, WebAudit
 from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError
@@ -25,7 +26,8 @@ from daimon.core.coding_key_connect import (
 from daimon.core.coding_key_prompts import CODING_CLIENTS
 from daimon.core.coding_keys import list_coding_keys
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.stores import agent_owners
+from daimon.core.mcp_auth import ADMIN_CODING_KEY_TTL_DAYS
+from daimon.core.stores import agent_owners, web_roles
 from daimon.core.stores.domain import Role
 from daimon.testing.db import DatabasePreflight, require_owned_sessionmaker
 from daimon.testing.factories import make_account, make_tenant
@@ -290,6 +292,70 @@ async def test_an_admin_who_stays_an_admin_can_claim(world: _World) -> None:
     code = code_of(await world.mint(actor=world.admin), "codex")
 
     assert await world.claim(code), "an admin's code trades while they are one"
+
+
+async def _owner_grant_maker(world: _World) -> AgentActor:
+    """The owner of the agent whose stored role is `user` but who holds the workspace owner
+    grant: the web calls them an admin, the verifier's standing is theirs as the owner."""
+    async with world.sessions.begin() as session:
+        maker = Account(tenant_id=world.tenant_id)
+        session.add(maker)
+        await session.flush()
+        assert maker.role == Role.USER, "the stored role is the plain one"
+        await web_roles.set_workspace_role(
+            session,
+            tenant_id=world.tenant_id,
+            account_id=maker.id,
+            role="owner",
+            granted_by_account_id=None,
+        )
+        await agent_owners.clear_owner(session, tenant_id=world.tenant_id, agent_id=world.agent_id)
+        await agent_owners.record_creator(
+            session, tenant_id=world.tenant_id, agent_id=world.agent_id, account_id=maker.id
+        )
+    return AgentActor(
+        tenant_id=world.tenant_id,
+        account_id=maker.id,
+        subject=Subject(is_admin=True, platform_user_id=str(maker.id)),
+        surface=Surface.WEB,
+    )
+
+
+async def test_an_owner_grant_maker_with_a_user_role_is_an_admin_at_claim_too(
+    world: _World,
+) -> None:
+    """The web role decides, as at the mint: the stored `user` role is not the standing."""
+    actor = await _owner_grant_maker(world)
+    body = world.served["agent"]
+    assert body is not None
+    metadata = body["metadata"]
+    assert isinstance(metadata, dict)
+    metadata["daimon_setup_hidden"] = "true"
+    code = code_of(await world.mint(actor=actor), "codex")
+
+    token = await world.claim(code)
+
+    assert token, "an owner grant sees a withheld setup, so its code trades"
+    exp = jwt.decode(token, SECRET, algorithms=["HS256"], options={"verify_exp": False})["exp"]
+    assert exp == int((NOW + dt.timedelta(days=ADMIN_CODING_KEY_TTL_DAYS)).timestamp()), (
+        "the key lasts an admin's term, not an owner's"
+    )
+
+
+async def test_an_owner_grant_removed_between_mint_and_claim_is_refused(world: _World) -> None:
+    actor = await _owner_grant_maker(world)
+    body = world.served["agent"]
+    assert body is not None
+    metadata = body["metadata"]
+    assert isinstance(metadata, dict)
+    metadata["daimon_setup_hidden"] = "true"
+    code = code_of(await world.mint(actor=actor), "codex")
+    async with world.sessions.begin() as session:
+        await web_roles.delete_workspace_role(
+            session, tenant_id=world.tenant_id, account_id=actor.account_id
+        )
+
+    assert await world.claim(code) is None, "without the grant a withheld setup is not theirs"
 
 
 async def test_an_archived_agent_refuses_the_claim(world: _World) -> None:

@@ -40,7 +40,8 @@ from daimon.core.mcp_auth import coding_key_ttl_days, mint_agent_mcp_token, toke
 from daimon.core.stores import coding_key_claims as claims_store
 from daimon.core.stores import web_audit
 from daimon.core.stores.accounts import get_account_with_tenant
-from daimon.core.stores.domain import Role
+from daimon.core.web_roles_rules import is_admin as web_is_admin
+from daimon.core.web_roles_rules import role_of_account
 from pydantic import BaseModel
 
 CODE_TTL = dt.timedelta(minutes=CODE_TTL_MINUTES)
@@ -179,7 +180,8 @@ async def claim_coding_key(
     """Trade a code for the coding key it stands for; None when it cannot be traded.
 
     What made the code is checked again now, as a key made on screen is: the maker
-    must still be allowed to make one for this agent (`authorize_coding_mint`). That
+    must still be allowed to make one for this agent (`authorize_coding_mint`), as the
+    web role they hold now rates them, not the stored account role. That
     reads the live agent, so it runs before the batch is locked and no row lock is
     held across it. The code's whole batch is then row-locked before anything is
     decided, so two claims racing in one batch cannot both mint: the second waits,
@@ -191,9 +193,17 @@ async def claim_coding_key(
         if seen is None or seen.used_at is not None or seen.expires_at <= now:
             return None
         identity = await get_account_with_tenant(session, account_id=seen.account_id)
-    if identity is None or identity.tenant_id != seen.tenant_id:
+        if identity is None or identity.tenant_id != seen.tenant_id:
+            return None
+        # The web role, as the screen that made the code reads it (an owner grant or a
+        # chat admin counts, as the stored account role alone would miss); None is a
+        # suspended person, who can open nothing.
+        role = await role_of_account(
+            session, tenant_id=seen.tenant_id, account_id=seen.account_id, chat_admin=False
+        )
+    if role is None:
         return None
-    is_admin = identity.role is Role.ADMIN
+    is_admin = web_is_admin(role)
     actor = AgentActor(
         tenant_id=seen.tenant_id,
         account_id=seen.account_id,
