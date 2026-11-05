@@ -192,7 +192,11 @@ MAIN_BRANCH_COLUMNS = {
 
 
 # Columns added after the continuation migration; heads below HEAD skip them.
-AFTER_MERGE_COLUMNS = {("turn_origins", "helper_of"), ("turn_origins", "serves_helpers")}
+AFTER_MERGE_COLUMNS = {
+    ("turn_origins", "helper_of"),
+    ("turn_origins", "serves_helpers"),
+    ("mcp_tokens", "client"),
+}
 
 
 MAIN_BRANCH_OBJECTS = {"ix_platform_principals_account_id", "usage_observation_binding_id_fkey"}
