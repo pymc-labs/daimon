@@ -25,7 +25,8 @@ team forgets that team and archives no tenant: a deployment serves one
 organisation. A completion ping is an @mention plus Discord's 👀 and ✅ on the
 asker's message, and Ask a person is a button on the card below the answer (and
 the `support` form); a post_wizard form has no step images. An agent edits or deletes its own
-posts but closes no thread (`delete_thread`, `archive_thread`).
+posts but closes no thread (`delete_thread`, `archive_thread`), never in a group chat,
+and with no rule for whoever opened the thread: Teams opens none for a turn.
 Thread participation shares Discord's gates
 (`test_thread_participation_platforms.py`) but needs Graph, so without the
 consent a followed thread stays mention-only; and where Discord's unprompted
@@ -51,19 +52,24 @@ No platform parametrization, no database -- this is a scope check.
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import json
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Literal, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import pytest
 import yaml
 from daimon.adapters.mcp.tools import github_connect as connect_tool
+from daimon.adapters.mcp.tools.discord import _tidy as discord_tidy
+from daimon.adapters.mcp.tools.teams import _tidy as teams_tidy
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
 from daimon.adapters.teams import here, installations, memory
+from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.attachments import (
     ChannelMedia,
     InboundFile,
@@ -71,12 +77,14 @@ from daimon.adapters.teams.attachments import (
     prepare_attachments,
 )
 from daimon.adapters.teams.commands import CommandContext, parse_command
+from daimon.adapters.teams.context import render_user_message
 from daimon.adapters.teams.credential_requests import credential_form
 from daimon.adapters.teams.help import COMMAND_HELP
 from daimon.adapters.teams.identity import TeamsInbound, parse_inbound
 from daimon.adapters.teams.installations import TeamInstalls
 from daimon.adapters.teams.lifecycle import TeamsTurnLifecycle
 from daimon.adapters.teams.private_replies import IN_THREAD
+from daimon.adapters.teams.thread_reader import ThreadReader
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.credential_requests import ENV_FILE_TARGET
 from daimon.core.github_connect_cards import build_connect_card
@@ -84,6 +92,7 @@ from daimon.core.here_card import assemble_here_card
 from daimon.core.stores.domain import CredentialRequestRow
 from daimon.core.teams_threads import conversation_of, new_setup_thread_id
 from daimon.core.turn.state import TextBlock, TurnState
+from fastmcp.exceptions import ToolError
 from microsoft_teams.api import MessageActivity, MessageActivityInput, SentActivity
 from microsoft_teams.api.activities.install_update import UninstalledActivity
 
@@ -417,3 +426,63 @@ async def test_a_teams_connect_github_link_goes_to_the_requesters_one_to_one_cha
         "the link goes to a 1:1 chat, never the channel; if it moves to a private reply "
         "in the thread, replace this record"
     )
+
+
+def _inbound(kind: Literal["dm", "channel", "group"], conversation: str) -> TeamsInbound:
+    return TeamsInbound(
+        kind=kind,
+        entra_tenant_id=TENANT,
+        user_id="00000000-0000-0000-0000-000000000002",
+        conversation_id=conversation,
+        channel_id=conversation.split(";", 1)[0],
+        activity_id="a-1",
+        text="delete that",
+        service_url="https://smba.example.test",
+    )
+
+
+async def test_a_teams_one_to_one_chat_lists_the_agents_posts_instead_of_its_history() -> None:
+    """Graph cannot read a 1:1 chat back, so the turn lists the agent's own posts."""
+    dm = _inbound("dm", "a:chat-1")
+    graph = MagicMock()
+    reader = ThreadReader(graph, cast(Any, None), bot_app_id="bot")
+    assert await reader.read(dm, watermark=None, skip_ids=frozenset()) is None
+    assert graph.mock_calls == [], "nothing is read back"
+    message = render_user_message(
+        "<controls/>",
+        dm,
+        is_admin=False,
+        keys="",
+        prefix="",
+        history=None,
+        own_posts=[("m-1", "answer", "2026-11-05T09:00:00+00:00")],
+    )
+    assert '<post message_id="m-1" role="answer"' in message
+    for kind, conversation in [
+        ("channel", "19:c@thread.tacv2;messageid=1"),
+        ("group", "19:g@thread.v2"),
+    ]:
+        own = TeamsApp._own_posts(  # pyright: ignore[reportPrivateUsage]
+            cast(Any, None), _inbound(kind, conversation), uuid.uuid4(), "ag-1", skip=None
+        )
+        assert await own == [], f"a {kind} replays its history and lists no posts"
+
+
+def test_a_teams_tidy_has_no_thread_opener_rule() -> None:
+    """Teams records no auto-thread, so only the requester or an admin tidies a turn post;
+    Discord also lets whoever opened the thread do so."""
+    assert "thread_opener_id" in inspect.getsource(discord_tidy)
+    assert "thread_opener_id" not in inspect.getsource(teams_tidy)
+
+
+async def test_a_teams_group_chat_refuses_tidying() -> None:
+    """Agent tools do not reach a group chat, so its posts are never edited or deleted."""
+    runtime = SimpleNamespace(teams_client=object())
+    auth = SimpleNamespace(platform_user_id="u")
+    with pytest.raises(ToolError, match="group chats"):
+        await teams_tidy._check_place(  # pyright: ignore[reportPrivateUsage]
+            cast(Any, runtime),
+            cast(Any, SimpleNamespace(origin=None)),
+            cast(Any, auth),
+            "19:g@thread.v2",
+        )
