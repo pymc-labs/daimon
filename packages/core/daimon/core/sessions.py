@@ -64,6 +64,7 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_TENANT,
 )
 from daimon.core.errors import StoreError
+from daimon.core.github_app_auth import PermissionProfile, group_repository_access
 from daimon.core.github_app_session import (
     REQUESTER_CACHE,
     AppSessionAccess,
@@ -75,6 +76,7 @@ from daimon.core.github_app_session import (
     effective_app_grant_view,
     finish_app_delivery,
     prepare_app_access,
+    projected_vault_credential_count,
     repo_credential_entries,
     resolve_bot_identity,
     revoke_app_access,
@@ -83,9 +85,10 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_hold import hold_key
 from daimon.core.mcp_identity import RelayBinding, identity_relay_urls
 from daimon.core.mcp_personal_servers import visible_mcp_servers, visible_tools
-from daimon.core.mcp_server_url import session_mcp_url
+from daimon.core.mcp_server_url import github_router_url, same_mcp_url, session_mcp_url
 from daimon.core.mcp_vault import (
     GITHUB_COPILOT_MCP_URL,
+    add_github_router_credential,
     create_relay_vault,
     ensure_agent_mcp_vault,
     hold_agent_vault_lock,
@@ -105,6 +108,8 @@ from daimon.core.session_ports_compat import (
 )
 from daimon.core.session_seal import origin_stamp
 from daimon.core.session_snapshot import (
+    MA_METADATA_KEY_GITHUB_TRANSPORT,
+    GithubTransport,
     MaSkill,
     session_mcp_servers,
     session_skills,
@@ -116,11 +121,12 @@ from daimon.core.skills.unresolved import (
     skill_unavailable,
     unresolved_skill_id,
 )
-from daimon.core.stores import agent_files, agent_memory_stores
+from daimon.core.stores import agent_files, agent_memory_stores, github_router_sessions
 from daimon.core.stores import agent_mcp_credentials as credential_store
 from daimon.core.stores.agent_daimon_tools import record_enabled_daimon_tools
 from daimon.core.stores.channel_skills import list_skill_channel_rules
 from daimon.core.stores.domain import BackendAgent
+from daimon.core.stores.github_access import MAX_SESSION_VAULT_CREDENTIALS
 from daimon.core.stores.github_issued_tokens import register_app_session_vault
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolSafetyPolicy
 from daimon.core.turn_hold import TurnHold
@@ -200,6 +206,117 @@ def _shared_mcp_vault_required(
 
 def _session_mcp_credential(url: str, *, app_mode: bool) -> bool:
     return not app_mode or url != GITHUB_COPILOT_MCP_URL
+
+
+#: Vault credentials besides the GitHub tokens a routed session's App vault
+#: holds: its Daimon credential and the router bearer.
+_ROUTED_VAULT_OTHER_CREDENTIALS = 2
+
+
+def _needs_github_router(
+    grant_view: EffectiveAppGrantView,
+    *,
+    agent: BetaManagedAgentsAgent,
+    enabled: bool,
+    public_url: str | None,
+) -> bool:
+    """Whether a new session reaches GitHub's MCP server through the router.
+
+    Only when the setting is on, the deployment has a public URL, the agent has
+    GitHub's hosted MCP server attached, and its grants need more than one
+    installation token: more than one installation, or more than one
+    permission or 500-repository chunk in one. One token keeps the direct URL
+    and bearer, exactly as before the router. The router bearer takes one
+    vault slot, so a grant set that would then overflow the vault stays direct.
+    """
+    if not enabled or public_url is None:
+        return False
+    if not any(same_mcp_url(server.url, GITHUB_COPILOT_MCP_URL) for server in agent.mcp_servers):
+        return False
+    rows, _, _, inadmissible_urls = grant_view
+    refused = set(inadmissible_urls)
+    granted: list[tuple[int, int, PermissionProfile]] = [
+        (repo.installation_id, repo.repo_id, profile)
+        for _, repo, profile in rows
+        if f"https://github.com/{repo.repo_full_name}" not in refused
+    ]
+    multi_installation = len({installation_id for installation_id, _, _ in granted}) > 1
+    groups = group_repository_access(granted, sort_repo_ids=multi_installation)
+    if len(groups) <= 1:
+        return False
+    return (
+        projected_vault_credential_count(
+            groups,
+            other_credentials=_ROUTED_VAULT_OTHER_CREDENTIALS,
+            multi_installation=multi_installation,
+        )
+        <= MAX_SESSION_VAULT_CREDENTIALS
+    )
+
+
+async def _open_github_router(
+    anthropic: AsyncAnthropic,
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    account_id: uuid.UUID | None,
+    vault_id: str,
+    public_url: str,
+    scope: Scope,
+) -> uuid.UUID | None:
+    """Create the session's router record and write its bearer to the App vault.
+
+    Returns the record id only when both succeeded. On any failure the record is
+    closed locally, the failure is logged, and the session stays direct (None).
+    """
+    record_id: uuid.UUID | None = None
+    try:
+        async with session_factory.begin() as db:
+            record, bearer = await github_router_sessions.create(
+                db,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                account_id=account_id,
+                expires_at=(
+                    dt.datetime.now(dt.UTC) + github_router_sessions.GITHUB_ROUTER_SESSION_TTL
+                ),
+            )
+        record_id = record.id
+        await add_github_router_credential(
+            anthropic,
+            vault_id=vault_id,
+            router_url=github_router_url(public_url),
+            bearer=bearer,
+            scope=scope,
+        )
+    except Exception as exc:
+        _log.warning(
+            "session.github_router_unavailable",
+            tenant_id=str(tenant_id),
+            agent_uuid=str(agent_id),
+            error_type=type(exc).__name__,
+        )
+        if record_id is not None:
+            await _close_github_router_session(session_factory, record_id)
+        return None
+    return record_id
+
+
+async def _close_github_router_session(
+    session_factory: async_sessionmaker[AsyncSession], router_session_id: uuid.UUID
+) -> None:
+    """Revoke a router bearer locally, before any remote cleanup. Never raises:
+    a failed close is logged, and the record still lapses at its expiry."""
+    try:
+        async with session_factory.begin() as db:
+            await github_router_sessions.close_local(db, router_session_id=router_session_id)
+    except Exception as exc:
+        _log.warning(
+            "session.github_router_close_failed",
+            router_session_id=str(router_session_id),
+            error_type=type(exc).__name__,
+        )
 
 
 def _check_resource_source(
@@ -565,6 +682,7 @@ async def create_session(
     model_override: str | None = None,
     system_override: str | None = None,
     relay_session_key: uuid.UUID | None = None,
+    github_mcp_router: bool = False,
 ) -> BetaManagedAgentsSession:
     """Create an MA session. Returns the SDK session object directly.
 
@@ -675,6 +793,15 @@ async def create_session(
     GitHub App grants. ``prepare_app_access`` mints installation tokens and
     mounts the granted repositories when an App vault is available.
 
+    ``github_mcp_router`` is the deployment's ``DAIMON_GITHUB__MCP_ROUTER``. With
+    it on, a session whose grants need more than one installation token
+    (`_needs_github_router`) gets a router record and its bearer in the App
+    vault, its GitHub MCP server re-pointed at the router, and the
+    ``daimon_github_transport=router`` stamp that its snapshot records. Every
+    token minted for it carries the record id. Any failure to set the router up
+    leaves the session direct. The record is closed locally before any remote
+    cleanup when creation fails.
+
     ``extra_resources`` are mounted alongside everything this function
     assembles, for a caller that has a file the new session must start with —
     today, the bundle carrying a replaced session's work. They are passed
@@ -735,6 +862,8 @@ async def create_session(
     )
     execution_vault_id: str | None = None
     relay_vault_id: str | None = None
+    router_session_id: uuid.UUID | None = None
+    github_transport: GithubTransport = "direct"
     try:
         if app_mode:
             assert tenant_id is not None and agent_uuid is not None and session_factory is not None
@@ -757,6 +886,29 @@ async def create_session(
                     ),
                     hold=hold,
                 )
+                public_url = (
+                    str(mcp_settings.public_url)
+                    if mcp_settings is not None and mcp_settings.public_url is not None
+                    else None
+                )
+                if public_url is not None and _needs_github_router(
+                    app_grant_view,
+                    agent=agent,
+                    enabled=github_mcp_router,
+                    public_url=public_url,
+                ):
+                    router_session_id = await _open_github_router(
+                        anthropic,
+                        session_factory=session_factory,
+                        tenant_id=tenant_id,
+                        agent_id=agent_uuid,
+                        account_id=account_id,
+                        vault_id=vault_id,
+                        public_url=public_url,
+                        scope=scope,
+                    )
+                    if router_session_id is not None:
+                        github_transport = "router"
             if shared_vault:
                 assert hide_personal_for is not None and fernet is not None
                 # A shared thread's own vault: the agent's shared tokens only.
@@ -1048,6 +1200,7 @@ async def create_session(
             public_url=public_url,
             confirmed_tools=confirmed_tools,
             chat_session_id=chat_session_id,
+            github_transport=github_transport,
         )
         gated = list(tools) != list(visible_tools(agent, hidden))
         healed = list(servers) != list(visible_mcp_servers(agent, hidden))
@@ -1103,6 +1256,8 @@ async def create_session(
         )
         if chat_session_id is not None:
             metadata["daimon_chat_session_id"] = chat_session_id
+        if github_transport == "router":
+            metadata[MA_METADATA_KEY_GITHUB_TRANSPORT] = github_transport
         if slack_turn_context_id is not None:
             metadata[MA_METADATA_KEY_PRIVATE_DM] = str(slack_turn_context_id)
         elif private_dm_id is not None:
@@ -1136,11 +1291,12 @@ async def create_session(
                         grant_view=app_grant_view,
                         anthropic=anthropic,
                         vault_id=vault_id,
+                        router_session_id=router_session_id,
                     )
                 if on_app_access is not None:
                     on_app_access(app_access)
                 resources.extend(app_access.resources)
-                if app_access.multi_installation and any(
+                if app_access.per_token_credentials and any(
                     token.credential_name.startswith("GH_TOKEN_I") for token in app_access.tokens
                 ):
                     entries = repo_credential_entries(app_access)
@@ -1248,6 +1404,10 @@ async def create_session(
                             snapshot.repo_resource_ids if snapshot is not None else None
                         ),
                     )
+                    if router_session_id is not None:
+                        await github_router_sessions.set_ma_session_id(
+                            session, router_session_id=router_session_id, ma_session_id=created.id
+                        )
                 async with httpx.AsyncClient() as app_client:
                     await finish_app_delivery(
                         session_factory,
@@ -1258,6 +1418,10 @@ async def create_session(
                     )
             return created
         except BaseException:
+            # Local revocation first: the bearer stops working before any remote cleanup.
+            if router_session_id is not None:
+                assert session_factory is not None
+                await _close_github_router_session(session_factory, router_session_id)
             if created is not None and app_mode:
                 await archive_session_record(
                     anthropic,
@@ -1270,6 +1434,9 @@ async def create_session(
                     await revoke_app_access(session_factory, app_client, app_access)
             raise
     except BaseException:
+        if router_session_id is not None:
+            assert session_factory is not None
+            await _close_github_router_session(session_factory, router_session_id)
         if app_mode and vault_id is not None:
             await archive_app_vault(anthropic, vault_id=vault_id, scope=scope)
         if relay_vault_id is not None:

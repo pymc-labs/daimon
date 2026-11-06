@@ -44,8 +44,14 @@ from anthropic.types.beta.sessions.beta_managed_agents_memory_store_resource imp
     BetaManagedAgentsMemoryStoreResource,
 )
 from daimon.core.credential_env import assemble_env_bytes
+from daimon.core.mcp_server_url import (
+    GITHUB_COPILOT_MCP_URL,
+    github_router_url,
+    session_mcp_url,
+)
 from daimon.core.session_compat import identity_change_reasons, valid_unavailable_repo_urls
 from daimon.core.session_snapshot import (
+    MA_METADATA_KEY_GITHUB_TRANSPORT,
     SessionSnapshot,
     desired_snapshot,
     fingerprint_identity,
@@ -56,12 +62,13 @@ from daimon.core.session_snapshot import (
     hash_system,
     hash_tools,
     refreshed_unavailable_state,
+    session_mcp_servers,
     session_skills,
     snapshot_from_created_session,
     snapshot_from_retrieved_session,
 )
 from daimon.core.stores.domain import AgentFileRow
-from daimon.core.tool_safety import OPEN_TOOL_SAFETY
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
 
 _NOW = datetime(2026, 9, 13, 12, 0, tzinfo=UTC)
 
@@ -1035,3 +1042,205 @@ def test_a_system_override_is_what_the_desired_session_hashes() -> None:
     assert plain.system_sha256 == hash_system("be useful"), "no override: the agent's own prompt"
     assert variant.system_sha256 == hash_system("be useful, on Teams")
     assert variant.skills_sha256 == plain.skills_sha256, "only the system axis moves"
+
+
+# --- GitHub MCP transport -----------------------------------------------------
+
+_DAIMON_URL = "https://daimon.example.com/mcp"
+
+
+def _github_agent() -> BetaManagedAgentsAgent:
+    """An agent with GitHub's hosted MCP server and Daimon's own attached."""
+    return BetaManagedAgentsAgent.model_validate(
+        {
+            **_agent().model_dump(),
+            "mcp_servers": [
+                {"name": "github", "type": "url", "url": GITHUB_COPILOT_MCP_URL},
+                {"name": "daimon-mcp", "type": "url", "url": _DAIMON_URL},
+            ],
+            "tools": [
+                {
+                    "type": "mcp_toolset",
+                    "mcp_server_name": "github",
+                    "default_config": {
+                        "enabled": True,
+                        "permission_policy": {"type": "always_allow"},
+                    },
+                    "configs": [],
+                }
+            ],
+        }
+    )
+
+
+def _github_desired(**overrides: object) -> SessionSnapshot:
+    return desired_snapshot(
+        _github_agent(),
+        hidden_mcp_server_names=frozenset(),
+        environment_id="env_science",
+        env_sha256=None,
+        repo_url=None,
+        repo_branch=None,
+        memory_store_id="memstore_1",
+        vault_id="vlt_app",
+        github_mode="app",
+        repo_urls=("https://github.com/acme/app",),
+        token_repo_urls=("https://github.com/acme/app", "https://github.com/client-org/product"),
+        token_scopes=((771, 0, (101,), 1, "t1"), (772, 0, (201,), 1, "t2")),
+        chat_session_id="chat-1",
+        tool_safety=ToolSafetyPolicy(enabled=True),
+        public_url=_DAIMON_URL,
+        **overrides,  # pyright: ignore[reportArgumentType]
+    )
+
+
+#: A two-installation App session's snapshot as stored before GitHub routing
+#: existed, and its fingerprints, all computed with that code (2026-11-06).
+_STORED_BEFORE_ROUTING: dict[str, object] = {
+    "agent_name": "research-bot",
+    "agent_version": 3,
+    "chat_session_id": "chat-1",
+    "env_file_id": None,
+    "env_resource_id": None,
+    "env_sha256": None,
+    "environment_id": "env_science",
+    "github_mode": "app",
+    "ma_agent_id": "agent_research",
+    "mcp_servers_sha256": "8937719a678ba221abc87a6901168498ed431853b1507d51e0adcf9ebd87145d",
+    "memory_read_only": False,
+    "memory_store_id": "memstore_1",
+    "model_id": "claude-sonnet-5",
+    "model_speed": "standard",
+    "personal_memory_store_id": None,
+    "repo_branch": None,
+    "repo_mount_path": None,
+    "repo_resource_id": None,
+    "repo_resource_ids": {},
+    "repo_token_issued_at": None,
+    "repo_url": None,
+    "repo_urls": ["https://github.com/acme/app"],
+    "schema_version": 1,
+    "skills_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "system_sha256": "00cfaff22b91d98da477bb5205abd4f50dc6ca0c227019522f004561496ed259",
+    "token_repo_urls": [
+        "https://github.com/acme/app",
+        "https://github.com/client-org/product",
+    ],
+    "token_scopes": [[771, 0, [101], 1, "t1"], [772, 0, [201], 1, "t2"]],
+    "tools_sha256": "0641fb6d8f04d68896fb160ba848401fb6023874ae9b4b2a8395834460b4d432",
+    "vault_id": "vlt_app",
+}
+_IDENTITY_BEFORE_ROUTING = "3d6632704c576dab7a4ead75aa40135f739998915980bd385cc260d3f98b8efc"
+_MUTABLE_BEFORE_ROUTING = "699500b72fe83004a50653f3909e94298734d114318282b33b2bd3d4f507c8ff"
+
+
+def test_a_snapshot_stored_before_github_routing_hashes_as_it_did() -> None:
+    """Absent means direct: existing sessions are neither updated nor replaced."""
+    stored = SessionSnapshot.model_validate(_STORED_BEFORE_ROUTING)
+    desired = _github_desired()
+
+    assert stored.github_transport == "direct"
+    assert json.loads(stored.model_dump_json()) == _STORED_BEFORE_ROUTING, (
+        "a direct snapshot is stored exactly as before: no new key"
+    )
+    assert json.loads(desired.model_dump_json()) == _STORED_BEFORE_ROUTING
+    for snapshot in (stored, desired):
+        assert fingerprint_identity(snapshot) == _IDENTITY_BEFORE_ROUTING
+        assert fingerprint_mutable(snapshot) == _MUTABLE_BEFORE_ROUTING
+
+
+def _routed_session(metadata: dict[str, str]) -> BetaManagedAgentsSession:
+    return BetaManagedAgentsSession(
+        id="sess_routed",
+        agent=BetaManagedAgentsSessionAgent(
+            id="agent_research",
+            description=None,
+            mcp_servers=[
+                BetaManagedAgentsMCPServerURLDefinition(
+                    name="github", type="url", url=github_router_url(_DAIMON_URL)
+                ),
+                BetaManagedAgentsMCPServerURLDefinition(
+                    name="daimon-mcp", type="url", url=session_mcp_url(_DAIMON_URL, "chat-1")
+                ),
+            ],
+            model=BetaManagedAgentsModelConfig(id="claude-sonnet-5"),
+            name="research-bot",
+            skills=[],
+            system="be useful",
+            tools=[],
+            type="agent",
+            version=3,
+        ),
+        archived_at=None,
+        created_at=_NOW,
+        environment_id="env_science",
+        metadata=metadata,
+        outcome_evaluations=[],
+        resources=[],
+        stats=BetaManagedAgentsSessionStats(),
+        status="idle",
+        title=None,
+        type="session",
+        updated_at=_NOW,
+        usage=BetaManagedAgentsSessionUsage(),
+        vault_ids=["vlt_app"],
+    )
+
+
+def test_a_routed_session_keeps_the_router_whatever_the_setting_says_later() -> None:
+    """The mode comes from the session's own stamp, and the desired servers follow
+    the recorded mode. Nothing the router setting says reaches either."""
+    recorded = snapshot_from_created_session(
+        _routed_session({MA_METADATA_KEY_GITHUB_TRANSPORT: "router"}),
+        env_sha256=None,
+        env_file_id=None,
+        repo_token_issued_at=None,
+        vault_id="vlt_app",
+        sent_skills=[],
+    )
+    unstamped = snapshot_from_created_session(
+        _routed_session({}),
+        env_sha256=None,
+        env_file_id=None,
+        repo_token_issued_at=None,
+        vault_id="vlt_app",
+        sent_skills=[],
+    )
+    desired = _github_desired(github_transport=recorded.github_transport)
+
+    assert recorded.github_transport == "router"
+    assert unstamped.github_transport == "direct"
+    assert json.loads(recorded.model_dump_json())["github_transport"] == "router"
+    assert SessionSnapshot.model_validate_json(recorded.model_dump_json()) == recorded
+    assert desired.mcp_servers_sha256 == recorded.mcp_servers_sha256, (
+        "a routed session is not pushed back to GitHub's URL"
+    )
+    assert _github_desired().mcp_servers_sha256 != recorded.mcp_servers_sha256
+    assert fingerprint_identity(desired) == fingerprint_identity(_github_desired()), (
+        "the transport is not session identity: it never replaces a session"
+    )
+
+
+def test_only_github_hosted_server_moves_to_the_router_under_its_own_name() -> None:
+    servers = session_mcp_servers(
+        _github_agent(),
+        frozenset(),
+        tool_safety=OPEN_TOOL_SAFETY,
+        public_url=_DAIMON_URL,
+        github_transport="router",
+    )
+    assert [(server.name, server.url) for server in servers] == [
+        ("github", "https://daimon.example.com/github/mcp"),
+        ("daimon-mcp", _DAIMON_URL),
+    ]
+    direct = session_mcp_servers(
+        _github_agent(), frozenset(), tool_safety=OPEN_TOOL_SAFETY, public_url=_DAIMON_URL
+    )
+    assert [server.url for server in direct] == [GITHUB_COPILOT_MCP_URL, _DAIMON_URL]
+    assert session_mcp_servers(
+        _github_agent(),
+        frozenset(),
+        tool_safety=OPEN_TOOL_SAFETY,
+        public_url=None,
+        github_transport="router",
+    ) == list(_github_agent().mcp_servers), "no public URL, no router"

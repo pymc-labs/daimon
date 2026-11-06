@@ -1134,6 +1134,10 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # FK; the scheduler then retires the orphaned session and vault
             # instead of renewing its tokens as a headless requester.
             "github_app_session_vaults",
+            # A GitHub router session holds a bearer hash and ids, no content.
+            # Erasure closes the person's open records, then ON DELETE SET NULL
+            # clears account_id; a closed record authenticates nothing.
+            "github_router_sessions",
             # The erasure fence's tombstone of a principal: a bare id with no content,
             # kept on purpose so a stale writer naming an erased principal is refused.
             "erased_principal",

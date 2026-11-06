@@ -158,6 +158,7 @@ from daimon.core.stores.github_issued_tokens import (
     session_token_needs_rotation,
     touch_running_mcp_app_session,
 )
+from daimon.core.stores.github_router_sessions import close_for_ma_session
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.routines import (
     clear_sandbox_drift,
@@ -876,6 +877,7 @@ async def _build_fire(
             github_app_id=github_app_id,
             github_app_private_key=github_app_private_key,
             agent_github_app=settings.github_app,
+            github_mcp_router=settings.github.mcp_router,
             tool_safety=settings.tool_safety,
             budget_channel_id=row.channel_id,
             # Stamped like a turn in the destination, so an isolated or sealed
@@ -1260,6 +1262,9 @@ async def _retire_mcp_app_session(
         account_id=item.account_id,
         call_site="scheduler:retire_mcp_app_session",
     )
+    # Local revocation first: the router bearer stops working before remote cleanup.
+    async with sm.begin() as session:
+        await close_for_ma_session(session, ma_session_id=item.session_id)
     await archive_session(anthropic_client, item.session_id, scope=scope)
     async with sm.begin() as session:
         await finish_headless_app_session(session, session_id=item.session_id)
@@ -1339,6 +1344,8 @@ async def _refresh_github_app_sessions(
                         account_id=item.mapping.account_id,
                         call_site="scheduler:refresh_github_app_sessions",
                     )
+                    async with sm.begin() as session:
+                        await close_for_ma_session(session, ma_session_id=session_id)
                     await archive_session(anthropic_client, session_id, scope=scope)
                     async with sm.begin() as session:
                         await mark_dead(session, id=item.mapping.id)

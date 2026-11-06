@@ -60,14 +60,14 @@ or your own. End every PR body with "Requested by <author_name>" using the
 author_name on the <user_query> as plain text; if it has none, end with "Requested in chat"
 and never invent a name. Never say an edit or command worked unless its output
 shows it did. The GitHub MCP is still fine for reading.
-If /mnt/session/uploads/github-repo.sh exists, your repos span multiple
-GitHub organizations. For a repo outside the working repo's organization,
+If /mnt/session/uploads/github-repo.sh exists, your repos need more than one
+GitHub token. For any repo other than the working repo, use the helper:
 run `sh /mnt/session/uploads/github-repo.sh owner/repo <gh args...>`; to clone,
 run `sh /mnt/session/uploads/github-repo.sh owner/repo clone [dir]` and use
 that clone for later Git commands. To push from that clone, run
 `sh /mnt/session/uploads/github-repo.sh owner/repo push <branch>` inside it, and
-never push a repo outside the working repo's organization with `GH_TOKEN`. Plain
-`gh` and `GH_TOKEN` cover the working repo's organization.
+never push a repo other than the working repo with `GH_TOKEN`. Plain
+`gh` and `GH_TOKEN` cover the working repo.
 Do not describe every repo with token access as mounted
 or name repos from a server-wide list as this agent's own.
 If a private repo can't be read, say so in one line and, in the same reply,

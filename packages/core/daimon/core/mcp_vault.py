@@ -35,7 +35,14 @@ from daimon.core.lead_intake_execution import current_intake_execution
 from daimon.core.mcp_auth import CHAT_TOKEN_REFRESH_MARGIN, chat_token_label, mint_chat_mcp_token
 from daimon.core.mcp_hold import hold_from_metadata, hold_metadata_value, hold_vault_suffix
 from daimon.core.mcp_identity import RelayBinding
-from daimon.core.mcp_server_url import canonical_mcp_url, is_session_mcp_url, same_mcp_url
+from daimon.core.mcp_server_url import (
+    GITHUB_COPILOT_MCP_URL as GITHUB_COPILOT_MCP_URL,  # re-exported: callers import it here
+)
+from daimon.core.mcp_server_url import (
+    canonical_mcp_url,
+    is_session_mcp_url,
+    same_mcp_url,
+)
 from daimon.core.mux_compat import (
     archive_vault,
     create_vault,
@@ -47,13 +54,14 @@ from daimon.core.mux_compat import (
     update_credential,
 )
 from daimon.core.stores.accounts import account_exists, get_account_with_tenant
+from daimon.core.stores.github_router_sessions import (
+    GITHUB_ROUTER_SESSION_TTL as GITHUB_ROUTER_SESSION_TTL,  # re-exported for callers here
+)
 from daimon.core.stores.mcp_tokens import get_mcp_token
 from daimon.core.turn_hold import TurnHold
 from mux.contracts.ids import Scope
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-GITHUB_COPILOT_MCP_URL = "https://api.githubcopilot.com/mcp"
 
 # Namespace prefix for the pg_advisory_xact_lock key — keeps this subsystem's
 # lock keys distinct from any other advisory-lock user in the same database.
@@ -847,6 +855,38 @@ async def add_github_copilot_credential(
             },
             scope=scope,
         )
+
+
+async def add_github_router_credential(
+    client: AsyncAnthropic,
+    *,
+    vault_id: str,
+    router_url: str,
+    bearer: str,
+    scope: Scope,
+) -> None:
+    """Write a routed session's GitHub MCP router bearer into its own App vault.
+
+    A `static_bearer` at `router_url` (`mcp_server_url.github_router_url`), the
+    exact string the session's `github` server is re-pointed at. The vault is the
+    session's own (`github_app_session.create_session_vault`), so nothing else
+    mounts the bearer. Any earlier credential at that URL is replaced, as for the
+    Copilot credential: a vault holds one credential per server.
+    """
+    stale = [
+        cred.id
+        async for cred in list_credentials(client, vault_id, scope=scope)
+        if not isinstance(cred.auth, BetaManagedAgentsEnvironmentVariableAuthResponse)
+        and same_server_url(cred.auth.mcp_server_url, router_url)
+    ]
+    for credential_id in stale:
+        await delete_credential(client, vault_id, credential_id, scope=scope)
+    await store_credential(
+        client,
+        vault_id,
+        {"auth": {"type": "static_bearer", "mcp_server_url": router_url, "token": bearer}},
+        scope=scope,
+    )
 
 
 async def add_external_mcp_credential(

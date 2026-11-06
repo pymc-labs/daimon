@@ -3565,6 +3565,11 @@ class GitHubIssuedToken(Base):
             "session_id",
             postgresql_where=text("status IN ('stored', 'delivered')"),
         ),
+        Index(
+            "ix_github_issued_tokens_router_session",
+            "router_session_id",
+            postgresql_where=text("router_session_id IS NOT NULL AND status = 'delivered'"),
+        ),
     )
     token_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
@@ -3592,6 +3597,53 @@ class GitHubIssuedToken(Base):
     superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoke_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # The router session this token serves, stamped on every row a routed
+    # session mints, so the router finds the replacement after a rotation.
+    router_session_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("github_router_sessions.id", ondelete="SET NULL")
+    )
+
+
+class GitHubRouterSession(Base):
+    """A session that reaches GitHub's MCP server through Daimon's token router.
+
+    The router authenticates the session by an opaque bearer held in the
+    session's vault; only its SHA-256 is stored. Closing the row is the local
+    revocation: a closed or expired row authenticates nothing.
+    """
+
+    __tablename__ = "github_router_sessions"
+    __table_args__ = (
+        Index(
+            "ix_github_router_sessions_open_ma_session",
+            "ma_session_id",
+            postgresql_where=text("closed_at IS NULL"),
+        ),
+        Index(
+            "ix_github_router_sessions_open_account",
+            "account_id",
+            postgresql_where=text("closed_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    # Null for shared and headless sessions, and after account erasure.
+    account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL")
+    )
+    # Set once Managed Agents has created the session.
+    ma_session_id: Mapped[str | None] = mapped_column(Text)
+    credential_sha256: Mapped[bytes] = mapped_column(LargeBinary, unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class GitHubAppSessionVault(Base):

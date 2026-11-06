@@ -101,6 +101,9 @@ class TurnDeps:
         default_factory=dict[uuid.UUID, DirectMessagePolicy]
     )
     agent_github_app: GithubAppSettings | None = None
+    # `DAIMON_GITHUB__MCP_ROUTER`: new multi-token sessions reach GitHub's MCP
+    # server through the router (`daimon.core.sessions.create_session`).
+    github_mcp_router: bool = False
     repo_memory: RepoMemorySettings = field(default_factory=RepoMemorySettings)
     # Required: safety off is the explicit `enabled=False` policy from settings.
     tool_safety: ToolSafetyPolicy = field(kw_only=True)
@@ -198,6 +201,12 @@ def _notices_off(settings: Settings) -> frozenset[uuid.UUID]:
     return frozenset(t for t, on in cast("dict[uuid.UUID, bool]", configured).items() if not on)
 
 
+def _github_mcp_router(settings: Settings) -> bool:
+    """`DAIMON_GITHUB__MCP_ROUTER`; tolerate settings mocks in adapter tests."""
+    github: object = getattr(settings, "github", None)
+    return getattr(github, "mcp_router", False) is True
+
+
 def build_turn_deps(
     settings: Settings,
     anthropic: AsyncAnthropic,
@@ -246,6 +255,7 @@ def build_turn_deps(
         github_app_id=settings.github_app.app_id,
         github_app_private_key=_reveal(settings.github_app.private_key),
         agent_github_app=settings.github_app,
+        github_mcp_router=_github_mcp_router(settings),
         public_url=str(settings.mcp.public_url) if settings.mcp.public_url is not None else None,
         web_links=WebLinks.from_settings(web if isinstance(web, WebSettings) else None),
         tool_safety=settings.tool_safety,

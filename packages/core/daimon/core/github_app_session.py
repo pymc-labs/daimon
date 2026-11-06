@@ -49,6 +49,7 @@ from daimon.core.session_snapshot import SessionSnapshot, TokenScope, token_scop
 from daimon.core.stores.github_access import (
     MAX_AGENT_INSTALLATIONS,
     MAX_SESSION_VAULT_CREDENTIALS,
+    RESERVED_CHAT_MCP_CREDENTIALS,
     AdmissibleGrantRows,
     AgentGrant,
     AuthorizedRepo,
@@ -77,6 +78,12 @@ from daimon.core.stores.github_issued_tokens import (
     set_session_id,
     store_token,
 )
+from daimon.core.stores.github_router_sessions import (
+    GITHUB_ROUTER_SESSION_TTL,
+    close_for_ma_session,
+    renew,
+    router_session_id_for_ma_session,
+)
 from daimon.core.stores.security_audit import append_github_token_event
 from daimon.core.stores.thread_sessions import (
     live_effective_config_for_ma_session,
@@ -90,6 +97,22 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = logging.getLogger(__name__)
 MAX_INSTALLATIONS_PER_AGENT = MAX_AGENT_INSTALLATIONS
+#: One installation whose grants need several tokens (read and write groups, or
+#: more than 500 repos) gets a variable per token and the `github-repo.sh`
+#: helper, as several installations do, while the variables fit the vault next
+#: to GH_TOKEN, the Copilot bearer, a router bearer and the reserved chat
+#: credential. Beyond that it keeps the one-token layout.
+MAX_SINGLE_INSTALLATION_HELPER_GROUPS = (
+    MAX_SESSION_VAULT_CREDENTIALS - RESERVED_CHAT_MCP_CREDENTIALS - 3
+)
+
+
+def uses_per_token_credentials(token_count: int, *, multi_installation: bool) -> bool:
+    """True when the session gets one variable per token and the repo helper.
+
+    A single installation with one token keeps exactly the GH_TOKEN layout.
+    """
+    return multi_installation or 2 <= token_count <= MAX_SINGLE_INSTALLATION_HELPER_GROUPS
 
 
 def installation_credential_name(installation_id: int, chunk: int) -> str:
@@ -210,6 +233,12 @@ class AppSessionAccess:
     multi_installation: bool = False
     working_repo_id: int | None = None
     repo_credential_map: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def per_token_credentials(self) -> bool:
+        return uses_per_token_credentials(
+            len(self.tokens), multi_installation=self.multi_installation
+        )
 
 
 class GitHubTokenMintUnavailable(RuntimeError):
@@ -336,14 +365,26 @@ async def effective_repo_plan(
     )
     scopes = token_scopes_for_groups(groups, multi_installation=multi_installation)
     names = {repo.repo_id: repo.repo_full_name for _, repo, _ in rows}
-    helper_entries = tuple(
-        sorted(
-            (
-                names[repo_id],
-                installation_credential_name(installation_id, chunk),
-            )
+    if multi_installation:
+        labelled = [
+            (installation_id, chunk, repo_ids)
             for installation_id, chunk, repo_ids, _, _ in map(token_scope_parts, scopes)
             if chunk is not None
+        ]
+    elif uses_per_token_credentials(len(groups), multi_installation=False):
+        # Name the groups in minting order, as `prepare_app_access` does.
+        labelled = [
+            (installation_id, chunk, repo_ids)
+            for chunk, (installation_id, _, repo_ids) in enumerate(
+                sorted(groups, key=lambda group: (group[0], group[1], group[2]))
+            )
+        ]
+    else:
+        labelled = []
+    helper_entries = tuple(
+        sorted(
+            (names[repo_id], installation_credential_name(installation_id, chunk))
+            for installation_id, chunk, repo_ids in labelled
             for repo_id in repo_ids
         )
     )
@@ -357,7 +398,7 @@ async def effective_repo_plan(
 
 def repo_credential_entries(access: AppSessionAccess) -> tuple[tuple[str, str], ...]:
     """Map granted repos to variables; an unminted variable fails closed in sh."""
-    return access.repo_credential_map if access.multi_installation else ()
+    return access.repo_credential_map if access.per_token_credentials else ()
 
 
 async def effective_repo_state(
@@ -537,8 +578,13 @@ async def prepare_app_access(
     grant_view: EffectiveAppGrantView | None = None,
     anthropic: AsyncAnthropic | None = None,
     vault_id: str | None = None,
+    router_session_id: uuid.UUID | None = None,
 ) -> AppSessionAccess:
-    """Mint only this session's effective repository groups, recording every token."""
+    """Mint only this session's effective repository groups, recording every token.
+
+    A routed session passes its router session id; every row minted here
+    carries it, so the router finds these tokens after they replace older ones.
+    """
     rows, user_id, link_generation, inadmissible_urls = (
         grant_view
         or await effective_app_grant_view(
@@ -593,7 +639,9 @@ async def prepare_app_access(
         active_groups,
         other_credentials=other_credentials,
         include_alias=include_alias,
-        multi_installation=multi_installation,
+        multi_installation=uses_per_token_credentials(
+            len(active_groups), multi_installation=multi_installation
+        ),
     )
     mint_groups = [
         group for group in active_groups if installation_ids is None or group[0] in installation_ids
@@ -646,6 +694,7 @@ async def prepare_app_access(
                     github_user_id=user_id,
                     link_generation=link_generation,
                     chunk=chunk if multi_installation else None,
+                    router_session_id=router_session_id,
                 )
             pending_token_id = pending.token_id
             try:
@@ -813,7 +862,7 @@ async def prepare_app_access(
                 for repo_id in token.repo_ids
             )
         )
-        if multi_installation
+        if uses_per_token_credentials(len(tokens), multi_installation=multi_installation)
         else (),
     )
 
@@ -876,13 +925,14 @@ async def add_app_credentials(
     multi_installation = (
         access.multi_installation or len({token.installation_id for token in access.tokens}) > 1
     )
+    per_token = uses_per_token_credentials(
+        len(access.tokens), multi_installation=multi_installation
+    )
     working_token = _working_alias(
         access.tokens, access.working_token, multi_installation=multi_installation
     )
     desired = (
-        {issued.credential_name: issued.token for issued in access.tokens}
-        if multi_installation
-        else {}
+        {issued.credential_name: issued.token for issued in access.tokens} if per_token else {}
     )
     if working_token is not None:
         desired["GH_TOKEN"] = working_token
@@ -911,7 +961,7 @@ async def add_app_credentials(
         [(item.installation_id, item.profile, item.repo_ids) for item in access.tokens],
         other_credentials=other_count,
         include_alias=working_token is not None,
-        multi_installation=multi_installation,
+        multi_installation=per_token,
     )
     for name, credential_id in existing.items():
         if name not in desired:
@@ -976,6 +1026,7 @@ async def finish_app_delivery(
     provisional_session_id: str,
     session_id: str,
     grant_guard: tuple[uuid.UUID, uuid.UUID] | None = None,
+    router_session_id: uuid.UUID | None = None,
 ) -> None:
     async with sessionmaker.begin() as session:
         if grant_guard is not None:
@@ -983,7 +1034,10 @@ async def finish_app_delivery(
             if await _access_is_stale(session, access):
                 raise ValueError("GitHub access changed during session delivery")
         await set_session_id(
-            session, provisional_session_id=provisional_session_id, session_id=session_id
+            session,
+            provisional_session_id=provisional_session_id,
+            session_id=session_id,
+            router_session_id=router_session_id,
         )
         for issued in access.tokens:
             delivered = await mark_delivered(session, token_id=issued.token_id)
@@ -1032,6 +1086,13 @@ async def revoke_session_tokens(
     fernet: MultiFernet,
     except_ids: frozenset[uuid.UUID] = frozenset(),
 ) -> None:
+    """Revoke a closing session's tokens, after closing its router record.
+
+    The router record closes in its own transaction first, so a failed GitHub
+    revoke never leaves the router bearer usable.
+    """
+    async with sessionmaker.begin() as session:
+        await close_for_ma_session(session, ma_session_id=session_id)
     async with sessionmaker() as session:
         rows = await list_session_tokens(session, session_id=session_id)
     for row in rows:
@@ -1071,6 +1132,7 @@ async def close_headless_app_session(
     """Finish a routine's App session; an interrupted cleanup is retried by the sweeper."""
     async with sessionmaker.begin() as session:
         vault_id = await finish_headless_app_session(session, session_id=session_id)
+        await close_for_ma_session(session, ma_session_id=session_id)
     if vault_id is None:
         return
     async with httpx.AsyncClient() as client:
@@ -1171,6 +1233,9 @@ async def _current_app_access(
     mounted = _mounted_repo_ids(
         [repo_id for row in ordered for repo_id in row.repo_ids], working_ids=working_ids
     )
+    # Unlabelled single-installation rows are numbered in minting order (read
+    # before write), so each per-token variable keeps its own name.
+    unlabelled_chunks: dict[int, int] = {}
     for row in ordered:
         if recorded_by_token_id and recorded_by_token_id.get(row.token_id) != (
             row.installation_id,
@@ -1189,7 +1254,11 @@ async def _current_app_access(
         profile: PermissionProfile = (
             "write" if row.permissions.get("contents") == "write" else "read"
         )
-        chunk = row.chunk if row.chunk is not None else 0
+        if row.chunk is not None:
+            chunk = row.chunk
+        else:
+            chunk = unlabelled_chunks.get(row.installation_id, 0)
+            unlabelled_chunks[row.installation_id] = chunk + 1
         credential_name = installation_credential_name(row.installation_id, chunk)
         tokens.append(
             AppToken(
@@ -1252,7 +1321,7 @@ async def _current_app_access(
                 for repo_id in token.repo_ids
             )
         )
-        if multi_installation
+        if uses_per_token_credentials(len(tokens), multi_installation=multi_installation)
         else (),
     )
 
@@ -1352,8 +1421,14 @@ async def _rotate_live_app_tokens_unlocked(
     active_turn: bool = False,
     unavailable_repos: tuple[tuple[str, datetime], ...] = (),
     installation_ids: tuple[int, ...] = (),
+    router_session_id: uuid.UUID | None = None,
 ) -> AppSessionAccess:
-    """Refresh resources and vault in place; leave equal-access old tokens to expire."""
+    """Refresh resources and vault in place; leave equal-access old tokens to expire.
+
+    A routed session's new rows carry its router session id. The caller may
+    pass it; otherwise it is read from the session's router record or its
+    current rows, so no rotation path drops the stamp.
+    """
     scope = resource_scope(
         tenant_id=str(tenant_id),
         account_id=str(account_id) if account_id is not None else "service",
@@ -1367,6 +1442,12 @@ async def _rotate_live_app_tokens_unlocked(
     def mark_swapped() -> None:
         nonlocal swapped
         swapped = True
+
+    if router_session_id is None:
+        async with sessionmaker() as session:
+            router_session_id = await router_session_id_for_ma_session(
+                session, ma_session_id=session_id
+            )
 
     async with httpx.AsyncClient() as client:
         grant_view = await effective_app_grant_view(
@@ -1415,6 +1496,7 @@ async def _rotate_live_app_tokens_unlocked(
             grant_view=grant_view,
             anthropic=anthropic,
             vault_id=vault_id,
+            router_session_id=router_session_id,
         )
         if installation_ids and old_access is None:
             await revoke_app_access(sessionmaker, client, minted_access)
@@ -1490,6 +1572,7 @@ async def _rotate_live_app_tokens_unlocked(
                 provisional_session_id=provisional,
                 session_id=session_id,
                 grant_guard=(tenant_id, agent_id),
+                router_session_id=router_session_id,
             )
             async with sessionmaker.begin() as session:
                 await lock_agent_grants(session, tenant_id=tenant_id, agent_id=agent_id)
@@ -1509,6 +1592,13 @@ async def _rotate_live_app_tokens_unlocked(
                     access=access,
                     now=finished_at,
                 )
+                if router_session_id is not None:
+                    # A rotation is a refresh point: the routed session is in use.
+                    await renew(
+                        session,
+                        router_session_id=router_session_id,
+                        expires_at=finished_at + GITHUB_ROUTER_SESSION_TTL,
+                    )
             return access
         except Exception:
             kept: frozenset[uuid.UUID] = frozenset()
@@ -1533,6 +1623,7 @@ async def _rotate_live_app_tokens_unlocked(
                             await restore_session_tokens(
                                 session,
                                 token_ids=frozenset(token.token_id for token in old_access.tokens),
+                                router_session_id=router_session_id,
                             )
                     except Exception:
                         _log.exception(
@@ -1567,7 +1658,10 @@ async def _rotate_live_app_tokens_unlocked(
                                 )
                 elif swapped and not active_turn:
                     # Only an idle session is archived; a running turn is never
-                    # interrupted, and the next turn boundary replaces it.
+                    # interrupted, and the next turn boundary replaces it. Close
+                    # its router record first so its bearer stops working.
+                    async with sessionmaker.begin() as session:
+                        await close_for_ma_session(session, ma_session_id=session_id)
                     await archive_session(anthropic, session_id, scope=scope)
                 elif swapped:
                     _log.warning(
@@ -1588,6 +1682,7 @@ async def _rotate_live_app_tokens_unlocked(
                                     if token.token in delivered
                                 ),
                                 now=datetime.now(UTC),
+                                router_session_id=router_session_id,
                             )
                     except Exception:
                         _log.exception(
@@ -1622,6 +1717,7 @@ async def rotate_live_app_tokens(
     active_turn: bool = False,
     unavailable_repos: tuple[tuple[str, datetime], ...] = (),
     installation_ids: tuple[int, ...] = (),
+    router_session_id: uuid.UUID | None = None,
 ) -> AppSessionAccess:
     """Rotate without holding a database connection during network calls."""
     return await _rotate_live_app_tokens_unlocked(
@@ -1638,4 +1734,5 @@ async def rotate_live_app_tokens(
         active_turn=active_turn,
         unavailable_repos=unavailable_repos,
         installation_ids=installation_ids,
+        router_session_id=router_session_id,
     )

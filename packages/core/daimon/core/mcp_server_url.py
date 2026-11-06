@@ -8,6 +8,11 @@ from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
+#: GitHub's hosted MCP server, the URL an agent's `github` server is attached at.
+GITHUB_COPILOT_MCP_URL = "https://api.githubcopilot.com/mcp"
+#: The deployment's GitHub MCP router route, at the app root beside `/mcp`.
+GITHUB_ROUTER_PATH = "/github/mcp"
+
 
 def canonical_mcp_url(url: str) -> str:
     """Lowercase scheme and host, drop a default port, the fragment and a trailing slash.
@@ -63,6 +68,16 @@ def ascii_mcp_url(url: str) -> str:
 
 def same_ascii_mcp_url(left: str, right: str) -> bool:
     return ascii_mcp_url(left) == ascii_mcp_url(right)
+
+
+def github_router_url(public_url: str) -> str:
+    """The GitHub MCP router URL for the MCP endpoint URL `public_url` (`…/mcp`).
+
+    A routed session's `github` server and its router credential both use this
+    exact string: the managed runtime matches a credential to a server by URL.
+    """
+    root = public_url.rstrip("/").removesuffix("/mcp").rstrip("/")
+    return root + GITHUB_ROUTER_PATH
 
 
 def session_mcp_url(public_url: str, session_id: str) -> str:

@@ -420,6 +420,17 @@ def create_mcp_app(
         from daimon.adapters.mcp.identity_relay import build_relay_clients
 
         relay_clients = build_relay_clients(identity.servers)
+    # The GitHub MCP router serves sessions whose App grants need more than one
+    # token. It decrypts those tokens, so it needs the App and the crypto keys.
+    github_router_client: httpx.AsyncClient | None = None
+    if (
+        fernet is not None
+        and effective_settings.github_app.app_id is not None
+        and effective_settings.github_app.private_key is not None
+    ):
+        from daimon.adapters.mcp.github_router import build_github_router_client
+
+        github_router_client = build_github_router_client()
 
     @asynccontextmanager
     async def audit_lifespan(_server: FastMCP) -> AsyncIterator[None]:
@@ -444,6 +455,8 @@ def create_mcp_app(
                 await slack_http.close()
                 for client in relay_clients.values():
                     await client.aclose()
+                if github_router_client is not None:
+                    await github_router_client.aclose()
 
     # Session state is keyed per request (StripSessionIdMiddleware, below) and
     # kept a day: bound it. Nothing needs it past the request.
@@ -691,6 +704,29 @@ def create_mcp_app(
                 clock=lambda: datetime.now(UTC),
             ),
             methods=RELAY_METHODS,
+        )
+    if github_router_client is not None:
+        assert fernet is not None
+        from daimon.adapters.mcp.github_router import (
+            GITHUB_ROUTER_METHODS,
+            GITHUB_ROUTER_ROUTE,
+            CoreRouterBackend,
+            build_github_router_route,
+        )
+
+        # The router bearer IS the credential, as with the identity relay.
+        app.add_route(
+            GITHUB_ROUTER_ROUTE,
+            build_github_router_route(
+                backend=CoreRouterBackend(
+                    sessionmaker=effective_sessionmaker,
+                    fernet=fernet,
+                    clock=lambda: datetime.now(UTC),
+                ),
+                sessionmaker=effective_sessionmaker,
+                client=github_router_client,
+            ),
+            methods=GITHUB_ROUTER_METHODS,
         )
     app.add_route("/readyz", _build_readyz(effective_sessionmaker), methods=["GET"])
     app.add_route(
