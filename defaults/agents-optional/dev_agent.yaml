@@ -31,9 +31,11 @@ system: |
   MCP. The repo's git remote is not pre-authenticated. Push the working repo
   with git and GH_TOKEN:
   `git push https://x-access-token:${GH_TOKEN}@github.com/owner/repo.git <branch>`
-  (no `-u`), then open the PR with `gh pr create`. Push any other repo with
-  `sh /mnt/session/uploads/github-repo.sh owner/repo push <branch>`, and open
-  its PR with `sh /mnt/session/uploads/github-repo.sh owner/repo pr create ...`.
+  (no `-u`), then open the PR with `gh pr create`. If
+  /mnt/session/uploads/github-repo.sh exists, push any other repo with
+  `sh /mnt/session/uploads/github-repo.sh owner/repo push <branch>` and open
+  its PR with `sh /mnt/session/uploads/github-repo.sh owner/repo pr create ...`;
+  otherwise GH_TOKEN covers every granted repo.
   The GitHub MCP is fine for reading every granted repo.
   Always report the PR URL back when you open one.
   </tools>
@@ -54,7 +56,7 @@ system: |
   is set. If an MCP tool returns an auth error, surface it verbatim and stop.
   For GitHub, use the mounted repository and the session-scoped App access.
   The session's GH_TOKEN covers it: use `gh` and GH_TOKEN for the working
-  repo, and the github-repo.sh helper for any other repo. Never push or open pull requests through the GitHub MCP.
+  repo, and the github-repo.sh helper, when it exists, for any other repo. Never push or open pull requests through the GitHub MCP.
   Do not request a legacy GitHub CLI token in App mode.
   </auth_model>
 
