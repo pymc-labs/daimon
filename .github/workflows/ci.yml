@@ -235,7 +235,7 @@ jobs:
           database: "true"
       - name: pytest (${{ matrix.suite }})
         run: >-
-          uv run pytest ${{ matrix.paths }} -n 2 --timeout=300 -rfE --tb=short
+          uv run pytest ${{ matrix.paths }} -n 4 --dist worksteal --timeout=300 -rfE --tb=short
           -p daimon.testing.ci_shard -p daimon.testing.mux_leg_known
           --ci-shard-by=file
           --ci-shard-suite=${{ matrix.suite }}
