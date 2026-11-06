@@ -32,6 +32,11 @@ _THIS_TEST = "packages/core/tests/test_seeded_github_claims.py"
 #: Claims seeded text may make beyond the core guidance's, each mapped to the
 #: test that backs it.
 SEEDED_GITHUB_CLAIMS: Mapping[str, str] = {
+    # Which surface reaches which repo: the helper when it exists, else GH_TOKEN.
+    "otherwise GH_TOKEN covers every granted repo.": (
+        "packages/core/tests/test_github_access_surfaces.py"
+        "::test_every_surface_uses_the_repo_installation_token"
+    ),
     "The repo's git remote is not pre-authenticated.": (
         f"{_THIS_TEST}::test_dev_agent_github_wording_matches_the_core_guidance"
     ),
