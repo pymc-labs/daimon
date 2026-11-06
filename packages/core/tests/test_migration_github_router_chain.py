@@ -69,10 +69,14 @@ async def test_staging_at_0186_with_tables_reruns_and_downgrades(
             config = _config(SCRIPTS, sync)
             command.upgrade(config, "head")
             sync.commit()
-            # Staging: stamped 0185 on the old chain's shape, tables from 0186.
+            # Downgrading past 0186 keeps 0174a's router schema: production
+            # rolled back to its release revision still needs it.
             command.downgrade(config, "0185_agent_post_role")
             sync.commit()
-            assert not inspect(sync).has_table(SESSION_TABLE)
+            _assert_router_objects(sync)
+            command.downgrade(config, "0174a_github_router_sessions")
+            sync.commit()
+            _assert_router_objects(sync)
             command.upgrade(config, "head")
             _assert_head(sync, HEAD)
             _assert_router_objects(sync)
@@ -84,7 +88,7 @@ async def test_staging_at_0186_with_tables_reruns_and_downgrades(
             _assert_head(sync, HEAD)
             _assert_router_objects(sync)
             sync.commit()
-            # Downgrading across both revisions does not fail on missing objects.
+            # Downgrading below 0174a removes the schema it owns.
             command.downgrade(config, "0174_drop_channel_admins")
             assert not inspect(sync).has_table(SESSION_TABLE)
 

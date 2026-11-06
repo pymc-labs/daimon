@@ -8,7 +8,7 @@ from the issued-token rows stamped with the same router session.
 Revision ID: 0186_github_router_sessions
 Revises: 0185_agent_post_role
 
-downgrade: destructive
+downgrade: safe
 """
 
 from collections.abc import Sequence
@@ -63,6 +63,7 @@ def upgrade() -> None:
             ["router_session_id"],
             postgresql_where=sa.text("router_session_id IS NOT NULL AND status = 'delivered'"),
         )
+    op.execute("COMMENT ON TABLE github_router_sessions IS 'GitHub MCP router sessions'")
 
 
 def _create_sessions_table() -> None:
@@ -99,10 +100,6 @@ def _create_sessions_table() -> None:
 
 
 def downgrade() -> None:
-    # IF EXISTS: 0174a and 0186 share this DDL, and whichever downgrades first
-    # removes it for the other.
-    op.execute("DROP INDEX IF EXISTS ix_github_issued_tokens_router_session")
-    op.execute("ALTER TABLE github_issued_tokens DROP COLUMN IF EXISTS router_session_id")
-    op.execute("DROP INDEX IF EXISTS ix_github_router_sessions_open_account")
-    op.execute("DROP INDEX IF EXISTS ix_github_router_sessions_open_ma_session")
-    op.execute("DROP TABLE IF EXISTS github_router_sessions")
+    # 0174a owns the router schema; downgrading to it must keep that schema, so
+    # this revision undoes only its own table comment.
+    op.execute("COMMENT ON TABLE github_router_sessions IS NULL")
