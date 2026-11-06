@@ -1211,7 +1211,7 @@ Size limits for GitHub skill imports, and the agent GitHub MCP router switch.
 
 ### `DAIMON_GITHUB__MCP_ROUTER`
 
-`bool` · optional · default `False`
+`bool` · optional · default `True`
 
 Route the agent's `github` MCP server through Daimon's `/github/mcp` route, beside the
 MCP endpoint, for each new session whose GitHub App grants need more than one
@@ -1219,7 +1219,8 @@ installation token, so every granted repository is reached with its own installa
 token. Sessions that need one token, and every session created while this is off, call
 GitHub's hosted MCP server directly. A session keeps the mode it was created with:
 turning this off sends only new sessions direct, and routed sessions keep working until
-they close. Needs `DAIMON_MCP__PUBLIC_URL`.
+they close. On by default; set it to false to send new sessions direct. Needs
+`DAIMON_MCP__PUBLIC_URL`.
 
 ### `DAIMON_GITHUB__MAX_TARBALL_BYTES`
 

@@ -114,8 +114,9 @@ installation splits into read and write groups or into groups of 500 repos.
 Called directly, the MCP tool then reaches only the working repo's group, and
 other repos answer 404.
 
-Set [`DAIMON_GITHUB__MCP_ROUTER`](configuration.md#daimon_github__mcp_router)
-to `true` to route those sessions through Daimon. It needs
+Daimon routes those sessions through itself while
+[`DAIMON_GITHUB__MCP_ROUTER`](configuration.md#daimon_github__mcp_router) is
+`true`, the default; set it to `false` to send new sessions direct. It needs
 [`DAIMON_MCP__PUBLIC_URL`](configuration.md#daimon_mcp__public_url) and the MCP
 service. When it is on, each new session that needs more than one token works
 like this:
