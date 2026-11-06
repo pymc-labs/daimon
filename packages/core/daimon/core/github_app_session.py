@@ -1658,7 +1658,10 @@ async def _rotate_live_app_tokens_unlocked(
                                 )
                 elif swapped and not active_turn:
                     # Only an idle session is archived; a running turn is never
-                    # interrupted, and the next turn boundary replaces it.
+                    # interrupted, and the next turn boundary replaces it. Close
+                    # its router record first so its bearer stops working.
+                    async with sessionmaker.begin() as session:
+                        await close_for_ma_session(session, ma_session_id=session_id)
                     await archive_session(anthropic, session_id, scope=scope)
                 elif swapped:
                     _log.warning(

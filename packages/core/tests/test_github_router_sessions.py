@@ -721,6 +721,56 @@ async def test_failed_delivery_restores_old_rows_and_keeps_every_row_routed(
     ) == next(t.token for t in initial.tokens if t.installation_id == 772)
 
 
+async def test_failed_idle_rotation_after_a_swap_closes_the_router_record_before_archiving(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bearers: list[str] = []
+    real_create = router_sessions.create
+
+    async def capture_create(*args: Any, **kwargs: Any) -> Any:
+        record, bearer = await real_create(*args, **kwargs)
+        bearers.append(bearer)
+        return record, bearer
+
+    monkeypatch.setattr(router_sessions, "create", capture_create)
+    github, fernet = _GitHub(), _fernet()
+    tenant_id, agent_id, router_id, _ = await _routed_session(
+        db_session_factory, monkeypatch, github, fernet
+    )
+    bearer = bearers[0]
+    async with db_session_factory() as session:
+        assert await router_sessions.verify(session, bearer=bearer) is not None
+
+    archived: list[str] = []
+    closed_when_archived: list[bool] = []
+
+    async def archive(_anthropic: Any, session_id: str, **_kwargs: Any) -> None:
+        async with db_session_factory() as session:
+            row = await session.get(GitHubRouterSession, router_id)
+            assert row is not None
+            closed_when_archived.append(row.closed_at is not None)
+        archived.append(session_id)
+
+    async def swap_then_fail(*_args: Any, on_mutation: Callable[[], None], **_kwargs: Any) -> None:
+        on_mutation()  # MA already holds a new vault credential
+        raise RuntimeError("vault write failed")
+
+    monkeypatch.setattr(github_app_session, "add_app_credentials", swap_then_fail)
+    monkeypatch.setattr(github_app_session, "archive_session", archive)
+
+    with pytest.raises(RuntimeError, match="vault write failed"):
+        await _rotate(db_session_factory, tenant_id, agent_id, fernet, active_turn=False)
+
+    assert archived == [SESSION_ID]
+    assert closed_when_archived == [True], "the record closes before the archive call"
+    async with db_session_factory() as session:
+        row = await session.get(GitHubRouterSession, router_id)
+        assert row is not None
+        assert row.closed_at is not None
+        assert await router_sessions.verify(session, bearer=bearer) is None
+
+
 # --- Lifecycle hooks ---------------------------------------------------------------
 
 
