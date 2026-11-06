@@ -43,5 +43,6 @@ def test_connect_embed_escapes_agent_name_markdown() -> None:
     )
     embed = connect_embed(card)
     assert embed.description == discord.utils.escape_markdown(
-        "Nothing is connected yet.\n\n" + f"Tap the button and tick the repos {name} can use."
+        "Nothing is connected yet.\n\n"
+        + f"Tap the button and tick the repos for {name}. They stay until you remove them."
     )

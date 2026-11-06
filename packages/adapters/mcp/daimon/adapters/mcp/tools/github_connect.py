@@ -39,6 +39,7 @@ from daimon.core.stores.accounts import get_account
 from daimon.core.stores.github_access import (
     list_agent_grants,
     list_authorized_repos,
+    list_live_grant_repositories,
     stage_grant,
 )
 from daimon.core.stores.github_app_installations import get as get_app_installation
@@ -58,6 +59,7 @@ from daimon.core.teams_threads import conversation_of
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class ConnectResult(BaseModel):
@@ -65,6 +67,19 @@ class ConnectResult(BaseModel):
 
     status: Literal["sent", "proposed", "granted", "ask_admin", "delivery_failed", "client_agent"]
     message: str
+
+
+async def _agent_has_repo(
+    session: AsyncSession, tenant_id: uuid.UUID, agent_id: uuid.UUID, repo_name: str
+) -> str | None:
+    """Return the repo's name when this agent's own live grants include it."""
+    wanted = repo_name.strip().casefold()
+    for _grant, repo in await list_live_grant_repositories(
+        session, tenant_id=tenant_id, agent_id=agent_id
+    ):
+        if repo.repo_full_name.casefold() == wanted:
+            return repo.repo_full_name
+    return None
 
 
 async def _post_discord_connect_card(
@@ -233,6 +248,13 @@ async def _github_connect_impl(
             is_daimon_managed=agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
             allow_owner=may_own(auth),
         )
+        if repo_name is not None and not is_admin:
+            # Any member may learn whether this agent has the repo, and nothing else.
+            already = await _agent_has_repo(session, auth.tenant_id, agent_id, repo_name)
+            if already is not None:
+                return ConnectResult(
+                    status="granted", message=f"{agent.name} already has {already}."
+                )
         if not manages:
             await record_connect_request(
                 session,

@@ -420,6 +420,13 @@ def _repo_count(count: int) -> str:
     return f"{count} {'repo' if count == 1 else 'repos'}"
 
 
+def _agent_only_line(count: int, agent_name: str) -> str:
+    """Say a connected repo belongs to this agent alone and stays until removed."""
+    if count == 1:
+        return f"1 repo connected to {html.escape(agent_name)} only. It stays until removed."
+    return f"{count} repos connected to {html.escape(agent_name)} only. They stay until removed."
+
+
 def _already_connected_page(
     count: int | None,
     back: str = "",
@@ -427,7 +434,7 @@ def _already_connected_page(
     agent_name: str | None = None,
 ) -> Response:
     status = (
-        f"{_repo_count(count)} connected to {html.escape(agent_name)}."
+        _agent_only_line(count, agent_name)
         if agent_name and count is not None
         else "GitHub repos are connected."
     )
@@ -467,8 +474,7 @@ def _done_page(
             title="Repos connected",
             heading_icon=True,
             body_html=f'<div class="gh-status-icon">{icon("circle-check")}</div>'
-            + f'<p class="gh-status-line">{_repo_count(count)} connected to '
-            + f"{html.escape(agent_name)}.</p>"
+            + f'<p class="gh-status-line">{_agent_only_line(count, agent_name)}</p>'
             + (
                 '<p class="gh-action-line">Return to Discord to use the agent.</p>'
                 if actions
@@ -653,9 +659,7 @@ def _saved_agent_page(
         '<div class="gh-status-icon">'
         + icon("circle-check")
         + "</div>"
-        + f'<p class="gh-status-line">{html.escape(name)} can read and change '
-        + ("this repo." if len(grants) == 1 else f"these {_repo_count(len(grants))}.")
-        + "</p>"
+        + f'<p class="gh-status-line">{_agent_only_line(len(grants), name)}</p>'
         + '<div class="gh-saved-groups">'
         + "".join(
             f'<section class="gh-owner-group"><h2 class="gh-owner-heading">'
