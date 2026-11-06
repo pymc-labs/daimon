@@ -396,12 +396,16 @@ async def _world(
             )
         await session.commit()
     store = IntakeStore(sessions, build_multifernet((FERNET_KEY,)), tenant.id)
+    # The mailbox scan claims a Postgres advisory lock, which is database-wide, keyed
+    # by the tenant (derived from GUILD, so equal in every xdist worker) and the
+    # mailbox. A mailbox per test keeps two workers' scans from seeing ``intake_busy``.
+    mailbox = f"owner-{uuid.uuid4().hex[:8]}@example.test"
     config = IntakeConfig(
         agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_x"),
         guild_id=GUILD,
         channel_id=A,
         source_connection_id="gmail",
-        gmail_mailbox="owner@example.test",
+        gmail_mailbox=mailbox,
         crm_connection_id="crm",
         portal_id="3",
         reconciliation_start=now,
@@ -415,7 +419,7 @@ async def _world(
             LeadSubmission(
                 source=LeadSource(
                     kind="gmail",  # pyright: ignore[reportArgumentType]
-                    mailbox="owner@example.test",
+                    mailbox=mailbox,
                     message_id=f"source-{kind}",
                 ),
                 evidence=LeadEvidence(original_text=_sentinel(kind)),
