@@ -412,7 +412,9 @@ def _discord_guild(everyone_permissions: int) -> FakeUpstream:
         if path.endswith("/members/m-1"):
             return httpx.Response(200, json={"roles": []})
         if path.endswith("/channels"):
-            return httpx.Response(200, json=[{"id": _CHANNEL, "permission_overwrites": []}])
+            return httpx.Response(
+                200, json=[{"id": _CHANNEL, "type": 0, "permission_overwrites": []}]
+            )
         guild_id = path.rsplit("/", 1)[-1]
         roles = [{"id": guild_id, "permissions": str(everyone_permissions)}]
         return httpx.Response(200, json={"owner_id": "someone-else", "roles": roles})

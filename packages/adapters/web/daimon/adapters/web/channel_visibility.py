@@ -13,6 +13,7 @@ import time
 import uuid
 from collections.abc import Collection
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import cast
 
 import httpx
@@ -34,6 +35,8 @@ CACHE_SECONDS = 60.0
 _DISCORD_API = "https://discord.com/api/v10"
 _SLACK_API = "https://slack.com/api"
 _SLACK_PAGES = 20
+_DISCORD_TEXT_TYPES = frozenset({0, 5})
+"""Text and announcement channels: the types chat accepts as a routine destination."""
 _CACHE_SIZE = 2048
 
 
@@ -84,6 +87,17 @@ def _int(value: object) -> int:
     return int(value) if isinstance(value, (int, str)) else 0
 
 
+def _timed_out(member: dict[str, object]) -> bool:
+    """Whether the member is under a communication timeout now."""
+    until = member.get("communication_disabled_until")
+    if not isinstance(until, str):
+        return False
+    try:
+        return datetime.fromisoformat(until) > datetime.now(UTC)
+    except ValueError:
+        return True
+
+
 def _overwrites(raw: object) -> tuple[DiscordOverwrite, ...]:
     return tuple(
         DiscordOverwrite(
@@ -119,7 +133,11 @@ async def _discord(runtime: WebRuntime, guild_id: str, user_id: str) -> _Reach:
         if isinstance(roles, list)
         else frozenset(),
         is_owner=str(guild.get("owner_id")) == user_id,
+        timed_out=_timed_out(member),
     )
+    text_channels = [
+        str(row.get("id")) for row in channels if row.get("type") in _DISCORD_TEXT_TYPES
+    ]
     role_permissions = {
         str(role.get("id")): _int(role.get("permissions")) for role in _dicts(guild.get("roles"))
     }
@@ -136,7 +154,7 @@ async def _discord(runtime: WebRuntime, guild_id: str, user_id: str) -> _Reach:
             guild_id=guild_id,
             role_permissions=role_permissions,
             channel_overwrites=overwrites,
-            channel_ids=overwrites.keys(),
+            channel_ids=text_channels,
         ),
     )
 
@@ -154,9 +172,9 @@ async def _slack_token(runtime: WebRuntime, team_id: str) -> str:
 
 async def _slack_conversations(
     runtime: WebRuntime, token: str, user_id: str | None
-) -> frozenset[str]:
-    """The channels `user_id` is in; with no user, the channels the bot is in."""
-    found: set[str] = set()
+) -> list[dict[str, object]]:
+    """The channels `user_id` is in; with no user, the channels the bot is in. One call per page."""
+    found: list[dict[str, object]] = []
     cursor = ""
     for _ in range(_SLACK_PAGES):
         params = {
@@ -178,32 +196,50 @@ async def _slack_conversations(
         )
         if body.get("ok") is not True:
             raise _Unverified("slack refused")
-        found.update(str(channel.get("id")) for channel in _dicts(body.get("channels")))
+        found.extend(_dicts(body.get("channels")))
         meta = body.get("response_metadata")
         cursor = str(_dict(meta).get("next_cursor") or "") if meta is not None else ""
         if not cursor:
-            return frozenset(found)
+            return found
     raise _Unverified("too many pages")
+
+
+async def _slack_guest(runtime: WebRuntime, token: str, user_id: str) -> bool:
+    """Whether the member is a guest, as chat's `check_channel_access` reads it."""
+    body = _dict(
+        _json(
+            await runtime.http_client.get(
+                f"{_SLACK_API}/users.info",
+                params={"user": user_id},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        )
+    )
+    if body.get("ok") is not True:
+        raise _Unverified("slack refused")
+    user = _dict(body.get("user"))
+    return bool(user.get("is_restricted") or user.get("is_ultra_restricted"))
 
 
 async def _slack(runtime: WebRuntime, team_id: str, user_id: str) -> _Reach:
     token = await _slack_token(runtime, team_id)
-    mine = await _slack_conversations(runtime, token, user_id)
-    bots = await _slack_conversations(runtime, token, None)
-    # The listing holds only channels the member is in and is not archived, so
-    # the member's own access is met; daimon must be in the channel as well.
+    mine = frozenset(str(c.get("id")) for c in await _slack_conversations(runtime, token, user_id))
+    in_bot = await _slack_conversations(runtime, token, None)
+    is_guest = await _slack_guest(runtime, token, user_id)
+    # Candidates are the channels daimon is in (the listing leaves out archived ones).
+    # The member's own membership counts only where the rule needs it.
     return _Reach(
         readable=mine,
         postable=frozenset(
-            channel_id
-            for channel_id in mine
+            str(channel.get("id"))
+            for channel in in_bot
             if slack_may_deliver(
-                bot_is_member=channel_id in bots,
+                bot_is_member=True,
                 is_archived=False,
                 is_im_or_mpim=False,
-                is_private=False,
-                is_guest=False,
-                caller_is_member=True,
+                is_private=bool(channel.get("is_private")),
+                is_guest=is_guest,
+                caller_is_member=str(channel.get("id")) in mine,
             )
         ),
     )

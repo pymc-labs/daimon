@@ -88,3 +88,10 @@ def test_slack_needs_daimon_in_the_channel_and_the_callers_access(
         "caller_is_member": True,
     }
     assert slack_may_deliver(**(base | facts)) is allowed
+
+
+def test_a_timed_out_member_delivers_nowhere_but_an_administrator_still_does() -> None:
+    timed_out = DiscordMember(user_id="u1", role_ids=frozenset(), timed_out=True)
+    assert _deliverable(timed_out, {GUILD: VIEW | SEND}) == frozenset()
+    admin = DiscordMember(user_id="u1", role_ids=frozenset({"staff"}), timed_out=True)
+    assert "open" in _deliverable(admin, {GUILD: 0, "staff": DISCORD_ADMINISTRATOR})

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 DISCORD_ADMINISTRATOR = 1 << 3
 DISCORD_VIEW_CHANNEL = 1 << 10
 DISCORD_SEND_MESSAGES = 1 << 11
+DISCORD_READ_HISTORY = 1 << 16
 _ROLE, _MEMBER = 0, 1
 
 
@@ -32,6 +33,8 @@ class DiscordMember:
     user_id: str
     role_ids: frozenset[str]
     is_owner: bool = False
+    timed_out: bool = False
+    """Under a communication timeout: Discord leaves only viewing and reading history."""
 
 
 def discord_base_permissions(
@@ -73,6 +76,8 @@ def discord_channel_permissions(
     )
     if own is not None:
         permissions = (permissions & ~own.deny) | own.allow
+    if member.timed_out:
+        permissions &= DISCORD_VIEW_CHANNEL | DISCORD_READ_HISTORY
     return permissions
 
 

@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The plugin docs now say hub turns are billed.**
   `ask`, `start_turn` and `continue_turn` debit the asked daimon's workspace once the turn ends. The plugin README had said they recorded no usage debit.
 - **The web app no longer offers a routine destination the member could not post in through chat.**
-  On Discord the channel list and the save check need view and send permission. On Slack, Daimon must be in the channel too.
+  On Discord the channel list and the save check need a text channel where the member can view and send, and not be timed out. On Slack, Daimon must be in the channel; a private channel, or any channel for a guest, also needs the member in it.
 - **An agent's GitHub MCP tool can reach every connected repo when its repos need more than one GitHub token.**
   With `DAIMON_GITHUB__MCP_ROUTER` (on by default), such a new session sends the tool through Daimon, which uses the right token for each repo; a repo outside the agent's grants, such as a public one, gets GitHub's own answer as before. Sessions that need one token, and every session started while the setting is off, call GitHub directly as before; adds a database migration.
   One organization whose repos need two tokens (read and write, or more than 500 repos) now also gets `github-repo.sh` for `gh`, clone and push, and the agent guidance sends every repo other than the working repo through it. The guidance change replaces each existing session once, at its next message.
