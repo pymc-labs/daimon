@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The optional dev agent no longer tells the agent to push through the GitHub MCP.**
+  Its prompt now says the git remote is not pre-authenticated, to push with git and `GH_TOKEN` (or `github-repo.sh` for another repo) and open PRs with `gh pr create`, and that the GitHub MCP is for reading. A new test checks every seeded prompt and skill for GitHub access claims.
 - **The plugin docs now say hub turns are billed.**
   `ask`, `start_turn` and `continue_turn` debit the asked daimon's workspace once the turn ends. The plugin README had said they recorded no usage debit.
 - **An agent's GitHub MCP tool can reach every connected repo when its repos need more than one GitHub token.**
