@@ -190,6 +190,27 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, a
 log = structlog.get_logger(__name__)
 
 
+def scheduler_step[**P](step: Callable[P, Awaitable[None]]) -> Callable[P, Awaitable[None]]:
+    """Mark a sweep or drain that `tick` awaits, and stop its transient failures.
+
+    `_run_loops` ends every loop when one loop raises. A database, Anthropic or
+    GitHub error in one step would stop routine dispatch until a restart. This
+    boundary logs such an error and returns; the next tick retries. A step may
+    keep a narrower catch for its own log event. A test requires every step
+    `tick` awaits to carry this decorator or sit in an allow-list.
+    """
+
+    @functools.wraps(step)
+    async def guarded(*args: P.args, **kwargs: P.kwargs) -> None:
+        try:
+            await step(*args, **kwargs)
+        except (SQLAlchemyError, anthropic.APIError, httpx.HTTPError):
+            log.exception("scheduler.step.failed", step=step.__name__)
+
+    return guarded
+
+
+@scheduler_step
 async def _sweep_compute(compute: ComputeSessions) -> None:
     # Cleanup is independent of launch enablement and user routines.
     if not compute.settings.deployment_id or compute.settings.api_token is None:
@@ -200,6 +221,7 @@ async def _sweep_compute(compute: ComputeSessions) -> None:
         log.warning("compute.sweep_retry")
 
 
+@scheduler_step
 async def _poll_compute_tasks(compute: ComputeSessions) -> None:
     # Background commands are read and reported even if new launches are disabled.
     if not compute.settings.deployment_id or compute.settings.session_auth_key is None:
@@ -931,6 +953,7 @@ async def _build_fire(
     return _fire
 
 
+@scheduler_step
 async def _drain_pending_usage(sm: async_sessionmaker[AsyncSession], *, markup: Decimal) -> None:
     """Settle pending usage of profiles with no infrastructure charge; failures retry on
     the next scheduler tick (an applied row is never applied twice)."""
@@ -942,6 +965,7 @@ async def _drain_pending_usage(sm: async_sessionmaker[AsyncSession], *, markup: 
         log.exception("scheduler.pending_usage_drain.failed")
 
 
+@scheduler_step
 async def _sweep_pending_files(
     client: AsyncAnthropic, sm: async_sessionmaker[AsyncSession]
 ) -> None:
@@ -956,6 +980,7 @@ async def _sweep_pending_files(
         log.exception("scheduler.sweep.failed")
 
 
+@scheduler_step
 async def _sweep_privacy_deletes(
     client: AsyncAnthropic, sm: async_sessionmaker[AsyncSession]
 ) -> None:
@@ -966,6 +991,7 @@ async def _sweep_privacy_deletes(
         log.exception("scheduler.privacy_delete_sweep.failed")
 
 
+@scheduler_step
 async def _sweep_headless_usage(
     client: AsyncAnthropic,
     sm: async_sessionmaker[AsyncSession],
@@ -985,6 +1011,7 @@ async def _sweep_headless_usage(
         log.exception("scheduler.usage_sweep.failed")
 
 
+@scheduler_step
 async def _sweep_long_jobs(long_jobs: LongJobExecutor) -> None:
     """Claim and start due long jobs; database errors retry on the next tick."""
     try:
@@ -993,6 +1020,7 @@ async def _sweep_long_jobs(long_jobs: LongJobExecutor) -> None:
         log.exception("scheduler.long_jobs_sweep.failed")
 
 
+@scheduler_step
 async def _sweep_wizard_sessions(sm: async_sessionmaker[AsyncSession]) -> None:
     """Abandon expired open wizard_session rows once. Boundary catch: a sweep
     failure must not kill the scheduler loop — the next tick retries.
@@ -1005,6 +1033,7 @@ async def _sweep_wizard_sessions(sm: async_sessionmaker[AsyncSession]) -> None:
         log.exception("scheduler.wizard_sweep.failed")
 
 
+@scheduler_step
 async def _sweep_slack_event_dedup(sm: async_sessionmaker[AsyncSession]) -> None:
     """Prune aged slack_event_dedup rows once. Boundary catch: a sweep
     failure must not kill the scheduler loop — the next tick retries.
@@ -1017,6 +1046,7 @@ async def _sweep_slack_event_dedup(sm: async_sessionmaker[AsyncSession]) -> None
         log.exception("scheduler.slack_event_dedup_sweep.failed")
 
 
+@scheduler_step
 async def _sweep_retired_turn_card_intents(
     sm: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -1027,6 +1057,7 @@ async def _sweep_retired_turn_card_intents(
         log.exception("scheduler.turn_card_intent_sweep.failed")
 
 
+@scheduler_step
 async def _sweep_hub_oauth_kv(sm: async_sessionmaker[AsyncSession]) -> None:
     """Prune expired hub login rows once. Boundary catch: a sweep failure
     must not kill the scheduler loop; the next tick retries. No upstream call.
@@ -1037,6 +1068,7 @@ async def _sweep_hub_oauth_kv(sm: async_sessionmaker[AsyncSession]) -> None:
         log.exception("scheduler.hub_oauth_kv_sweep.failed")
 
 
+@scheduler_step
 async def _sweep_lead_intake(sm: async_sessionmaker[AsyncSession]) -> None:
     """Erase expired lead content independently of mailbox activity."""
     from daimon.core.stores.lead_intake import purge_expired
@@ -1048,6 +1080,7 @@ async def _sweep_lead_intake(sm: async_sessionmaker[AsyncSession]) -> None:
         log.error("scheduler.lead_retention_failed")
 
 
+@scheduler_step
 async def _sweep_mcp_tokens(sm: async_sessionmaker[AsyncSession]) -> None:
     """Bound ephemeral credential history without pruning operator/external keys."""
     from daimon.core.admin_actions import BILLING_PANEL_TOKEN_LABEL
@@ -1075,6 +1108,7 @@ async def _sweep_mcp_tokens(sm: async_sessionmaker[AsyncSession]) -> None:
         log.exception("scheduler.mcp_token_sweep.failed")
 
 
+@scheduler_step
 async def _sweep_github_connect_flows(sm: async_sessionmaker[AsyncSession]) -> None:
     """Discard expired encrypted GitHub browser-flow tokens."""
     try:
@@ -1091,6 +1125,7 @@ _GITHUB_TOKEN_PRUNE_INTERVAL = timedelta(minutes=10)
 _last_github_token_prune: dict[str, datetime] = {}
 
 
+@scheduler_step
 async def _sweep_github_issued_tokens(
     sm: async_sessionmaker[AsyncSession], *, now: datetime | None = None
 ) -> None:
@@ -1117,6 +1152,7 @@ _RELAY_VAULT_ARCHIVE_INTERVAL = timedelta(minutes=10)
 _last_relay_vault_archive: dict[str, datetime] = {}
 
 
+@scheduler_step
 async def _archive_idle_relay_vaults(
     client: AsyncAnthropic, *, now: datetime | None = None
 ) -> None:
@@ -1134,6 +1170,7 @@ async def _archive_idle_relay_vaults(
         log.exception("scheduler.relay_vault_archive.failed")
 
 
+@scheduler_step
 async def _sweep_github_app_tokens(
     sm: async_sessionmaker[AsyncSession], *, fernet: MultiFernet | None
 ) -> None:
@@ -1338,6 +1375,7 @@ async def _retire_mcp_app_session(
         await mark_headless_app_session_closed(session, session_id=item.session_id)
 
 
+@scheduler_step
 async def _refresh_github_app_sessions(
     anthropic_client: AsyncAnthropic,
     sm: async_sessionmaker[AsyncSession],
@@ -1622,6 +1660,7 @@ async def _refresh_github_app_sessions(
             del state[session_id]
 
 
+@scheduler_step
 async def _close_github_app_sessions(
     anthropic_client: AsyncAnthropic,
     sm: async_sessionmaker[AsyncSession],
@@ -1684,6 +1723,7 @@ async def _close_github_app_sessions(
                 )
 
 
+@scheduler_step
 async def _settle_promo_credit(sm: async_sessionmaker[AsyncSession]) -> None:
     """Grant opened timed promo windows, expire closed ones, credit back late spend.
 
@@ -1745,6 +1785,7 @@ def _tick_progress(
     return step
 
 
+@scheduler_step
 async def _usage_sweep_once(*, enabled: bool, sweep: Callable[[], Awaitable[None]]) -> None:
     """One usage pass for `--once`, honouring the same switch as the loop."""
     if not enabled:
@@ -2063,6 +2104,7 @@ async def run(
             await engine.dispose()
 
 
+@scheduler_step
 async def _drain_github_push_resync(
     *,
     engine: AsyncEngine,
@@ -2085,6 +2127,7 @@ async def _drain_github_push_resync(
         log.exception("scheduler.github_push_resync.failed")
 
 
+@scheduler_step
 async def _drain_github_installation_reconciliations(
     *, sm: async_sessionmaker[AsyncSession], settings: Settings
 ) -> None:
