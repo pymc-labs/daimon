@@ -57,7 +57,7 @@ copy of a rule that was left behind. Before you change a behaviour:
    Examples: `packages/adapters/scheduler/tests/test_step_boundary.py` (every
    scheduler step, found by AST) and
    `packages/core/tests/test_github_access_surfaces.py` (a listed set of GitHub
-   surfaces, checked against real tokens).
+   surfaces, checked through the real token preparation code with a fake GitHub token API).
 4. Count sessions that already exist as a path. A change must reach chat threads
    and MCP handles that started before it, not only new ones (`packages/core/daimon/core/session_compat.py`).
 5. A sentence that says what works needs a test that proves it. This covers
