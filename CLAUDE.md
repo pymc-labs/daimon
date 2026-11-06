@@ -38,6 +38,35 @@ Errors and notices are never hardcoded text in or beside the agent's reply:
 enforce the words and the separators; Daimon's own prompt carries the setup part
 (`defaults/agents/daimon.yaml`).
 
+## One rule, every path
+
+Daimon reaches people through Discord, Slack, Teams, the web app, MCP clients
+(Claude Code and the plugin), the CLI and the scheduler. Many of our incidents
+were a change that reached some of these paths and missed others, or a second
+copy of a rule that was left behind. Before you change a behaviour:
+
+1. Find every path that does it. Search for the rule and check its siblings in
+   each adapter and each loop. `tests/parity/drivers/`,
+   `tests/parity/web_chat_parity.json` and
+   `packages/core/daimon/core/platform_words.py` list the chat and web paths.
+2. When more than one path follows a rule, put the rule in one core helper and
+   call that helper from each path. Do not copy it.
+3. Give the rule a contract test that checks every implementation. Find the
+   implementations from the code where you can (the AST, a live registry).
+   Otherwise list them, and add a failing test for each path that was missed.
+   Examples: `packages/adapters/scheduler/tests/test_step_boundary.py` (every
+   scheduler step, found by AST) and
+   `packages/core/tests/test_github_access_surfaces.py` (a listed set of GitHub
+   surfaces, checked through the real token preparation code with a fake GitHub token API).
+4. Count sessions that already exist as a path. A change must reach chat threads
+   and MCP handles that started before it, not only new ones (`packages/core/daimon/core/session_compat.py`).
+5. A sentence that says what works needs a test that proves it. This covers
+   agent guidance, seeded prompts, skills, tool docstrings and docs. Map the
+   sentence to its test, as `GITHUB_MCP_CLAIMS` does.
+6. Record a deliberate difference between paths in a test or allow-list, with
+   its reason. A comment alone is not enough. Example:
+   `tests/parity/test_teams_deliberate_gaps.py`.
+
 ## Documentation
 
 `docs/` is the public site, written for people who scan it, not for agents.
