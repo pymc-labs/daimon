@@ -46,8 +46,8 @@ their snapshots. Selecting a target does not change who answers or routing.
    granted repos through this session's GitHub App access. For any repo other
    than the working repo, when that helper exists, use
    `sh /mnt/session/uploads/github-repo.sh owner/repo clone [dir]`; it selects
-   the repo's credential. Otherwise `gh repo clone owner/repo` works for every
-   granted repo. Do not claim all repos are
+   the repo's credential. Plain `gh repo clone owner/repo` covers the working
+   repo. Do not claim all repos are
    mounted or name repos that belong only to other agents.
    If GitHub is not connected, or the requested repo is not connected, say so
    in one line and call `github_connect` to post the Connect GitHub button.

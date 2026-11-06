@@ -13,6 +13,7 @@ be backed: either by a claim the core guidance already maps to a test
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 
@@ -32,12 +33,12 @@ _THIS_TEST = "packages/core/tests/test_seeded_github_claims.py"
 #: Claims seeded text may make beyond the core guidance's, each mapped to the
 #: test that backs it.
 SEEDED_GITHUB_CLAIMS: Mapping[str, str] = {
-    # Which token each push or read uses, as the surfaces contract checks.
-    "Push the working repo with git and GH_TOKEN": (
+    "exists, push any other repo with": (
         "packages/core/tests/test_github_access_surfaces.py"
         "::test_every_surface_uses_the_repo_installation_token"
     ),
-    "The session's GH_TOKEN covers it": (
+    # Which token each push or read uses, as the surfaces contract checks.
+    "Push the working repo with git and GH_TOKEN": (
         "packages/core/tests/test_github_access_surfaces.py"
         "::test_every_surface_uses_the_repo_installation_token"
     ),
@@ -46,10 +47,6 @@ SEEDED_GITHUB_CLAIMS: Mapping[str, str] = {
         "::test_every_surface_uses_the_repo_installation_token"
     ),
     # Which surface reaches which repo: the helper when it exists, else GH_TOKEN.
-    "otherwise GH_TOKEN covers every granted repo.": (
-        "packages/core/tests/test_github_access_surfaces.py"
-        "::test_every_surface_uses_the_repo_installation_token"
-    ),
     "The repo's git remote is not pre-authenticated.": (
         f"{_THIS_TEST}::test_dev_agent_github_wording_matches_the_core_guidance"
     ),
@@ -77,7 +74,7 @@ BACKING_TESTS = frozenset(
 def _is_seeded_github_claim(sentence: str) -> bool:
     """A claim about how an agent authenticates to GitHub, or what it pushes through."""
     lowered = sentence.lower()
-    if "github" not in lowered and "git remote" not in lowered:
+    if not re.search(r"github|git remote|gh_token|\bgh\b", lowered):
         return False  # a 404 in a data skill is not a GitHub claim
     github_tools = any(tool in lowered for tool in ("github tools", "github mcp", "copilot mcp"))
     tokens = any(word in lowered for word in ("gh_token", "github-repo.sh", "token"))

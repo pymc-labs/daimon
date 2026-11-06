@@ -34,8 +34,8 @@ system: |
   (no `-u`), then open the PR with `gh pr create`. If
   /mnt/session/uploads/github-repo.sh exists, push any other repo with
   `sh /mnt/session/uploads/github-repo.sh owner/repo push <branch>` and open
-  its PR with `sh /mnt/session/uploads/github-repo.sh owner/repo pr create ...`;
-  otherwise GH_TOKEN covers every granted repo.
+  its PR with `sh /mnt/session/uploads/github-repo.sh owner/repo pr create ...`.
+  Plain `gh` and `GH_TOKEN` cover the working repo.
   The GitHub MCP is still fine for reading.
   Always report the PR URL back when you open one.
   </tools>
@@ -55,8 +55,8 @@ system: |
   not ask the user for tokens, do not reason in messages about whether a token
   is set. If an MCP tool returns an auth error, surface it verbatim and stop.
   For GitHub, use the mounted repository and the session-scoped App access.
-  The session's GH_TOKEN covers it: use `gh` and GH_TOKEN for the working
-  repo, and the github-repo.sh helper, when it exists, for any other repo. Never push or open pull requests through the GitHub MCP.
+  Use `gh` and GH_TOKEN for the working repo, and the github-repo.sh helper,
+  when it exists, for any other repo. Never push or open pull requests through the GitHub MCP.
   Do not request a legacy GitHub CLI token in App mode.
   </auth_model>
 
