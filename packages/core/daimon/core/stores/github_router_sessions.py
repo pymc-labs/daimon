@@ -21,7 +21,7 @@ from daimon.core._models import (
     ThreadSession,
 )
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import CursorResult, exists, or_, select, update
+from sqlalchemy import CursorResult, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 #: How long a router session record stays valid without renewal. Each refresh
@@ -122,32 +122,45 @@ async def is_session_live(
     *,
     now: datetime | None = None,  # accepted for callers; liveness does not depend on age
 ) -> bool:
-    """True while the record's Managed Agents session is still running.
+    """True until the record's Managed Agents session has positively ended.
 
-    A chat session is live while its `thread_sessions` row is `live`. A
-    headless or MCP-origin session has no such row; it is live while its
-    unmapped app vault is neither closed nor finished. Turn age is not
-    checked: one turn may run for hours while the scheduler keeps rotating
-    its tokens, and the idle sweep finishes and closes the vault (closing
-    the router record first) when the session is really done. A record with
-    no session id yet is not live: nothing can call the router before the
-    session exists.
+    Managed Agents connects to the session's MCP servers while it creates the
+    session, before Daimon has stored the session id or its `thread_sessions`
+    row, so a record whose session is not recorded anywhere yet is live; its
+    own expiry and close still bound it. Once recorded, a chat session is live
+    while a `thread_sessions` row for it is `live`, and a headless or
+    MCP-origin session while its unmapped app vault is neither closed nor
+    finished. Turn age is not checked: one turn may run for hours while the
+    scheduler keeps rotating its tokens.
     """
     if record.ma_session_id is None:
-        return False
-    mapped_live = exists().where(
-        ThreadSession.ma_session_id == record.ma_session_id,
-        ThreadSession.tenant_id == record.tenant_id,
-        ThreadSession.status == "live",
+        return True
+    rows = (
+        (
+            await session.execute(
+                select(ThreadSession.status).where(
+                    ThreadSession.ma_session_id == record.ma_session_id,
+                    ThreadSession.tenant_id == record.tenant_id,
+                )
+            )
+        )
+        .scalars()
+        .all()
     )
-    unmapped_live = exists().where(
-        GitHubAppSessionVault.session_id == record.ma_session_id,
-        GitHubAppSessionVault.tenant_id == record.tenant_id,
-        GitHubAppSessionVault.is_unmapped.is_(True),
-        GitHubAppSessionVault.closed_at.is_(None),
-        GitHubAppSessionVault.finished_at.is_(None),
-    )
-    return bool(await session.scalar(select(or_(mapped_live, unmapped_live))))
+    if rows:
+        return "live" in rows
+    vaults = (
+        await session.execute(
+            select(GitHubAppSessionVault.closed_at, GitHubAppSessionVault.finished_at).where(
+                GitHubAppSessionVault.session_id == record.ma_session_id,
+                GitHubAppSessionVault.tenant_id == record.tenant_id,
+                GitHubAppSessionVault.is_unmapped.is_(True),
+            )
+        )
+    ).all()
+    if vaults:
+        return any(closed is None and finished is None for closed, finished in vaults)
+    return True
 
 
 async def set_ma_session_id(
