@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A Slack routine no longer posts in a channel Daimon was removed from.**
+  Its result goes to the creator by DM, as for an archived channel. Saving a routine already refused that channel; delivery now applies the same rule.
 - **A shared MCP token removed from an agent no longer comes back when a conversation starts at the same moment.**
   A new conversation, a new shared thread and a shared thread's next message read the agent's tokens under the vault lock before they copy them, as an existing conversation already did.
 - **A Claude Code (agent chat) conversation no longer keeps running an agent's old setup.**

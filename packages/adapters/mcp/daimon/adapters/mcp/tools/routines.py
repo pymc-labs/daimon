@@ -37,8 +37,6 @@ from daimon.adapters.mcp.tools.discord._client import (
     rest_client,
 )
 from daimon.adapters.mcp.tools.discord._visibility import (
-    _check_send_permission,  # pyright: ignore[reportPrivateUsage]
-    _check_thread_view,  # pyright: ignore[reportPrivateUsage]
     _ensure_thread_parent_cached,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.setup_target import origin_channel_id
@@ -47,7 +45,10 @@ from daimon.adapters.mcp.tools.slack._client import (
     _require_team_id,  # pyright: ignore[reportPrivateUsage]
     slack_web_client,
 )
-from daimon.adapters.mcp.tools.slack._visibility import check_channel_access
+from daimon.adapters.mcp.tools.slack._visibility import (
+    _is_guest,  # pyright: ignore[reportPrivateUsage]
+    _is_user_in_channel,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.mcp.tools.teams._directory import (
     graph_for,
     locate_channel,
@@ -62,6 +63,8 @@ from daimon.core.discord_membership import verify_discord_source
 from daimon.core.errors import StoreError
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.permissions import dm_source_limited
+from daimon.core.routine_delivery import discord_creator_may_post
+from daimon.core.routine_destinations import slack_may_deliver
 from daimon.core.routine_sandbox import SandboxPinUnavailable, current_pin
 from daimon.core.routine_service import (
     CallView,
@@ -109,11 +112,10 @@ async def _resolve_discord_destination(
     """(parent_channel_id, category_id) of a channel or thread in the caller's
     guild that the CALLER may post in.
 
-    A routine posts on its creator's behalf, so its destination passes the
-    exact checks the `send_message` tool applies to a caller: the member is
-    resolved with roles hydrated, a thread's parent is cached, a thread must
-    be viewable (a private one needs membership or manage_threads), and the
-    caller needs view + send there.
+    A routine posts on its creator's behalf, so the caller must be able to post
+    there: `discord_creator_may_post`, the rule delivery applies again when the
+    routine fires. The member is resolved with roles hydrated, and a thread's
+    permissions come from its cached parent, as delivery reads them.
     """
     guild_id = _require_guild_id(auth)
     caller = _require_discord_identity(auth)
@@ -136,15 +138,12 @@ async def _resolve_discord_destination(
                 raise ToolError(f"{destination_id} is not a text channel or thread")
             if str(channel.guild.id) != guild_id:
                 raise ToolError(f"{destination_id} is not in this server")
-            try:
-                if isinstance(channel, discord.Thread):
-                    await _check_thread_view(client, channel, member, caller)
-                _check_send_permission(channel, member)
-            except ToolError as err:
+            if not await _discord_caller_may_post(channel, member, caller):
                 raise ToolError(
-                    f"you cannot post in {destination_id} ({err}), so a routine cannot deliver "
-                    "there for you. Nothing was saved."
-                ) from err
+                    f"You can't post in {destination_id}, so a routine can't deliver there "
+                    "for you. Nothing was saved.\n"
+                    "Pick a channel you can post in, or ask an admin or an owner for access."
+                )
             return placement
     except (discord.NotFound, discord.Forbidden) as err:
         raise ToolError(
@@ -153,33 +152,88 @@ async def _resolve_discord_destination(
         ) from err
 
 
+async def _discord_caller_may_post(
+    channel: discord.TextChannel | discord.Thread, member: discord.Member, caller: str
+) -> bool:
+    """The facts `discord_creator_may_post` needs, read as delivery reads them."""
+    administrator = member.guild_permissions.administrator
+    is_thread = isinstance(channel, discord.Thread)
+    is_private_thread = False
+    is_thread_member = False
+    if isinstance(channel, discord.Thread):
+        perms = (await _ensure_thread_parent_cached(channel)).permissions_for(member)
+        is_private_thread = channel.type is discord.ChannelType.private_thread
+        if is_private_thread and not (administrator or perms.manage_threads):
+            try:
+                await channel.fetch_member(int(caller))
+                is_thread_member = True
+            except discord.NotFound:
+                is_thread_member = False
+    else:
+        perms = channel.permissions_for(member)
+    return discord_creator_may_post(
+        administrator=administrator,
+        view_channel=perms.view_channel,
+        send_messages=perms.send_messages,
+        is_thread=is_thread,
+        send_messages_in_threads=perms.send_messages_in_threads,
+        is_private_thread=is_private_thread,
+        manage_threads=perms.manage_threads,
+        is_thread_member=is_thread_member,
+    )
+
+
 async def _resolve_slack_destination(
     runtime: McpRuntime, auth: AuthIdentity, *, kind: str, destination_id: str
 ) -> tuple[str | None, str | None]:
-    """Check the channel (and thread) exists in the caller's workspace, with daimon in it."""
+    """Check the channel (and thread) exists in the caller's workspace and may be delivered to.
+
+    `slack_may_deliver` decides, as for the web app: daimon in a channel that is
+    not archived, and the caller with the access the channel tools require.
+    """
     channel_id, _, thread_ts = destination_id.partition(":")
     client = await slack_web_client(runtime, team_id=_require_team_id(auth))
     try:
         info = await client.conversations_info(channel=channel_id)  # pyright: ignore[reportUnknownMemberType]
         channel = cast("dict[str, object]", info["channel"])
-        if channel.get("is_archived"):
-            raise ToolError(f"{channel_id} is archived")
-        if not channel.get("is_member"):
+        is_archived = bool(channel.get("is_archived"))
+        bot_is_member = bool(channel.get("is_member"))
+        is_im_or_mpim = bool(channel.get("is_im") or channel.get("is_mpim"))
+        is_private = bool(channel.get("is_private"))
+        is_guest = False
+        caller_is_member = False
+        if bot_is_member and not is_archived and not is_im_or_mpim:
+            caller = _require_slack_identity(auth)
+            is_guest = await _is_guest(client, user_id=caller)
+            if is_private or is_guest:
+                caller_is_member = await _is_user_in_channel(
+                    client, channel_id=channel_id, user_id=caller
+                )
+        if not slack_may_deliver(
+            bot_is_member=bot_is_member,
+            is_archived=is_archived,
+            is_im_or_mpim=is_im_or_mpim,
+            is_private=is_private,
+            is_guest=is_guest,
+            caller_is_member=caller_is_member,
+        ):
+            if is_archived:
+                raise ToolError(
+                    f"{channel_id} is archived, so a routine can't deliver there. "
+                    "Nothing was saved.\n"
+                    "Pick another channel, or ask an admin or an owner to unarchive it."
+                )
+            if not bot_is_member:
+                raise ToolError(
+                    f"Daimon isn't in {channel_id}, so a routine can't deliver there. "
+                    "Nothing was saved.\n"
+                    "Invite it to the channel first, or ask an admin or an owner to."
+                )
             raise ToolError(
-                f"daimon is not in {channel_id}; invite it to the channel first. Nothing was saved."
+                f"You can't post in {channel_id}, so a routine can't deliver there for you. "
+                "Nothing was saved.\n"
+                "Pick a channel you can post in, or ask an admin or an owner for access."
             )
-        # The routine posts on the caller's behalf: the caller must have the
-        # same access the channel tools require of them (private channel or
-        # guest → membership).
-        try:
-            await check_channel_access(
-                client, channel=channel, user_id=_require_slack_identity(auth)
-            )
-        except ToolError as err:
-            raise ToolError(
-                f"you cannot post in {channel_id} ({err}), so a routine cannot deliver there "
-                "for you. Nothing was saved."
-            ) from err
         if kind == "thread":
             replies = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]
                 channel=channel_id, ts=thread_ts, limit=1
