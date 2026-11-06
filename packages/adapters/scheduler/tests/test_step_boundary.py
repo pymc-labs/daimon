@@ -12,6 +12,7 @@ import ast
 import asyncio
 import inspect
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -24,62 +25,76 @@ from daimon.adapters.scheduler.main import (
     _close_github_app_sessions,  # pyright: ignore[reportPrivateUsage]  # boundary behaviour test
     _refresh_github_app_sessions,  # pyright: ignore[reportPrivateUsage]  # boundary behaviour test
     _run_loops,  # pyright: ignore[reportPrivateUsage]  # loop-level test
+    _run_one_tick_step,  # pyright: ignore[reportPrivateUsage]  # boundary behaviour test
     _sweep_github_app_tokens,  # pyright: ignore[reportPrivateUsage]  # boundary behaviour test
     _sweep_pending_files,  # pyright: ignore[reportPrivateUsage]  # boundary behaviour test
     scheduler_step,
 )
 from daimon.core.config import Settings
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import SessionTransaction
 
-# Awaited names that need no decorator, with the reason each is safe.
-ALLOWED_UNGUARDED: dict[str, str] = {
-    "run_one_tick": (
-        "core pipeline in daimon.core.scheduler; it catches and logs each stage "
-        "itself (advance_stale, claim_due_fireable, configured_routines, every fire)"
-    ),
-}
+# Awaited calls that need no decorator, with the reason each is safe. Empty: every
+# step goes through `scheduler_step`. Attribute calls (`await obj.method()`) are
+# keyed by their source text.
+ALLOWED_UNGUARDED: dict[str, str] = {}
 
 
-def _called_names(nodes: list[ast.stmt] | list[ast.AST]) -> list[str]:
-    """Names of functions awaited, or called inside a lambda, under `nodes`."""
+def _call_name(call: ast.Call) -> str:
+    """`name` for a plain call, source text such as `obj.method` for an attribute call."""
+    return ast.unparse(call.func)
+
+
+def _called_names(nodes: list[ast.AST]) -> list[str]:
+    """Functions awaited, or called inside a lambda, under `nodes`."""
     names: list[str] = []
     for root in nodes:
         for node in ast.walk(root):
             if isinstance(node, ast.Await) and isinstance(node.value, ast.Call):
-                if isinstance(node.value.func, ast.Name):
-                    names.append(node.value.func.id)
+                names.append(_call_name(node.value))
             elif isinstance(node, ast.Lambda):
-                for inner in ast.walk(node.body):
-                    if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name):
-                        names.append(inner.func.id)
+                names.extend(
+                    _call_name(inner)
+                    for inner in ast.walk(node.body)
+                    if isinstance(inner, ast.Call)
+                )
     return names
 
 
 def tick_step_names(source: str) -> set[str]:
-    """Steps run by the repeating tick, the `--once` path and the side loops."""
+    """Steps run by the `--once` path and by every callable passed to `_run_loops`.
+
+    A callback can be a lambda, a name, or an expression holding names. A name that
+    resolves to a function nested in the entrypoint (such as `tick`) is searched for
+    its steps. A name that resolves to a module-level function is itself a step.
+    """
     tree = ast.parse(source)
+    module_level = {n.name for n in tree.body if isinstance(n, ast.AsyncFunctionDef)}
+    nested = {
+        n.name: n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.AsyncFunctionDef) and n.name not in module_level
+    }
     scopes: list[ast.AST] = []
+    direct: set[str] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.AsyncFunctionDef) and node.name in {
-            "tick",
-            "usage_sweep",
-            "privacy_sweep",
-        }:
-            scopes.append(node)
         if (
             isinstance(node, ast.If)
             and isinstance(node.test, ast.Attribute)
             and node.test.attr == "once"
         ):
             scopes.extend(node.body)
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "_run_loops"
-        ):
-            scopes.extend(kw.value for kw in node.keywords if isinstance(kw.value, ast.Lambda))
-    return set(_called_names(scopes))
+        if isinstance(node, ast.Call) and _call_name(node) == "_run_loops":
+            for keyword in node.keywords:
+                for inner in ast.walk(keyword.value):
+                    if isinstance(inner, ast.Lambda):
+                        scopes.append(inner)
+                    elif isinstance(inner, ast.Name) and inner.id in nested:
+                        scopes.append(nested[inner.id])
+                    elif isinstance(inner, ast.Name) and inner.id in module_level:
+                        direct.add(inner.id)
+    return set(_called_names(scopes)) | direct
 
 
 def unguarded_steps(source: str) -> set[str]:
@@ -107,6 +122,37 @@ def test_every_tick_step_is_behind_the_shared_boundary() -> None:
 
 def test_allow_list_has_no_stale_entries() -> None:
     assert set(ALLOWED_UNGUARDED) <= tick_step_names(_main_source())
+
+
+def test_contract_covers_run_one_tick_and_the_loop_callbacks() -> None:
+    steps = tick_step_names(_main_source())
+    assert {"_run_one_tick_step", "_sweep_compute", "_sweep_privacy_deletes"} <= steps
+    assert "run_one_tick" not in steps
+
+
+def test_contract_flags_a_named_unguarded_callback() -> None:
+    source = _main_source().replace(
+        "                compute_sweep=lambda: _sweep_compute(compute),\n",
+        "                compute_sweep=extra_loop,\n",
+        1,
+    )
+    source = source.replace(
+        "        async def privacy_sweep() -> None:",
+        "        async def extra_loop() -> None:\n            await _new_cleanup()\n\n"
+        "        async def privacy_sweep() -> None:",
+        1,
+    )
+    source += "\n\nasync def _new_cleanup() -> None:\n    return None\n"
+    assert unguarded_steps(source) == {"_new_cleanup"}
+
+
+def test_contract_flags_an_attribute_call_in_tick() -> None:
+    source = _main_source().replace(
+        "            await _sweep_long_jobs(long_jobs)\n            await _drain_pending_usage(",
+        "            await long_jobs.cleanup()\n            await _drain_pending_usage(",
+        1,
+    )
+    assert unguarded_steps(source) == {"long_jobs.cleanup"}
 
 
 def test_contract_flags_a_new_unguarded_step() -> None:
@@ -211,3 +257,27 @@ async def test_a_failing_step_does_not_stop_the_next_tick() -> None:
             tick=tick, privacy_sweep=noop, compute_sweep=noop, compute_task_poll=noop, **kwargs
         )
     assert ticks == 3
+
+
+async def test_run_one_tick_step_logs_a_database_error_at_commit(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """`run_one_tick` opens its transaction outside its own catches."""
+
+    def commit_fails(self: SessionTransaction, *args: object, **kwargs: object) -> None:
+        raise OperationalError("COMMIT", {}, Exception("connection lost"))
+
+    with (
+        patch.object(SessionTransaction, "commit", commit_fails),
+        structlog.testing.capture_logs() as logs,
+    ):
+        await _run_one_tick_step(
+            now=datetime.now(UTC),
+            sm=db_session_factory,
+            fire=AsyncMock(),
+            max_age=timedelta(minutes=5),
+            max_concurrent_fires=1,
+            dispatch_timeout_s=5.0,
+        )
+    assert [e["event"] for e in logs if e["log_level"] == "error"] == ["scheduler.step.failed"]
+    assert logs[-1]["step"] == "_run_one_tick_step"

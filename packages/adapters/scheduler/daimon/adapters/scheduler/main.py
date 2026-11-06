@@ -211,6 +211,35 @@ def scheduler_step[**P](step: Callable[P, Awaitable[None]]) -> Callable[P, Await
 
 
 @scheduler_step
+async def _run_one_tick_step(
+    *,
+    now: datetime,
+    sm: async_sessionmaker[AsyncSession],
+    fire: FireFn,
+    max_age: timedelta,
+    max_concurrent_fires: int,
+    dispatch_timeout_s: float,
+    dispatcher: RoutineDispatcher | None = None,
+    wait_for_completion: bool = False,
+) -> None:
+    """Run the routine claim and dispatch step behind the shared boundary.
+
+    `run_one_tick` opens its transaction outside its own catches, so a database
+    error on connect or commit would otherwise end every loop.
+    """
+    await run_one_tick(
+        now=now,
+        sm=sm,
+        fire=fire,
+        max_age=max_age,
+        max_concurrent_fires=max_concurrent_fires,
+        dispatch_timeout_s=dispatch_timeout_s,
+        dispatcher=dispatcher,
+        wait_for_completion=wait_for_completion,
+    )
+
+
+@scheduler_step
 async def _sweep_compute(compute: ComputeSessions) -> None:
     # Cleanup is independent of launch enablement and user routines.
     if not compute.settings.deployment_id or compute.settings.api_token is None:
@@ -1975,7 +2004,7 @@ async def run(
         if not args.once:
             dm_turn_deps.start_context_providers()
         if args.once:
-            await run_one_tick(
+            await _run_one_tick_step(
                 now=datetime.now(UTC),
                 sm=sm,
                 fire=fire,
@@ -2020,7 +2049,7 @@ async def run(
             return 0
 
         async def tick() -> None:
-            await run_one_tick(
+            await _run_one_tick_step(
                 now=datetime.now(UTC),
                 sm=sm,
                 fire=fire,
