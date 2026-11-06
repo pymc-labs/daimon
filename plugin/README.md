@@ -43,9 +43,11 @@ locally. A server you never authenticate simply has no daimons to list.
 
 A hub turn runs the same balance and cap admission check as the existing `/mcp`
 tools: a workspace with a depleted balance or an exhausted monthly cap refuses the
-turn before it starts. Like those tools today, a hub turn does not record a metered
-usage debit against the workspace once it completes — usage metering for
-MCP-initiated turns is tracked as a separate piece of work.
+turn before it starts.
+
+A hub turn is billed to the workspace of the daimon you ask. `ask`, `start_turn` and
+`continue_turn` write a settle request before they send the message. After the turn
+ends, the scheduler processes pending settle requests and debits each model call once.
 
 ## Self-hosted deployments
 
