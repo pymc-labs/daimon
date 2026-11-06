@@ -138,7 +138,7 @@ async def hold_agent_vault_lock(
     *,
     account_id: uuid.UUID,
     agent_id: uuid.UUID,
-) -> AsyncIterator[None]:
+) -> AsyncIterator[AsyncSession]:
     """Hold this (account_id, agent_id)'s vault lock for the body of the block.
 
     A vault holds one credential per URL, and each writer below lists the
@@ -182,7 +182,9 @@ async def hold_agent_vault_lock(
     """
     async with session_factory() as session, session.begin():
         await _lock_vault_namespace(session, account_id=account_id, agent_id=agent_id)
-        yield
+        # The holder may read through the lock's own transaction instead of
+        # checking out another pooled connection.
+        yield session
 
 
 async def chat_mcp_credential(

@@ -601,8 +601,10 @@ async def test_public_continue_turn_keeps_ownership_recheck_send_and_clock(
     clock = dt.datetime(2026, 10, 9, 12, tzinfo=dt.UTC)
     replies: list[tuple[str, str, int, dict[str, Any]]] = [
         ("GET", "/v1/sessions/session", 200, BODY),
-        # Read again inside the fence, then checked for a paused turn.
+        # Read again inside the fence, the agent read for changes since the
+        # session started, then checked for a paused turn.
         ("GET", "/v1/sessions/session", 200, BODY),
+        ("GET", "/v1/agents/agent", 200, AGENT.model_dump(mode="json")),
         ("GET", "/v1/sessions/session/events", 200, {"data": [], "next_page": None}),
         ("POST", "/v1/sessions/session/events", 200, ECHO),
     ]
@@ -610,6 +612,7 @@ async def test_public_continue_turn_keeps_ownership_recheck_send_and_clock(
     async with old.client() as before, new.client() as after:
         await before.beta.sessions.retrieve("session")
         await before.beta.sessions.retrieve("session")
+        await before.beta.agents.retrieve("agent")
         await before.beta.sessions.events.list(
             "session", order="desc", limit=1, types=["session.status_idle"]
         )

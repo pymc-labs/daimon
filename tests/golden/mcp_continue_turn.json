@@ -150,6 +150,57 @@
       "payload": {
         "body": null,
         "method": "GET",
+        "path": "/v1/agents/<id:2>",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "archived_at": null,
+          "created_at": "<time:epoch-24278400s>",
+          "description": null,
+          "id": "<id:2>",
+          "mcp_servers": [],
+          "metadata": {
+            "daimon_name": "test-agent",
+            "daimon_tenant": "00000000-0000-0000-0000-000000100005"
+          },
+          "model": {
+            "id": "claude-sonnet-4-6",
+            "speed": null
+          },
+          "multiagent": null,
+          "name": "test-agent",
+          "skills": [],
+          "system": null,
+          "tools": [],
+          "type": "agent",
+          "updated_at": "<time:epoch-24278400s>",
+          "version": 1
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
         "path": "/v1/sessions/<id:1>/events",
         "protocol_headers": [
           [
@@ -604,6 +655,108 @@
             "output_tokens": null
           },
           "vault_ids": []
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/agents/<id:2>",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "archived_at": null,
+          "created_at": "<time:epoch-24278400s>",
+          "description": null,
+          "id": "<id:2>",
+          "mcp_servers": [],
+          "metadata": {
+            "daimon_name": "test-agent",
+            "daimon_tenant": "00000000-0000-0000-0000-000000100005"
+          },
+          "model": {
+            "id": "claude-sonnet-4-6",
+            "speed": null
+          },
+          "multiagent": null,
+          "name": "test-agent",
+          "skills": [],
+          "system": null,
+          "tools": [],
+          "type": "agent",
+          "updated_at": "<time:epoch-24278400s>",
+          "version": 1
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/agents/<id:2>",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "archived_at": null,
+          "created_at": "<time:epoch-24278400s>",
+          "description": null,
+          "id": "<id:2>",
+          "mcp_servers": [],
+          "metadata": {
+            "daimon_name": "test-agent",
+            "daimon_tenant": "00000000-0000-0000-0000-000000100005"
+          },
+          "model": {
+            "id": "claude-sonnet-4-6",
+            "speed": null
+          },
+          "multiagent": null,
+          "name": "test-agent",
+          "skills": [],
+          "system": null,
+          "tools": [],
+          "type": "agent",
+          "updated_at": "<time:epoch-24278400s>",
+          "version": 1
         },
         "status": 200
       }

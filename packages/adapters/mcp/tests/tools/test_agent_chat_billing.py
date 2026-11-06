@@ -148,6 +148,7 @@ def _directory(tenant_id: uuid.UUID) -> MARouter:
         metadata={"daimon_tenant": str(tenant_id), "daimon_name": "test-agent"},
     )
     router = MARouter()
+    router.add_agent(agent)
     router.add("GET", r"/v1/agents", lambda _r, _m: list_response([agent.model_dump(mode="json")]))
     router.add("GET", r"/v1/environments", lambda _r, _m: list_response([env]))
     return router

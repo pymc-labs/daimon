@@ -752,3 +752,60 @@ async def test_sync_resolves_again_when_the_cached_vault_is_deleted_or_archived(
     assert calls.count("POST /v1/vaults/vlt_me/credentials") == 2, (
         f"both turns must land the credential in the live vault: {calls}"
     )
+
+
+async def test_a_token_deleted_before_the_mirror_takes_the_lock_is_not_written_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The detach deletes the stored token, then each vault copy under the vault lock.
+
+    A mirror that read the token before the delete must read again under that
+    lock, or it writes the deleted token back (`forget_mirrored_mcp_token`).
+    """
+    from contextlib import asynccontextmanager
+
+    from daimon.core import agent_mcp_credentials as module
+    from daimon.core.agent_mcp_credentials import ResolvedMcpCredential
+
+    stored = [
+        ResolvedMcpCredential(mcp_server_url="https://crm.example/mcp", token="t", version="1")
+    ]
+    mirrored: list[tuple[ResolvedMcpCredential, ...]] = []
+
+    async def resolve(**_kwargs: Any) -> tuple[ResolvedMcpCredential, ...]:
+        return tuple(stored)
+
+    async def ensure(*_args: Any, **_kwargs: Any) -> str:
+        stored.clear()  # the detach lands between the first read and the lock
+        return "vlt_caller"
+
+    @asynccontextmanager
+    async def lock(*_args: Any, **_kwargs: Any):
+        yield "the lock's own session"
+
+    async def read_under_lock(session: Any, **_kwargs: Any) -> tuple[ResolvedMcpCredential, ...]:
+        assert session == "the lock's own session", "read through another connection"
+        return tuple(stored)
+
+    async def mirror(_client: Any, *, credentials: Any, **_kwargs: Any) -> None:
+        mirrored.append(tuple(credentials))
+
+    monkeypatch.setattr(module, "resolve_agent_mcp_credentials", resolve)
+    monkeypatch.setattr(module, "ensure_agent_mcp_vault", ensure)
+    monkeypatch.setattr(module, "hold_agent_vault_lock", lock)
+    monkeypatch.setattr(module, "_read_agent_mcp_credentials", read_under_lock)
+    monkeypatch.setattr(module, "mirror_credentials_into_vault", mirror)
+
+    await sync_agent_mcp_credentials(
+        object(),  # type: ignore[arg-type]
+        sessionmaker=object(),  # type: ignore[arg-type]
+        fernet=object(),  # type: ignore[arg-type]
+        tenant_id=uuid.uuid4(),
+        agent_id=uuid.uuid4(),
+        account_id=uuid.uuid4(),
+        jwt_secret=b"s" * 32,
+        public_url="https://mcp.example/mcp",
+        now=dt.datetime(2026, 11, 6, tzinfo=dt.UTC),
+    )
+
+    assert mirrored == [()], "the deleted token was written back into the vault"

@@ -91,6 +91,7 @@ class _Hub:
             metadata={"daimon_tenant": str(self.tenant_id), "daimon_name": "acme-project"},
         ).model_dump(mode="json")
         router.add("GET", r"/v1/agents", lambda _r, _m: list_response([agent]))
+        router.add("GET", rf"/v1/agents/{_AGENT}", lambda _r, _m: httpx.Response(200, json=agent))
         router.add(
             "GET", r"/v1/sessions$", lambda _r, _m: list_response(list(self.sessions.values()))
         )

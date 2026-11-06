@@ -107,6 +107,7 @@ from daimon.adapters.mcp.tools._session_access import (
 from daimon.adapters.mcp.tools._turn_observation import observed_agent_turn
 from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
 from daimon.core import bundle_handle
+from daimon.core.agent_mcp_credentials import sync_agent_mcp_credentials
 from daimon.core.agent_pins import agent_pin_names as core_agent_pin_names
 from daimon.core.billing import BillingConfig
 from daimon.core.config import get_repo_memory_settings
@@ -115,18 +116,26 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_BUDGET_CHANNEL,
     MA_METADATA_KEY_ISOLATED,
     MA_METADATA_KEY_NAME,
+    MA_METADATA_KEY_SOURCE_RELEASE,
+    MA_METADATA_KEY_SOURCE_RELEASE_AT,
+    MA_METADATA_KEY_SOURCE_RELEASE_URL,
+    MA_METADATA_KEY_SPEC_HASH,
 )
 from daimon.core.github_app_session import close_headless_app_session
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import find_agent_by_derived_uuid_cached
 from daimon.core.mcp_identity import identity_relay_urls
 from daimon.core.mcp_vault import archive_relay_vaults, refresh_mounted_mcp_vaults
+from daimon.core.mux_compat import retrieve_agent, retrieve_agent_version
 from daimon.core.permissions import agent_permissions, channel_permissions, memory_writable
 from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import ScopeContext
 from daimon.core.session_mutation import session_mutation_fence
 from daimon.core.session_ports_compat import archive_session_record
 from daimon.core.session_seal import seal_ids
+from daimon.core.session_snapshot import (
+    canonical_json,
+)
 from daimon.core.sessions import create_isolated_session, create_session
 from daimon.core.stores import session_settle_state
 from daimon.core.stores.github_access import list_live_grant_repositories
@@ -142,7 +151,7 @@ from fastmcp.exceptions import ToolError
 from fastmcp.tools import ToolResult
 from mux.contracts.ids import Scope
 from mux.errors import ScopeViolation
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, JsonValue
 from pydantic.json_schema import SkipJsonSchema
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -376,6 +385,10 @@ _RESUME_FAILED_MSG = (
     "this conversation is paused on tool confirmations and could not be resumed. "
     "Call continue_turn again."
 )
+_AGENT_CHANGED_MSG = (
+    "This agent changed since this conversation started. Start a new one with "
+    "start_turn to use the new setup. Nothing was sent. Tell the caller."
+)
 
 _MESSAGE_REQUIRED_MSG = (
     "a message is required: only a conversation paused on tool confirmations "
@@ -570,6 +583,135 @@ async def _refuse_another_provider(
             f"{name} runs on {provider_name(backend)}; agent keys and the hub can only "
             f"talk to agents on Claude for now. Ask it in chat instead. {nothing}"
         )
+
+
+def _canonical_setup(value: JsonValue) -> str:
+    """`value` encoded with lists unordered and every `permission_policy` dropped.
+
+    A send's gate rewrites permission policies from the current policy (`gate`),
+    and the order of servers, skills, tools or a toolset's per-tool configs
+    means nothing to the provider, so neither counts as a change.
+    """
+    if isinstance(value, dict):
+        kept: dict[str, JsonValue] = {
+            key: _canonical_setup(item) for key, item in value.items() if key != "permission_policy"
+        }
+        return canonical_json(kept)
+    if isinstance(value, list):
+        members: list[JsonValue] = [*sorted(_canonical_setup(item) for item in value)]
+        return canonical_json(members)
+    return canonical_json(value)
+
+
+_DESCRIPTIVE_METADATA = frozenset(
+    {
+        MA_METADATA_KEY_NAME,
+        MA_METADATA_KEY_SOURCE_RELEASE,
+        MA_METADATA_KEY_SOURCE_RELEASE_AT,
+        MA_METADATA_KEY_SOURCE_RELEASE_URL,
+        MA_METADATA_KEY_SPEC_HASH,
+    }
+)
+"""Agent metadata that only labels the agent. Any other key may shape a session
+(`daimon_isolated` decides which mounts it gets), so a change to it counts."""
+
+
+def _session_setup(agent: BetaManagedAgentsAgent) -> str:
+    """What an agent definition gives a session: all of it but its name, description
+    and descriptive metadata (`_DESCRIPTIVE_METADATA`)."""
+    multiagent = getattr(agent, "multiagent", None)
+    return _canonical_setup(
+        {
+            "metadata": {
+                key: value
+                for key, value in agent.metadata.items()
+                if key not in _DESCRIPTIVE_METADATA
+            },
+            "model": agent.model.id,
+            "speed": getattr(agent.model, "speed", None) or "standard",
+            "system": agent.system,
+            "skills": [skill.model_dump(mode="json") for skill in agent.skills],
+            "mcp_servers": [server.model_dump(mode="json") for server in agent.mcp_servers],
+            "tools": [tool.model_dump(mode="json") for tool in agent.tools],
+            "multiagent": None if multiagent is None else multiagent.model_dump(mode="json"),
+        }
+    )
+
+
+async def _refuse_a_changed_agent(
+    runtime: McpRuntime, auth: AuthIdentity, session: BetaManagedAgentsSession
+) -> None:
+    """Refuse a message to a session started on an agent version since edited.
+
+    The edit counts when it changed the agent's model, prompt, skills, MCP
+    servers, tools or session-shaping metadata (`_session_setup`), read from
+    the version the session started on and the current one.
+
+    The comparison is of the agent's own definition, not of what each
+    caller's session gets from it: rebuilding a session's past view from
+    today's sign-ins can hide a change. So an edit to a server only someone
+    else signs in to, or to a custom tool the unattended gate removes anyway,
+    asks this caller for a new conversation too: a needless refusal, never a
+    missed change.
+
+    A live session can't take any of these safely (new servers need the
+    sign-in vault `start_turn` mounts, and a tool change would reach the
+    provider only after this turn's safety gate), and agent chat does not
+    move a conversation, so the caller starts a new one (`_AGENT_CHANGED_MSG`).
+    An unedited agent costs one agent read.
+    """
+    scope = mcp_scope(auth)
+    agent = await retrieve_agent(runtime.client, session.agent.id, scope=scope)
+    if agent.version == session.agent.version:
+        return
+    started = await retrieve_agent_version(
+        runtime.client, agent.id, session.agent.version, scope=scope
+    )
+    if _session_setup(started) != _session_setup(agent):
+        log.info(
+            "agent_chat.agent_changed_refused",
+            session_id=session.id,
+            from_version=session.agent.version,
+            to_version=agent.version,
+        )
+        raise ToolError(_AGENT_CHANGED_MSG)
+
+
+async def _mirror_shared_mcp_tokens(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    session: BetaManagedAgentsSession,
+    *,
+    now: Callable[[], dt.datetime],
+) -> None:
+    """Copy the agent's shared MCP tokens into the caller's mounted vault.
+
+    The chat path does this on every turn (`RemirrorVaultCredentials`), so a
+    token someone replaced or revoked reaches an open conversation. GitHub's
+    own MCP token is left out, as `create_session` does in App mode.
+    """
+    mcp = runtime.settings.mcp
+    if (
+        runtime.fernet is None
+        or mcp.public_url is None
+        or mcp.jwt_secret is None
+        or not session.vault_ids
+    ):
+        return
+    assert auth.agent_id is not None  # _verify_agent_owns_session requires it
+    await sync_agent_mcp_credentials(
+        runtime.client,
+        sessionmaker=runtime.session_factory,
+        fernet=runtime.fernet,
+        tenant_id=auth.tenant_id,
+        agent_id=auth.agent_id,
+        account_id=auth.account_id,
+        jwt_secret=mcp.jwt_secret.get_secret_value().encode(),
+        public_url=str(mcp.public_url),
+        now=now(),
+        exclude_github_copilot=True,
+        vault_ids=runtime.resolver_cache.mcp_vault_ids,
+    )
 
 
 @observed_agent_turn
@@ -858,6 +1000,11 @@ async def _continue_turn_impl(
             touched = await touch_unmapped_app_session(db, session_id=handle)
             if touched is False:
                 raise ToolError("This conversation is closed.")
+        # A chat turn's bind reconciles here (`prepare_session_for_turn`). Agent
+        # chat refuses instead; a resume alone finishes the turn already running.
+        if message is not None:
+            await _refuse_a_changed_agent(runtime, auth, current)
+        await _mirror_shared_mcp_tokens(runtime, auth, current, now=now)
         mcp = runtime.settings.mcp
         if mcp.public_url is not None and mcp.jwt_secret is not None:
             assert auth.agent_id is not None  # verified above, including after fence acquisition
@@ -1564,6 +1711,8 @@ def register_agent_chat_tools(
         ``message``.
         Use a handle opened through agent chat. Platform conversations and
         older sessions without headless creation provenance cannot be driven here.
+        If the agent's model, prompt, skills, MCP servers or tools changed since
+        the session started, a message is refused: start a new one with ``start_turn``.
         """
         auth = await _check_admission(
             ctx,
