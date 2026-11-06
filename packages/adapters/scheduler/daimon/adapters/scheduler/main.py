@@ -67,6 +67,7 @@ from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.direct_messages import DirectMessageAccessRevoked, run_dm_routine
 from daimon.core.discord_membership import DiscordRestMembershipResolver
 from daimon.core.github_app_session import (
+    GitHubTokenMintUnavailable,
     archive_app_vault,
     effective_repo_state,
     revoke_session_tokens,
@@ -1197,6 +1198,11 @@ _app_refresh_failures: dict[str, tuple[int, datetime]] = {}
 _app_refresh_retired: dict[str, str] = {}
 _REFRESH_BACKOFF_START = timedelta(minutes=1)
 _REFRESH_BACKOFF_MAX = timedelta(minutes=30)
+# A refresh is due 15 minutes before the token expires. Backoff attempts land at
+# 0, 1, 3, 7 and 15 minutes, so the fifth consecutive failure means the old token
+# is about to expire. Until then a GitHub mint outage is retried quietly (WARNING);
+# from then on it is an ERROR, so a real outage or broken session still alerts.
+_REFRESH_DEFERRED_FAILURES = 4
 # A turn running continuously for longer than this is treated as abandoned and
 # stops renewing its tokens. Mapped turns use active_turn_started_at; MCP
 # sessions use when the scheduler first saw MA report them running.
@@ -1213,6 +1219,63 @@ def _record_refresh_failure(session_id: str, now: datetime) -> None:
     count = _app_refresh_failures.get(session_id, (0, now))[0] + 1
     delay = min(_REFRESH_BACKOFF_START * 2 ** min(count - 1, 5), _REFRESH_BACKOFF_MAX)
     _app_refresh_failures[session_id] = (count, now + delay)
+
+
+# With this little life left on the current token, a mint outage is no longer
+# something to wait out. The count above resets when the scheduler restarts, so
+# the token's own expiry (persisted) is the second trigger.
+_REFRESH_URGENT_MARGIN = timedelta(minutes=5)
+
+
+def _is_transient_cause(error: BaseException) -> bool:
+    """True when the wrapped cause is clearly a passing GitHub or network problem.
+
+    `GitHubTokenMintUnavailable` wraps every mint failure, including a 401 and
+    unknown bugs, so only a timeout, a network error, a 5xx or a 429 count.
+    """
+    seen: set[int] = set()
+    cause = error.__cause__ or error.__context__
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        if isinstance(cause, httpx.TransportError):
+            return True
+        if isinstance(cause, httpx.HTTPStatusError):
+            status = cause.response.status_code
+            return status == 429 or status >= 500
+        cause = cause.__cause__ or cause.__context__
+    return False
+
+
+def _log_refresh_failure(
+    event_prefix: str,
+    session_id: str,
+    error: Exception,
+    *,
+    expires_at: datetime | None,
+    now: datetime,
+) -> None:
+    """Log a failed refresh as `<prefix>.deferred` (WARNING) or `<prefix>.failed` (ERROR).
+
+    Call it inside the `except` block, after `_record_refresh_failure`, so the
+    traceback is attached and the failure count includes this failure. It defers
+    only a transient mint outage, only while the session is inside its retry
+    budget and its token is not about to expire. Used by the mapped-session
+    loop (`scheduler.github_app_session_refresh`) and the MCP loop
+    (`scheduler.github_mcp_app_session_refresh`).
+    """
+    failures = _app_refresh_failures[session_id][0]
+    token_urgent = expires_at is not None and expires_at <= now + _REFRESH_URGENT_MARGIN
+    if (
+        isinstance(error, GitHubTokenMintUnavailable)
+        and _is_transient_cause(error)
+        and failures <= _REFRESH_DEFERRED_FAILURES
+        and not token_urgent
+    ):
+        log.warning(
+            f"{event_prefix}.deferred", session_id=session_id, consecutive_failures=failures
+        )
+        return
+    log.exception(f"{event_prefix}.failed", session_id=session_id)
 
 
 def _dead_session_refresh_reason(error: BaseException) -> str | None:
@@ -1412,7 +1475,13 @@ async def _refresh_github_app_sessions(
                 )
                 continue
             _record_refresh_failure(session_id, now)
-            log.exception("scheduler.github_app_session_refresh.failed", session_id=session_id)
+            _log_refresh_failure(
+                "scheduler.github_app_session_refresh",
+                session_id,
+                error,
+                expires_at=candidate.expires_at,
+                now=now,
+            )
     async with sm() as session:
         mcp_live = await list_live_mcp_app_sessions(session, now=now, include_expired=True)
     for candidate in mcp_live:
@@ -1526,12 +1595,15 @@ async def _refresh_github_app_sessions(
                     _record_refresh_failure(current.session_id, now)
                 else:
                     _app_refresh_failures.pop(current.session_id, None)
-        except Exception:
+        except Exception as error:
             _last_app_access_checks[candidate.session_id] = now
             _record_refresh_failure(candidate.session_id, now)
-            log.exception(
-                "scheduler.github_mcp_app_session_refresh.failed",
-                session_id=candidate.session_id,
+            _log_refresh_failure(
+                "scheduler.github_mcp_app_session_refresh",
+                candidate.session_id,
+                error,
+                expires_at=candidate.expires_at,
+                now=now,
             )
     # Drop state for sessions that died or closed since the last sweep.
     async with sm() as session:
