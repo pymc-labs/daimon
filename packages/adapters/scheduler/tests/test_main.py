@@ -221,15 +221,37 @@ async def test_mcp_app_session_refreshes_before_token_expiry(
     assert "mcp-refresh" in checks
 
 
+_MINT_UNAVAILABLE = "GitHub access is temporarily unavailable. Try again."
+
+
+def _mint_unavailable(cause: BaseException | None = None) -> GitHubTokenMintUnavailable:
+    """The error the mint raises, wrapping its cause (a 503 unless told otherwise)."""
+    if cause is None:
+        cause = _github_status_error(503)
+    error = GitHubTokenMintUnavailable(_MINT_UNAVAILABLE)
+    error.__cause__ = cause
+    return error
+
+
+def _github_status_error(status: int) -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "https://api.github.com/app/installations/1/access_tokens")
+    return httpx.HTTPStatusError(
+        "status", request=request, response=httpx.Response(status, request=request)
+    )
+
+
 async def _refresh_mcp_session_that_fails(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     error: Exception,
+    *,
+    token_expires_in: timedelta | None = None,
 ) -> Sequence[Mapping[str, Any]]:
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     url = "https://github.com/acme/failing"
+    agent_id = uuid.uuid4()
     await github_issued_tokens.register_app_session_vault(
         db_session,
         session_id=_MCP_FAILING,
@@ -237,10 +259,27 @@ async def _refresh_mcp_session_that_fails(
         vault_id="failing-vault",
         is_unmapped=True,
         is_mcp=True,
-        agent_id=uuid.uuid4(),
+        agent_id=agent_id,
         account_id=account.id,
         repo_urls=(url,),
     )
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    if token_expires_in is not None:
+        pending = await github_issued_tokens.create_pending(
+            db_session,
+            tenant_id=tenant.id,
+            agent_id=agent_id,
+            session_id=_MCP_FAILING,
+            installation_id=1,
+            repo_ids=[11],
+            permissions={"contents": "read"},
+            grant_versions={"grant:11": 1, "authorization:11": 1},
+            expires_at=datetime.now(UTC) + token_expires_in,
+        )
+        await github_issued_tokens.store_token(
+            db_session, token_id=pending.token_id, token="t", fernet=fernet
+        )
+        await github_issued_tokens.mark_delivered(db_session, token_id=pending.token_id)
     await db_session.commit()
     monkeypatch.setattr(
         "daimon.adapters.scheduler.main.effective_repo_state",
@@ -263,7 +302,7 @@ async def _refresh_mcp_session_that_fails(
             anthropic,
             db_session_factory,
             settings=settings,
-            fernet=build_multifernet((Fernet.generate_key().decode(),)),
+            fernet=fernet,
         )
     return logs
 
@@ -277,7 +316,7 @@ async def test_mcp_refresh_defers_a_first_github_mint_outage_at_warning(
     monkeypatch: pytest.MonkeyPatch,
     fresh_refresh_state: dict[str, tuple[int, datetime]],
 ) -> None:
-    error = GitHubTokenMintUnavailable(_MINT_UNAVAILABLE)
+    error = _mint_unavailable()
     logs = await _refresh_mcp_session_that_fails(db_session, db_session_factory, monkeypatch, error)
     [deferred] = _events(logs, "scheduler.github_mcp_app_session_refresh.deferred")
     assert deferred["log_level"] == "warning"
@@ -309,10 +348,71 @@ async def test_mcp_refresh_alerts_when_a_github_mint_outage_outlasts_the_retry_b
 ) -> None:
     fresh_refresh_state[_MCP_FAILING] = (4, datetime.now(UTC) - timedelta(seconds=1))
     logs = await _refresh_mcp_session_that_fails(
-        db_session, db_session_factory, monkeypatch, GitHubTokenMintUnavailable(_MINT_UNAVAILABLE)
+        db_session, db_session_factory, monkeypatch, _mint_unavailable()
     )
     [failed] = _events(logs, "scheduler.github_mcp_app_session_refresh.failed")
     assert failed["log_level"] == "error"
+
+
+_NON_TRANSIENT_CAUSES = [
+    pytest.param(_github_status_error(401), id="401"),
+    pytest.param(_github_status_error(403), id="403"),
+    pytest.param(RuntimeError("bug in the mint"), id="unknown"),
+]
+_TRANSIENT_CAUSES = [
+    pytest.param(_github_status_error(503), id="503"),
+    pytest.param(_github_status_error(429), id="429"),
+    pytest.param(httpx.ReadTimeout("slow"), id="timeout"),
+    pytest.param(httpx.ConnectError("down"), id="connect"),
+]
+
+
+@pytest.mark.parametrize("cause", _NON_TRANSIENT_CAUSES)
+async def test_mcp_refresh_keeps_the_error_when_the_mint_cause_is_not_transient(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+    cause: BaseException,
+) -> None:
+    logs = await _refresh_mcp_session_that_fails(
+        db_session, db_session_factory, monkeypatch, _mint_unavailable(cause)
+    )
+    assert len(_events(logs, "scheduler.github_mcp_app_session_refresh.failed")) == 1
+    assert _events(logs, "scheduler.github_mcp_app_session_refresh.deferred") == []
+
+
+@pytest.mark.parametrize("cause", _TRANSIENT_CAUSES)
+async def test_mcp_refresh_defers_a_transient_mint_cause(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+    cause: BaseException,
+) -> None:
+    logs = await _refresh_mcp_session_that_fails(
+        db_session, db_session_factory, monkeypatch, _mint_unavailable(cause)
+    )
+    assert len(_events(logs, "scheduler.github_mcp_app_session_refresh.deferred")) == 1
+    assert _events(logs, "scheduler.github_mcp_app_session_refresh.failed") == []
+
+
+async def test_mcp_refresh_alerts_after_a_restart_when_the_token_is_about_to_expire(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+) -> None:
+    # The failure count is empty (a restart reset it), yet the token has 2 minutes left.
+    logs = await _refresh_mcp_session_that_fails(
+        db_session,
+        db_session_factory,
+        monkeypatch,
+        _mint_unavailable(),
+        token_expires_in=timedelta(minutes=2),
+    )
+    assert len(_events(logs, "scheduler.github_mcp_app_session_refresh.failed")) == 1
+    assert _events(logs, "scheduler.github_mcp_app_session_refresh.deferred") == []
 
 
 async def test_mcp_coverage_refusal_backs_off_next_tick_during_active_turn(
@@ -466,7 +566,10 @@ async def test_running_mcp_turn_refreshes_across_three_token_expiries(
 
 
 def _mapped_app_session(
-    *, active_turn: bool = True, started_ago: timedelta = timedelta(hours=1)
+    *,
+    active_turn: bool = True,
+    started_ago: timedelta = timedelta(hours=1),
+    expires_in: timedelta = timedelta(minutes=10),
 ) -> SimpleNamespace:
     url = "https://github.com/acme/repo"
     return SimpleNamespace(
@@ -486,7 +589,7 @@ def _mapped_app_session(
             ),
         ),
         agent_id=uuid.UUID(int=4),
-        expires_at=datetime.now(UTC) + timedelta(minutes=10),
+        expires_at=datetime.now(UTC) + expires_in,
         permissions_by_repo={11: {"contents": "read"}},
     )
 
@@ -990,9 +1093,6 @@ async def test_refresh_keeps_backing_off_on_any_other_failure(
     assert _events(logs, "scheduler.github_app_session_refresh.retired") == []
 
 
-_MINT_UNAVAILABLE = "GitHub access is temporarily unavailable. Try again."
-
-
 async def test_refresh_defers_a_first_github_mint_outage_at_warning(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -1000,7 +1100,7 @@ async def test_refresh_defers_a_first_github_mint_outage_at_warning(
     fresh_refresh_state: dict[str, tuple[int, datetime]],
 ) -> None:
     item = _mapped_app_session()
-    rotate = unittest.mock.AsyncMock(side_effect=GitHubTokenMintUnavailable(_MINT_UNAVAILABLE))
+    rotate = unittest.mock.AsyncMock(side_effect=_mint_unavailable())
     with structlog.testing.capture_logs() as logs:
         await _refresh_mapped(db_session_factory, monkeypatch, [[item], [item]], rotate=rotate)
     [deferred] = _events(logs, "scheduler.github_app_session_refresh.deferred")
@@ -1019,7 +1119,7 @@ async def test_refresh_alerts_when_a_github_mint_outage_outlasts_the_retry_budge
     fresh_refresh_state: dict[str, tuple[int, datetime]],
 ) -> None:
     item = _mapped_app_session()
-    rotate = unittest.mock.AsyncMock(side_effect=GitHubTokenMintUnavailable(_MINT_UNAVAILABLE))
+    rotate = unittest.mock.AsyncMock(side_effect=_mint_unavailable())
     fresh_refresh_state[_SESSION] = (4, datetime.now(UTC) - timedelta(seconds=1))
     with structlog.testing.capture_logs() as logs:
         await _refresh_mapped(db_session_factory, monkeypatch, [[item], [item]], rotate=rotate)
@@ -1041,6 +1141,53 @@ async def test_refresh_keeps_the_error_for_a_non_retryable_failure_on_the_first_
         await _refresh_mapped(db_session_factory, monkeypatch, [[item], [item]], rotate=rotate)
     [failed] = _events(logs, "scheduler.github_app_session_refresh.failed")
     assert failed["log_level"] == "error"
+    assert _events(logs, "scheduler.github_app_session_refresh.deferred") == []
+
+
+@pytest.mark.parametrize("cause", _NON_TRANSIENT_CAUSES)
+async def test_refresh_keeps_the_error_when_the_mint_cause_is_not_transient(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    retired_refresh_state: dict[str, str],
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+    cause: BaseException,
+) -> None:
+    item = _mapped_app_session()
+    rotate = unittest.mock.AsyncMock(side_effect=_mint_unavailable(cause))
+    with structlog.testing.capture_logs() as logs:
+        await _refresh_mapped(db_session_factory, monkeypatch, [[item], [item]], rotate=rotate)
+    assert len(_events(logs, "scheduler.github_app_session_refresh.failed")) == 1
+    assert _events(logs, "scheduler.github_app_session_refresh.deferred") == []
+
+
+@pytest.mark.parametrize("cause", _TRANSIENT_CAUSES)
+async def test_refresh_defers_a_transient_mint_cause(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    retired_refresh_state: dict[str, str],
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+    cause: BaseException,
+) -> None:
+    item = _mapped_app_session()
+    rotate = unittest.mock.AsyncMock(side_effect=_mint_unavailable(cause))
+    with structlog.testing.capture_logs() as logs:
+        await _refresh_mapped(db_session_factory, monkeypatch, [[item], [item]], rotate=rotate)
+    assert len(_events(logs, "scheduler.github_app_session_refresh.deferred")) == 1
+    assert _events(logs, "scheduler.github_app_session_refresh.failed") == []
+
+
+async def test_refresh_alerts_after_a_restart_when_the_token_is_about_to_expire(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    retired_refresh_state: dict[str, str],
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+) -> None:
+    # No failure history (a restart reset it), but the token has 2 minutes left.
+    item = _mapped_app_session(expires_in=timedelta(minutes=2))
+    rotate = unittest.mock.AsyncMock(side_effect=_mint_unavailable())
+    with structlog.testing.capture_logs() as logs:
+        await _refresh_mapped(db_session_factory, monkeypatch, [[item], [item]], rotate=rotate)
+    assert len(_events(logs, "scheduler.github_app_session_refresh.failed")) == 1
     assert _events(logs, "scheduler.github_app_session_refresh.deferred") == []
 
 
