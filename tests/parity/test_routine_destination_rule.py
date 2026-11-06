@@ -370,8 +370,21 @@ async def _web_discord_postable(facts: dict[str, bool]) -> bool:
 #: Facts the rule refuses (Daimon in a private channel the caller is not in) and allows.
 _SLACK_REFUSED = dict.fromkeys(_SLACK_FACTS, False) | {"bot_is_member": True, "is_private": True}
 _SLACK_ALLOWED = dict.fromkeys(_SLACK_FACTS, False) | {"bot_is_member": True}
-_DISCORD_REFUSED = dict.fromkeys(_DISCORD_FACTS, False)
-_DISCORD_ALLOWED = dict.fromkeys(_DISCORD_FACTS, False) | {"administrator": True}
+_NO_DISCORD = dict.fromkeys(_DISCORD_FACTS, False)
+_THREAD = {"is_thread": True, "view_channel": True}
+#: Places on each Discord path: a channel, a public thread, and private threads the
+#: caller reaches by membership, by manage_threads, or not at all.
+_DISCORD_PLACES = {
+    "channel": _NO_DISCORD | {"view_channel": True},
+    "public_thread": _NO_DISCORD | _THREAD,
+    "private_thread_member": _NO_DISCORD
+    | _THREAD
+    | {"is_private_thread": True, "is_thread_member": True},
+    "private_thread_manager": _NO_DISCORD
+    | _THREAD
+    | {"is_private_thread": True, "manage_threads": True},
+    "private_thread_outsider": _NO_DISCORD | _THREAD | {"is_private_thread": True},
+}
 
 
 @pytest.mark.parametrize("answer", [True, False])
@@ -415,11 +428,16 @@ async def test_each_slack_surface_follows_the_rules_answer(
 
 
 @pytest.mark.parametrize("answer", [True, False])
+@pytest.mark.parametrize(
+    ("place", "send"), [(p, s) for p in _DISCORD_PLACES for s in (False, True)]
+)
 async def test_each_discord_surface_follows_the_rules_answer(
-    answer: bool, monkeypatch: pytest.MonkeyPatch
+    place: str, send: bool, answer: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """As for Slack. The web app asks the rule through `discord_deliverable_channels`."""
-    facts = _DISCORD_REFUSED if answer else _DISCORD_ALLOWED
+    """As for Slack, on every Discord path. The web app offers channels only and asks
+    the rule through `discord_deliverable_channels`."""
+    send_fact = "send_messages_in_threads" if place != "channel" else "send_messages"
+    facts = _DISCORD_PLACES[place] | {send_fact: send}
 
     def rule(**_facts: bool) -> bool:
         return answer
@@ -433,8 +451,8 @@ async def test_each_discord_surface_follows_the_rules_answer(
     channel, source, member = _discord_place(facts)
     saved = await _mcp_discord_saves(channel, member, facts, monkeypatch)
     posted = await discord_delivery.creator_may_post(channel, source, 1)
-    web = await _web_discord_postable(facts)
+    web = answer if facts["is_thread"] else await _web_discord_postable(facts)
     assert (saved, posted, web) == (answer, answer, answer), (
         f"chat tool saves={saved}, delivery posts={posted}, web offers={web}; "
-        f"the rule answered {answer}"
+        f"the rule answered {answer} for {place}"
     )
