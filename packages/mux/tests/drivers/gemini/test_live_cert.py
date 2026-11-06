@@ -569,14 +569,25 @@ async def test_other_refusals_and_ambiguous_delivery_never_fallback(
 
 
 @pytest.mark.asyncio
-async def test_poll503_after_acceptance_never_starts_another_model(tmp_path: Path) -> None:
+async def test_poll503_after_acceptance_never_starts_another_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mux.drivers.gemini import core
+
     source = FakeTransport()
     source.responses.append(native("in_progress"))
     source.reads["smoke"] = [ProviderError("overloaded", retryable=True, native_code="503")]
+    # The interaction stays in progress after the 503, so the probe ends on its deadline:
+    # keep it short and the read retry instant instead of waiting the 120 s default.
+    monkeypatch.setattr(core, "INTERACTION_READ_RETRY_DELAYS_S", (0.0,) * 5)
     with pytest.raises(ProbeRunError):
         await smoke_with_fallback(
-            source, budget(tmp_path), tmp_path / "smoke.json", SmokeSettings(model=LIVE_MODEL)
+            source,
+            budget(tmp_path),
+            tmp_path / "smoke.json",
+            SmokeSettings(model=LIVE_MODEL, timeout_s=1.0, poll_s=0.05),
         )
+    assert source.reads["smoke"] == []  # The poll did hit the 503.
     assert len(source.requests) == 1 and source.cancelled == ["smoke"]
 
 
