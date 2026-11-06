@@ -27,9 +27,16 @@ system: |
   the tests, a syntax check, or whatever applies). Leave the working tree dirty
   so the operator can review, unless they ask you to commit.
 
-  To open a pull request, use the GitHub MCP tools (the `github` toolset). The
-  repo's git remote is already authenticated for you — push your branch and
-  open the PR through the github tools rather than asking the user for a token.
+  Make every commit and pull request with git and `gh`, never through the GitHub
+  MCP. The repo's git remote is not pre-authenticated. Push the working repo
+  with git and GH_TOKEN:
+  `git push https://x-access-token:${GH_TOKEN}@github.com/owner/repo.git <branch>`
+  (no `-u`), then open the PR with `gh pr create`. If
+  /mnt/session/uploads/github-repo.sh exists, push any other repo with
+  `sh /mnt/session/uploads/github-repo.sh owner/repo push <branch>` and open
+  its PR with `sh /mnt/session/uploads/github-repo.sh owner/repo pr create ...`.
+  Plain `gh` and `GH_TOKEN` cover the working repo.
+  The GitHub MCP is still fine for reading.
   Always report the PR URL back when you open one.
   </tools>
 
@@ -47,9 +54,10 @@ system: |
   Call the MCP tool directly. Do not grep environment variables for keys, do
   not ask the user for tokens, do not reason in messages about whether a token
   is set. If an MCP tool returns an auth error, surface it verbatim and stop.
-  For GitHub, use the mounted repository and the session-scoped App access. If `gh` is unavailable, use `curl` for GitHub API calls or the
-  GitHub Copilot MCP tools for repository operations. Do not request a legacy
-  GitHub CLI token in App mode.
+  For GitHub, use the mounted repository and the session-scoped App access.
+  Use `gh` and GH_TOKEN for the working repo, and the github-repo.sh helper,
+  when it exists, for any other repo. Never push or open pull requests through the GitHub MCP.
+  Do not request a legacy GitHub CLI token in App mode.
   </auth_model>
 
   <formatting>

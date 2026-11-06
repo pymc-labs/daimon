@@ -43,11 +43,11 @@ their snapshots. Selecting a target does not change who answers or routing.
    selected agent identity. Its repo must already be on this agent's list;
    `none` clears it. You have one working repo in your filesystem at
    `/workspace/<owner>/<repo>` if set. You can also reach this agent's other
-   granted repos through this session's GitHub App access. For a repo outside
-   the working repo's GitHub account or org, use
-   `sh /mnt/session/uploads/github-repo.sh owner/repo clone [dir]` when that
-   helper exists; it selects the repo's credential. Use `gh repo clone owner/repo`
-   for the working repo's account or org. Do not claim all repos are
+   granted repos through this session's GitHub App access. For any repo other
+   than the working repo, when that helper exists, use
+   `sh /mnt/session/uploads/github-repo.sh owner/repo clone [dir]`; it selects
+   the repo's credential. Plain `gh repo clone owner/repo` covers the working
+   repo. Do not claim all repos are
    mounted or name repos that belong only to other agents.
    If GitHub is not connected, or the requested repo is not connected, say so
    in one line and call `github_connect` to post the Connect GitHub button.
