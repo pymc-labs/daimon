@@ -573,6 +573,17 @@ def make_fake_ma_handler(
                         "error": {"type": "not_found_error", "message": "no such agent"},
                     },
                 )
+            if (version := request.url.params.get("version")) is not None:
+                stored = st.agent_versions.get(agent_id, {}).get(int(version))
+                if stored is None:
+                    return httpx.Response(
+                        404,
+                        json={
+                            "type": "error",
+                            "error": {"type": "not_found_error", "message": "no such version"},
+                        },
+                    )
+                return httpx.Response(200, json=stored)
             return httpx.Response(200, json=store[agent_id])
 
         # PATCH/POST /v1/agents/{id} — update (MA uses POST for updates)

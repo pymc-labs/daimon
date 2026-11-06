@@ -2025,6 +2025,7 @@ def _agent_and_env_router(*extra_envs: dict[str, Any]) -> MARouter:
         "updated_at": "2026-06-23T00:00:00Z",
     }
     router = MARouter()
+    router.add_agent(ma_agent(id=_MA_AGENT_ID, tenant_id=_TENANT_ID))
     router.add(
         "GET",
         r"/v1/agents",
@@ -2286,6 +2287,7 @@ async def test_continue_turn_by_billed_caller_leaves_exempt_stamp_in_place(
         return _boundary_send_response(request, m)
 
     router = MARouter()
+    router.add_agent(ma_agent(id=_MA_AGENT_ID, tenant_id=_TENANT_ID))
     router.add("POST", r"/v1/sessions/([^/]+)/events", on_send)
     router.add("GET", r"/v1/sessions/([^/]+)/events", lambda _r, _m: list_response([]))
     router.add("GET", r"/v1/sessions/([^/]+)", on_retrieve)
@@ -2686,6 +2688,7 @@ async def test_continue_turn_gates_on_the_sessions_own_budget_channel(billed: bo
         },
     ).model_dump(mode="json")
     router = MARouter()
+    router.add_agent(ma_agent(id=_MA_AGENT_ID, tenant_id=_TENANT_ID))
     router.add("GET", r"/v1/sessions/([^/]+)/events", lambda _r, _m: list_response([]))
     router.add("GET", r"/v1/sessions/([^/]+)", lambda _r, _m: httpx.Response(200, json=session))
     router.add(
@@ -2739,6 +2742,7 @@ async def test_continue_turn_returns_boundary_from_its_own_send(
 
     sent = False
     router = MARouter()
+    router.add_agent(ma_agent(id=_MA_AGENT_ID, tenant_id=_TENANT_ID))
     router.add("GET", r"/v1/sessions/([^/]+)/events", lambda _r, _m: list_response([]))
     router.add(
         "GET",
@@ -3392,6 +3396,7 @@ async def test_ask_with_handle_continues_instead_of_starting(
 ) -> None:
     """With a handle, ask sends continue_turn on that session and never creates a new one."""
     router = MARouter()
+    router.add_agent(ma_agent(id=_MA_AGENT_ID, tenant_id=_TENANT_ID))
     router.add(
         "GET",
         r"/v1/agents",
@@ -3458,6 +3463,7 @@ async def test_ask_with_handle_reads_only_this_turns_reply(
     """A resumed session is already idle and still holds the previous answer; ask must
     read from this turn's boundary, not the newest agent.message in the transcript."""
     router = MARouter()
+    router.add_agent(ma_agent(id=_MA_AGENT_ID, tenant_id=_TENANT_ID))
     router.add(
         "GET",
         r"/v1/sessions/([^/]+)",

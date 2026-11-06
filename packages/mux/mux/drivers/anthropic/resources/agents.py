@@ -4,7 +4,7 @@ import hashlib
 import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import cast
+from typing import Protocol, cast
 
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
@@ -24,6 +24,7 @@ from mux.drivers.anthropic.resources._authorization import (
     visible,
 )
 from mux.drivers.anthropic.resources._errors import provider_call, provider_iter
+from mux.drivers.anthropic.resources._native import NativeSnapshot, native_snapshot
 from mux.drivers.anthropic.schemas import (
     AgentCreateNulls,
     AgentModelConfig,
@@ -289,6 +290,18 @@ def agent_record(item: BetaManagedAgentsAgent, account_scope_id: str, scope: Sco
     )
 
 
+class AgentVersions(Protocol):
+    """`anthropic.agent_versions@1`: one stored version of an agent, exactly as returned.
+
+    A session runs the agent version it started on; this reads that version back,
+    so a caller can tell what an edit since then changed.
+    """
+
+    async def retrieve_version(
+        self, scope: Scope, ref: ResourceRef, version: int
+    ) -> NativeSnapshot: ...
+
+
 class AnthropicAgents:
     def __init__(
         self,
@@ -317,6 +330,15 @@ class AnthropicAgents:
         item = await provider_call(self._client.beta.agents.retrieve(ref.id))
         check_record(scope, item.id, item.metadata)
         return agent_record(item, self._account_scope_id, scope)
+
+    async def retrieve_version(
+        self, scope: Scope, ref: ResourceRef, version: int
+    ) -> NativeSnapshot:
+        authorize(self._authorization, scope, "agent", ref.id)
+        check_ref(scope, ref, self._account_scope_id, "agent")
+        item = await provider_call(self._client.beta.agents.retrieve(ref.id, version=version))
+        check_record(scope, item.id, item.metadata)
+        return native_snapshot(item)
 
     async def list(self, scope: Scope, *, filters: AgentFilter, page: PageRequest) -> Page[Agent]:
         authorize(self._authorization, scope, "agent")

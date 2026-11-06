@@ -1250,6 +1250,8 @@
         ``message``.
         Use a handle opened through agent chat. Platform conversations and
         older sessions without headless creation provenance cannot be driven here.
+        If the agent's model, prompt, skills, MCP servers or tools changed since
+        the session started, a message is refused: start a new one with ``start_turn``.
       ''',
       'parameters': dict({
         'additionalProperties': False,

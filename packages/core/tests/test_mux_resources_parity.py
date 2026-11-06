@@ -14,6 +14,7 @@ from daimon.core.mux_compat import (
     list_agents,
     list_environments,
     retrieve_agent,
+    retrieve_agent_version,
     update_agent,
     update_environment,
 )
@@ -308,6 +309,18 @@ async def test_agent_update_keeps_version_and_null_clear_semantics(payload):
             scope=platform_scope("test request fidelity"),
         )
     assert_transport_equal(old, new)
+
+
+async def test_an_agent_version_read_sends_the_sdk_request():
+    old = ResourceTransport()
+    new = ResourceTransport()
+    async with fake_client(old) as before, fake_client(new) as after:
+        await before.beta.agents.retrieve("agent1", version=1)
+        agent = await retrieve_agent_version(
+            after, "agent1", 1, scope=platform_scope("test request fidelity")
+        )
+    assert_transport_equal(old, new)
+    assert agent.id == "agent1"
 
 
 @pytest.mark.parametrize(

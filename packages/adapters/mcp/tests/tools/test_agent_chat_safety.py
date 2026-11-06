@@ -230,10 +230,16 @@ class FakeSession:
     def router(self, router: MARouter | None = None) -> MARouter:
         router = router or MARouter()
         router.add("GET", rf"/v1/sessions/{_SESSION}$", self._retrieve)
+        # `continue_turn` reads the agent to see if it changed since the session froze it.
+        router.add("GET", rf"/v1/agents/{_MA_AGENT_ID}$", self._agent)
         router.add("POST", rf"/v1/sessions/{_SESSION}$", self._update)
         router.add("GET", rf"/v1/sessions/{_SESSION}/events$", self._list)
         router.add("POST", rf"/v1/sessions/{_SESSION}/events$", self._send)
         return router
+
+    def _agent(self, _r: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        agent = ma_agent(id=_MA_AGENT_ID, tools=self.tools, mcp_servers=self.servers)
+        return httpx.Response(200, json=agent.model_dump(mode="json"))
 
     def _retrieve(self, _r: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         return httpx.Response(200, json=self.model.model_dump(mode="json"))

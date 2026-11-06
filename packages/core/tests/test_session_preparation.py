@@ -3203,11 +3203,13 @@ async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
     deps = replace(deps, sessionmaker=factory)
     router = MARouter()
     router.add_agent_list(first.admission.agent)
+    router.add_agent(first.admission.agent)
     client = build_fake_anthropic(
         combine_handlers(make_fake_sessions_handler(transport.state), router.dispatch)
     )
     runtime = SimpleNamespace(
         client=client,
+        fernet=None,
         session_factory=factory,
         settings=SimpleNamespace(
             mcp=deps.mcp,
@@ -3421,6 +3423,7 @@ async def test_sends_complete_while_two_replacements_block_on_ma_io(
     )
     runtime = SimpleNamespace(
         client=deps.anthropic,
+        fernet=None,
         session_factory=factory,
         settings=SimpleNamespace(
             mcp=deps.mcp,
@@ -3607,6 +3610,7 @@ async def test_independent_sends_during_replacements_with_old_session_waiters(
     )
     runtime = SimpleNamespace(
         client=deps.anthropic,
+        fernet=None,
         session_factory=factory,
         settings=SimpleNamespace(
             mcp=deps.mcp,
@@ -4152,11 +4156,13 @@ async def test_old_session_cannot_be_written_after_successor_exists(db_session, 
     observed = await deps.anthropic.beta.sessions.retrieve(first.ma_session_id)
     router = MARouter()
     router.add_agent_list(first.admission.agent, handed.admission.agent)
+    router.add_agent(first.admission.agent)
     client = build_fake_anthropic(
         combine_handlers(make_fake_sessions_handler(transport.state), router.dispatch)
     )
     runtime = SimpleNamespace(
         client=client,
+        fernet=None,
         session_factory=db_session_factory,
         settings=SimpleNamespace(
             mcp=deps.mcp,
@@ -4462,6 +4468,7 @@ async def test_handoff_waits_for_an_inflight_handle_send(
     assert (await _click_hand_over(admission_deps, tenant)).switched
     router = MARouter()
     router.add_agent_list(first.admission.agent)
+    router.add_agent(first.admission.agent)
     client = build_fake_anthropic(
         combine_handlers(make_fake_sessions_handler(transport.state), router.dispatch)
     )

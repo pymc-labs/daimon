@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A Claude Code (agent chat) conversation no longer keeps running an agent's old setup.**
+  If the agent's model, prompt, skills, MCP servers or tools changed since the conversation started, `continue_turn` and `ask` with a handle refuse the message and ask for a new conversation, which runs the new setup.
+  Each message also copies the agent's current shared MCP tokens into the conversation, so a replaced token reaches it.
+  A token removed from the agent while a message copied tokens can no longer be copied back into a person's vault.
 - **The optional dev agent no longer tells the agent to push through the GitHub MCP.**
   Its GitHub instructions, and the workspace-setup skill's clone advice, now match the core guidance:
   push with `GH_TOKEN` or, when it exists, the `github-repo.sh` helper.
