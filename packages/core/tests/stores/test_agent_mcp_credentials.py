@@ -819,6 +819,15 @@ _PACKAGES = Path(__file__).resolve().parents[3]
 def _calls_outside(callee: str, allowed: str, source: str) -> list[tuple[int, str | None]]:
     """(line, enclosing function) of each call to ``callee`` outside ``allowed``."""
     found: list[tuple[int, str | None]] = []
+    tree = ast.parse(source)
+    # `from ... import mirror_credentials_into_vault as other` calls it as `other`.
+    names = {callee} | {
+        alias.asname
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+        if alias.name == callee and alias.asname
+    }
 
     def walk(node: ast.AST, function: str | None) -> None:
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
@@ -826,13 +835,33 @@ def _calls_outside(callee: str, allowed: str, source: str) -> list[tuple[int, st
         if isinstance(node, ast.Call):
             target = node.func
             name = target.id if isinstance(target, ast.Name) else getattr(target, "attr", None)
-            if name == callee and function != allowed:
+            if name in names and function != allowed:
                 found.append((node.lineno, function))
         for child in ast.iter_child_nodes(node):
             walk(child, function)
 
-    walk(ast.parse(source), None)
+    walk(tree, None)
     return found
+
+
+def _calls_inside_the_vault_lock(source: str, function: str) -> set[str]:
+    """Names called inside ``async with hold_agent_vault_lock(...)`` in ``function``."""
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == function:
+            return {
+                call.func.id if isinstance(call.func, ast.Name) else getattr(call.func, "attr", "")
+                for block in ast.walk(node)
+                if isinstance(block, ast.AsyncWith)
+                and any(
+                    isinstance(item.context_expr, ast.Call)
+                    and getattr(item.context_expr.func, "id", None) == "hold_agent_vault_lock"
+                    for item in block.items
+                )
+                for statement in block.body
+                for call in ast.walk(statement)
+                if isinstance(call, ast.Call)
+            }
+    return set()
 
 
 def test_every_mirror_reads_the_tokens_under_the_vault_lock() -> None:
@@ -863,6 +892,10 @@ def test_every_mirror_reads_the_tokens_under_the_vault_lock() -> None:
         "copy stored tokens into a vault through mirror_stored_credentials, "
         f"which reads them under the vault lock: {sorted(offenders)}"
     )
+    helper = (_PACKAGES / "core/daimon/core/agent_mcp_credentials.py").read_text(encoding="utf-8")
+    assert {"_read_agent_mcp_credentials", "mirror_credentials_into_vault"} <= (
+        _calls_inside_the_vault_lock(helper, "mirror_stored_credentials")
+    ), "mirror_stored_credentials must read the tokens and copy them inside the vault lock"
 
 
 def test_the_mirror_contract_flags_a_mirror_outside_the_helper() -> None:
@@ -875,3 +908,20 @@ def test_the_mirror_contract_flags_a_mirror_outside_the_helper() -> None:
     assert _calls_outside("mirror_credentials_into_vault", "mirror_stored_credentials", source) == [
         (2, "create")
     ]
+    aliased = (
+        "from daimon.core.agent_mcp_credentials import mirror_credentials_into_vault as copy\n"
+        "async def create(client, creds):\n"
+        "    await copy(client, credentials=creds)\n"
+    )
+    assert _calls_outside(
+        "mirror_credentials_into_vault", "mirror_stored_credentials", aliased
+    ) == [(3, "create")]
+    read_first = (
+        "async def mirror_stored_credentials(sm, client):\n"
+        "    creds = await _read_agent_mcp_credentials(sm)\n"
+        "    async with hold_agent_vault_lock(sm) as locked:\n"
+        "        await mirror_credentials_into_vault(client, credentials=creds)\n"
+    )
+    assert "_read_agent_mcp_credentials" not in _calls_inside_the_vault_lock(
+        read_first, "mirror_stored_credentials"
+    )
