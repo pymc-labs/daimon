@@ -221,6 +221,100 @@ async def test_mcp_app_session_refreshes_before_token_expiry(
     assert "mcp-refresh" in checks
 
 
+async def _refresh_mcp_session_that_fails(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+) -> Sequence[Mapping[str, Any]]:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    url = "https://github.com/acme/failing"
+    await github_issued_tokens.register_app_session_vault(
+        db_session,
+        session_id=_MCP_FAILING,
+        tenant_id=tenant.id,
+        vault_id="failing-vault",
+        is_unmapped=True,
+        is_mcp=True,
+        agent_id=uuid.uuid4(),
+        account_id=account.id,
+        repo_urls=(url,),
+    )
+    await db_session.commit()
+    monkeypatch.setattr(
+        "daimon.adapters.scheduler.main.effective_repo_state",
+        unittest.mock.AsyncMock(return_value=((url,), {11: {"contents": "read"}})),
+    )
+    monkeypatch.setattr(
+        "daimon.adapters.scheduler.main.rotate_live_app_tokens",
+        unittest.mock.AsyncMock(side_effect=error),
+    )
+    retrieve = unittest.mock.AsyncMock(return_value=SimpleNamespace(status="running"))
+    anthropic = SimpleNamespace(beta=SimpleNamespace(sessions=SimpleNamespace(retrieve=retrieve)))
+    settings = Settings.model_validate(
+        {
+            "database": {"url": "postgresql+asyncpg://localhost/test"},
+            "anthropic": {"api_key": "test"},
+        }
+    )
+    with structlog.testing.capture_logs() as logs:
+        await _refresh_github_app_sessions(
+            anthropic,
+            db_session_factory,
+            settings=settings,
+            fernet=build_multifernet((Fernet.generate_key().decode(),)),
+        )
+    return logs
+
+
+_MCP_FAILING = "mcp-failing-session"
+
+
+async def test_mcp_refresh_defers_a_first_github_mint_outage_at_warning(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+) -> None:
+    error = GitHubTokenMintUnavailable(_MINT_UNAVAILABLE)
+    logs = await _refresh_mcp_session_that_fails(db_session, db_session_factory, monkeypatch, error)
+    [deferred] = _events(logs, "scheduler.github_mcp_app_session_refresh.deferred")
+    assert deferred["log_level"] == "warning"
+    assert deferred["session_id"] == _MCP_FAILING
+    assert deferred["consecutive_failures"] == 1
+    assert _events(logs, "scheduler.github_mcp_app_session_refresh.failed") == []
+    assert [entry for entry in logs if entry["log_level"] == "error"] == []
+
+
+async def test_mcp_refresh_keeps_the_error_for_other_failures(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+) -> None:
+    logs = await _refresh_mcp_session_that_fails(
+        db_session, db_session_factory, monkeypatch, RuntimeError("vault exploded")
+    )
+    [failed] = _events(logs, "scheduler.github_mcp_app_session_refresh.failed")
+    assert failed["log_level"] == "error"
+    assert _events(logs, "scheduler.github_mcp_app_session_refresh.deferred") == []
+
+
+async def test_mcp_refresh_alerts_when_a_github_mint_outage_outlasts_the_retry_budget(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+) -> None:
+    fresh_refresh_state[_MCP_FAILING] = (4, datetime.now(UTC) - timedelta(seconds=1))
+    logs = await _refresh_mcp_session_that_fails(
+        db_session, db_session_factory, monkeypatch, GitHubTokenMintUnavailable(_MINT_UNAVAILABLE)
+    )
+    [failed] = _events(logs, "scheduler.github_mcp_app_session_refresh.failed")
+    assert failed["log_level"] == "error"
+
+
 async def test_mcp_coverage_refusal_backs_off_next_tick_during_active_turn(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],

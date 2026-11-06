@@ -1219,6 +1219,23 @@ def _record_refresh_failure(session_id: str, now: datetime) -> None:
     _app_refresh_failures[session_id] = (count, now + delay)
 
 
+def _log_refresh_failure(event_prefix: str, session_id: str, error: Exception) -> None:
+    """Log a failed refresh as `<prefix>.deferred` (WARNING) or `<prefix>.failed` (ERROR).
+
+    Call it inside the `except` block, after `_record_refresh_failure`, so the
+    traceback is attached and the failure count includes this failure. Used by
+    the mapped-session loop (`scheduler.github_app_session_refresh`) and the MCP
+    loop (`scheduler.github_mcp_app_session_refresh`).
+    """
+    failures = _app_refresh_failures[session_id][0]
+    if isinstance(error, GitHubTokenMintUnavailable) and failures <= _REFRESH_DEFERRED_FAILURES:
+        log.warning(
+            f"{event_prefix}.deferred", session_id=session_id, consecutive_failures=failures
+        )
+        return
+    log.exception(f"{event_prefix}.failed", session_id=session_id)
+
+
 def _dead_session_refresh_reason(error: BaseException) -> str | None:
     """Name the failure when MA says the session is archived or gone, else None.
 
@@ -1411,17 +1428,7 @@ async def _refresh_github_app_sessions(
                 )
                 continue
             _record_refresh_failure(session_id, now)
-            failures = _app_refresh_failures[session_id][0]
-            if isinstance(error, GitHubTokenMintUnavailable) and (
-                failures <= _REFRESH_DEFERRED_FAILURES
-            ):
-                log.warning(
-                    "scheduler.github_app_session_refresh.deferred",
-                    session_id=session_id,
-                    consecutive_failures=failures,
-                )
-                continue
-            log.exception("scheduler.github_app_session_refresh.failed", session_id=session_id)
+            _log_refresh_failure("scheduler.github_app_session_refresh", session_id, error)
     async with sm() as session:
         mcp_live = await list_live_mcp_app_sessions(session, now=now, include_expired=True)
     for candidate in mcp_live:
@@ -1535,12 +1542,11 @@ async def _refresh_github_app_sessions(
                     _record_refresh_failure(current.session_id, now)
                 else:
                     _app_refresh_failures.pop(current.session_id, None)
-        except Exception:
+        except Exception as error:
             _last_app_access_checks[candidate.session_id] = now
             _record_refresh_failure(candidate.session_id, now)
-            log.exception(
-                "scheduler.github_mcp_app_session_refresh.failed",
-                session_id=candidate.session_id,
+            _log_refresh_failure(
+                "scheduler.github_mcp_app_session_refresh", candidate.session_id, error
             )
     # Drop state for sessions that died or closed since the last sweep.
     async with sm() as session:
