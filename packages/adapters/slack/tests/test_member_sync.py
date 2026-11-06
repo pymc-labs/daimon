@@ -131,9 +131,14 @@ async def _until(check: Callable[[], bool]) -> None:
     raise AssertionError("condition never held")
 
 
-async def _stop(task: asyncio.Task[None]) -> None:
-    """Cancel once the load in flight has written, so no transaction is cut mid-way."""
-    await asyncio.sleep(0.1)
+async def _stop(task: asyncio.Task[None], sync: SlackMemberSync) -> None:
+    """Cancel once the load in flight has committed, so no transaction is cut mid-way.
+
+    The test's session and the sync's sessions share one connection, so a cancel
+    that lands inside a statement or a commit corrupts it for the fixture's teardown.
+    A fixed pause only guesses how long the write takes; a slow runner outlasts it.
+    `_loading` holds the team until the write is done."""
+    await _until(lambda: not sync._loading)  # pyright: ignore[reportPrivateUsage]
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await task
@@ -161,12 +166,12 @@ async def test_lists_load_again_after_a_reconnect_and_on_a_timer(
         after_first_hello = client.users_list.await_count
         await sync.on_socket_message(None, {"type": "hello"}, None)
         await _until(lambda: client.users_list.await_count == 2)
-        await _stop(task)
+        await _stop(task, sync)
 
         timed = SlackMemberSync(runtime, reload_every_s=0.3)
         timed_task = asyncio.create_task(timed.keep_loaded())
         await _until(lambda: client.users_list.await_count == 4)
-        await _stop(timed_task)
+        await _stop(timed_task, timed)
 
     assert after_first_hello == 1, "the first connection's hello loads nothing more"
 
@@ -205,7 +210,7 @@ async def test_keep_loaded_survives_a_failing_pass_and_loads_on_the_next(
         await sync.on_socket_message(None, {"type": "hello"}, None)
         await _until(lambda: client.users_list.await_count == 1)
         crashed = task.done()
-        await _stop(task)
+        await _stop(task, sync)
 
     assert not crashed, "the loop outlives the failed pass"
     assert calls >= 2, "the next pass lists the installs again"

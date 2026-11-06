@@ -258,8 +258,11 @@ async def test_a_restart_during_backoff_continues_the_same_allowance(
     persistence = context(store, now=lambda: clock[0])
     async with first.client() as client:
         task = asyncio.create_task(send(persistence, client))
-        # Wait until the refusal is recorded: the turn is now in its backoff.
-        while (await statuses(store))[:1] != ["failed"]:
+        # Wait until the turn is inside its backoff: the refusal is recorded and the
+        # next attempt's intent is begun, which happens in a second transaction.
+        # Cancelling between the two would not be a restart *during* the backoff, and
+        # on a slow runner it leaves attempt 1 never begun.
+        while (await statuses(store))[:2] != ["failed", "pending"]:
             await asyncio.sleep(0.01)
         task.cancel()  # The process dies while waiting out Retry-After.
         with pytest.raises(asyncio.CancelledError):
