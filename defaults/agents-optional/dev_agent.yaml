@@ -36,7 +36,7 @@ system: |
   `sh /mnt/session/uploads/github-repo.sh owner/repo push <branch>` and open
   its PR with `sh /mnt/session/uploads/github-repo.sh owner/repo pr create ...`;
   otherwise GH_TOKEN covers every granted repo.
-  The GitHub MCP is fine for reading every granted repo.
+  The GitHub MCP is still fine for reading.
   Always report the PR URL back when you open one.
   </tools>
 
