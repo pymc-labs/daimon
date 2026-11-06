@@ -46,9 +46,8 @@ tools: a workspace with a depleted balance or an exhausted monthly cap refuses t
 turn before it starts.
 
 A hub turn is billed to the workspace of the daimon you ask. `ask`, `start_turn` and
-`continue_turn` write a settle request before they send the message. The next
-`get_session` or transcript read that sees the turn end debits its model calls, once
-each. The scheduler debits any turn that no read reached.
+`continue_turn` write a settle request before they send the message. After the turn
+ends, the scheduler processes pending settle requests and debits each model call once.
 
 ## Self-hosted deployments
 
