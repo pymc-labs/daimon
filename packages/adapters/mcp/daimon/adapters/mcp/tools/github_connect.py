@@ -248,8 +248,9 @@ async def _github_connect_impl(
             is_daimon_managed=agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
             allow_owner=may_own(auth),
         )
-        if repo_name is not None and not is_admin:
-            # Any member may learn whether this agent has the repo, and nothing else.
+        if repo_name is not None and not manages:
+            # A member may learn whether this agent has the repo, and nothing else. Admins and
+            # owners keep the grant path, which can still upgrade a read grant to write.
             already = await _agent_has_repo(session, auth.tenant_id, agent_id, repo_name)
             if already is not None:
                 return ConnectResult(
