@@ -25,11 +25,14 @@ def test_github_helper_guidance_adds_exactly_one_static_paragraph() -> None:
         "`sh /mnt/session/uploads/github-repo.sh owner/repo push <branch>` inside it, and\n"
         "never push a repo outside the working repo's organization with `GH_TOKEN`. Plain\n"
         "`gh` and `GH_TOKEN` cover the working repo's organization.\n"
+        "The GitHub MCP covers only the working repo's organization too: read every\n"
+        "other repo with the helper, and never take a GitHub MCP 404 on one as missing\n"
+        "access.\n"
     )
     assert CREDENTIAL_GUIDANCE_BLOCK.count(paragraph) == 1
     before = CREDENTIAL_GUIDANCE_BLOCK.replace(paragraph, "")
     assert hashlib.sha256(before.encode()).hexdigest() == (
-        "f0cbfd773f6fd765d6812797f9f90ccfc4d35dcf1e626eecc486712cbf42ec2b"
+        "4261178e920c4b8f2486702017bc151293440eda4f43d90bc1e393ff8c326056"
     )
     assert apply_credential_guidance("base prompt").count(paragraph) == 1
 
@@ -422,3 +425,14 @@ def test_commit_guidance_adds_no_personal_access_token_hint() -> None:
     block = _collapse(CREDENTIAL_GUIDANCE_BLOCK)
     assert block.count("personal access token") == 1, "only the existing prohibition"
     assert re.search(r"\bPATs?\b", block) is None, "no PAT hint (PATCH is an HTTP method)"
+
+
+def test_the_github_mcp_is_never_offered_for_repos_outside_the_working_org() -> None:
+    # The GitHub MCP carries one installation's token. Told it was "fine for
+    # reading" in general, an agent read a second org's repo through it, got a
+    # 404 and reported the repo unreadable while the helper could read it.
+    block = " ".join(CREDENTIAL_GUIDANCE_BLOCK.split())
+
+    assert "The GitHub MCP is still fine for reading." not in block
+    assert "fine for reading the working repo's organization." in block
+    assert "never take a GitHub MCP 404 on one as missing access." in block

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **An agent with repos in two GitHub organizations reads the second one instead of reporting a 404.**
+  The agent's instructions said the GitHub MCP was fine for reading, but it holds only the
+  working repo's organization. Agents now read other organizations' repos with the session's
+  GitHub helper and never take a GitHub MCP 404 on one as missing access. Every agent's
+  instructions change once, so open Discord and Slack conversations start a new session.
 - **In Teams channels and 1:1 chats the agent can edit and delete its own replies, cards and routine results.**
   Each message a turn or routine posts is recorded as the agent's, so `edit_message`
   and `delete_message` accept it once the turn is over, when the person who started it
