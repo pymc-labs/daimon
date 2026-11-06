@@ -403,11 +403,16 @@ async def _write_audit_row(
 
 
 def _upstream_headers(request: Request, token: str) -> dict[str, str]:
-    headers = {
-        name: value
+    # GitHub's MCP server binds a session to the installation that opened it and
+    # answers "invalid session" when another installation's token presents it.
+    # Its POSTs need no session, so a POST goes without one; the GET stream and
+    # DELETE keep it, since they use the owner-free token that opened it.
+    names = [
+        name
         for name in (*_REQUEST_HEADERS, *_GITHUB_HEADERS)
-        if (value := request.headers.get(name)) is not None
-    }
+        if not (name == "mcp-session-id" and request.method == "POST")
+    ]
+    headers = {name: value for name in names if (value := request.headers.get(name)) is not None}
     headers["authorization"] = f"Bearer {token}"
     return headers
 

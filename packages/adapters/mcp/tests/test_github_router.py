@@ -440,7 +440,6 @@ async def test_only_allowlisted_headers_go_upstream(router: _Router) -> None:
         "authorization",
         "accept",
         "content-type",
-        "mcp-session-id",
         "mcp-protocol-version",
         "x-mcp-toolsets",
         "x-mcp-readonly",
@@ -708,3 +707,13 @@ async def test_the_route_mounts_with_the_app_and_crypto_keys(
     )
     paths = [r.path for r in built.routes if isinstance(r, Route)]
     assert (GITHUB_ROUTER_ROUTE in paths) is mounted
+
+
+async def test_a_post_never_carries_the_session_upstream(router: _Router) -> None:
+    # GitHub ties a session to the installation that opened it; another
+    # installation's token presenting it gets 400 "invalid session". Its POSTs
+    # need no session, so none is sent.
+    response = await router.post(_call(1, "acme", "app"), **{"mcp-session-id": "gh-1"})
+    assert response.status_code == 200
+    (sent,) = router.upstream.requests
+    assert "mcp-session-id" not in sent.headers
