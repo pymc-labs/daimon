@@ -434,7 +434,8 @@ async def case(db_engine: AsyncEngine, db_clean: None, tmp_path: Path) -> AsyncI
 def _assert_product_github_offer(message: DiscordMessageCapture) -> None:
     assert "Connect GitHub" in message.embed_texts, "missing product GitHub title"
     assert any(
-        "Tap the button and tick the repos credential-team can use." in text
+        "Tap the button and tick the repos for credential-team. They stay until you remove them."
+        in text
         for text in message.embed_texts
     ), "missing product GitHub description"
 

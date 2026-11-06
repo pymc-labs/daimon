@@ -75,7 +75,7 @@ async def test_connect_returns_ephemeral_url_button(monkeypatch: pytest.MonkeyPa
     assert interaction.followup.send.await_args.args == ()
     assert (
         kwargs["embed"].description
-        == "Nothing is connected yet.\n\nTap the button and tick the repos ResearchBot can use."
+        == "Nothing is connected yet.\n\nTap the button and tick the repos for ResearchBot. They stay until you remove them."
     )
     button = kwargs["view"].children[0]
     assert button.label == "Connect GitHub"

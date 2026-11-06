@@ -405,7 +405,7 @@ async def test_actual_native_target_posts_shared_offer(case: Case, kind: str, ta
         embed = _OBJECT.validate_python(embeds[0])
         assert embed["title"] == "Connect GitHub"
         assert embed["description"] == (
-            "Nothing is connected yet.\n\nTap the button and tick the repos credential-team can use."
+            "Nothing is connected yet.\n\nTap the button and tick the repos for credential-team. They stay until you remove them."
         )
         assert embed["author"] == {
             "name": "Daimon",
@@ -626,7 +626,7 @@ async def test_native_mcp_dispatch_posts_actual_verified_target_offer(
         embed = _OBJECT.validate_python(embeds[0])
         assert embed["title"] == "Connect GitHub"
         assert embed["description"] == (
-            "Nothing is connected yet.\n\nTap the button and tick the repos credential-team can use."
+            "Nothing is connected yet.\n\nTap the button and tick the repos for credential-team. They stay until you remove them."
         )
         assert embed["author"] == {
             "name": "Daimon",
