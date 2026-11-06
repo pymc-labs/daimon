@@ -219,12 +219,13 @@ async def _resolve_slack_destination(
         ):
             if is_archived:
                 raise ToolError(
-                    f"{channel_id} is archived. Pick another channel. Nothing was saved."
+                    f"{channel_id} is archived, so a routine cannot deliver there. Pick another "
+                    "channel, or ask an admin or an owner to unarchive it. Nothing was saved."
                 )
             if not bot_is_member:
                 raise ToolError(
-                    f"daimon is not in {channel_id}; invite it to the channel first. "
-                    "Nothing was saved."
+                    f"daimon is not in {channel_id}; invite it to the channel first, or ask an "
+                    "admin or an owner to. Nothing was saved."
                 )
             raise ToolError(
                 f"you cannot post in {channel_id}, so a routine cannot deliver there "

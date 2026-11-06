@@ -13,19 +13,29 @@ from __future__ import annotations
 
 import ast
 import itertools
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
+import httpx
 import pytest
 from daimon.adapters.discord import routine_delivery as discord_delivery
 from daimon.adapters.mcp.tools import routines as mcp_routines
 from daimon.adapters.slack import routine_delivery as slack_delivery
+from daimon.adapters.web import channel_visibility as web_visibility
+from daimon.core.channel_visibility import (
+    DISCORD_ADMINISTRATOR,
+    DISCORD_SEND_MESSAGES,
+    DISCORD_VIEW_CHANNEL,
+)
 from daimon.core.routine_delivery import discord_creator_may_post
 from daimon.core.routine_destinations import slack_may_deliver
 from fastmcp.exceptions import ToolError
+from pydantic import SecretStr
 
 _ROOT = Path(__file__).resolve().parents[2]
 _ADAPTERS = _ROOT / "packages" / "adapters"
@@ -213,9 +223,35 @@ async def test_slack_save_and_delivery_agree_with_the_rule(
         cast(Any, SimpleNamespace(created_by_user_id="U1")),
         cast(Any, SimpleNamespace(channel_id="C1", thread_ts=None)),
     )
-    assert (saved, refusal is None) == (expected, expected), (
-        f"chat tool saves={saved}, delivery posts={refusal is None}, rule={expected}: {facts}"
+    web = await _web_slack_postable(facts, monkeypatch)
+    assert (saved, refusal is None, web) == (expected, expected, expected), (
+        f"chat tool saves={saved}, delivery posts={refusal is None}, web offers={web}, "
+        f"rule={expected}: {facts}"
     )
+
+
+async def _web_slack_postable(facts: dict[str, bool], monkeypatch: pytest.MonkeyPatch) -> bool:
+    """Whether the web app offers the channel. Slack lists only the channels daimon
+    is in, without archived ones or DMs, so those facts decide the listing."""
+    channel: dict[str, object] = {"id": "C1", "is_private": facts["is_private"]}
+    listed = facts["bot_is_member"] and not facts["is_archived"] and not facts["is_im_or_mpim"]
+
+    async def token(*_args: Any) -> str:
+        return "xoxb-test"
+
+    async def conversations(_runtime: Any, _token: str, user_id: str | None) -> list[Any]:
+        if user_id is None:
+            return [channel] if listed else []
+        return [channel] if facts["caller_is_member"] else []
+
+    async def guest(*_args: Any) -> bool:
+        return facts["is_guest"]
+
+    monkeypatch.setattr(web_visibility, "_slack_token", token)
+    monkeypatch.setattr(web_visibility, "_slack_conversations", conversations)
+    monkeypatch.setattr(web_visibility, "_slack_guest", guest)
+    reach = await web_visibility._slack(cast(Any, None), "T1", "U1")  # pyright: ignore[reportPrivateUsage]
+    return "C1" in reach.postable
 
 
 def _discord_place(facts: dict[str, bool]) -> tuple[MagicMock, MagicMock, MagicMock]:
@@ -255,16 +291,75 @@ def _discord_place(facts: dict[str, bool]) -> tuple[MagicMock, MagicMock, MagicM
 @pytest.mark.parametrize(
     "values", list(itertools.product((False, True), repeat=len(_DISCORD_FACTS)))
 )
-async def test_discord_save_and_delivery_agree_with_the_rule(values: tuple[bool, ...]) -> None:
+async def test_discord_save_and_delivery_agree_with_the_rule(
+    values: tuple[bool, ...], monkeypatch: pytest.MonkeyPatch
+) -> None:
     facts = dict(zip(_DISCORD_FACTS, values, strict=True))
     if not facts["is_thread"] and (facts["is_private_thread"] or facts["is_thread_member"]):
         pytest.skip("thread facts do not apply to a channel")
     expected = discord_creator_may_post(**facts)
     channel, source, member = _discord_place(facts)
-    saved = await mcp_routines._discord_caller_may_post(  # pyright: ignore[reportPrivateUsage]
-        channel, member, "1"
-    )
+    saved = await _mcp_discord_saves(channel, member, facts, monkeypatch)
     posted = await discord_delivery.creator_may_post(channel, source, 1)
-    assert (saved, posted) == (expected, expected), (
-        f"chat tool saves={saved}, delivery posts={posted}, rule={expected}: {facts}"
+    # The web app offers channels only, never a thread.
+    web = expected if facts["is_thread"] else await _web_discord_postable(facts)
+    assert (saved, posted, web) == (expected, expected, expected), (
+        f"chat tool saves={saved}, delivery posts={posted}, web offers={web}, "
+        f"rule={expected}: {facts}"
     )
+
+
+async def _mcp_discord_saves(
+    channel: MagicMock, member: MagicMock, facts: dict[str, bool], monkeypatch: pytest.MonkeyPatch
+) -> bool:
+    """Whether `create_routine`'s Discord resolver accepts the destination."""
+    channel.guild.id = 10
+    channel.category_id = None
+    channel.parent_id = 5
+    if facts["is_thread"]:
+        channel.parent.category_id = None
+    client = MagicMock()
+    client.fetch_channel = AsyncMock(return_value=channel)
+
+    @asynccontextmanager
+    async def rest(_token: str) -> AsyncIterator[MagicMock]:
+        yield client
+
+    monkeypatch.setattr(mcp_routines, "rest_client", rest)
+    monkeypatch.setattr(mcp_routines, "_require_bot_token", lambda _runtime: "bot-token")
+    monkeypatch.setattr(mcp_routines, "_resolve_member", AsyncMock(return_value=(None, member)))
+    auth = cast(Any, SimpleNamespace(external_id="10", platform_user_id="1"))
+    try:
+        await mcp_routines._resolve_discord_destination(  # pyright: ignore[reportPrivateUsage]
+            cast(Any, None),
+            auth,
+            kind="thread" if facts["is_thread"] else "channel",
+            destination_id="7",
+        )
+    except ToolError:
+        return False
+    return True
+
+
+async def _web_discord_postable(facts: dict[str, bool]) -> bool:
+    """Whether the web app offers the channel, from the raw guild the API returns."""
+    everyone = (
+        (DISCORD_ADMINISTRATOR if facts["administrator"] else 0)
+        | (DISCORD_VIEW_CHANNEL if facts["view_channel"] else 0)
+        | (DISCORD_SEND_MESSAGES if facts["send_messages"] else 0)
+    )
+    bodies = {
+        "/guilds/10": {"owner_id": "999", "roles": [{"id": "10", "permissions": str(everyone)}]},
+        "/guilds/10/members/1": {"roles": []},
+        "/guilds/10/channels": [{"id": "7", "type": 0, "permission_overwrites": []}],
+    }
+
+    async def get(url: str, **_kwargs: Any) -> httpx.Response:
+        return httpx.Response(200, json=bodies[url.removeprefix("https://discord.com/api/v10")])
+
+    runtime = SimpleNamespace(
+        settings=SimpleNamespace(discord=SimpleNamespace(bot_token=SecretStr("bot-token"))),
+        http_client=SimpleNamespace(get=get),
+    )
+    reach = await web_visibility._discord(cast(Any, runtime), "10", "1")  # pyright: ignore[reportPrivateUsage]
+    return "7" in reach.postable
