@@ -14,7 +14,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "0175_channel_name_status"
-down_revision: str | None = "0174_drop_channel_admins"
+down_revision: str | None = "0174a_github_router_sessions"
 branch_labels: str | None = None
 depends_on: str | None = None
 
