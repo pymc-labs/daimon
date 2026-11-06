@@ -339,7 +339,7 @@ async def test_a_member_may_deliver_only_to_a_channel_their_platform_shows_them(
         asked.append((str(user_id), frozenset(channel_ids)))
         return frozenset({_CHANNEL, "222", "333"} & set(channel_ids))
 
-    monkeypatch.setattr(routines_module, "readable_channels", shown)
+    monkeypatch.setattr(routines_module, "postable_channels", shown)
     async with rig.open() as (client, ws, _):
         async with rig.factory.begin() as db:
             await platform_names.upsert_channel_names(
@@ -444,10 +444,6 @@ async def test_a_member_may_deliver_to_a_channel_they_can_view_and_post_in(rig: 
     assert res.status_code == 200, res.text
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="web routine destination check is looser than chat; feature-consistency",
-)
 async def test_a_member_may_not_deliver_to_a_channel_they_can_view_but_not_post_in(
     rig: Rig,
 ) -> None:

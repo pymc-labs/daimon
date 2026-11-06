@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 DISCORD_ADMINISTRATOR = 1 << 3
 DISCORD_VIEW_CHANNEL = 1 << 10
+DISCORD_SEND_MESSAGES = 1 << 11
 _ROLE, _MEMBER = 0, 1
 
 
@@ -43,16 +44,19 @@ def discord_base_permissions(
     return permissions
 
 
-def discord_can_view(
+def discord_channel_permissions(
     member: DiscordMember,
     *,
     guild_id: str,
     base_permissions: int,
     overwrites: Sequence[DiscordOverwrite],
-) -> bool:
-    """Whether Discord shows `member` a channel with these overwrites. Pure."""
+) -> int:
+    """The member's permission bits in one channel: base, then @everyone's, roles', own overwrites.
+
+    Pure. An owner or administrator holds every bit the rule below tests.
+    """
     if member.is_owner or base_permissions & DISCORD_ADMINISTRATOR:
-        return True
+        return base_permissions | DISCORD_ADMINISTRATOR
     permissions = base_permissions
     everyone = next((o for o in overwrites if o.type == _ROLE and o.id == guild_id), None)
     if everyone is not None:
@@ -69,7 +73,21 @@ def discord_can_view(
     )
     if own is not None:
         permissions = (permissions & ~own.deny) | own.allow
-    return bool(permissions & DISCORD_VIEW_CHANNEL)
+    return permissions
+
+
+def discord_can_view(
+    member: DiscordMember,
+    *,
+    guild_id: str,
+    base_permissions: int,
+    overwrites: Sequence[DiscordOverwrite],
+) -> bool:
+    """Whether Discord shows `member` a channel with these overwrites. Pure."""
+    permissions = discord_channel_permissions(
+        member, guild_id=guild_id, base_permissions=base_permissions, overwrites=overwrites
+    )
+    return bool(permissions & (DISCORD_ADMINISTRATOR | DISCORD_VIEW_CHANNEL))
 
 
 def discord_visible_channels(

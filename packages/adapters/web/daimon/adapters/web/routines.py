@@ -16,7 +16,7 @@ from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.web.access import is_admin
 from daimon.adapters.web.audit import audit
 from daimon.adapters.web.caller import WebCaller, requires
-from daimon.adapters.web.channel_visibility import readable_channels
+from daimon.adapters.web.channel_visibility import postable_channels
 from daimon.adapters.web.directory import chattable
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core import credit_views, routine_service
@@ -191,9 +191,9 @@ def routines_router(runtime: WebRuntime) -> APIRouter:
     ) -> dict[str, str]:
         """The channels a routine of this person may deliver to, by id.
 
-        Every channel the workspace knows that the rules let people write in; for a
-        member, only those their chat platform shows them, and never one kept to its own
-        agents (the same check the Channels module makes).
+        Every channel the workspace knows that the rules let people write in and where
+        the person could post through chat (`postable_channels`, the chat tool's check).
+        A member never gets a channel kept to its own agents (the Channels module's check).
         """
         tenant_id = caller.person.tenant_id
         known = {
@@ -204,24 +204,23 @@ def routines_router(runtime: WebRuntime) -> APIRouter:
         }
         principal = await caller.principal(db)
         policy = await load_access_policy(db, tenant_id=tenant_id)
-        if not is_admin(caller.role):
-            tenant = await get_tenant(db, tenant_id)
-            readable = await readable_channels(
-                runtime,
-                tenant_id=tenant_id,
-                platform=platform,
-                workspace_id=tenant.external_id if tenant is not None else "",
-                user_id=principal.external_id if principal.platform == platform else None,
-                channel_ids=known.keys(),
-            )
-            confidential = {
-                cid for cid, rule in policy.channel_rules.items() if rule.readers == "own"
-            }
-            known = {
-                cid: name
-                for cid, name in known.items()
-                if cid in readable and cid not in confidential
-            }
+        tenant = await get_tenant(db, tenant_id)
+        postable = await postable_channels(
+            runtime,
+            tenant_id=tenant_id,
+            platform=platform,
+            workspace_id=tenant.external_id if tenant is not None else "",
+            user_id=principal.external_id if principal.platform == platform else None,
+            channel_ids=known.keys(),
+        )
+        confidential = (
+            set[str]()
+            if is_admin(caller.role)
+            else {cid for cid, rule in policy.channel_rules.items() if rule.readers == "own"}
+        )
+        known = {
+            cid: name for cid, name in known.items() if cid in postable and cid not in confidential
+        }
         return {
             cid: name
             for cid, name in sorted(known.items(), key=lambda item: item[1].lower())

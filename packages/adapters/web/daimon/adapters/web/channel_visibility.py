@@ -2,8 +2,9 @@
 
 Discord: the member's roles and every channel's overwrites over REST, with the
 bot token this process holds. Slack: `users.conversations` with the workspace's
-stored bot token. Teams: no membership read here, so no channel. Any failure
-hides every channel (fail closed). Answers are cached for `CACHE_SECONDS`.
+stored bot token, for the member and for the bot. Teams: no membership read here,
+so no channel. Any failure hides every channel (fail closed). Answers are cached for
+`CACHE_SECONDS`.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from __future__ import annotations
 import time
 import uuid
 from collections.abc import Collection
+from dataclasses import dataclass
 from typing import cast
 
 import httpx
@@ -23,6 +25,7 @@ from daimon.core.channel_visibility import (
     discord_visible_channels,
 )
 from daimon.core.github_credentials import decrypt_token
+from daimon.core.routine_destinations import discord_deliverable_channels, slack_may_deliver
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
 
 log = structlog.get_logger(__name__)
@@ -33,7 +36,16 @@ _SLACK_API = "https://slack.com/api"
 _SLACK_PAGES = 20
 _CACHE_SIZE = 2048
 
-_cache: dict[tuple[uuid.UUID, str], tuple[float, frozenset[str]]] = {}
+
+@dataclass(frozen=True)
+class _Reach:
+    """What one member can do in a workspace's channels, as the platform answered."""
+
+    readable: frozenset[str]
+    postable: frozenset[str]
+
+
+_cache: dict[tuple[uuid.UUID, str], tuple[float, _Reach]] = {}
 
 
 class _Unverified(Exception):
@@ -84,7 +96,7 @@ def _overwrites(raw: object) -> tuple[DiscordOverwrite, ...]:
     )
 
 
-async def _discord(runtime: WebRuntime, guild_id: str, user_id: str) -> frozenset[str]:
+async def _discord(runtime: WebRuntime, guild_id: str, user_id: str) -> _Reach:
     discord = runtime.settings.discord
     if discord is None:
         raise _Unverified("no bot token")
@@ -101,43 +113,60 @@ async def _discord(runtime: WebRuntime, guild_id: str, user_id: str) -> frozense
     overwrites = {
         str(row.get("id")): _overwrites(row.get("permission_overwrites")) for row in channels
     }
-    return discord_visible_channels(
-        DiscordMember(
-            user_id=user_id,
-            role_ids=frozenset(str(r) for r in cast("list[object]", roles))
-            if isinstance(roles, list)
-            else frozenset(),
-            is_owner=str(guild.get("owner_id")) == user_id,
+    member_facts = DiscordMember(
+        user_id=user_id,
+        role_ids=frozenset(str(r) for r in cast("list[object]", roles))
+        if isinstance(roles, list)
+        else frozenset(),
+        is_owner=str(guild.get("owner_id")) == user_id,
+    )
+    role_permissions = {
+        str(role.get("id")): _int(role.get("permissions")) for role in _dicts(guild.get("roles"))
+    }
+    return _Reach(
+        readable=discord_visible_channels(
+            member_facts,
+            guild_id=guild_id,
+            role_permissions=role_permissions,
+            channel_overwrites=overwrites,
+            channel_ids=overwrites.keys(),
         ),
-        guild_id=guild_id,
-        role_permissions={
-            str(role.get("id")): _int(role.get("permissions"))
-            for role in _dicts(guild.get("roles"))
-        },
-        channel_overwrites=overwrites,
-        channel_ids=overwrites.keys(),
+        postable=discord_deliverable_channels(
+            member_facts,
+            guild_id=guild_id,
+            role_permissions=role_permissions,
+            channel_overwrites=overwrites,
+            channel_ids=overwrites.keys(),
+        ),
     )
 
 
-async def _slack(runtime: WebRuntime, team_id: str, user_id: str) -> frozenset[str]:
+async def _slack_token(runtime: WebRuntime, team_id: str) -> str:
     async with runtime.sessionmaker() as db:
         row = await get_slack_bot_token(db, team_id=team_id)
     if row is None:
         raise _Unverified("no bot token")
     try:
-        token = decrypt_token(runtime.fernet, row.encrypted_token)
+        return decrypt_token(runtime.fernet, row.encrypted_token)
     except InvalidToken as exc:
         raise _Unverified("bad token") from exc
+
+
+async def _slack_conversations(
+    runtime: WebRuntime, token: str, user_id: str | None
+) -> frozenset[str]:
+    """The channels `user_id` is in; with no user, the channels the bot is in."""
     found: set[str] = set()
     cursor = ""
     for _ in range(_SLACK_PAGES):
         params = {
-            "user": user_id,
             "types": "public_channel,private_channel",
             "exclude_archived": "true",
             "limit": "1000",
             "cursor": cursor,
         }
+        if user_id is not None:
+            params["user"] = user_id
         body = _dict(
             _json(
                 await runtime.http_client.get(
@@ -157,6 +186,62 @@ async def _slack(runtime: WebRuntime, team_id: str, user_id: str) -> frozenset[s
     raise _Unverified("too many pages")
 
 
+async def _slack(runtime: WebRuntime, team_id: str, user_id: str) -> _Reach:
+    token = await _slack_token(runtime, team_id)
+    mine = await _slack_conversations(runtime, token, user_id)
+    bots = await _slack_conversations(runtime, token, None)
+    # The listing holds only channels the member is in and is not archived, so
+    # the member's own access is met; daimon must be in the channel as well.
+    return _Reach(
+        readable=mine,
+        postable=frozenset(
+            channel_id
+            for channel_id in mine
+            if slack_may_deliver(
+                bot_is_member=channel_id in bots,
+                is_archived=False,
+                is_im_or_mpim=False,
+                is_private=False,
+                is_guest=False,
+                caller_is_member=True,
+            )
+        ),
+    )
+
+
+async def _reach(
+    runtime: WebRuntime,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    workspace_id: str,
+    user_id: str | None,
+) -> _Reach:
+    """The member's reach in the workspace; nothing when unverified. Cached briefly."""
+    none = _Reach(frozenset(), frozenset())
+    if user_id is None or not workspace_id:
+        return none
+    key = (tenant_id, user_id)
+    cached = _cache.get(key)
+    now = time.monotonic()
+    if cached is not None and now - cached[0] < CACHE_SECONDS:
+        return cached[1]
+    try:
+        if platform == "discord":
+            reach = await _discord(runtime, workspace_id, user_id)
+        elif platform == "slack":
+            reach = await _slack(runtime, workspace_id, user_id)
+        else:
+            reach = none
+    except (_Unverified, httpx.HTTPError, ValueError, TypeError) as exc:
+        log.info("web.channel_visibility_unverified", platform=platform, error=str(exc))
+        return none
+    if len(_cache) >= _CACHE_SIZE:
+        _cache.clear()
+    _cache[key] = (now, reach)
+    return reach
+
+
 async def readable_channels(
     runtime: WebRuntime,
     *,
@@ -171,24 +256,27 @@ async def readable_channels(
     `user_id` is the member's id on the workspace's platform; None (no linked chat
     account) sees none.
     """
-    if user_id is None or not workspace_id:
-        return frozenset()
-    key = (tenant_id, user_id)
-    cached = _cache.get(key)
-    now = time.monotonic()
-    if cached is not None and now - cached[0] < CACHE_SECONDS:
-        return cached[1] & frozenset(channel_ids)
-    try:
-        if platform == "discord":
-            visible = await _discord(runtime, workspace_id, user_id)
-        elif platform == "slack":
-            visible = await _slack(runtime, workspace_id, user_id)
-        else:
-            visible = frozenset[str]()
-    except (_Unverified, httpx.HTTPError, ValueError, TypeError) as exc:
-        log.info("web.channel_visibility_unverified", platform=platform, error=str(exc))
-        return frozenset()
-    if len(_cache) >= _CACHE_SIZE:
-        _cache.clear()
-    _cache[key] = (now, visible)
-    return visible & frozenset(channel_ids)
+    reach = await _reach(
+        runtime, tenant_id=tenant_id, platform=platform, workspace_id=workspace_id, user_id=user_id
+    )
+    return reach.readable & frozenset(channel_ids)
+
+
+async def postable_channels(
+    runtime: WebRuntime,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    workspace_id: str,
+    user_id: str | None,
+    channel_ids: Collection[str],
+) -> frozenset[str]:
+    """The ids among `channel_ids` a routine may deliver to for the member; none when unverified.
+
+    The member must be able to read and post there (Discord) or be in the channel
+    with daimon in it (Slack): the checks the chat tool makes when it creates a routine.
+    """
+    reach = await _reach(
+        runtime, tenant_id=tenant_id, platform=platform, workspace_id=workspace_id, user_id=user_id
+    )
+    return reach.postable & frozenset(channel_ids)
