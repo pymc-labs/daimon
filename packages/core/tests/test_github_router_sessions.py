@@ -199,7 +199,8 @@ async def test_chat_session_is_live_while_its_thread_session_is_live(
 ) -> None:
     tenant_id = await _tenant(db_session)
     record, _ = await _record(db_session, tenant_id)
-    assert not await router_sessions.is_session_live(db_session, record)
+    # Managed Agents connects while it creates the session, before the row exists.
+    assert await router_sessions.is_session_live(db_session, record)
     await create_thread_session(
         db_session,
         tenant_id=tenant_id,
@@ -257,16 +258,40 @@ async def test_live_session_of_another_tenant_does_not_count(db_session: AsyncSe
     tenant_id = await _tenant(db_session)
     other_tenant = await _tenant(db_session)
     record, _ = await _record(db_session, tenant_id)
-    await github_issued_tokens.register_headless_app_session(
-        db_session, session_id=SESSION_ID, tenant_id=other_tenant, vault_id="vlt_1"
+    for tenant, thread in ((tenant_id, "thread-own"), (other_tenant, "thread-other")):
+        await create_thread_session(
+            db_session,
+            tenant_id=tenant,
+            platform="discord",
+            thread_id=thread,
+            account_id=uuid.uuid4(),
+            ma_session_id=SESSION_ID,
+        )
+    await db_session.execute(
+        update(ThreadSession)
+        .where(ThreadSession.tenant_id == tenant_id, ThreadSession.ma_session_id == SESSION_ID)
+        .values(status="dead")
     )
     assert not await router_sessions.is_session_live(db_session, record)
 
 
-async def test_record_without_a_session_id_is_not_live(db_session: AsyncSession) -> None:
+async def test_record_whose_session_is_still_being_created_is_live(
+    db_session: AsyncSession,
+) -> None:
+    # Managed Agents connects to the router while it creates the session, before
+    # Daimon stores the session id; refusing then hides the GitHub tool for good.
     tenant_id = await _tenant(db_session)
     record, _ = await _record(db_session, tenant_id, ma_session_id=None)
-    assert not await router_sessions.is_session_live(db_session, record)
+    assert await router_sessions.is_session_live(db_session, record)
+
+
+async def test_closed_record_is_refused_even_while_its_session_is_being_created(
+    db_session: AsyncSession,
+) -> None:
+    tenant_id = await _tenant(db_session)
+    record, bearer = await _record(db_session, tenant_id, ma_session_id=None)
+    await router_sessions.close_local(db_session, router_session_id=record.id)
+    assert await router_sessions.verify(db_session, bearer=bearer) is None
 
 
 # --- Privacy erasure --------------------------------------------------------------
