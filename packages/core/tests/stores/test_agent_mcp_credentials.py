@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import ast
 import datetime as dt
 import json
 import re
 import uuid
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -809,3 +811,67 @@ async def test_a_token_deleted_before_the_mirror_takes_the_lock_is_not_written_b
     )
 
     assert mirrored == [()], "the deleted token was written back into the vault"
+
+
+_PACKAGES = Path(__file__).resolve().parents[3]
+
+
+def _calls_outside(callee: str, allowed: str, source: str) -> list[tuple[int, str | None]]:
+    """(line, enclosing function) of each call to ``callee`` outside ``allowed``."""
+    found: list[tuple[int, str | None]] = []
+
+    def walk(node: ast.AST, function: str | None) -> None:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            function = node.name
+        if isinstance(node, ast.Call):
+            target = node.func
+            name = target.id if isinstance(target, ast.Name) else getattr(target, "attr", None)
+            if name == callee and function != allowed:
+                found.append((node.lineno, function))
+        for child in ast.iter_child_nodes(node):
+            walk(child, function)
+
+    walk(ast.parse(source), None)
+    return found
+
+
+def test_every_mirror_reads_the_tokens_under_the_vault_lock() -> None:
+    """Rule contract: a copy of the agent's stored tokens into a vault reads them
+    under the vault lock, through `mirror_stored_credentials`.
+
+    `forget_mirrored_mcp_token` clears each copy under that lock after the
+    stored token is deleted, so a writer that read the tokens first writes a
+    removed token back. Found in `create_session` and both shared-vault paths
+    after `sync_agent_mcp_credentials` alone was fixed.
+    """
+    sources = sorted(
+        path
+        for path in _PACKAGES.rglob("*.py")
+        if "tests" not in path.relative_to(_PACKAGES).parts and "daimon" in path.parts
+    )
+    assert any(path.name == "sessions.py" for path in sources), "the walk found no source"
+    offenders = {
+        f"{path.relative_to(_PACKAGES)}:{line} in {function}"
+        for path in sources
+        for line, function in _calls_outside(
+            "mirror_credentials_into_vault",
+            "mirror_stored_credentials",
+            path.read_text(encoding="utf-8"),
+        )
+    }
+    assert offenders == set(), (
+        "copy stored tokens into a vault through mirror_stored_credentials, "
+        f"which reads them under the vault lock: {sorted(offenders)}"
+    )
+
+
+def test_the_mirror_contract_flags_a_mirror_outside_the_helper() -> None:
+    source = (
+        "async def create(client, creds):\n"
+        "    await mirror_credentials_into_vault(client, vault_id='v', credentials=creds)\n"
+        "async def mirror_stored_credentials(client, creds):\n"
+        "    await agent_mcp_credentials.mirror_credentials_into_vault(client, credentials=creds)\n"
+    )
+    assert _calls_outside("mirror_credentials_into_vault", "mirror_stored_credentials", source) == [
+        (2, "create")
+    ]

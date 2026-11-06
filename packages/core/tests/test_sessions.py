@@ -1349,7 +1349,7 @@ async def test_app_session_attaches_caller_and_session_vaults(
     add_app = AsyncMock()
     mirror = AsyncMock()
     monkeypatch.setattr("daimon.core.sessions.add_app_credentials", add_app)
-    monkeypatch.setattr("daimon.core.sessions.mirror_credentials_into_vault", mirror)
+    monkeypatch.setattr("daimon.core.sessions.mirror_stored_credentials", mirror)
     bodies: list[dict[str, Any]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
