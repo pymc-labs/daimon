@@ -6,6 +6,105 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+- **Connect GitHub now says a repo is for that agent only and stays until removed.**
+  The success page and the connect card on Discord, Slack and Teams use the same words.
+  A member who names a repo the agent already has hears "already has", not "ask an admin".
+- **In Teams channels and 1:1 chats the agent can edit and delete its own replies, cards and routine results.**
+  Each message a turn or routine posts is recorded as the agent's, so `edit_message`
+  and `delete_message` accept it once the turn is over, when the person who started it
+  or a Teams admin asks. In a 1:1 chat the agent sees its recent messages grouped by
+  reply, and replayed channel history carries each message's id. Group chats stay out
+  of reach, as do messages posted before this release. Adds a database migration.
+- **The agent can delete a whole reply of its own with `delete_reply`, on Discord, Slack and Teams.**
+  Pass any one message of the reply and every message of it goes: its text messages and
+  its status, notice and controls cards, or every chunk of a routine result on Discord
+  and Teams (Slack does not record routine results). A message sent with `send_message`
+  is a reply of one message, and `delete_message` still deletes just one. Each deletion
+  takes the rules and limits of `delete_message`, all checked before the first, so a
+  reply whose turn is still running, or that another person asked for where that
+  matters, is refused whole. A message already gone is skipped, and a limit or failure
+  stops with how many were deleted and how many are left.
+- **"Coding tools" is now "Access via MCP", and connecting a tool is one prompt to copy.**
+  The agent's page has a Tool select for Claude Code, Codex, Cursor, Pi, Other MCP and Token;
+  copy a tool's prompt into it and the tool makes its own key, with nothing to paste by hand.
+  Each prompt holds a single-use code that ends after 10 minutes, and the first tool to use
+  one ends the rest. The prompt never carries the agent's name, only a `daimon-` server key.
+  The page shows when a tool has connected; when the codes end it says Expired and New prompt
+  makes a fresh set. The person's access is checked again when a code is used, and the key is
+  logged as before. Claim attempts are limited per client, keyed on the rightmost
+  `X-Forwarded-For` entries and IPv6 by /64 (`DAIMON_MCP__CODING_CLAIM_ATTEMPTS`,
+  `..._WINDOW_MINUTES`, `..._CLAIM_FORWARDED_ENTRIES`). The Token option keeps the old way of
+  making a key by hand, and keys and the profile page now list each key's tool. Migration 0184
+  adds the claim codes and a tool column on keys.
+
+- **The Channels list and panel show spend for the last 30 days.** The list column and the panel facts no longer mix "This month" with "Last 30 days".
+- **Signing in to the web app with Microsoft shows your email and your organization's name.** The Teams workspace is named after the organization instead of "Microsoft Teams", and the sidebar shows the email under your name. Where the organization hasn't allowed Daimon to read profiles, the sign-in address is used and the workspace keeps its old name. Slack and Discord sign-ins have no email, so the sidebar shows the name alone.
+- **Teams channels in the web app's Channels tab are grouped under their team.** A channel is filed under its team once Daimon has seen a message in it or listed it in billing, and a team shows the name it was installed with.
+- **Teams channels are grouped under their team without waiting for a message.** Daimon now lists each installed team's channels every six hours, so the Channels page files them under their team from the start.
+- **Helpers pass files both ways.** `ask_helper` takes files uploaded with `create_file_upload_url`, and the helper's own files come back with its reply as download links that work for that ask only and expire after an hour. It works on every model provider and needs the public URL set. Migration 0183 adds the columns.
+- **A hand-off the person asked for starts the new agent right away, with a clearer confirmation.** The new agent answers without waiting for another message when the person's own new message asked for it; a routine, timer, agent key, resumed turn or switch-card approval hands over from their next message, as does an agent that can't read the conversation or run here. The confirmation says who takes over, whether it starts now, what it keeps (the conversation and files, or a summary after a provider move) and its first piece of work.
+- **The approval card for a wide request is one short question.** It reads, for example, "Open 10 threads in #launch and tag 3 people?" or "Post in 4 places and tag 6 people?" above Approve, Deny and Details. The "Daimon wants to" lead, the second line and the "(N tags)" count are gone, and the approved card repeats the question without its question mark.
+- **Slack QA bots can be allow-listed with `DAIMON_SLACK__QA_BOT_USER_IDS`.** A listed bot's mention runs as a plain member, never a Slack admin; mentions from any other bot are ignored, as is Daimon's own.
+
+- **An agent switched to Gemini or OpenAI no longer gets stuck on "needs to be confirmed
+  again".** Daimon's own tool-safety and ask-before-publishing settings no longer make a
+  confirmed switch stale by themselves; one that changes what the agent would lose still
+  asks again. Gemini keeps the agent's MCP tools when those settings name tools it doesn't
+  list. When a switch does need confirming again, a person's message in a new conversation
+  gets an answer on Anthropic instead of an error, and the agent offers to switch again.
+  Routines and watches still stop until someone confirms, a channel pinned to a provider
+  never falls back, and a conversation already on the provider shows the card until someone
+  confirms the switch from a new conversation.
+
+- **Chat answers and setup panels link to the agent, channel or routine on the web.** Each opens in the right workspace (sign-in or a workspace picker first when needed). Agent setup details, routines, billing and channel settings on Discord, Slack and Teams carry an "Open in web" button. The agent also knows the workspace's main pages to link. Nothing changes with no web app set.
+- **Everything the web admin pages do also works from Discord, Slack and Teams chat.** Admins invite people and send visitor links (sent by direct message), change roles, set agent access and workspace settings, manage spend allowances, read the audit log, spend and feedback, restore agent versions and set owners, edit skill files, resync repo skills, and see their own credits; results link to the page. People can also run a routine on demand, clear a thread's own settings, and remove their own data (memory, sign-ins, coding keys) with one tool. Removing or reconfiguring runs only on a Confirm card in chat, and routines and other unattended runs do not list those tools. Long lists show 25 rows with a total, and people lists page on. A test keeps the web app and chat in step.
+- **Admins set any agent's helpers, built-in Daimon's too.** On the agent's page or in chat with `set_agent_helpers` (on a Confirm card). A seeded agent's helpers apply to that workspace only, and nothing else on it is editable. In chat, a normal agent's change is recorded as a version, so an open draft goes out of date.
+- **The web app's agent editor offers the skills of a connected data server, and
+  keeps them current.** **Add skill** lists the server's skills. An added skill joins the library read-only, and new versions move every
+  agent that follows it; a pinned agent shows **Update available** and moves at once
+  when it follows again. Agents fixed by settings show **Managed by settings**. An agent switched to
+  OpenAI or Gemini moves only when its dropped capabilities stay the same, else it shows
+  **Needs re-confirm**. Script and `allowed-tools` changes wait for an admin's approval;
+  other files apply at once. A skill the server stops offering keeps its last version and
+  shows as unavailable. **Fork** makes an editable copy under a name you choose.
+  Chat does the same: add, check and approve, fork, follow and apply updates. Updates are
+  read as the chat account that added the skill, while it stays in the workspace.
+
+- **The agent editor in the web app has a GitHub panel.** It lists the agent's repos with
+  their access, status, skill count and which one is the working repo, and shows whether the
+  latest push sync failed. The Skills panel shows the release an outside pipeline stamped in
+  the agent's `source_release`, `source_release_at` and `source_release_url` metadata, and each
+  skill shows where it came from: a repo (with branch and path), the library or
+  elsewhere. The agent's owner or a server admin can connect GitHub, pick or clear the working repo, take a repo
+  off the agent and resync its repo skills now. Each change is audited like the chat tools.
+
+- **The agent posts for other people more carefully, and anyone can ask never to be tagged.**
+  Mentions of everyone, here, roles and groups no longer go out live on any platform, and
+  posts made for someone say who asked for them. One request that opens several threads,
+  posts in several places or tags many people now shows the requester an approval card
+  first, with limits an operator can change (`DAIMON_OUTBOUND__*`). `send_message` takes a
+  batch, so a request can go out in one call. A person can ask the agent to never tag them
+  with the new `set_never_tag` tool: their mentions turn into plain names in replies,
+  routines, tool posts, direct messages, cards and completion pings, they count toward no
+  limit, and the setting follows them through privacy export and erasure. The seeded agent
+  gains a short prompt block and a `team-etiquette` skill covering threads, routines and
+  shared media. Slack posts resolve names through a cache, so mentions cost fewer calls.
+
+- **The web app signs in with Slack and Microsoft again, besides Discord.** Each shows on the sign-in page once its login app is set (`DAIMON_HUB__SLACK_*`, `DAIMON_MICROSOFT_ACCOUNTS__*`); register `<web public url>/auth/slack/callback` and `/auth/microsoft/callback` on it. A signed-in member connects the other two from the account menu (see below).
+
+- **The web app remembers connected accounts.** A member signs in with one chat account, connects others from the account menu, and the workspace switcher lists the workspaces of all of them. A later sign-in with any connected account, on any device, shows them all while each was proven within 30 days; an older one returns when it signs in again. Profile lists the connected accounts and disconnects one (not the one signed in with). Guests cannot connect.
+
+- **A switched OpenAI or Gemini agent answers again after Daimon gates more of its own
+  tools.** An agent whose switch was confirmed before such a release had every turn refused
+  with a request to confirm the switch again. A switch now stays confirmed while the agent
+  loses exactly what its owner accepted, not counting Daimon tools that need a confirmation
+  or no longer exist. A change to the agent, its model or its losses still asks again, and
+  so does a tool it gains. A switch to the provider's default model also asks again if a
+  release changes that default.
+
+- Remove client-specific references and use neutral self-hosting examples.
+
 - In the web app, a Discord routine can post to its owner by direct message, and a routine shows when sandbox tools are on. Changing a routine there needs a linked chat account, because the routine then runs as you.
 
 - After **Hand over**, the new agent's first reply goes straight to the person's request. Before, it opened by naming the work in progress and the files that came across. It still says when a file it needs is missing or when something could not be carried over.

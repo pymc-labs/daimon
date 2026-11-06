@@ -29,7 +29,8 @@ def test_names_on_connect_card(name: str, shown: str | None) -> None:
     assert (
         card.description
         == "Nothing is connected yet.\n\n"
-        + f"Tap the button and tick the repos {shown or 'this agent'} can use."
+        + f"Tap the button and tick the repos for {shown or 'this agent'}. "
+        + "They stay until you remove them."
     )
     if shown is None:
         assert name not in json.dumps(
@@ -90,7 +91,8 @@ def test_card_clips_long_agent_name() -> None:
     assert (
         card.description
         == "Nothing is connected yet.\n\n"
-        + f"Tap the button and tick the repos {name[:80]} can use."
+        + f"Tap the button and tick the repos for {name[:80]}. "
+        + "They stay until you remove them."
     )
 
 

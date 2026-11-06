@@ -135,7 +135,7 @@ async def test_d8_native_mcp_product_card_reaches_frozen_consumer(
     assert receipt.message_id == message.message_id
     assert "Connect GitHub" in message.embed_texts
     assert (
-        "Nothing is connected yet.\n\nTap the button and tick the repos credential-team can use."
+        "Nothing is connected yet.\n\nTap the button and tick the repos for credential-team. They stay until you remove them."
         in message.embed_texts
     )
     assert message.component_labels == ("Connect GitHub",)

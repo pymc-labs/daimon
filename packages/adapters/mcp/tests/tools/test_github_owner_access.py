@@ -405,6 +405,42 @@ async def test_a_member_still_gets_ask_admin_and_a_recorded_request(
     assert await _role(world, who) == Role.USER
 
 
+async def _connect_named_repo(
+    world: World, monkeypatch: pytest.MonkeyPatch, who: str, repo_name: str
+):
+    _patch_chat(monkeypatch, connect_tool)
+    monkeypatch.setattr(connect_tool, "_post_discord_connect_card", AsyncMock())
+    return await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
+        _runtime(world.sessions),
+        world.auth(who),
+        origin_context_id=str(uuid.uuid4()),
+        repo_name=repo_name,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_member_naming_a_repo_the_agent_already_has_is_told_so_not_sent_to_an_admin(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _connect_repo(world, 101)
+    result = await _connect_named_repo(world, monkeypatch, "member", "Team-A/App")
+    assert result.message == "Agent already has team-a/app."
+    assert "admin" not in result.message
+    assert await _count(world, "github_connect_requests") == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repo_id", [101, 103])
+async def test_a_member_learns_nothing_about_repos_the_agent_does_not_have(
+    world: World, monkeypatch: pytest.MonkeyPatch, repo_id: int
+) -> None:
+    """Another agent's repo, or a server-wide repo this agent lacks, still gets the admin ask."""
+    await _connect_repo(world, repo_id, ma_agent_id=MA_OTHER, server_wide=repo_id == 103)
+    result = await _connect_named_repo(world, monkeypatch, "member", REPOS[repo_id])
+    assert result.status == "ask_admin"
+    assert "already has" not in result.message
+
+
 @pytest.mark.asyncio
 async def test_an_owner_agent_scoped_grant_is_the_only_direct_grant(
     world: World, monkeypatch: pytest.MonkeyPatch

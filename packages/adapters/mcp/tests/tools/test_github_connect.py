@@ -83,7 +83,7 @@ async def test_discord_mention_card_has_no_url_and_slack_mention_is_ephemeral(
     assert kwargs["embed"].to_dict()["author"]["name"] == "ResearchBot"
     assert (
         kwargs["embed"].description
-        == "Nothing is connected yet.\n\nTap the button and tick the repos ResearchBot can use."
+        == "Nothing is connected yet.\n\nTap the button and tick the repos for ResearchBot. They stay until you remove them."
     )
     assert kwargs["embed"].to_dict()["color"] == 0x0C1F40
     item = kwargs["view"].children[0]

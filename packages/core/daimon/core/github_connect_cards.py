@@ -73,9 +73,10 @@ def build_connect_card(
             f"Tap the button. On the page, click Add repos, make sure {requested_repo} is ticked, "
             "click Add 1 repo, then Save changes."
             if requested_repo
-            else f"Tap the button and tick the repos {shown or 'this agent'} can use."
+            else f"Tap the button and tick the repos for {shown or 'this agent'}. "
+            "They stay until you remove them."
             if agent_name
-            else "Tap the button and tick the repos your agents can use."
+            else "Tap the button and tick the repos to connect."
         ),
         github_mark_url=f"{root}/web/github-mark.png",
         variant=chosen,
