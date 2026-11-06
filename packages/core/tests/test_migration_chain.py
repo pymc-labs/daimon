@@ -136,6 +136,7 @@ TAIL = (
     "0172_fold_caps_into_allowances",
     "0173_channel_settings",
     "0174_drop_channel_admins",
+    "0174a_github_router_sessions",
 )
 HEAD = TAIL[-1]
 

@@ -698,3 +698,79 @@ async def test_suppressed_update_matches_desired_snapshot(monkeypatch: pytest.Mo
     assert isinstance(result, AppliedOps)
     assert result.snapshot.tools_sha256 == hash_tools(expected_tools) == desired.tools_sha256
     assert result.snapshot.mcp_servers_sha256 == desired.mcp_servers_sha256
+
+
+async def test_a_routed_session_keeps_the_router_and_renews_its_record(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An in-place tools update never flips the session's GitHub transport, and
+    every bind of a routed session pushes its router record's expiry forward."""
+    from daimon.core.mcp_server_url import GITHUB_COPILOT_MCP_URL, github_router_url
+    from daimon.core.mcp_vault import GITHUB_ROUTER_SESSION_TTL
+    from daimon.core.stores import github_router_sessions
+    from pydantic import HttpUrl
+
+    public_url = "https://daimon.example.com/mcp"
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    state = FakeSessionsState(ma=FakeMAState())
+    _register_agent(state.ma)
+    bodies: list[dict[str, Any]] = []
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path.count("/") == 3:
+            import json
+
+            bodies.append(json.loads(request.content))
+        raise NotHandled
+
+    client = _build_client(state, before=[_capture])
+    session_id, recorded = await _session_with_env(client, content=b"A=1\n")
+    recorded = recorded.model_copy(update={"github_transport": "router"})
+    async with db_session_factory.begin() as session:
+        record, _ = await github_router_sessions.create(
+            session,
+            tenant_id=tenant.id,
+            agent_id=uuid.uuid4(),
+            account_id=None,
+            expires_at=_NOW,
+            ma_session_id=session_id,
+        )
+    agent = _agent(
+        mcp_servers=[
+            BetaManagedAgentsMCPServerURLDefinition(
+                name="github", type="url", url=GITHUB_COPILOT_MCP_URL
+            )
+        ]
+    )
+
+    result = await apply_update_ops(
+        client,
+        db_session_factory,
+        ops=(ReplaceToolsAndMcpServers(),),
+        session_id=session_id,
+        recorded=recorded,
+        agent=agent,
+        tenant_id=tenant.id,
+        agent_uuid=uuid.uuid4(),
+        account_id=uuid.uuid4(),
+        mcp=McpSettings(public_url=HttpUrl(public_url)),
+        tool_safety=OPEN_TOOL_SAFETY,
+        fernet=None,
+        github_fallback_pat=None,
+        github_app_id=None,
+        github_app_private_key=None,
+        now=_NOW,
+    )
+
+    assert isinstance(result, AppliedOps)
+    (sent,) = [body["agent"] for body in bodies if "agent" in body]
+    assert sent["mcp_servers"] == [
+        {"name": "github", "type": "url", "url": github_router_url(public_url)}
+    ]
+    assert result.snapshot.github_transport == "router"
+    async with db_session_factory() as session:
+        renewed = await github_router_sessions.get(session, router_session_id=record.id)
+    assert renewed is not None
+    assert renewed.expires_at == _NOW + GITHUB_ROUTER_SESSION_TTL

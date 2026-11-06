@@ -452,6 +452,7 @@ async def create_ma_session(
             github_app_id=deps.github_app_id,
             github_app_private_key=deps.github_app_private_key,
             agent_github_app=deps.agent_github_app,
+            github_mcp_router=deps.github_mcp_router,
             extra_resources=extra_resources,
             memory_read_only=admission.memory_read_only,
             # A chat session is keyed on the caller's account, so it belongs to one

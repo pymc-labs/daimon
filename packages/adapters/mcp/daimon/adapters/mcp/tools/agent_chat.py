@@ -748,6 +748,7 @@ async def _start_turn_impl(
             github_app_id=github_app_id,
             github_app_private_key=github_app_private_key,
             agent_github_app=runtime.settings.github_app,
+            github_mcp_router=runtime.settings.github.mcp_router,
             billing_exempt=billing_exempt,
             agent_chat=True,
             memory_read_only=memory_read_only,

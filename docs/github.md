@@ -105,6 +105,48 @@ credentials. GitHub Copilot MCP credentials for `https://api.githubcopilot.com/m
 are left alone. During the rollout, an old-image process may briefly reuse a
 marked session until it refreshes.
 
+## The agent's GitHub MCP tool
+
+An agent with GitHub's hosted MCP server (`https://api.githubcopilot.com/mcp`)
+attached calls it with one GitHub App token from its session. A session needs
+more than one token when the agent's repos span two App installations, or one
+installation splits into read and write groups or into groups of 500 repos.
+Called directly, the MCP tool then reaches only the working repo's group, and
+other repos answer 404.
+
+Daimon routes those sessions through itself while
+[`DAIMON_GITHUB__MCP_ROUTER`](configuration.md#daimon_github__mcp_router) is
+`true`, the default; set it to `false` to send new sessions direct. It needs
+[`DAIMON_MCP__PUBLIC_URL`](configuration.md#daimon_mcp__public_url) and the MCP
+service. When it is on, each new session that needs more than one token works
+like this:
+
+- Its `github` server points at `<root>/github/mcp`, under the same name, so the
+  toolset keeps its permission policy.
+- Its own vault holds a bearer that works for that session only. The bearer
+  stops working when the session closes or is replaced.
+- For each call, Daimon picks the token that covers the repo or owner the call
+  names, and forwards the call to GitHub's server.
+- A call that names only repos outside the agent's grants uses the working
+  repo's token, as a direct session does: GitHub reads a public repo and
+  answers 404 for a private one. A call whose granted repos need two tokens is
+  refused and asks for one repo at a time. Daimon never uses a token wider than
+  the agent's current grants.
+
+Sessions that need one token, and every session created while the setting is
+off, call GitHub's server directly, as before.
+
+A session keeps the mode it started with. To roll back, set the setting to
+`false` and restart. New sessions then go direct. Routed sessions keep using
+the router until they end, so keep the `/github/mcp` route deployed until they
+drain.
+
+Before each production release, run this check on staging. Use a test agent
+whose repos need two tokens. In a chat turn and in a turn from an MCP coding
+key, read one repo from each token group with the `github` MCP tool and with
+`gh`. Also ask the tool for a private repo the agent has no grant for, and
+confirm that GitHub answers 404, and for a public one, and confirm that it reads.
+
 ## How pushes resync skills
 
 A push to a bound repository's default branch refreshes the agent's skills from

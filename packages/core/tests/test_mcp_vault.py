@@ -1805,6 +1805,8 @@ async def test_app_vault_variables_follow_single_multi_single_transition() -> No
         ("POST", "/v1/vaults/vlt_1/credentials/vcrd_copilot"),
     ]
 
+    # One installation with two tokens: GH_TOKEN holds only one of them, so each
+    # token also gets its own variable for github-repo.sh.
     writes.clear()
     same_installation = AppToken(uuid.uuid4(), "a-write", 1, (12,), "write", "GH_TOKEN_I1_1")
     await add_app_credentials(
@@ -1812,11 +1814,11 @@ async def test_app_vault_variables_follow_single_multi_single_transition() -> No
         vault_id="vlt_1",
         access=AppSessionAccess((), (a, same_installation), same_installation.token),
     )
-    assert token_names() == {"GH_TOKEN"}
-    assert writes == [
-        ("POST", "/v1/vaults/vlt_1/credentials/vcrd_alias"),
-        ("POST", "/v1/vaults/vlt_1/credentials/vcrd_copilot"),
-    ]
+    assert token_names() == {"GH_TOKEN", "GH_TOKEN_I1_0", "GH_TOKEN_I1_1"}
+    assert [
+        path for method, path in writes if method == "POST" and path.endswith("/credentials")
+    ] == ["/v1/vaults/vlt_1/credentials"] * 2
+    assert not any(method == "DELETE" for method, _ in writes)
 
     writes.clear()
     delivered: list[str] = []
@@ -1826,8 +1828,9 @@ async def test_app_vault_variables_follow_single_multi_single_transition() -> No
         access=AppSessionAccess((), (a, same_installation), None),
         on_delivered=delivered.append,
     )
-    assert token_names() == {"GH_TOKEN"}
-    assert delivered == [a.token, a.token]
+    assert token_names() == {"GH_TOKEN", "GH_TOKEN_I1_0", "GH_TOKEN_I1_1"}
+    # Without a working token the first token is the alias, as with one token.
+    assert delivered == [a.token, same_installation.token, a.token, a.token]
 
     writes.clear()
     await add_app_credentials(
@@ -1836,8 +1839,10 @@ async def test_app_vault_variables_follow_single_multi_single_transition() -> No
     assert token_names() == {"GH_TOKEN", "GH_TOKEN_I1_0", "GH_TOKEN_I2_0"}
     assert [
         path for method, path in writes if method == "POST" and path.endswith("/credentials")
-    ] == ["/v1/vaults/vlt_1/credentials"] * 2
-    assert not any(method == "DELETE" for method, _ in writes)
+    ] == ["/v1/vaults/vlt_1/credentials"]
+    assert {path for method, path in writes if method == "DELETE"} == {
+        "/v1/vaults/vlt_1/credentials/vcrd_GH_TOKEN_I1_1"
+    }
 
     writes.clear()
     await add_app_credentials(client, vault_id="vlt_1", access=AppSessionAccess((), (b,), b.token))
@@ -1854,7 +1859,7 @@ async def test_app_vault_variables_follow_single_multi_single_transition() -> No
         vault_id="vlt_1",
         access=AppSessionAccess((), (b, b_second_chunk), b.token),
     )
-    assert token_names() == {"GH_TOKEN"}
+    assert token_names() == {"GH_TOKEN", "GH_TOKEN_I2_0", "GH_TOKEN_I2_1"}
     assert not any(method == "DELETE" for method, _ in writes)
 
     writes.clear()
@@ -1988,3 +1993,69 @@ async def test_app_vault_removes_alias_and_copilot_before_chunk_growth() -> None
     assert writes[:2] == ["delete:vcrd_GH_TOKEN", "delete:vcrd_copilot"]
     assert len(credentials) == 15
     assert "vcrd_GH_TOKEN" not in credentials and "vcrd_copilot" not in credentials
+
+
+async def test_router_bearer_replaces_any_earlier_credential_at_the_router_url() -> None:
+    """A routed session's bearer sits at the exact router URL its `github` server
+    is re-pointed at; the Copilot slot and other servers are left alone."""
+    from daimon.core.mcp_server_url import GITHUB_COPILOT_MCP_URL, github_router_url
+    from daimon.core.mcp_vault import add_github_router_credential
+    from mux.contracts.ids import Scope
+
+    router_url = github_router_url("https://daimon.example.com/mcp")
+    writes: list[tuple[str, str, dict[str, object] | None]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": credential_id,
+                            "type": "credential",
+                            "vault_id": "vlt_app",
+                            "auth": {"type": "static_bearer", "mcp_server_url": url},
+                        }
+                        for credential_id, url in (
+                            ("vcrd_copilot", GITHUB_COPILOT_MCP_URL),
+                            ("vcrd_stale", router_url + "/"),
+                        )
+                    ],
+                    "has_more": False,
+                },
+            )
+        writes.append((req.method, req.url.path, json.loads(req.content) if req.content else None))
+        if req.method == "DELETE":
+            return httpx.Response(204)
+        return httpx.Response(
+            200,
+            json={
+                "id": "vcrd_router",
+                "type": "credential",
+                "vault_id": "vlt_app",
+                "auth": {"type": "static_bearer", "mcp_server_url": router_url},
+            },
+        )
+
+    await add_github_router_credential(
+        _make_client(httpx.MockTransport(handler)),
+        vault_id="vlt_app",
+        router_url=router_url,
+        bearer="router-bearer",
+        scope=Scope.legacy_host_authorized(call_site="test"),
+    )
+    assert writes == [
+        ("DELETE", "/v1/vaults/vlt_app/credentials/vcrd_stale", None),
+        (
+            "POST",
+            "/v1/vaults/vlt_app/credentials",
+            {
+                "auth": {
+                    "type": "static_bearer",
+                    "mcp_server_url": "https://daimon.example.com/github/mcp",
+                    "token": "router-bearer",
+                }
+            },
+        ),
+    ]

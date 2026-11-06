@@ -149,6 +149,7 @@ from daimon.core.stores import gemini_runtime_state as gemini_state_store
 from daimon.core.stores import github_connect as github_connect_store
 from daimon.core.stores import github_issued_tokens as github_issued_tokens_store
 from daimon.core.stores import github_links as github_links_store
+from daimon.core.stores import github_router_sessions as github_router_sessions_store
 from daimon.core.stores import identity as identity_store
 from daimon.core.stores import lead_intake as lead_intake_store
 from daimon.core.stores import mcp_tokens as mcp_tokens_store
@@ -666,6 +667,8 @@ async def _purge_account_transaction(
         session, account_id=account_id
     )
     await github_issued_tokens_store.erase_requester_identity(session, account_id=account_id)
+    # Revoke the person's GitHub router bearers before SET NULL detaches them.
+    await github_router_sessions_store.close_for_account(session, account_id=account_id)
     account_count = await accounts_store.delete_account(session, account_id=account_id)
     github_user_links_count = (
         await github_links_store.delete_unlinked_user(

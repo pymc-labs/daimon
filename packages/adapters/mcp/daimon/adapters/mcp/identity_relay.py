@@ -81,7 +81,7 @@ def build_relay_clients(servers: Iterable[SignedIdentityServer]) -> dict[str, ht
     return clients
 
 
-async def _capped_body(request: Request) -> bytes | None:
+async def read_capped_body(request: Request) -> bytes | None:
     """The request body, or None once it passes `MAX_BODY_BYTES`."""
     declared = request.headers.get("content-length")
     if declared is not None and declared.isdigit() and int(declared) > MAX_BODY_BYTES:
@@ -163,7 +163,7 @@ def build_identity_relay_route(
         if server.workspaces is not None and f"{platform}:{workspace}" not in server.workspaces:
             return Response(status_code=403)
         person = claims.get("platform_user_id")
-        body = await _capped_body(request)
+        body = await read_capped_body(request)
         if body is None:
             return Response(status_code=413)
         now = clock()

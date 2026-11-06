@@ -17,14 +17,14 @@ from daimon.core.agent_guidance import CREDENTIAL_GUIDANCE_BLOCK, apply_credenti
 
 def test_github_helper_guidance_adds_exactly_one_static_paragraph() -> None:
     paragraph = (
-        "If /mnt/session/uploads/github-repo.sh exists, your repos span multiple\n"
-        "GitHub organizations. For a repo outside the working repo's organization,\n"
+        "If /mnt/session/uploads/github-repo.sh exists, your repos need more than one\n"
+        "GitHub token. For any repo other than the working repo, use the helper:\n"
         "run `sh /mnt/session/uploads/github-repo.sh owner/repo <gh args...>`; to clone,\n"
         "run `sh /mnt/session/uploads/github-repo.sh owner/repo clone [dir]` and use\n"
         "that clone for later Git commands. To push from that clone, run\n"
         "`sh /mnt/session/uploads/github-repo.sh owner/repo push <branch>` inside it, and\n"
-        "never push a repo outside the working repo's organization with `GH_TOKEN`. Plain\n"
-        "`gh` and `GH_TOKEN` cover the working repo's organization.\n"
+        "never push a repo other than the working repo with `GH_TOKEN`. Plain\n"
+        "`gh` and `GH_TOKEN` cover the working repo.\n"
     )
     assert CREDENTIAL_GUIDANCE_BLOCK.count(paragraph) == 1
     before = CREDENTIAL_GUIDANCE_BLOCK.replace(paragraph, "")

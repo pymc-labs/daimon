@@ -233,6 +233,7 @@ async def test_scheduler_actual_callsite_requests_scopes_and_cleanup_order(
         ("mark_headless_app_session_closed", "closed"),
         ("mark_dead", "dead"),
         ("touch_running_mcp_app_session", "touch"),
+        ("close_for_ma_session", "router_close"),
     ):
         monkeypatch.setattr(main, name, effect(marker))
     monkeypatch.setattr(main, "_last_app_access_checks", {})
@@ -285,8 +286,10 @@ async def test_scheduler_actual_callsite_requests_scopes_and_cleanup_order(
     )
     expected_account = "service" if kind == "refresh" else str(ACCOUNT)
     assert all(s.account_id == expected_account for s in scopes)
+    # The router record closes locally before any remote cleanup.
     if kind == "retire" and status == 200:
         assert effects == [
+            "router_close",
             "/v1/sessions/session1/archive",
             "finish",
             "revoke",
@@ -295,6 +298,7 @@ async def test_scheduler_actual_callsite_requests_scopes_and_cleanup_order(
         ]
     elif kind == "mapped" and status == 200:
         assert effects == [
+            "router_close",
             "/v1/sessions/session1/archive",
             "dead",
             "revoke",
@@ -303,6 +307,7 @@ async def test_scheduler_actual_callsite_requests_scopes_and_cleanup_order(
     elif kind == "refresh" and status == 200:
         assert effects == [
             "/v1/sessions/session1",
+            "router_close",
             "/v1/sessions/session1/archive",
             "finish",
             "revoke",
@@ -316,7 +321,8 @@ async def test_scheduler_actual_callsite_requests_scopes_and_cleanup_order(
     elif kind == "running":
         assert effects == ["/v1/sessions/session1", "touch"]
     else:
-        assert effects == [r.path for r in after.requests]
+        remote = [r.path for r in after.requests]
+        assert effects == (["router_close", *remote] if kind in ("retire", "mapped") else remote)
 
 
 async def test_closed_projection_exposes_the_already_fetched_tenant_and_account(
