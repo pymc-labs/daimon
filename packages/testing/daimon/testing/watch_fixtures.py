@@ -17,6 +17,11 @@ def watch_migration() -> dict[str, object]:
 
 
 async def install_watch_ports(session: AsyncSession) -> None:
+    """Install 0142's ingress ports; ``install_poll_ports`` builds on them.
+
+    Call ``install_poll_ports`` from a test: a ``fresh_schema`` baseline already
+    holds these functions, and 0142 creates them without ``OR REPLACE``.
+    """
     schema = await session.scalar(text("SELECT current_schema()"))
     if not isinstance(schema, str) or not schema.startswith("test_"):
         raise ValueError("Watch fixtures require an owned test schema")
@@ -72,11 +77,23 @@ async def install_watch_ports(session: AsyncSession) -> None:
 
 
 async def install_poll_ports(session: AsyncSession) -> None:
-    """Install the successor polling ports into the same owned throwaway schema."""
-    await install_watch_ports(session)
+    """Install the successor polling ports into the same owned throwaway schema.
+
+    A ``fresh_schema`` baseline already holds them (``daimon.testing.db``), so
+    this returns at once there. Its catalog fingerprint covers their bodies,
+    owners and grants: a test that committed a change to them forces a rebuild
+    before the next test runs, so a present port is the one built here. Call it
+    before the test changes any port or grant: after such a change, finding
+    ``claim_watch_polls`` present does not prove the rest is the baseline.
+    """
     schema = await session.scalar(text("SELECT current_schema()"))
-    assert isinstance(schema, str) and schema.startswith("test_")
+    if not isinstance(schema, str) or not schema.startswith("test_"):
+        raise ValueError("Watch fixtures require an owned test schema")
     quoted = '"' + schema + '"'
+    claim = f"{quoted}.claim_watch_polls()"
+    if await session.scalar(text("SELECT to_regprocedure(:claim)"), {"claim": claim}):
+        return
+    await install_watch_ports(session)
     migration = runpy.run_path(
         str(Path(__file__).resolve().parents[3] / "core/alembic/versions/0143_watch_polling.py")
     )

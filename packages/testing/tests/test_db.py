@@ -33,6 +33,7 @@ from daimon.testing.db import (
     wipe_schema,
 )
 from daimon.testing.factories import make_tenant
+from daimon.testing.watch_fixtures import install_poll_ports
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import (
@@ -285,6 +286,26 @@ _COMMITTED_DDL = [
         "CREATE FUNCTION leaked_fn() RETURNS integer LANGUAGE sql AS 'SELECT 1'", id="function"
     ),
     pytest.param("CREATE SEQUENCE leaked_seq", id="sequence"),
+    pytest.param("CREATE RULE leaked_rule AS ON DELETE TO tenants DO INSTEAD NOTHING", id="rule"),
+    pytest.param("ALTER TABLE tenants DISABLE TRIGGER ALL", id="trigger_off"),
+    # Who may do what. A committed grant or policy would otherwise reach every later test.
+    pytest.param("CREATE POLICY leaked_policy ON tenants USING (true)", id="row_security_policy"),
+    pytest.param("ALTER TABLE tenants ENABLE ROW LEVEL SECURITY", id="row_security"),
+    pytest.param("ALTER TABLE tenants FORCE ROW LEVEL SECURITY", id="forced_row_security"),
+    pytest.param(
+        'ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema}" GRANT SELECT ON TABLES TO PUBLIC',
+        id="default_privileges",
+    ),
+    pytest.param('GRANT USAGE ON SCHEMA "{schema}" TO PUBLIC', id="schema_grant"),
+    pytest.param("GRANT SELECT ON tenants TO PUBLIC", id="table_grant"),
+    pytest.param("GRANT SELECT (id) ON tenants TO PUBLIC", id="column_grant"),
+    pytest.param("ALTER TABLE tenants OWNER TO daimon_sidecar", id="table_owner"),
+    pytest.param(
+        "REVOKE EXECUTE ON FUNCTION claim_watch_polls() FROM daimon_sidecar", id="function_grant"
+    ),
+    pytest.param(
+        "ALTER FUNCTION prune_watch_evidence() OWNER TO CURRENT_USER", id="function_owner"
+    ),
 ]
 
 
@@ -306,10 +327,35 @@ async def test_ddl_schema_fingerprint_notices_committed_ddl_of_every_kind(
     ddl = worker.ddl
     assert await _schema_fingerprint(ddl.engine, ddl.name) == ddl.baseline
     async with ddl.engine.begin() as conn:
-        await conn.execute(text(statement))
+        await conn.execute(text(statement.format(schema=ddl.name)))
     assert await _schema_fingerprint(ddl.engine, ddl.name) != ddl.baseline
     await db_session.rollback()
     await _ready_ddl_schema(worker, url)
+    assert await _schema_fingerprint(ddl.engine, ddl.name) == ddl.baseline
+
+
+@pytest.mark.fresh_schema
+async def test_ddl_schema_baseline_holds_the_watch_ports_so_installing_them_is_free(
+    db_session: AsyncSession,
+    db_preflight: object,
+    db_schema: str,
+    request: pytest.FixtureRequest,
+) -> None:
+    """Watch tests commit ``install_poll_ports``; that must not cost the next test a rebuild."""
+    if os.environ.get("DAIMON_TEST_FRESH_SCHEMA") == "1":
+        pytest.skip("DAIMON_TEST_FRESH_SCHEMA=1 gives every fresh_schema test a private schema")
+    url = os.environ["DAIMON_DATABASE__TEST_URL"]
+    worker = request.config.stash[_WORKER_ENGINES][(make_url(url), db_schema)]
+    assert worker.ddl is not None
+    ddl = worker.ddl
+    owner = await db_session.scalar(
+        text("SELECT pg_get_userbyid(proowner) FROM pg_proc WHERE oid = to_regprocedure(:claim)"),
+        {"claim": f'"{ddl.name}".claim_watch_polls()'},
+    )
+    assert owner == "daimon_watch_ingress_owner"
+    await db_session.rollback()
+    async with AsyncSession(ddl.engine) as session, session.begin():  # committed, as watch tests do
+        await install_poll_ports(session)
     assert await _schema_fingerprint(ddl.engine, ddl.name) == ddl.baseline
 
 
