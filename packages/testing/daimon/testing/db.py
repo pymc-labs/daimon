@@ -34,11 +34,15 @@ Model:
   other worktrees share it, and a few own-engine tests write there on purpose.
 - ``@pytest.mark.fresh_schema`` opts a test out of the shared schema, for tests
   that run DDL. It gets one reusable per-worker DDL schema, ``test_f<pid>_<8hex>``,
-  built on first use. The test runs in a transaction ``db_session`` rolls back, and
-  Postgres rolls DDL back with it. The next such test first compares a catalog
-  fingerprint with the baseline: unchanged, it deletes every row; changed (a test
-  committed DDL), it drops and rebuilds the schema. ``DAIMON_TEST_FRESH_SCHEMA=1``
-  restores a private schema per test (CREATE / create_all / DROP around it).
+  built on first use. Its baseline also holds the watch ingress and polling
+  functions with their grants (``install_poll_ports``), so a watch test that
+  commits them again leaves the schema as it found it. The test runs in a
+  transaction ``db_session`` rolls back, and Postgres rolls DDL back with it. The
+  next such test first compares a catalog fingerprint with the baseline:
+  unchanged, it deletes every row; changed (a test committed DDL, a grant or a
+  row-security change), it drops and rebuilds the schema.
+  ``DAIMON_TEST_FRESH_SCHEMA=1`` restores a private schema per test (CREATE /
+  create_all / DROP around it), built the same way.
 - ``db_committing_engine`` is a pooled engine (production's 5 + 10) on the worker
   schema for tests whose sessions really COMMIT; ``db_nullpool_engine`` (a new
   connection per checkout, ~20 ms each) remains for code that runs its own event
@@ -70,6 +74,7 @@ import pytest_asyncio
 from cryptography.fernet import Fernet
 from daimon.core import platform_names
 from daimon.core._models import Base
+from daimon.testing.watch_fixtures import install_poll_ports
 from sqlalchemy import event, text
 from sqlalchemy.dialects.postgresql import asyncpg as asyncpg_dialect
 from sqlalchemy.engine import URL, make_url
@@ -546,6 +551,13 @@ async def _create_schema_with_tables(engine: AsyncEngine, schema: str) -> None:
         )
 
 
+async def _create_fresh_schema(engine: AsyncEngine, schema: str) -> None:
+    """A ``fresh_schema`` baseline: the ORM tables plus the committed watch ports."""
+    await _create_schema_with_tables(engine, schema)
+    async with AsyncSession(engine) as session, session.begin():
+        await install_poll_ports(session)
+
+
 async def _drop_schema(engine: AsyncEngine, schema: str) -> None:
     """Drop ``schema`` a few tables per transaction, child-first, then the schema itself.
 
@@ -1006,10 +1018,15 @@ async def _drain_background_tasks() -> None:
 
 
 # Everything DDL can change in one schema: columns (type, nullability, default,
-# identity, generation, collation), indexes, constraints, triggers, functions,
-# views, sequences, enum and domain types. A rolled-back transaction leaves it
-# untouched; a committed ALTER/CREATE/DROP does not. Row data is not part of it:
-# every fresh test starts by deleting every row.
+# identity, generation, collation), indexes, constraints, triggers (and any
+# trigger switched off, foreign-key ones included), rules, functions, views,
+# sequences, enum and domain types; and who may use them: owners and grants on
+# the schema, its relations, columns, functions and types, the default
+# privileges set in it, row-level security flags and policies. A rolled-back
+# transaction leaves it untouched; a committed ALTER/CREATE/DROP/GRANT does not.
+# Row data is not part of it: every fresh test starts by deleting every row.
+# Database-wide state (roles, default privileges set without IN SCHEMA) is
+# outside it: a rebuild could not undo it anyway.
 _FINGERPRINT_SQL = text(
     """
 SELECT md5(concat_ws('|',
@@ -1035,19 +1052,48 @@ SELECT md5(concat_ws('|',
      FROM pg_trigger g JOIN pg_class c ON c.oid = g.tgrelid
      JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname = :schema AND NOT g.tgisinternal),
-  (SELECT coalesce(string_agg(pg_get_functiondef(p.oid), ',' ORDER BY p.proname, p.oid), '')
+  (SELECT coalesce(string_agg(c.relname || '.' || g.tgname || ':' || g.tgenabled::text, ','
+          ORDER BY c.relname, g.tgname), '')
+     FROM pg_trigger g JOIN pg_class c ON c.oid = g.tgrelid
+     JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = :schema AND g.tgenabled <> 'O'),
+  (SELECT coalesce(string_agg(pg_get_functiondef(p.oid) || ':' || pg_get_userbyid(p.proowner)
+          || ':' || coalesce(p.proacl::text, ''), ',' ORDER BY p.proname, p.oid), '')
      FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
     WHERE n.nspname = :schema AND p.prokind IN ('f', 'p')),
   (SELECT coalesce(string_agg(c.relname || ':' || pg_get_viewdef(c.oid), ',' ORDER BY c.relname),
           '')
      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname = :schema AND c.relkind IN ('v', 'm')),
-  (SELECT coalesce(string_agg(t.typname || ':' || t.typtype::text, ',' ORDER BY t.typname), '')
+  (SELECT coalesce(string_agg(t.typname || ':' || t.typtype::text || ':'
+          || pg_get_userbyid(t.typowner) || ':' || coalesce(t.typacl::text, ''),
+          ',' ORDER BY t.typname), '')
      FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
     WHERE n.nspname = :schema AND t.typtype IN ('e', 'd')),
   (SELECT coalesce(string_agg(e.enumtypid::text || e.enumlabel, ',' ORDER BY e.oid), '')
      FROM pg_enum e JOIN pg_type t ON t.oid = e.enumtypid
-     JOIN pg_namespace n ON n.oid = t.typnamespace WHERE n.nspname = :schema)
+     JOIN pg_namespace n ON n.oid = t.typnamespace WHERE n.nspname = :schema),
+  (SELECT coalesce(string_agg(definition, ',' ORDER BY tablename, rulename), '')
+     FROM pg_rules WHERE schemaname = :schema),
+  (SELECT pg_get_userbyid(n.nspowner) || ':' || coalesce(n.nspacl::text, '')
+     FROM pg_namespace n WHERE n.nspname = :schema),
+  (SELECT coalesce(string_agg(c.relname || ':' || pg_get_userbyid(c.relowner) || ':'
+          || coalesce(c.relacl::text, '') || ':' || c.relrowsecurity::text || ':'
+          || c.relforcerowsecurity::text, ',' ORDER BY c.relname), '')
+     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = :schema AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')),
+  (SELECT coalesce(string_agg(c.relname || '.' || a.attname || ':' || a.attacl::text,
+          ',' ORDER BY c.relname, a.attnum), '')
+     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+     JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND a.attacl IS NOT NULL
+    WHERE n.nspname = :schema),
+  (SELECT coalesce(string_agg(concat_ws(':', tablename, policyname, permissive, roles::text, cmd,
+          qual, with_check), ',' ORDER BY tablename, policyname), '')
+     FROM pg_policies WHERE schemaname = :schema),
+  (SELECT coalesce(string_agg(pg_get_userbyid(d.defaclrole) || ':' || d.defaclobjtype::text
+          || ':' || d.defaclacl::text, ',' ORDER BY d.defaclrole, d.defaclobjtype), '')
+     FROM pg_default_acl d JOIN pg_namespace n ON n.oid = d.defaclnamespace
+    WHERE n.nspname = :schema)
 )) AS fingerprint
 """
 )
@@ -1059,7 +1105,7 @@ async def _schema_fingerprint(engine: AsyncEngine, schema: str) -> str:
 
 
 async def _ready_ddl_schema(worker: _WorkerEngine, url: str) -> _DdlSchema:
-    """The worker's DDL schema, empty and shaped exactly like the ORM models.
+    """The worker's DDL schema, empty and shaped like the ORM models plus the watch ports.
 
     Built on first use and reused: a ``fresh_schema`` test runs inside a
     transaction that ``db_session`` rolls back, and Postgres rolls DDL back with
@@ -1089,13 +1135,13 @@ async def _ready_ddl_schema(worker: _WorkerEngine, url: str) -> _DdlSchema:
         return ddl
     if ddl is not None:
         await _drop_schema(ddl.engine, ddl.name)
-        await _create_schema_with_tables(ddl.engine, ddl.name)
+        await _create_fresh_schema(ddl.engine, ddl.name)
         return ddl
     name = _new_schema_name("f")
     engine = build_test_engine(url, name, poolclass=NullPool)
     try:
         require_owned_sessionmaker(engine)
-        await _create_schema_with_tables(engine, name)
+        await _create_fresh_schema(engine, name)
         worker.ddl = _DdlSchema(name, engine, await _schema_fingerprint(engine, name))
     except BaseException:
         await engine.dispose()
@@ -1124,7 +1170,7 @@ async def _fresh_schema_session(url: str) -> AsyncIterator[AsyncSession]:
     engine = build_test_engine(url, schema, poolclass=NullPool)
     try:
         require_owned_sessionmaker(engine)
-        await _create_schema_with_tables(engine, schema)
+        await _create_fresh_schema(engine, schema)
         try:
             async with engine.connect() as conn:
                 session = AsyncSession(bind=conn, expire_on_commit=False)

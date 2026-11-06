@@ -18,7 +18,7 @@ from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.testing.factories import make_tenant
-from daimon.testing.watch_fixtures import install_watch_ports
+from daimon.testing.watch_fixtures import install_poll_ports
 from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
@@ -34,7 +34,7 @@ async def registered(db_session_factory, monkeypatch):
     monkeypatch.setenv("DAIMON_WATCHES__ENABLED", "true")
     now = datetime.now(UTC)
     async with db_session_factory.begin() as session:
-        await install_watch_ports(session)
+        await install_poll_ports(session)
         await watches.set_watch_control(session, scope="global", enabled=True)
         tenant = await make_tenant(session)
         await tenant_ledger.insert_entry(
