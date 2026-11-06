@@ -78,6 +78,9 @@ from mux.testing.drivers.anthropic.ma import (
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+# Routine fires collect generated files; skip the real 6 s settle wait.
+pytestmark = pytest.mark.usefixtures("instant_routine_file_settle")
+
 GUILD = 700000101
 OWNER_A, OWNER_B = "999", "888"
 ROUTE = "555"

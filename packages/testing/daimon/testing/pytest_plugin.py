@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 import threading
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
@@ -12,6 +12,8 @@ import pytest
 import structlog
 
 if TYPE_CHECKING:
+    from anthropic import AsyncAnthropic
+    from anthropic.types.beta import FileMetadata
     from daimon.testing.db import DatabasePreflight
 
 
@@ -71,6 +73,33 @@ def restoring_structlog_config() -> Iterator[None]:
 def _restore_structlog_config() -> Iterator[None]:  # pyright: ignore[reportUnusedFunction]
     with restoring_structlog_config():
         yield
+
+
+@pytest.fixture
+def instant_routine_file_settle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run a routine fire's generated-file settle polls without waiting them out.
+
+    The scheduler calls `collect_routine_files` with its default real `asyncio.sleep`,
+    so every routine fire that reaches file collection waits the 6 s settle floor on
+    empty listings. Every listing poll and the settle rule still run; only the sleep
+    between polls is instant. Core's output-delivery tests prove the real schedule.
+    """
+    import asyncio
+
+    from daimon.core import output_delivery, routine_files
+
+    real_poll = output_delivery.poll_output_files
+
+    async def no_wait(_delay: float) -> None:
+        await asyncio.sleep(0)
+
+    async def poll(
+        client: AsyncAnthropic, *, session_id: str, sleep: Callable[[float], Awaitable[None]]
+    ) -> dict[str, FileMetadata]:
+        del sleep  # The real `asyncio.sleep` the scheduler passes by default.
+        return await real_poll(client, session_id=session_id, sleep=no_wait)
+
+    monkeypatch.setattr(routine_files, "poll_output_files", poll)
 
 
 def _schema_cache_key(request: pytest.FixtureRequest) -> object:

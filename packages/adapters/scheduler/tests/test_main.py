@@ -75,6 +75,9 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+# Routine fires collect generated files; skip the real 6 s settle wait.
+pytestmark = pytest.mark.usefixtures("instant_routine_file_settle")
+
 
 @pytest.fixture
 def db_session_factory(

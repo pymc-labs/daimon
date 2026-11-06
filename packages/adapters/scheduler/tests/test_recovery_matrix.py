@@ -44,6 +44,9 @@ MODES: tuple[Mode, ...] = ("kill", "cancel")
 NOW = datetime(2026, 10, 26, 12, 0, 0, tzinfo=UTC)
 TICK = dict(max_age=timedelta(minutes=15), max_concurrent_fires=4, dispatch_timeout_s=60.0)
 
+# Routine fires collect generated files; skip the real 6 s settle wait.
+pytestmark = pytest.mark.usefixtures("instant_routine_file_settle")
+
 
 @pytest.fixture(params=["legacy", "mux"])
 def turn_path(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> str:
