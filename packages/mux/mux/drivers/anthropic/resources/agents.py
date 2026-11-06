@@ -290,6 +290,9 @@ def agent_record(item: BetaManagedAgentsAgent, account_scope_id: str, scope: Sco
     )
 
 
+AGENT_VERSIONS_NAMESPACE = "anthropic.agent_versions"
+
+
 class AgentVersions(Protocol):
     """`anthropic.agent_versions@1`: one stored version of an agent, exactly as returned.
 

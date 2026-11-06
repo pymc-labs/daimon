@@ -29,6 +29,7 @@ from mux.drivers.anthropic.outputs import AnthropicOutputs, Outputs
 from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
 from mux.drivers.anthropic.resources._secrets import CredentialFileUpload, SecretResolver
 from mux.drivers.anthropic.resources.agents import (
+    AGENT_VERSIONS_NAMESPACE,
     UNCLASSIFIED_SOURCE_NAMESPACE,
     AgentVersions,
     AnthropicAgents,
@@ -169,7 +170,7 @@ class AnthropicManagedAgents:
                 client, self.account_scope_id, authorization, secrets
             ),
             (EnvironmentReads, "anthropic.environment_reads", 1): self.environments,
-            (AgentVersions, "anthropic.agent_versions", 1): self.agents,
+            (AgentVersions, AGENT_VERSIONS_NAMESPACE, 1): self.agents,
             (CoreMemoryStores, "anthropic.memory_stores", 1): native_memory,
             (NativeMemoryStores, "anthropic.memory_stores", 1): native_memory,
             (NativeArtifacts, "anthropic.artifacts", 1): native_artifacts,
@@ -302,6 +303,7 @@ __all__ = [
     "SecretResolver",
     "SessionCreateRequest",
     "SESSION_READS_NAMESPACE",
+    "AGENT_VERSIONS_NAMESPACE",
     "SessionReads",
     "SessionResourceConfig",
     "SessionSend",

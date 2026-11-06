@@ -42,6 +42,7 @@ from mux.contracts.resources import (
     SkillUploadFile,
 )
 from mux.drivers.anthropic import (
+    AGENT_VERSIONS_NAMESPACE,
     AgentVersions,
     CredentialFileUpload,
     EnvironmentConfig,
@@ -329,7 +330,7 @@ async def retrieve_agent_version(
 ) -> BetaManagedAgentsAgent:
     """One stored version of an agent, such as the one a session started on."""
     backend = managed_agents(client, scope=scope, resources=frozenset({("agent", agent_id)}))
-    port = backend.extension(AgentVersions, namespace="anthropic.agent_versions", version=1)
+    port = backend.extension(AgentVersions, namespace=AGENT_VERSIONS_NAMESPACE, version=1)
     record = await legacy_call(
         port.retrieve_version(scope, resource_ref(backend, "agent", agent_id, scope=scope), version)
     )
