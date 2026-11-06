@@ -153,7 +153,6 @@ def test_pytest_jobs_use_four_workers_with_worksteal_except_discord() -> None:
             assert "-n auto" not in command
             if name in (
                 "pytest-discord",
-                "pytest-mux-leg",
                 "pytest-staging-config",
                 "journeys-offline",
             ):
