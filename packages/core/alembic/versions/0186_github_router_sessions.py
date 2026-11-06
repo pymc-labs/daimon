@@ -8,7 +8,7 @@ from the issued-token rows stamped with the same router session.
 Revision ID: 0186_github_router_sessions
 Revises: 0185_agent_post_role
 
-downgrade: destructive
+downgrade: safe
 """
 
 from collections.abc import Sequence
@@ -24,6 +24,49 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    # Idempotent: production's release branch ran this DDL as 0174a, and staging
+    # ran it here before 0174a joined the chain. Both leave the objects behind.
+    inspector = sa.inspect(op.get_bind())
+    if not inspector.has_table("github_router_sessions"):
+        _create_sessions_table()
+    sessions_indexes = {i["name"] for i in inspector.get_indexes("github_router_sessions")}
+    if "ix_github_router_sessions_open_ma_session" not in sessions_indexes:
+        op.create_index(
+            "ix_github_router_sessions_open_ma_session",
+            "github_router_sessions",
+            ["ma_session_id"],
+            postgresql_where=sa.text("closed_at IS NULL"),
+        )
+    if "ix_github_router_sessions_open_account" not in sessions_indexes:
+        op.create_index(
+            "ix_github_router_sessions_open_account",
+            "github_router_sessions",
+            ["account_id"],
+            postgresql_where=sa.text("closed_at IS NULL"),
+        )
+    token_columns = {c["name"] for c in inspector.get_columns("github_issued_tokens")}
+    if "router_session_id" not in token_columns:
+        op.add_column(
+            "github_issued_tokens",
+            sa.Column(
+                "router_session_id",
+                postgresql.UUID(as_uuid=True),
+                sa.ForeignKey("github_router_sessions.id", ondelete="SET NULL"),
+                nullable=True,
+            ),
+        )
+    token_indexes = {i["name"] for i in inspector.get_indexes("github_issued_tokens")}
+    if "ix_github_issued_tokens_router_session" not in token_indexes:
+        op.create_index(
+            "ix_github_issued_tokens_router_session",
+            "github_issued_tokens",
+            ["router_session_id"],
+            postgresql_where=sa.text("router_session_id IS NOT NULL AND status = 'delivered'"),
+        )
+    op.execute("COMMENT ON TABLE github_router_sessions IS 'GitHub MCP router sessions'")
+
+
+def _create_sessions_table() -> None:
     op.create_table(
         "github_router_sessions",
         sa.Column(
@@ -54,38 +97,9 @@ def upgrade() -> None:
         sa.Column("closed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("last_used_at", sa.DateTime(timezone=True), nullable=True),
     )
-    op.create_index(
-        "ix_github_router_sessions_open_ma_session",
-        "github_router_sessions",
-        ["ma_session_id"],
-        postgresql_where=sa.text("closed_at IS NULL"),
-    )
-    op.create_index(
-        "ix_github_router_sessions_open_account",
-        "github_router_sessions",
-        ["account_id"],
-        postgresql_where=sa.text("closed_at IS NULL"),
-    )
-    op.add_column(
-        "github_issued_tokens",
-        sa.Column(
-            "router_session_id",
-            postgresql.UUID(as_uuid=True),
-            sa.ForeignKey("github_router_sessions.id", ondelete="SET NULL"),
-            nullable=True,
-        ),
-    )
-    op.create_index(
-        "ix_github_issued_tokens_router_session",
-        "github_issued_tokens",
-        ["router_session_id"],
-        postgresql_where=sa.text("router_session_id IS NOT NULL AND status = 'delivered'"),
-    )
 
 
 def downgrade() -> None:
-    op.drop_index("ix_github_issued_tokens_router_session", table_name="github_issued_tokens")
-    op.drop_column("github_issued_tokens", "router_session_id")
-    op.drop_index("ix_github_router_sessions_open_account", table_name="github_router_sessions")
-    op.drop_index("ix_github_router_sessions_open_ma_session", table_name="github_router_sessions")
-    op.drop_table("github_router_sessions")
+    # 0174a owns the router schema; downgrading to it must keep that schema, so
+    # this revision undoes only its own table comment.
+    op.execute("COMMENT ON TABLE github_router_sessions IS NULL")
