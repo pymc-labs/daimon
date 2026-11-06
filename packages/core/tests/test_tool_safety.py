@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from daimon.core.defaults.mcp_merge import DAIMON_MCP_SERVER_NAME
+from daimon.core.mcp_server_url import GITHUB_COPILOT_MCP_URL, github_router_url
 from daimon.core.tool_safety import (
     CARDED_TOOLS,
     CONFIRMED_DAIMON_TOOLS,
@@ -993,3 +994,43 @@ def test_fly_only_lease_actions_force_a_card(tool, arguments, expected):
         _ON, call, attended=True, trusted_servers=frozenset({DAIMON_SERVER_NAME})
     )
     assert verdict.outcome == expected
+
+
+# --- GitHub MCP router --------------------------------------------------------
+
+_PUBLIC = "https://mcp.example.com/mcp"
+
+
+def test_the_github_router_url_is_not_a_daimon_server_alias() -> None:
+    """A routed session's `github` server is on Daimon's host, but it is GitHub's
+    tools behind it: it must never get the own-server exemption."""
+    router = github_router_url(_PUBLIC)
+    assert router == "https://mcp.example.com/github/mcp"
+    assert trusted_servers_for(_PUBLIC, {DAIMON_SERVER_NAME: _PUBLIC, "github": router}) == (
+        frozenset({DAIMON_SERVER_NAME})
+    )
+
+
+def test_a_routed_github_toolset_keeps_its_permission_policy() -> None:
+    """The router changes the `github` server's URL only: under tool safety its
+    toolset is gated exactly as when the server is GitHub's own."""
+    stored = [
+        {
+            "type": "mcp_toolset",
+            "mcp_server_name": "github",
+            "default_config": {"permission_policy": {"type": "always_allow"}},
+            "configs": [
+                {"name": "get_file_contents", "permission_policy": {"type": "always_allow"}}
+            ],
+        }
+    ]
+
+    def gated(github_url: str) -> list[dict[str, object]] | None:
+        trusted = trusted_servers_for(_PUBLIC, {DAIMON_SERVER_NAME: _PUBLIC, "github": github_url})
+        return session_tools_for_policy(_ON, stored, trusted_servers=trusted)
+
+    direct = gated(GITHUB_COPILOT_MCP_URL)
+    routed = gated(github_router_url(_PUBLIC))
+    assert direct is not None and routed is not None
+    assert routed == direct
+    assert routed[0]["default_config"] == {"permission_policy": {"type": "always_ask"}}

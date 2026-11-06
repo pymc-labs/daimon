@@ -244,6 +244,7 @@ source_modules = [
     "daimon.core.github_rate_limit",
     "daimon.core.github_repo_auth",
     "daimon.core.github_retirement",
+    "daimon.core.github_router_tokens",
     "daimon.core.github_request_cards",
     "daimon.core.github_request_expiry",
     "daimon.core.github_requester_access",

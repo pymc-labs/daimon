@@ -7,12 +7,13 @@ key without bound, and two identities sharing an id shared visibility: a member
 saw admin tools after an admin request. Without the header every request gets
 its own key.
 
-The signed-identity relay is exempt: the id belongs to the server it forwards
-to, which may keep a session under it.
+The signed-identity relay and the GitHub MCP router are exempt: the id belongs
+to the server they forward to, which may keep a session under it.
 """
 
 from __future__ import annotations
 
+from daimon.adapters.mcp.github_router import GITHUB_ROUTER_ROUTE
 from daimon.core.mcp_identity import RELAY_PATH
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -20,12 +21,17 @@ _SESSION_HEADER = b"mcp-session-id"
 _RELAY_PREFIX = RELAY_PATH + "/"
 
 
+def _forwarded(path: str) -> bool:
+    """A path whose session id belongs to the upstream server it forwards to."""
+    return path.startswith(_RELAY_PREFIX) or path == GITHUB_ROUTER_ROUTE
+
+
 class StripSessionIdMiddleware:
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] == "http" and not str(scope["path"]).startswith(_RELAY_PREFIX):
+        if scope["type"] == "http" and not _forwarded(str(scope["path"])):
             headers: list[tuple[bytes, bytes]] = scope["headers"]
             scope = {
                 **scope,

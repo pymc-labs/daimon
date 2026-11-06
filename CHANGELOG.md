@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **An agent's GitHub MCP tool can reach every connected repo when its repos need more than one GitHub token.**
+  With `DAIMON_GITHUB__MCP_ROUTER` on, such a new session sends the tool through Daimon, which uses the right token for each repo; a repo outside the agent's grants, such as a public one, gets GitHub's own answer as before. Sessions that need one token, and every session started while the setting is off, call GitHub directly as before; adds a database migration.
+  One organization whose repos need two tokens (read and write, or more than 500 repos) now also gets `github-repo.sh` for `gh`, clone and push, and the agent guidance sends every repo other than the working repo through it. The guidance change replaces each existing session once, at its next message.
 - **Connect GitHub now says a repo is for that agent only and stays until removed.**
   The success page and the connect card on Discord, Slack and Teams use the same words.
   A member who names a repo the agent already has hears "already has", not "ask an admin".

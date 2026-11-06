@@ -1294,7 +1294,21 @@ def validate_github_app_slug(value: str | None) -> str | None:
 
 
 class GithubSettings(BaseModel):
-    """Size limits for GitHub skill imports."""
+    """Size limits for GitHub skill imports, and the agent GitHub MCP router switch."""
+
+    mcp_router: bool = Field(
+        default=False,
+        description=(
+            "Route the agent's `github` MCP server through Daimon's `/github/mcp` "
+            "route, beside the MCP endpoint, for each new session whose GitHub App grants need "
+            "more than one installation token, so every granted repository is "
+            "reached with its own installation's token. Sessions that need one "
+            "token, and every session created while this is off, call GitHub's "
+            "hosted MCP server directly. A session keeps the mode it was created "
+            "with: turning this off sends only new sessions direct, and routed "
+            "sessions keep working until they close. Needs `DAIMON_MCP__PUBLIC_URL`."
+        ),
+    )
 
     max_tarball_bytes: int = Field(
         default=50 * 1024 * 1024,

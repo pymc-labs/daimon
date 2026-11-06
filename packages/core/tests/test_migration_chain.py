@@ -147,6 +147,7 @@ TAIL = (
     "0183_helper_files",
     "0184_coding_key_claims",
     "0185_agent_post_role",
+    "0186_github_router_sessions",
 )
 HEAD = TAIL[-1]
 

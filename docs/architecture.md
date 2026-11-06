@@ -224,10 +224,13 @@ an admin. So an admin is exempt only where the output reaches no one else.
 
 An MCP server listed in
 [`DAIMON_MCP_IDENTITY__SERVERS`](configuration.md#daimon_mcp_identity__servers)
-is reached through a relay in the MCP adapter. The relay names the person to
-that server in a signed token, only for a live chat session. Routines and
-agent chat name nobody. The signing key stays in the MCP service. See
+is reached through an MCP adapter relay that names the person in a signed
+token, only for a live chat session (routines and agent chat name nobody); the
+key stays in the MCP service. See
 [mcp-servers](mcp-servers.md).
+
+Multi-token GitHub sessions use the `/github/mcp` router. See
+[GitHub](github.md#the-agents-github-mcp-tool).
 
 ## Tenancy
 

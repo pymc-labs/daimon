@@ -52,7 +52,7 @@ from daimon.core.credential_env import assemble_env_bytes, upload_env_file
 from daimon.core.errors import DaimonError
 from daimon.core.github_app_session import rotate_live_app_tokens
 from daimon.core.mcp_identity import identity_relay_urls
-from daimon.core.mcp_vault import refresh_mounted_mcp_vaults
+from daimon.core.mcp_vault import GITHUB_ROUTER_SESSION_TTL, refresh_mounted_mcp_vaults
 from daimon.core.session_compat import (
     ChangeReason,
     RemirrorVaultCredentials,
@@ -79,6 +79,7 @@ from daimon.core.session_snapshot import (
     session_mcp_servers,
     session_tools,
 )
+from daimon.core.stores import github_router_sessions
 from daimon.core.stores.agent_daimon_tools import record_enabled_daimon_tools
 from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.tool_safety import ToolSafetyPolicy
@@ -263,6 +264,10 @@ async def apply_update_ops(
     snapshot = recorded
     applied: list[ChangeReason] = []
 
+    if recorded.github_transport == "router":
+        # A refresh point for the router record, like the vault refresh below.
+        await _renew_github_router_session(sessionmaker, session_id=session_id, now=now)
+
     # Shared workspaces must never acquire a caller's MCP identity. App mode
     # can mount both a caller and a repository vault; refresh every actual slot
     # rather than relying on undocumented provider credential precedence.
@@ -339,6 +344,8 @@ async def apply_update_ops(
                     public_url=public_url,
                     confirmed_tools=confirmed_tools,
                     chat_session_id=recorded.chat_session_id,
+                    # The session's own mode: an in-place update never flips it.
+                    github_transport=recorded.github_transport,
                 )
                 try:
                     await update_session_record(
@@ -445,3 +452,22 @@ async def apply_update_ops(
                     )
 
     return AppliedOps(snapshot=snapshot, applied=tuple(applied))
+
+
+async def _renew_github_router_session(
+    sessionmaker: async_sessionmaker[AsyncSession], *, session_id: str, now: dt.datetime
+) -> None:
+    """Push a routed session's router record expiry forward before its turn.
+
+    A closed record is not reopened: its bearer stays refused and the session's
+    GitHub MCP calls fail until the session is replaced.
+    """
+    async with sessionmaker.begin() as db:
+        router_session_id = await github_router_sessions.router_session_id_for_ma_session(
+            db, ma_session_id=session_id
+        )
+        renewed = router_session_id is not None and await github_router_sessions.renew(
+            db, router_session_id=router_session_id, expires_at=now + GITHUB_ROUTER_SESSION_TTL
+        )
+    if not renewed:
+        log.warning("session_update.github_router_not_renewed", session_id=session_id)

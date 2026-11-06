@@ -53,7 +53,12 @@ from anthropic.types.beta.sessions.beta_managed_agents_github_repository_resourc
     BetaManagedAgentsGitHubRepositoryResource,
 )
 from daimon.core.mcp_personal_servers import visible_mcp_servers, visible_tools
-from daimon.core.mcp_server_url import session_mcp_url
+from daimon.core.mcp_server_url import (
+    GITHUB_COPILOT_MCP_URL,
+    github_router_url,
+    same_mcp_url,
+    session_mcp_url,
+)
 from daimon.core.model_presets import model_choice_id
 from daimon.core.repo_memory_tools import suppress_legacy_readers
 from daimon.core.tool_safety import (
@@ -77,6 +82,9 @@ type TokenScope = (
     tuple[int, tuple[int, ...]] | tuple[int, int, tuple[int, ...], int | None, str | None]
 )
 type MaSkill = BetaManagedAgentsAnthropicSkill | BetaManagedAgentsCustomSkill
+#: How a session reaches GitHub's MCP server: `direct` at GitHub's URL, or
+#: `router` through the deployment's GitHub MCP router (`github_router_url`).
+type GithubTransport = Literal["direct", "router"]
 type MaTool = (
     BetaManagedAgentsAgentToolset20260401
     | BetaManagedAgentsMCPToolset
@@ -84,6 +92,9 @@ type MaTool = (
 )
 
 _ENV_MOUNT_SUFFIX = ".env"
+#: Session metadata key `create_session` stamps on a routed session. Recorded
+#: on the session itself, so every snapshot taken of it reads the same mode.
+MA_METADATA_KEY_GITHUB_TRANSPORT = "daimon_github_transport"
 _TOOLS: TypeAdapter[list[MaTool]] = TypeAdapter(list[MaTool])
 _MCP_SERVERS: TypeAdapter[list[BetaManagedAgentsMCPServerURLDefinition]] = TypeAdapter(
     list[BetaManagedAgentsMCPServerURLDefinition]
@@ -136,6 +147,10 @@ class SessionSnapshot(BaseModel):
         ):
             if not data.get(name):
                 data.pop(name, None)
+        # Absent means direct, so every snapshot written before routing existed,
+        # and every direct one since, keeps its stored and compared JSON.
+        if data.get("github_transport") == "direct":
+            data.pop("github_transport")
         return data
 
     schema_version: Literal[1] = 1
@@ -188,6 +203,11 @@ class SessionSnapshot(BaseModel):
     # Kept apart from `memory_store_id` so the scope is known even when the
     # store failed to provision and nothing mounted.
     memory_scope: str | None = None
+    # How the session reaches GitHub's MCP server, fixed at creation from the
+    # session's own metadata. Never fingerprinted and never re-derived: the
+    # desired `mcp_servers` follow the recorded mode, so turning the router
+    # setting off later never flips a routed session (or the reverse).
+    github_transport: GithubTransport = "direct"
 
     # Mutable axis — a difference here can be applied to the live session.
     tools_sha256: str
@@ -503,6 +523,9 @@ def _snapshot_from_session(
         env_resource_id=env_resource_id,
         repo_resource_id=repo_resource_id,
         repo_resource_ids=repo_resource_ids,
+        github_transport=(
+            "router" if metadata.get(MA_METADATA_KEY_GITHUB_TRANSPORT) == "router" else "direct"
+        ),
         github_repo_map_sha256=metadata.get("daimon_github_repo_map_sha256"),
         github_repo_script_sha256=metadata.get("daimon_github_repo_script_sha256"),
         github_repo_map_file_id=github_repo_map_file_id,
@@ -576,8 +599,14 @@ def session_mcp_servers(
     public_url: str | None,
     confirmed_tools: frozenset[str] = frozenset(),
     chat_session_id: str | None = None,
+    github_transport: GithubTransport = "direct",
 ) -> Sequence[BetaManagedAgentsMCPServerURLDefinition]:
-    """The MCP servers a session for this caller runs, a foreign `daimon-mcp` re-pointed."""
+    """The MCP servers a session for this caller runs, a foreign `daimon-mcp` re-pointed.
+
+    With `github_transport="router"` (and a `public_url`), a server attached at
+    GitHub's hosted MCP URL is re-pointed at the deployment's GitHub MCP router
+    under the same name, so its toolset and permission policy are unchanged.
+    """
     visible = visible_mcp_servers(agent, hidden_mcp_server_names)
     healed = heal_reserved_server(
         tool_safety,
@@ -586,10 +615,19 @@ def session_mcp_servers(
         confirmed_tools=confirmed_tools,
     )
     servers = visible if healed is None else _MCP_SERVERS.validate_python(healed)
-    if public_url is not None and chat_session_id is not None:
-        return [
+    if public_url is None:
+        return servers
+    if chat_session_id is not None:
+        servers = [
             server.model_copy(update={"url": session_mcp_url(public_url, chat_session_id)})
             if server.name == "daimon-mcp"
+            else server
+            for server in servers
+        ]
+    if github_transport == "router":
+        servers = [
+            server.model_copy(update={"url": github_router_url(public_url)})
+            if same_mcp_url(server.url, GITHUB_COPILOT_MCP_URL)
             else server
             for server in servers
         ]
@@ -622,6 +660,7 @@ def desired_snapshot(
     legacy_memory_servers: tuple[str, ...] = (),
     mcp_hold: str | None = None,
     memory_scope: str | None = None,
+    github_transport: GithubTransport = "direct",
     repo_mount_path: str | None = None,
     repo_token_issued_at: int | None = None,
     token_issued_at_by_installation: dict[int, int] | None = None,
@@ -645,7 +684,8 @@ def desired_snapshot(
     `create_session` gates them (`session_tools`). `channel_skills` are the
     turn's channel's extra skills, hashed with the agent's (`session_skills`).
     `system_override` is the prompt sent in place of the agent's own, hashed
-    instead of it.
+    instead of it. `github_transport` is the recorded session's own mode (absent
+    means direct), never the router setting's current value.
     """
     return SessionSnapshot(
         ma_agent_id=agent.id,
@@ -674,6 +714,7 @@ def desired_snapshot(
         chat_session_id=chat_session_id,
         mcp_hold=mcp_hold,
         memory_scope=memory_scope,
+        github_transport=github_transport,
         tools_sha256=hash_tools(
             session_tools(
                 agent,
@@ -694,6 +735,7 @@ def desired_snapshot(
                 public_url=public_url,
                 confirmed_tools=confirmed_tools,
                 chat_session_id=chat_session_id,
+                github_transport=github_transport,
             )
         ),
         env_sha256=env_sha256,

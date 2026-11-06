@@ -2652,6 +2652,7 @@ async def test_start_turn_returns_the_accepted_events_boundary(
         "github_app_id",
         "github_app_private_key",
         "agent_github_app",
+        "github_mcp_router",
         "billing_exempt",
         "memory_read_only",
         "budget_channel_id",

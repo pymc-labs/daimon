@@ -394,8 +394,9 @@ async def desired_snapshot_for(
         excluded_repo_urls=excluded,
     )
     # Token scopes are labelled only in multi mode. A surviving installation
-    # still needs the helper when another installation refused its mint.
-    has_multi_installation_tokens = bool(app_urls[2])
+    # still needs the helper when another installation refused its mint, and
+    # one installation with several token groups gets it too (helper entries).
+    has_multi_installation_tokens = bool(app_urls[2]) or bool(app_urls[3])
     desired = desired_snapshot(
         agent,
         hidden_mcp_server_names=await resolve_hidden_mcp_server_names(
@@ -428,6 +429,8 @@ async def desired_snapshot_for(
         legacy_memory_servers=legacy_memory_servers,
         vault_id=None if recorded is None else recorded.vault_id,
         chat_session_id=None if recorded is None else recorded.chat_session_id,
+        # The session's own mode, never the router setting's current value.
+        github_transport="direct" if recorded is None else recorded.github_transport,
         env_file_id=None if recorded is None else recorded.env_file_id,
         repo_mount_path=None if recorded is None else recorded.repo_mount_path,
         repo_token_issued_at=None if recorded is None else recorded.repo_token_issued_at,

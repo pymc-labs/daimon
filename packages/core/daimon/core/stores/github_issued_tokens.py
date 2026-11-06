@@ -15,6 +15,11 @@ from daimon.core.session_snapshot import SessionSnapshot, token_scope_parts
 from daimon.core.stores.domain import ThreadSessionRow
 from daimon.core.stores.github_access import admissible_grant_rows, list_live_grant_repositories
 from daimon.core.stores.github_installation_coverage import installation_covers_repo_sql
+from daimon.core.stores.github_router_sessions import (
+    GITHUB_ROUTER_SESSION_TTL,
+    router_session_id_for_ma_session,
+)
+from daimon.core.stores.github_router_sessions import renew as renew_router_session
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import CursorResult, and_, delete, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -55,6 +60,7 @@ class IssuedToken(BaseModel):
     superseded_at: datetime | None
     revoke_after: datetime | None
     created_at: datetime
+    router_session_id: uuid.UUID | None = None
 
     @property
     def chunk(self) -> int | None:
@@ -122,6 +128,7 @@ async def create_pending(
     github_user_id: int | None = None,
     link_generation: int | None = None,
     chunk: int | None = None,
+    router_session_id: uuid.UUID | None = None,
 ) -> IssuedToken:
     if (requester_account_id is None) != (github_user_id is None) or (github_user_id is None) != (
         link_generation is None
@@ -158,6 +165,7 @@ async def create_pending(
         expires_at=expires_at,
         status="pending",
         revoke_attempts=0,
+        router_session_id=router_session_id,
     )
     session.add(row)
     await session.flush()
@@ -489,13 +497,42 @@ async def session_installations_needing_rotation(
 
 
 async def set_session_id(
-    session: AsyncSession, *, provisional_session_id: str, session_id: str
+    session: AsyncSession,
+    *,
+    provisional_session_id: str,
+    session_id: str,
+    router_session_id: uuid.UUID | None = None,
 ) -> None:
+    """Move provisional rows to the session; stamp the router session when given.
+
+    A router session that exists only after the tokens were minted is stamped
+    here. None leaves any existing stamp alone.
+    """
+    values: dict[str, object] = {"session_id": session_id}
+    if router_session_id is not None:
+        values["router_session_id"] = router_session_id
     await session.execute(
         update(GitHubIssuedToken)
         .where(GitHubIssuedToken.session_id == provisional_session_id)
-        .values(session_id=session_id)
+        .values(values)
     )
+
+
+async def list_router_session_tokens(
+    session: AsyncSession, *, router_session_id: uuid.UUID, valid_after: datetime
+) -> list[IssuedToken]:
+    """Current delivered rows of a router session that stay valid past `valid_after`."""
+    rows = await session.scalars(
+        select(GitHubIssuedToken)
+        .where(
+            GitHubIssuedToken.router_session_id == router_session_id,
+            GitHubIssuedToken.status == "delivered",
+            GitHubIssuedToken.superseded_at.is_(None),
+            GitHubIssuedToken.expires_at > valid_after,
+        )
+        .order_by(GitHubIssuedToken.installation_id, GitHubIssuedToken.created_at)
+    )
+    return [IssuedToken.model_validate(row) for row in rows]
 
 
 async def list_session_tokens(session: AsyncSession, *, session_id: str) -> list[IssuedToken]:
@@ -555,7 +592,12 @@ async def mark_session_tokens_superseded(
 
 
 async def keep_failed_rotation_tokens(
-    session: AsyncSession, *, session_id: str, token_ids: frozenset[uuid.UUID], now: datetime
+    session: AsyncSession,
+    *,
+    session_id: str,
+    token_ids: frozenset[uuid.UUID],
+    now: datetime,
+    router_session_id: uuid.UUID | None = None,
 ) -> frozenset[uuid.UUID]:
     """Keep new tokens a failed active-turn refresh already handed to MA.
 
@@ -580,6 +622,8 @@ async def keep_failed_rotation_tokens(
         if row.token_id in hard_stale:
             continue
         row.session_id = session_id
+        if router_session_id is not None:
+            row.router_session_id = router_session_id
         row.status = "delivered"
         row.superseded_at = now
         row.revoke_after = row.expires_at + timedelta(minutes=6)
@@ -588,17 +632,29 @@ async def keep_failed_rotation_tokens(
     return frozenset(kept)
 
 
-async def restore_session_tokens(session: AsyncSession, *, token_ids: frozenset[uuid.UUID]) -> None:
-    """Undo a failed rotation's pending revocation of the old tokens."""
+async def restore_session_tokens(
+    session: AsyncSession,
+    *,
+    token_ids: frozenset[uuid.UUID],
+    router_session_id: uuid.UUID | None = None,
+) -> None:
+    """Undo a failed rotation's pending revocation of the old tokens.
+
+    The restored rows are the router session's current tokens again, so they
+    carry its stamp when one is given.
+    """
     if not token_ids:
         return
+    values: dict[str, object] = {"superseded_at": None, "revoke_after": None}
+    if router_session_id is not None:
+        values["router_session_id"] = router_session_id
     await session.execute(
         update(GitHubIssuedToken)
         .where(
             GitHubIssuedToken.token_id.in_(token_ids),
             GitHubIssuedToken.status == "delivered",
         )
-        .values(superseded_at=None, revoke_after=None)
+        .values(values)
     )
 
 
@@ -684,7 +740,11 @@ async def finish_headless_app_session(session: AsyncSession, *, session_id: str)
 
 
 async def touch_unmapped_app_session(session: AsyncSession, *, session_id: str) -> bool | None:
-    """Extend an open MCP vault. False means closed or past its turn ceiling."""
+    """Extend an open MCP vault. False means closed or past its turn ceiling.
+
+    A headless turn start is a refresh point for the session's router record,
+    so an extended vault also renews it in the same transaction.
+    """
     now = datetime.now(UTC)
     result = await session.execute(
         update(GitHubAppSessionVault)
@@ -699,6 +759,15 @@ async def touch_unmapped_app_session(session: AsyncSession, *, session_id: str) 
         .returning(GitHubAppSessionVault.session_id)
     )
     if result.scalar_one_or_none() is not None:
+        router_session_id = await router_session_id_for_ma_session(
+            session, ma_session_id=session_id
+        )
+        if router_session_id is not None:
+            await renew_router_session(
+                session,
+                router_session_id=router_session_id,
+                expires_at=now + GITHUB_ROUTER_SESSION_TTL,
+            )
         return True
     is_unmapped = await session.scalar(
         select(GitHubAppSessionVault.is_unmapped).where(
