@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A shared MCP token removed from an agent no longer comes back when a conversation starts at the same moment.**
+  A new conversation, a new shared thread and a shared thread's next message read the agent's tokens under the vault lock before they copy them, as an existing conversation already did.
 - **A Claude Code (agent chat) conversation no longer keeps running an agent's old setup.**
   If the agent's model, prompt, skills, MCP servers or tools changed since the conversation started, `continue_turn` and `ask` with a handle refuse the message and ask for a new conversation, which runs the new setup.
   Each message also copies the agent's current shared MCP tokens into the conversation, so a replaced token reaches it.

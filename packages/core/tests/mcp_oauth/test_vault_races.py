@@ -20,7 +20,9 @@ import datetime as dt
 import json
 import os
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -33,8 +35,10 @@ from daimon.core.agent_mcp_credentials import (
     ResolvedMcpCredential,
     mirror_credentials_into_vault,
     resolve_agent_mcp_credentials,
+    resync_mounted_shared_vault,
     save_agent_mcp_credential,
     sync_agent_mcp_credentials,
+    sync_shared_mcp_credentials,
 )
 from daimon.core.config import McpSettings
 from daimon.core.credential_requests import mint_request_token
@@ -43,7 +47,9 @@ from daimon.core.mcp_oauth.complete import McpOAuthCompletion, complete_mcp_oaut
 from daimon.core.mcp_oauth.models import ClientRegistration, TokenResponse
 from daimon.core.mcp_oauth.vault import put_mcp_oauth_credential
 from daimon.core.mcp_vault import ensure_agent_mcp_vault as real_ensure_agent_mcp_vault
+from daimon.core.mcp_vault import shared_vault_name
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores import agent_mcp_credentials as credential_store
 from daimon.core.stores import credential_requests as requests_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores.accounts import set_role
@@ -474,4 +480,149 @@ async def test_a_sign_in_survives_three_turns_mirroring_while_the_grant_is_writt
     holder = vault._holder(url)  # pyright: ignore[reportPrivateUsage]
     assert holder is not None and holder["auth"]["type"] == "mcp_oauth", (
         "the person's grant must hold the URL once the sign-in finishes"
+    )
+
+
+# ----- A detach while a mirror waits for the vault lock (real Postgres) -----
+
+# Every writer that copies the agent's stored tokens into a vault:
+#   remirror       - a reused session's `sync_agent_mcp_credentials`.
+#   fresh_session  - a new session's `create_session`.
+#   shared_create  - a new shared thread's `sync_shared_mcp_credentials`.
+#   shared_resync  - a reused shared thread's `resync_mounted_shared_vault`.
+_MIRROR_PATHS = ("remirror", "fresh_session", "shared_create", "shared_resync")
+
+
+@pytest.mark.parametrize("path", _MIRROR_PATHS)
+async def test_a_token_removed_while_a_mirror_waits_for_the_lock_is_not_written_back(
+    db_clean: None, db_schema: str, monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    """Trace: a mirror starts while the agent holds the token; the detach then
+    deletes the stored token and clears the vault copy under the vault lock
+    (`forget_mirrored_mcp_token`); the mirror takes the lock last.
+
+    A mirror that read the tokens before the lock writes the removed token back,
+    and it keeps authenticating. Each path must read under the lock.
+    """
+    dsn = os.environ["DAIMON_DATABASE__TEST_URL"]
+    engine = build_test_engine(dsn, db_schema, poolclass=NullPool)
+    factory = async_sessionmaker(bind=engine, expire_on_commit=False)
+    fernet = make_fernet()
+    owner = uuid.uuid4()
+    try:
+        async with factory() as session, session.begin():
+            tenant = await make_tenant(session)
+            account = await make_account(session, tenant=tenant)
+        agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_detach")
+        await save_agent_mcp_credential(
+            sessionmaker=factory,
+            fernet=fernet,
+            tenant_id=tenant.id,
+            agent_id=agent_id,
+            mcp_server_url=_URL,
+            plaintext_token="agent-tok",
+        )
+        (stored,) = await resolve_agent_mcp_credentials(
+            sessionmaker=factory, fernet=fernet, tenant_id=tenant.id, agent_id=agent_id
+        )
+        # The copy an earlier turn mirrored, current with the stored token.
+        copy = _static("vcrd_copy", stored.version)
+        vault = SlowVault([copy], display_name=f"daimon-mcp:{account.id}:{agent_id}")
+        client = vault.client()
+
+        at_lock = asyncio.Event()
+        detached = asyncio.Event()
+        racer: list[asyncio.Task[Any] | None] = []
+        real_lock = agent_mcp_credentials.hold_agent_vault_lock
+
+        @asynccontextmanager
+        async def lock_after_the_detach(*args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+            if asyncio.current_task() in racer:
+                at_lock.set()
+                await detached.wait()
+            async with real_lock(*args, **kwargs) as locked:
+                yield locked
+
+        async def vault_id(*_args: Any, **_kwargs: Any) -> str:
+            return _VAULT
+
+        async def memory_mount(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+            return {"type": "memory_store", "memory_store_id": "memstore_test"}
+
+        async def mounted_vault(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+            return SimpleNamespace(display_name=shared_vault_name(owner, agent_id))
+
+        for module in (agent_mcp_credentials, sessions):
+            monkeypatch.setattr(
+                module, "hold_agent_vault_lock", lock_after_the_detach, raising=False
+            )
+            monkeypatch.setattr(module, "ensure_agent_mcp_vault", vault_id, raising=False)
+        monkeypatch.setattr(agent_mcp_credentials, "ensure_shared_mcp_vault", vault_id)
+        monkeypatch.setattr(agent_mcp_credentials, "retrieve_vault", mounted_vault)
+        monkeypatch.setattr(sessions, "ensure_memory_store_and_mount", memory_mount)
+
+        async def mirror() -> None:
+            racer.append(asyncio.current_task())
+            if path == "remirror":
+                await sync_agent_mcp_credentials(
+                    client,
+                    sessionmaker=factory,
+                    fernet=fernet,
+                    tenant_id=tenant.id,
+                    agent_id=agent_id,
+                    account_id=account.id,
+                    jwt_secret=b"x" * 32,
+                    public_url=_PUBLIC_URL,
+                    now=_NOW,
+                )
+            elif path == "fresh_session":
+                await sessions.create_session(
+                    client,
+                    agent=ma_agent(id="ag_detach"),
+                    environment=ma_environment(),
+                    mcp_settings=McpSettings(
+                        jwt_secret=SecretStr("x" * 32), public_url=HttpUrl(_PUBLIC_URL)
+                    ),
+                    account_id=account.id,
+                    tenant_id=tenant.id,
+                    agent_uuid=agent_id,
+                    session_factory=factory,
+                    fernet=fernet,
+                    tool_safety=OPEN_TOOL_SAFETY,
+                )
+            elif path == "shared_create":
+                await sync_shared_mcp_credentials(
+                    client,
+                    sessionmaker=factory,
+                    fernet=fernet,
+                    tenant_id=tenant.id,
+                    agent_id=agent_id,
+                    owner=owner,
+                )
+            else:
+                await resync_mounted_shared_vault(
+                    client,
+                    sessionmaker=factory,
+                    fernet=fernet,
+                    tenant_id=tenant.id,
+                    agent_id=agent_id,
+                    owner=owner,
+                    mounted_vault_ids=(_VAULT,),
+                )
+
+        async def detach() -> None:
+            await at_lock.wait()
+            async with factory() as session, session.begin():
+                assert await credential_store.delete_credential(
+                    session, tenant_id=tenant.id, agent_id=agent_id, mcp_server_url=_URL
+                )
+            vault.creds.pop("vcrd_copy")  # `forget_mirrored_mcp_token`, under the lock
+            detached.set()
+
+        await asyncio.wait_for(asyncio.gather(mirror(), detach()), timeout=10)
+    finally:
+        await engine.dispose()
+
+    assert vault._holder(_URL) is None, (  # pyright: ignore[reportPrivateUsage]
+        "a token removed from the agent must not come back into the vault"
     )

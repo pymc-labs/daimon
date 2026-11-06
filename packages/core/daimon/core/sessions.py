@@ -36,8 +36,7 @@ from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
 from anthropic.types.beta.session_create_params import Agent, Resource
 from cryptography.fernet import MultiFernet
 from daimon.core.agent_mcp_credentials import (
-    mirror_credentials_into_vault,
-    resolve_agent_mcp_credentials,
+    mirror_stored_credentials,
     resolve_hidden_mcp_server_names,
     sync_shared_mcp_credentials,
 )
@@ -91,7 +90,6 @@ from daimon.core.mcp_vault import (
     add_github_router_credential,
     create_relay_vault,
     ensure_agent_mcp_vault,
-    hold_agent_vault_lock,
 )
 from daimon.core.memory_resource import (
     ensure_channel_memory_store_and_mount,
@@ -746,11 +744,11 @@ async def create_session(
     Copilot credential mounted that turn.
 
     The agent's stored external-MCP credentials are mirrored into the same
-    vault on every session create (``resolve_agent_mcp_credentials`` +
-    ``mirror_credentials_into_vault``). The servers themselves live on the agent
-    spec, so a credential held only in the vault of whoever attached one leaves
-    every other caller's turn failing at MCP init; mirroring per session is what
-    makes an agent-level server work for an agent-level audience. Unlike the
+    vault on every session create (``mirror_stored_credentials``). The servers
+    themselves live on the agent spec, so a credential held only in the vault
+    of whoever attached one leaves every other caller's turn failing at MCP
+    init; mirroring per session is what makes an agent-level server work for an
+    agent-level audience. Unlike the
     Copilot and memory mounts this is NOT degrade-not-block — a missing
     credential hard-fails the turn at MA, so ``anthropic.APIError`` propagates.
 
@@ -1033,28 +1031,20 @@ async def create_session(
                 credential_vault_id is not None and account_id is not None and tenant_id is not None
             )
             assert agent_uuid is not None and session_factory is not None and fernet is not None
-            credentials = await resolve_agent_mcp_credentials(
+            # Under the vault lock, so a person's OAuth grant replacing a shared
+            # token at the same URL never sees this recreate it between its delete
+            # and its create, and a removed token is never written back.
+            await mirror_stored_credentials(
+                anthropic,
                 sessionmaker=session_factory,
                 fernet=fernet,
                 tenant_id=tenant_id,
                 agent_id=agent_uuid,
+                lock_account_id=account_id,
+                vault_id=credential_vault_id,
+                scope=scope,
+                exclude_github_copilot=app_mode,
             )
-            credentials = tuple(
-                credential
-                for credential in credentials
-                if _session_mcp_credential(credential.mcp_server_url, app_mode=app_mode)
-            )
-            # Locked so a person's OAuth grant replacing a shared token at the same
-            # URL never sees this recreate it between its delete and its create.
-            async with hold_agent_vault_lock(
-                session_factory, account_id=account_id, agent_id=agent_uuid
-            ):
-                await mirror_credentials_into_vault(
-                    anthropic,
-                    vault_id=credential_vault_id,
-                    credentials=credentials,
-                    scope=scope,
-                )
 
         resources: list[Resource] = list(extra_resources)
         app_access: AppSessionAccess | None = None

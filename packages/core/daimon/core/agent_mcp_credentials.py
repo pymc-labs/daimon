@@ -451,25 +451,17 @@ async def sync_agent_mcp_credentials(
         )
 
     async def mirror(vault_id: str) -> None:
-        async with hold_agent_vault_lock(
-            sessionmaker, account_id=account_id, agent_id=agent_id
-        ) as locked:
-            # Read again under the lock, through its own transaction (no extra
-            # pooled connection): a token deleted since the read above
-            # (`forget_mirrored_mcp_token` clears each copy under this lock)
-            # must not be written back.
-            current = await _read_agent_mcp_credentials(
-                locked, fernet=fernet, tenant_id=tenant_id, agent_id=agent_id
-            )
-            if exclude_github_copilot:
-                current = tuple(
-                    credential
-                    for credential in current
-                    if credential.mcp_server_url != GITHUB_COPILOT_MCP_URL
-                )
-            await mirror_credentials_into_vault(
-                client, vault_id=vault_id, credentials=current, scope=scope
-            )
+        await mirror_stored_credentials(
+            client,
+            sessionmaker=sessionmaker,
+            fernet=fernet,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            lock_account_id=account_id,
+            vault_id=vault_id,
+            scope=scope,
+            exclude_github_copilot=exclude_github_copilot,
+        )
 
     if vault_ids is None:
         await mirror(await ensure())
@@ -508,25 +500,21 @@ async def sync_shared_mcp_credentials(
     mounted vault to land in. Never calls ``ensure_agent_mcp_vault``: the
     synthetic owner gets no daimon-mcp vault or JWT.
     """
-    credentials = await _shared_credentials(
-        sessionmaker,
-        fernet=fernet,
-        tenant_id=tenant_id,
-        agent_id=agent_id,
-        exclude_github_copilot=exclude_github_copilot,
-    )
     scope = resource_scope(tenant_id=str(tenant_id), account_id=str(owner))
     vault_id = await ensure_shared_mcp_vault(
         client, owner=owner, agent_id=agent_id, session_factory=sessionmaker, scope=scope
     )
-    await _fill_shared_vault(
+    await mirror_stored_credentials(
         client,
-        sessionmaker,
-        vault_id=vault_id,
-        owner=owner,
+        sessionmaker=sessionmaker,
+        fernet=fernet,
+        tenant_id=tenant_id,
         agent_id=agent_id,
-        credentials=credentials,
+        lock_account_id=owner,
+        vault_id=vault_id,
         scope=scope,
+        exclude_github_copilot=exclude_github_copilot,
+        prune=True,
     )
     return vault_id
 
@@ -575,71 +563,74 @@ async def resync_mounted_shared_vault(
             return
         if vault_ids is not None:
             vault_ids[key] = vault_id
-    credentials = await _shared_credentials(
-        sessionmaker,
-        fernet=fernet,
-        tenant_id=tenant_id,
-        agent_id=agent_id,
-        exclude_github_copilot=exclude_github_copilot,
-    )
-    await _fill_shared_vault(
+    await mirror_stored_credentials(
         client,
-        sessionmaker,
-        vault_id=vault_id,
-        owner=owner,
-        agent_id=agent_id,
-        credentials=credentials,
-        scope=scope,
-    )
-
-
-async def _shared_credentials(
-    sessionmaker: async_sessionmaker[AsyncSession],
-    *,
-    fernet: MultiFernet,
-    tenant_id: uuid.UUID,
-    agent_id: uuid.UUID,
-    exclude_github_copilot: bool,
-) -> tuple[ResolvedMcpCredential, ...]:
-    credentials = await resolve_agent_mcp_credentials(
         sessionmaker=sessionmaker,
         fernet=fernet,
         tenant_id=tenant_id,
         agent_id=agent_id,
+        lock_account_id=owner,
+        vault_id=vault_id,
+        scope=scope,
+        exclude_github_copilot=exclude_github_copilot,
+        prune=True,
     )
-    if exclude_github_copilot:
-        credentials = tuple(
-            credential
-            for credential in credentials
-            if credential.mcp_server_url != GITHUB_COPILOT_MCP_URL
-        )
-    return credentials
 
 
-async def _fill_shared_vault(
+async def mirror_stored_credentials(
     client: AsyncAnthropic,
-    sessionmaker: async_sessionmaker[AsyncSession],
     *,
-    vault_id: str,
-    owner: uuid.UUID,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    fernet: MultiFernet,
+    tenant_id: uuid.UUID,
     agent_id: uuid.UUID,
-    credentials: tuple[ResolvedMcpCredential, ...],
+    lock_account_id: uuid.UUID,
+    vault_id: str,
     scope: Scope,
+    exclude_github_copilot: bool = False,
+    prune: bool = False,
 ) -> None:
-    """Prune the shared vault to `credentials`, then mirror them in."""
-    wanted = {_url_key(credential.mcp_server_url) for credential in credentials}
-    async with hold_agent_vault_lock(sessionmaker, account_id=owner, agent_id=agent_id):
-        # Collect first: deleting while the list paginates can skip an entry.
-        stale = [
-            existing.id
-            async for existing in list_credentials(client, vault_id, scope=scope)
-            if existing.auth.type != "static_bearer"
-            or _url_key(existing.auth.mcp_server_url) not in wanted
-        ]
-        for credential_id in stale:
-            await delete_credential(client, vault_id, credential_id, scope=scope)
-        if stale:
-            log.info("mcp_credentials.shared_vault_pruned", vault_id=vault_id, deleted=len(stale))
+    """Copy the agent's stored tokens into ``vault_id``, read under its vault lock.
+
+    Every copy of the stored tokens into a vault goes through here
+    (`test_every_mirror_reads_the_tokens_under_the_vault_lock`). A detach
+    deletes the stored token, then clears each vault copy under this lock
+    (`forget_mirrored_mcp_token`). Tokens read before the lock could be
+    written back after that, so they are read under it, through the lock's
+    own transaction (no extra pooled connection).
+
+    ``lock_account_id`` is the vault's owner: the caller, or a shared
+    thread's synthetic owner. ``prune`` is for a shared thread's vault, which
+    nobody else writes: anything that is not a stored token is deleted first,
+    so a removed token stops authenticating on the thread's next turn.
+    """
+    async with hold_agent_vault_lock(
+        sessionmaker, account_id=lock_account_id, agent_id=agent_id
+    ) as locked:
+        credentials = await _read_agent_mcp_credentials(
+            locked, fernet=fernet, tenant_id=tenant_id, agent_id=agent_id
+        )
+        if exclude_github_copilot:
+            credentials = tuple(
+                credential
+                for credential in credentials
+                if credential.mcp_server_url != GITHUB_COPILOT_MCP_URL
+            )
+        if prune:
+            wanted = {_url_key(credential.mcp_server_url) for credential in credentials}
+            # Collect first: deleting while the list paginates can skip an entry.
+            stale = [
+                existing.id
+                async for existing in list_credentials(client, vault_id, scope=scope)
+                if existing.auth.type != "static_bearer"
+                or _url_key(existing.auth.mcp_server_url) not in wanted
+            ]
+            for credential_id in stale:
+                await delete_credential(client, vault_id, credential_id, scope=scope)
+            if stale:
+                log.info(
+                    "mcp_credentials.shared_vault_pruned", vault_id=vault_id, deleted=len(stale)
+                )
         await mirror_credentials_into_vault(
             client, vault_id=vault_id, credentials=credentials, scope=scope
         )
@@ -667,9 +658,8 @@ async def forget_mirrored_mcp_token(
     own ``mcp_oauth`` sign-in at that URL is theirs, not a copy.
 
     Each vault is cleared under its (account, agent) vault lock, so a mirror
-    already holding it finishes first. `sync_agent_mcp_credentials` reads the
-    stored tokens again under that lock, so it cannot write a copy back.
-    `create_session`'s own mirror still reads them before the lock.
+    already holding it finishes first. Every mirror reads the stored tokens
+    under that lock (`mirror_stored_credentials`), so none writes a copy back.
 
     Best effort per vault: returns the ids of vaults whose copy could not be
     deleted, after trying all of them.
