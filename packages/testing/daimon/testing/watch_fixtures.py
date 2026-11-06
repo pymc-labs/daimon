@@ -82,7 +82,9 @@ async def install_poll_ports(session: AsyncSession) -> None:
     A ``fresh_schema`` baseline already holds them (``daimon.testing.db``), so
     this returns at once there. Its catalog fingerprint covers their bodies,
     owners and grants: a test that committed a change to them forces a rebuild
-    before the next test runs, so a present port is the one built here.
+    before the next test runs, so a present port is the one built here. Call it
+    before the test changes any port or grant: after such a change, finding
+    ``claim_watch_polls`` present does not prove the rest is the baseline.
     """
     schema = await session.scalar(text("SELECT current_schema()"))
     if not isinstance(schema, str) or not schema.startswith("test_"):

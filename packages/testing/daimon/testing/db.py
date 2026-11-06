@@ -1017,7 +1017,7 @@ async def _drain_background_tasks() -> None:
     platform_names.forget_all()
 
 
-# Everything DDL can change in one schema: columns (type, nullability, default,
+# What the fingerprint covers in one schema: columns (type, nullability, default,
 # identity, generation, collation), indexes, constraints, triggers (and any
 # trigger switched off, foreign-key ones included), rules, functions, views,
 # sequences, enum and domain types; and who may use them: owners and grants on
@@ -1026,7 +1026,9 @@ async def _drain_background_tasks() -> None:
 # transaction leaves it untouched; a committed ALTER/CREATE/DROP/GRANT does not.
 # Row data is not part of it: every fresh test starts by deleting every row.
 # Database-wide state (roles, default privileges set without IN SCHEMA) is
-# outside it: a rebuild could not undo it anyway.
+# outside it: a rebuild could not undo it anyway. So are comments, sequence
+# options, extensions and objects in other schemas; a test that commits one of
+# those still leaks it into the next test on the worker.
 _FINGERPRINT_SQL = text(
     """
 SELECT md5(concat_ws('|',
