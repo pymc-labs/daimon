@@ -363,3 +363,78 @@ async def _web_discord_postable(facts: dict[str, bool]) -> bool:
     )
     reach = await web_visibility._discord(cast(Any, runtime), "10", "1")  # pyright: ignore[reportPrivateUsage]
     return "7" in reach.postable
+
+
+# ----- Each surface follows the rule's answer, not a copy of its own -----
+
+#: Facts the rule refuses (Daimon in a private channel the caller is not in) and allows.
+_SLACK_REFUSED = dict.fromkeys(_SLACK_FACTS, False) | {"bot_is_member": True, "is_private": True}
+_SLACK_ALLOWED = dict.fromkeys(_SLACK_FACTS, False) | {"bot_is_member": True}
+_DISCORD_REFUSED = dict.fromkeys(_DISCORD_FACTS, False)
+_DISCORD_ALLOWED = dict.fromkeys(_DISCORD_FACTS, False) | {"administrator": True}
+
+
+@pytest.mark.parametrize("answer", [True, False])
+async def test_each_slack_surface_follows_the_rules_answer(
+    answer: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rule is replaced by a fixed answer, the opposite of what the facts give.
+
+    A surface that decides with its own copy of the rule ignores it."""
+    facts = _SLACK_REFUSED if answer else _SLACK_ALLOWED
+
+    def rule(**_facts: bool) -> bool:
+        return answer
+
+    for module in (mcp_routines, slack_delivery, web_visibility):
+        monkeypatch.setattr(module, "slack_may_deliver", rule)
+    client = _slack_client(facts)
+
+    async def web_client(*_args: Any, **_kwargs: Any) -> MagicMock:
+        return client
+
+    monkeypatch.setattr(mcp_routines, "slack_web_client", web_client)
+    auth = cast(Any, SimpleNamespace(external_id="T1", platform_user_id="U1"))
+    try:
+        await mcp_routines._resolve_slack_destination(  # pyright: ignore[reportPrivateUsage]
+            cast(Any, None), auth, kind="channel", destination_id="C1"
+        )
+        saved = True
+    except ToolError:
+        saved = False
+    refusal = await slack_delivery._destination_refusal(  # pyright: ignore[reportPrivateUsage]
+        client,
+        cast(Any, SimpleNamespace(created_by_user_id="U1")),
+        cast(Any, SimpleNamespace(channel_id="C1", thread_ts=None)),
+    )
+    web = await _web_slack_postable(facts, monkeypatch)
+    assert (saved, refusal is None, web) == (answer, answer, answer), (
+        f"chat tool saves={saved}, delivery posts={refusal is None}, web offers={web}; "
+        f"the rule answered {answer}"
+    )
+
+
+@pytest.mark.parametrize("answer", [True, False])
+async def test_each_discord_surface_follows_the_rules_answer(
+    answer: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """As for Slack. The web app asks the rule through `discord_deliverable_channels`."""
+    facts = _DISCORD_REFUSED if answer else _DISCORD_ALLOWED
+
+    def rule(**_facts: bool) -> bool:
+        return answer
+
+    def deliverable(*_args: Any, channel_ids: Any, **_kwargs: Any) -> frozenset[str]:
+        return frozenset(channel_ids) if answer else frozenset()
+
+    monkeypatch.setattr(mcp_routines, "discord_creator_may_post", rule)
+    monkeypatch.setattr(discord_delivery, "discord_creator_may_post", rule)
+    monkeypatch.setattr(web_visibility, "discord_deliverable_channels", deliverable)
+    channel, source, member = _discord_place(facts)
+    saved = await _mcp_discord_saves(channel, member, facts, monkeypatch)
+    posted = await discord_delivery.creator_may_post(channel, source, 1)
+    web = await _web_discord_postable(facts)
+    assert (saved, posted, web) == (answer, answer, answer), (
+        f"chat tool saves={saved}, delivery posts={posted}, web offers={web}; "
+        f"the rule answered {answer}"
+    )
