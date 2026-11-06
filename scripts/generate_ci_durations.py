@@ -8,14 +8,18 @@ from files you already have or from the artifacts of a workflow run:
     uv run python scripts/generate_ci_durations.py path/to/junit-dir-or-file ...
     uv run python scripts/generate_ci_durations.py --run 123456789
 
-The suite a junit file belongs to is the part of its name before the first
-``-`` (``core-shard-2.xml`` -> ``core``, as CI names them); ``--suite`` overrides
-it. A file's seconds are the sum of its test cases' ``time`` (setup, call and
-teardown). The junit files of one suite are read as the shards of one run, so
-their cases add up; a case present in more than one (repeated runs, or runs
-sharded differently) takes the median of its timings. Suites not present in the
-input keep their current entries, so refresh one suite at a time. Reading a run uses
-``gh run download`` only, which is read-only.
+Only the suites CI splits over more than one shard read the table, so only they
+are written. The suite a junit file belongs to is the longest suite name of the
+sharded CI jobs that its name equals or starts with followed by ``-``
+(``discord-mux-shard-1.xml`` -> ``discord-mux``, ``core-shard-2.xml`` -> ``core``,
+as CI names them); files of other suites are skipped. ``--suite`` overrides it
+and writes that suite whatever its shard count. A file's seconds are the sum of
+its test cases' ``time`` (setup, call and teardown). The junit files of one
+suite are read as the shards of one run, so their cases add up; a case present
+in more than one (repeated runs, or runs sharded differently) takes the median
+of its timings. Suites not present in the input keep their current entries, so
+refresh one suite at a time. Reading a run uses ``gh run download`` only, which
+is read-only.
 
 Junit records a dotted ``classname``, not a path, so each is resolved to the
 longest prefix that is a ``.py`` file under the current directory; test cases
@@ -25,6 +29,7 @@ that resolve to no file are counted and ignored.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import statistics
 import subprocess
@@ -32,9 +37,32 @@ import sys
 import tempfile
 import xml.etree.ElementTree as ET
 from collections import defaultdict
+from collections.abc import Iterable
 from pathlib import Path
 
 TABLE = Path("packages/testing/daimon/testing/ci_durations.json")
+
+
+def _sharded_suites() -> dict[str, int]:
+    """Shard count per suite of the CI jobs that load the shard plugin."""
+    path = Path(__file__).with_name("check_ci_shards.py")
+    spec = importlib.util.spec_from_file_location("check_ci_shards", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.sharded_suites()
+
+
+def suite_of(stem: str, suites: Iterable[str]) -> str | None:
+    """The longest suite name ``stem`` equals or starts with followed by ``-``."""
+    return next(
+        (
+            suite
+            for suite in sorted(suites, key=len, reverse=True)
+            if stem == suite or stem.startswith(f"{suite}-")
+        ),
+        None,
+    )
 
 
 def _resolve(classname: str, root: Path, cache: dict[str, str | None]) -> str | None:
@@ -67,12 +95,19 @@ def _junit_files(inputs: list[Path]) -> list[Path]:
 
 
 def build(
-    files: list[Path], root: Path, suite_override: str | None
+    files: list[Path], root: Path, suite_override: str | None, shards: dict[str, int]
 ) -> tuple[dict[str, dict[str, float]], int]:
-    """Suite -> file -> seconds, merged across junit files, plus unresolved case count."""
+    """Suite -> file -> seconds, merged across junit files, plus unresolved case count.
+
+    ``shards`` maps each suite name to its shard count; without ``suite_override``
+    a junit file counts only when its suite has more than one shard.
+    """
     samples: dict[str, dict[tuple[str, str], list[float]]] = defaultdict(lambda: defaultdict(list))
     for path in files:
-        suite = suite_override or path.stem.split("-")[0]
+        suite = suite_override or suite_of(path.stem, shards)
+        if suite is None or (suite_override is None and shards[suite] < 2):
+            print(f"skipped {path}: not a sharded suite", file=sys.stderr)
+            continue
         for key, value in read_junit(path).items():
             samples[suite][key].append(value)
     cache: dict[str, str | None] = {}
@@ -114,7 +149,7 @@ def main() -> int:
         files = _junit_files(inputs)
         if not files:
             parser.error("no junit files: pass paths or --run")
-        fresh, unresolved = build(files, Path.cwd(), args.suite)
+        fresh, unresolved = build(files, Path.cwd(), args.suite, _sharded_suites())
 
     table: dict[str, dict[str, float]] = (
         json.loads(args.table.read_text()) if args.table.exists() else {}

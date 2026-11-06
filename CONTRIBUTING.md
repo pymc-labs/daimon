@@ -105,12 +105,13 @@ how to write it; `scripts/check_docs.py` keeps the hand-written pages within
 their length budgets.
 
 CI splits the Postgres-backed pytest run into parallel jobs, and the largest
-suites (`core`, `mcp`, `discord`) into shards by test file with
+suites (`core`, `mcp`, `discord`, `discord-mux`) into shards by test file with
 `-p daimon.testing.ci_shard --ci-shard-by=file --ci-shard-suite=S --ci-shard-index=N --ci-shard-count=M`.
 Files are placed longest-first on the least-loaded shard using the per-file
 seconds in `packages/testing/daimon/testing/ci_durations.json`; a file missing
 from it still runs, on the shard its path hashes to. Refresh the table from a
-run's junit artifacts with `uv run python scripts/generate_ci_durations.py --run <run-id>`.
+run's junit artifacts with `uv run python scripts/generate_ci_durations.py --run <run-id>`;
+it writes only the suites split over more than one shard.
 Each job runs `-n 4 --dist worksteal` (the four vCPUs of a hosted runner;
 Discord keeps `-n 2`), so a failure names the failing area in the job list. Add
 a shard by adding a leg to `pytest-db` in `MATRICES` in `scripts/ci/plan.py`
@@ -118,7 +119,9 @@ a shard by adding a leg to `pytest-db` in `MATRICES` in `scripts/ci/plan.py`
 runs `uv run python scripts/check_ci_shards.py`, which collects each split suite
 once (`--collect-only`, no database), places its files the way CI will, and
 fails if a shard is empty or the shards omit or repeat a test, so a new test
-file lands in exactly one shard without any edit.
+file lands in exactly one shard without any edit. It also fails when a split
+suite has no entries in the table, because then every file of that suite is
+placed by path hash and the shards drift out of balance.
 
 A pull request runs only the jobs its changed files need: `scripts/ci/plan.py`
 maps each path to the suites that cover it and starts only their jobs and matrix
