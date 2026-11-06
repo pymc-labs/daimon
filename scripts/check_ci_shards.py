@@ -15,7 +15,9 @@ shard count and the suite -- and fails when
   matrix's suite, index and count),
 * a shard would receive no test file (pytest exits 5 on it and the job fails),
 * the shards do not hold exactly the collected tests, or a file is placed
-  outside ``0..N-1``.
+  outside ``0..N-1``,
+* a suite with more than one shard has no files in the duration table, so every
+  file would be placed by path hash and the shards drift out of balance.
 
 Suites with one shard are not split, so they are not collected at all.
 One collection per suite keeps this cheap; the plugin's behaviour under real
@@ -29,6 +31,7 @@ from __future__ import annotations
 import argparse
 import glob
 import importlib.util
+import json
 import re
 import shlex
 import subprocess
@@ -73,6 +76,25 @@ def sharded_jobs(workflow: Path) -> dict[str, dict[str, Any]]:
         for name, job in jobs.items()
         if any(_PLUGIN in command for command in _pytest_commands(job))
     }
+
+
+def sharded_suites(workflow: Path = _WORKFLOW) -> dict[str, int]:
+    """The shard count of every suite whose legs load the plugin (1 when not split)."""
+    return _shard_counts(_legs(sharded_jobs(workflow))[0])
+
+
+def _shard_counts(suites: dict[str, list[dict[str, Any]]]) -> dict[str, int]:
+    return {suite: max(int(leg["shards"]) for leg in legs) for suite, legs in suites.items()}
+
+
+def unlisted_suites(shards: dict[str, int], table: dict[str, dict[str, float]]) -> list[str]:
+    """Problems for the split suites that have no files in the duration table."""
+    return [
+        f"{suite}: {count} shards but no files in {DURATIONS.name}, so every file is "
+        "placed by path hash; regenerate it with scripts/generate_ci_durations.py"
+        for suite, count in sorted(shards.items())
+        if count > 1 and not table.get(suite)
+    ]
 
 
 def _legs(jobs: dict[str, dict[str, Any]]) -> tuple[dict[str, list[dict[str, Any]]], list[str]]:
@@ -169,10 +191,12 @@ def check_suite(suite: str, legs: list[dict[str, Any]]) -> list[str]:
     return problems
 
 
-def _stale_entries(suites: list[str]) -> list[str]:
-    import json
+def _table() -> dict[str, dict[str, float]]:
+    return cast("dict[str, dict[str, float]]", json.loads(DURATIONS.read_text()))
 
-    table = cast("dict[str, dict[str, float]]", json.loads(DURATIONS.read_text()))
+
+def _stale_entries(suites: list[str]) -> list[str]:
+    table = _table()
     return [
         f"{suite}: {file}"
         for suite in suites
@@ -197,6 +221,7 @@ def main() -> int:
         raise SystemExit(f"unknown suite(s) {unknown}; the matrices have {list(suites)}")
     problems += [problem for name, job in jobs.items() for problem in _command_problems(name, job)]
     problems += [problem for name in selected for problem in check_suite(name, suites[name])]
+    problems += unlisted_suites(_shard_counts({name: suites[name] for name in selected}), _table())
     stale = _stale_entries(selected)
     if stale:
         print(
