@@ -195,15 +195,14 @@ def _slack_client(facts: dict[str, bool]) -> MagicMock:
     client.conversations_members = AsyncMock(
         return_value={"members": ["U1"] if facts["caller_is_member"] else ["U2"]}
     )
+    client.conversations_replies = AsyncMock(return_value={"messages": [{"ts": "1717.5"}]})
     return client
 
 
-@pytest.mark.parametrize("values", list(itertools.product((False, True), repeat=len(_SLACK_FACTS))))
-async def test_slack_save_and_delivery_agree_with_the_rule(
-    values: tuple[bool, ...], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    facts = dict(zip(_SLACK_FACTS, values, strict=True))
-    expected = slack_may_deliver(**facts)
+async def _slack_save_and_post(
+    facts: dict[str, bool], thread: bool, monkeypatch: pytest.MonkeyPatch
+) -> tuple[bool, bool]:
+    """(the chat tool saves, delivery posts) for C1, or a thread in it."""
     client = _slack_client(facts)
 
     async def web_client(*_args: Any, **_kwargs: Any) -> MagicMock:
@@ -213,7 +212,10 @@ async def test_slack_save_and_delivery_agree_with_the_rule(
     auth = cast(Any, SimpleNamespace(external_id="T1", platform_user_id="U1"))
     try:
         await mcp_routines._resolve_slack_destination(  # pyright: ignore[reportPrivateUsage]
-            cast(Any, None), auth, kind="channel", destination_id="C1"
+            cast(Any, None),
+            auth,
+            kind="thread" if thread else "channel",
+            destination_id="C1:1717.5" if thread else "C1",
         )
         saved = True
     except ToolError:
@@ -221,12 +223,24 @@ async def test_slack_save_and_delivery_agree_with_the_rule(
     refusal = await slack_delivery._destination_refusal(  # pyright: ignore[reportPrivateUsage]
         client,
         cast(Any, SimpleNamespace(created_by_user_id="U1")),
-        cast(Any, SimpleNamespace(channel_id="C1", thread_ts=None)),
+        cast(Any, SimpleNamespace(channel_id="C1", thread_ts="1717.5" if thread else None)),
     )
-    web = await _web_slack_postable(facts, monkeypatch)
-    assert (saved, refusal is None, web) == (expected, expected, expected), (
-        f"chat tool saves={saved}, delivery posts={refusal is None}, web offers={web}, "
-        f"rule={expected}: {facts}"
+    return saved, refusal is None
+
+
+@pytest.mark.parametrize("thread", [False, True], ids=["channel", "thread"])
+@pytest.mark.parametrize("values", list(itertools.product((False, True), repeat=len(_SLACK_FACTS))))
+async def test_slack_save_and_delivery_agree_with_the_rule(
+    values: tuple[bool, ...], thread: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    facts = dict(zip(_SLACK_FACTS, values, strict=True))
+    expected = slack_may_deliver(**facts)
+    saved, posted = await _slack_save_and_post(facts, thread, monkeypatch)
+    # The web app offers channels only, never a thread.
+    web = expected if thread else await _web_slack_postable(facts, monkeypatch)
+    assert (saved, posted, web) == (expected, expected, expected), (
+        f"chat tool saves={saved}, delivery posts={posted}, web offers={web}, "
+        f"rule={expected}, thread={thread}: {facts}"
     )
 
 
@@ -388,8 +402,9 @@ _DISCORD_PLACES = {
 
 
 @pytest.mark.parametrize("answer", [True, False])
+@pytest.mark.parametrize("thread", [False, True], ids=["channel", "thread"])
 async def test_each_slack_surface_follows_the_rules_answer(
-    answer: bool, monkeypatch: pytest.MonkeyPatch
+    thread: bool, answer: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The rule is replaced by a fixed answer, the opposite of what the facts give.
 
@@ -401,29 +416,11 @@ async def test_each_slack_surface_follows_the_rules_answer(
 
     for module in (mcp_routines, slack_delivery, web_visibility):
         monkeypatch.setattr(module, "slack_may_deliver", rule)
-    client = _slack_client(facts)
-
-    async def web_client(*_args: Any, **_kwargs: Any) -> MagicMock:
-        return client
-
-    monkeypatch.setattr(mcp_routines, "slack_web_client", web_client)
-    auth = cast(Any, SimpleNamespace(external_id="T1", platform_user_id="U1"))
-    try:
-        await mcp_routines._resolve_slack_destination(  # pyright: ignore[reportPrivateUsage]
-            cast(Any, None), auth, kind="channel", destination_id="C1"
-        )
-        saved = True
-    except ToolError:
-        saved = False
-    refusal = await slack_delivery._destination_refusal(  # pyright: ignore[reportPrivateUsage]
-        client,
-        cast(Any, SimpleNamespace(created_by_user_id="U1")),
-        cast(Any, SimpleNamespace(channel_id="C1", thread_ts=None)),
-    )
-    web = await _web_slack_postable(facts, monkeypatch)
-    assert (saved, refusal is None, web) == (answer, answer, answer), (
-        f"chat tool saves={saved}, delivery posts={refusal is None}, web offers={web}; "
-        f"the rule answered {answer}"
+    saved, posted = await _slack_save_and_post(facts, thread, monkeypatch)
+    web = answer if thread else await _web_slack_postable(facts, monkeypatch)
+    assert (saved, posted, web) == (answer, answer, answer), (
+        f"chat tool saves={saved}, delivery posts={posted}, web offers={web}; "
+        f"the rule answered {answer}, thread={thread}"
     )
 
 

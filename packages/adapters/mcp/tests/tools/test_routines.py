@@ -1105,7 +1105,7 @@ async def test_create_routine_refuses_a_channel_in_a_protected_category(
     ("kwargs", "kind", "destination_id", "message"),
     [
         ({}, "thread", "C0123ABC", "invalid destination_id"),
-        ({"is_member": False}, "channel", "C0123ABC", "invite it"),
+        ({"is_member": False}, "channel", "C0123ABC", "Invite it"),
         ({"info_error": "channel_not_found"}, "channel", "C0123ABC", "could not find"),
         ({"thread_found": False}, "thread", "C0123ABC:1717.5", "no thread"),
     ],
@@ -1261,8 +1261,8 @@ async def test_update_routine_sets_and_clears_a_destination(
 @pytest.mark.parametrize(
     ("channel", "message"),
     [
-        (lambda: _text_channel(perms=_perms(send=False)), "you cannot post"),
-        (lambda: _text_channel(perms=_perms(view=False)), "you cannot post"),
+        (lambda: _text_channel(perms=_perms(send=False)), "You can't post"),
+        (lambda: _text_channel(perms=_perms(view=False)), "You can't post"),
     ],
 )
 async def test_create_routine_refuses_a_discord_channel_the_caller_cannot_post_in(
@@ -1294,7 +1294,7 @@ async def test_create_routine_refuses_a_private_thread_the_caller_is_not_in(
     _discord_channels(
         monkeypatch, {1234: _private_thread(parent=parent, caller_is_member=False), 444: parent}
     )
-    with pytest.raises(ToolError, match="you cannot post"):
+    with pytest.raises(ToolError, match="You can't post"):
         await _create(
             committing_sessionmaker,
             db_session,
@@ -1332,7 +1332,7 @@ async def test_create_routine_refuses_a_private_slack_channel_the_caller_is_not_
     """Review regression (round 3): daimon is in the private channel, the
     caller is not."""
     _slack_client(monkeypatch, is_private=True, caller_in_channel=False)
-    with pytest.raises(ToolError, match="you cannot post"):
+    with pytest.raises(ToolError, match="You can't post"):
         await _create(
             committing_sessionmaker,
             db_session,

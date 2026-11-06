@@ -140,9 +140,9 @@ async def _resolve_discord_destination(
                 raise ToolError(f"{destination_id} is not in this server")
             if not await _discord_caller_may_post(channel, member, caller):
                 raise ToolError(
-                    f"you cannot post in {destination_id}, so a routine cannot deliver there "
-                    "for you. Pick a channel you can post in, or ask an admin or an owner "
-                    "for access. Nothing was saved."
+                    f"You can't post in {destination_id}, so a routine can't deliver there "
+                    "for you. Nothing was saved.\n"
+                    "Pick a channel you can post in, or ask an admin or an owner for access."
                 )
             return placement
     except (discord.NotFound, discord.Forbidden) as err:
@@ -219,18 +219,20 @@ async def _resolve_slack_destination(
         ):
             if is_archived:
                 raise ToolError(
-                    f"{channel_id} is archived, so a routine cannot deliver there. Pick another "
-                    "channel, or ask an admin or an owner to unarchive it. Nothing was saved."
+                    f"{channel_id} is archived, so a routine can't deliver there. "
+                    "Nothing was saved.\n"
+                    "Pick another channel, or ask an admin or an owner to unarchive it."
                 )
             if not bot_is_member:
                 raise ToolError(
-                    f"daimon is not in {channel_id}; invite it to the channel first, or ask an "
-                    "admin or an owner to. Nothing was saved."
+                    f"Daimon isn't in {channel_id}, so a routine can't deliver there. "
+                    "Nothing was saved.\n"
+                    "Invite it to the channel first, or ask an admin or an owner to."
                 )
             raise ToolError(
-                f"you cannot post in {channel_id}, so a routine cannot deliver there "
-                "for you. Pick a channel you can post in, or ask an admin or an owner "
-                "for access. Nothing was saved."
+                f"You can't post in {channel_id}, so a routine can't deliver there for you. "
+                "Nothing was saved.\n"
+                "Pick a channel you can post in, or ask an admin or an owner for access."
             )
         if kind == "thread":
             replies = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]
