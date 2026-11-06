@@ -327,6 +327,7 @@ source_modules = [
     "daimon.core.repo_memory_tools",
     "daimon.core.roster",
     "daimon.core.routine_delivery",
+    "daimon.core.routine_destinations",
     "daimon.core.routine_sandbox",
     "daimon.core.routine_move",
     "daimon.core.routine_hold",

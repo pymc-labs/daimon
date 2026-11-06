@@ -12,7 +12,9 @@ from typing import Any
 import httpx
 import pytest
 from daimon.adapters.web import routines as routines_module
+from daimon.adapters.web.channel_visibility import forget_visibility
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
+from daimon.core.config import DiscordSettings, Settings
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import platform_names
 from daimon.core.stores import tenants as tenants_store
@@ -25,6 +27,7 @@ from daimon.core.stores.routines import create_routine, list_routines_for_tenant
 from daimon.testing.factories import make_platform_principal
 from daimon.testing.turn_router import AGENT_ID, build_turn_router
 from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME
+from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .chat_support import (
@@ -35,7 +38,7 @@ from .chat_support import (
     signed_in,
     visitor_of,
 )
-from .conftest import PUBLIC_URL, WebClientFactory, web_settings
+from .conftest import PUBLIC_URL, FakeUpstream, WebClientFactory, web_settings
 
 _OWN = {"X-Daimon-Web": "1", "Origin": PUBLIC_URL}
 _CHANNEL = "123456789012345678"
@@ -107,7 +110,12 @@ class Rig:
 
     @asynccontextmanager
     async def open(
-        self, *, as_: str = "member", discord_id: str | None = "m-1"
+        self,
+        *,
+        as_: str = "member",
+        discord_id: str | None = "m-1",
+        provider: FakeUpstream | None = None,
+        settings: Settings | None = None,
     ) -> AsyncIterator[tuple[httpx.AsyncClient, Workspace, WebPersonRow]]:
         ws = await funded_workspace(self.factory)
         member = await _member(self.factory, ws.tenant_id, "Mia", discord_id=discord_id)
@@ -125,7 +133,11 @@ class Rig:
         turns = build_turns(self.factory, build_turn_router(str(ws.tenant_id)), self.tmp_path)
         token = await signed_in(self.factory, person)
         async with self.web_client(
-            web_settings(), sessionmaker=self.factory, turns=turns
+            web_settings(),
+            sessionmaker=self.factory,
+            turns=turns,
+            provider=provider,
+            settings=settings,
         ) as client:
             client.cookies.set("__Host-daimon_web", token, domain="web.example.com")
             client.headers.update(_OWN)
@@ -327,7 +339,7 @@ async def test_a_member_may_deliver_only_to_a_channel_their_platform_shows_them(
         asked.append((str(user_id), frozenset(channel_ids)))
         return frozenset({_CHANNEL, "222", "333"} & set(channel_ids))
 
-    monkeypatch.setattr(routines_module, "readable_channels", shown)
+    monkeypatch.setattr(routines_module, "postable_channels", shown)
     async with rig.open() as (client, ws, _):
         async with rig.factory.begin() as db:
             await platform_names.upsert_channel_names(
@@ -386,3 +398,57 @@ async def test_changing_a_routine_needs_a_linked_chat_account(rig: Rig) -> None:
         refused = await client.patch(f"/api/routines/{theirs}", json={"message": "mine now"})
     assert choices["can_dm"] is False
     assert refused.status_code == 409
+
+
+_VIEW_CHANNEL = 1 << 10
+_SEND_MESSAGES = 1 << 11
+
+
+def _discord_guild(everyone_permissions: int) -> FakeUpstream:
+    """A Discord server where `_CHANNEL` exists and @everyone holds `everyone_permissions`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/members/m-1"):
+            return httpx.Response(200, json={"roles": []})
+        if path.endswith("/channels"):
+            return httpx.Response(
+                200, json=[{"id": _CHANNEL, "type": 0, "permission_overwrites": []}]
+            )
+        guild_id = path.rsplit("/", 1)[-1]
+        roles = [{"id": guild_id, "permissions": str(everyone_permissions)}]
+        return httpx.Response(200, json={"owner_id": "someone-else", "roles": roles})
+
+    return FakeUpstream(handler)
+
+
+async def _create_routine_to_channel(rig: Rig, *, everyone_permissions: int) -> httpx.Response:
+    settings = Settings(
+        _env_file=None,  # pyright: ignore[reportCallIssue]
+        database={"url": "postgresql+asyncpg://u:p@h/db"},  # pyright: ignore[reportArgumentType]
+        discord=DiscordSettings(bot_token=SecretStr("token")),
+    )
+    forget_visibility()
+    async with rig.open(provider=_discord_guild(everyone_permissions), settings=settings) as (
+        client,
+        ws,
+        _,
+    ):
+        async with rig.factory.begin() as db:
+            await platform_names.upsert_channel_names(
+                db, tenant_id=ws.tenant_id, platform="discord", names={_CHANNEL: "general"}
+            )
+        return await client.post("/api/routines", json=_NEW | {"destination": _CHANNEL})
+
+
+async def test_a_member_may_deliver_to_a_channel_they_can_view_and_post_in(rig: Rig) -> None:
+    res = await _create_routine_to_channel(rig, everyone_permissions=_VIEW_CHANNEL | _SEND_MESSAGES)
+    assert res.status_code == 200, res.text
+
+
+async def test_a_member_may_not_deliver_to_a_channel_they_can_view_but_not_post_in(
+    rig: Rig,
+) -> None:
+    """Chat refuses this destination (`_check_send_permission`); the web app must too."""
+    res = await _create_routine_to_channel(rig, everyone_permissions=_VIEW_CHANNEL)
+    assert res.status_code == 422, res.text
