@@ -58,7 +58,9 @@ def _poster(
     client.users_info = AsyncMock(return_value={"user": {"id": "U1", "team_id": "T_ROUTINES"}})
     client.conversations_open = AsyncMock(return_value={"channel": {"id": "D_CREATOR"}})
     client.conversations_info = AsyncMock(
-        side_effect=lambda channel: {"channel": {"id": channel, "is_private": False}}
+        side_effect=lambda channel: {
+            "channel": {"id": channel, "is_private": False, "is_member": True}
+        }
     )
     client.conversations_members = AsyncMock(return_value={"members": ["U1"]})
     client.conversations_replies = AsyncMock(return_value={"messages": [{"ts": "1717.5"}]})
@@ -364,7 +366,7 @@ async def test_a_private_channel_the_creator_is_not_in_gets_their_dm_not_a_post(
     row = await _routine(db_session, kind="channel", destination_id="C_PRIV")
     post, client = _poster(db_session_factory, monkeypatch)
     client.conversations_info = AsyncMock(
-        return_value={"channel": {"id": "C_PRIV", "is_private": True}}
+        return_value={"channel": {"id": "C_PRIV", "is_private": True, "is_member": True}}
     )
     client.conversations_members = AsyncMock(return_value={"members": ["U_SOMEONE_ELSE"]})
 
@@ -373,6 +375,29 @@ async def test_a_private_channel_the_creator_is_not_in_gets_their_dm_not_a_post(
     assert outcome.note == "dm_fallback:creator_cannot_post"
     (call,) = client.chat_postMessage.await_args_list
     assert call.kwargs["channel"] == "D_CREATOR", "only the creator's own DM, never C_PRIV"
+
+
+async def test_a_channel_daimon_was_removed_from_gets_the_creators_dm_not_a_post(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Daimon was removed from a public channel after the routine was saved.
+
+    Saving refuses that channel (chat tool and web app, `slack_may_deliver`),
+    so delivery must not post there either, even where Slack would accept it.
+    """
+    row = await _routine(db_session, kind="channel", destination_id="C_LEFT")
+    post, client = _poster(db_session_factory, monkeypatch)
+    client.conversations_info = AsyncMock(
+        return_value={"channel": {"id": "C_LEFT", "is_private": False, "is_member": False}}
+    )
+
+    outcome = await post(row)
+
+    assert outcome.note == "dm_fallback:destination_unavailable"
+    (call,) = client.chat_postMessage.await_args_list
+    assert call.kwargs["channel"] == "D_CREATOR", "only the creator's own DM, never C_LEFT"
 
 
 @pytest.mark.parametrize("deleted_as", ["error", "empty"])

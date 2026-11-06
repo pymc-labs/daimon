@@ -43,9 +43,9 @@ from daimon.core.routine_delivery import (
     render_fallback_post,
     resolve_routine_identity,
     routine_requester_name,
-    slack_creator_may_post,
     tenant_dm_still_open,
 )
+from daimon.core.routine_destinations import slack_may_deliver
 from daimon.core.routine_files import deliver_routine_files, payload_for
 from daimon.core.routine_hold import result_is_held
 from daimon.core.rule_views import keeps_routine_inside
@@ -147,11 +147,12 @@ async def _destination_refusal(
     """Why the destination cannot take this post now, or None.
 
     Re-checked at every post, because access and threads change after the
-    routine is saved: the channel must still exist, the creator must still be
-    allowed to post there (the channel tools' rule: private channel or guest
-    → membership), and a stored thread must still exist — Slack accepts a
-    missing `thread_ts` and posts at the channel root, so the ordinary
-    `send_message` checks `conversations.replies` first, and so does this.
+    routine is saved. `slack_may_deliver` decides, the rule the chat tools and
+    the web app apply when the routine is saved: daimon still in a channel that
+    is not archived, and the creator still allowed to post there (private
+    channel or guest → membership). A stored thread must still exist too —
+    Slack accepts a missing `thread_ts` and posts at the channel root, so the
+    ordinary `send_message` checks `conversations.replies` first, and so does this.
     """
     creator = row.created_by_user_id
     if creator is None:
@@ -159,23 +160,28 @@ async def _destination_refusal(
     try:
         info = await client.conversations_info(channel=target.channel_id)  # pyright: ignore[reportUnknownMemberType]
         channel = cast("dict[str, object]", info["channel"])
-        if channel.get("is_archived"):
-            return "destination_unavailable"
-        user_info = await client.users_info(user=creator)  # pyright: ignore[reportUnknownMemberType]
-        user = cast("dict[str, object]", user_info["user"])
-        is_guest = bool(user.get("is_restricted") or user.get("is_ultra_restricted"))
+        is_archived = bool(channel.get("is_archived"))
+        bot_is_member = bool(channel.get("is_member"))
+        is_im_or_mpim = bool(channel.get("is_im") or channel.get("is_mpim"))
         is_private = bool(channel.get("is_private"))
-        is_member = (
-            await _is_member(client, channel_id=target.channel_id, user_id=creator)
-            if is_private or is_guest
-            else False
-        )
-        if not slack_creator_may_post(
-            is_im_or_mpim=bool(channel.get("is_im") or channel.get("is_mpim")),
+        is_guest = False
+        is_member = False
+        if bot_is_member and not is_archived and not is_im_or_mpim:
+            user_info = await client.users_info(user=creator)  # pyright: ignore[reportUnknownMemberType]
+            user = cast("dict[str, object]", user_info["user"])
+            is_guest = bool(user.get("is_restricted") or user.get("is_ultra_restricted"))
+            if is_private or is_guest:
+                is_member = await _is_member(client, channel_id=target.channel_id, user_id=creator)
+        if not slack_may_deliver(
+            bot_is_member=bot_is_member,
+            is_archived=is_archived,
+            is_im_or_mpim=is_im_or_mpim,
             is_private=is_private,
             is_guest=is_guest,
-            is_member=is_member,
+            caller_is_member=is_member,
         ):
+            if not is_im_or_mpim and (is_archived or not bot_is_member):
+                return "destination_unavailable"
             return "creator_cannot_post"
         if target.thread_ts is not None:
             replies = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]

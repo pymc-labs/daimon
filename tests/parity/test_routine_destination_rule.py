@@ -12,9 +12,20 @@ code and fails when it stops reaching the rule.
 from __future__ import annotations
 
 import ast
+import itertools
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
+from unittest.mock import AsyncMock, MagicMock
 
+import discord
 import pytest
+from daimon.adapters.discord import routine_delivery as discord_delivery
+from daimon.adapters.mcp.tools import routines as mcp_routines
+from daimon.adapters.slack import routine_delivery as slack_delivery
+from daimon.core.routine_delivery import discord_creator_may_post
+from daimon.core.routine_destinations import slack_may_deliver
+from fastmcp.exceptions import ToolError
 
 _ROOT = Path(__file__).resolve().parents[2]
 _ADAPTERS = _ROOT / "packages" / "adapters"
@@ -131,3 +142,129 @@ def test_the_contract_flags_a_local_copy_of_the_rule() -> None:
     graph = _call_graph(source)
     assert not _reaches_rule("_resolve_slack_destination", graph)
     assert _reaches_rule("_resolve_discord_destination", graph)
+
+
+# ----- Behaviour: each surface's verdict equals the core rule's, for every fact -----
+
+_SLACK_FACTS = (
+    "bot_is_member",
+    "is_archived",
+    "is_im_or_mpim",
+    "is_private",
+    "is_guest",
+    "caller_is_member",
+)
+_DISCORD_FACTS = (
+    "administrator",
+    "view_channel",
+    "send_messages",
+    "is_thread",
+    "send_messages_in_threads",
+    "is_private_thread",
+    "manage_threads",
+    "is_thread_member",
+)
+
+
+def _slack_client(facts: dict[str, bool]) -> MagicMock:
+    client = MagicMock()
+    client.conversations_info = AsyncMock(
+        return_value={
+            "channel": {
+                "id": "C1",
+                "is_member": facts["bot_is_member"],
+                "is_archived": facts["is_archived"],
+                "is_im": facts["is_im_or_mpim"],
+                "is_private": facts["is_private"],
+            }
+        }
+    )
+    client.users_info = AsyncMock(
+        return_value={"user": {"id": "U1", "is_restricted": facts["is_guest"]}}
+    )
+    client.conversations_members = AsyncMock(
+        return_value={"members": ["U1"] if facts["caller_is_member"] else ["U2"]}
+    )
+    return client
+
+
+@pytest.mark.parametrize("values", list(itertools.product((False, True), repeat=len(_SLACK_FACTS))))
+async def test_slack_save_and_delivery_agree_with_the_rule(
+    values: tuple[bool, ...], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    facts = dict(zip(_SLACK_FACTS, values, strict=True))
+    expected = slack_may_deliver(**facts)
+    client = _slack_client(facts)
+
+    async def web_client(*_args: Any, **_kwargs: Any) -> MagicMock:
+        return client
+
+    monkeypatch.setattr(mcp_routines, "slack_web_client", web_client)
+    auth = cast(Any, SimpleNamespace(external_id="T1", platform_user_id="U1"))
+    try:
+        await mcp_routines._resolve_slack_destination(  # pyright: ignore[reportPrivateUsage]
+            cast(Any, None), auth, kind="channel", destination_id="C1"
+        )
+        saved = True
+    except ToolError:
+        saved = False
+    refusal = await slack_delivery._destination_refusal(  # pyright: ignore[reportPrivateUsage]
+        client,
+        cast(Any, SimpleNamespace(created_by_user_id="U1")),
+        cast(Any, SimpleNamespace(channel_id="C1", thread_ts=None)),
+    )
+    assert (saved, refusal is None) == (expected, expected), (
+        f"chat tool saves={saved}, delivery posts={refusal is None}, rule={expected}: {facts}"
+    )
+
+
+def _discord_place(facts: dict[str, bool]) -> tuple[MagicMock, MagicMock, MagicMock]:
+    """(channel, permission source, member) carrying `facts`."""
+    perms = SimpleNamespace(
+        view_channel=facts["view_channel"],
+        send_messages=facts["send_messages"],
+        send_messages_in_threads=facts["send_messages_in_threads"],
+        manage_threads=facts["manage_threads"],
+    )
+    member = MagicMock(spec=discord.Member)
+    member.guild_permissions = SimpleNamespace(administrator=facts["administrator"])
+    if not facts["is_thread"]:
+        channel = MagicMock(spec=discord.TextChannel)
+        channel.permissions_for = MagicMock(return_value=perms)
+        source = channel
+    else:
+        source = MagicMock(spec=discord.TextChannel)
+        source.permissions_for = MagicMock(return_value=perms)
+        channel = MagicMock(spec=discord.Thread)
+        channel.parent = source
+        channel.type = (
+            discord.ChannelType.private_thread
+            if facts["is_private_thread"]
+            else discord.ChannelType.public_thread
+        )
+        not_found = discord.NotFound(MagicMock(status=404, reason="Not Found"), "no member")
+        channel.fetch_member = AsyncMock(
+            return_value=member if facts["is_thread_member"] else None,
+            side_effect=None if facts["is_thread_member"] else not_found,
+        )
+    channel.guild = MagicMock()
+    channel.guild.get_member = MagicMock(return_value=member)
+    return channel, source, member
+
+
+@pytest.mark.parametrize(
+    "values", list(itertools.product((False, True), repeat=len(_DISCORD_FACTS)))
+)
+async def test_discord_save_and_delivery_agree_with_the_rule(values: tuple[bool, ...]) -> None:
+    facts = dict(zip(_DISCORD_FACTS, values, strict=True))
+    if not facts["is_thread"] and (facts["is_private_thread"] or facts["is_thread_member"]):
+        pytest.skip("thread facts do not apply to a channel")
+    expected = discord_creator_may_post(**facts)
+    channel, source, member = _discord_place(facts)
+    saved = await mcp_routines._discord_caller_may_post(  # pyright: ignore[reportPrivateUsage]
+        channel, member, "1"
+    )
+    posted = await discord_delivery.creator_may_post(channel, source, 1)
+    assert (saved, posted) == (expected, expected), (
+        f"chat tool saves={saved}, delivery posts={posted}, rule={expected}: {facts}"
+    )

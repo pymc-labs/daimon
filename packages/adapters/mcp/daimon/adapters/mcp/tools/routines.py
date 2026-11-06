@@ -140,8 +140,9 @@ async def _resolve_discord_destination(
                 raise ToolError(f"{destination_id} is not in this server")
             if not await _discord_caller_may_post(channel, member, caller):
                 raise ToolError(
-                    f"you cannot post in {destination_id}, so a routine cannot deliver "
-                    "there for you. Nothing was saved."
+                    f"you cannot post in {destination_id}, so a routine cannot deliver there "
+                    "for you. Pick a channel you can post in, or ask an admin or an owner "
+                    "for access. Nothing was saved."
                 )
             return placement
     except (discord.NotFound, discord.Forbidden) as err:
@@ -217,7 +218,9 @@ async def _resolve_slack_destination(
             caller_is_member=caller_is_member,
         ):
             if is_archived:
-                raise ToolError(f"{channel_id} is archived")
+                raise ToolError(
+                    f"{channel_id} is archived. Pick another channel. Nothing was saved."
+                )
             if not bot_is_member:
                 raise ToolError(
                     f"daimon is not in {channel_id}; invite it to the channel first. "
@@ -225,7 +228,8 @@ async def _resolve_slack_destination(
                 )
             raise ToolError(
                 f"you cannot post in {channel_id}, so a routine cannot deliver there "
-                "for you. Nothing was saved."
+                "for you. Pick a channel you can post in, or ask an admin or an owner "
+                "for access. Nothing was saved."
             )
         if kind == "thread":
             replies = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]
