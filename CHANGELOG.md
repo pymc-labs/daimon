@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Connect GitHub now says a repo is for that agent only and stays until removed.**
   The success page and the connect card on Discord, Slack and Teams use the same words.
   A member who names a repo the agent already has hears "already has", not "ask an admin".
+- **A GitHub token refresh that fails because GitHub is briefly unavailable no longer raises an app-errors alert at once.** The scheduler logs `scheduler.github_app_session_refresh.deferred` at warning level, with the session and its failure count, for the first four consecutive failures of a session (about 15 minutes of backoff, the time left before the token expires). The fifth failure, and any other refresh error, still logs `scheduler.github_app_session_refresh.failed` at error level.
 - **In Teams channels and 1:1 chats the agent can edit and delete its own replies, cards and routine results.**
   Each message a turn or routine posts is recorded as the agent's, so `edit_message`
   and `delete_message` accept it once the turn is over, when the person who started it

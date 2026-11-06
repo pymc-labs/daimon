@@ -67,6 +67,7 @@ from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.direct_messages import DirectMessageAccessRevoked, run_dm_routine
 from daimon.core.discord_membership import DiscordRestMembershipResolver
 from daimon.core.github_app_session import (
+    GitHubTokenMintUnavailable,
     archive_app_vault,
     effective_repo_state,
     revoke_session_tokens,
@@ -1195,6 +1196,11 @@ _app_refresh_failures: dict[str, tuple[int, datetime]] = {}
 _app_refresh_retired: dict[str, str] = {}
 _REFRESH_BACKOFF_START = timedelta(minutes=1)
 _REFRESH_BACKOFF_MAX = timedelta(minutes=30)
+# A refresh is due 15 minutes before the token expires. Backoff attempts land at
+# 0, 1, 3, 7 and 15 minutes, so the fifth consecutive failure means the old token
+# is about to expire. Until then a GitHub mint outage is retried quietly (WARNING);
+# from then on it is an ERROR, so a real outage or broken session still alerts.
+_REFRESH_DEFERRED_FAILURES = 4
 # A turn running continuously for longer than this is treated as abandoned and
 # stops renewing its tokens. Mapped turns use active_turn_started_at; MCP
 # sessions use when the scheduler first saw MA report them running.
@@ -1405,6 +1411,16 @@ async def _refresh_github_app_sessions(
                 )
                 continue
             _record_refresh_failure(session_id, now)
+            failures = _app_refresh_failures[session_id][0]
+            if isinstance(error, GitHubTokenMintUnavailable) and (
+                failures <= _REFRESH_DEFERRED_FAILURES
+            ):
+                log.warning(
+                    "scheduler.github_app_session_refresh.deferred",
+                    session_id=session_id,
+                    consecutive_failures=failures,
+                )
+                continue
             log.exception("scheduler.github_app_session_refresh.failed", session_id=session_id)
     async with sm() as session:
         mcp_live = await list_live_mcp_app_sessions(session, now=now, include_expired=True)

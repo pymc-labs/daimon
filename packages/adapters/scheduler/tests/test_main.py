@@ -41,7 +41,7 @@ from daimon.adapters.scheduler.main import (
     _validate_mcp_settings,
 )
 from daimon.core.config import Settings
-from daimon.core.github_app_session import AppSessionAccess
+from daimon.core.github_app_session import AppSessionAccess, GitHubTokenMintUnavailable
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
@@ -894,6 +894,60 @@ async def test_refresh_keeps_backing_off_on_any_other_failure(
     assert fresh_refresh_state[_SESSION][0] == 1
     assert len(_events(logs, "scheduler.github_app_session_refresh.failed")) == 1
     assert _events(logs, "scheduler.github_app_session_refresh.retired") == []
+
+
+_MINT_UNAVAILABLE = "GitHub access is temporarily unavailable. Try again."
+
+
+async def test_refresh_defers_a_first_github_mint_outage_at_warning(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    retired_refresh_state: dict[str, str],
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+) -> None:
+    item = _mapped_app_session()
+    rotate = unittest.mock.AsyncMock(side_effect=GitHubTokenMintUnavailable(_MINT_UNAVAILABLE))
+    with structlog.testing.capture_logs() as logs:
+        await _refresh_mapped(db_session_factory, monkeypatch, [[item], [item]], rotate=rotate)
+    [deferred] = _events(logs, "scheduler.github_app_session_refresh.deferred")
+    assert deferred["log_level"] == "warning"
+    assert deferred["session_id"] == _SESSION
+    assert deferred["consecutive_failures"] == 1
+    assert _events(logs, "scheduler.github_app_session_refresh.failed") == []
+    assert [entry for entry in logs if entry["log_level"] == "error"] == []
+    assert fresh_refresh_state[_SESSION][0] == 1
+
+
+async def test_refresh_alerts_when_a_github_mint_outage_outlasts_the_retry_budget(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    retired_refresh_state: dict[str, str],
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+) -> None:
+    item = _mapped_app_session()
+    rotate = unittest.mock.AsyncMock(side_effect=GitHubTokenMintUnavailable(_MINT_UNAVAILABLE))
+    fresh_refresh_state[_SESSION] = (4, datetime.now(UTC) - timedelta(seconds=1))
+    with structlog.testing.capture_logs() as logs:
+        await _refresh_mapped(db_session_factory, monkeypatch, [[item], [item]], rotate=rotate)
+    [failed] = _events(logs, "scheduler.github_app_session_refresh.failed")
+    assert failed["log_level"] == "error"
+    assert _events(logs, "scheduler.github_app_session_refresh.deferred") == []
+    assert fresh_refresh_state[_SESSION][0] == 5
+
+
+async def test_refresh_keeps_the_error_for_a_non_retryable_failure_on_the_first_try(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    retired_refresh_state: dict[str, str],
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+) -> None:
+    item = _mapped_app_session()
+    rotate = unittest.mock.AsyncMock(side_effect=RuntimeError("vault exploded"))
+    with structlog.testing.capture_logs() as logs:
+        await _refresh_mapped(db_session_factory, monkeypatch, [[item], [item]], rotate=rotate)
+    [failed] = _events(logs, "scheduler.github_app_session_refresh.failed")
+    assert failed["log_level"] == "error"
+    assert _events(logs, "scheduler.github_app_session_refresh.deferred") == []
 
 
 async def test_retired_session_does_not_stop_the_others_in_the_sweep(
