@@ -1204,7 +1204,7 @@ def _agent_done(**changes: object) -> str:
 
 def test_agent_done_page_says_connected_and_close_tab() -> None:
     body = _agent_done()
-    assert "2 repos connected to ResearchBot." in body
+    assert "2 repos connected to ResearchBot only. They stay until removed." in body
     assert "You can close this tab." in body
     assert "old GitHub token" not in body
 
@@ -1351,7 +1351,7 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
         assert (await save(hidden)).status_code == 200  # No-op keeps the invitation.
         added = await save(hidden, repo=["101", "102"])
         assert added.status_code == 200
-        assert "Editor can read and change these 2 repos." in added.text
+        assert "2 repos connected to Editor only. They stay until removed." in added.text
         async with sessionmaker() as session:
             grants = await github_access.list_agent_repos(
                 session, tenant_id=tenant_id, agent_id=agent_id
@@ -1362,7 +1362,8 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
         }
         replay = await save(hidden, repo=["101", "102"])
         assert (
-            replay.status_code == 200 and "Editor can read and change these 2 repos." in replay.text
+            replay.status_code == 200
+            and "2 repos connected to Editor only. They stay until removed." in replay.text
         )
 
         state, hidden, rendered = await page()
@@ -1374,7 +1375,7 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
         working = await save(hidden, working="101")
         assert (
             working.status_code == 200
-            and "Editor can read and change these 2 repos." in working.text
+            and "2 repos connected to Editor only. They stay until removed." in working.text
         )
 
         admin_ids.clear()
@@ -1404,12 +1405,12 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
         mixed = await save(hidden, repo="103", remove="101", working="103")
         assert mixed.status_code == 200
         assert "repo-101" not in mixed.text
-        assert "Editor can read and change this repo." in mixed.text
+        assert "1 repo connected to Editor only. It stays until removed." in mixed.text
 
         state, hidden, rendered = await page()
         cleared = await save(hidden, working="clear")
         assert cleared.status_code == 200
-        assert "Editor can read and change this repo." in cleared.text
+        assert "1 repo connected to Editor only. It stays until removed." in cleared.text
 
         state, hidden, rendered = await page()
         async with sessionmaker.begin() as session:
@@ -1870,7 +1871,7 @@ async def test_editor_mixed_owner_save_is_atomic_and_binds_each_installation(
         },
     )
     assert mixed.status_code == 200
-    assert "Editor can read and change these 3 repos." in mixed.text
+    assert "3 repos connected to Editor only. They stay until removed." in mixed.text
     for owner in ("org-a", "org-b", "editor"):
         assert owner in mixed.text
     assert "org-c" not in mixed.text
@@ -2168,7 +2169,7 @@ async def test_failed_save_retry_form_keeps_state_and_the_ticked_repos(
     editor_env.details_down = False
     retried = await _submit(editor_env.browser, form.group(1), carried)
     assert retried.status_code == 200
-    assert "Editor can read and change these 2 repos." in retried.text
+    assert "2 repos connected to Editor only. They stay until removed." in retried.text
     assert await editor_env.saved_repo_ids() == [101, 102]
 
 

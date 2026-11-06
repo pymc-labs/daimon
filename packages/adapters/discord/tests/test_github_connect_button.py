@@ -209,7 +209,7 @@ async def test_requester_gets_ephemeral_link_and_click_sets_followup(
     assert interaction.followup.send.await_args.args == ()
     assert (
         kwargs["embed"].description
-        == "Nothing is connected yet.\n\nTap the button and tick the repos ResearchBot can use."
+        == "Nothing is connected yet.\n\nTap the button and tick the repos for ResearchBot. They stay until you remove them."
     )
     assert kwargs["embed"].to_dict()["author"]["name"] == "Daimon"
     assert kwargs["view"].children[0].url == (
