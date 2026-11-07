@@ -108,7 +108,7 @@ async def test_a_press_goes_to_the_shared_writer_with_the_presser(
     result = MagicMock(note="Approvals is now Allow writes for this thread.")
     change = AsyncMock(return_value=result)
     monkeypatch.setattr(cog, "change_setting", change)
-    monkeypatch.setattr(cog, "find_platform_principal", AsyncMock(return_value=None))
+    monkeypatch.setattr(cog, "actor_account", AsyncMock(return_value=None))
     monkeypatch.setattr(cog, "resolve_tenant_for_interaction", AsyncMock(return_value=TENANT))
     view = cog.SettingsView(
         _runtime(),
@@ -137,7 +137,7 @@ async def test_a_refusal_is_an_error_card_and_a_forgery_is_ignored(
         )
     )
     monkeypatch.setattr(cog, "change_setting", change)
-    monkeypatch.setattr(cog, "find_platform_principal", AsyncMock(return_value=None))
+    monkeypatch.setattr(cog, "actor_account", AsyncMock(return_value=None))
     monkeypatch.setattr(cog, "resolve_tenant_for_interaction", AsyncMock(return_value=TENANT))
     view = cog.SettingsView(
         _runtime(),

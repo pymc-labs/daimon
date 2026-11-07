@@ -22,7 +22,7 @@ from daimon.core.admin_actions import DelegatedAction
 from daimon.core.cost_footer import cost_footer_note
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.platform_words import DESCRIPTIONS
-from daimon.core.scope_settings import SettingsActor, SettingsPlace, change_setting
+from daimon.core.scope_settings import SettingsActor, SettingsPlace, actor_account, change_setting
 from daimon.core.settings_card import moved_to_settings
 from daimon.core.stores.tenants import get_cost_footer
 from sqlalchemy.exc import SQLAlchemyError
@@ -79,7 +79,12 @@ class CostFooterCog(commands.Cog):
                     runtime.settings,
                     SettingsActor(
                         tenant_id=tenant_id,
-                        account_id=None,
+                        account_id=await actor_account(
+                            runtime.sessionmaker,
+                            tenant_id=tenant_id,
+                            platform="discord",
+                            user_id=str(interaction.user.id),
+                        ),
                         surface="panel",
                         native_user_id=str(interaction.user.id),
                         admin_for=admin_for,

@@ -25,6 +25,7 @@ from daimon.core.here_card import HereCard, load_here_card, render_here_card, re
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.outsiders import OutsiderVisibility
 from daimon.core.permissions import channel_permissions
+from daimon.core.scope_settings import actor_account
 from daimon.core.settings_card import moved_to_settings
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.identity import find_platform_principal
@@ -419,7 +420,9 @@ async def handle_here_approvals(runtime: SlackRuntime, payload: dict[str, Any]) 
             record=ApprovalChange(
                 channel_id=None if scope == "server" else channel_id,
                 thread_id=None,
-                actor_account_id=None,
+                actor_account_id=await actor_account(
+                    runtime.sessionmaker, tenant_id=tenant_id, platform="slack", user_id=user_id
+                ),
                 surface="panel",
             ),
         )
@@ -513,7 +516,9 @@ async def handle_here_approval_submission(runtime: SlackRuntime, payload: dict[s
             record=ApprovalChange(
                 channel_id=channel_id,
                 thread_id=f"{channel_id}:{root}",
-                actor_account_id=None,
+                actor_account_id=await actor_account(
+                    runtime.sessionmaker, tenant_id=tenant_id, platform="slack", user_id=user_id
+                ),
                 surface="panel",
             ),
         )

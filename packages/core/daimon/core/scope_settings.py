@@ -46,6 +46,7 @@ from daimon.core.scope_cascade import CascadeMode, CascadeScope, ResolvedCascade
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.channel_changes import WORKSPACE_ID, WriteHook, record_change
 from daimon.core.stores.domain import CHAT_PLATFORMS, ChangeSurface
+from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.switch_modes import Switch, get_switch_modes
 from daimon.core.stores.tenants import get_cost_footer, set_cost_footer
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -289,6 +290,23 @@ def _refused(
     message: str, kind: Literal["forbidden", "invalid"], reason: str
 ) -> ChannelChangeRefused:
     return ChannelChangeRefused(message, kind=kind, reason=reason)
+
+
+async def actor_account(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    user_id: str,
+) -> uuid.UUID | None:
+    """The account a chat person's change is recorded under, or None before they have one.
+
+    Never creates an account: pressing a control is not a reason to mint one."""
+    async with sessionmaker() as session:
+        principal = await find_platform_principal(
+            session, tenant_id=tenant_id, platform=platform, external_id=user_id
+        )
+    return principal.account_id if principal is not None else None
 
 
 def setting_refusal(

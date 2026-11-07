@@ -25,6 +25,7 @@ from daimon.core.scope_settings import (
     SettingsActor,
     SettingsDefaults,
     SettingsPlace,
+    actor_account,
     change_setting,
     may_change_approvals,
     read_settings,
@@ -35,7 +36,6 @@ from daimon.core.settings_card import (
     decode_choice,
     may_change_for,
 )
-from daimon.core.stores.identity import find_platform_principal
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
@@ -93,16 +93,6 @@ def _actor(
         native_user_id=user_id,
         admin_for=admin_for,
     )
-
-
-async def _account_id(
-    runtime: SlackRuntime, *, tenant_id: uuid.UUID, user_id: str
-) -> uuid.UUID | None:
-    async with runtime.sessionmaker() as session:
-        principal = await find_platform_principal(
-            session, tenant_id=tenant_id, platform="slack", external_id=user_id
-        )
-    return principal.account_id if principal is not None else None
 
 
 async def handle_settings_command(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
@@ -179,7 +169,9 @@ async def handle_settings_change(runtime: SlackRuntime, payload: dict[str, Any])
         tenant_id=tenant_id,
         team_id=team_id,
         user_id=user_id,
-        account_id=await _account_id(runtime, tenant_id=tenant_id, user_id=user_id),
+        account_id=await actor_account(
+            runtime.sessionmaker, tenant_id=tenant_id, platform="slack", user_id=user_id
+        ),
     )
     try:
         change = await change_setting(

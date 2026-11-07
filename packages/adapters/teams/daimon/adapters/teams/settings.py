@@ -33,6 +33,7 @@ from daimon.core.scope_settings import (
     SettingsActor,
     SettingsDefaults,
     SettingsPlace,
+    actor_account,
     change_setting,
     may_change_approvals,
     read_settings,
@@ -43,7 +44,6 @@ from daimon.core.settings_card import (
     decode_choice,
     may_change_for,
 )
-from daimon.core.stores.identity import find_platform_principal
 from microsoft_teams.api import AdaptiveCardInvokeActivity, AdaptiveCardInvokeResponse
 from microsoft_teams.apps import ActivityContext
 from microsoft_teams.cards import Action, ActionSet, AdaptiveCard, CardElement, TextBlock
@@ -95,14 +95,6 @@ def _actor(
     )
 
 
-async def _account(runtime: TeamsRuntime, tenant_id: uuid.UUID, user_id: str) -> uuid.UUID | None:
-    async with runtime.sessionmaker() as session:
-        principal = await find_platform_principal(
-            session, tenant_id=tenant_id, platform="teams", external_id=user_id
-        )
-    return principal.account_id if principal is not None else None
-
-
 async def show_settings(context: CommandContext) -> None:
     runtime, asked = context.runtime, context.asked_in or context.inbound
     if asked.kind != "channel":
@@ -111,7 +103,12 @@ async def show_settings(context: CommandContext) -> None:
     thread_id = asked.thread_id if asked.thread_id != asked.channel_id else None
     place = SettingsPlace.of("teams", asked.channel_id, thread_id)
     try:
-        account_id = await _account(runtime, context.tenant_id, asked.user_id)
+        account_id = await actor_account(
+            runtime.sessionmaker,
+            tenant_id=context.tenant_id,
+            platform="teams",
+            user_id=asked.user_id,
+        )
         actor = _actor(context.tenant_id, account_id, asked.user_id, context.is_admin)
         native = await may_change_approvals(
             runtime.sessionmaker, runtime.settings, actor, place.platform
@@ -179,7 +176,12 @@ class SettingsActions:
         if not in_post and level == "thread" and not actor.admin_for(None):
             return toast(OPEN_IN_POST)
         try:
-            account_id = await _account(self.runtime, actor.tenant_id, actor.user_id)
+            account_id = await actor_account(
+                self.runtime.sessionmaker,
+                tenant_id=actor.tenant_id,
+                platform="teams",
+                user_id=actor.user_id,
+            )
             change = await change_setting(
                 self.runtime.sessionmaker,
                 self.runtime.settings,

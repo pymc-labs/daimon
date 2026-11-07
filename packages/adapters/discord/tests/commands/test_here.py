@@ -212,6 +212,45 @@ async def test_native_admin_can_set_every_approval_scope(
     fresh.assert_awaited_once()
 
 
+async def test_retired_approvals_menu_records_the_admins_account(
+    db_session_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from daimon.adapters.discord.commands import here
+    from daimon.core.authz import Subject
+    from daimon.core.stores.channel_changes import list_changes
+    from daimon.core.stores.identity import get_or_create_platform_principal
+    from daimon.core.tool_safety import ToolSafetyPolicy
+    from daimon.testing.factories import make_tenant
+
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+        principal = await get_or_create_platform_principal(
+            session, tenant_id=tenant.id, platform="discord", external_id="native-admin"
+        )
+    runtime = MagicMock()
+    runtime.sessionmaker = db_session_factory
+    runtime.settings.tool_safety = ToolSafetyPolicy(enabled=True, allow_gate_overrides=True)
+    monkeypatch.setattr(
+        here,
+        "approval_admin",
+        AsyncMock(return_value=Subject(is_admin=True, platform_user_id="native-admin")),
+    )
+    monkeypatch.setattr(here, "resolve_tenant_for_interaction", AsyncMock(return_value=tenant.id))
+    interaction = MagicMock()
+    interaction.user.id = "native-admin"
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
+    interaction.data = {"values": ["channel:off"]}
+    await here.ApprovalGateView(runtime, tenant.id, "channel", "thread").change(interaction)
+    async with db_session_factory() as session:
+        rows = await list_changes(session, tenant_id=tenant.id, channel_id="channel")
+    assert [(row.setting, row.actor_account_id) for row in rows] == [
+        ("approvals", principal.account_id)
+    ]
+
+
 async def test_approval_controls_preserve_confidential_action_and_its_admin_check(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

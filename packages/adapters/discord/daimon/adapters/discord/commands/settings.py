@@ -30,6 +30,7 @@ from daimon.core.scope_settings import (
     SettingsActor,
     SettingsDefaults,
     SettingsPlace,
+    actor_account,
     change_setting,
     read_settings,
 )
@@ -39,7 +40,6 @@ from daimon.core.settings_card import (
     decode_choice,
     may_change_for,
 )
-from daimon.core.stores.identity import find_platform_principal
 
 import discord
 from discord import Interaction, app_commands
@@ -128,19 +128,16 @@ class SettingsView(discord.ui.View):
             return
         key, level, value = choice
         try:
-            async with self.runtime.sessionmaker() as session:
-                principal = await find_platform_principal(
-                    session,
-                    tenant_id=self.tenant_id,
-                    platform="discord",
-                    external_id=str(interaction.user.id),
-                )
+            account_id = await actor_account(
+                self.runtime.sessionmaker,
+                tenant_id=self.tenant_id,
+                platform="discord",
+                user_id=str(interaction.user.id),
+            )
             change = await change_setting(
                 self.runtime.sessionmaker,
                 self.runtime.settings,
-                settings_actor(
-                    interaction, self.tenant_id, principal.account_id if principal else None
-                ),
+                settings_actor(interaction, self.tenant_id, account_id),
                 key=key,
                 level=level,
                 value=value,

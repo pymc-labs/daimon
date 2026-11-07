@@ -89,7 +89,7 @@ def _buttons(card: Any) -> list[dict[str, Any]]:
 def reads(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     read = AsyncMock(return_value=_views())
     monkeypatch.setattr(teams_settings, "read_settings", read)
-    monkeypatch.setattr(teams_settings, "_account", AsyncMock(return_value=None))
+    monkeypatch.setattr(teams_settings, "actor_account", AsyncMock(return_value=None))
     monkeypatch.setattr(
         teams_settings.SettingsDefaults, "from_settings", MagicMock(return_value=None)
     )
@@ -152,7 +152,7 @@ def change(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
         return_value=SimpleNamespace(note="Progress plans is now On for this thread.")
     )
     monkeypatch.setattr(teams_settings, "change_setting", applied)
-    monkeypatch.setattr(teams_settings, "_account", AsyncMock(return_value=None))
+    monkeypatch.setattr(teams_settings, "actor_account", AsyncMock(return_value=None))
     return applied
 
 

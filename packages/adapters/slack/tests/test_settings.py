@@ -96,7 +96,7 @@ def _wire(monkeypatch: pytest.MonkeyPatch, change: AsyncMock) -> MagicMock:
     client.chat_postEphemeral = AsyncMock()
     monkeypatch.setattr(module, "resolve_web_client", AsyncMock(return_value=client))
     monkeypatch.setattr(module, "change_setting", change)
-    monkeypatch.setattr(module, "_account_id", AsyncMock(return_value=None))
+    monkeypatch.setattr(module, "actor_account", AsyncMock(return_value=None))
     return client
 
 
