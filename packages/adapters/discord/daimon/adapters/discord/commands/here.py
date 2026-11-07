@@ -21,10 +21,11 @@ from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_details import GitHubDeploymentFacts
 from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.approval_admin import approval_admin
-from daimon.core.approval_gate import set_approval_gate
+from daimon.core.approval_gate import ApprovalChange, set_approval_gate
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.here_card import HereCard, load_here_card, render_here_card, render_here_card_text
 from daimon.core.platform_words import DESCRIPTIONS
+from daimon.core.settings_card import moved_to_settings
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.web_links import OPEN_IN_WEB, panel_links
@@ -68,6 +69,8 @@ class ApprovalGateView(discord.ui.View):
         super().__init__(timeout=300)
         self.runtime = runtime
         self.tenant_id = tenant_id
+        self.channel_id = channel_id
+        self.thread_id = thread_id
         scopes: list[tuple[str, str, str | None]] = [
             ("server", "Server", None),
             ("channel", "Channel", channel_id),
@@ -129,11 +132,18 @@ class ApprovalGateView(discord.ui.View):
                 target=target,
                 value=value,
                 subject=subject,
+                record=ApprovalChange(
+                    channel_id=None if target is None else self.channel_id,
+                    thread_id=target if target is not None and target == self.thread_id else None,
+                    actor_account_id=None,
+                    surface="panel",
+                ),
             )
             active = self.runtime.settings.tool_safety.gate_overrides_active
             message = f"Third-party write approvals: {value} ({target or 'server'})."
             if not active:
                 message += " Saved but ignored: approval overrides are not enabled."
+            message += f" {moved_to_settings('discord')}"
         except DaimonError as exc:
             message = str(exc)
         await interaction.followup.send(message, ephemeral=True)
