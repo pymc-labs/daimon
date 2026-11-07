@@ -53,6 +53,8 @@ from daimon.adapters.teams.restart_catch_up import RestartCatchUp
 from daimon.adapters.teams.routine_delivery import make_teams_routine_poster
 from daimon.adapters.teams.routines_panel import RoutinesPanel
 from daimon.adapters.teams.runtime import TeamsRuntime
+from daimon.adapters.teams.settings import VERB as SETTINGS_VERB
+from daimon.adapters.teams.settings import SettingsActions, show_settings
 from daimon.adapters.teams.setup_conversation import new_command
 from daimon.adapters.teams.setup_panel import SetupPanel
 from daimon.adapters.teams.support import VERB as SUPPORT_VERB
@@ -311,6 +313,7 @@ def create_teams_http_service(
         "new": new_command,
         "setup": setup.command,
         "here": show_here,
+        "settings": show_settings,
         "routines": routines.command,
         "memory": show_memory,
         "privacy": privacy.command,
@@ -437,6 +440,7 @@ def create_teams_http_service(
     teams_app.on_card_action_execute(routines_card.VERB, routines.on_action)
     teams_app.on_card_action_execute(privacy_card.VERB, privacy.on_action)
     teams_app.on_card_action_execute("here_approvals", HereApprovals(runtime).on_action)
+    teams_app.on_card_action_execute(SETTINGS_VERB, SettingsActions(runtime).on_action)
     teams_app.on_card_action_execute(billing_panel.VERB, billing.on_action)
     teams_app.on_card_action_execute(tool_confirmation.VERB, turns.confirmations.on_action)
     teams_app.on_card_action_execute(provider_actions.VERB, turns.provider_actions.on_action)

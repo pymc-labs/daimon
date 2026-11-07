@@ -131,6 +131,8 @@ bots:
             description: This list
           - title: here
             description: Who answers here and what it can use
+          - title: settings
+            description: Approvals, threads, plans and the cost line here
           - title: memory
             description: What the agent remembers
           - title: routines

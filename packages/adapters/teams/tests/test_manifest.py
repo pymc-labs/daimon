@@ -70,7 +70,12 @@ def test_manifest_offers_what_the_adapter_answers() -> None:
     assert bot["supportsFiles"] is True
     assert bot["supportsTargetedMessages"] is True, "slash commands need targeted messages"
     lists = _lists()
-    assert _basic(lists[("personal", "mention")]) == set(COMMAND_HELP), "every command in 1:1"
+    # A command that works only in a channel (`settings`) is left out of the 1:1 list,
+    # which Teams caps at 12 entries with the prompt starters.
+    in_chat = {c.word for c in WORDS["teams"].commands.values() if c.reach != "space"} & set(
+        COMMAND_HELP
+    )
+    assert _basic(lists[("personal", "mention")]) == in_chat, "every 1:1 command in 1:1"
     slash = _basic(lists[("team", "slash")])
     assert slash == IN_THREAD, "a channel's slash menu offers what is answered privately there"
     assert _basic(lists[("groupChat", "slash")]) == slash, "a group chat's too"

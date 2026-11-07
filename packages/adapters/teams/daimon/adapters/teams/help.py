@@ -27,6 +27,7 @@ _ORDER: tuple[Action, ...] = (
     "billing",
     "privacy",
     "here",
+    "settings",
     "support",
     "help",
 )
