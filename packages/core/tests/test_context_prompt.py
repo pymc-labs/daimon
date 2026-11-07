@@ -51,3 +51,17 @@ def test_chat_can_opt_into_custom_guidance():
     system = encode_fragments("Base", {"chat": ContextFragment(text="Keep replies short.")})
     assert "Keep replies short." in context_prompt("chat", system=system)
     assert "Keep replies short." not in context_prompt("routine", system=system)
+
+
+def test_routine_framing_limits_messaging_posts_to_requested_ones():
+    """Every routine-origin run, with or without controls, keeps posts to what was asked.
+
+    The framing must hold without routine controls: DM watch reports use the
+    routine origin and have none, so it cannot name controls as where a reply goes.
+    """
+    text = context_prompt("routine")
+    assert "controls" not in text
+    assert "only to post what your instructions ask you to post" in text
+    assert "run summary or status note of your own" in text
+    assert "do not copy earlier ones" in text
+    assert "put any blockers there" in text

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Routines no longer post their own run summaries.**
+  A routine with nothing to do could post a "nothing to do" note with a messaging tool, and later runs copied it. Routines now post only what their instructions ask for. Their final reply is delivered as before.
 - **A Slack routine no longer posts in a channel Daimon was removed from.**
   Its result goes to the creator by DM, as for an archived channel. Saving a routine already refused that channel; delivery now applies the same rule.
 - **A shared MCP token removed from an agent no longer comes back when a conversation starts at the same moment.**
