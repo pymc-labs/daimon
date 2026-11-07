@@ -244,7 +244,6 @@ export type SwitchChoice = "inherit" | SwitchMode
 
 export const choiceOf = (s: Pick<ChannelSwitch, "own">): SwitchChoice => s.own ?? "inherit"
 
-/** The write for a pick; `inherit` clears this tier's own value. `expected` is the own value as read. */
 /** The Settings group's names and value words, the same as in chat (`daimon.core.scope_settings.SPECS`). */
 export const SETTING_NAMES = {
   approvals: "Approvals", participation: "Thread participation", progress_plans: "Progress plans", cost_footer: "Cost footer",
@@ -263,6 +262,7 @@ export const approvalsFrom = (a: ChannelApprovals) => (a.source === "server" ? "
 export const approvalsChange = (mode: ApprovalMode | null, a: Pick<ChannelApprovals, "own">): ApprovalsChange =>
   ({ mode, expected: a.own })
 
+/** The write for a pick; `inherit` clears this tier's own value. `expected` is the own value as read. */
 export const switchChange = (choice: SwitchChoice, s: Pick<ChannelSwitch, "own">): SwitchChange =>
   ({ mode: choice === "inherit" ? null : choice, expected: s.own })
 
