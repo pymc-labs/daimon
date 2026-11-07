@@ -84,9 +84,9 @@ was debited and the money left, for example `Ada  12s  $0.042 used  $41.20
 left`. The money left is the channel budget's remainder, else the prepaid
 balance.
 
-An admin can hide that line for the whole server with `/cost-footer hide` on
-Discord, or the `set_cost_footer` tool on any platform. Failure notices still
-show, and billing is unchanged.
+An admin can hide that line for the whole server under Cost footer in
+`/settings` (`settings` on Teams), the web app's Settings section, or by asking
+Daimon. Failure notices still show, and billing is unchanged.
 
 ### Overdraft bound
 
