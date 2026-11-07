@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
+from daimon.core.confirmation import prompt_for_tool_call
 from daimon.core.scope_settings import LevelValue, SettingsPlace, SettingView
 from daimon.core.settings_card import (
     PICK,
@@ -12,6 +15,7 @@ from daimon.core.settings_card import (
     may_change_for,
     moved_to_settings,
 )
+from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall
 
 PLACE = SettingsPlace.of("discord", "C1", "T1")
 
@@ -120,3 +124,47 @@ def test_choices_round_trip_and_forgeries_are_dropped() -> None:
 )
 def test_retired_controls_point_to_settings(platform: str, said: str) -> None:
     assert moved_to_settings(platform) == f"Next time, {said}."
+
+
+@pytest.mark.parametrize(
+    "arguments,line",
+    [
+        (
+            {"key": "approvals", "level": "thread", "value": "off"},
+            "Approvals: Allow writes for this thread",
+        ),
+        (
+            {"key": "approvals", "level": "channel", "value": "on"},
+            "Approvals: Ask for this channel",
+        ),
+        (
+            {"key": "cost_footer", "level": "server", "value": "hidden"},
+            "Cost footer: Hidden for all channels",
+        ),
+    ],
+)
+def test_the_agent_tool_card_says_the_change_in_the_panel_words(
+    arguments: dict[str, object], line: str
+) -> None:
+    call = ToolCall(
+        tool_use_id="setting",
+        server_name=DAIMON_SERVER_NAME,
+        tool_name="change_setting",
+        input={"origin_context_id": "origin", **arguments},
+    )
+    prompt = prompt_for_tool_call(call, requester_platform_user_id="u1", now=datetime.now(UTC))
+    assert prompt.consequence == line
+    assert prompt.detail_lines == (line,)
+    assert "origin" not in " ".join(prompt.detail_lines)
+
+
+def test_a_change_the_tool_would_refuse_keeps_the_generic_card() -> None:
+    call = ToolCall(
+        tool_use_id="setting",
+        server_name=DAIMON_SERVER_NAME,
+        tool_name="change_setting",
+        input={"key": "cost_footer", "level": "thread", "value": "hidden"},
+    )
+    prompt = prompt_for_tool_call(call, requester_platform_user_id="u1", now=datetime.now(UTC))
+    assert prompt.consequence is None
+    assert "Level: thread" in prompt.detail_lines

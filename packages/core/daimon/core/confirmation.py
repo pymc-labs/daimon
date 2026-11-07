@@ -29,7 +29,8 @@ import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Final, Literal, cast
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Final, Literal, cast
 from urllib.parse import unquote
 
 from daimon.core.agent_configuration import (
@@ -558,6 +559,25 @@ def _watch_edit_lines(data: dict[str, object]) -> tuple[str, ...]:
     )
 
 
+_SETTING_PLACES: Final[Mapping[str, str]] = MappingProxyType(
+    {"server": "all channels", "channel": "this channel", "thread": "this thread"}
+)
+
+
+def _setting_line(data: Mapping[str, object]) -> str | None:
+    """`change_setting` in the words of the panel: "Approvals: Allow writes for this thread".
+
+    None for a key, level or value the tool would refuse, which gets the generic card."""
+    # Imported here: scope_settings reaches back to this module through the turn package.
+    from daimon.core.scope_settings import SPECS
+
+    spec = SPECS.get(cast("Any", data.get("key")))
+    level, value = data.get("level"), data.get("value")
+    if spec is None or level not in spec.levels or value not in spec.values:
+        return None
+    return f"{spec.name}: {spec.label(str(value))} for {_SETTING_PLACES[str(level)]}"
+
+
 def prompt_for_tool_call(
     call: ToolCall,
     *,
@@ -820,6 +840,12 @@ def prompt_for_tool_call(
             *(() if daily is None else (f"Reports a day at most: {_one_line(daily, limit=12)}",)),
             *_generic_details(rest),
         )
+    elif call.tool_name == "change_setting" and own_server and (line := _setting_line(data)):
+        action = "Change setting"
+        title = "Change this setting?"
+        denied_action = "Setting not changed"
+        consequence = line
+        detail_lines = (line,)
     elif call.tool_name == "update_watch" and own_server:
         action = "Change watch"
         title = "Change this watch?"
