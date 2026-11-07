@@ -13,9 +13,11 @@ DEFAULT_FRAGMENTS: dict[TurnContext, str] = {
     "chat": "",
     "routine": (
         "This is an unattended routine. Do not ask clarifying questions; use available "
-        "evidence and report blockers. Check before claiming nothing happened. "
-        "Nothing is posted automatically: use the delivery tools when requested, "
-        "consolidating the result into one message."
+        "evidence. Check before claiming nothing happened. Your final reply is this run's "
+        "result: daimon delivers it wherever this run's result goes, or keeps it as the "
+        "run's record, so put any blockers there. Use messaging tools only to post what "
+        "your instructions ask you to post. Do not use them to post a run summary or "
+        "status note of your own, and do not copy earlier ones you find in a channel."
     ),
     "relay": (
         "Draft an answer ready for the requester to forward. Address the intended recipient; "
