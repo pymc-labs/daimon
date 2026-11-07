@@ -829,9 +829,9 @@ Organic thread participation: replying in a thread unprompted.
 
 Platform-agnostic settings (the store and tool are keyed by platform); the Discord and
 Teams adapters read them. `mode` is the deployment tier of a cascade (deployment,
-workspace, channel, thread) that the agent's `set_thread_participation` tool writes the
-other tiers of. `off` (the default) changes nothing for anyone: no classifier runs and
-every server behaves as today until someone asks the agent to follow a thread, or an
+workspace, channel, thread) that the agent's `change_setting` tool and `/settings` write
+the other tiers of. `off` (the default) changes nothing for anyone: no classifier runs
+and every server behaves as today until someone asks the agent to follow a thread, or an
 admin turns a channel or the workspace on. `disabled` also refuses those requests. `on`
 follows every thread unless a lower tier says otherwise.
 
@@ -879,8 +879,8 @@ Read from `daimon.core.config.ProgressPlansSettings`. Prefix `DAIMON_PROGRESS_PL
 Progress plans: the agent keeps a short plan the working card draws.
 
 `mode` is the deployment tier of the same cascade thread participation uses (deployment,
-workspace, channel, thread); the agent's `set_progress_plans` tool writes the other
-tiers when a person asks.
+workspace, channel, thread); the agent's `change_setting` tool and `/settings` write the
+other tiers when a person asks.
 
 The agent's plan on the working card. See ProgressPlansSettings.
 

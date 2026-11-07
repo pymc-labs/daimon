@@ -620,6 +620,9 @@ ChannelSetting = Literal[
     "thread_progress_plans",
     "thread_rule",
     "thread_handoff",
+    "approvals",
+    "thread_approvals",
+    "cost_footer",
 ]
 """What a change record names. The `thread_*` settings are a thread's own, recorded under
 its channel with the thread id in the values."""

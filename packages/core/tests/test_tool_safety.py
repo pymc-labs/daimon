@@ -282,6 +282,7 @@ def test_session_tools_gate_third_party_toolsets_only() -> None:
                 "add_skill",
                 "approve_reach",
                 "approve_server_skill_update",
+                "change_setting",
                 "change_workspace_settings",
                 "create_watch",
                 "delete_allowance",
@@ -1034,3 +1035,11 @@ def test_a_routed_github_toolset_keeps_its_permission_policy() -> None:
     assert direct is not None and routed is not None
     assert routed == direct
     assert routed[0]["default_config"] == {"permission_policy": {"type": "always_ask"}}
+
+
+def test_change_setting_is_carded_protected_and_never_auto_allowed() -> None:
+    from daimon.core.tool_safety import CARDED_TOOLS, PERMISSION_SETTER_TOOLS, gate_protected_tool
+
+    assert CARDED_TOOLS["change_setting"] == "origin_context_id"
+    assert "change_setting" in PERMISSION_SETTER_TOOLS
+    assert gate_protected_tool("change_setting")
