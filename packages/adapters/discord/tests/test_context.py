@@ -2047,3 +2047,55 @@ async def test_a_reply_target_in_another_channel_needs_the_askers_read_history(
         "another channel's message is fetched only for a person with Read Message History there"
     )
     assert other.fetch_message.await_count == (1 if allowed else 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delta", [False, True])
+@pytest.mark.parametrize("allowed", [False, True])
+async def test_thread_context_needs_the_askers_read_history(delta: bool, allowed: bool) -> None:
+    earlier = _make_message(msg_id=5, content="earlier thread secret")
+    trigger = _make_message(msg_id=10, content="<@999> sum up")
+    thread = _make_thread([earlier, trigger])
+    _history_permission(thread, allowed)
+
+    if delta:
+        result, _ = await build_delta_xml(thread, trigger, after_message_id=1)
+    else:
+        result, _ = await build_context_xml(thread, trigger)
+
+    assert ("earlier thread secret" in result) is allowed, (
+        "earlier thread messages reach the agent only for a person with Read Message History"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resolved", [False, True], ids=["fetched", "discords_copy"])
+@pytest.mark.parametrize("allowed", [False, True])
+async def test_a_reply_target_in_the_same_channel_needs_the_askers_read_history(
+    resolved: bool, allowed: bool
+) -> None:
+    target = _make_message(msg_id=5, channel_id=900, content="earlier secret")
+    home = MagicMock(spec=discord.TextChannel)
+    home.id = 900
+    home.fetch_message = AsyncMock(return_value=target)
+    _history_permission(home, allowed)
+    replying = _make_message(msg_id=10, channel_id=900, content="see this")
+    replying.reference = MagicMock(spec=discord.MessageReference)
+    replying.reference.resolved = target if resolved else None
+    replying.reference.message_id = 5
+    replying.reference.channel_id = 900
+
+    found = await context_mod._resolve_reply_target(home, replying)  # pyright: ignore[reportPrivateUsage]
+
+    assert (found is target) is allowed, (
+        "a reply target is an earlier message: only for a person with Read Message History"
+    )
+
+
+def test_an_administrator_may_read_history_whatever_the_channel_says() -> None:
+    admin = MagicMock(spec=discord.Member)
+    admin.guild_permissions = SimpleNamespace(administrator=True)
+    thread = MagicMock(spec=discord.Thread)
+    thread.permissions_for = MagicMock(side_effect=discord.ClientException("parent not cached"))
+
+    assert context_mod._may_read_history(thread, admin)  # pyright: ignore[reportPrivateUsage]

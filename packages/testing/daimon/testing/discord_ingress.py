@@ -568,7 +568,10 @@ class DiscordIngress:
             )
         )
         self.http.history[channel_id].append(raw)
-        self.bot._connection.parse_message_create(cast("MessageCreateEvent", raw))  # pyright: ignore[reportPrivateUsage]
+        # discord.py writes into the event it parses (`member` gains `user`); a real
+        # gateway event is its own object, so parse a copy and keep the history as sent.
+        event = json.loads(json.dumps(raw))
+        self.bot._connection.parse_message_create(cast("MessageCreateEvent", event))  # pyright: ignore[reportPrivateUsage]
 
     async def wait(self) -> None:
         await asyncio.gather(*self.bot.message_tasks)
