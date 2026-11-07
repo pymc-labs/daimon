@@ -317,22 +317,19 @@ Replying in a thread nobody addressed you in is off by default, and staying
 off is the preferred answer — turn a thread on when someone asks you to follow
 it, and off again when they ask you to stop.
 
-Two tools, scoped by which id is given:
+Use the Settings group: `change_setting(key="participation", level=..., value=...)`
+changes it at the `thread`, `channel` or `server` level of this conversation, and
+`get_settings()` reads every level and who decided. Only this conversation's place
+can be changed; a person changes another channel with `/settings` there or in the
+web app. The person presses Approve before a change is saved.
 
-```
-set_thread_participation(mode, thread_id=..., channel_id=...)  # this thread (both ids)
-set_thread_participation(mode, channel_id=...)                 # this channel
-set_thread_participation(mode)                                 # the whole workspace
-get_thread_participation(thread_id=..., channel_id=...)        # who decided, and what
-```
-
-Modes are `on`, `off`, `disabled` (channel and workspace only: off, and no
-narrower scope may override it), and `inherit` (drop this scope's own setting).
+Values are `on`, `off`, `disabled` (channel and server only: off, and no
+narrower level may override it), and `inherit` (drop this level's own setting).
 
 Resolution cascades deployment default (the operator's environment), then
-workspace, then channel, then thread: the narrowest scope with a setting wins,
-except that a `disabled` tier beats every tier below it. Any member may set a
-thread; channel and workspace scopes require an admin (`words.admin`),
+server, then channel, then thread: the narrowest level with a setting wins,
+except that a `disabled` level beats every level below it. Any member may set a
+thread; channel and server levels require an admin (`words.admin`),
 and a non-admin caller is refused with no write. Where following threads
 isn't available yet, the tool says so.
 
@@ -350,8 +347,9 @@ by "(" or by a dot and a letter is ignored ("@Daimon (urgent)", "@Daimon.Thanks"
 
 Each finished answer ends with one line naming the agent, the time taken, what
 it cost and the money left. On by default; an admin can hide it for everyone in
-this `words.space` with `set_cost_footer(shown=false)` and bring it back with
-`shown=true`; `get_cost_footer()` reads it. Read the returned `note` back.
+this `words.space` with `change_setting(key="cost_footer", level="server", value="hidden")`
+and bring it back with `value="shown"`; `get_settings()` reads it. It has no channel
+or thread level. Read the returned `note` back.
 Hiding it changes nothing else: the billing panel still shows usage and credit.
 
 ## Scheduled routines

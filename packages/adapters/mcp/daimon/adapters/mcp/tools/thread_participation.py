@@ -248,7 +248,8 @@ def register_thread_participation_tools(mcp: FastMCP, runtime: McpRuntime) -> No
         thread_id: str | None = None,
         channel_id: str | None = None,
     ) -> ThreadParticipationResult:
-        """Start or stop replying in a thread without being addressed each time.
+        """Deprecated: use ``change_setting`` with ``key="participation"``. Start or stop
+        replying in a thread without being addressed each time. Removed in a later release.
 
         Scope: ``thread_id`` from ``<thread role="current_thread">`` for a
         thread (its parent is looked up, so ``channel_id`` is optional);
@@ -271,7 +272,8 @@ def register_thread_participation_tools(mcp: FastMCP, runtime: McpRuntime) -> No
         thread_id: str | None = None,
         channel_id: str | None = None,
     ) -> ThreadParticipationStatus:
-        """Report whether you follow a thread or channel, and which tier decided it.
+        """Deprecated: use ``get_settings``. Report whether you follow a thread or channel,
+        and which tier decided it. Removed in a later release.
 
         Scope: ``thread_id`` from ``<thread role="current_thread">`` for a
         thread (its parent is looked up, so ``channel_id`` is optional);

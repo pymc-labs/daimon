@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 222 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 224 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -229,8 +229,8 @@ Cost footer tools: show or hide the line under each finished answer, workspace-w
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `get_cost_footer` | all callers | Report whether finished answers here end with the cost footer. |
-| `set_cost_footer` | admin only | Show or hide the footer under each finished answer. |
+| `get_cost_footer` | all callers | Deprecated: use ``get_settings``. |
+| `set_cost_footer` | admin only | Deprecated: use ``change_setting`` with ``key="cost_footer"``. |
 
 ## `credential_requests`
 
@@ -443,8 +443,8 @@ plan.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `get_progress_plans` | Discord callers, Slack callers, Teams callers | Report whether progress plans are on for a thread or channel, and which tier decided it. |
-| `set_progress_plans` | Discord callers, Slack callers, Teams callers | Turn progress plans on or off where you are asked to. |
+| `get_progress_plans` | Discord callers, Slack callers, Teams callers | Deprecated: use ``get_settings``. |
+| `set_progress_plans` | Discord callers, Slack callers, Teams callers | Deprecated: use ``change_setting`` with ``key="progress_plans"``. |
 | `update_plan` | Discord callers, Slack callers, Teams callers | Show the task's plan as a checklist on the progress card. |
 
 ## `promo_codes`
@@ -524,6 +524,15 @@ Routines tools: create / list / get / update / delete, and an admin's sandbox op
 | `list_routines` | all callers | List the routines you created (an admin sees every routine in the workspace). |
 | `set_routine_sandbox_tools` | admin only | Turn built-in sandbox tools (bash, file reads and edits and the rest) on or off for one routine's own scheduled runs. |
 | `update_routine` | all callers | PATCH-update a routine, including owner-only DM delivery where supported. |
+
+## `scope_settings`
+
+The Settings group from chat: `get_settings` (anyone) and `change_setting` (carded).
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `change_setting` | Discord callers, Slack callers, Teams callers | Change one setting where you are, after the person presses Approve. |
+| `get_settings` | Discord callers, Slack callers, Teams callers | Report this conversation's settings: approvals, thread participation, progress plans and the cost footer. |
 
 ## `self_edit`
 
@@ -640,8 +649,8 @@ Thread-participation tools: follow a thread (or a channel, or the workspace).
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `get_thread_participation` | Discord callers, Teams callers | Report whether you follow a thread or channel, and which tier decided it. |
-| `set_thread_participation` | Discord callers, Teams callers | Start or stop replying in a thread without being addressed each time. |
+| `get_thread_participation` | Discord callers, Teams callers | Deprecated: use ``get_settings``. |
+| `set_thread_participation` | Discord callers, Teams callers | Deprecated: use ``change_setting`` with ``key="participation"``. |
 
 ## `tidy`
 

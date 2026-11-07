@@ -269,7 +269,8 @@ def register_progress_plan_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         thread_id: str | None = None,
         channel_id: str | None = None,
     ) -> ProgressPlansResult:
-        """Turn progress plans on or off where you are asked to.
+        """Deprecated: use ``change_setting`` with ``key="progress_plans"``. Turn progress
+        plans on or off where you are asked to. Removed in a later release.
 
         A progress plan is a short checklist of a longer task's steps on the
         progress card. Call this when someone asks, for example "turn on
@@ -293,7 +294,8 @@ def register_progress_plan_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         thread_id: str | None = None,
         channel_id: str | None = None,
     ) -> ProgressPlansStatus:
-        """Report whether progress plans are on for a thread or channel, and which tier decided it.
+        """Deprecated: use ``get_settings``. Report whether progress plans are on for a
+        thread or channel, and which tier decided it. Removed in a later release.
 
         Scope: ``thread_id`` and ``channel_id`` for a thread; ``channel_id``
         alone for a channel; neither for the workspace. Reading
