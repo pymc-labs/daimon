@@ -623,10 +623,10 @@ async def test_recorded_change_lands_in_channel_changes_with_the_thread_key(
     assert [(row.setting, row.before, row.after) for row in server] == [
         ("approvals", "inherit", "off")
     ]
-    assert sorted((row.setting, str(row.after)) for row in channel) == [
-        ("approvals", "off"),
-        ("thread_approvals", str({"thread": "T1", "mode": "off"})),
-    ]
+    assert {row.setting: row.after for row in channel} == {
+        "approvals": "off",
+        "thread_approvals": {"thread": "T1", "mode": "off"},
+    }
 
 
 async def test_stale_expected_value_writes_nothing(
