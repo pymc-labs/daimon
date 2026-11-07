@@ -189,7 +189,9 @@ channel.
 ### Pick agents and see where they answer
 
 `/agent-setup` opens the agents roster, and `/here` shows only the caller a
-card with the agent that answers in the channel. Members see only agents whose
+card with the agent that answers in the channel. `/settings` changes the
+channel's or workspace's approvals, progress plans and cost footer; for a
+thread's own setting, ask Daimon in that thread. Members see only agents whose
 rules allow them to answer at that location, while admins see all. Knowing an
 agent's name does not grant edit rights.
 

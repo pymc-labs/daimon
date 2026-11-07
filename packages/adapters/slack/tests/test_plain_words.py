@@ -17,7 +17,7 @@ def test_feedback_and_memory_messages_keep_approved_spacing() -> None:
 def test_help_lists_registered_commands_on_consecutive_lines() -> None:
     blocks = build_help_blocks(display_name="Daimon")
     commands = blocks[2]["text"]["text"]
-    assert len(commands.splitlines()) == 9
+    assert len(commands.splitlines()) == 10
     assert all(line.startswith("/") for line in commands.splitlines())
     assert "/github connect" not in commands
     assert "/github       Connect GitHub repos" in commands
