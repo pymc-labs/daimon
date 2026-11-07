@@ -117,7 +117,7 @@ export type ChannelHistoryEntry = {
 export type ChannelSetting =
   | "default_agent" | "kept_agents" | "access" | "budget" | "participation" | "progress_plans" | "environment"
   | "skills" | "provider_pin" | "channel_copy" | "thread_participation" | "thread_progress_plans" | "thread_rule"
-  | "thread_handoff" | "tool_rule"
+  | "thread_handoff" | "tool_rule" | "approvals" | "thread_approvals" | "cost_footer"
 
 export type SwitchMode = "on" | "off" | "disabled"
 /** Following threads or progress plans. `own` is this tier's own mode (null: inherits); `value` and `source` are what applies. */
@@ -127,6 +127,21 @@ export type ChannelSwitch = {
   value: SwitchMode
   source: "deployment" | "workspace" | "channel" | "thread"
 }
+export type ApprovalMode = "on" | "off"
+/**
+ * Whether third-party writes wait for an Approve card here. `own` is this tier's own value (null: inherits);
+ * `value` and `source` are what applies. `active` is false until the operator enables approval overrides,
+ * so a saved value is ignored. `editable` needs a linked chat account; the server checks it is a chat admin.
+ */
+export type ChannelApprovals = {
+  available: boolean
+  own: ApprovalMode | null
+  value: ApprovalMode
+  source: "default" | "server" | "channel" | "thread"
+  active: boolean
+  editable: boolean
+}
+export type CostFooter = { shown: boolean; editable: boolean }
 export type ThreadOverrideKind = "participation" | "progress_plans" | "thread_rule" | "handoff"
 export type ToolRule = { agent: string; tool: string; tool_label: string; server_name: string; rule: "allow" | "ask" | "deny" | null; scope: "chat" | "chat_and_routines"; revision: number }
 /** `key` is a day (YYYY-MM-DD), an agent id or a person id; null when unknown. */
@@ -136,6 +151,7 @@ export type SpendAmount = { key: string | null; name: string | null; usd: number
 export type ChannelSettings = {
   participation: ChannelSwitch
   progress_plans: ChannelSwitch
+  approvals: ChannelApprovals
   skills: { skill_id: string; name: string }[]
   /** `editable` is false while tool safety is off, or for members. */
   tool_rules: { editable: boolean; rules: ToolRule[] }
@@ -153,6 +169,10 @@ export type ChannelSettings = {
 
 /** PUT /:id/participation, /:id/progress-plans, /api/channel-defaults/{participation,progress-plans}. null mode inherits. */
 export type SwitchChange = { mode: SwitchMode | null; expected: SwitchMode | null }
+/** PUT /:id/approvals, /api/channel-defaults/approvals. null mode inherits. */
+export type ApprovalsChange = { mode: ApprovalMode | null; expected: ApprovalMode | null }
+/** PUT /api/channel-defaults/cost-footer. */
+export type CostFooterChange = { shown: boolean; expected: boolean }
 /** PUT /:id/environment, /api/channel-defaults/environment. A 428 asks to resend with `confirm_open_network`. */
 export type EnvironmentChange = { environment: string | null; expected: string | null; confirm_open_network?: boolean }
 /** POST /:id/skills. `skill` is a name or id to add, the skill id to remove; `expected` the skill ids as read. */
@@ -173,6 +193,8 @@ export type ChannelDefaults = {
   environment: Sourced
   participation: ChannelSwitch
   progress_plans: ChannelSwitch
+  approvals: ChannelApprovals
+  cost_footer: CostFooter
 }
 /** PUT /api/channel-defaults/agent. */
 export type WorkspaceAgentChange = { agent: string | null; expected: string | null }

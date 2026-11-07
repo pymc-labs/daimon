@@ -74,7 +74,7 @@ export function useSave(id: string) {
   }
 }
 
-export type DefaultsKey = "agent" | "environment" | "participation" | "progress-plans"
+export type DefaultsKey = "agent" | "environment" | "participation" | "progress-plans" | "approvals" | "cost-footer"
 
 /** Change one workspace default. The answer is every default as it is now; the directory reloads. */
 export function useDefaultsSave() {

@@ -87,6 +87,8 @@ _AUDIT_DETAIL = {
     "provider_pin": "Provider",
     "channel_copy": "Channel copy",
     "thread": "Thread settings",
+    "approvals": "Approvals",
+    "cost_footer": "Cost footer",
 }
 
 

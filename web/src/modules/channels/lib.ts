@@ -4,7 +4,7 @@ import type { EntityRef } from "@/lib/types"
 import { fromCron, WEEKDAYS } from "@/modules/routines/cron"
 import type { TreeRow } from "@/components/tree-state"
 import type {
-  AgentRefs, Channel, ChannelBudget, ChannelDetail, ChannelHistoryEntry, ChannelSwitch, ChannelTag, Choice, PathNode, Readers, SpendAmount, Sourced,
+  AgentRefs, ApprovalMode, ApprovalsChange, Channel, ChannelApprovals, ChannelBudget, ChannelDetail, ChannelHistoryEntry, ChannelSwitch, ChannelTag, Choice, PathNode, Readers, SpendAmount, Sourced,
   SwitchChange, SwitchMode, ThreadOverrideKind, ToolRule, ToolRuleChange, Writers,
 } from "./types"
 
@@ -212,9 +212,10 @@ export function describeChange(e: ChannelHistoryEntry, labels: { readers: Choice
 
 const list = (v: unknown): Part[] => (Array.isArray(v) && v.length ? [v.join(", ")] : none)
 const OTHER: Record<string, string> = {
-  participation: "Joins threads", progress_plans: "Progress plans", environment: "Sandbox", channel_copy: "Channel copy",
+  participation: "Thread participation", progress_plans: "Progress plans", environment: "Sandbox", channel_copy: "Channel copy",
   thread_participation: "Joins in a thread", thread_progress_plans: "Progress plans in a thread",
   thread_rule: "Thread access", thread_handoff: "Thread handed to",
+  approvals: "Approvals", thread_approvals: "Approvals in a thread", cost_footer: "Cost footer",
 }
 
 /** A channel as people write it; web chat keeps its own name. */
@@ -244,6 +245,24 @@ export type SwitchChoice = "inherit" | SwitchMode
 export const choiceOf = (s: Pick<ChannelSwitch, "own">): SwitchChoice => s.own ?? "inherit"
 
 /** The write for a pick; `inherit` clears this tier's own value. `expected` is the own value as read. */
+/** The Settings group's names and value words, the same as in chat (`daimon.core.scope_settings.SPECS`). */
+export const SETTING_NAMES = {
+  approvals: "Approvals", participation: "Thread participation", progress_plans: "Progress plans", cost_footer: "Cost footer",
+} as const
+export const APPROVAL_VALUE: Record<ApprovalMode, string> = { on: "Ask", off: "Allow writes" }
+export const OVERRIDES_OFF = "Saved but ignored until the operator enables approval overrides."
+export const APPROVALS_NEED_CHAT_ADMIN = "Only a chat admin signed in with their chat account can change this."
+
+export const SWITCH_OPTIONS = (Object.keys(SWITCH_VALUE) as SwitchMode[]).map((value) => ({ value, label: SWITCH_VALUE[value] }))
+export const APPROVAL_OPTIONS = (Object.keys(APPROVAL_VALUE) as ApprovalMode[]).map((value) => ({ value, label: APPROVAL_VALUE[value] }))
+
+/** Where an inherited value comes from, as the default item reads it. */
+export const switchFrom = (s: ChannelSwitch) => (s.source === "deployment" ? "Built-in" : "Workspace") as "Built-in" | "Workspace"
+export const approvalsFrom = (a: ChannelApprovals) => (a.source === "server" ? "Workspace" : "Built-in") as "Built-in" | "Workspace"
+
+export const approvalsChange = (mode: ApprovalMode | null, a: Pick<ChannelApprovals, "own">): ApprovalsChange =>
+  ({ mode, expected: a.own })
+
 export const switchChange = (choice: SwitchChoice, s: Pick<ChannelSwitch, "own">): SwitchChange =>
   ({ mode: choice === "inherit" ? null : choice, expected: s.own })
 
