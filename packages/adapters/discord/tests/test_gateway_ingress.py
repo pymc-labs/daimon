@@ -223,6 +223,14 @@ def payload(
         "pinned": False,
         "timestamp": "2026-10-11T02:00:00+00:00",
         "edited_timestamp": None,
+        # A guild message carries the author's member data, as Discord sends it.
+        "member": {
+            "roles": [],
+            "joined_at": "2026-10-01T00:00:00+00:00",
+            "deaf": False,
+            "mute": False,
+            "flags": 0,
+        },
     }
 
 
@@ -268,7 +276,26 @@ async def start(
         utc_clock=utc_clock,
     )
     await harness.open(
-        guild={"id": "100", "name": "owned QA", "roles": [], "emojis": [], "stickers": []},
+        guild={
+            "id": "100",
+            "name": "owned QA",
+            # @everyone with View Channel, Send Messages and Read Message History,
+            # as a new Discord server grants them.
+            "roles": [
+                {
+                    "id": "100",
+                    "name": "@everyone",
+                    "permissions": str((1 << 10) | (1 << 11) | (1 << 16)),
+                    "position": 0,
+                    "color": 0,
+                    "hoist": False,
+                    "managed": False,
+                    "mentionable": False,
+                }
+            ],
+            "emojis": [],
+            "stickers": [],
+        },
         channel={
             "id": "101",
             "name": "owned-parent",

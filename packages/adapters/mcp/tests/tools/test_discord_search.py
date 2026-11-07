@@ -49,6 +49,7 @@ _search_messages_impl = _search_mod._search_messages_impl  # pyright: ignore[rep
 # ---------------------------------------------------------------------------
 
 _VIEW_CHANNEL = 1 << 10  # 1024
+_READ_MESSAGE_HISTORY = 1 << 16
 _MANAGE_THREADS = 1 << 34  # 17179869184
 
 
@@ -272,7 +273,10 @@ def _standard_guild_member_routes() -> dict[str, Any]:
     """Return a dict of route.path -> payload for the standard guild/member
     resolution that every search impl call triggers."""
     return {
-        "/guilds/{guild_id}": {**_guild_payload(), "roles": [_everyone_role("111", _VIEW_CHANNEL)]},
+        "/guilds/{guild_id}": {
+            **_guild_payload(),
+            "roles": [_everyone_role("111", _VIEW_CHANNEL | _READ_MESSAGE_HISTORY)],
+        },
         "/guilds/{guild_id}/members/{member_id}": _member_payload(),
     }
 
@@ -930,3 +934,68 @@ async def test_search_rows_carry_author_username_and_role(
     assert result.rows[0].author_username == "caller"
     assert result.rows[0].role == "user"
     assert result.rows[1].role == "assistant", "bot author must have role 'assistant'"
+
+
+# A member who may view a channel but not read its history (Discord's "Read
+# Message History" denied for them) gets no search results from it, as in Discord.
+_NO_HISTORY_FOR_42 = [{"id": "42", "type": 1, "allow": "0", "deny": str(_READ_MESSAGE_HISTORY)}]
+
+
+def _history_routes(channels: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "/guilds/{guild_id}": {
+            **_guild_payload(),
+            "roles": [_everyone_role("111", _VIEW_CHANNEL | _READ_MESSAGE_HISTORY)],
+        },
+        "/guilds/{guild_id}/members/{member_id}": _member_payload(),
+        "/guilds/{guild_id}/channels": channels,
+    }
+
+
+async def test_search_refuses_a_channel_the_member_cannot_read_history_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    routes = _history_routes([_text_channel_payload(permission_overwrites=_NO_HISTORY_FOR_42)])
+
+    async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
+        if route.path in routes:
+            return routes[route.path]
+        if route.path == "/channels/{channel_id}":
+            return _text_channel_payload(permission_overwrites=_NO_HISTORY_FOR_42)
+        raise AssertionError(f"the search must not run: {route.path}")
+
+    patch_discord_http(monkeypatch, handler)
+    with pytest.raises(ToolError, match="read_message_history"):
+        await _search_messages_impl(
+            _runtime_with_discord_token(), _auth(), content="hello", channel_ids=["222"]
+        )
+
+
+async def test_search_drops_hits_from_a_channel_the_member_cannot_read_history_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    routes = _history_routes(
+        [
+            _text_channel_payload(channel_id="222", permission_overwrites=_NO_HISTORY_FOR_42),
+            _text_channel_payload(channel_id="333"),
+        ]
+    )
+
+    async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
+        if route.path in routes:
+            return routes[route.path]
+        if route.path == "/guilds/{guild_id}/messages/search":
+            return _search_response(
+                messages=[
+                    [_search_hit_payload(message_id="1001", channel_id="222", content="old")],
+                    [_search_hit_payload(message_id="1002", channel_id="333", content="open")],
+                ],
+                total_results=2,
+            )
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    patch_discord_http(monkeypatch, handler)
+    result = await _search_messages_impl(_runtime_with_discord_token(), _auth(), content="o")
+    assert [row.channel_id for row in result.rows] == ["333"], (
+        "a hit from a channel without Read Message History must be withheld"
+    )

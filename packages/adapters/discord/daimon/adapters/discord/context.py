@@ -150,16 +150,60 @@ def _embed_text(msg: discord.Message) -> str:
     return "\n".join(parts)
 
 
+def _may_read_history(channel: object, member: object, *, posted_here: bool = False) -> bool:
+    """Whether the person who asked may read ``channel``'s earlier messages.
+
+    The bot reads with its own permissions, so earlier messages reach the agent
+    only for a person Discord lets read them: Read Message History, which
+    administrators always have; a thread takes it from its parent. The MCP read
+    tools apply the same rule (`_check_history_permission`). ``posted_here``
+    marks the channel the person wrote in, which makes them a member of a
+    private thread. A permission that cannot be read counts as missing.
+    """
+    guild = getattr(channel, "guild", None)
+    if not isinstance(member, discord.Member) and guild is not None:
+        # An author can arrive as a plain User; the guild's cached member has the roles.
+        cached = guild.get_member(getattr(member, "id", 0))
+        member = cached if cached is not None else member
+    if getattr(getattr(member, "guild_permissions", None), "administrator", False) is True:
+        return True
+    permissions_for = getattr(channel, "permissions_for", None)
+    if permissions_for is None:
+        return False
+    try:
+        permissions = permissions_for(member)
+    except (discord.ClientException, AttributeError, TypeError):
+        return False
+    if not getattr(permissions, "read_message_history", False):
+        return False
+    # Elsewhere, membership of a private thread is not in the cache reliably.
+    return not (
+        isinstance(channel, discord.Thread)
+        and channel.type is discord.ChannelType.private_thread
+        and not posted_here
+        and not getattr(permissions, "manage_threads", False)
+    )
+
+
 async def _resolve_reply_target(
     home: discord.abc.Messageable, msg: discord.Message
 ) -> discord.Message | discord.DeletedReferencedMessage | None:
     """Find the message ``msg`` replies to: Discord's own copy, else one fetch.
 
-    ``None`` means it could not be found (not cached and the fetch failed); the
+    ``None`` means it could not be found (not cached and the fetch failed), or
+    the person who replied may not read that channel's earlier messages; the
     agent then keeps only the ``reply_to`` id.
     """
     reference = msg.reference
     if not isinstance(reference, discord.MessageReference):
+        return None
+    channel: object | None = home
+    if reference.channel_id != getattr(home, "id", None):
+        guild = getattr(home, "guild", None)
+        channel = None if guild is None else guild.get_channel_or_thread(reference.channel_id)
+    # Discord's copy or a fetch with the bot's permissions: an earlier message
+    # either way, so only for a person who may read that channel's history.
+    if channel is None or not _may_read_history(channel, msg.author, posted_here=channel is home):
         return None
     resolved = reference.resolved
     if isinstance(resolved, discord.Message | discord.DeletedReferencedMessage):
@@ -168,11 +212,6 @@ async def _resolve_reply_target(
     if target_id is None:
         return None
     try:
-        channel: object | None = home
-        home_id = getattr(home, "id", None)
-        if reference.channel_id != home_id:
-            guild = getattr(home, "guild", None)
-            channel = None if guild is None else guild.get_channel_or_thread(reference.channel_id)
         fetch = getattr(channel, "fetch_message", None)
         if fetch is None:
             return None
@@ -436,7 +475,9 @@ async def build_context_xml(
     ``excluded_message_ids`` lists messages to keep out of the history, such as
     the turn's own status card.
     """
-    messages = [m async for m in thread.history(limit=limit)]
+    # Earlier messages only for a person who may read them in Discord.
+    may_read_history = _may_read_history(thread, trigger.author, posted_here=True)
+    messages = [m async for m in thread.history(limit=limit)] if may_read_history else []
     messages.sort(key=lambda m: m.created_at)
     excluded_ids = {
         trigger.id,
@@ -451,9 +492,9 @@ async def build_context_xml(
     # would miss the original post that gave the thread its context.
     # Wrapped in try/except so a fetch failure (deleted message, permission denied)
     # never breaks the turn — we simply proceed without the starter.
-    starter: discord.Message | None = thread.starter_message
+    starter: discord.Message | None = thread.starter_message if may_read_history else None
     parent = thread.parent
-    if starter is None and isinstance(parent, discord.TextChannel):
+    if starter is None and may_read_history and isinstance(parent, discord.TextChannel):
         try:
             starter = await parent.fetch_message(thread.id)
         except discord.HTTPException:
@@ -579,7 +620,11 @@ async def build_delta_xml(
         )
 
     after_obj = discord.Object(id=after_message_id)
-    messages = [m async for m in thread.history(after=after_obj, oldest_first=True)]
+    messages = (
+        [m async for m in thread.history(after=after_obj, oldest_first=True)]
+        if _may_read_history(thread, trigger.author, posted_here=True)
+        else []
+    )
     # Intentionally minimal filter: only post-watermark, non-trigger messages.
     # Bot replies ARE included for cross-speaker coherence.
     # No backfill, no thread-starter prepend, no coalescing — the reused MA session
@@ -679,8 +724,13 @@ async def build_channel_context_xml(
     ``key_names`` names this agent's stored keys, names only (see
     `daimon.core.turn_keys`); empty renders no ``<keys>`` element at all.
     """
+    # Earlier messages only for a person who may read them in Discord.
     try:
-        recent = [m async for m in channel.history(limit=limit)]
+        recent = (
+            [m async for m in channel.history(limit=limit)]
+            if _may_read_history(channel, trigger.author, posted_here=True)
+            else []
+        )
     except discord.HTTPException:
         recent = []
 

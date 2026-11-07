@@ -21,6 +21,22 @@ def _check_view_permission(  # pyright: ignore[reportUnusedFunction]
         raise ToolError("missing view_channel permission")
 
 
+def _check_history_permission(  # pyright: ignore[reportUnusedFunction]
+    channel: discord.abc.GuildChannel | discord.Thread, member: discord.Member
+) -> None:
+    """Refuse unless the member may read the channel's earlier messages.
+
+    Discord's Read Message History: without it a member sees only messages
+    posted while they look, so no tool reads earlier ones for them. Watches
+    and the Discord commands apply the same rule. A thread takes it from its
+    parent, so cache the parent first (`_ensure_thread_parent_cached`).
+    """
+    if member.guild_permissions.administrator:
+        return
+    if not channel.permissions_for(member).read_message_history:
+        raise ToolError("missing read_message_history permission")
+
+
 def _bot_read_error(  # pyright: ignore[reportUnusedFunction]
     channel: discord.abc.GuildChannel | discord.Thread | str,
     *,

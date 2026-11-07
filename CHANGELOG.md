@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Daimon no longer shows earlier Discord messages to someone who can't read a channel's history.**
+  The read and search tools, a mention's channel context, and a reply to a message in another channel check the person's Read Message History, as watches already did.
 - **Routines no longer post their own run summaries.**
   A routine with nothing to do could post a "nothing to do" note with a messaging tool, and later runs copied it. Routines now post only what their instructions ask for. Their final reply is delivered as before.
 - **A Slack routine no longer posts in a channel Daimon was removed from.**
