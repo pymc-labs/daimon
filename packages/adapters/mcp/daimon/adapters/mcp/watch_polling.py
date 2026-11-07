@@ -464,7 +464,6 @@ async def read_native(
             thread_id=str(arguments["thread_id"]),
             limit=limit,
             read_policy=read,
-            require_owner_history=True,
             poll_humans_only=True,
         )
     else:
@@ -474,7 +473,6 @@ async def read_native(
             channel_id=str(arguments["channel_id"]),
             limit=limit,
             read_policy=read,
-            require_owner_history=True,
             poll_humans_only=True,
         )
     # Keep only human-authored rows; no pagination metadata or assistant

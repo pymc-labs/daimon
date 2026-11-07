@@ -39,6 +39,7 @@ from daimon.adapters.mcp.tools.discord._models import (
 from daimon.adapters.mcp.tools.discord._visibility import (
     _bot_lacks_read_permission,  # pyright: ignore[reportPrivateUsage]
     _bot_read_error,  # pyright: ignore[reportPrivateUsage]
+    _check_history_permission,  # pyright: ignore[reportPrivateUsage]
     _check_thread_view,  # pyright: ignore[reportPrivateUsage]
     _check_view_permission,  # pyright: ignore[reportPrivateUsage]
 )
@@ -160,7 +161,6 @@ async def _read_channel_impl(  # pyright: ignore[reportUnusedFunction]
     limit: int = 50,
     before: str | None = None,
     read_policy: ChannelReadPolicy = OPEN_READ_POLICY,
-    require_owner_history: bool = False,
     poll_humans_only: bool = False,
 ) -> ReadChannelResult:
     """Read channel messages, oldest-first, with before-cursor pagination.
@@ -191,12 +191,7 @@ async def _read_channel_impl(  # pyright: ignore[reportUnusedFunction]
         read_policy.require(str(channel.id))
         if not isinstance(channel, discord.abc.Messageable):
             raise ToolError("channel does not support message history")
-        if (
-            require_owner_history
-            and not member.guild_permissions.administrator
-            and not channel.permissions_for(member).read_message_history
-        ):
-            raise ToolError("missing read_message_history permission")
+        _check_history_permission(channel, member)
         try:
             rows, next_before, hint = await _history_page(
                 channel,
@@ -286,6 +281,7 @@ async def _get_message_impl(  # pyright: ignore[reportUnusedFunction]
         else:
             _check_view_permission(channel, member)
             read_policy.require(str(channel.id))
+        _check_history_permission(channel, member)
 
         if not isinstance(channel, discord.abc.Messageable):
             raise ToolError("channel does not support message history")
@@ -368,7 +364,6 @@ async def _read_thread_impl(  # pyright: ignore[reportUnusedFunction]
     limit: int = 50,
     before: str | None = None,
     read_policy: ChannelReadPolicy = OPEN_READ_POLICY,
-    require_owner_history: bool = False,
     poll_humans_only: bool = False,
 ) -> ReadThreadResult:
     """Read messages from a thread, oldest-first, with before-cursor pagination.
@@ -398,12 +393,7 @@ async def _read_thread_impl(  # pyright: ignore[reportUnusedFunction]
         await _check_thread_view(c, channel, member, _require_discord_identity(auth))
         read_policy.require(str(channel.id), str(channel.parent_id))
 
-        if (
-            require_owner_history
-            and not member.guild_permissions.administrator
-            and not channel.permissions_for(member).read_message_history
-        ):
-            raise ToolError("missing read_message_history permission")
+        _check_history_permission(channel, member)
         try:
             rows, next_before, hint = await _history_page(
                 channel,

@@ -288,7 +288,9 @@ async def test_read_channel_happy_path_oldest_first(monkeypatch: pytest.MonkeyPa
         if route.path == "/guilds/{guild_id}":
             return {
                 **_guild_payload(),
-                "roles": [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)],
+                "roles": [
+                    _everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES | _READ_MESSAGE_HISTORY)
+                ],
             }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
@@ -373,7 +375,7 @@ async def test_read_channel_full_page_returns_cursor(monkeypatch: pytest.MonkeyP
         if route.path == "/guilds/{guild_id}":
             return {
                 **_guild_payload(),
-                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _READ_MESSAGE_HISTORY)],
             }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
@@ -404,7 +406,7 @@ async def test_read_channel_passes_before_cursor(monkeypatch: pytest.MonkeyPatch
         if route.path == "/guilds/{guild_id}":
             return {
                 **_guild_payload(),
-                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _READ_MESSAGE_HISTORY)],
             }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
@@ -462,7 +464,7 @@ async def test_read_channel_bot_author_has_assistant_role(
         if route.path == "/guilds/{guild_id}":
             return {
                 **_guild_payload(),
-                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _READ_MESSAGE_HISTORY)],
             }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
@@ -490,7 +492,7 @@ async def test_read_channel_rejects_thread_id(monkeypatch: pytest.MonkeyPatch) -
         if route.path == "/guilds/{guild_id}":
             return {
                 **_guild_payload(),
-                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _READ_MESSAGE_HISTORY)],
             }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
@@ -534,7 +536,7 @@ async def test_read_channel_rejects_cross_guild(monkeypatch: pytest.MonkeyPatch)
         if route.path == "/guilds/{guild_id}":
             return {
                 **_guild_payload(),
-                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _READ_MESSAGE_HISTORY)],
             }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
@@ -554,7 +556,7 @@ async def test_read_channel_rejects_dm(monkeypatch: pytest.MonkeyPatch) -> None:
         if route.path == "/guilds/{guild_id}":
             return {
                 **_guild_payload(),
-                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _READ_MESSAGE_HISTORY)],
             }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
@@ -581,7 +583,7 @@ async def test_list_channels_filters_by_view_permission(
         if route.path == "/guilds/{guild_id}":
             return {
                 **_guild_payload(),
-                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _READ_MESSAGE_HISTORY)],
             }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
@@ -615,7 +617,7 @@ async def test_list_channels_held_to_an_isolated_channel_lists_only_it(
         if route.path == "/guilds/{guild_id}":
             return {
                 **_guild_payload(),
-                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _READ_MESSAGE_HISTORY)],
             }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
@@ -650,7 +652,7 @@ async def test_list_channels_includes_category_id(
         if route.path == "/guilds/{guild_id}":
             return {
                 **_guild_payload(),
-                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _READ_MESSAGE_HISTORY)],
             }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
@@ -706,7 +708,7 @@ async def test_get_message_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
         if route.path == "/guilds/{guild_id}":
             return {
                 **_guild_payload(),
-                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _READ_MESSAGE_HISTORY)],
             }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
@@ -732,7 +734,7 @@ async def test_get_message_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
         if route.path == "/guilds/{guild_id}":
             return {
                 **_guild_payload(),
-                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _READ_MESSAGE_HISTORY)],
             }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
@@ -758,7 +760,7 @@ async def test_get_message_thread_aware_denies_private_thread_non_member(
         if route.path == "/guilds/{guild_id}":
             return {
                 **_guild_payload(),
-                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _READ_MESSAGE_HISTORY)],
             }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
@@ -852,7 +854,7 @@ async def test_read_thread_happy_path_oldest_first(monkeypatch: pytest.MonkeyPat
         if route.path == "/guilds/{guild_id}":
             return {
                 **_guild_payload(),
-                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _READ_MESSAGE_HISTORY)],
             }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
@@ -895,7 +897,7 @@ async def test_read_thread_full_page_returns_cursor(monkeypatch: pytest.MonkeyPa
         if route.path == "/guilds/{guild_id}":
             return {
                 **_guild_payload(),
-                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _READ_MESSAGE_HISTORY)],
             }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
@@ -929,7 +931,7 @@ async def test_read_thread_with_before_cursor(monkeypatch: pytest.MonkeyPatch) -
         if route.path == "/guilds/{guild_id}":
             return {
                 **_guild_payload(),
-                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _READ_MESSAGE_HISTORY)],
             }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
@@ -962,7 +964,7 @@ async def test_read_thread_rejects_non_thread(monkeypatch: pytest.MonkeyPatch) -
         if route.path == "/guilds/{guild_id}":
             return {
                 **_guild_payload(),
-                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _READ_MESSAGE_HISTORY)],
             }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
@@ -984,7 +986,7 @@ async def test_read_thread_private_thread_denies_non_member(
         if route.path == "/guilds/{guild_id}":
             return {
                 **_guild_payload(),
-                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _READ_MESSAGE_HISTORY)],
             }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
@@ -1016,7 +1018,7 @@ async def test_list_threads_merges_active_and_archived(
         if route.path == "/guilds/{guild_id}":
             return {
                 **_guild_payload(),
-                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _READ_MESSAGE_HISTORY)],
             }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
@@ -1078,7 +1080,7 @@ async def test_list_threads_private_thread_membership_check(
         if route.path == "/guilds/{guild_id}":
             return {
                 **_guild_payload(),
-                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _READ_MESSAGE_HISTORY)],
             }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
@@ -1113,7 +1115,7 @@ async def test_list_threads_rejects_voice_channel(monkeypatch: pytest.MonkeyPatc
         if route.path == "/guilds/{guild_id}":
             return {
                 **_guild_payload(),
-                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _READ_MESSAGE_HISTORY)],
             }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
@@ -1135,7 +1137,7 @@ async def test_list_threads_rejects_thread_as_parent(
         if route.path == "/guilds/{guild_id}":
             return {
                 **_guild_payload(),
-                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _READ_MESSAGE_HISTORY)],
             }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
@@ -1157,7 +1159,7 @@ async def test_list_threads_last_activity_from_last_message_id(
         if route.path == "/guilds/{guild_id}":
             return {
                 **_guild_payload(),
-                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _READ_MESSAGE_HISTORY)],
             }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
@@ -1195,7 +1197,7 @@ async def test_list_threads_archived_without_last_message_uses_archive_timestamp
         if route.path == "/guilds/{guild_id}":
             return {
                 **_guild_payload(),
-                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _READ_MESSAGE_HISTORY)],
             }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
@@ -1243,10 +1245,43 @@ async def test_poll_reads_recheck_owners_history_permission_at_actual_read(monke
     patch_discord_http(monkeypatch, handler)
     with pytest.raises(ToolError, match="read_message_history"):
         if tool == "channel":
-            await _read_channel_impl(
-                _runtime_with_discord_token(), _auth(), channel_id="222", require_owner_history=True
-            )
+            await _read_channel_impl(_runtime_with_discord_token(), _auth(), channel_id="222")
         else:
-            await _read_thread_impl(
-                _runtime_with_discord_token(), _auth(), thread_id="444", require_owner_history=True
+            await _read_thread_impl(_runtime_with_discord_token(), _auth(), thread_id="444")
+
+
+# A member who may view a channel but not read its history (Discord's "Read
+# Message History" denied for them) sees only messages posted while they look.
+# Reading the history for them must refuse, as watches and Discord itself do.
+_NO_HISTORY_FOR_42 = [{"id": "42", "type": 1, "allow": "0", "deny": str(_READ_MESSAGE_HISTORY)}]
+
+
+@pytest.mark.parametrize("tool", ["read_channel", "read_thread", "get_message"])
+async def test_a_member_without_read_history_gets_no_messages(
+    monkeypatch: pytest.MonkeyPatch, tool: str
+) -> None:
+    async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
+        if route.path == "/guilds/{guild_id}":
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _READ_MESSAGE_HISTORY)],
+            }
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return _member_payload()
+        if route.path == "/channels/{channel_id}":
+            channel_id = kwargs.get("channel_id") or route.channel_id
+            if str(channel_id) == "444":
+                return _thread_payload()
+            return _text_channel_payload(permission_overwrites=_NO_HISTORY_FOR_42)
+        raise AssertionError(f"no message may be read for this member: {route.path}")
+
+    patch_discord_http(monkeypatch, handler)
+    with pytest.raises(ToolError, match="read_message_history"):
+        if tool == "read_channel":
+            await _read_channel_impl(_runtime_with_discord_token(), _auth(), channel_id="222")
+        elif tool == "read_thread":
+            await _read_thread_impl(_runtime_with_discord_token(), _auth(), thread_id="444")
+        else:
+            await _get_message_impl(
+                _runtime_with_discord_token(), _auth(), channel_id="222", message_id="1000"
             )

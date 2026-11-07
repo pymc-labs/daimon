@@ -28,6 +28,7 @@ from daimon.adapters.mcp.tools.discord._models import AttachmentRow, MessageRow,
 from daimon.adapters.mcp.tools.discord._visibility import (
     _bot_lacks_read_permission,  # pyright: ignore[reportPrivateUsage]
     _bot_read_error,  # pyright: ignore[reportPrivateUsage]
+    _check_history_permission,  # pyright: ignore[reportPrivateUsage]
     _check_thread_view,  # pyright: ignore[reportPrivateUsage]
     _check_view_permission,  # pyright: ignore[reportPrivateUsage]
 )
@@ -178,6 +179,7 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
                 else:
                     _check_view_permission(guild_ch, member)
                     read_policy.require(ch_id)
+                _check_history_permission(guild_ch, member)
 
         # 5. Build per-channel visibility data from fetch_channels.
         #    Absence does NOT mean invisible — it means "resolve it".
@@ -187,7 +189,9 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
         for ch in channels:
             ch_id_str = str(ch.id)
             perms = ch.permissions_for(member)
-            view_by_channel_id[ch_id_str] = perms.view_channel
+            # Search returns earlier messages, so it needs Read Message History
+            # too (`_check_history_permission`); a thread inherits its parent's.
+            view_by_channel_id[ch_id_str] = perms.view_channel and perms.read_message_history
             manage_threads_by_channel_id[ch_id_str] = perms.manage_threads
 
         # 6. Build server-side filter params
@@ -284,6 +288,7 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
                             raw_parent = await _resolve_channel(c, parent_id)
                             if isinstance(raw_parent, (discord.abc.GuildChannel, discord.Thread)):
                                 _check_view_permission(raw_parent, member)
+                                _check_history_permission(raw_parent, member)
                                 parent_view = True
                             else:
                                 parent_view = False
@@ -317,6 +322,7 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
                         parent_by_channel_id[ch_id] = str(raw_ch.parent_id)
                         try:
                             await _check_thread_view(c, raw_ch, member, user_id)
+                            _check_history_permission(raw_ch, member)
                             can_view = True
                         except ToolError:
                             can_view = False
@@ -324,6 +330,7 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
                         can_view = False
                     else:
                         _check_view_permission(raw_ch, member)
+                        _check_history_permission(raw_ch, member)
                         can_view = True
                 except ToolError:
                     can_view = False

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import xml.etree.ElementTree as ET
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock
 from xml.etree import ElementTree
 
 import discord
 import pytest
+from daimon.adapters.discord import context as context_mod
 from daimon.adapters.discord.context import (
     CHANNEL_BACKFILL_LIMIT,
     CHANNEL_FILE_LIMIT,
@@ -1990,3 +1992,58 @@ async def test_composite_sources_keep_each_request_identity(builder: str, same_t
         {"message_id": "32", "channel_id": "900"},
     ]
     assert [source.text for source in sources] == [first.content, second.content]
+
+
+# A person who may post in a channel but not read its history (Discord's "Read
+# Message History" denied) sees only messages posted while they look. The bot
+# reads with its own permissions, so earlier messages must not reach the agent
+# for them; the MCP read tools apply the same rule.
+
+
+def _history_permission(channel: object, allowed: bool) -> None:
+    cast(MagicMock, channel).permissions_for = MagicMock(
+        return_value=SimpleNamespace(read_message_history=allowed, manage_threads=False)
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("allowed", [False, True])
+async def test_channel_backfill_needs_the_askers_read_history(allowed: bool) -> None:
+    earlier = _make_message(msg_id=5, channel_id=42, content="earlier secret plan")
+    trigger = _make_message(msg_id=10, channel_id=42, content="<@999> what was decided?")
+    channel = _make_text_channel([trigger, earlier])
+    _history_permission(channel, allowed)
+    thread = _make_thread([trigger], thread_id=900, parent_id=42)
+
+    result, _ = await build_channel_context_xml(channel, trigger, thread=thread)
+
+    assert ("earlier secret plan" in result) is allowed, (
+        "earlier channel messages reach the agent only for a person with Read Message History"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("allowed", [False, True])
+async def test_a_reply_target_in_another_channel_needs_the_askers_read_history(
+    allowed: bool,
+) -> None:
+    target = _make_message(msg_id=5, channel_id=777, content="other channel secret")
+    other = MagicMock(spec=discord.TextChannel)
+    other.fetch_message = AsyncMock(return_value=target)
+    _history_permission(other, allowed)
+    home = MagicMock(spec=discord.TextChannel)
+    home.id = 900
+    home.guild = MagicMock()
+    home.guild.get_channel_or_thread = MagicMock(return_value=other)
+    replying = _make_message(msg_id=10, channel_id=900, content="see this")
+    replying.reference = MagicMock(spec=discord.MessageReference)
+    replying.reference.resolved = None
+    replying.reference.message_id = 5
+    replying.reference.channel_id = 777
+
+    found = await context_mod._resolve_reply_target(home, replying)  # pyright: ignore[reportPrivateUsage]
+
+    assert (found is target) is allowed, (
+        "another channel's message is fetched only for a person with Read Message History there"
+    )
+    assert other.fetch_message.await_count == (1 if allowed else 0)
