@@ -25,8 +25,7 @@ from daimon.core.here_card import HereCard, load_here_card, render_here_card, re
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.outsiders import OutsiderVisibility
 from daimon.core.permissions import channel_permissions
-from daimon.core.scope_settings import actor_account
-from daimon.core.settings_card import moved_to_settings
+from daimon.core.scope_settings import actor_account, moved_to_settings
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.web_links import panel_links

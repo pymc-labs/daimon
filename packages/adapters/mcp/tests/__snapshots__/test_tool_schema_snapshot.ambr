@@ -945,14 +945,14 @@
       'description': '''
         Change one setting where you are, after the person presses Approve.
         <blank line>
-        ``key`` and its values: ``approvals`` is ``on`` (Ask before third-party writes),
-        ``off`` (Allow writes) or ``inherit``, and only a server admin of the platform
-        itself may change it; ``participation`` (reply in threads without being
-        addressed) and ``progress_plans`` are ``on``, ``off``, ``disabled`` (a channel or
-        server lock) or ``inherit``, a thread's for anyone and a channel's or the
-        server's for an admin; ``cost_footer`` is ``shown`` or ``hidden``, server level
-        only, for an admin. ``level`` is the ``server``, ``channel`` or ``thread`` of
-        this conversation; other places cannot be named. Read the returned ``note`` back.
+        ``approvals`` is ``on`` (Ask before third-party writes), ``off`` (Allow writes) or
+        ``inherit``; only an admin of the chat platform itself, checked live, may change
+        it. ``participation`` (reply in threads without being addressed) and
+        ``progress_plans`` are ``on``, ``off``, ``disabled`` (a channel or server lock) or
+        ``inherit``: a thread's for anyone, a channel's or the server's for an admin.
+        ``cost_footer`` is ``shown`` or ``hidden``, server level only, for an admin.
+        ``level`` is the ``server``, ``channel`` or ``thread`` of this conversation; other
+        places cannot be named. Read the returned ``note`` back.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -4484,10 +4484,9 @@
         Report this conversation's settings: approvals, thread participation, progress
         plans and the cost footer.
         <blank line>
-        Each setting lists its own value at the server, channel and thread level of where
-        you are, and what is in effect. Anyone may read them. Read each ``note`` back.
-        People change them with ``/settings``, the web app's Settings section or
-        ``change_setting``.
+        Each lists its own value at the server, channel and thread level of where you are,
+        and what is in effect. Anyone may read them; read each ``note`` back. People change
+        them with ``/settings``, the web app's Settings section or ``change_setting``.
       ''',
       'parameters': dict({
         'additionalProperties': False,

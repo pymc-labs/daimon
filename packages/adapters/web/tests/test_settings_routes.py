@@ -67,70 +67,44 @@ async def test_members_read_approvals_and_the_footer_but_never_write(
     assert writes == [403, 403, 403]
 
 
-async def test_a_web_only_owner_cannot_change_approvals(
+@pytest.mark.parametrize("linked", [False, True], ids=["web_only_owner", "linked_non_admin"])
+async def test_approvals_need_a_linked_chat_admin(
     web_client: WebClientFactory,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    linked: bool,
 ) -> None:
+    checked = _linked(monkeypatch, admin=False) if linked else []
     async with _channels(web_client, db_session_factory, tmp_path) as admin:
         writes = [(await admin.client.put(url, json=body)).status_code for url, body in _APPROVALS]
         settings = (await admin.client.get("/api/channels/c1/settings")).json()
 
-    assert writes == [403, 403], "an owner with no linked chat account is no chat admin"
+    assert writes == [403, 403], "an owner with no linked chat admin account is no chat admin"
     assert settings["approvals"]["own"] is None, "a refused change writes nothing"
-    assert settings["approvals"]["editable"] is False
+    assert settings["approvals"]["editable"] is linked
+    assert checked == (["u-linked"] * 2 if linked else []), "the live check names the account"
 
 
-async def test_a_linked_member_who_is_no_chat_admin_is_refused(
+async def test_allowed_changes_are_recorded_and_stale_is_409(
     web_client: WebClientFactory,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    checked = _linked(monkeypatch, admin=False)
+    _linked(monkeypatch, admin=True)
     async with _channels(web_client, db_session_factory, tmp_path) as admin:
-        res = await admin.client.put(_APPROVALS[0][0], json=_APPROVALS[0][1])
-
-    assert res.status_code == 403, res.text
-    assert checked == ["u-linked"], "the live check names the linked account"
-
-
-async def test_a_linked_chat_admin_changes_approvals_recorded_and_stale_is_409(
-    web_client: WebClientFactory,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    checked = _linked(monkeypatch, admin=True)
-    async with _channels(web_client, db_session_factory, tmp_path) as admin:
-        first = await admin.client.put(_APPROVALS[0][0], json=_APPROVALS[0][1])
-        stale = await admin.client.put(_APPROVALS[0][0], json=_APPROVALS[0][1])
+        first, stale = [
+            await admin.client.put(_APPROVALS[0][0], json=_APPROVALS[0][1]) for _ in "ab"
+        ]
+        hidden, stale_footer = [await admin.client.put(_FOOTER[0], json=_FOOTER[1]) for _ in "ab"]
         settings = (await admin.client.get("/api/channels/c1/settings")).json()
         history = (await admin.client.get("/api/channels/c1/history")).json()["entries"]
 
-    assert first.status_code == 200, first.text
-    assert stale.status_code == 409, "the value read was inherit; it is off now"
+    assert (first.status_code, stale.status_code) == (200, 409), first.text
     assert settings["approvals"] == {
-        "available": True,
-        "own": "off",
-        "value": "off",
-        "source": "channel",
-        "active": False,
-        "editable": True,
-    }
+        "available": True, "own": "off", "value": "off", "source": "channel", "active": False, "editable": True,
+    }  # fmt: skip
     assert [(h["setting"], h["after"]) for h in history] == [("approvals", "off")]
-    assert checked and set(checked) == {"u-linked"}
-
-
-async def test_an_owner_hides_the_cost_footer_and_stale_is_409(
-    web_client: WebClientFactory,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    async with _channels(web_client, db_session_factory, tmp_path) as admin:
-        hidden = await admin.client.put(_FOOTER[0], json=_FOOTER[1])
-        stale = await admin.client.put(_FOOTER[0], json=_FOOTER[1])
-
-    assert hidden.status_code == 200, hidden.text
+    assert (hidden.status_code, stale_footer.status_code) == (200, 409), hidden.text
     assert hidden.json()["cost_footer"] == {"shown": False, "editable": True}
-    assert stale.status_code == 409

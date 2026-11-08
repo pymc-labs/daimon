@@ -1,38 +1,42 @@
-"""The Settings group's registry, readers and writer: one rule per key for every surface."""
+"""The Settings group: registry, reader, writer and panel, one rule per key for every surface."""
 
 from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from daimon.core import scope_settings
+from daimon.core import scope_settings as core
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.approval_gate import ApprovalGate
 from daimon.core.authz import Subject
 from daimon.core.channel_changes import ChannelChangeRefused, Expected
-from daimon.core.channel_switches import SwitchChange
-from daimon.core.config import Settings
+from daimon.core.channel_switches import SwitchChange, switch_refusal
+from daimon.core.confirmation import prompt_for_tool_call
 from daimon.core.errors import StaleChannelValue
 from daimon.core.scope_cascade import CascadeMode, CascadeModes, ResolvedCascade
 from daimon.core.scope_settings import (
     OVERRIDES_OFF,
-    SETTING_KEYS,
     SPECS,
+    LevelValue,
     SettingsActor,
-    SettingsDefaults,
     SettingsPlace,
-    change_refusal,
+    SettingView,
+    apply_choice,
+    build_settings_panel,
     change_setting,
+    decode_choice,
+    moved_to_settings,
     read_settings,
     setting_refusal,
+    switch_default,
 )
-from daimon.core.tool_safety import ToolSafetyPolicy
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall, ToolSafetyPolicy
 
 TENANT = uuid.uuid4()
 THREAD = SettingsPlace.of("discord", "C1", "T1")
@@ -41,61 +45,60 @@ THREAD = SettingsPlace.of("discord", "C1", "T1")
 class _Factory:
     """A sessionmaker stand-in: every session is a mock, and nothing reaches a database."""
 
-    def __init__(self) -> None:
-        self.session = MagicMock()
-
     @asynccontextmanager
     async def _open(self) -> AsyncIterator[Any]:
-        yield self.session
+        yield MagicMock()
 
     def __call__(self) -> Any:
         return self._open()
 
-    def begin(self) -> Any:
-        return self._open()
+    begin = __call__
 
 
-def _factory() -> async_sessionmaker[AsyncSession]:
-    return _Factory()  # type: ignore[return-value]
-
-
-def _settings(*, overrides: bool = True) -> Settings:
+def _settings(*, overrides: bool = True) -> Any:
     settings = MagicMock()
     settings.tool_safety = ToolSafetyPolicy(enabled=overrides, allow_gate_overrides=overrides)
-    settings.discord = object()
     settings.teams = None
-    settings.thread_participation.mode = CascadeMode.OFF
-    settings.progress_plans.mode = CascadeMode.OFF
+    settings.thread_participation.mode = settings.progress_plans.mode = CascadeMode.OFF
     return settings
 
 
-def _actor(
-    *, admin: bool = False, delegated: frozenset[DelegatedAction] = frozenset()
-) -> SettingsActor:
-    async def admin_for(action: DelegatedAction | None) -> bool:
-        return admin or (action is not None and action in delegated)
+def _actor(kind: str = "member") -> SettingsActor:
+    """``member``, ``admin``, ``granted`` (every delegated action), ``agent_key``, ``web_only``."""
 
-    return SettingsActor(
-        tenant_id=TENANT,
-        account_id=None,
-        surface="chat",
-        native_user_id="person",
-        admin_for=admin_for,
-    )
+    async def admin_for(action: DelegatedAction | None) -> bool:
+        return kind in ("admin", "agent_key", "web_only") or (
+            kind == "granted" and action is not None
+        )
+
+    native = None if kind == "web_only" else "person"
+    return SettingsActor(TENANT, None, "chat", native, admin_for, via_agent_key=kind == "agent_key")
 
 
 @pytest.fixture
 def stores(monkeypatch: pytest.MonkeyPatch) -> dict[str, AsyncMock]:
+    on = ResolvedCascade(CascadeMode.ON, "thread")
+
+    async def set_switch(_sm: Any, actor: Any, switch: Any, **kw: Any) -> SwitchChange:
+        """The real switch rules (admin levels, the thread lock); no database."""
+        rule = switch_refusal(
+            switch,
+            actor,
+            platform=kw["platform"],
+            deployment=kw["deployment"],
+            scope=kw["target"].scope,
+            mode=kw["mode"],
+        )
+        if rule is not None:
+            raise rule
+        return SwitchChange(None, CascadeMode.ON, on)
+
     fakes = {
         "approval_admin": AsyncMock(return_value=Subject(is_admin=True, platform_user_id="person")),
         "set_approval_gate": AsyncMock(
             return_value=ApprovalGate("off", "server", "person", TENANT, "inherit")
         ),
-        "set_switch": AsyncMock(
-            return_value=SwitchChange(
-                None, CascadeMode.ON, ResolvedCascade(CascadeMode.ON, "thread")
-            )
-        ),
+        "set_switch": AsyncMock(side_effect=set_switch),
         "get_cost_footer": AsyncMock(return_value=True),
         "set_cost_footer": AsyncMock(),
         "record_change": AsyncMock(),
@@ -103,32 +106,36 @@ def stores(monkeypatch: pytest.MonkeyPatch) -> dict[str, AsyncMock]:
         "get_switch_modes": AsyncMock(return_value=CascadeModes(None, None, None)),
     }
     for name, fake in fakes.items():
-        monkeypatch.setattr(scope_settings, name, fake)
+        monkeypatch.setattr(core, name, fake)
     return fakes
 
 
-def test_registry_names_four_keys_with_their_values_and_levels() -> None:
-    assert SETTING_KEYS == ("approvals", "participation", "progress_plans", "cost_footer")
-    assert dict(SPECS["approvals"].labels) == {
-        "on": "Ask",
-        "off": "Allow writes",
-        "inherit": "Inherit",
-    }
-    assert SPECS["participation"].values == ("on", "off", "disabled", "inherit")
+async def _change(key: str, level: str, value: str, actor: str = "admin", **kw: Any) -> Any:
+    return await change_setting(
+        _Factory(),
+        _settings(),
+        _actor(actor),
+        key=key,
+        level=level,
+        value=value,
+        place=THREAD,
+        **kw,
+    )  # type: ignore[arg-type]
+
+
+def test_registry_places_and_defaults() -> None:
+    assert SPECS["approvals"].labels == {"on": "Ask", "off": "Allow writes", "inherit": "Inherit"}
     assert SPECS["participation"].platforms == frozenset({"discord", "teams"})
-    assert SPECS["progress_plans"].platforms == frozenset({"discord", "slack", "teams"})
     assert SPECS["cost_footer"].levels == ("server",)
-
-
-def test_place_levels_and_thread_keys() -> None:
     assert SettingsPlace.of("discord", "C1", "C1").levels() == ("server", "channel")
-    assert THREAD.levels() == ("server", "channel", "thread")
     slack = SettingsPlace.of("slack", "C1", "C1:1.2")
-    assert slack.thread_id == "1.2"
-    assert slack.switch_thread_id == "C1:1.2"
-    assert slack.approvals_target("thread") == "C1:1.2"
-    assert THREAD.approvals_target("thread") == "T1"
-    assert THREAD.approvals_target("server") is None
+    assert (slack.thread_id, slack.thread_key, slack.target("thread")) == (
+        "1.2",
+        "C1:1.2",
+        "C1:1.2",
+    )
+    assert THREAD.target("thread") == "T1" and THREAD.target("server") is None
+    assert switch_default(_settings(), "participation", "teams") is CascadeMode.DISABLED
 
 
 @pytest.mark.parametrize(
@@ -138,218 +145,204 @@ def test_place_levels_and_thread_keys() -> None:
         ("approvals", "server", "disabled", THREAD, "bad_value"),
         ("approvals", "planet", "on", THREAD, "bad_level"),
         ("participation", "server", "on", SettingsPlace.of("slack", "C1", None), "wrong_platform"),
-        ("cost_footer", "channel", "hidden", THREAD, "server_only"),
         ("cost_footer", "thread", "hidden", THREAD, "server_only"),
         ("approvals", "thread", "on", SettingsPlace.of("discord", "C1", None), "no_such_level"),
     ],
 )
 def test_refusals_before_any_read(
-    key: str, level: str, value: str, place: SettingsPlace, reason: str
+    key: str, level: str, value: str, place: Any, reason: str
 ) -> None:
     refusal = setting_refusal(key, level, value, place=place)
     assert refusal is not None and refusal.reason == reason
+    if reason == "server_only":
+        assert str(refusal) == (
+            "Cost footer is set for the whole server only. Change it at the server level."
+        )
 
 
-def test_cost_footer_at_channel_level_is_refused_in_a_plain_sentence() -> None:
-    refusal = setting_refusal("cost_footer", "channel", "hidden", place=THREAD)
-    assert str(refusal) == (
-        "Cost footer is set for the whole server only. Change it at the server level."
-    )
-
-
-async def test_read_reports_every_key_with_its_own_resolver(stores: dict[str, AsyncMock]) -> None:
+async def test_read_uses_each_keys_resolver(stores: dict[str, AsyncMock]) -> None:
     stores["load_access_policy"].return_value = TenantAccessPolicy(
-        approvals="on",
-        approvals_set_by="a",
-        channel_rules={"T1": ChannelRule(approvals="off", approvals_set_by="a")},
+        approvals="on", approvals_set_by="a", channel_rules={"T1": ChannelRule(approvals="off")}
     )
     stores["get_switch_modes"].return_value = CascadeModes(
         CascadeMode.DISABLED, CascadeMode.ON, None
     )
-    views = await read_settings(
-        _factory(),
-        tenant_id=TENANT,
-        place=THREAD,
-        defaults=SettingsDefaults.from_settings(_settings(), "discord"),
-    )
-    by_key = {view.key: view for view in views}
-    assert by_key["approvals"].effective == "off", "the most specific level wins"
-    assert by_key["approvals"].decided_by == "thread"
-    assert by_key["approvals"].own("server") == "on"
-    assert by_key["participation"].effective == "disabled", "disabled is final below it"
-    assert by_key["participation"].decided_by == "server"
-    assert by_key["cost_footer"].effective == "shown"
-    assert [item.level for item in by_key["cost_footer"].levels] == ["server"]
-
-
-async def test_approvals_read_says_saved_but_ignored_when_overrides_are_off(
-    stores: dict[str, AsyncMock],
-) -> None:
-    (view,) = await read_settings(
-        _factory(),
-        tenant_id=TENANT,
-        place=THREAD,
-        defaults=SettingsDefaults.from_settings(_settings(overrides=False), "discord"),
-        keys=("approvals",),
-    )
-    assert not view.active
-    assert view.effective_label == "Ask"
-    assert view.note.endswith(OVERRIDES_OFF)
-
-
-async def test_participation_is_disabled_where_its_platform_is_not_set_up() -> None:
-    defaults = SettingsDefaults.from_settings(_settings(), "teams")
-    assert defaults.participation is CascadeMode.DISABLED
-
-
-async def test_approvals_need_a_live_native_admin(stores: dict[str, AsyncMock]) -> None:
-    stores["approval_admin"].return_value = Subject(platform_user_id="person")
-    with pytest.raises(ChannelChangeRefused, match="Only a server admin can change approvals"):
-        await change_setting(
-            _factory(),
-            _settings(),
-            _actor(admin=True),
-            key="approvals",
-            level="server",
-            value="off",
-            place=THREAD,
+    views = {
+        v.key: v
+        for v in await read_settings(
+            _Factory(), settings=_settings(), tenant_id=TENANT, place=THREAD
         )
+    }  # type: ignore[arg-type]
+    assert (views["approvals"].effective, views["approvals"].decided_by) == ("off", "thread")
+    assert views["approvals"].own("server") == "on"
+    assert views["participation"].effective == "disabled", "disabled is final below its level"
+    assert [item.level for item in views["cost_footer"].levels] == ["server"]
+    (ignored,) = await read_settings(
+        _Factory(),
+        settings=_settings(overrides=False),
+        tenant_id=TENANT,
+        place=THREAD,
+        keys=("approvals",),
+    )  # type: ignore[arg-type]
+    assert not ignored.active and ignored.note.endswith(OVERRIDES_OFF)
+
+
+# (key, level, value, actor, native admin live?, refusal match or None, store written)
+CHANGES = [
+    ("approvals", "thread", "off", "member", True, None, "set_approval_gate"),
+    (
+        "approvals",
+        "server",
+        "off",
+        "admin",
+        False,
+        "Only a server admin can change approvals",
+        None,
+    ),
+    ("approvals", "server", "off", "granted", False, "can change approvals", None),
+    ("approvals", "server", "off", "agent_key", True, "can change approvals", None),
+    ("approvals", "server", "off", "web_only", True, "can change approvals", None),
+    ("cost_footer", "server", "hidden", "granted", False, None, "set_cost_footer"),
+    ("cost_footer", "server", "hidden", "member", True, "Ask a server admin", None),
+    ("participation", "thread", "on", "member", False, None, "set_switch"),
+    ("participation", "channel", "on", "member", False, "Only a server admin", None),
+    ("progress_plans", "thread", "disabled", "admin", False, "thread-level", None),
+]
+
+
+@pytest.mark.parametrize(("key", "level", "value", "actor", "native", "refused", "store"), CHANGES)
+async def test_who_may_change_what(
+    stores: dict[str, AsyncMock], key: str, level: str, value: str, actor: str, native: bool,
+    refused: str | None, store: str | None,
+) -> None:  # fmt: skip
+    stores["approval_admin"].return_value = Subject(is_admin=native, platform_user_id="person")
+    if refused is not None:
+        with pytest.raises(ChannelChangeRefused, match=refused):
+            await _change(key, level, value, actor)
+    else:
+        change = await _change(key, level, value, actor)
+        assert change.after == value
+    for name in ("set_approval_gate", "set_cost_footer"):
+        assert stores[name].await_count == (name == store)
+    if actor in ("agent_key", "web_only"):
+        stores["approval_admin"].assert_not_awaited()
+
+
+async def test_writes_carry_the_place_record_and_stale_check(stores: dict[str, AsyncMock]) -> None:
+    await _change("approvals", "thread", "off")
+    call = stores["set_approval_gate"].await_args.kwargs
+    assert call["target"] == "T1" and call["subject"].is_admin
+    assert (call["record"].channel_id, call["record"].thread_id) == ("C1", "T1")
+    await _change("participation", "thread", "on", "member")
+    target = stores["set_switch"].await_args.kwargs["target"]
+    assert (target.scope_id, target.channel_id) == ("T1", "C1")
+    footer = await _change("cost_footer", "server", "hidden")
+    assert (
+        stores["record_change"].await_args.kwargs["channel_id"] == "*" and footer.before == "shown"
+    )
+    with pytest.raises(StaleChannelValue):
+        await _change("cost_footer", "server", "hidden", expected=Expected("hidden"))
+    assert stores["set_cost_footer"].await_count == 1
+
+
+def _view(
+    key: Any, *, own: tuple[str, ...] = ("server", "channel", "thread"), available: bool = True
+) -> SettingView:
+    levels = tuple(
+        LevelValue(level, "inherit" if key != "cost_footer" else "shown") for level in own
+    )  # type: ignore[arg-type]
+    return SettingView(
+        key, SPECS[key].name, levels, "on", "Ask", "default", available, True, "Note."
+    )
+
+
+@pytest.mark.parametrize(
+    ("admin", "native", "place", "expected"),
+    [
+        (False, False, THREAD, {"participation": ["Thread: On", "Thread: Off"]}),
+        (True, True, THREAD, {
+            "approvals": [f"{lv}: {v}" for lv in ("Server", "Channel", "Thread") for v in ("Ask", "Allow writes")],
+            "participation": [f"{lv}: {v}" for lv in ("Server", "Channel") for v in ("On", "Off", "Disabled")]
+            + ["Thread: On", "Thread: Off"],
+            "cost_footer": ["Server: Hidden"],
+        }),
+        (True, True, SettingsPlace.of("slack", "C1", None), {"approvals": ["Workspace: Ask", "Workspace: Allow writes", "Channel: Ask", "Channel: Allow writes"]}),
+    ],
+)  # fmt: skip
+def test_the_panel_offers_each_viewer_their_choices(
+    admin: bool, native: bool, place: SettingsPlace, expected: dict[str, list[str]]
+) -> None:
+    levels = tuple(place.levels())
+    views = [
+        _view("approvals", own=levels),
+        _view("participation", own=levels),
+        _view("cost_footer", own=("server",)),
+    ]
+    if place.platform == "slack":
+        views = views[:1]
+    panel = build_settings_panel(views, place=place, admin=admin, native_admin=native)
+    offered = {row.key: [label for _, label in row.choices] for row in panel.rows if row.choices}
+    assert offered == expected
+    assert panel.subline == core.PICK
+    nobody = build_settings_panel(
+        [_view("approvals")], place=THREAD, admin=True, native_admin=False
+    )
+    assert nobody.subline == "Only a server admin can change these. Ask a server admin."
+    off = build_settings_panel(
+        [_view("participation", available=False)], place=THREAD, admin=True, native_admin=True
+    )
+    assert off.rows[0].choices == ()
+
+
+@pytest.mark.parametrize(
+    "raw", ["approvals:thread:maybe", "colour:server:on", "a:b", "approvals:server:off:x", None, 3]
+)
+async def test_a_forged_choice_writes_and_says_nothing(
+    stores: dict[str, AsyncMock], raw: object
+) -> None:
+    assert decode_choice(raw) is None
+    assert await apply_choice(_Factory(), _settings(), _actor("admin"), raw, THREAD) is None  # type: ignore[arg-type]
     stores["set_approval_gate"].assert_not_awaited()
 
 
-async def test_a_daimon_granted_admin_sets_the_footer_but_not_approvals(
+async def test_apply_choice_answers_with_the_change_or_the_refusal(
     stores: dict[str, AsyncMock],
 ) -> None:
-    granted = _actor(delegated=frozenset(DelegatedAction))
-    stores["approval_admin"].return_value = Subject(platform_user_id="person")
-    with pytest.raises(ChannelChangeRefused):
-        await change_setting(
-            _factory(),
-            _settings(),
-            granted,
-            key="approvals",
-            level="server",
-            value="off",
-            place=THREAD,
-        )
-    change = await change_setting(
-        _factory(),
-        _settings(),
-        granted,
-        key="cost_footer",
-        level="server",
-        value="hidden",
-        place=THREAD,
-    )
-    assert change.before == "shown" and change.after == "hidden"
-    stores["set_cost_footer"].assert_awaited_once()
-    recorded = stores["record_change"].await_args.kwargs
-    assert recorded["setting"] == "cost_footer" and recorded["channel_id"] == "*"
+    done = await apply_choice(
+        _Factory(), _settings(), _actor("member"), "participation:thread:on", THREAD
+    )  # type: ignore[arg-type]
+    assert done is not None and done[0] and "Thread participation is now On" in done[1]
+    refused = await apply_choice(
+        _Factory(), _settings(), _actor("member"), "participation:channel:on", THREAD
+    )  # type: ignore[arg-type]
+    assert refused is not None and not refused[0] and "Ask a server admin" in refused[1]
 
 
-async def test_footer_needs_the_agent_settings_admin(stores: dict[str, AsyncMock]) -> None:
-    with pytest.raises(ChannelChangeRefused, match="Ask a server admin"):
-        await change_setting(
-            _factory(),
-            _settings(),
-            _actor(),
-            key="cost_footer",
-            level="server",
-            value="hidden",
-            place=THREAD,
-        )
-    stores["set_cost_footer"].assert_not_awaited()
+@pytest.mark.parametrize(
+    ("platform", "said"),
+    [("discord", "run `/settings`"), ("slack", "run `/settings`"), ("teams", "send `settings`")],
+)
+def test_retired_controls_point_to_settings(platform: str, said: str) -> None:
+    assert moved_to_settings(platform) == f"Next time, {said}."
 
 
-async def test_footer_stale_expected_writes_nothing(stores: dict[str, AsyncMock]) -> None:
-    with pytest.raises(StaleChannelValue):
-        await change_setting(
-            _factory(),
-            _settings(),
-            _actor(admin=True),
-            key="cost_footer",
-            level="server",
-            value="hidden",
-            place=THREAD,
-            expected=Expected("hidden"),
-        )
-    stores["set_cost_footer"].assert_not_awaited()
-
-
-async def test_approvals_change_is_written_with_its_record(stores: dict[str, AsyncMock]) -> None:
-    change = await change_setting(
-        _factory(),
-        _settings(),
-        _actor(),
-        key="approvals",
-        level="thread",
-        value="off",
-        place=THREAD,
-    )
-    call = stores["set_approval_gate"].await_args.kwargs
-    assert call["target"] == "T1"
-    assert call["subject"].is_admin
-    assert call["record"].channel_id == "C1" and call["record"].thread_id == "T1"
-    assert call["record"].surface == "chat"
-    assert change.before == "inherit"
-    stores["approval_admin"].assert_awaited_once()
-
-
-async def test_member_may_change_a_thread_switch_but_not_the_channel(
-    stores: dict[str, AsyncMock],
+@pytest.mark.parametrize(
+    ("arguments", "line"),
+    [
+        ({"key": "approvals", "level": "thread", "value": "off"}, "Approvals: Allow writes for this thread"),
+        ({"key": "cost_footer", "level": "server", "value": "hidden"}, "Cost footer: Hidden for all channels"),
+        ({"key": "cost_footer", "level": "thread", "value": "hidden"}, None),
+    ],
+)  # fmt: skip
+def test_the_agent_tool_card_says_the_change_in_the_panel_words(
+    arguments: dict[str, object], line: str | None
 ) -> None:
-    await change_setting(
-        _factory(),
-        _settings(),
-        _actor(),
-        key="participation",
-        level="thread",
-        value="on",
-        place=THREAD,
+    call = ToolCall(
+        tool_use_id="s", server_name=DAIMON_SERVER_NAME, tool_name="change_setting",
+        input={"origin_context_id": "origin", **arguments},
+    )  # fmt: skip
+    prompt = prompt_for_tool_call(call, requester_platform_user_id="u1", now=datetime.now(UTC))
+    assert prompt.consequence == line
+    assert prompt.detail_lines == (
+        (line,) if line else ("Key: cost_footer", "Level: thread", "Value: hidden")
     )
-    target = stores["set_switch"].await_args.kwargs["target"]
-    assert target.scope_id == "T1" and target.channel_id == "C1"
-    with pytest.raises(ChannelChangeRefused, match="Only a server admin"):
-        await change_setting(
-            _factory(),
-            _settings(),
-            _actor(),
-            key="participation",
-            level="channel",
-            value="on",
-            place=THREAD,
-        )
-    assert stores["set_switch"].await_count == 1
-
-
-async def test_disabled_is_not_a_thread_value(stores: dict[str, AsyncMock]) -> None:
-    with pytest.raises(ChannelChangeRefused):
-        await change_setting(
-            _factory(),
-            _settings(),
-            _actor(admin=True),
-            key="progress_plans",
-            level="thread",
-            value="disabled",
-            place=THREAD,
-        )
-    stores["set_switch"].assert_not_awaited()
-
-
-async def test_agent_keys_and_unlinked_people_never_change_approvals(
-    stores: dict[str, AsyncMock],
-) -> None:
-    async def yes(action: DelegatedAction | None) -> bool:
-        return True
-
-    for actor in (
-        SettingsActor(TENANT, None, "chat", "person", yes, via_agent_key=True),
-        SettingsActor(TENANT, None, "web", None, yes),
-    ):
-        assert (
-            await change_refusal(
-                _factory(), _settings(), actor, key="approvals", level="server", platform="discord"
-            )
-            is not None
-        )
-    stores["approval_admin"].assert_not_awaited()

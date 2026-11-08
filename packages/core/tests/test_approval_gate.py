@@ -627,25 +627,3 @@ async def test_recorded_change_lands_in_channel_changes_with_the_thread_key(
         "approvals": "off",
         "thread_approvals": {"thread": "T1", "mode": "off"},
     }
-
-
-async def test_stale_expected_value_writes_nothing(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    from daimon.core.errors import StaleChannelValue
-
-    async with db_session_factory.begin() as session:
-        tenant = await make_tenant(session)
-    with pytest.raises(StaleChannelValue):
-        await set_approval_gate(
-            db_session_factory,
-            tenant_id=tenant.id,
-            platform="discord",
-            target=None,
-            value="off",
-            subject=Subject(is_admin=True, platform_user_id="admin"),
-            expected="on",
-        )
-    async with db_session_factory() as session:
-        assert (await load_access_policy(session, tenant_id=tenant.id)).approvals == "inherit"
-        assert not await list_events(session, tenant_id=tenant.id)

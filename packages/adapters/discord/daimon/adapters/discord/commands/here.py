@@ -25,8 +25,7 @@ from daimon.core.approval_gate import ApprovalChange, set_approval_gate
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.here_card import HereCard, load_here_card, render_here_card, render_here_card_text
 from daimon.core.platform_words import DESCRIPTIONS
-from daimon.core.scope_settings import actor_account
-from daimon.core.settings_card import moved_to_settings
+from daimon.core.scope_settings import actor_account, moved_to_settings
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.web_links import OPEN_IN_WEB, panel_links
@@ -125,17 +124,6 @@ class ApprovalGateView(discord.ui.View):
         if choice is None:
             return
         target, value = choice
-        # Only an admin's change is written, so only an admin's account is looked up.
-        account_id = (
-            await actor_account(
-                self.runtime.sessionmaker,
-                tenant_id=self.tenant_id,
-                platform="discord",
-                user_id=str(interaction.user.id),
-            )
-            if subject.is_admin
-            else None
-        )
         try:
             await set_approval_gate(
                 self.runtime.sessionmaker,
@@ -147,7 +135,16 @@ class ApprovalGateView(discord.ui.View):
                 record=ApprovalChange(
                     channel_id=None if target is None else self.channel_id,
                     thread_id=target if target is not None and target == self.thread_id else None,
-                    actor_account_id=account_id,
+                    actor_account_id=(  # only an admin's change is written
+                        await actor_account(
+                            self.runtime.sessionmaker,
+                            tenant_id=self.tenant_id,
+                            platform="discord",
+                            user_id=str(interaction.user.id),
+                        )
+                        if subject.is_admin
+                        else None
+                    ),
                     surface="panel",
                 ),
             )

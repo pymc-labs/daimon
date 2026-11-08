@@ -1,10 +1,9 @@
-"""The Teams `settings` command: the card per viewer, and what a press applies."""
+"""The Teams `settings` command: a card of buttons, and where a press applies."""
 
 from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -12,119 +11,45 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from daimon.adapters.teams import settings as teams_settings
 from daimon.adapters.teams.card_actions import Actor
-from daimon.core.channel_changes import ChannelChangeRefused
-from daimon.core.scope_settings import LevelValue, SettingsPlace, SettingView
+from daimon.core import scope_settings as core
+from daimon.core.scope_settings import SettingsPanel, SettingsPlace, SettingsRow
 
 CHANNEL = "19:abc@thread.tacv2"
 THREAD = f"{CHANNEL};messageid=1700"
 TENANT = uuid.uuid4()
+PANEL = SettingsPanel("Settings", "Pick.", (
+    SettingsRow("participation", "Thread participation", "Off.", (("participation:thread:on", "Thread: On"),), "Change"),
+))  # fmt: skip
 
 
-def _views() -> tuple[SettingView, ...]:
-    def view(key: Any, name: str, levels: tuple[LevelValue, ...], effective: str) -> SettingView:
-        return SettingView(
-            key=key,
-            name=name,
-            levels=levels,
-            effective=effective,
-            effective_label=effective,
-            decided_by="default",
-            available=True,
-            active=True,
-            note=f"{name}: {effective}.",
-        )
-
-    three = (
-        LevelValue("server", "inherit"),
-        LevelValue("channel", "inherit"),
-        LevelValue("thread", "inherit"),
-    )
-    return (
-        view("approvals", "Approvals", three, "on"),
-        view("participation", "Thread participation", three, "off"),
-        view("progress_plans", "Progress plans", three, "off"),
-        view("cost_footer", "Cost footer", (LevelValue("server", "shown"),), "shown"),
-    )
-
-
-@dataclass
-class _Asked:
-    kind: str
-    channel_id: str
-    thread_id: str
-    user_id: str = "user-1"
-
-
-def _context(kind: str, *, admin: bool) -> tuple[Any, list[Any]]:
+def _context(kind: str) -> tuple[Any, list[Any]]:
     sent: list[Any] = []
-
-    async def send(activity: Any) -> Any:
-        sent.append(activity)
-        return MagicMock()
-
-    async def send_card(card: Any) -> None:
-        sent.append(card)
-
-    asked = _Asked(
-        kind, CHANNEL if kind == "channel" else "a:chat", THREAD if kind == "channel" else "a:chat"
+    asked = SimpleNamespace(
+        kind=kind,
+        channel_id=CHANNEL,
+        thread_id=THREAD if kind == "channel" else CHANNEL,
+        user_id="u1",
     )
-    context = SimpleNamespace(
-        runtime=MagicMock(),
-        asked_in=None,
-        inbound=asked,
-        tenant_id=TENANT,
-        is_admin=admin,
-        send=send,
-        send_card=send_card,
-    )
-    return context, sent
+    return SimpleNamespace(
+        runtime=MagicMock(), asked_in=None, inbound=asked, tenant_id=TENANT, is_admin=False,
+        send=AsyncMock(side_effect=sent.append), send_card=AsyncMock(side_effect=sent.append),
+    ), sent  # fmt: skip
 
 
-def _buttons(card: Any) -> list[dict[str, Any]]:
-    data = card.model_dump(by_alias=True, exclude_none=True)
-    return [a for block in data["body"] if block["type"] == "ActionSet" for a in block["actions"]]
-
-
-@pytest.fixture
-def reads(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
-    read = AsyncMock(return_value=_views())
-    monkeypatch.setattr(teams_settings, "read_settings", read)
-    monkeypatch.setattr(teams_settings, "actor_account", AsyncMock(return_value=None))
-    monkeypatch.setattr(
-        teams_settings.SettingsDefaults, "from_settings", MagicMock(return_value=None)
-    )
-    return read
-
-
-async def test_an_admin_sees_buttons_for_every_row(
-    monkeypatch: pytest.MonkeyPatch, reads: AsyncMock
-) -> None:
-    monkeypatch.setattr(teams_settings, "may_change_approvals", AsyncMock(return_value=True))
-    context, sent = _context("channel", admin=True)
+async def test_the_card_is_for_the_post_it_was_typed_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(teams_settings, "chat_actor", AsyncMock(return_value="sender"))
+    load = AsyncMock(return_value=PANEL)
+    monkeypatch.setattr(teams_settings, "load_panel", load)
+    context, sent = _context("channel")
     await teams_settings.show_settings(context)
-    place = reads.await_args.kwargs["place"]
-    assert place == SettingsPlace("teams", CHANNEL, THREAD), "the post it was typed in"
-    keys = {b["data"]["op"].split(":")[0] for b in _buttons(sent[0])}
-    assert keys == {"approvals", "participation", "progress_plans", "cost_footer"}
-    assert all(b["verb"] == "settings" for b in _buttons(sent[0]))
-
-
-async def test_a_member_sees_only_a_threads_switches(
-    monkeypatch: pytest.MonkeyPatch, reads: AsyncMock
-) -> None:
-    monkeypatch.setattr(teams_settings, "may_change_approvals", AsyncMock(return_value=False))
-    context, sent = _context("channel", admin=False)
-    await teams_settings.show_settings(context)
-    ops = {b["data"]["op"] for b in _buttons(sent[0])}
-    assert ops, "a member may still change this thread's switches"
-    assert all(op.split(":")[1] == "thread" for op in ops)
-    assert not any(op.startswith(("approvals", "cost_footer")) for op in ops)
-
-
-async def test_the_one_to_one_chat_is_pointed_to_a_channel(reads: AsyncMock) -> None:
-    context, sent = _context("dm", admin=True)
-    await teams_settings.show_settings(context)
-    reads.assert_not_awaited()
+    assert load.await_args.args[2:] == ("sender", SettingsPlace("teams", CHANNEL, THREAD))
+    card = sent[0].model_dump(by_alias=True, exclude_none=True)
+    (button,) = [
+        a for block in card["body"] if block["type"] == "ActionSet" for a in block["actions"]
+    ]
+    assert (button["verb"], button["data"]["op"]) == ("settings", "participation:thread:on")
+    chat, sent = _context("personal")
+    await teams_settings.show_settings(chat)
     assert "channel post" in json.dumps(sent[0].model_dump(by_alias=True, exclude_none=True))
 
 
@@ -136,100 +61,43 @@ def _press(op: str, *, conversation: str = THREAD, kind: str = "channel", **data
     return ctx
 
 
-def _actor(*, admin: bool = False) -> Actor:
-    return Actor(
-        user_id="clicker",
-        tenant_id=TENANT,
-        is_admin=admin,
-        is_platform_admin=admin,
-        conversation_id=THREAD,
-    )
-
-
 @pytest.fixture
 def change(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """The real `apply_choice`, with the core writer stubbed."""
     applied = AsyncMock(
         return_value=SimpleNamespace(note="Progress plans is now On for this thread.")
     )
-    monkeypatch.setattr(teams_settings, "change_setting", applied)
-    monkeypatch.setattr(teams_settings, "actor_account", AsyncMock(return_value=None))
+    monkeypatch.setattr(core, "change_setting", applied)
+    monkeypatch.setattr(teams_settings, "chat_actor", AsyncMock(return_value="clicker"))
     return applied
 
 
-async def test_a_press_applies_to_the_post_it_was_pressed_in(
-    monkeypatch: pytest.MonkeyPatch, change: AsyncMock
-) -> None:
-    monkeypatch.setattr(teams_settings, "card_actor", AsyncMock(return_value=_actor()))
-    ctx = _press("progress_plans:thread:on", channel="19:other@thread.tacv2", thread="x")
-    response = await teams_settings.SettingsActions(MagicMock()).on_action(ctx)
-    kwargs = change.await_args.kwargs
-    assert kwargs["place"] == SettingsPlace("teams", CHANNEL, THREAD), "card data is ignored"
-    assert (kwargs["key"], kwargs["level"], kwargs["value"]) == ("progress_plans", "thread", "on")
-    actor = change.await_args.args[2]
-    assert actor.native_user_id == "clicker" and actor.surface == "panel"
-    assert actor.tenant_id == TENANT
-    assert "now On" in str(response)
-
-
-async def test_a_refusal_is_shown(monkeypatch: pytest.MonkeyPatch, change: AsyncMock) -> None:
-    monkeypatch.setattr(teams_settings, "card_actor", AsyncMock(return_value=_actor()))
-    change.side_effect = ChannelChangeRefused(
-        "Only an admin can change approvals. Ask an admin.", kind="forbidden"
+async def _on(ctx: MagicMock, monkeypatch: pytest.MonkeyPatch, *, admin: bool | None) -> str:
+    actor = (
+        None if admin is None else Actor("clicker", TENANT, admin, THREAD, is_platform_admin=admin)
     )
-    response = await teams_settings.SettingsActions(MagicMock()).on_action(
-        _press("approvals:server:off")
-    )
-    assert "Ask an admin" in str(response)
+    monkeypatch.setattr(teams_settings, "card_actor", AsyncMock(return_value=actor))
+    return str(await teams_settings.SettingsActions(MagicMock()).on_action(ctx))
 
 
-@pytest.mark.parametrize(
-    "op", ["approvals:everywhere:off", "nope:server:on", "cost_footer:server:on", ""]
-)
-async def test_forged_choices_change_nothing(
-    monkeypatch: pytest.MonkeyPatch, change: AsyncMock, op: str
-) -> None:
-    monkeypatch.setattr(teams_settings, "card_actor", AsyncMock(return_value=_actor(admin=True)))
-    await teams_settings.SettingsActions(MagicMock()).on_action(_press(op))
-    change.assert_not_awaited()
+PRESSES = [
+    # (case, press, clicker admin? (None: unverified), applied place or None)
+    ("channel card: place from the post, card data ignored", _press("progress_plans:thread:on", channel="19:other@thread.tacv2", thread="x"), False, SettingsPlace("teams", CHANNEL, THREAD)),
+    ("unverified clicker", _press("progress_plans:thread:on"), None, None),
+    ("forged choice", _press("approvals:everywhere:off"), True, None),
+    ("chat card thread from a member", _press("participation:thread:on", conversation="a:chat", kind="personal", channel=CHANNEL, thread=THREAD), False, None),
+    ("chat card thread from an admin", _press("participation:thread:on", conversation="a:chat", kind="personal", channel=CHANNEL, thread=THREAD), True, SettingsPlace("teams", CHANNEL, THREAD)),
+    ("chat card naming another channel's thread", _press("participation:thread:on", conversation="a:chat", kind="personal", channel=CHANNEL, thread="19:other@thread.tacv2;messageid=1"), True, None),
+]  # fmt: skip
 
 
-async def test_an_unverified_clicker_changes_nothing(
-    monkeypatch: pytest.MonkeyPatch, change: AsyncMock
-) -> None:
-    monkeypatch.setattr(teams_settings, "card_actor", AsyncMock(return_value=None))
-    await teams_settings.SettingsActions(MagicMock()).on_action(_press("progress_plans:thread:on"))
-    change.assert_not_awaited()
-
-
-async def test_a_chat_card_trusts_its_post_only_from_an_admin(
-    monkeypatch: pytest.MonkeyPatch, change: AsyncMock
-) -> None:
-    monkeypatch.setattr(teams_settings, "card_actor", AsyncMock(return_value=_actor()))
-    member = _press(
-        "participation:thread:on",
-        conversation="a:chat",
-        kind="personal",
-        channel=CHANNEL,
-        thread=THREAD,
-    )
-    await teams_settings.SettingsActions(MagicMock()).on_action(member)
-    change.assert_not_awaited()
-
-    monkeypatch.setattr(teams_settings, "card_actor", AsyncMock(return_value=_actor(admin=True)))
-    await teams_settings.SettingsActions(MagicMock()).on_action(member)
-    assert change.await_args.kwargs["place"] == SettingsPlace("teams", CHANNEL, THREAD)
-
-
-async def test_a_chat_card_naming_a_thread_of_another_channel_is_ignored(
-    monkeypatch: pytest.MonkeyPatch, change: AsyncMock
-) -> None:
-    monkeypatch.setattr(teams_settings, "card_actor", AsyncMock(return_value=_actor(admin=True)))
-    forged = _press(
-        "participation:thread:on",
-        conversation="a:chat",
-        kind="personal",
-        channel=CHANNEL,
-        thread="19:other@thread.tacv2;messageid=1",
-    )
-    await teams_settings.SettingsActions(MagicMock()).on_action(forged)
-    change.assert_not_awaited()
+@pytest.mark.parametrize(("case", "ctx", "admin", "place"), PRESSES, ids=[p[0] for p in PRESSES])
+async def test_where_a_press_applies(
+    monkeypatch: pytest.MonkeyPatch, change: AsyncMock, case: str, ctx: MagicMock, admin: bool | None, place: SettingsPlace | None
+) -> None:  # fmt: skip
+    answer = await _on(ctx, monkeypatch, admin=admin)
+    if place is None:
+        change.assert_not_awaited()
+    else:
+        assert change.await_args.kwargs["place"] == place and "now On" in answer
+        assert change.await_args.args[2] == "clicker"
