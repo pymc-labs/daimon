@@ -5,8 +5,8 @@ for some signatures, so this module does NOT enable annotations futures.
 
 The line names the agent, the time taken, the cost and the money left. With
 no choice the command says whether it is shown; only an admin may change it.
-Asking in words reaches the same setting through the agent's
-`set_cost_footer` tool.
+Deprecated: the setting lives in `/settings`, and each answer points there. A
+change is written by the Settings group's writer, so it is recorded the same way.
 """
 
 from typing import cast
@@ -22,7 +22,8 @@ from daimon.core.admin_actions import DelegatedAction
 from daimon.core.cost_footer import cost_footer_note
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.platform_words import DESCRIPTIONS
-from daimon.core.stores.tenants import get_cost_footer, set_cost_footer
+from daimon.core.scope_settings import SettingsPlace, change_setting, chat_actor, moved_to_settings
+from daimon.core.stores.tenants import get_cost_footer
 from sqlalchemy.exc import SQLAlchemyError
 
 import discord
@@ -68,10 +69,28 @@ class CostFooterCog(commands.Cog):
                 if not await is_guild_admin(interaction, action=DelegatedAction.AGENT_SETTINGS):
                     raise UserFacingError(_NOT_ALLOWED)
                 shown = choice.value == "show"
-                async with runtime.sessionmaker.begin() as session:
-                    await set_cost_footer(session, tenant_id=tenant_id, shown=shown)
+
+                async def admin_for(action: DelegatedAction | None) -> bool:
+                    return await is_guild_admin(interaction, action=action)
+
+                await change_setting(
+                    runtime.sessionmaker,
+                    runtime.settings,
+                    await chat_actor(
+                        runtime.sessionmaker,
+                        tenant_id=tenant_id,
+                        platform="discord",
+                        user_id=str(interaction.user.id),
+                        admin_for=admin_for,
+                    ),
+                    key="cost_footer",
+                    level="server",
+                    value="shown" if shown else "hidden",
+                    place=SettingsPlace("discord", None),
+                )
             await interaction.edit_original_response(
-                content=cost_footer_note(shown), allowed_mentions=discord.AllowedMentions.none()
+                content=f"{cost_footer_note(shown)} {moved_to_settings('discord')}",
+                allowed_mentions=discord.AllowedMentions.none(),
             )
         except (DaimonError, discord.HTTPException, SQLAlchemyError) as exc:
             await interaction.edit_original_response(

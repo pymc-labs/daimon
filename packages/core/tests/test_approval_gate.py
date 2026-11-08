@@ -592,3 +592,38 @@ async def test_protected_names_never_auto_allow_on_any_host(endpoint: str, tool:
     gate.assert_not_awaited()
     if tool in ADMIN_INPUTS:
         assert card.await_args.args[0].admin is ("office" in trusted)
+
+
+async def test_recorded_change_lands_in_channel_changes_with_the_thread_key(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.approval_gate import ApprovalChange
+    from daimon.core.stores.channel_changes import WORKSPACE_ID, list_changes
+
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+    admin = Subject(is_admin=True, platform_user_id="admin")
+    for target, record in (
+        (None, ApprovalChange(None, None, None, "panel")),
+        ("C1", ApprovalChange("C1", None, None, "chat")),
+        ("T1", ApprovalChange("C1", "T1", None, "web")),
+    ):
+        await set_approval_gate(
+            db_session_factory,
+            tenant_id=tenant.id,
+            platform="discord",
+            target=target,
+            value="off",
+            subject=admin,
+            record=record,
+        )
+    async with db_session_factory() as session:
+        server = await list_changes(session, tenant_id=tenant.id, channel_id=WORKSPACE_ID)
+        channel = await list_changes(session, tenant_id=tenant.id, channel_id="C1")
+    assert [(row.setting, row.before, row.after) for row in server] == [
+        ("approvals", "inherit", "off")
+    ]
+    assert {row.setting: row.after for row in channel} == {
+        "approvals": "off",
+        "thread_approvals": {"thread": "T1", "mode": "off"},
+    }

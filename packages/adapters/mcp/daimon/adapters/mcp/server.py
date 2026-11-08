@@ -99,6 +99,7 @@ from daimon.adapters.mcp.tools.propagation import register_propagation_tools
 from daimon.adapters.mcp.tools.publish import register_publish_tools
 from daimon.adapters.mcp.tools.repo_memory import register_repo_memory_tools
 from daimon.adapters.mcp.tools.routine_run import register_routine_run_tool
+from daimon.adapters.mcp.tools.scope_settings import register_scope_settings_tools
 from daimon.adapters.mcp.tools.server_skills import register_server_skill_tools
 from daimon.adapters.mcp.tools.setup_target import register_setup_target_tools
 from daimon.adapters.mcp.tools.skill_library_edits import register_skill_library_edit_tools
@@ -582,6 +583,7 @@ def create_mcp_app(
     register_channel_environment_tools(mcp, runtime)  # which environment a channel runs in
     register_thread_participation_tools(mcp, runtime)  # follow/unfollow threads
     register_progress_plan_tools(mcp, runtime)  # the plan on the progress card, and its switch
+    register_scope_settings_tools(mcp, runtime)  # the Settings group: get_settings, change_setting
     register_plain_text_mentions_tools(mcp, runtime)  # typed "@<name>" starts a turn
     register_agent_coding_key_tools(mcp, runtime)
     register_my_data_tools(mcp, runtime)

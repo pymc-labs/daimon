@@ -190,6 +190,8 @@ from daimon.adapters.slack.runtime import (
     responder_account,
     responder_handle,
 )
+from daimon.adapters.slack.settings import ACTION_ID as SETTINGS_ACTION_ID
+from daimon.adapters.slack.settings import handle_settings_change, handle_settings_command
 from daimon.adapters.slack.setup_conversations import handle_setup_lifecycle
 from daimon.adapters.slack.shared_channel import (
     ENVELOPE_EXT_SHARED_KEY,
@@ -1352,6 +1354,8 @@ class SlackApp:
                 self._spawn(handle_help_command(runtime, payload))
             elif cmd == "/here":
                 handler = lambda: handle_here_command(runtime, payload)  # noqa: E731
+            elif cmd == "/settings":
+                handler = lambda: handle_settings_command(runtime, payload)  # noqa: E731
             elif cmd == "/routines":
                 handler = lambda: handle_routines_command(runtime, payload)  # noqa: E731
             elif cmd == "/billing":
@@ -1533,6 +1537,8 @@ class SlackApp:
             self._spawn(handle_routine_action(self.runtime, payload))
         elif action_id == "here_approvals":
             self._spawn(handle_here_approvals(self.runtime, payload))
+        elif action_id == SETTINGS_ACTION_ID:
+            self._spawn(handle_settings_change(self.runtime, payload))
         elif action_id == "billing_topup":
             self._spawn(handle_topup_select(self.runtime, payload))
         elif action_id == REDEEM_OPEN_ACTION_ID:

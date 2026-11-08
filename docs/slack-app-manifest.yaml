@@ -52,6 +52,9 @@ features:
     - command: /billing
       description: Your usage and credit
       should_escape: false
+    - command: /settings
+      description: Approvals, threads, plans and the cost line here
+      should_escape: false
     - command: /privacy
       description: See, export or delete your data
       should_escape: false

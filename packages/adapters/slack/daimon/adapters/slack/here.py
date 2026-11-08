@@ -19,12 +19,13 @@ from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_details import GitHubDeploymentFacts
 from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.approval_admin import approval_admin
-from daimon.core.approval_gate import set_approval_gate
+from daimon.core.approval_gate import ApprovalChange, set_approval_gate
 from daimon.core.errors import DaimonError
 from daimon.core.here_card import HereCard, load_here_card, render_here_card, render_here_card_text
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.outsiders import OutsiderVisibility
 from daimon.core.permissions import channel_permissions
+from daimon.core.scope_settings import actor_account, moved_to_settings
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.web_links import panel_links
@@ -415,10 +416,19 @@ async def handle_here_approvals(runtime: SlackRuntime, payload: dict[str, Any]) 
             target=None if scope == "server" else channel_id,
             value=cast(Approvals, value),
             subject=subject,
+            record=ApprovalChange(
+                channel_id=None if scope == "server" else channel_id,
+                thread_id=None,
+                actor_account_id=await actor_account(
+                    runtime.sessionmaker, tenant_id=tenant_id, platform="slack", user_id=user_id
+                ),
+                surface="panel",
+            ),
         )
         message = f"Third-party write approvals: {value} ({scope})."
         if not runtime.settings.tool_safety.gate_overrides_active:
             message += " Saved but ignored: approval overrides are not enabled."
+        message += f" {moved_to_settings('slack')}"
     except (DaimonError, SlackApiError) as exc:
         message = str(exc)
     await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
@@ -502,10 +512,19 @@ async def handle_here_approval_submission(runtime: SlackRuntime, payload: dict[s
             target=f"{channel_id}:{root}",
             value=cast(Approvals, value),
             subject=subject,
+            record=ApprovalChange(
+                channel_id=channel_id,
+                thread_id=f"{channel_id}:{root}",
+                actor_account_id=await actor_account(
+                    runtime.sessionmaker, tenant_id=tenant_id, platform="slack", user_id=user_id
+                ),
+                surface="panel",
+            ),
         )
         message = f"Third-party write approvals: {value} (thread:{channel_id}:{root})."
         if not runtime.settings.tool_safety.gate_overrides_active:
             message += " Saved but ignored: approval overrides are not enabled."
+        message += f" {moved_to_settings('slack')}"
     except (DaimonError, SlackApiError) as exc:
         message = str(exc)
     await client.chat_postEphemeral(channel=channel_id, user=user_id, text=message, parse="none")  # pyright: ignore[reportUnknownMemberType]

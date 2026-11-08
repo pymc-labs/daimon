@@ -1280,6 +1280,7 @@ class DaimonBot(commands.Bot):
         from daimon.adapters.discord.commands.model import ModelCog
         from daimon.adapters.discord.commands.privacy import PrivacyCog
         from daimon.adapters.discord.commands.routines import RoutinesCog
+        from daimon.adapters.discord.commands.settings import SettingsCog
         from daimon.adapters.discord.feedback_reactions import FeedbackReactionCog
 
         await self.add_cog(HelpCog(self))
@@ -1291,6 +1292,7 @@ class DaimonBot(commands.Bot):
         await self.add_cog(LeadsCog(self))
         await self.add_cog(BillingCog(self))
         await self.add_cog(CostFooterCog(self))
+        await self.add_cog(SettingsCog(self))
         await self.add_cog(PrivacyCog(self))
         await self.add_cog(MemoryCog(self))
         await self.add_cog(ModelCog(self))

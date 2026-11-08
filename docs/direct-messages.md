@@ -68,7 +68,7 @@ server, even after access is revoked.
 - **Files.** Files the agent saves are attached to the answer, under Discord's
   10 MB DM limit. A larger file stays in the session with a notice.
 - **Cost line.** The answer ends with the usual summary line unless an admin
-  hid it with `/cost-footer hide`.
+  hid it under Cost footer in `/settings`.
 
 Before every card update, output chunk and file, Daimon checks the person may
 still receive the answer. That check applies the server's DM switch, the

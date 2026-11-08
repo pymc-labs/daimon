@@ -1,4 +1,8 @@
-"""Approval overrides have no CLI mutation surface or generic policy-clear bypass."""
+"""Approval overrides have no CLI mutation surface or generic policy-clear bypass.
+
+People change them in chat with `/settings` or `change_setting`, or in the web app;
+the CLI deliberately has no setter.
+"""
 
 from io import StringIO
 

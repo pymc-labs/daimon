@@ -941,6 +941,63 @@
         'type': 'object',
       }),
     }),
+    'change_setting': dict({
+      'description': '''
+        Change one setting where you are, after the person presses Approve.
+        <blank line>
+        ``approvals`` is ``on`` (Ask before third-party writes), ``off`` (Allow writes) or
+        ``inherit``; only an admin of the chat platform itself, checked live, may change
+        it. ``participation`` (reply in threads without being addressed) and
+        ``progress_plans`` are ``on``, ``off``, ``disabled`` (a channel or server lock) or
+        ``inherit``: a thread's for anyone, a channel's or the server's for an admin.
+        ``cost_footer`` is ``shown`` or ``hidden``, server level only, for an admin.
+        ``level`` is the ``server``, ``channel`` or ``thread`` of this conversation; other
+        places cannot be named. Read the returned ``note`` back.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'key': dict({
+            'enum': list([
+              'approvals',
+              'participation',
+              'progress_plans',
+              'cost_footer',
+            ]),
+            'type': 'string',
+          }),
+          'level': dict({
+            'enum': list([
+              'server',
+              'channel',
+              'thread',
+            ]),
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'value': dict({
+            'enum': list([
+              'on',
+              'off',
+              'disabled',
+              'inherit',
+              'shown',
+              'hidden',
+            ]),
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'origin_context_id',
+          'key',
+          'level',
+          'value',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'change_workspace_settings': dict({
       'description': '''
         Change the web modules, web chat agent, who may start turns (everyone or exactly
@@ -4092,10 +4149,10 @@
     }),
     'get_cost_footer': dict({
       'description': '''
-        Report whether finished answers here end with the cost footer.
+        Deprecated: use ``get_settings``. Report whether finished answers here end with
+        the cost footer. Removed in a later release.
         <blank line>
-        Reading needs no admin; changing it does (``set_cost_footer``, an
-        admin). Read the returned ``note`` back to the user.
+        Reading needs no admin; changing it does. Read the returned ``note`` back to the user.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -4332,7 +4389,8 @@
     }),
     'get_progress_plans': dict({
       'description': '''
-        Report whether progress plans are on for a thread or channel, and which tier decided it.
+        Deprecated: use ``get_settings``. Report whether progress plans are on for a
+        thread or channel, and which tier decided it. Removed in a later release.
         <blank line>
         Scope: ``thread_id`` and ``channel_id`` for a thread; ``channel_id``
         alone for a channel; neither for the workspace. Reading
@@ -4421,6 +4479,28 @@
         'type': 'object',
       }),
     }),
+    'get_settings': dict({
+      'description': '''
+        Report this conversation's settings: approvals, thread participation, progress
+        plans and the cost footer.
+        <blank line>
+        Each lists its own value at the server, channel and thread level of where you are,
+        and what is in effect. Anyone may read them; read each ``note`` back. People change
+        them with ``/settings``, the web app's Settings section or ``change_setting``.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'get_skill': dict({
       'description': '''
         Look up a visible skill by name, including version count. Pass
@@ -4470,7 +4550,8 @@
     }),
     'get_thread_participation': dict({
       'description': '''
-        Report whether you follow a thread or channel, and which tier decided it.
+        Deprecated: use ``get_settings``. Report whether you follow a thread or channel,
+        and which tier decided it. Removed in a later release.
         <blank line>
         Scope: ``thread_id`` from ``<thread role="current_thread">`` for a
         thread (its parent is looked up, so ``channel_id`` is optional);
@@ -9532,7 +9613,8 @@
     }),
     'set_cost_footer': dict({
       'description': '''
-        Show or hide the footer under each finished answer. Admin-only.
+        Deprecated: use ``change_setting`` with ``key="cost_footer"``. Show or hide the
+        footer under each finished answer. Admin-only. Removed in a later release.
         <blank line>
         For the whole workspace. The footer is one line naming the agent, the
         time taken, what the turn cost and the money left. With ``shown``
@@ -9659,7 +9741,8 @@
     }),
     'set_progress_plans': dict({
       'description': '''
-        Turn progress plans on or off where you are asked to.
+        Deprecated: use ``change_setting`` with ``key="progress_plans"``. Turn progress
+        plans on or off where you are asked to. Removed in a later release.
         <blank line>
         A progress plan is a short checklist of a longer task's steps on the
         progress card. Call this when someone asks, for example "turn on
@@ -9845,7 +9928,8 @@
     }),
     'set_thread_participation': dict({
       'description': '''
-        Start or stop replying in a thread without being addressed each time.
+        Deprecated: use ``change_setting`` with ``key="participation"``. Start or stop
+        replying in a thread without being addressed each time. Removed in a later release.
         <blank line>
         Scope: ``thread_id`` from ``<thread role="current_thread">`` for a
         thread (its parent is looked up, so ``channel_id`` is optional);

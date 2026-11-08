@@ -30,6 +30,7 @@ _TOOLS = {
     "update_web_person",
     "set_agent_web_access",
     "change_workspace_settings",
+    "change_setting",
     "revert_agent",
     "set_agent_helpers",
     "set_agent_owners",

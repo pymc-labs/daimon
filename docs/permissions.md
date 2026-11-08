@@ -153,9 +153,9 @@ Overrides work only while both `DAIMON_TOOL_SAFETY__ENABLED` and
 [`DAIMON_TOOL_SAFETY__ALLOW_GATE_OVERRIDES`](configuration.md#daimon_tool_safety__allow_gate_overrides)
 are on.
 
-Only platform admins change them, on the `/here` card (`here` on Teams). Each
-click rechecks their authority; there is no CLI or MCP tool. On Slack a
-thread choice asks for the thread's root message link.
+Only platform admins change them, in `/settings` (`settings` on Teams), the
+web app, or by asking Daimon behind an Approve card. Each change rechecks their
+standing live. On Slack, ask Daimon in a thread to set that thread.
 
 An override relaxes only an ordinary third-party write. Deny and `ask` rules
 still apply, and Daimon's own confirmed actions, publishing and permission

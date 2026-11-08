@@ -568,7 +568,7 @@ class ProgressPlansSettings(BaseModel):
 
     `mode` is the deployment tier of the same cascade thread participation
     uses (deployment, workspace, channel, thread); the agent's
-    `set_progress_plans` tool writes the other tiers when a person asks.
+    `change_setting` tool and `/settings` write the other tiers when a person asks.
     """
 
     mode: CascadeMode = Field(
@@ -640,7 +640,7 @@ class ThreadParticipationSettings(BaseModel):
     Platform-agnostic settings (the store and tool are keyed by platform);
     the Discord and Teams adapters read them. `mode` is the deployment tier
     of a cascade (deployment, workspace, channel, thread) that the agent's
-    `set_thread_participation` tool writes the other tiers of. `off` (the
+    `change_setting` tool and `/settings` write the other tiers of. `off` (the
     default) changes nothing for anyone: no classifier runs and every server
     behaves as today until someone asks the agent to follow a thread, or an
     admin turns a channel or the workspace on. `disabled` also refuses those

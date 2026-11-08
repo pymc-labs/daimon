@@ -17,7 +17,7 @@ from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings,
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
 from daimon.core.stores.tenants import get_cost_footer
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_account, make_tenant
 from fastmcp.exceptions import ToolError
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -36,9 +36,12 @@ def _runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> McpRuntime:
     )
 
 
-def _auth(tenant_id: uuid.UUID, *, admin: bool, platform: str = "discord") -> AuthIdentity:
+def _auth(
+    seeded: tuple[uuid.UUID, uuid.UUID], *, admin: bool, platform: str = "discord"
+) -> AuthIdentity:
+    tenant_id, account_id = seeded
     return AuthIdentity(
-        account_id=uuid.uuid4(),
+        account_id=account_id,
         tenant_id=tenant_id,
         role=Role.ADMIN if admin else Role.USER,
         platform=platform,
@@ -46,9 +49,14 @@ def _auth(tenant_id: uuid.UUID, *, admin: bool, platform: str = "discord") -> Au
     )
 
 
-async def _seed(sessionmaker: async_sessionmaker[AsyncSession], platform: str) -> uuid.UUID:
+async def _seed(
+    sessionmaker: async_sessionmaker[AsyncSession], platform: str
+) -> tuple[uuid.UUID, uuid.UUID]:
+    """A tenant and a real account in it: a recorded change names its actor account."""
     async with sessionmaker.begin() as session:
-        return (await make_tenant(session, platform=platform)).id  # type: ignore[arg-type]
+        tenant = await make_tenant(session, platform=platform)  # type: ignore[arg-type]
+        account = await make_account(session, tenant=tenant)
+        return tenant.id, account.id
 
 
 async def _stored(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID) -> bool:
@@ -60,31 +68,31 @@ async def _stored(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uui
 async def test_admin_hides_and_shows_the_cost_footer(
     committing_sessionmaker: async_sessionmaker[AsyncSession], platform: str
 ) -> None:
-    tenant_id = await _seed(committing_sessionmaker, platform)
+    seeded = await _seed(committing_sessionmaker, platform)
     runtime = _runtime(committing_sessionmaker)
-    auth = _auth(tenant_id, admin=True, platform=platform)
+    auth = _auth(seeded, admin=True, platform=platform)
 
     hidden = await _set_cost_footer_impl(runtime, auth, False)
     assert hidden.shown is False, "the result must echo the new value"
     assert "without the footer" in hidden.note
-    assert await _stored(committing_sessionmaker, tenant_id) is False, "hiding must be committed"
+    assert await _stored(committing_sessionmaker, seeded[0]) is False, "hiding must be committed"
 
     shown = await _set_cost_footer_impl(runtime, auth, True)
     assert shown.shown is True
-    assert await _stored(committing_sessionmaker, tenant_id) is True, "showing must be committed"
+    assert await _stored(committing_sessionmaker, seeded[0]) is True, "showing must be committed"
 
 
 async def test_non_admin_is_refused_and_the_footer_stays(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    tenant_id = await _seed(committing_sessionmaker, "discord")
+    seeded = await _seed(committing_sessionmaker, "discord")
 
     with pytest.raises(ToolError, match="requires a server admin"):
         await _set_cost_footer_impl(
-            _runtime(committing_sessionmaker), _auth(tenant_id, admin=False), False
+            _runtime(committing_sessionmaker), _auth(seeded, admin=False), False
         )
 
-    assert await _stored(committing_sessionmaker, tenant_id) is True, (
+    assert await _stored(committing_sessionmaker, seeded[0]) is True, (
         "a refused call must leave the footer shown"
     )
 
@@ -92,23 +100,23 @@ async def test_non_admin_is_refused_and_the_footer_stays(
 async def test_cli_tenant_is_refused_because_it_has_no_answers_in_chat(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    tenant_id = await _seed(committing_sessionmaker, "cli")
+    seeded = await _seed(committing_sessionmaker, "cli")
 
     with pytest.raises(ToolError, match="isn't available here"):
         await _set_cost_footer_impl(
-            _runtime(committing_sessionmaker), _auth(tenant_id, admin=True, platform="cli"), False
+            _runtime(committing_sessionmaker), _auth(seeded, admin=True, platform="cli"), False
         )
 
 
 async def test_member_reads_the_current_value(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    tenant_id = await _seed(committing_sessionmaker, "discord")
+    seeded = await _seed(committing_sessionmaker, "discord")
     runtime = _runtime(committing_sessionmaker)
 
-    before = await _get_cost_footer_impl(runtime, _auth(tenant_id, admin=False))
+    before = await _get_cost_footer_impl(runtime, _auth(seeded, admin=False))
     assert before.shown is True, "a new tenant must read as shown"
 
-    await _set_cost_footer_impl(runtime, _auth(tenant_id, admin=True), False)
-    after = await _get_cost_footer_impl(runtime, _auth(tenant_id, admin=False))
+    await _set_cost_footer_impl(runtime, _auth(seeded, admin=True), False)
+    after = await _get_cost_footer_impl(runtime, _auth(seeded, admin=False))
     assert after.shown is False, "a member must see the admin's change"

@@ -11,13 +11,15 @@ from dataclasses import dataclass
 
 from daimon.core.access_policy import Approvals, ChannelRule, TenantAccessPolicy
 from daimon.core.authz import Action, Subject, authorize
-from daimon.core.errors import DaimonError
+from daimon.core.errors import DaimonError, StaleChannelValue
 from daimon.core.stores.access_policy import (
     load_access_policy,
     lock_access_policy,
     policy_write_transaction,
     set_access_policy,
 )
+from daimon.core.stores.channel_changes import WORKSPACE_ID, WriteHook, record_change
+from daimon.core.stores.domain import ChangeSurface
 from daimon.core.stores.security_audit import append_event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -28,6 +30,20 @@ class ApprovalGate:
     scope: str
     set_by: str | None
     tenant_id: uuid.UUID | None = None
+    before: Approvals | None = None
+    """The target's own value before a change; None from a read."""
+
+
+@dataclass(frozen=True)
+class ApprovalChange:
+    """How a change is recorded in `channel_changes`: the channel (None for the server),
+    the thread key for a thread's own setting, the actor's account and the surface."""
+
+    channel_id: str | None
+    thread_id: str | None
+    actor_account_id: uuid.UUID | None
+    surface: ChangeSurface
+    on_write: WriteHook | None = None
 
 
 def resolve_approval_gate(
@@ -58,11 +74,15 @@ async def set_approval_gate(
     target: str | None,
     value: Approvals,
     subject: Subject,
+    record: ApprovalChange | None = None,
+    expected: Approvals | None = None,
 ) -> ApprovalGate:
     """Authorize before I/O, then merge and audit atomically under the policy lock.
 
     Adapters must supply a fresh native server-admin check, never a requester's
     ownership of a thread. None targets the server, otherwise an exact rule key.
+    With `record`, the change is also written to `channel_changes` in the same
+    transaction; with `expected`, a target whose own value differs is refused as stale.
     """
     if not authorize(TenantAccessPolicy(), subject=subject, action=Action.SET_APPROVAL_GATE):
         raise DaimonError("Only a server or workspace admin can change approval settings.")
@@ -95,6 +115,8 @@ async def set_approval_gate(
             else:
                 rules[target] = updated
             changed = policy.model_copy(update={"channel_rules": rules})
+        if expected is not None and expected != before:
+            raise StaleChannelValue("approvals", before)
         await set_access_policy(session, tenant_id=tenant_id, policy=changed)
         await append_event(
             session,
@@ -108,4 +130,37 @@ async def set_approval_gate(
             outcome="allowed",
             reason=f"{target or 'server'}:{before}->{value}",
         )
-    return ApprovalGate(value, target or "server", setter, tenant_id)
+        if record is not None:
+            await _record(
+                session, record, tenant_id=tenant_id, platform=platform, before=before, after=value
+            )
+    return ApprovalGate(value, target or "server", setter, tenant_id, before)
+
+
+async def _record(
+    session: AsyncSession,
+    record: ApprovalChange,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    before: Approvals,
+    after: Approvals,
+) -> None:
+    thread = record.thread_id
+
+    def shown(value: Approvals) -> object:
+        return value if thread is None else {"thread": thread, "mode": value}
+
+    await record_change(
+        session,
+        tenant_id=tenant_id,
+        platform=platform,
+        channel_id=record.channel_id or WORKSPACE_ID,
+        setting="approvals" if thread is None else "thread_approvals",
+        before=shown(before),  # pyright: ignore[reportArgumentType]
+        after=shown(after),  # pyright: ignore[reportArgumentType]
+        actor_account_id=record.actor_account_id,
+        surface=record.surface,
+    )
+    if before != after and record.on_write is not None:
+        await record.on_write(session)

@@ -2,7 +2,7 @@
 import { http, HttpResponse, type HttpHandler } from "msw"
 
 import type {
-  AccessChange, AgentRefs, BudgetChange, Channel, ChannelDefaults, ChannelDetail, ChannelHistoryEntry, ChannelList, ChannelSettings, ChannelSwitch,
+  AccessChange, AgentRefs, ApprovalsChange, ChannelApprovals, CostFooterChange, BudgetChange, Channel, ChannelDefaults, ChannelDetail, ChannelHistoryEntry, ChannelList, ChannelSettings, ChannelSwitch,
   CopyRetire, DefaultAgentChange, EnvironmentChange, KeptAgentChange, PathNode, PinClear, Readers, SkillChange, SwitchChange, ThreadClear,
   ToolRuleChange, WorkspaceAgentChange, Writers,
 } from "@/modules/channels/types"
@@ -95,9 +95,12 @@ const curve = (total: number, days: number): { key: string; name: null; usd: num
   const sum = weights.reduce((a, b) => a + b, 0)
   return weights.map((w, i) => ({ key: ago((days - 1 - i) * 24).slice(0, 10), name: null, usd: +((w / sum) * total).toFixed(2) }))
 }
+const ap = (value: ChannelApprovals["value"], source: ChannelApprovals["source"], own: ChannelApprovals["own"] = null): ChannelApprovals =>
+  ({ available: true, own, value, source, active: false, editable: true })
 const settingsOf = (c: Stored): ChannelSettings => ({
   participation: sw("off", "deployment"),
   progress_plans: sw("on", "workspace"),
+  approvals: ap("on", "default"),
   skills: c.id === "c_clv" ? [{ skill_id: "data-validation", name: "Data validation" }, { skill_id: "exploratory-data-analysis", name: "Exploratory analysis" }] : [],
   tool_rules: { editable: true, rules: c.id === "c_clv" ? [
     { agent: "clv", tool: "search/web_search", tool_label: "Web search", server_name: "Search", rule: "ask", scope: "chat", revision: 2 },
@@ -139,6 +142,7 @@ const withAgents = (s: ChannelSettings): ChannelSettings => ({
 const defaults: ChannelDefaults = {
   platform: "discord", agent: WORKSPACE, environment: { value: "default", source: "deployment" },
   participation: sw("off", "deployment"), progress_plans: sw("on", "workspace", "on"),
+  approvals: ap("on", "default"), cost_footer: { shown: true, editable: true },
 }
 const confirmNeeded = () => HttpResponse.json({ detail: "This channel is sealed and that sandbox has open network access. Confirm to go ahead." }, { status: 428 })
 
@@ -196,6 +200,16 @@ export const channelsHandlers: HttpHandler[] = [
     s[key] = body.mode ? sw(body.mode, "channel", body.mode) : sw(defaults[key].value, defaults[key].source)
     return changed(c, {}, key, body.expected, body.mode)
   })),
+  http.put("/api/channels/:id/approvals", async ({ params, request }) => {
+    const c = find(params.id as string)
+    if (!c) return notFound()
+    if (c.id === "web") return invalid("Web chat has no such setting.")
+    const body = (await request.json()) as ApprovalsChange
+    const s = settingsFor(c)
+    if (body.expected !== s.approvals.own) return stale()
+    s.approvals = body.mode ? ap(body.mode, "channel", body.mode) : ap(defaults.approvals.value, defaults.approvals.own ? "server" : "default")
+    return changed(c, {}, "approvals", body.expected ?? "inherit", body.mode ?? "inherit")
+  }),
   http.put("/api/channels/:id/environment", async ({ params, request }) => {
     const c = find(params.id as string)
     if (!c) return notFound()
@@ -329,6 +343,14 @@ export const channelsHandlers: HttpHandler[] = [
       const body = (await request.json()) as SwitchChange
       if (body.expected !== defaults[key].own) return stale()
       defaults[key] = body.mode ? sw(body.mode, "workspace", body.mode) : sw("off", "deployment")
+    } else if (what === "approvals") {
+      const body = (await request.json()) as ApprovalsChange
+      if (body.expected !== defaults.approvals.own) return stale()
+      defaults.approvals = body.mode ? ap(body.mode, "server", body.mode) : ap("on", "default")
+    } else if (what === "cost-footer") {
+      const body = (await request.json()) as CostFooterChange
+      if (body.expected !== defaults.cost_footer.shown) return stale()
+      defaults.cost_footer = { ...defaults.cost_footer, shown: body.shown }
     } else return notFound()
     return HttpResponse.json(defaults)
   }),

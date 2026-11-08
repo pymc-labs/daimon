@@ -50,7 +50,7 @@ warnings.filterwarnings(
 )
 
 # Commands answered privately in the thread; the rest keep the 1:1 chat.
-IN_THREAD = frozenset({"help", "here", "memory", "routines", "billing", "privacy"})
+IN_THREAD = frozenset({"help", "here", "settings", "memory", "routines", "billing", "privacy"})
 NOT_YET_PRIVATE = (
     "Private questions aren't supported yet. Mention {bot} here to ask openly, "
     "or ask me in our 1:1 chat."

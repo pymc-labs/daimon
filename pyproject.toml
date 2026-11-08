@@ -338,6 +338,7 @@ source_modules = [
     "daimon.core.scheduler",
     "daimon.core.scope",
     "daimon.core.scope_cascade",
+    "daimon.core.scope_settings",
     "daimon.core.selfhosted_usage",
     "daimon.core.server_skills",
     "daimon.core.session_compat",

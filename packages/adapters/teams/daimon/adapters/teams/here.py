@@ -31,7 +31,7 @@ from daimon.core.access_policy import Approvals
 from daimon.core.agent_details import GitHubDeploymentFacts
 from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.approval_admin import approval_admin
-from daimon.core.approval_gate import set_approval_gate
+from daimon.core.approval_gate import ApprovalChange, set_approval_gate
 from daimon.core.errors import DaimonError
 from daimon.core.here_card import (
     HereCard,
@@ -39,6 +39,7 @@ from daimon.core.here_card import (
     load_here_card,
     render_here_card,
 )
+from daimon.core.scope_settings import actor_account, moved_to_settings
 from daimon.core.stores.identity import find_platform_principal
 from microsoft_teams.api import AdaptiveCardInvokeActivity, AdaptiveCardInvokeResponse
 from microsoft_teams.apps import ActivityContext
@@ -190,9 +191,25 @@ class HereApprovals:
                 target=None if scope == "server" else target,
                 value=value,
                 subject=subject,
+                record=ApprovalChange(
+                    channel_id=None if scope == "server" else target.split(";", 1)[0],
+                    thread_id=target if scope == "thread" else None,
+                    actor_account_id=(  # only an admin's change is written
+                        await actor_account(
+                            self.runtime.sessionmaker,
+                            tenant_id=actor.tenant_id,
+                            platform="teams",
+                            user_id=actor.user_id,
+                        )
+                        if subject.is_admin
+                        else None
+                    ),
+                    surface="panel",
+                ),
             )
         except DaimonError as exc:
             return toast(str(exc))
+        pointer = moved_to_settings("teams")
         if not self.runtime.settings.tool_safety.gate_overrides_active:
-            return toast("Saved but ignored: approval overrides are not enabled.")
-        return toast(f"Third-party write approvals: {value}.")
+            return toast(f"Saved but ignored: approval overrides are not enabled. {pointer}")
+        return toast(f"Third-party write approvals: {value}. {pointer}")
