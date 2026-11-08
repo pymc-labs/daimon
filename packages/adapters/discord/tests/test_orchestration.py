@@ -1509,8 +1509,9 @@ class TestSetupHook:
         ):
             await bot.setup_hook()
 
-        assert len(add_cog_calls) == 13, "setup_hook should add exactly 13 Cogs"
+        assert len(add_cog_calls) == 14, "setup_hook should add exactly 14 Cogs"
         assert sum(type(cog).__name__ == "LeadsCog" for cog in add_cog_calls) == 1
+        assert sum(type(cog).__name__ == "SettingsCog" for cog in add_cog_calls) == 1
         assert sum(type(cog).__name__ == "CostFooterCog" for cog in add_cog_calls) == 1
         assert sum(type(cog).__name__ == "ModelCog" for cog in add_cog_calls) == 1
         assert sum(isinstance(cog, DirectMessageCog) for cog in add_cog_calls) == 1
