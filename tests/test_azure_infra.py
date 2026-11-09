@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import shutil
 import ssl
+import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -625,3 +628,340 @@ def test_model_guards_fire_in_deployment_snapshots(
             "Invalid model configuration unexpectedly deployed in snapshot"
         )
         assert error in diagnostics
+
+
+TEAMS_IDS = (
+    "{ DAIMON_TEAMS__CLIENT_ID: '00000000-0000-4000-8000-000000000001', "
+    "DAIMON_TEAMS__TENANT_ID: '00000000-0000-4000-8000-000000000002' }"
+)
+
+
+def _snapshot(tmp_path: Path, *params: str) -> tuple[int, str, dict]:
+    """Evaluate main.bicep with the local deployment engine; no Azure call."""
+    source = tmp_path / "snapshot.bicepparam"
+    relative = os.path.relpath(ROOT / "deploy/azure/main.bicep", tmp_path)
+    source.write_text(
+        f"using '{relative}'\n"
+        "param location = 'eastus2'\n"
+        "param postgresAdministratorPassword = 'SnapshotOnlyPassword123'\n"
+        + "".join(f"param {line}\n" for line in params)
+    )
+    result = subprocess.run(
+        ["bicep", "snapshot", str(source), "--mode", "overwrite"]
+        + ["--tenant-id", "00000000-0000-0000-0000-000000000001"]
+        + ["--subscription-id", "00000000-0000-0000-0000-000000000002"]
+        + ["--location", "eastus2", "--resource-group", "rg-offline-test"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    snapshot = tmp_path / "snapshot.snapshot.json"
+    data = json.loads(snapshot.read_text()) if result.returncode == 0 else {}
+    return result.returncode, result.stdout + result.stderr, data
+
+
+def _bot_resources(snapshot: dict) -> dict[str, dict]:
+    return {
+        r["type"].rsplit("/", 1)[-1]: r
+        for r in snapshot["predictedResources"]
+        if r["type"].startswith("Microsoft.BotService/")
+    }
+
+
+def test_bot_module_is_single_tenant_with_an_opt_in_teams_channel(
+    templates: dict[str, dict],
+) -> None:
+    bot = templates["modules/bot.bicep"]
+    resources = {r["type"]: r for r in bot["resources"]}
+    assert set(resources) == {
+        "Microsoft.BotService/botServices",
+        "Microsoft.BotService/botServices/channels",
+    }
+    service = resources["Microsoft.BotService/botServices"]
+    assert service["location"] == "global"
+    assert service["properties"]["msaAppType"] == "SingleTenant"
+    channel = resources["Microsoft.BotService/botServices/channels"]
+    assert channel["condition"] == "[parameters('teamsChannelTermsAccepted')]"
+    settings = channel["properties"]["properties"]
+    assert settings["deploymentEnvironment"] == "CommercialDeployment"
+    assert settings["enableCalling"] is False
+    assert bot["parameters"]["teamsChannelTermsAccepted"]["defaultValue"] is False
+    assert "/api/messages" in bot["variables"]["endpoint"]
+    assert not any("secret" in name.lower() for name in bot["parameters"]), "no credential"
+
+
+def test_bot_identity_requests_no_permissions_and_makes_no_secret(
+    templates: dict[str, dict],
+) -> None:
+    identity = templates["teams/bot-identity.bicep"]
+    resources = identity["resources"]
+    application = next(r for r in resources if r["type"].startswith("Microsoft.Graph/applications"))
+    properties = application["properties"]
+    assert properties["signInAudience"] == "AzureADMyOrg"
+    assert properties["requiredResourceAccess"] == []
+    assert properties["web"]["redirectUris"] == []
+    assert properties["identifierUris"] == []
+    assert "passwordCredentials" not in json.dumps(identity)
+    assert set(identity["outputs"]) == {"clientId", "tenantId"}
+
+
+def test_teams_bot_is_off_by_default_and_follows_the_teams_app(
+    templates: dict[str, dict], tmp_path: Path
+) -> None:
+    for entrypoint in ("main.bicep", "azd/main.bicep"):
+        params = templates[entrypoint]["parameters"]
+        assert params["deployTeamsBot"]["defaultValue"] is False
+        assert params["teamsChannelTermsAccepted"]["defaultValue"] is False
+    code, diagnostics, default = _snapshot(tmp_path)
+    assert code == 0, diagnostics
+    assert _bot_resources(default) == {}, "nothing changes for current installs"
+
+    code, diagnostics, snapshot = _snapshot(
+        tmp_path, "deployTeamsBot = true", f"serviceEnvironment = {{ teams: {TEAMS_IDS} }}"
+    )
+    assert code == 0, diagnostics
+    bots = _bot_resources(snapshot)
+    assert set(bots) == {"botServices"}, "no Teams channel until its terms are accepted"
+    properties = bots["botServices"]["properties"]
+    assert properties["msaAppId"] == "00000000-0000-4000-8000-000000000001"
+    assert properties["msaAppTenantId"] == "00000000-0000-4000-8000-000000000002"
+    endpoint = properties["endpoint"]
+    assert "https://" in endpoint and "-teams." in endpoint and "/api/messages" in endpoint, (
+        "points at the Teams app's own hostname"
+    )
+
+    code, diagnostics, snapshot = _snapshot(
+        tmp_path,
+        "deployTeamsBot = true",
+        "teamsChannelTermsAccepted = true",
+        "teamsBaseUrl = 'https://teams.example.com'",
+        "teamsBotDisplayName = 'Example analyst'",
+        f"serviceEnvironment = {{ teams: {TEAMS_IDS} }}",
+    )
+    assert code == 0, diagnostics
+    bots = _bot_resources(snapshot)
+    assert set(bots) == {"botServices", "channels"}
+    assert bots["botServices"]["properties"]["endpoint"] == "https://teams.example.com/api/messages"
+    assert bots["botServices"]["properties"]["displayName"] == "Example analyst"
+    assert snapshot["outputs"]["teamsMessagingEndpoint"] == (
+        "https://teams.example.com/api/messages"
+    )
+
+
+@pytest.mark.parametrize(
+    ("params", "error"),
+    [
+        (("deployTeamsBot = true",), "DAIMON_TEAMS__CLIENT_ID"),
+        (
+            (
+                "deployTeamsBot = true",
+                "serviceEnvironment = { teams: "
+                "{ DAIMON_TEAMS__CLIENT_ID: '00000000-0000-4000-8000-000000000001' } }",
+            ),
+            "DAIMON_TEAMS__TENANT_ID",
+        ),
+        (
+            (
+                "deployTeamsBot = true",
+                "serviceEnvironment = { teams: { DAIMON_TEAMS__CLIENT_ID: '', "
+                "DAIMON_TEAMS__TENANT_ID: '00000000-0000-4000-8000-000000000002' } }",
+            ),
+            "DAIMON_TEAMS__CLIENT_ID",
+        ),
+        (
+            (
+                "deployTeamsBot = true",
+                "services = ['discord', 'mcp', 'scheduler']",
+                f"serviceEnvironment = {{ teams: {TEAMS_IDS} }}",
+            ),
+            "needs teams in services",
+        ),
+        (
+            (
+                "deployTeamsBot = true",
+                "teamsBaseUrl = 'https://teams.example.com/'",
+                f"serviceEnvironment = {{ teams: {TEAMS_IDS} }}",
+            ),
+            "no trailing slash",
+        ),
+    ],
+)
+def test_teams_bot_refuses_incomplete_settings(
+    templates: dict[str, dict], tmp_path: Path, params: tuple[str, ...], error: str
+) -> None:
+    code, diagnostics, _ = _snapshot(tmp_path, *params)
+    assert code != 0, "an incomplete Teams bot configuration deployed in snapshot"
+    assert error in diagnostics
+
+
+def _fake_az(tmp_path: Path, script: str) -> dict[str, str]:
+    """An `az` on PATH that logs its arguments and runs the given Python body."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    az = bin_dir / "az"
+    az.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "args = sys.argv[1:]\n"
+        "open(os.environ['AZ_LOG'], 'a').write(json.dumps(args) + '\\n')\n" + script
+    )
+    az.chmod(0o755)
+    log = tmp_path / "az.log"
+    log.touch()
+    return {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "AZ_LOG": str(log)}
+
+
+def _az_calls(env: dict[str, str]) -> list[list[str]]:
+    return [json.loads(line) for line in Path(env["AZ_LOG"]).read_text().splitlines()]
+
+
+def _run(script: str, env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(ROOT / "scripts/azure" / script), *args],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+        check=False,
+    )
+
+
+@pytest.fixture
+def outside_git(tmp_path: Path) -> Path:
+    if any((parent / ".git").exists() for parent in (tmp_path, *tmp_path.parents)):
+        pytest.skip("the temporary directory is inside a git checkout")
+    return tmp_path
+
+
+BOT_CLIENT_ID = "00000000-0000-4000-8000-000000000001"
+BOT_TENANT_ID = "00000000-0000-4000-8000-000000000002"
+GRAPH_REPLY = (
+    "if args[:2] == ['account', 'show']:\n"
+    f"    print(os.environ.get('AZ_TENANT', '{BOT_TENANT_ID}'))\n"
+    "else:\n"
+    "    print(json.dumps({'secretText': 'one-time-secret-value', 'keyId': 'k1',"
+    " 'displayName': 'x', 'endDateTime': '2030-01-01T00:00:00Z'}))\n"
+)
+
+
+def test_bot_credential_plans_by_default_and_saves_the_secret_privately(
+    outside_git: Path,
+) -> None:
+    env = _fake_az(outside_git, GRAPH_REPLY)
+    ids = ["--client-id", BOT_CLIENT_ID, "--tenant-id", BOT_TENANT_ID]
+    state = outside_git / "credential"
+    plan = _run("create_bot_credential.py", env, *ids, "--state", str(state))
+    assert plan.returncode == 0, plan.stderr
+    assert _az_calls(env) == [] and not state.exists(), "the plan makes no Azure call"
+
+    created = _run("create_bot_credential.py", env, *ids, "--state", str(state), "--create")
+    assert created.returncode == 0, created.stderr
+    assert "one-time-secret-value" not in created.stdout + created.stderr
+    assert stat.S_IMODE(state.stat().st_mode) == 0o700
+    assert sorted(p.name for p in state.iterdir()) == [
+        "client-secret.txt",
+        "credential-metadata.json",
+        "request.json",
+    ]
+    assert all(stat.S_IMODE(p.stat().st_mode) == 0o600 for p in state.iterdir())
+    assert (state / "client-secret.txt").read_text() == "one-time-secret-value"
+    [_, graph] = _az_calls(env)
+    assert graph[:4] == ["rest", "--method", "POST", "--uri"]
+    assert f"applications(appId='{BOT_CLIENT_ID}')/addPassword" in graph[4]
+
+    again = _run("create_bot_credential.py", env, *ids, "--state", str(state), "--create")
+    assert again.returncode != 0 and "must not exist" in again.stderr
+
+    bad = ["--client-id", "not-a-guid", "--tenant-id", BOT_TENANT_ID]
+    refused = _run("create_bot_credential.py", env, *bad, "--state", str(outside_git / "x"))
+    assert refused.returncode != 0 and "must be GUIDs" in refused.stderr
+
+
+def test_bot_credential_refuses_another_tenant(outside_git: Path) -> None:
+    env = _fake_az(outside_git, GRAPH_REPLY)
+    env["AZ_TENANT"] = "00000000-0000-4000-8000-000000000009"
+    state = outside_git / "credential"
+    result = _run(
+        "create_bot_credential.py",
+        env,
+        *["--client-id", BOT_CLIENT_ID, "--tenant-id", BOT_TENANT_ID],
+        *["--state", str(state), "--create"],
+    )
+    assert result.returncode != 0 and "another tenant" in result.stderr
+    assert [call[0] for call in _az_calls(env)] == ["account"], "Graph is never called"
+    assert not state.exists()
+
+
+VAULT_REPLY = (
+    "if args[:3] == ['keyvault', 'secret', 'show']:\n"
+    "    name = args[args.index('--name') + 1]\n"
+    "    if name in os.environ.get('AZ_EXISTING', '').split(','):\n"
+    "        print('{}')\n"
+    "    else:\n"
+    "        sys.stderr.write('(SecretNotFound) not found')\n"
+    "        sys.exit(3)\n"
+    "if args[:3] == ['keyvault', 'secret', 'show-deleted']:\n"
+    "    name = args[args.index('--name') + 1]\n"
+    "    if name not in os.environ.get('AZ_DELETED', '').split(','):\n"
+    "        sys.stderr.write('(SecretNotFound) not found')\n"
+    "        sys.exit(3)\n"
+)
+
+
+def test_bootstrap_generates_new_keys_and_sets_them_once(outside_git: Path) -> None:
+    env = _fake_az(outside_git, VAULT_REPLY)
+    bot_secret = outside_git / "client-secret.txt"
+    bot_secret.write_text("bot-secret\n")
+    bot_secret.chmod(0o600)
+    state = outside_git / "secrets"
+    result = _run(
+        "bootstrap_secrets.py",
+        env,
+        *["--state", str(state), "--teams-client-secret-file", str(bot_secret)],
+        *["--vault", "example-vault"],
+    )
+    assert result.returncode == 0, result.stderr
+    names = ["crypto-keys", "mcp-jwt-secret", "teams-client-secret"]
+    assert sorted(p.name for p in state.iterdir()) == names
+    assert all(stat.S_IMODE(p.stat().st_mode) == 0o600 for p in state.iterdir())
+    assert len(base64.urlsafe_b64decode((state / "crypto-keys").read_text())) == 32
+    assert len((state / "mcp-jwt-secret").read_text()) == 64
+    assert (state / "teams-client-secret").read_text() == "bot-secret"
+    sets = [call for call in _az_calls(env) if call[:3] == ["keyvault", "secret", "set"]]
+    assert sorted(call[call.index("--name") + 1] for call in sets) == names
+    for call in sets:
+        assert call[call.index("--file") + 1].startswith(str(state)), "values never on argv"
+
+
+def test_bootstrap_never_overwrites_an_existing_secret(outside_git: Path) -> None:
+    env = _fake_az(outside_git, VAULT_REPLY)
+    env["AZ_EXISTING"] = "crypto-keys"
+    result = _run("bootstrap_secrets.py", env, "--state", str(outside_git / "s"), "--vault", "v")
+    assert result.returncode != 0 and "already exists" in result.stderr
+    assert not [call for call in _az_calls(env) if "set" in call], "nothing set"
+
+
+def test_bootstrap_refuses_a_deleted_but_recoverable_secret(outside_git: Path) -> None:
+    env = _fake_az(outside_git, VAULT_REPLY)
+    env["AZ_DELETED"] = "mcp-jwt-secret"
+    result = _run("bootstrap_secrets.py", env, "--state", str(outside_git / "s"), "--vault", "v")
+    assert result.returncode != 0 and "recover or purge" in result.stderr
+    assert not [call for call in _az_calls(env) if "set" in call], "nothing set"
+
+
+def test_bootstrap_without_a_vault_makes_no_azure_call(outside_git: Path) -> None:
+    env = _fake_az(outside_git, VAULT_REPLY)
+    loose = outside_git / "loose.txt"
+    loose.write_text("x")
+    loose.chmod(0o644)
+    refused = _run(
+        "bootstrap_secrets.py",
+        env,
+        *["--state", str(outside_git / "a"), "--teams-client-secret-file", str(loose)],
+    )
+    assert refused.returncode != 0 and "mode 0600" in refused.stderr
+    prepared = _run("bootstrap_secrets.py", env, "--state", str(outside_git / "b"))
+    assert prepared.returncode == 0, prepared.stderr
+    assert _az_calls(env) == []
+    again = _run("bootstrap_secrets.py", env, "--state", str(outside_git / "b"))
+    assert again.returncode != 0 and "never regenerates" in again.stderr

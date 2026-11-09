@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The Azure deploy can register the Teams bot, and one script builds the Teams app package.**
+  `deployTeamsBot` (off by default) adds the Azure Bot; a template and scripts create its Entra app and secret, and set a fresh install's secrets without overwriting any. `scripts/teams/build_package.py` builds the Teams zip with your own name and policy URLs.
 - **A workspace the data server node doesn't serve no longer sees the node.**
   The agent editor lists no node and the node's routes answer "Not found." as if none were set up, even for an agent whose MCP server is the node's. The server-skill chat tools answer "Server skills aren't set up here."
   Neither names the node's label. Workspaces listed in the identity server's `workspaces` are unchanged.

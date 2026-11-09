@@ -44,6 +44,7 @@ def _ci() -> dict[str, Any]:
         (".github/workflows/docs.yml", "repo"),
         (".github/workflows/deploy.yml", "deploy-workflow"),
         ("deploy/azure/main.bicep", "repo"),
+        ("scripts/teams/build_package.py", "teams-builder"),
         ("typings/pydub/__init__.pyi", "tooling"),
         (".github/ISSUE_TEMPLATE/bug.md", "tooling"),
         (".github/ISSUE_TEMPLATE/config.yml", "tooling"),

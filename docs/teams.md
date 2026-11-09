@@ -133,32 +133,22 @@ SingleTenant, then select **Apply**.
 
 Teams installs apps from a zip with `manifest.json`, `color.png` (192x192,
 full colour) and `outline.png` (32x32, white on transparent) at its top level.
-The template is [`teams-app-manifest.yaml`](teams-app-manifest.yaml). From the
-repository root, with Python 3 and PyYAML, fill in your client ID and hostname:
+The builder fills the template [`teams-app-manifest.yaml`](teams-app-manifest.yaml)
+with your client ID and hostname, checks the icons and writes the zip. From the
+repository root, with Python 3 and PyYAML:
 
 ```bash
-mkdir -p teams-app
-CLIENT_ID=<application (client) ID> TEAMS_HOST=teams.example.com python3 - <<'EOF'
-import json, os, yaml
-text = open("docs/teams-app-manifest.yaml").read()
-text = text.replace("${DAIMON_TEAMS__CLIENT_ID}", os.environ["CLIENT_ID"])
-text = text.replace("DAIMON_HOST", os.environ["TEAMS_HOST"])
-with open("teams-app/manifest.json", "w") as f:
-    json.dump(yaml.safe_load(text), f, indent=2)
-EOF
+python3 scripts/teams/build_package.py \
+  --client-id <application (client) ID> --host teams.example.com \
+  --color color.png --outline outline.png --output daimon-teams.zip \
+  --privacy-url https://example.com/privacy --terms-url https://example.com/terms
 ```
 
-In `manifest.json`, point `termsOfUseUrl`, `websiteUrl` and `privacyUrl` at
-pages you serve, since Daimon serves none. `name` is what people see. Give a
-test deployment its own Entra app, Azure Bot and package, with a distinct name
-such as `daimon (test)`.
-
-Add the icons (`assets/icon.png` resized works for `color.png`), then zip the
-three files, not their folder:
-
-```bash
-cd teams-app && zip ../daimon-teams.zip manifest.json color.png outline.png
-```
+Point `--website-url`, `--privacy-url` and `--terms-url` at pages you serve,
+since Daimon serves none. `--name` is what people see; `--description` and
+`--developer` replace the other shown text. Give a test deployment its own
+Entra app, Azure Bot and package, with a distinct name such as `daimon (test)`.
+`assets/icon.png` resized works for `color.png`.
 
 ### 6. Upload and allow the app
 
@@ -252,8 +242,8 @@ Shared channels hosted by another organisation cannot be subscribed.
 
 ### Update the app
 
-Manifest changes reach Teams only in a new package. Bump `version` in
-`manifest.json`, zip it again and upload it over the existing app in the Teams
+Manifest changes reach Teams only in a new package. Build it again with a
+higher `--version` and upload it over the existing app in the Teams
 admin center (the app > **Upload file**). A team owner may be asked to accept
 new permissions. Rebuild packages made before template version 0.6.0 or
 manifest 1.25, which lack `/` commands, group chats and private or shared channels.

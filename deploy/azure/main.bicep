@@ -54,9 +54,34 @@ param serviceSecretNames object = {}
 @description('Optional additional Postgres firewall ranges: [{name, startIpAddress, endIpAddress}]. Azure-service access is enabled for ACA.')
 param postgresFirewallRules array = []
 
+@description('Create the Azure Bot for the Teams app. Needs teams in services and DAIMON_TEAMS__CLIENT_ID and DAIMON_TEAMS__TENANT_ID in serviceEnvironment.teams.')
+param deployTeamsBot bool = false
+@description('Name shown for the Azure Bot in the Azure portal.')
+param teamsBotDisplayName string = 'daimon'
+@description('Public HTTPS base URL of the Teams adapter, for a custom domain. Empty uses the Teams app\'s Container Apps hostname.')
+param teamsBaseUrl string = ''
+@description('True accepts the Microsoft Teams channel terms for your organisation and adds the channel. Set it only with authority to accept them.')
+param teamsChannelTermsAccepted bool = false
+@allowed(['F0', 'S1'])
+param teamsBotSku string = 'F0'
+
 var checkedModelDeploymentName = validateModelDeploymentName(modelName, modelDeploymentName)
 var checkedNamePrefix = validateNamePrefix(namePrefix)
 var checkedChartStorage = validateChartStorage(chartStorage, secretNames, serviceSecretNames.?mcp ?? {})
+var checkedTeamsBot = deployTeamsBot && !contains(services, 'teams')
+  ? fail('deployTeamsBot needs teams in services')
+  : deployTeamsBot
+// Checked only when the bot is wanted, so default deployments never evaluate fail().
+var teamsBotClientId = !checkedTeamsBot
+  ? ''
+  : empty(serviceEnvironment.?teams.?DAIMON_TEAMS__CLIENT_ID ?? '')
+      ? fail('deployTeamsBot needs serviceEnvironment.teams.DAIMON_TEAMS__CLIENT_ID')
+      : serviceEnvironment.teams.DAIMON_TEAMS__CLIENT_ID
+var teamsBotTenantId = !checkedTeamsBot
+  ? ''
+  : empty(serviceEnvironment.?teams.?DAIMON_TEAMS__TENANT_ID ?? '')
+      ? fail('deployTeamsBot needs serviceEnvironment.teams.DAIMON_TEAMS__TENANT_ID')
+      : serviceEnvironment.teams.DAIMON_TEAMS__TENANT_ID
 var suffix = uniqueString(resourceGroup().id)
 var stem = '${checkedNamePrefix}-${suffix}'
 var tags = { application: 'daimon' }
@@ -206,6 +231,20 @@ module apps './modules/app.bicep' = [
   }
 ]
 
+module teamsBot './modules/bot.bicep' = if (checkedTeamsBot) {
+  name: 'teams-bot'
+  params: {
+    name: '${stem}-bot'
+    displayName: teamsBotDisplayName
+    clientId: teamsBotClientId
+    tenantId: teamsBotTenantId
+    teamsBaseUrl: empty(teamsBaseUrl) ? 'https://${stem}-teams.${foundation.outputs.defaultDomain}' : teamsBaseUrl
+    sku: teamsBotSku
+    teamsChannelTermsAccepted: teamsChannelTermsAccepted
+    tags: tags
+  }
+}
+
 output resourceGroupName string = resourceGroup().name
 output registryName string = foundation.outputs.registryName
 output registryServer string = foundation.outputs.registryServer
@@ -227,4 +266,5 @@ output harnessEnvironment object = {
   AZURE_OPENAI_API_VERSION: deployAi ? '2025-04-01-preview' : ''
   AZURE_AI_PROJECT_ENDPOINT: deployAi ? ai!.outputs.projectEndpoint : ''
 }
+output teamsMessagingEndpoint string = checkedTeamsBot ? teamsBot!.outputs.messagingEndpoint : ''
 output privateNetworkingEnabled bool = enablePrivateNetworking

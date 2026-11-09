@@ -58,6 +58,8 @@ RULES: tuple[tuple[str, str], ...] = (
     ("deploy/azure/", "repo"),
     ("deploy/lanes/", "repo"),
     ("scripts/azure/", "repo"),
+    # The Teams package builder is tested beside the manifest it fills in.
+    ("scripts/teams/", "teams-builder"),
     ("tests/test_", "repo"),
     ("web/", "spa"),
     ("tests/parity/", "parity"),
@@ -111,6 +113,8 @@ SUITES: dict[str, tuple[str, ...]] = {
     "mcp-catalogue": ("lint", "core", "mux"),
     "slack-manifest": ("slack", "slack-mux", "parity", "parity-mux"),
     "teams-manifest": ("teams", "teams-mux", "parity", "parity-mux"),
+    # A script, so ruff and the public-repo scan run on it as well.
+    "teams-builder": ("teams", "teams-mux", "parity", "parity-mux", "lint"),
     "formal": ("discord", "discord-mux", "lint"),
     # tests/parity reads web/src for the plain-words rules.
     "spa": ("spa", "parity", "parity-mux", "image-daimon"),
