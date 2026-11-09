@@ -260,6 +260,9 @@ async def test_a_routine_fire_that_returns_without_finishing_logs_nothing(
             agent_id="agent",
             created_by_user_id=None,
             updated_at=None,
+            destination_kind=None,
+            destination_id=None,
+            channel_id=None,
         ),
     )
 

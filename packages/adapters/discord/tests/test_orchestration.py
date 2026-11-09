@@ -38,6 +38,8 @@ from daimon.core.session_snapshot import (
 )
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.domain import FeatureTarget
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.tenants import set_provision_status
 from daimon.core.stores.turn_card_intents import (
     TurnCardIntentRow,
@@ -473,7 +475,18 @@ class TestNewThreadCreation:
         mock_find_env.return_value = "env_test"
 
         runtime = _make_runtime(tenant.id, db_session_factory)
-        runtime.settings.completion_pings = {tenant.id: True} if completion_enabled else {}
+        if completion_enabled:
+            async with db_session_factory() as session:
+                await set_feature_value(
+                    session,
+                    tenant_id=tenant.id,
+                    target=FeatureTarget("workspace"),
+                    key="completion_pings",
+                    value="on",
+                    set_by=None,
+                    surface="cli",
+                )
+                await session.commit()
         bot = make_bot(runtime)
         from daimon.adapters.discord import bot as bot_module
 
@@ -957,7 +970,6 @@ class TestNewThreadCreation:
         mock_watermark.side_effect = OperationalError("update", {}, Exception("db down"))
 
         runtime = _make_runtime(tenant.id, db_session_factory)
-        runtime.settings.completion_pings = {}
         bot = make_bot(runtime)
         message = _make_channel_message()
         card = MagicMock(spec=discord.Message)
@@ -1015,7 +1027,6 @@ class TestNewThreadCreation:
         mock_find_env.return_value = "env_test"
 
         runtime = _make_runtime(tenant.id, db_session_factory)
-        runtime.settings.completion_pings = {}
         bot = make_bot(runtime)
         message = _make_channel_message()
         replacement = MagicMock(spec=discord.Message)

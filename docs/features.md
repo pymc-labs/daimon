@@ -446,7 +446,7 @@ The person who asked is pinged when a long answer is finished.
 
 ## Table images
 
-Tables in an answer are drawn as an image (Discord) or a native table (Slack) instead of text.
+Tables in an answer are drawn as an image or a native table instead of text.
 
 | | |
 | --- | --- |
@@ -536,7 +536,7 @@ Says so when a channel's write access is set to no one and a message is skipped.
 
 ## Waiting card
 
-A card shows in a channel whose turn is waiting on the workspace's turn cap.
+A card shows in a channel whose reply is waiting on the team's limit on replies at once.
 
 | | |
 | --- | --- |
@@ -549,7 +549,7 @@ A card shows in a channel whose turn is waiting on the workspace's turn cap.
 
 ## Private channel messages
 
-Every message in Teams private and shared channels is read through Microsoft Graph, not only the ones that mention the agent.
+Every message in private and shared channels is read through Microsoft Graph, not only the ones that mention the agent.
 
 | | |
 | --- | --- |
@@ -562,7 +562,7 @@ Every message in Teams private and shared channels is read through Microsoft Gra
 
 ## Direct messages
 
-Conversations may move to a direct message with the agent. The agent that answers there is the workspace's DM agent, which is chosen apart from this.
+Conversations may move to a direct message with the agent. The agent that answers there is the team's DM agent, which is chosen apart from this.
 
 | | |
 | --- | --- |
@@ -574,7 +574,7 @@ Conversations may move to a direct message with the agent. The agent that answer
 
 ## Read-only memory in direct messages
 
-A turn started from a direct message can read the agent's memory but not change it.
+A reply in a direct message can read the agent's memory but not change it.
 
 | | |
 | --- | --- |
@@ -586,7 +586,7 @@ A turn started from a direct message can read the agent's memory but not change 
 
 ## Web app: chat
 
-The chat pages of the web app. Off hides them for everyone in the workspace.
+The chat pages of the web app. Off hides them for everyone on the team.
 
 | | |
 | --- | --- |
@@ -598,7 +598,7 @@ The chat pages of the web app. Off hides them for everyone in the workspace.
 
 ## Web app: agents
 
-The agents pages of the web app. Off hides them for everyone in the workspace.
+The agents pages of the web app. Off hides them for everyone on the team.
 
 | | |
 | --- | --- |
@@ -610,7 +610,7 @@ The agents pages of the web app. Off hides them for everyone in the workspace.
 
 ## Web app: channels
 
-The channels pages of the web app. Off hides them for everyone in the workspace.
+The channels pages of the web app. Off hides them for everyone on the team.
 
 | | |
 | --- | --- |
@@ -622,7 +622,7 @@ The channels pages of the web app. Off hides them for everyone in the workspace.
 
 ## Web app: routines
 
-The routines pages of the web app. Off hides them for everyone in the workspace.
+The routines pages of the web app. Off hides them for everyone on the team.
 
 | | |
 | --- | --- |
@@ -634,7 +634,7 @@ The routines pages of the web app. Off hides them for everyone in the workspace.
 
 ## Web app: credits
 
-The credits pages of the web app. Off hides them for everyone in the workspace.
+The credits pages of the web app. Off hides them for everyone on the team.
 
 | | |
 | --- | --- |
@@ -646,7 +646,7 @@ The credits pages of the web app. Off hides them for everyone in the workspace.
 
 ## Web app: integrations
 
-The integrations pages of the web app. Off hides them for everyone in the workspace.
+The integrations pages of the web app. Off hides them for everyone on the team.
 
 | | |
 | --- | --- |
@@ -805,7 +805,7 @@ The agent can take in sales leads and look them up. Off removes the lead tools h
 
 ## Long job dollar cap
 
-The most one long job may spend. The smallest setting wins, and the workspace's long-job policy still applies.
+The most one long job may spend. The smallest setting wins, and the team's long-job policy still applies.
 
 | | |
 | --- | --- |
@@ -818,7 +818,7 @@ The most one long job may spend. The smallest setting wins, and the workspace's 
 
 ## Long job time limit
 
-The longest one long job may run. The smallest setting wins, and the workspace's long-job policy still applies.
+The longest one long job may run. The smallest setting wins, and the team's long-job policy still applies.
 
 | | |
 | --- | --- |
@@ -841,9 +841,9 @@ The agent can post where other people are: other channels, new threads and direc
 | Levels | Deployment, Server, Agent, Channel |
 | Combines | Off above is a ceiling |
 
-## New threads per turn
+## New threads per reply
 
-How many new threads or forum posts outside its own channel, or tagging someone else, one turn may open without approval. The smallest setting wins.
+How many new threads or forum posts outside its own channel, or tagging someone else, one reply may open without approval. The smallest setting wins.
 
 | | |
 | --- | --- |
@@ -854,9 +854,9 @@ How many new threads or forum posts outside its own channel, or tagging someone 
 | Combines | Lowest wins |
 | Deprecated | `DAIMON_OUTBOUND__MAX_THREADS` |
 
-## Places per turn
+## Places per reply
 
-How many channels, threads and direct-message recipients outside its own conversation one turn may post into without approval. The smallest setting wins.
+How many channels, threads and direct-message recipients outside its own conversation one reply may post into without approval. The smallest setting wins.
 
 | | |
 | --- | --- |
@@ -867,9 +867,9 @@ How many channels, threads and direct-message recipients outside its own convers
 | Combines | Lowest wins |
 | Deprecated | `DAIMON_OUTBOUND__MAX_PLACES` |
 
-## People tagged per turn
+## People tagged per reply
 
-How many different people one turn may tag without approval. The smallest setting wins.
+How many different people one reply may tag without approval. The smallest setting wins.
 
 | | |
 | --- | --- |
@@ -882,7 +882,7 @@ How many different people one turn may tag without approval. The smallest settin
 
 ## Post length outside the conversation
 
-The longest post, in characters, a turn may send outside its own conversation. The smallest setting wins.
+The longest post, in characters, a reply may send outside its own conversation. The smallest setting wins.
 
 | | |
 | --- | --- |
@@ -895,7 +895,7 @@ The longest post, in characters, a turn may send outside its own conversation. T
 
 ## Daily spend per model
 
-The most the workspace may spend on one OpenAI or Gemini model in a day, at list price. The smallest setting wins, and the operator's provider cap still applies.
+The most the team may spend on one OpenAI or Gemini model in a day, at list price. The smallest setting wins, and the operator's provider cap still applies.
 
 | | |
 | --- | --- |

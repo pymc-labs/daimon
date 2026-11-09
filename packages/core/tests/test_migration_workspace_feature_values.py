@@ -1,4 +1,4 @@
-"""Migration 0188 copies the workspace settings kept in columns into feature values."""
+"""Migration 0189 copies the workspace settings kept in columns into feature values."""
 
 import importlib.util
 from pathlib import Path
@@ -27,8 +27,8 @@ async def test_upgrade_turns_the_old_columns_into_workspace_values(
         ),
         {"id": tenant.id},
     )
-    path = Path(__file__).parents[1] / "alembic/versions/0188_workspace_feature_values.py"
-    spec = importlib.util.spec_from_file_location("migration_0188", path)
+    path = Path(__file__).parents[1] / "alembic/versions/0189_workspace_feature_values.py"
+    spec = importlib.util.spec_from_file_location("migration_0189", path)
     assert spec and spec.loader, "the migration module must load"
     migration = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(migration)

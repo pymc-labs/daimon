@@ -29,6 +29,8 @@ from daimon.adapters.slack.app import SlackApp
 from daimon.core.config import McpSettings, OutboundSettings, TurnQueueSettings
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.membership import Membership
+from daimon.core.stores.domain import FeatureTarget
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.turn import driver as turn_driver
 from daimon.core.turn.ceiling import CEILING_MESSAGE
@@ -182,7 +184,17 @@ async def test_cold_thread_feedback_before_session_create(
             )
             await session.commit()
         runtime = driver._make_runtime(db_session_factory, boundary, fernet_key=key)
-    runtime.settings.completion_pings = {tenant.id: True}
+    async with db_session_factory() as session:
+        await set_feature_value(
+            session,
+            tenant_id=tenant.id,
+            target=FeatureTarget("workspace"),
+            key="completion_pings",
+            value="on",
+            set_by=None,
+            surface="cli",
+        )
+        await session.commit()
     deps = replace(
         runtime.turn_deps,
         defaults_root=Path("/nonexistent"),

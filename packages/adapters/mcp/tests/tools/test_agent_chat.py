@@ -913,6 +913,7 @@ async def test_ask_delivers_embedded_charts_without_artifact_settings() -> None:
         turn_started_at=turn_started_at,
         message="Final answer",
         store=None,
+        embed_images=True,
     )
 
 
@@ -1351,6 +1352,7 @@ async def test_deliver_turn_charts_uses_newest_completed_turn_window() -> None:
         turn_started_at=turn_started_at,
         message="Final answer",
         store=None,
+        embed_images=True,
     )
 
 

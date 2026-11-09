@@ -5,8 +5,8 @@ Copies four workspace settings into `feature_values` (`plain_text_mentions`,
 Only the On or Off that differs from the default is copied. The old columns stay, unread,
 so an older build can still start; a downgrade copies the rows back and removes them.
 
-Revision ID: 0188_workspace_feature_values
-Revises: 0187_feature_values
+Revision ID: 0189_workspace_feature_values
+Revises: 0188_eval_key
 
 downgrade: safe
 """
@@ -15,8 +15,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0188_workspace_feature_values"
-down_revision: str | None = "0187_feature_values"
+revision: str = "0189_workspace_feature_values"
+down_revision: str | None = "0188_eval_key"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

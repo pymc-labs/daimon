@@ -522,8 +522,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
     _shown(
         "table_rendering",
         "Table images",
-        "Tables in an answer are drawn as an image (Discord) or a native table (Slack) "
-        "instead of text.",
+        "Tables in an answer are drawn as an image or a native table instead of text.",
         platforms=_DM_PLATFORMS,
         default="on",
         platform_defaults={"slack": "off"},
@@ -579,7 +578,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
     _shown(
         "waiting_card",
         "Waiting card",
-        "A card shows in a channel whose turn is waiting on the workspace's turn cap.",
+        "A card shows in a channel whose reply is waiting on the team's limit on replies at once.",
         platforms=_DISCORD,
         tiers=("deployment", "workspace"),
         legacy_env=("DAIMON_DISCORD__TENANT_CAP_WAITING_CARD",),
@@ -594,7 +593,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         tiers=_CHANNELS,
         binds="turn",
         doc=(
-            "Every message in Teams private and shared channels is read through Microsoft "
+            "Every message in private and shared channels is read through Microsoft "
             "Graph, not only the ones that mention the agent."
         ),
         platforms=frozenset({"teams"}),
@@ -612,7 +611,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         binds="turn",
         doc=(
             "Conversations may move to a direct message with the agent. The agent that answers "
-            "there is the workspace's DM agent, which is chosen apart from this."
+            "there is the team's DM agent, which is chosen apart from this."
         ),
         platforms=_DM_PLATFORMS,
         authority=_ADMIN,
@@ -626,7 +625,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         default="off",
         tiers=("deployment", "workspace"),
         binds="turn",
-        doc="A turn started from a direct message can read the agent's memory but not change it.",
+        doc="A reply in a direct message can read the agent's memory but not change it.",
         platforms=_DM_PLATFORMS,
         authority=_ADMIN,
     ),
@@ -642,7 +641,7 @@ _WORKSPACE: Final[tuple[FeatureSpec, ...]] = tuple(
         default="on",
         tiers=("deployment", "workspace"),
         binds="turn",
-        doc=f"The {module} pages of the web app. Off hides them for everyone in the workspace.",
+        doc=f"The {module} pages of the web app. Off hides them for everyone on the team.",
         platforms=EVERY_PLATFORM,
         authority=_ADMIN,
     )
@@ -820,7 +819,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
     _limit(
         "long_jobs_max_usd",
         "Long job dollar cap",
-        "The most one long job may spend. The smallest setting wins, and the workspace's "
+        "The most one long job may spend. The smallest setting wins, and the team's "
         "long-job policy still applies.",
         {"20": "$20", "10": "$10", "5": "$5", "2": "$2", "1": "$1"},
         tiers=("deployment", "workspace", "agent"),
@@ -829,7 +828,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
     _limit(
         "long_jobs_max_deadline",
         "Long job time limit",
-        "The longest one long job may run. The smallest setting wins, and the workspace's "
+        "The longest one long job may run. The smallest setting wins, and the team's "
         "long-job policy still applies.",
         {"70": "70 minutes", "60": "60 minutes", "30": "30 minutes", "15": "15 minutes"},
         tiers=("deployment", "workspace", "agent"),
@@ -844,26 +843,26 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
     ),
     _limit(
         "outbound_threads",
-        "New threads per turn",
+        "New threads per reply",
         "How many new threads or forum posts outside its own channel, or tagging someone "
-        "else, one turn may open without approval. The smallest setting wins.",
+        "else, one reply may open without approval. The smallest setting wins.",
         {"2": "2", "1": "1", "0": "None"},
         tiers=_OUTBOUND_TIERS,
         legacy_env=("DAIMON_OUTBOUND__MAX_THREADS",),
     ),
     _limit(
         "outbound_places",
-        "Places per turn",
+        "Places per reply",
         "How many channels, threads and direct-message recipients outside its own "
-        "conversation one turn may post into without approval. The smallest setting wins.",
+        "conversation one reply may post into without approval. The smallest setting wins.",
         {"2": "2", "1": "1", "0": "None"},
         tiers=_OUTBOUND_TIERS,
         legacy_env=("DAIMON_OUTBOUND__MAX_PLACES",),
     ),
     _limit(
         "outbound_people",
-        "People tagged per turn",
-        "How many different people one turn may tag without approval. The smallest setting wins.",
+        "People tagged per reply",
+        "How many different people one reply may tag without approval. The smallest setting wins.",
         {"5": "5", "3": "3", "1": "1", "0": "None"},
         tiers=_OUTBOUND_TIERS,
         legacy_env=("DAIMON_OUTBOUND__MAX_PEOPLE",),
@@ -871,7 +870,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
     _limit(
         "outbound_length",
         "Post length outside the conversation",
-        "The longest post, in characters, a turn may send outside its own conversation. "
+        "The longest post, in characters, a reply may send outside its own conversation. "
         "The smallest setting wins.",
         {"1500": "1500", "1000": "1000", "500": "500", "250": "250"},
         tiers=_OUTBOUND_TIERS,
@@ -880,7 +879,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
     _limit(
         "daily_model_cap",
         "Daily spend per model",
-        "The most the workspace may spend on one OpenAI or Gemini model in a day, at list "
+        "The most the team may spend on one OpenAI or Gemini model in a day, at list "
         "price. The smallest setting wins, and the operator's provider cap still applies.",
         {"20": "$20", "10": "$10", "5": "$5", "2": "$2", "1": "$1"},
         tiers=("deployment", "workspace", "agent"),

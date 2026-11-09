@@ -151,6 +151,7 @@ TAIL = (
     "0186_github_router_sessions",
     "0187_feature_values",
     "0188_eval_key",
+    "0189_workspace_feature_values",
 )
 HEAD = TAIL[-1]
 

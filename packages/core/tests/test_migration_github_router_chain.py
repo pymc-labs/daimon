@@ -81,7 +81,10 @@ async def test_staging_at_0186_with_tables_reruns_and_downgrades(
             _assert_head(sync, HEAD)
             _assert_router_objects(sync)
             sync.commit()
-            # Objects present, version behind: 0186 must skip all of them.
+            # Objects present, version behind: 0186 must skip all of them. Later
+            # revisions are undone first, so only 0186's own objects are left over.
+            command.downgrade(config, "0186_github_router_sessions")
+            sync.commit()
             sync.execute(text("UPDATE alembic_version SET version_num = '0185_agent_post_role'"))
             sync.commit()
             command.upgrade(config, "head")

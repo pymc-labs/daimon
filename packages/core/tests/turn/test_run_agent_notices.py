@@ -164,9 +164,11 @@ async def _run(monkeypatch: pytest.MonkeyPatch, outcome: Any, *, sent: bool) -> 
             account_id=uuid.uuid4(),
             agent=SimpleNamespace(id="agt"),
             backend_footer_profile=None,
+            features=None,
             backend_revision=None,
         ),
         ma_session_id="sess",
+        snapshot=None,
         _finalize=None,
     )
     deps = SimpleNamespace(

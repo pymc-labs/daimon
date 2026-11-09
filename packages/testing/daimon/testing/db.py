@@ -74,6 +74,7 @@ import pytest_asyncio
 from cryptography.fernet import Fernet
 from daimon.core import platform_names
 from daimon.core._models import Base
+from daimon.core.features.snapshot import CACHE as FEATURE_CACHE
 from daimon.testing.watch_fixtures import install_poll_ports
 from sqlalchemy import event, text
 from sqlalchemy.dialects.postgresql import asyncpg as asyncpg_dialect
@@ -990,6 +991,10 @@ async def db_clean(
             raise RuntimeError(
                 f"{err}; the previous DB test in this worker was {_last_db_test}"
             ) from err
+    # The wipe and the next test's rows reuse tenant ids and revisions, so a cached read of
+    # the last test would be returned for a different commit that reaches the same revision.
+    # Production reads only committed rows through its own pool, so it never sees this.
+    FEATURE_CACHE.clear()
     try:
         yield
     finally:

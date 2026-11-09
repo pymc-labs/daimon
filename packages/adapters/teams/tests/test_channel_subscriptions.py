@@ -38,14 +38,14 @@ from daimon.adapters.teams.channel_subscriptions import (
 )
 from daimon.adapters.teams.http_service import TeamsHttpService, create_teams_http_service
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.stores.domain import TeamsChannelSubscriptionRow
+from daimon.core.stores.domain import FeatureTarget, TeamsChannelSubscriptionRow
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.teams_channel_subscriptions import (
     get_teams_channel_subscription,
     insert_teams_channel_subscription,
     record_teams_channel_watermark,
     update_teams_channel_subscription,
 )
-from daimon.core.stores.tenants import set_plain_text_mentions
 from daimon.core.teams_graph import (
     ChangeNotification,
     GraphClient,
@@ -484,7 +484,15 @@ async def test_a_message_held_while_draining_moves_the_watermark_past_it(
 ) -> None:
     """The next boot's catch-up starts after it: only the admission's reclaim can run it."""
     async with db_session_factory.begin() as session:
-        await set_plain_text_mentions(session, tenant_id=TENANT, enabled=True)
+        await set_feature_value(
+            session,
+            tenant_id=TENANT,
+            target=FeatureTarget("workspace"),
+            key="plain_text_mentions",
+            value="on",
+            set_by=None,
+            surface="cli",
+        )
     sender = FakeSender()
     teams = TeamsApp(
         runtime=build_teams_runtime(db_session_factory),

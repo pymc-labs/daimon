@@ -104,7 +104,7 @@ class Tenant(Base):
     )
     turn_cap: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Read by nothing: typed mentions are the `plain_text_mentions` feature now (migration
-    # 0188 copied this value). Kept so an older build still starts.
+    # 0189 copied this value). Kept so an older build still starts.
     plain_text_mentions: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
     )
