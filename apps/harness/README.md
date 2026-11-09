@@ -777,7 +777,7 @@ HARNESS_MUTATION_IMAGE=daimon-harness:l4-hardening \
 
 The script reverts each fix separately in copied source, using the same Hypothesis
 property (seed 7, including explicit regression traces). Expected pytest exit: 1
-for mutations 1–6 and 8–12. Restoring startup repair before WAL reconciliation loses measured
+for mutations 1–6, 8–13 and 15. Restoring startup repair before WAL reconciliation loses measured
 usage; restoring submit-owned warning delivery strands a claim; removing pending
 measured-response persistence loses measured usage; removing terminal WAL records
 emits events after a terminal; disabling the divergence seal makes a mid-process

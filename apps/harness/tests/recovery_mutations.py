@@ -154,7 +154,11 @@ for number in range(1, 16):
             "            workspace_report = {}",
         )
     elif number == 11:
-        change("service.py", "if failures == CLEANUP_FAILURE_LIMIT:", "if False:")
+        change(
+            "service.py",
+            "                    failures >= CLEANUP_FAILURE_LIMIT\n",
+            "                    False\n",
+        )
     elif number == 12:
         change("service.py", 'cancelled=terminal == "interrupted"', "cancelled=True")
     elif number == 13:

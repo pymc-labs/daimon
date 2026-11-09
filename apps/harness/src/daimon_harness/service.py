@@ -545,7 +545,7 @@ class Supervisor:
         # A terminal or removed context never releases an in-flight coordinator.
         for turn_id, cleanup in list(self.cleanups.items()):
             owner = self.tasks.get(turn_id)
-            if (
+            if (session_id is None or self.cleanup_sessions.get(turn_id) == session_id) and (
                 owner is not None
                 and owner.done()
                 and turn_id in self.cleanup_verified
