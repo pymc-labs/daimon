@@ -52,6 +52,7 @@ async def test_kill_uid_failure_keeps_i5_seal(tmp_path, monkeypatch):
                 response = await client.post("/v0/turns", json=turn(turn_id="next", key="next"))
                 assert response.status_code == 503
         assert TurnContext.stop_processes is original
+        await asyncio.wait_for(supervisor.cleanups["turn-1"], timeout=3)
         response = await client.get("/v0/sessions/session-1/events")
         assert response.status_code == 200 and response.json()["complete"]
         assert (

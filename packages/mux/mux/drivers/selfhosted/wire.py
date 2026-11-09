@@ -33,6 +33,7 @@ from pydantic import (
 )
 
 __all__ = [
+    "CLEANUP_EXHAUSTED",
     "ActionRequest",
     "AgentMessageData",
     "AgentMessageDeltaData",
@@ -76,6 +77,9 @@ __all__ = [
 ]
 
 PROTOCOL = "daimon-harness/0"
+# Error kind for a conversation sealed because its tools could not be stopped.
+# It is never retryable; the person starts a new conversation.
+CLEANUP_EXHAUSTED = "cleanup_exhausted"
 
 
 class WireModel(BaseModel):

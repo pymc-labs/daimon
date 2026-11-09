@@ -340,6 +340,21 @@ class Journal:
         ).fetchall()
         return [Event.model_validate_json(row[0]) for row in rows]
 
+    def terminal_outcome(self, turn_id: str) -> str | None:
+        request = self.find(turn_id)
+        if request is None:
+            return None
+        row = (
+            self.connection(request.session_id)
+            .execute(
+                "SELECT body FROM events WHERE turn_id=? AND type='turn_ended' "
+                "ORDER BY seq DESC LIMIT 1",
+                (turn_id,),
+            )
+            .fetchone()
+        )
+        return str(Event.model_validate_json(row[0]).data["outcome"]) if row else None
+
     def ended(self, turn_id: str) -> bool:
         row = self.db.execute("SELECT ended FROM turns WHERE turn_id=?", (turn_id,)).fetchone()
         return bool(row and row[0])

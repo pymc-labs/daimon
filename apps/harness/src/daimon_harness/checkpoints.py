@@ -689,6 +689,19 @@ class Checkpoints:
             sync_directory(sandbox.parent)
             sync_directory(journal.root / "sessions")
             sync_directory(home)
+            workspace_report = manifest.get("workspace", {})
+            if (
+                workspace_report.get("degraded")
+                or workspace_report.get("skipped_count")
+                or workspace_report.get("skipped")
+            ):
+                # The local notice is not archived. Recreate it from the durable
+                # omission report before publishing a completed restore.
+                notice = restored.root / "checkpoint.notice"
+                with notice.open("w") as output:
+                    output.write(session_id)
+                    output.flush()
+                    os.fsync(output.fileno())
             pending.unlink()
             sync_directory(journal.root)
             self.restored_seq = seq
