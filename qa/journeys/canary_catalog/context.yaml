@@ -1,0 +1,35 @@
+id: QA-JOURNEY-CONTEXT
+title: Keep a canary value across two turns
+friction: [context]
+sources: [qa/journeys/JOURNEYS.md]
+set: A
+surface: discord
+tier: canary
+priority: P1
+est_turns: 2
+steps:
+  - do: mention
+    text: "Remember this QA value for our next message: journey-{nonce}. Reply with only that value. Do not use tools."
+  - do: wait_done
+    timeout_s: 180
+  - do: thread_reply
+    mention: true
+    text: "Reply with only the QA value I asked you to remember. Do not use tools."
+  - do: wait_done
+    timeout_s: 180
+assert:
+  - kind: text_present
+    turn: 1
+    pattern: "^journey-{nonce}$"
+  - kind: text_present
+    turn: 2
+    pattern: "^journey-{nonce}$"
+  - kind: same_thread
+    turn: 2
+    as_turn: 1
+  - kind: no_blank_message
+    turn: 1
+  - kind: no_blank_message
+    turn: 2
+  - kind: card_finalized
+    turn: 2

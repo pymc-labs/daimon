@@ -1,0 +1,48 @@
+name: QA journeys
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-and-owned-pages:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: mirror.gcr.io/library/postgres:18-alpine
+        env:
+          POSTGRES_USER: daimon
+          POSTGRES_PASSWORD: daimon
+          POSTGRES_DB: daimon_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd="pg_isready -U daimon -d daimon_test"
+          --health-interval=5s --health-timeout=3s --health-retries=10
+    env:
+      DAIMON_DATABASE__TEST_URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon_test
+      DAIMON_QA_ARTIFACT_ROOT: /tmp/qa-journeys
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras --all-packages
+      - name: Migrate isolated fixture database
+        env:
+          DAIMON_DATABASE_URL: ${{ env.DAIMON_DATABASE__TEST_URL }}
+        run: uv run alembic upgrade head
+      - name: Install Chromium
+        run: uv run --with playwright==1.63.0 playwright install --with-deps chromium
+      - name: Scripted and actual owned-page journeys
+        run: uv run --with playwright==1.63.0 pytest qa/journeys/tests -m 'not contract' -n 2
+      - name: Journey type checks
+        run: >-
+          uv run --with playwright==1.63.0 pyright
+          qa/journeys/evidence.py qa/journeys/offline.py
+          qa/journeys/owned_pages.py qa/journeys/canary.py qa/journeys/profile.py
