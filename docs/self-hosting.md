@@ -215,7 +215,7 @@ the Azure Bot for Teams. The templates are validated offline, and live
 deployments are not verified end to end.
 
 Deployment runs in stages: foundation, image publication and init, then the
-serving apps. Endpoints are public, and private networking is not
+serving apps. Endpoints are public (MCP can be kept private), and private networking is not
 implemented. Parameters, commands, roles and limitations are in the
 [Azure deployment guide](https://github.com/pymc-labs/daimon/blob/main/deploy/azure/README.md).
 

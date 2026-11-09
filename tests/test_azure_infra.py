@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import shutil
 import ssl
 import stat
@@ -975,11 +976,13 @@ def _apps(snapshot: dict) -> dict[str, dict]:
     }
 
 
-def _mcp_urls(apps: dict[str, dict]) -> set[str]:
+def _mcp_urls(snapshot: dict) -> set[str]:
+    """The MCP URL each serving app and the init job is given."""
     return {
         e["value"]
-        for app in apps.values()
-        for e in app["properties"]["template"]["containers"][0]["env"]
+        for r in snapshot["predictedResources"]
+        if r["type"] in ("Microsoft.App/containerApps", "Microsoft.App/jobs")
+        for e in r["properties"]["template"]["containers"][0]["env"]
         if e["name"] == "DAIMON_MCP__PUBLIC_URL"
     }
 
@@ -1003,8 +1006,9 @@ def test_mcp_can_stay_private_while_teams_is_public(
     assert set(apps) == {"discord", "teams", "mcp", "scheduler"}
     assert apps["mcp"]["properties"]["configuration"]["ingress"]["external"] is True
     assert apps["teams"]["properties"]["configuration"]["ingress"]["external"] is True
-    [url] = _mcp_urls(apps)
-    assert "-mcp.{" in url and ".internal." not in url, "current installs keep a public MCP"
+    assert sum(r["type"] == "Microsoft.App/jobs" for r in default["predictedResources"]) == 1
+    [url] = _mcp_urls(default)
+    assert re.search(r"-mcp\.\S*/mcp", url) and ".internal." not in url, "MCP stays public"
 
     code, diagnostics, private = _snapshot(tmp_path, *SERVING, "mcpPublicIngress = false")
     assert code == 0, diagnostics
@@ -1013,5 +1017,5 @@ def test_mcp_can_stay_private_while_teams_is_public(
     assert apps["teams"]["properties"]["configuration"]["ingress"]["external"] is True
     for worker in ("discord", "scheduler"):
         assert apps[worker]["properties"]["configuration"].get("ingress") is None
-    [url] = _mcp_urls(apps)
-    assert "-mcp.internal.{" in url, "every process uses the environment-internal MCP URL"
+    [url] = _mcp_urls(private)
+    assert re.search(r"-mcp\.internal\.\S*/mcp", url), "every process uses the internal URL"

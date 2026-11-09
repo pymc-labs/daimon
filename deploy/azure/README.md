@@ -34,8 +34,8 @@ incremental deployment.
 
 Discord and scheduler have HTTP liveness probes on their event-loop responders,
 ports 8081 and 8082 respectively. These ports have no public ingress.
-MCP (8765) and Teams (3978) have public HTTPS ingress; Discord and scheduler
-have none. Serving commands override the image entrypoint, matching Compose:
+MCP (8765) and Teams (3978) have public HTTPS ingress, unless MCP is
+[private](#private-mcp); Discord and scheduler have none. Serving commands override the image entrypoint, matching Compose:
 seeding belongs to the init job. No notebook/report host, Slack, harness image
 or hosted-agent version is deployed by this stack. The Azure Bot for Teams is
 optional (`deployTeamsBot`); see [Teams bot](#teams-bot).
@@ -50,15 +50,20 @@ private endpoints, VNet isolation or egress controls in these templates.
 ### Private MCP
 
 Set `mcpPublicIngress` to false to keep MCP reachable only from apps in the
-same Container Apps environment, while Teams stays public.
-`DAIMON_MCP__PUBLIC_URL` then uses the environment's `internal` hostname. Use
-it only with the self-hosted harness running as a container app in that
-environment. Other harness placements, such as session pools, are not verified.
+same Container Apps environment, while the Teams bot stays public.
+`DAIMON_MCP__PUBLIC_URL` then uses the environment's `internal` hostname; do not
+override it as well. Use this only with the self-hosted harness running as a
+container app in that environment. Other harness placements, such as session
+pools, are not verified.
 
-What stops working with a private MCP:
+The MCP app also serves Daimon's web pages, so a private MCP turns off
+everything that needs a browser or an outside caller:
 
 - **Hosted model backends.** Anthropic (the default), OpenAI and Gemini call MCP
   from outside Azure, so every Daimon tool call fails.
+- **Sign-in and connect links.** MCP server sign-in, Connect GitHub, Microsoft
+  sign-in and their OAuth callbacks point at the internal host.
+- **Other web pages.** Billing return pages, CLI key claims, uploads and bundles.
 - **Coding-tool setup in chat.** Daimon still offers it, but the connection it
   hands out works only inside the environment.
 - **Existing tokens, when switching an install.** The URL is the audience of the
@@ -425,7 +430,8 @@ edits. Keep the secure password input or Key Vault reference on each invocation.
 
 Set `deployServices` true in the same parameter file and run the same group
 what-if/create commands (or `azd provision`). Do this only after init succeeds.
-Verify all four replicas are healthy, MCP `/healthz` responds, and the Bot
+Verify all four replicas are healthy, MCP `/healthz` responds (from inside the
+environment when MCP is private), and the Bot
 registration points to Teams. Configure the desired provider using its existing
 Daimon setup procedure. Provisioning an AI account alone does not switch Daimon's
 backend or prove a turn works. There is no persistent `/app/runtime` mount in
