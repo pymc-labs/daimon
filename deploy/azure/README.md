@@ -35,11 +35,7 @@ incremental deployment.
 Discord and scheduler have HTTP liveness probes on their event-loop responders,
 ports 8081 and 8082 respectively. These ports have no public ingress.
 MCP (8765) and Teams (3978) have public HTTPS ingress; Discord and scheduler
-have none. Set `mcpPublicIngress` to false to keep MCP reachable only from apps
-in the same Container Apps environment while Teams stays public. Its URL
-(`DAIMON_MCP__PUBLIC_URL`) then uses the environment's `internal` hostname. Use
-this only when the harness runs in that environment: a hosted model backend,
-and a coding tool on someone's computer, cannot reach a private MCP. Serving commands override the image entrypoint, matching Compose:
+have none. Serving commands override the image entrypoint, matching Compose:
 seeding belongs to the init job. No notebook/report host, Slack, harness image
 or hosted-agent version is deployed by this stack. The Azure Bot for Teams is
 optional (`deployTeamsBot`); see [Teams bot](#teams-bot).
@@ -50,6 +46,23 @@ service endpoints. Postgres allows Azure-service connections through its
 as well; authentication and TLS are still required. This is not tenant sealing.
 Optional `postgresFirewallRules` add named operator IP ranges. There are no
 private endpoints, VNet isolation or egress controls in these templates.
+
+### Private MCP
+
+Set `mcpPublicIngress` to false to keep MCP reachable only from apps in the
+same Container Apps environment, while Teams stays public.
+`DAIMON_MCP__PUBLIC_URL` then uses the environment's `internal` hostname. Use
+it only with the self-hosted harness running as a container app in that
+environment. Other harness placements, such as session pools, are not verified.
+
+What stops working with a private MCP:
+
+- **Hosted model backends.** Anthropic (the default), OpenAI and Gemini call MCP
+  from outside Azure, so every Daimon tool call fails.
+- **Coding-tool setup in chat.** Daimon still offers it, but the connection it
+  hands out works only inside the environment.
+- **Existing tokens, when switching an install.** The URL is the audience of the
+  tokens MCP signs, so coding-tool configurations made before stop working.
 
 ## Validate offline
 

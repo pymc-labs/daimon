@@ -1011,6 +1011,7 @@ def test_mcp_can_stay_private_while_teams_is_public(
     apps = _apps(private)
     assert apps["mcp"]["properties"]["configuration"]["ingress"]["external"] is False
     assert apps["teams"]["properties"]["configuration"]["ingress"]["external"] is True
-    assert apps["discord"]["properties"]["configuration"].get("ingress") is None
+    for worker in ("discord", "scheduler"):
+        assert apps[worker]["properties"]["configuration"].get("ingress") is None
     [url] = _mcp_urls(apps)
     assert "-mcp.internal.{" in url, "every process uses the environment-internal MCP URL"
