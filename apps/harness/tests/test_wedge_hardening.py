@@ -268,20 +268,53 @@ def test_startup_sweep_kills_each_orphan_uid_and_checks_exit(tmp_path, monkeypat
     monkeypatch.setattr(
         Path, "iterdir", lambda p: real_iter(proc) if str(p) == "/proc" else real_iter(p)
     )
-    calls = []
-    monkeypatch.setattr(
-        startup_sweep.subprocess, "run", lambda command, **kw: calls.append((command, kw))
-    )
+
+    class Helper:
+        """A kill_uid helper: exits with `code`, or hangs past its budget."""
+
+        started: list["Helper"] = []
+        code = 0
+        hangs = False
+
+        def __init__(self, command, **kwargs):
+            self.command, self.kwargs, self.killed = command, kwargs, False
+            Helper.started.append(self)
+
+        def wait(self, timeout=None):
+            if self.hangs and not self.killed:
+                assert timeout is not None and timeout <= startup_sweep.HELPER_TIMEOUT
+                raise startup_sweep.subprocess.TimeoutExpired(self.command, timeout)
+            return self.code
+
+        def kill(self):
+            self.killed = True
+
+    monkeypatch.setattr(startup_sweep.subprocess, "Popen", Helper)
     startup_sweep.sweep()
-    assert [call[0][-1] for call in calls] == ["10001", "10002"]
-    assert all(call[1]["check"] and call[1]["timeout"] == 4 for call in calls)
+    # Every orphan UID gets its own helper, started before any is awaited.
+    assert [helper.command[-1] for helper in Helper.started] == ["10001", "10002"]
+    assert all(helper.kwargs == {"env": {}} for helper in Helper.started)
 
-    def failed(*args, **kwargs):
-        raise startup_sweep.subprocess.CalledProcessError(1, args[0])
-
-    monkeypatch.setattr(startup_sweep.subprocess, "run", failed)
-    with pytest.raises(startup_sweep.subprocess.CalledProcessError):
+    Helper.started, Helper.code = [], 1
+    with pytest.raises(SystemExit):
         startup_sweep.sweep()
+
+    # Many slow UIDs share one helper budget, so the caller's 10 s start bound holds.
+    Helper.started, Helper.code, Helper.hangs = [], 0, True
+    with pytest.raises(SystemExit):
+        startup_sweep.sweep()
+    assert Helper.started and all(helper.killed for helper in Helper.started)
+
+    def exited(self):
+        raise ProcessLookupError
+
+    real_read = Path.read_text
+    monkeypatch.setattr(
+        Path,
+        "read_text",
+        lambda p, *a, **k: exited(p) if p.parent.name == "4" else real_read(p, *a, **k),
+    )
+    assert startup_sweep.orphan_uids() == {10001, 10002}, "a process exiting mid-read is skipped"
 
 
 async def test_cancel_does_not_wait_for_slow_initial_cleanup(tmp_path, monkeypatch):

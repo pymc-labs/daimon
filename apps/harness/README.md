@@ -874,9 +874,9 @@ States and transitions:
   its UID and context until pod restart; multi mode cannot reclaim that UID safely.
 - **RECLAIMED:** workers are stopped and all cleanup operations have joined. For
   a sealed multi-mode turn, resolve unmatched usage inventory and commit exactly
-  one `turn_ended` (`errored`, `cleanup_exhausted`, `retryable:false`), with a visible
-  “Start a new conversation” message. The real driver stops polling on this
-  terminal and core displays the error. The failed conversation remains sealed.
+  one `turn_ended` (`errored`, `cleanup_exhausted`, `retryable:false`). The real
+  driver stops polling on this terminal, and core shows the platform error card
+  asking the person to start a new conversation. The failed conversation remains sealed.
   A stuck adapter outside a tool worker can therefore receive this terminal
   while its owner still runs: tools are disabled and the conversation stays sealed.
   Single mode requests process replacement even if worker verification succeeded

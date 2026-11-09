@@ -242,7 +242,12 @@ async def test_sealed_multi_cleanup_heals_and_real_driver_codec_finishes(tmp_pat
     from contextlib import suppress
 
     import httpx
+    from daimon.core.errors import TurnError
+    from daimon.core.turn import render_termination_notice
     from daimon.core.turn.selfhosted_codec import display_batch
+    from daimon.core.turn.selfhosted_io import root_failed
+    from daimon.core.turn.state import TurnState
+    from daimon.core.turn.termination import termination_reason
     from daimon_harness.runtime import TurnContext
     from daimon_harness.service import create_app
     from mux.errors import ProviderError
@@ -318,17 +323,25 @@ async def test_sealed_multi_cleanup_heals_and_real_driver_codec_finishes(tmp_pat
                 for event in events
                 for value in display_batch(event, session_id=session.ref.id)
             ]
-            notices = [
+            # Core shows the platform error card, never a message in the reply.
+            assert not [
                 item
                 for item in displayed
-                if item.type == "agent.message" and "Start a new conversation" in str(item.content)
+                if item.type == "agent.message" and "cleanup" in str(item.content).lower()
             ]
-            assert len(notices) == 1, "cleanup exhaustion hidden by core codec"
             assert any(item.type == "session.status_idle" for item in displayed)
+            live = root_failed(terminal[0].payload["native_reason"])
             # The real driver must honor the structured non-retryable 503 too.
             with pytest.raises(ProviderError) as error:
                 await driver.events.send(SCOPE, session.ref, [message("again")], key="again")
             assert not error.value.retryable and error.value.native_code == "cleanup_exhausted"
+            for cause in (live, error.value):
+                failure = TurnError(kind="upstream", message=str(cause), cause=cause)
+                notice = render_termination_notice(
+                    termination_reason(failure), state=TurnState(error=failure)
+                )
+                assert notice is not None, "cleanup exhaustion hidden from the person"
+                assert notice.next_step == "Start a new conversation to carry on."
             assert not supervisor.unhealthy
             assert sent.turn_id not in supervisor.contexts
         finally:

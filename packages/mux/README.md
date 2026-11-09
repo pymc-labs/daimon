@@ -1267,8 +1267,8 @@ Cleanup exhaustion is a structured non-retryable harness error. The transport
 honors `503 detail.kind=cleanup_exhausted, retryable=false` without retrying.
 Multi-mode reclamation continues behind the seal; after verified cleanup the
 harness commits an errored `turn_ended` with native reason `cleanup_exhausted`.
-Polling finishes on that terminal, and core displays the instruction to start
-a new conversation. Single-mode replacement errors remain retryable.
+Polling finishes on that terminal, and core's error card asks the person to
+start a new conversation. Single-mode replacement errors remain retryable.
 
 `mux.drivers.selfhosted.wire` defines the `daimon-harness/0` HTTP boundary:
 turn requests, approval decisions, durable event replay and typed event data.

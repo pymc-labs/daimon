@@ -21,6 +21,7 @@ from typing import Annotated, TypeVar, cast
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from mux.drivers.selfhosted.wire import (
+    CLEANUP_EXHAUSTED,
     ActionRequest,
     CancelResponse,
     EventsResponse,
@@ -63,6 +64,8 @@ T = TypeVar("T")
 CHECKPOINT_SHUTDOWN_TIMEOUT = 5.0
 CLEANUP_TIMEOUT = 10.0
 CLEANUP_FAILURE_LIMIT = 3
+CLEANUP_EXHAUSTED_MESSAGE = "Tool cleanup failed. Start a new conversation."
+REPLACEMENT_REQUIRED = "Sandbox cleanup exhausted; replacement required"
 CLEANUP_RETRY_DELAY = 1.0
 CANCEL_JOIN_TIMEOUT = CLEANUP_TIMEOUT + 1.0
 WAL_TIMEOUT = 15.0
@@ -357,8 +360,22 @@ class Supervisor:
             self.unhealthy = True
             asyncio.get_running_loop().call_later(1.0, self.exit_unhealthy)
         else:
-            await self.io(self.journal.append, context.request, "error", self.cleanup_error())
+            # Seal first: a failed error append must not leave the session open
+            # or end this coordinator before the turn's terminal is committed.
             self.sealed_sessions.add(context.request.session_id)
+            try:
+                await self.io(self.journal.append, context.request, "error", self.cleanup_error())
+            except Exception as exc:
+                audit_logger.error(
+                    json.dumps(
+                        {
+                            "event": "harness.cleanup_error_unrecorded",
+                            "session_id": context.request.session_id,
+                            "turn_id": context.request.turn_id,
+                            "reason": type(exc).__name__,
+                        }
+                    )
+                )
         self.changed.set()
 
     async def watchdog_delay(self, request: TurnRequest) -> None:
@@ -375,8 +392,8 @@ class Supervisor:
 
     def cleanup_error(self) -> dict[str, JsonValue]:
         return {
-            "kind": "cleanup_exhausted",
-            "message": "Tool cleanup failed. Start a new conversation.",
+            "kind": CLEANUP_EXHAUSTED,
+            "message": CLEANUP_EXHAUSTED_MESSAGE,
             "retryable": False,
         }
 
@@ -411,7 +428,11 @@ class Supervisor:
                         }
                     )
                 )
-                if failures == CLEANUP_FAILURE_LIMIT:
+                if (
+                    failures >= CLEANUP_FAILURE_LIMIT
+                    and not self.unhealthy
+                    and context.request.session_id not in self.sealed_sessions
+                ):
                     await self.exhaust_cleanup(context, failures)
                 backoff = min(
                     CLEANUP_BACKOFF_CAP,
@@ -518,11 +539,9 @@ class Supervisor:
         self, session_id: str | None = None, *, admission: bool = True
     ) -> None:
         if self.unhealthy:
-            raise HarnessError("workers_active", "Sandbox cleanup exhausted; replacement required")
+            raise HarnessError("workers_active", REPLACEMENT_REQUIRED)
         if session_id in self.sealed_sessions:
-            raise HarnessError(
-                "cleanup_exhausted", "Tool cleanup failed. Start a new conversation."
-            )
+            raise HarnessError(CLEANUP_EXHAUSTED, CLEANUP_EXHAUSTED_MESSAGE)
         # A terminal or removed context never releases an in-flight coordinator.
         for turn_id, cleanup in list(self.cleanups.items()):
             owner = self.tasks.get(turn_id)
@@ -894,7 +913,7 @@ class Supervisor:
             try:
                 await self.ensure_session(request.session_id)
             except HarnessError as exc:
-                if exc.kind == "cleanup_exhausted":
+                if exc.kind == CLEANUP_EXHAUSTED:
                     events = await self.io(self.journal.events, request.session_id, after)
                     for event in events:
                         if event.turn_id == request.turn_id:
@@ -1114,7 +1133,7 @@ def create_app(
 
     async def health() -> HealthResponse:
         if supervisor.unhealthy:
-            raise HarnessError("workers_active", "Sandbox cleanup exhausted; replacement required")
+            raise HarnessError("workers_active", REPLACEMENT_REQUIRED)
         return HealthResponse(version=os.environ.get("HARNESS_VERSION", "development"))
 
     async def turns(
@@ -1159,7 +1178,7 @@ def create_app(
                 "detail": {
                     "kind": exc.kind,
                     "message": str(exc),
-                    "retryable": exc.kind != "cleanup_exhausted",
+                    "retryable": exc.kind != CLEANUP_EXHAUSTED,
                 }
             },
         )
@@ -1257,7 +1276,7 @@ def create_app(
             try:
                 await supervisor.ensure_session(session_id, after_seq)
             except HarnessError as exc:
-                if exc.kind != "cleanup_exhausted":
+                if exc.kind != CLEANUP_EXHAUSTED:
                     raise
                 # Replay the terminal session error without repairing the live
                 # claim or accepting further work for this sealed session.
@@ -1359,7 +1378,7 @@ def create_app(
 
     async def readiness() -> dict[str, bool]:
         if supervisor.unhealthy:
-            raise HarnessError("workers_active", "Sandbox cleanup exhausted; replacement required")
+            raise HarnessError("workers_active", REPLACEMENT_REQUIRED)
         return {"ready": True}
 
     app.add_api_route("/v0/healthz", health, methods=["GET"], dependencies=secured)

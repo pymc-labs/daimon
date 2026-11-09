@@ -293,8 +293,9 @@ authentication.
 - **Storage.** Mount a persistent home at `/home/harness` and run one worker
   per home. Keep the image's tini process as PID 1 in custom entrypoints.
 - **Sessions.** The default `HARNESS_SESSION_MODE=single` binds the first
-  session and answers other IDs with 409. Multi-session mode needs
-  `hidepid=2,gid=60002` process visibility and shared scratch directories,
+  session and answers other IDs with 409. In either mode, a `/proc` mounted
+  with `hidepid` must add `gid=60002`, or startup refuses it. Multi-session mode
+  needs `hidepid=2,gid=60002` process visibility and shared scratch directories,
   including `/tmp`, `/var/tmp` and `/dev/shm`, that tools cannot write. Startup
   refuses it otherwise.
 - **Azure Container Apps pools.** Use the pool's management endpoint as
