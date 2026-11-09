@@ -22,8 +22,13 @@ from daimon.core.admin_actions import DelegatedAction
 from daimon.core.cost_footer import cost_footer_note
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.platform_words import DESCRIPTIONS
-from daimon.core.scope_settings import SettingsPlace, change_setting, chat_actor, moved_to_settings
-from daimon.core.stores.tenants import get_cost_footer
+from daimon.core.scope_settings import (
+    SettingsPlace,
+    change_setting,
+    chat_actor,
+    moved_to_settings,
+    read_settings,
+)
 from sqlalchemy.exc import SQLAlchemyError
 
 import discord
@@ -63,8 +68,14 @@ class CostFooterCog(commands.Cog):
             if tenant_id is None:
                 raise UserFacingError(_NOT_REGISTERED)
             if choice is None:
-                async with runtime.sessionmaker() as session:
-                    shown = await get_cost_footer(session, tenant_id=tenant_id)
+                (view,) = await read_settings(
+                    runtime.sessionmaker,
+                    tenant_id=tenant_id,
+                    place=SettingsPlace("discord", None),
+                    settings=runtime.settings,
+                    keys=("cost_footer",),
+                )
+                shown = view.effective == "shown"
             else:
                 if not await is_guild_admin(interaction, action=DelegatedAction.AGENT_SETTINGS):
                     raise UserFacingError(_NOT_ALLOWED)

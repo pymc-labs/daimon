@@ -108,9 +108,10 @@ class Tenant(Base):
     plain_text_mentions: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
     )
-    # The finished-turn line (agent, time, cost, money left) under each answer.
-    # On until an admin hides it.
-    cost_footer: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    # Bumped by every feature_values write: the feature resolver's cache key.
+    feature_revision: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
     last_reconcile_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     registered_at: Mapped[datetime] = mapped_column(
@@ -2557,49 +2558,67 @@ class HubOAuthKv(Base):
     )
 
 
-class ThreadParticipationScope(Base):
-    """An explicit organic-participation setting at one scope.
+class FeatureValue(Base):
+    """A feature set at one tier of one place; no row means the tier inherits.
 
-    One row per (tenant, platform, scope, scope_id); the workspace row uses an
-    empty scope_id because tenant_id already names it. No row means "inherit",
-    so the table only ever holds deliberate choices, and a deployment where
-    nobody asked stays empty. `daimon.core.thread_participation.resolve_participation`
-    turns these rows into an effective mode.
+    Rows exist for the workspace, agent, channel and thread tiers (the deployment tier
+    is the `features` setting). Unused place columns hold ''. A thread row is keyed by
+    its thread key alone; its `channel_id` is the channel the thread sits in, '' when
+    unknown. `daimon.core.features.resolver` combines the rows; `locked` is final for
+    every tier below.
     """
 
-    __tablename__ = "thread_participation_scopes"
+    __tablename__ = "feature_values"
     __table_args__ = (
-        PrimaryKeyConstraint(
-            "tenant_id", "platform", "scope", "scope_id", name="pk_thread_participation_scopes"
+        CheckConstraint(
+            "tier IN ('workspace', 'agent', 'channel', 'thread')", name="ck_feature_values_tier"
         ),
         CheckConstraint(
-            "scope IN ('workspace', 'channel', 'thread')",
-            name="ck_thread_participation_scopes_scope",
+            "surface IN ('web', 'chat', 'panel', 'cli', 'spec', 'migration')",
+            name="ck_feature_values_surface",
         ),
-        CheckConstraint(
-            "mode IN ('on', 'off', 'disabled')", name="ck_thread_participation_scopes_mode"
+        CheckConstraint("NOT (locked AND tier = 'thread')", name="ck_feature_values_lock"),
+        Index(
+            "uq_feature_values_place",
+            "tenant_id",
+            "tier",
+            "agent_id",
+            "channel_id",
+            "key",
+            unique=True,
+            postgresql_where=text("tier <> 'thread'"),
         ),
         Index(
-            "ix_thread_participation_scopes_parent",
+            "uq_feature_values_thread",
             "tenant_id",
-            "platform",
-            "parent_id",
-            postgresql_where=text("parent_id IS NOT NULL"),
+            "agent_id",
+            "thread_key",
+            "key",
+            unique=True,
+            postgresql_where=text("tier = 'thread'"),
         ),
+        Index("ix_feature_values_channel", "tenant_id", "channel_id"),
     )
 
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
     )
-    platform: Mapped[str] = mapped_column(Text)
-    scope: Mapped[str] = mapped_column(Text)
-    scope_id: Mapped[str] = mapped_column(Text)
-    mode: Mapped[str] = mapped_column(Text, nullable=False)
-    # The channel a thread row sits under; None for other scopes and old Discord rows.
-    parent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    updated_at: Mapped[datetime] = mapped_column(
+    tier: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
+    thread_key: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
+    key: Mapped[str] = mapped_column(Text, nullable=False)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    locked: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    set_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    surface: Mapped[str] = mapped_column(Text, nullable=False)
+    set_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
 
 
 class ThreadModelSetting(Base):
@@ -2620,47 +2639,6 @@ class ThreadModelSetting(Base):
     platform: Mapped[str] = mapped_column(Text)
     thread_id: Mapped[str] = mapped_column(Text)
     model: Mapped[str] = mapped_column(Text, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-
-
-class ProgressPlanScope(Base):
-    """An explicit progress-plans setting at one scope.
-
-    Same shape and meaning as `ThreadParticipationScope`: one row per (tenant,
-    platform, scope, scope_id), an empty scope_id for the workspace row, and no
-    row means "inherit". `daimon.core.scope_cascade.resolve_cascade` turns the
-    rows into an effective mode.
-    """
-
-    __tablename__ = "progress_plan_scopes"
-    __table_args__ = (
-        PrimaryKeyConstraint(
-            "tenant_id", "platform", "scope", "scope_id", name="pk_progress_plan_scopes"
-        ),
-        CheckConstraint(
-            "scope IN ('workspace', 'channel', 'thread')", name="ck_progress_plan_scopes_scope"
-        ),
-        CheckConstraint("mode IN ('on', 'off', 'disabled')", name="ck_progress_plan_scopes_mode"),
-        Index(
-            "ix_progress_plan_scopes_parent",
-            "tenant_id",
-            "platform",
-            "parent_id",
-            postgresql_where=text("parent_id IS NOT NULL"),
-        ),
-    )
-
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
-    )
-    platform: Mapped[str] = mapped_column(Text)
-    scope: Mapped[str] = mapped_column(Text)
-    scope_id: Mapped[str] = mapped_column(Text)
-    mode: Mapped[str] = mapped_column(Text, nullable=False)
-    # The channel a thread row sits under; None for other scopes and old Discord rows.
-    parent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

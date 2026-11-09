@@ -149,6 +149,7 @@ TAIL = (
     "0184_coding_key_claims",
     "0185_agent_post_role",
     "0186_github_router_sessions",
+    "0187_feature_values",
 )
 HEAD = TAIL[-1]
 
@@ -272,7 +273,6 @@ TABLES = {
     "selfhosted_agents",
     "selfhosted_environments",
     "selfhosted_resource_operations",
-    "progress_plan_scopes",
     "thread_model_settings",
     "shared_channels",
     "agent_channel_memory_store",
@@ -340,6 +340,9 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
     )
     if expected != HEAD:
         compared_tables = compared_tables - {"web_logins", "web_login_accounts"}
+    else:
+        # 0187 folds progress_plan_scopes (no longer modelled) into feature_values.
+        compared_tables = compared_tables | {"feature_values"}
     if expected not in (LONG_JOBS_HEAD, ADMINS_HEAD, *TOP):
         compared_tables = {name for name in compared_tables if not name.startswith("long_job")}
     if expected not in TOP:
@@ -392,6 +395,11 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             }
             and expected not in TOP
         ):
+            return False
+        # 0187: tenants gains feature_revision and loses cost_footer; the scope index goes.
+        if kind == "index" and name == "ix_progress_plan_scopes_parent":
+            return False
+        if expected != HEAD and kind == "column" and name in {"feature_revision", "cost_footer"}:
             return False
         # Added by the channel settings migration (0173), after PREVIEW_HEAD.
         if expected not in TAIL and (

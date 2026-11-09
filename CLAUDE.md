@@ -67,6 +67,14 @@ copy of a rule that was left behind. Before you change a behaviour:
    its reason. A comment alone is not enough. Example:
    `tests/parity/test_teams_deliberate_gaps.py`.
 
+## Features
+
+A per-place setting is a feature in `daimon.core.features.registry`, never a new
+column or table. Read it with `read_features` or `resolve_features`, write it with
+`change_feature` (`packages/core/tests/features/test_feature_contracts.py` checks writes). Add the
+key to the registry, give it an effect, then run
+`scripts/generate_feature_reference.py` for `docs/features.md`.
+
 ## Documentation
 
 `docs/` is the public site, written for people who scan it, not for agents.

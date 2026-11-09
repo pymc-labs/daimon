@@ -30,7 +30,7 @@ class CascadeScope(StrEnum):
     THREAD = "thread"
 
 
-CascadeTier = Literal["deployment", "workspace", "channel", "thread"]
+CascadeTier = Literal["deployment", "workspace", "agent", "channel", "thread"]
 
 
 @dataclass(frozen=True)

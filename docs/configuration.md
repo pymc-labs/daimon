@@ -125,6 +125,14 @@ true. Set DAIMON_TABLE_RENDERING to a JSON object.
 URL rendered on the privacy panels' Policy button. Override via
 DAIMON_PRIVACY_POLICY_URL if you host your own policy page.
 
+### `DAIMON_FEATURES`
+
+`dict[str, str]` · optional · default `{}`
+
+Deployment defaults for features, one variable each: DAIMON_FEATURES__PROGRESS_PLANS=on.
+A value may end in :locked so no workspace, agent, channel or thread can change it;
+disabled is off:locked. An unknown feature stops startup. docs/features.md lists them.
+
 ### `DAIMON_DEFAULTS_ROOT`
 
 `Path` · optional · default `defaults`
@@ -841,9 +849,10 @@ Replying in threads unprompted. See ThreadParticipationSettings.
 
 `CascadeMode` · optional · default `off`
 
-Deployment default for replying in threads unprompted. off: mention-only until a thread,
-channel or workspace is turned on. disabled: mention-only and cannot be turned on. on:
-follow every thread unless turned off below.
+Deprecated: use DAIMON_FEATURES__PARTICIPATION. Deployment default for replying in
+threads unprompted. off: mention-only until a thread, channel or workspace is turned on.
+disabled: mention-only and cannot be turned on. on: follow every thread unless turned
+off below.
 
 ### `DAIMON_THREAD_PARTICIPATION__QUIET_SECONDS`
 
@@ -888,11 +897,12 @@ The agent's plan on the working card. See ProgressPlansSettings.
 
 `CascadeMode` · optional · default `off`
 
-Deployment default for progress plans on the "Working on it…" card (Discord, Slack and
-Teams). On, the agent keeps a short checklist of a longer task's steps on the card and
-may add one-line updates on what it found and does next. off: shown only where a
-workspace, channel or thread is turned on. disabled: never shown, and cannot be turned
-on. on: shown everywhere unless turned off below.
+Deprecated: use DAIMON_FEATURES__PROGRESS_PLANS. Deployment default for progress plans
+on the "Working on it…" card (Discord, Slack and Teams). On, the agent keeps a short
+checklist of a longer task's steps on the card and may add one-line updates on what it
+found and does next. off: shown only where a workspace, channel or thread is turned on.
+disabled: never shown, and cannot be turned on. on: shown everywhere unless turned off
+below.
 
 ## Mcp Context
 

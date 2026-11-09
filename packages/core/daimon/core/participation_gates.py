@@ -22,9 +22,11 @@ import structlog
 from anthropic import AsyncAnthropic
 from daimon.core.channel_backend import effective_thread_backend
 from daimon.core.config import ThreadParticipationSettings
+from daimon.core.features.deployment import block_mode
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.rule_views import is_thread_turn_refused
 from daimon.core.scope import DeploymentDefault
+from daimon.core.scope_cascade import CascadeMode
 from daimon.core.spend_gate import SpendBlock, SpendRequest, spend_gate_in_new_session
 from daimon.core.stores.thread_participation import (
     count_auto_responses_since,
@@ -90,7 +92,10 @@ class ParticipationGates:
         bot_display_name: str,
         markup: Decimal,
         deployment_default: DeploymentDefault | None = None,
+        deployment: CascadeMode | None = None,
     ) -> None:
+        """`deployment` is the feature's deployment tier (`switch_default`); None reads
+        it from `settings` as the deprecated variable did."""
         self._platform = platform
         self._settings = settings
         self._sessionmaker = sessionmaker
@@ -98,6 +103,7 @@ class ParticipationGates:
         self._bot_display_name = bot_display_name
         self._markup = markup
         self._deployment_default = deployment_default
+        self._deployment = deployment
 
     async def resolve(
         self, *, tenant_id: uuid.UUID, channel_id: str, thread_id: str
@@ -112,7 +118,7 @@ class ParticipationGates:
                 thread_id=thread_id,
             )
         return resolve_participation(
-            deployment=self._settings.mode,
+            deployment=self._deployment or block_mode(self._settings),
             workspace=modes.workspace,
             channel=modes.channel,
             thread=modes.thread,

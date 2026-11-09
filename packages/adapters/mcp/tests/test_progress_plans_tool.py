@@ -183,7 +183,7 @@ async def test_a_disabled_channel_refuses_a_thread_turned_on_and_writes_nothing(
         runtime, _auth(tenant_id=tenant_id, admin=True), "disabled", None, _CHANNEL
     )
 
-    with pytest.raises(ToolError, match="disabled at the channel level"):
+    with pytest.raises(ToolError, match="locked to Off at the channel level"):
         await _set_progress_plans_impl(
             runtime, _auth(tenant_id=tenant_id, admin=False), "on", _THREAD, None
         )

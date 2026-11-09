@@ -39,6 +39,7 @@ from daimon.adapters.mcp.tools.teams._participation import verify_teams_particip
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.channel_switches import SwitchTarget, set_switch, switch_refusal
+from daimon.core.scope_settings import switch_default
 from daimon.core.stores.thread_participation import get_participation_modes
 from daimon.core.thread_participation import (
     ParticipationMode,
@@ -99,11 +100,7 @@ class ThreadParticipationStatus:
 
 def _deployment_mode(runtime: McpRuntime, platform: str | None) -> ParticipationMode:
     """The deployment tier. Without the platform's settings block there is no bot to follow."""
-    settings = runtime.settings
-    configured = settings.teams if platform == "teams" else settings.discord
-    if configured is None:
-        return ParticipationMode.DISABLED
-    return settings.thread_participation.mode
+    return switch_default(runtime.settings, "participation", platform or "")
 
 
 async def _verify_scope(
@@ -180,6 +177,7 @@ async def _set_thread_participation_impl(
             deployment=deployment,
             target=SwitchTarget(scope, scope_id, channel_id, thread_id),
             mode=requested,
+            settings=runtime.settings,
         )
     return ThreadParticipationResult(
         scope=_scope_result_label(scope, scope_id),

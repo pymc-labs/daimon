@@ -159,13 +159,11 @@ async def _follow(
     tenant_id: uuid.UUID,
     scope: ParticipationScope,
     scope_id: str | None,
-    *,
-    platform: str = "teams",
 ) -> None:
     await set_participation_mode(
         session,
         tenant_id=tenant_id,
-        platform=platform,
+        platform="teams",
         scope=scope,
         scope_id=scope_id,
         mode=ParticipationMode.ON,
@@ -205,17 +203,6 @@ async def test_each_cascade_tier_keys_on_the_teams_ids(
     assert await rig.observe(_reply("anyone?"), tenant_id) == 1
     assert len(rig.timers) == 1, f"a {scope.value} row follows the thread"
     rig.participation.cancel_all()
-
-
-async def test_a_discord_row_does_not_follow_a_teams_thread(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
-) -> None:
-    tenant_id = await _funded_tenant(db_session)
-    await _follow(db_session, tenant_id, ParticipationScope.WORKSPACE, None, platform="discord")
-    rig = _Rig(db_session_factory)
-
-    await rig.observe(_reply("anyone?"), tenant_id)
-    assert rig.timers == []
 
 
 async def test_a_burst_restarts_the_timer_and_is_judged_once_for_its_last_author(

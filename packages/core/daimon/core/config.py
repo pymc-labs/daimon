@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Annotated, Literal, cast
 from urllib.parse import urlsplit
 from uuid import UUID
 
+from daimon.core.features.registry import parse_deployment
 from daimon.core.mcp_server_url import ascii_mcp_url, canonical_mcp_url
 from daimon.core.outbound.reach import DEFAULT_MAX_PEOPLE
 from daimon.core.scope_cascade import CascadeMode
@@ -574,6 +575,7 @@ class ProgressPlansSettings(BaseModel):
     mode: CascadeMode = Field(
         default=CascadeMode.OFF,
         description=(
+            "Deprecated: use DAIMON_FEATURES__PROGRESS_PLANS. "
             'Deployment default for progress plans on the "Working on it…" card (Discord, '
             "Slack and Teams). On, the agent keeps a short checklist of a longer task's "
             "steps on the card and may add one-line updates on what it found and does "
@@ -650,6 +652,7 @@ class ThreadParticipationSettings(BaseModel):
     mode: ParticipationMode = Field(
         default=ParticipationMode.OFF,
         description=(
+            "Deprecated: use DAIMON_FEATURES__PARTICIPATION. "
             "Deployment default for replying in threads unprompted. off: mention-only "
             "until a thread, channel or workspace is turned on. disabled: mention-only "
             "and cannot be turned on. on: follow every thread unless turned off below."
@@ -2943,6 +2946,15 @@ class Settings(BaseSettings):
     agent_identity: AgentIdentitySettings = Field(default_factory=AgentIdentitySettings)
     environment: EnvironmentSettings = Field(default_factory=EnvironmentSettings)
     discord: DiscordSettings | None = None
+    features: dict[str, str] = Field(
+        default_factory=dict[str, str],
+        description=(
+            "Deployment defaults for features, one variable each: "
+            "DAIMON_FEATURES__PROGRESS_PLANS=on. A value may end in :locked so no "
+            "workspace, agent, channel or thread can change it; disabled is off:locked. "
+            "An unknown feature stops startup. docs/features.md lists them."
+        ),
+    )
     thread_participation: ThreadParticipationSettings = Field(
         default_factory=ThreadParticipationSettings,
         description="Replying in threads unprompted. See ThreadParticipationSettings.",
@@ -3043,6 +3055,14 @@ class Settings(BaseSettings):
         they need no crypto keys or public URL to agree.
         """
         return self.microsoft_accounts.touched and not self.microsoft_accounts_missing()
+
+    @field_validator("features")
+    @classmethod
+    def _features_are_registered(cls, value: dict[str, str]) -> dict[str, str]:
+        features = {key.lower(): raw for key, raw in value.items()}
+        for key, raw in features.items():
+            parse_deployment(key, raw)
+        return features
 
     @model_validator(mode="after")
     def _private_channel_messages_need_a_public_url(self) -> Settings:

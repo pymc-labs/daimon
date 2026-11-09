@@ -1246,6 +1246,41 @@ class SupportEscalationRow(BaseModel):
     created_at: datetime
 
 
+FeatureTier = Literal["workspace", "agent", "channel", "thread"]
+"""The tiers `feature_values` stores; the deployment tier is the `features` setting."""
+FeatureSurface = Literal["web", "chat", "panel", "cli", "spec", "migration"]
+"""Where a feature was set: a `ChangeSurface`, an agent spec, or the 0187 migration."""
+
+
+@dataclass(frozen=True)
+class FeatureTarget:
+    """One tier of one place; the ids a tier does not use are None."""
+
+    tier: FeatureTier
+    agent_id: str | None = None
+    channel_id: str | None = None
+    thread_key: str | None = None
+
+
+class FeatureValueRow(BaseModel):
+    """A feature set at one tier of one place."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    tier: FeatureTier
+    agent_id: str
+    channel_id: str
+    thread_key: str
+    key: str
+    value: str
+    locked: bool
+    set_by: uuid.UUID | None
+    surface: FeatureSurface
+    set_at: datetime
+    revision: int
+
+
 class ThreadAutoResponseRow(BaseModel):
     """One reply the agent posted in a thread unprompted (the rate-limit ledger)."""
 

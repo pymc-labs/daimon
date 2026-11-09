@@ -548,7 +548,13 @@ class SlackTurnLifecycle(OutputGate):
     async def _apply_balance(self) -> None:
         """Put the money left on the footer, or hide the footer where an admin did."""
         if self._sessionmaker is not None and self._tenant_id is not None:
-            if not await cost_footer_shown(self._sessionmaker, tenant_id=self._tenant_id):
+            if not await cost_footer_shown(
+                self._sessionmaker,
+                tenant_id=self._tenant_id,
+                platform="slack",
+                channel_id=self._channel,
+                thread_id=self._thread_ts,
+            ):
                 self._state = dataclasses.replace(self._state, footer_hidden=True)
                 return
             try:

@@ -8,14 +8,23 @@ import pytest
 from daimon.core.authz import Subject
 from daimon.core.channel_changes import ChannelActor, ChannelChangeRefused, Expected
 from daimon.core.channel_switches import WORKSPACE_ID, SwitchChange, SwitchTarget, set_switch
+from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
 from daimon.core.errors import StaleChannelValue
 from daimon.core.scope_cascade import CascadeMode, CascadeScope
 from daimon.core.stores.channel_changes import list_changes
 from daimon.core.stores.switch_modes import list_switch_modes
 from daimon.testing.factories import make_tenant
+from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 ON, OFF, DISABLED = CascadeMode.ON, CascadeMode.OFF, CascadeMode.DISABLED
+SETTINGS = Settings.model_validate(
+    {
+        "database": DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@localhost/d")),
+        "anthropic": AnthropicSettings(api_key=SecretStr("test")),
+        "discord": DiscordSettings(bot_token=SecretStr("test")),
+    }
+)
 
 
 def _actor(tenant_id: uuid.UUID, *, admin: bool = True) -> ChannelActor:
@@ -66,6 +75,7 @@ async def test_refusals_come_before_any_write(
                 deployment=deployment,
                 target=target,
                 mode=mode,
+                settings=SETTINGS,
             )
         assert refused.value.reason == reason, f"{reason} is refused as such"
     assert await list_changes(db_session, tenant_id=tenant.id, channel_id="c1") == []
@@ -84,6 +94,7 @@ async def test_a_member_sets_a_thread_and_it_lists_under_its_channel(
         deployment=OFF,
         target=SwitchTarget.thread("c1:171.1", "c1"),
         mode=ON,
+        settings=SETTINGS,
     )
     assert (change.before, change.after, change.effective.tier) == (None, ON, "thread")
     threads = await list_switch_modes(
@@ -120,6 +131,7 @@ async def test_channel_tier_is_compared_and_a_disabled_workspace_wins(
             deployment=OFF,
             target=target,
             mode=mode,
+            settings=SETTINGS,
             expected=Expected(expected),
         )
 

@@ -148,6 +148,7 @@ from daimon.core.permissions import channel_permissions
 from daimon.core.platform_words import words_for
 from daimon.core.posted_controls.lifecycle import drain_card_edits
 from daimon.core.routine_delivery import resolve_routine_identity, run_delivery_poller
+from daimon.core.scope_settings import switch_default
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.agent_posts import get_post
 from daimon.core.stores.discord_message_admissions import (
@@ -2582,6 +2583,7 @@ class DaimonBot(commands.Bot):
         if self._participant is None:
             self._participant = ThreadParticipant(
                 settings=self.runtime.settings.thread_participation,
+                deployment=switch_default(self.runtime.settings, "participation", "discord"),
                 sessionmaker=self.runtime.sessionmaker,
                 anthropic=self.runtime.anthropic,
                 bot_user_id=bot_user_id,
@@ -3186,11 +3188,7 @@ class DaimonBot(commands.Bot):
             # organic thread participation, which has its own gates.
             if not startup_replay and is_participation_candidate(
                 # No Discord settings block means no bot to follow anything.
-                deployment_mode=(
-                    self.runtime.settings.thread_participation.mode
-                    if discord_settings is not None
-                    else ParticipationMode.DISABLED
-                ),
+                deployment_mode=switch_default(self.runtime.settings, "participation", "discord"),
                 author_is_bot=message.author.bot,
                 bot_mentioned=bot_mentioned,
                 in_thread=isinstance(message.channel, discord.Thread),

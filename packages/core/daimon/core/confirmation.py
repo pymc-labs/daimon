@@ -560,7 +560,12 @@ def _watch_edit_lines(data: dict[str, object]) -> tuple[str, ...]:
 
 
 _SETTING_PLACES: Final[Mapping[str, str]] = MappingProxyType(
-    {"server": "all channels", "channel": "this channel", "thread": "this thread"}
+    {
+        "server": "all channels",
+        "agent": "this agent",
+        "channel": "this channel",
+        "thread": "this thread",
+    }
 )
 
 

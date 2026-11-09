@@ -59,7 +59,7 @@ from daimon.core.defaults.loader import load_platform_skills
 from daimon.core.defaults.metadata import MA_METADATA_KEY_CHANNEL_COPY
 from daimon.core.errors import SkillsListTruncatedError
 from daimon.core.routine_service import RoutineCaller, RoutineRefused
-from daimon.core.scope_cascade import CascadeMode, CascadeScope, resolve_modes
+from daimon.core.scope_cascade import CascadeMode, CascadeScope, CascadeTier, resolve_modes
 from daimon.core.scope_settings import (
     INHERIT,
     LEVELS,
@@ -68,6 +68,7 @@ from daimon.core.scope_settings import (
     SettingsPlace,
     change_setting,
     read_settings,
+    switch_default,
 )
 from daimon.core.stores import agent_tool_rules as tool_rules
 from daimon.core.stores.channel_changes import WORKSPACE_ID
@@ -87,7 +88,7 @@ ChannelAdmin = Annotated[WebCaller, Depends(requires("channels.manage"))]
 WorkspaceAdmin = Annotated[WebCaller, Depends(requires("workspace.manage"))]
 Mode = Literal["on", "off", "disabled"]
 ApprovalMode = Literal["on", "off"]
-Source = Literal["default", "server", "channel", "thread"]
+Source = Literal["default", "server", "agent", "channel", "thread"]
 _SPEND_DAYS = 30
 _NO_WEB = "Web chat has no such setting."
 _NO_AGENT = "Pick an agent from this workspace."
@@ -98,7 +99,7 @@ class SwitchJson(BaseModel):
     own: Mode | None
     """The channel's (or workspace's) own mode; None while it inherits."""
     value: Mode
-    source: Literal["deployment", "workspace", "channel", "thread"]
+    source: CascadeTier
 
 
 class ApprovalsJson(BaseModel):
@@ -310,10 +311,7 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
     settings = runtime.settings
 
     def deployment(switch: Switch, platform: str) -> CascadeMode:
-        if switch == "progress_plans":
-            return settings.progress_plans.mode
-        configured = settings.teams if platform == "teams" else settings.discord
-        return CascadeMode.DISABLED if configured is None else settings.thread_participation.mode
+        return switch_default(settings, switch, platform)
 
     async def switch_json(
         db: AsyncSession,

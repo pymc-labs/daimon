@@ -8,7 +8,7 @@ from decimal import Decimal
 
 import pytest
 from daimon.core import channel_directory
-from daimon.core._models import SharedChannel, ThreadParticipationScope
+from daimon.core._models import SharedChannel
 from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.channel_directory import (
     WEB_ROW_ID,
@@ -116,7 +116,7 @@ async def test_the_directory_unions_every_channel_source(
     )
     await set_scope_mode(
         db_session,
-        ThreadParticipationScope,
+        "participation",
         tenant_id=tenant.id,
         platform="discord",
         scope=CascadeScope.CHANNEL,

@@ -39,6 +39,7 @@ from daimon.core.scope_cascade import (
     CascadeScope,
     resolve_modes,
 )
+from daimon.core.scope_settings import switch_default
 from daimon.core.stores.progress_plans import (
     get_progress_plan_modes,
 )
@@ -176,7 +177,7 @@ async def _set_progress_plans_impl(
 ) -> ProgressPlansResult:
     """Validate every refusal BEFORE any write: a refused call must leave no row behind."""
     platform = auth.platform or ""
-    deployment = runtime.settings.progress_plans.mode
+    deployment = switch_default(runtime.settings, "progress_plans", platform)
     requested = None if mode == "inherit" else CascadeMode(mode)
     actor = chat_actor(auth)
     try:
@@ -199,6 +200,7 @@ async def _set_progress_plans_impl(
             deployment=deployment,
             target=SwitchTarget(target.scope, target.scope_id, target.channel_id, target.thread_id),
             mode=requested,
+            settings=runtime.settings,
         )
     except ChannelChangeRefused as exc:
         if exc.reason == "admin_required":
@@ -226,7 +228,7 @@ async def _get_progress_plans_impl(
     channel_id: str | None,
 ) -> ProgressPlansStatus:
     platform = _require_platform(auth)
-    deployment = runtime.settings.progress_plans.mode
+    deployment = switch_default(runtime.settings, "progress_plans", platform)
     target = await _verify(runtime, auth, _target(platform, thread_id, channel_id))
     if target.scope_id is not None:
         # The workspace's mode reveals no channel; a held call reads only its own.

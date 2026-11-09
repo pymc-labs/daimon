@@ -95,6 +95,9 @@ jobs:
       - name: mcp tool catalogue check
         run: uv run python scripts/generate_mcp_tool_catalogue.py --check
 
+      - name: feature reference check
+        run: uv run python scripts/generate_feature_reference.py --check
+
       - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: ~/.cache/daimon-web

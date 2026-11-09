@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from daimon.core._models import ThreadAutoResponse, ThreadParticipationScope
+from daimon.core._models import ThreadAutoResponse
 from daimon.core.scope_cascade import CascadeModes
 from daimon.core.stores._scope_modes import clear_scope_mode, get_scope_modes, set_scope_mode
 from daimon.core.stores.domain import ThreadAutoResponseRow
@@ -31,7 +31,7 @@ async def get_participation_modes(
     """One read for the whole cascade: the workspace row plus this channel's and thread's rows."""
     return await get_scope_modes(
         session,
-        ThreadParticipationScope,
+        "participation",
         tenant_id=tenant_id,
         platform=platform,
         channel_id=channel_id,
@@ -51,7 +51,7 @@ async def set_participation_mode(
 ) -> None:
     await set_scope_mode(
         session,
-        ThreadParticipationScope,
+        "participation",
         tenant_id=tenant_id,
         platform=platform,
         scope=scope,
@@ -72,7 +72,7 @@ async def clear_participation_mode(
     """Drop the explicit setting so the scope inherits again. Returns whether a row existed."""
     return await clear_scope_mode(
         session,
-        ThreadParticipationScope,
+        "participation",
         tenant_id=tenant_id,
         platform=platform,
         scope=scope,

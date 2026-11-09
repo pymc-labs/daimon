@@ -79,7 +79,12 @@ async def _place(
     origin = await get_verified_origin(runtime, auth, origin_context_id)
     if origin is None or (change and not origin.attended):
         raise ToolError(NEEDS_CARD if change else NO_PLACE)
-    return SettingsPlace.of(origin.platform, origin.parent_channel_id, origin.thread_id)
+    return SettingsPlace.of(
+        origin.platform,
+        origin.parent_channel_id,
+        origin.thread_id,
+        origin.responder_ma_agent_id or None,
+    )
 
 
 async def _get_settings_impl(
@@ -103,6 +108,7 @@ async def _change_setting_impl(
     level: str,
     value: str,
     origin_context_id: str | None,
+    locked: bool = False,
 ) -> SettingChange:
     """Every check before the card, in order; the writer re-checks the key's rule after it."""
     place = await _place(runtime, auth, origin_context_id, change=True)
@@ -114,6 +120,7 @@ async def _change_setting_impl(
         key=cast(SettingKey, key),
         level=cast(SettingLevel, level),
         platform=place.platform,
+        agent_id=place.agent_id,
     )
     if refusal is not None:
         raise ToolError(str(refusal))
@@ -127,6 +134,7 @@ async def _change_setting_impl(
             level=level,
             value=value,
             place=place,
+            locked=locked,
         )
     except (ChannelChangeRefused, StaleChannelValue) as exc:
         raise ToolError(str(exc)) from exc
@@ -137,12 +145,12 @@ def register_scope_settings_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def get_settings(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, origin_context_id: str
     ) -> SettingsResult:
-        """Report this conversation's settings: approvals, thread participation, progress
-        plans and the cost footer.
+        """Report this conversation's settings (every registered feature).
 
-        Each lists its own value at the server, channel and thread level of where you are,
-        and what is in effect. Anyone may read them; read each ``note`` back. People change
-        them with ``/settings``, the web app's Settings section or ``change_setting``.
+        Each lists its own value at the server, agent, channel and thread level of where
+        you are, what is in effect, which level decided it and whether it is locked.
+        Anyone may read them; read each ``note`` back. People change them with
+        ``/settings``, the web app's Settings section or ``change_setting``.
         """
         return await _get_settings_impl(runtime, await _auth(ctx), origin_context_id)
 
@@ -150,20 +158,19 @@ def register_scope_settings_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def change_setting_tool(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         origin_context_id: str,
-        key: Literal["approvals", "participation", "progress_plans", "cost_footer"],
-        level: Literal["server", "channel", "thread"],
-        value: Literal["on", "off", "disabled", "inherit", "shown", "hidden"],
+        key: str,
+        level: Literal["server", "agent", "channel", "thread"],
+        value: str,
+        locked: bool = False,
     ) -> SettingChange:
         """Change one setting where you are, after the person presses Approve.
 
-        ``approvals`` is ``on`` (Ask before third-party writes), ``off`` (Allow writes) or
-        ``inherit``; only an admin of the chat platform itself, checked live, may change
-        it. ``participation`` (reply in threads without being addressed) and
-        ``progress_plans`` are ``on``, ``off``, ``disabled`` (a channel or server lock) or
-        ``inherit``: a thread's for anyone, a channel's or the server's for an admin.
-        ``cost_footer`` is ``shown`` or ``hidden``, server level only, for an admin.
-        ``level`` is the ``server``, ``channel`` or ``thread`` of this conversation; other
-        places cannot be named. Read the returned ``note`` back.
+        ``key`` and ``value`` are one of ``get_settings``' keys and its values, or
+        ``inherit``. ``level`` is the ``server``, ``agent``, ``channel`` or ``thread`` of
+        this conversation; other places cannot be named. ``locked`` (an admin's, not at
+        the thread level) makes the value final below. Approvals need a live admin of
+        the chat platform; a thread's participation or progress plans are anyone's; the
+        rest an admin's. Read the returned ``note`` back.
         """
         return await _change_setting_impl(
             runtime,
@@ -172,4 +179,5 @@ def register_scope_settings_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             level=level,
             value=value,
             origin_context_id=origin_context_id,
+            locked=locked,
         )

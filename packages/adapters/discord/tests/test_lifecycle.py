@@ -41,7 +41,9 @@ from daimon.core.errors import TurnError, UserFacingError
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.scope import ResolvedConfig
 from daimon.core.stores import tenant_ledger
-from daimon.core.stores.tenants import set_cost_footer, set_funding_mode
+from daimon.core.stores.domain import FeatureTarget
+from daimon.core.stores.feature_values import set_feature_value
+from daimon.core.stores.tenants import set_funding_mode
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.admission import Admission
@@ -2056,7 +2058,15 @@ async def test_hidden_cost_footer_leaves_the_answer_bare(
     tenant = await make_tenant(db_session)
     await db_session.commit()
     async with db_session_factory() as s, s.begin():
-        await set_cost_footer(s, tenant_id=tenant.id, shown=False)
+        await set_feature_value(
+            s,
+            tenant_id=tenant.id,
+            target=FeatureTarget("workspace"),
+            key="cost_footer",
+            value="hidden",
+            set_by=None,
+            surface="web",
+        )
     lc, _sends, edits = _make_lifecycle(sessionmaker=db_session_factory, tenant_id=tenant.id)
     await lc.on_sse_event(_thinking_event())
     await lc.on_render(TurnState())

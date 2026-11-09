@@ -25,8 +25,7 @@ from daimon.core.admin_actions import DelegatedAction
 from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.cost_footer import cost_footer_note
 from daimon.core.errors import StoreError
-from daimon.core.scope_settings import SettingsPlace, change_setting
-from daimon.core.stores.tenants import get_cost_footer
+from daimon.core.scope_settings import SettingsPlace, change_setting, read_settings
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -67,8 +66,14 @@ async def _set_cost_footer_impl(
 
 
 async def _get_cost_footer_impl(runtime: McpRuntime, auth: AuthIdentity) -> CostFooterStatus:
-    async with runtime.session_factory() as session:
-        shown = await get_cost_footer(session, tenant_id=auth.tenant_id)
+    (view,) = await read_settings(
+        runtime.session_factory,
+        tenant_id=auth.tenant_id,
+        place=SettingsPlace(auth.platform or "", None),
+        settings=runtime.settings,
+        keys=("cost_footer",),
+    )
+    shown = view.effective == "shown"
     return CostFooterStatus(shown=shown, note=cost_footer_note(shown))
 
 

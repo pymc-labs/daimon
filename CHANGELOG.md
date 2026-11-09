@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Claude Fable 5.2 can be picked as an agent's model.**
   It appears as "Fable 5.2" in every model picker (Discord, Slack, Teams, web) and can be named in chat ("use Fable"). New agents still default to Sonnet 5.5. Fable 5.2 lists at $8 input / $40 output per million tokens, four times Sonnet 5.5, and is billed at that rate.
+- **One settings system for every feature.**
+  Approvals, thread participation, progress plans and the cost footer are set at the server, agent, channel or thread level, and settings show which level decided. Admins can lock a value for every level below.
+  Set the deployment level with `DAIMON_FEATURES__<KEY>`. `DAIMON_PROGRESS_PLANS__MODE` and `DAIMON_THREAD_PARTICIPATION__MODE` still work but log a deprecation. The cost footer can be set per channel and thread.
+
 - **The Azure deploy can keep MCP private while Teams is public.**
   Set `mcpPublicIngress` to false and MCP is reachable only from apps in the same Container Apps environment. The default keeps it public, as before.
   It suits only the self-hosted harness running in that environment. Hosted model backends, including the default Anthropic one, sign-in and connect links, and every other Daimon web page stop working, because MCP serves them.

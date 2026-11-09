@@ -3,7 +3,8 @@
 Both switches walk the same cascade (`daimon.core.scope_cascade`) under the same rules:
 a thread's switch is any member's, a channel's or the workspace's an admin's, and
 `disabled` is final below the scope that sets it. Participation runs on Discord and
-Teams only. The chat tools and the web call `set_switch`; `switch_refusal` is its pure
+Teams only. The chat tools and the web call `set_switch`, which writes through
+`daimon.core.features.service.change_feature`; `switch_refusal` is its pure
 first gate, which a tool runs before it looks a thread's parent up on the platform.
 """
 
@@ -17,23 +18,16 @@ from daimon.core.channel_changes import (
     ChannelActor,
     ChannelChangeRefused,
     Expected,
-    after_write,
 )
+from daimon.core.config import Settings
 from daimon.core.errors import StaleChannelValue
-from daimon.core.scope_cascade import (
-    CascadeMode,
-    CascadeModes,
-    CascadeScope,
-    ResolvedCascade,
-    resolve_above,
-    resolve_modes,
-    scope_label,
-    tier_word,
-)
-from daimon.core.stores.channel_changes import WORKSPACE_ID, record_change
-from daimon.core.stores.domain import ChannelSetting
-from daimon.core.stores.switch_modes import Switch, get_switch_modes, set_switch_mode
-from pydantic import JsonValue
+from daimon.core.features.registry import DEFAULT, Tier
+from daimon.core.features.resolver import as_cascade, from_mode
+from daimon.core.features.service import FeatureActor, change_feature
+from daimon.core.features.snapshot import FeaturePlace
+from daimon.core.scope_cascade import CascadeMode, CascadeModes, CascadeScope, ResolvedCascade
+from daimon.core.stores.channel_changes import WORKSPACE_ID
+from daimon.core.stores.switch_modes import Switch
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 SWITCH_PLATFORMS: Final[dict[Switch, frozenset[str]]] = {
@@ -72,10 +66,6 @@ _THREAD_DISABLED: Final[dict[Switch, str]] = {
         "a plan in this thread. 'disabled' locks a whole channel or everything here and "
         "is an admin action there."
     ),
-}
-_THREAD_SETTINGS: Final[dict[Switch, ChannelSetting]] = {
-    "participation": "thread_participation",
-    "progress_plans": "thread_progress_plans",
 }
 
 
@@ -146,10 +136,30 @@ def switch_refusal(
     return None
 
 
-def _mode_json(mode: CascadeMode | None, thread_id: str | None) -> JsonValue:
-    if thread_id is None:
-        return None if mode is None else mode.value
-    return None if mode is None else {"thread": thread_id, "mode": mode.value}
+_TIERS: Final[dict[CascadeScope, Tier]] = {
+    CascadeScope.WORKSPACE: "workspace",
+    CascadeScope.CHANNEL: "channel",
+    CascadeScope.THREAD: "thread",
+}
+
+
+def _as_mode(value: str, locked: bool) -> CascadeMode | None:
+    if value == DEFAULT:
+        return None
+    return CascadeMode.DISABLED if locked and value == "off" else CascadeMode(value)
+
+
+def _text(mode: CascadeMode | None) -> str:
+    """A mode as `TierSetting.text`."""
+    if mode is None:
+        return DEFAULT
+    value, locked = from_mode(mode)
+    return f"{value}:locked" if locked else value
+
+
+def _mode(text: str) -> str | None:
+    found = _as_mode(text.removesuffix(":locked"), text.endswith(":locked"))
+    return None if found is None else found.value
 
 
 async def set_switch(
@@ -162,75 +172,56 @@ async def set_switch(
     target: SwitchTarget,
     mode: CascadeMode | None,
     expected: Expected[CascadeMode | None] | None = None,
+    settings: Settings,
 ) -> SwitchChange:
-    """Set (None: drop) the switch's mode at `target`; refused before any write.
-
-    Turning a scope on under a `disabled` wider tier is refused, naming that tier.
-    """
+    """Set (None: drop) the switch's mode at `target` through `change_feature`; refused
+    before any write. Turning a scope on under a locked wider tier is refused."""
     refusal = switch_refusal(
         switch, actor, platform=platform, deployment=deployment, scope=target.scope, mode=mode
     )
     if refusal is not None:
         raise refusal
-    async with sessionmaker.begin() as session:
-        before_modes = await get_switch_modes(
-            session,
-            switch,
-            tenant_id=actor.tenant_id,
-            platform=platform,
-            channel_id=target.channel_id,
-            thread_id=target.thread_id,
-        )
-        before = own_mode(before_modes, target.scope)
-        if expected is not None and expected.value != before:
-            raise StaleChannelValue(switch, None if before is None else before.value)
-        above = resolve_above(target.scope, deployment, before_modes)
-        if mode is CascadeMode.ON and above.mode is CascadeMode.DISABLED:
-            tier = tier_word(above.tier, platform)
-            label = scope_label(target.scope, target.scope_id, platform)
-            raise ChannelChangeRefused(
-                f"{_NAMES[switch]} {'is' if switch == 'participation' else 'are'} disabled "
-                f"at the {tier} level, so {label} cannot be turned on. "
-                f"An admin would have to change the {tier} setting first.",
-                kind="invalid",
-                reason="disabled_above",
-            )
-        await set_switch_mode(
-            session,
-            switch,
-            tenant_id=actor.tenant_id,
-            platform=platform,
-            scope=target.scope,
-            scope_id=target.scope_id,
-            mode=mode,
-            parent_id=target.channel_id,
-        )
-        thread = target.scope is CascadeScope.THREAD
-        await record_change(
-            session,
-            tenant_id=actor.tenant_id,
-            platform=platform,
-            channel_id=(
-                WORKSPACE_ID
-                if target.scope is CascadeScope.WORKSPACE
-                else target.channel_id or target.scope_id or WORKSPACE_ID
+    thread = target.thread_id
+    channel = target.channel_id
+    if thread is not None and platform == "slack" and ":" in thread:
+        channel, _, thread = thread.partition(":")
+    place = FeaturePlace(actor.tenant_id, platform, channel, thread)
+    value, locked = (DEFAULT, False) if mode is None else from_mode(mode)
+
+    async def is_admin(_: object) -> bool:
+        return actor.subject.is_admin
+
+    try:
+        change = await change_feature(
+            sessionmaker,
+            settings,
+            FeatureActor(
+                actor.tenant_id,
+                actor.account_id,
+                actor.surface,
+                actor.subject.platform_user_id,
+                is_admin,
+                actor.subject.via_agent_key,
+                actor.on_write,
             ),
-            setting=_THREAD_SETTINGS[switch] if thread else switch,
-            before=_mode_json(before, target.thread_id),
-            after=_mode_json(mode, target.thread_id),
-            actor_account_id=actor.account_id,
-            surface=actor.surface,
+            key=switch,
+            tier=_TIERS[target.scope],
+            value=value,
+            place=place,
+            locked=locked,
+            expected=Expected(_text(expected.value)) if expected is not None else None,
         )
-        await after_write(session, actor, before != mode)
-        after_modes = await get_switch_modes(
-            session,
-            switch,
-            tenant_id=actor.tenant_id,
-            platform=platform,
-            channel_id=target.channel_id,
-            thread_id=target.thread_id,
-        )
-    return SwitchChange(before, mode, resolve_modes(deployment, after_modes))
+    except StaleChannelValue as exc:
+        raise StaleChannelValue(switch, _mode(str(exc.current))) from exc
+    except ChannelChangeRefused as exc:
+        if exc.reason != "locked_above":
+            raise
+        raise ChannelChangeRefused(str(exc), kind=exc.kind, reason="disabled_above") from exc
+    return SwitchChange(
+        _as_mode(change.before.value, change.before.locked),
+        mode,
+        as_cascade(change.view.resolved),
+    )
 
 
 __all__ = [

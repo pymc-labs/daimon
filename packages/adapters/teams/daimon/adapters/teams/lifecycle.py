@@ -545,7 +545,12 @@ class TeamsTurnLifecycle(OutputGate):
         if (
             self._sessionmaker is not None
             and self._tenant_id is not None
-            and not await cost_footer_shown(self._sessionmaker, tenant_id=self._tenant_id)
+            and not await cost_footer_shown(
+                self._sessionmaker,
+                tenant_id=self._tenant_id,
+                platform="teams",
+                channel_id=self._budget_channel_id,
+            )
         ):
             return None
         t = state.usage_totals

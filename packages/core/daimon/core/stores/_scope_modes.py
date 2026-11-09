@@ -1,37 +1,43 @@
-"""Reads and writes for the per-scope mode tables the scope cascade resolves.
+"""The on/off/disabled view of an on/off feature's workspace, channel and thread rows.
 
-Thread participation and progress plans keep one table each with the same
-columns, so both stores share these queries. Callers own the transaction.
+Thread participation and progress plans live in `feature_values`; these queries keep
+the cascade-mode shape the switch stores and the channel service were written
+against. `disabled` is Off + Locked (plain Off on a thread). Agent rows are not part
+of this view. Callers own the transaction.
 """
 
 from __future__ import annotations
 
 import uuid
-from typing import Any, cast
 
-from daimon.core._models import ProgressPlanScope, ThreadParticipationScope
 from daimon.core.scope_cascade import CascadeMode, CascadeModes, CascadeScope
-from sqlalchemy import CursorResult, delete, func, or_, select, tuple_
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from daimon.core.stores.domain import FeatureSurface, FeatureTarget, FeatureValueRow
+from daimon.core.stores.feature_values import (
+    clear_feature_value,
+    list_feature_values,
+    place_values,
+    set_feature_value,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
-ScopeModeTable = type[ThreadParticipationScope] | type[ProgressPlanScope]
 
-# The workspace row needs no id of its own: tenant_id already names it.
-_WORKSPACE_SCOPE_ID = ""
+def row_mode(row: FeatureValueRow) -> CascadeMode:
+    return CascadeMode.DISABLED if row.locked and row.value == "off" else CascadeMode(row.value)
 
 
-def _scope_id(scope: CascadeScope, scope_id: str | None) -> str:
+def _target(scope: CascadeScope, scope_id: str | None, parent_id: str | None) -> FeatureTarget:
     if scope is CascadeScope.WORKSPACE:
-        return _WORKSPACE_SCOPE_ID
+        return FeatureTarget("workspace")
     if scope_id is None:
         raise ValueError(f"{scope.value} scope needs a scope_id")
-    return scope_id
+    if scope is CascadeScope.CHANNEL:
+        return FeatureTarget("channel", channel_id=scope_id)
+    return FeatureTarget("thread", channel_id=parent_id, thread_key=scope_id)
 
 
 async def get_scope_modes(
     session: AsyncSession,
-    table: ScopeModeTable,
+    key: str,
     *,
     tenant_id: uuid.UUID,
     platform: str,
@@ -39,31 +45,26 @@ async def get_scope_modes(
     thread_id: str | None,
 ) -> CascadeModes:
     """One read for the whole cascade: the workspace row plus this channel's and thread's rows."""
-    keys: list[tuple[str, str]] = [(CascadeScope.WORKSPACE.value, _WORKSPACE_SCOPE_ID)]
-    if channel_id is not None:
-        keys.append((CascadeScope.CHANNEL.value, channel_id))
-    if thread_id is not None:
-        keys.append((CascadeScope.THREAD.value, thread_id))
-    rows = (
-        await session.execute(
-            select(table.scope, table.mode).where(
-                table.tenant_id == tenant_id,
-                table.platform == platform,
-                or_(*(tuple_(table.scope, table.scope_id) == k for k in keys)),
-            )
-        )
-    ).all()
-    found = {scope: CascadeMode(mode) for scope, mode in rows}
+    del platform  # A tenant lives on one platform.
+    rows = await place_values(
+        session,
+        tenant_id=tenant_id,
+        agent_id=None,
+        channel_id=channel_id,
+        thread_key=thread_id,
+        keys=(key,),
+    )
+    found = {row.tier: row_mode(row) for row in rows}
     return CascadeModes(
-        workspace=found.get(CascadeScope.WORKSPACE.value),
-        channel=found.get(CascadeScope.CHANNEL.value),
-        thread=found.get(CascadeScope.THREAD.value),
+        workspace=found.get("workspace"),
+        channel=found.get("channel"),
+        thread=found.get("thread"),
     )
 
 
 async def set_scope_mode(
     session: AsyncSession,
-    table: ScopeModeTable,
+    key: str,
     *,
     tenant_id: uuid.UUID,
     platform: str,
@@ -71,36 +72,27 @@ async def set_scope_mode(
     scope_id: str | None,
     mode: CascadeMode,
     parent_id: str | None = None,
+    set_by: uuid.UUID | None = None,
+    surface: FeatureSurface = "chat",
 ) -> None:
     """Write one scope's mode; `parent_id` is a thread's channel, kept once known."""
-    parent = parent_id if scope is CascadeScope.THREAD else None
-    stmt = (
-        pg_insert(table)
-        .values(
-            tenant_id=tenant_id,
-            platform=platform,
-            scope=scope.value,
-            scope_id=_scope_id(scope, scope_id),
-            mode=mode.value,
-            parent_id=parent,
-            updated_at=func.now(),
-        )
-        .on_conflict_do_update(
-            constraint=f"pk_{table.__tablename__}",
-            set_={
-                "mode": mode.value,
-                "parent_id": func.coalesce(parent, table.parent_id),
-                "updated_at": func.now(),
-            },
-        )
+    del platform
+    thread = scope is CascadeScope.THREAD
+    await set_feature_value(
+        session,
+        tenant_id=tenant_id,
+        target=_target(scope, scope_id, parent_id),
+        key=key,
+        value="off" if mode is CascadeMode.DISABLED else mode.value,
+        locked=mode is CascadeMode.DISABLED and not thread,
+        set_by=set_by,
+        surface=surface,
     )
-    await session.execute(stmt)
-    await session.flush()
 
 
 async def clear_scope_mode(
     session: AsyncSession,
-    table: ScopeModeTable,
+    key: str,
     *,
     tenant_id: uuid.UUID,
     platform: str,
@@ -108,21 +100,15 @@ async def clear_scope_mode(
     scope_id: str | None,
 ) -> bool:
     """Drop the explicit setting so the scope inherits again. Returns whether a row existed."""
-    result = await session.execute(
-        delete(table).where(
-            table.tenant_id == tenant_id,
-            table.platform == platform,
-            table.scope == scope.value,
-            table.scope_id == _scope_id(scope, scope_id),
-        )
+    del platform
+    return await clear_feature_value(
+        session, tenant_id=tenant_id, target=_target(scope, scope_id, None), key=key
     )
-    await session.flush()
-    return cast(CursorResult[Any], result).rowcount == 1
 
 
 async def list_scope_modes(
     session: AsyncSession,
-    table: ScopeModeTable,
+    key: str,
     *,
     tenant_id: uuid.UUID,
     platform: str,
@@ -130,10 +116,17 @@ async def list_scope_modes(
     parent_id: str | None = None,
 ) -> dict[str, CascadeMode]:
     """Every `scope` row's mode by scope id; thread rows only under `parent_id` when given."""
-    stmt = select(table.scope_id, table.mode).where(
-        table.tenant_id == tenant_id, table.platform == platform, table.scope == scope.value
+    del platform
+    rows = await list_feature_values(
+        session,
+        tenant_id=tenant_id,
+        keys=(key,),
+        tier=scope.value,
+        channel_id=parent_id if scope is CascadeScope.THREAD else None,
+        agent_id="",
     )
-    if parent_id is not None:
-        stmt = stmt.where(table.parent_id == parent_id)
-    rows = (await session.execute(stmt)).all()
-    return {scope_id: CascadeMode(mode) for scope_id, mode in rows}
+    return {_scope_id(row): row_mode(row) for row in rows}
+
+
+def _scope_id(row: FeatureValueRow) -> str:
+    return {"channel": row.channel_id, "thread": row.thread_key}.get(row.tier, "")

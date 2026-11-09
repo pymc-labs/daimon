@@ -124,6 +124,7 @@ from daimon.core.mux_compat import retrieve_agent
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.participation_gates import ParticipationGates
 from daimon.core.routine_delivery import RoutinePoster, run_delivery_poller
+from daimon.core.scope_settings import switch_default
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.agent_posts import list_recent_posts
 from daimon.core.stores.domain import (
@@ -1073,7 +1074,7 @@ class TeamsApp:
 
     def _ignored_unprompted(self, parsed: TeamsInbound) -> bool:
         """An unaddressed thread reply with participation off asks nothing: drop it."""
-        participation = self.runtime.settings.thread_participation.mode
+        participation = switch_default(self.runtime.settings, "participation", "teams")
         unwanted = (
             parsed.unprompted and not parsed.by_name and participation is ParticipationMode.DISABLED
         )
@@ -1103,7 +1104,8 @@ class TeamsApp:
             return
         if (
             inbound.unprompted
-            and self.runtime.settings.thread_participation.mode is not ParticipationMode.DISABLED
+            and switch_default(self.runtime.settings, "participation", "teams")
+            is not ParticipationMode.DISABLED
         ):
             await self._observe(dataclasses.replace(inbound, by_name=False))
 
@@ -1121,6 +1123,7 @@ class TeamsApp:
                 anthropic=self.runtime.anthropic,
                 bot_display_name=inbound.bot_name or "daimon",
                 markup=settings.billing.markup,
+                deployment=switch_default(settings, "participation", "teams"),
             )
             self._participation = TeamsParticipation(
                 gates=gates,

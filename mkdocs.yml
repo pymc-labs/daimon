@@ -49,6 +49,7 @@ nav:
       - Managed agents (mux): mux.md
   - Reference:
       - Configuration: configuration.md
+      - Features: features.md
       - MCP tools: mcp-tools.md
   - Contributing: https://github.com/pymc-labs/daimon/blob/main/CONTRIBUTING.md
 

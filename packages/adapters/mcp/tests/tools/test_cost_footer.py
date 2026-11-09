@@ -14,9 +14,9 @@ from daimon.adapters.mcp.tools.cost_footer import (
     _set_cost_footer_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
+from daimon.core.cost_footer import cost_footer_shown
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
-from daimon.core.stores.tenants import get_cost_footer
 from daimon.testing.factories import make_account, make_tenant
 from fastmcp.exceptions import ToolError
 from pydantic import HttpUrl, PostgresDsn, SecretStr
@@ -60,8 +60,7 @@ async def _seed(
 
 
 async def _stored(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID) -> bool:
-    async with sessionmaker() as session:
-        return await get_cost_footer(session, tenant_id=tenant_id)
+    return await cost_footer_shown(sessionmaker, tenant_id=tenant_id, platform="discord")
 
 
 @pytest.mark.parametrize("platform", ["discord", "slack", "teams"])

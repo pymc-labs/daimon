@@ -1,19 +1,12 @@
-"""The Settings group: four per-place settings, one reader and one writer for every surface.
+"""The Settings group: the registry's features as chat and the web show them.
 
 `/settings` in Discord, Slack and Teams, the agent's `get_settings` and `change_setting`
-tools and the web app all read with `read_settings` and write with `change_setting`.
+tools and the web app all read with `read_settings` and write with `change_setting`,
+which wrap `daimon.core.features.service` (`read_features`, `change_feature`).
 The chat platforms draw the same `SettingsPanel` (`load_panel`); each control carries one
-``key:level:value`` choice, applied by `apply_choice`.
-Each key keeps its store and resolver:
-
-- ``approvals``: the access policy's approval gate, most specific level wins. Only a
-  native platform admin, checked live and uncached (`approval_admin`), may change it.
-  It is saved but ignored until the operator enables approval overrides.
-- ``participation`` and ``progress_plans``: the scope tables (`channel_switches`);
-  `disabled` is final below its level. A thread's is anyone's, the rest an admin's.
-- ``cost_footer``: the tenant's flag, server level only, the agent-settings admin's.
-
-Every change is recorded in `channel_changes`.
+``key:level:value`` choice, applied by `apply_choice`. Levels are the tiers people name:
+``server`` (the workspace), ``agent``, ``channel`` and ``thread``. A switch's
+``disabled`` is Off plus a Lock, final below its level.
 """
 
 from __future__ import annotations
@@ -23,46 +16,54 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final, Literal, cast, get_args
 
-from daimon.core.access_policy import Approvals
 from daimon.core.admin_actions import DelegatedAction
-from daimon.core.approval_admin import approval_admin
-from daimon.core.approval_gate import ApprovalChange, resolve_approval_gate, set_approval_gate
-from daimon.core.authz import Subject
-from daimon.core.channel_changes import ChannelActor, ChannelChangeRefused, Expected, after_write
-from daimon.core.channel_switches import SWITCH_PLATFORMS, SwitchTarget, set_switch
+from daimon.core.channel_changes import ChannelChangeRefused, Expected
 from daimon.core.config import Settings
 from daimon.core.errors import StaleChannelValue
-from daimon.core.platform_words import NEUTRAL_ADMIN, space_for, words_for
-from daimon.core.scope_cascade import CascadeMode, resolve_modes
-from daimon.core.stores.access_policy import load_access_policy
-from daimon.core.stores.channel_changes import WORKSPACE_ID, WriteHook, record_change
-from daimon.core.stores.domain import CHAT_PLATFORMS, ChangeSurface
+from daimon.core.features.registry import DEFAULT, FEATURES, Tier
+from daimon.core.features.resolver import as_cascade
+from daimon.core.features.service import (
+    FeatureActor,
+    FeatureView,
+    TierSetting,
+    admin_word,
+    change_feature,
+    read_features,
+)
+from daimon.core.features.service import change_refusal as feature_change_refusal
+from daimon.core.features.snapshot import FeaturePlace, resolve_one
+from daimon.core.platform_words import space_for, words_for
+from daimon.core.scope_cascade import CascadeMode
 from daimon.core.stores.identity import find_platform_principal
-from daimon.core.stores.switch_modes import Switch, get_switch_modes
-from daimon.core.stores.tenants import get_cost_footer, set_cost_footer
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 SettingKey = Literal["approvals", "participation", "progress_plans", "cost_footer"]
-SettingLevel = Literal["server", "channel", "thread"]
+SettingLevel = Literal["server", "agent", "channel", "thread"]
 SETTING_KEYS: Final[tuple[SettingKey, ...]] = get_args(SettingKey)
 LEVELS: Final[tuple[SettingLevel, ...]] = get_args(SettingLevel)
 INHERIT: Final = "inherit"
 OVERRIDES_OFF: Final = "Saved but ignored until the operator enables approval overrides."
 Sessions = async_sessionmaker[AsyncSession]
-
-
-_CHAT = frozenset(CHAT_PLATFORMS)
+SettingsActor = FeatureActor
+_TIER: Final[dict[SettingLevel, Tier]] = {
+    "server": "workspace",
+    "agent": "agent",
+    "channel": "channel",
+    "thread": "thread",
+}
+_LEVEL: Final[dict[str, SettingLevel]] = {tier: level for level, tier in _TIER.items()}
+_SWITCHES: Final = ("participation", "progress_plans")
 
 
 @dataclass(frozen=True)
 class SettingSpec:
-    """One key: its name, its values (stored value to the word people read), where it works."""
+    """One key as people see it: its name, its values (stored value to word), its levels."""
 
     key: SettingKey
     name: str
     labels: Mapping[str, str]
-    levels: tuple[SettingLevel, ...] = LEVELS
-    platforms: frozenset[str] = _CHAT
+    levels: tuple[SettingLevel, ...]
+    platforms: frozenset[str]
     admin_action: DelegatedAction | None = None
 
     @property
@@ -73,57 +74,49 @@ class SettingSpec:
         return self.labels.get(value, value)
 
 
-_SWITCH = {"on": "On", "off": "Off", "disabled": "Disabled", INHERIT: "Inherit"}
-SPECS: Final[Mapping[SettingKey, SettingSpec]] = {
-    spec.key: spec
-    for spec in (
-        SettingSpec(
-            "approvals", "Approvals", {"on": "Ask", "off": "Allow writes", INHERIT: "Inherit"}
-        ),
-        SettingSpec(
-            "participation",
-            "Thread participation",
-            _SWITCH,
-            platforms=SWITCH_PLATFORMS["participation"],
-            admin_action=DelegatedAction.CHANNEL_PERMISSIONS,
-        ),
-        SettingSpec(
-            "progress_plans",
-            "Progress plans",
-            _SWITCH,
-            platforms=SWITCH_PLATFORMS["progress_plans"],
-        ),
-        SettingSpec(
-            "cost_footer",
-            "Cost footer",
-            {"shown": "Shown", "hidden": "Hidden"},
-            ("server",),
-            admin_action=DelegatedAction.AGENT_SETTINGS,
-        ),
+def _spec(key: SettingKey) -> SettingSpec:
+    feature = FEATURES[key]
+    labels = dict(feature.values)
+    if key in _SWITCHES:
+        labels = {"on": "On", "off": "Off", "disabled": "Disabled"}
+    return SettingSpec(
+        key,
+        feature.name,
+        {**labels, INHERIT: "Inherit"},
+        tuple(level for level, tier in _TIER.items() if tier in feature.tiers),
+        frozenset(feature.platforms),
+        feature.authority.action,
     )
-}
+
+
+SPECS: Final[Mapping[SettingKey, SettingSpec]] = {key: _spec(key) for key in SETTING_KEYS}
 
 
 @dataclass(frozen=True)
 class SettingsPlace:
-    """A channel and perhaps a thread in it (a Slack thread is its root timestamp)."""
+    """A channel and perhaps a thread in it (a Slack thread is its root timestamp), and
+    the agent answering there when the caller knows it."""
 
     platform: str
     channel_id: str | None
     thread_id: str | None = None
+    agent_id: str | None = None
 
     @classmethod
-    def of(cls, platform: str, channel_id: str | None, thread_id: str | None) -> SettingsPlace:
+    def of(
+        cls,
+        platform: str,
+        channel_id: str | None,
+        thread_id: str | None,
+        agent_id: str | None = None,
+    ) -> SettingsPlace:
         """From a turn's or a command's ids; a thread equal to its channel is none."""
-        if thread_id and platform == "slack" and ":" in thread_id:
-            channel, _, thread_id = thread_id.partition(":")
-            channel_id = channel_id or channel
-        if not thread_id or thread_id == channel_id or not channel_id:
-            thread_id = None
-        return cls(platform, channel_id or None, thread_id)
+        place = FeaturePlace.of(uuid.UUID(int=0), platform, channel_id, thread_id)
+        return cls(platform, place.channel_id, place.thread_id, agent_id)
 
     def levels(self) -> tuple[SettingLevel, ...]:
-        return LEVELS[: 1 + (self.channel_id is not None) + (self.thread_id is not None)]
+        present = (True, self.agent_id is not None, self.channel_id is not None, self.thread_id)
+        return tuple(level for level, here in zip(LEVELS, present, strict=True) if here)
 
     @property
     def thread_key(self) -> str | None:
@@ -134,15 +127,19 @@ class SettingsPlace:
 
     def target(self, level: SettingLevel) -> str | None:
         """The approval gate's rule key for `level`; None is the server."""
-        return {"server": None, "channel": self.channel_id, "thread": self.thread_key}[level]
+        return {"channel": self.channel_id, "thread": self.thread_key}.get(level)
+
+    def feature_place(self, tenant_id: uuid.UUID) -> FeaturePlace:
+        return FeaturePlace(
+            tenant_id, self.platform, self.channel_id, self.thread_id, agent_id=self.agent_id
+        )
 
 
-def switch_default(settings: Settings, key: Switch, platform: str) -> CascadeMode:
-    """A switch where no level sets it; participation is off where its adapter is not set up."""
-    if key == "progress_plans":
-        return settings.progress_plans.mode
-    adapter = {"teams": settings.teams, "discord": settings.discord}.get(platform)
-    return settings.thread_participation.mode if adapter is not None else CascadeMode.DISABLED
+def switch_default(settings: Settings, key: str, platform: str) -> CascadeMode:
+    """A switch where no level sets it: the deployment tier or the registry default; off
+    for good where the feature cannot run (participation without its adapter)."""
+    place = FeaturePlace(uuid.UUID(int=0), platform)
+    return as_cascade(resolve_one(FEATURES[key], settings, place, ())).mode
 
 
 @dataclass(frozen=True)
@@ -162,12 +159,14 @@ class SettingView:
     effective: str
     effective_label: str
     decided_by: str
-    """``server``, ``channel``, ``thread``, ``deployment`` or ``default``."""
+    """``server``, ``agent``, ``channel``, ``thread``, ``deployment`` or ``default``."""
     available: bool
     active: bool
     """False for approvals until the operator enables approval overrides."""
     note: str
     """One sentence a person reads: what is in effect and where it comes from."""
+    locked: bool = False
+    """True when a level's Lock makes the effective value final below it."""
 
     def own(self, level: SettingLevel) -> str | None:
         return next((item.own for item in self.levels if item.level == level), None)
@@ -184,28 +183,9 @@ class SettingChange:
     """What was saved and what is in effect, to read back."""
 
 
-@dataclass(frozen=True)
-class SettingsActor:
-    """Who changes a setting. `native_user_id` is the chat identity checked live for
-    approvals (None, a web person with no linked chat account, never may); `admin_for`
-    answers for a delegated action as the surface decides it."""
-
-    tenant_id: uuid.UUID
-    account_id: uuid.UUID | None
-    surface: ChangeSurface
-    native_user_id: str | None
-    admin_for: Callable[[DelegatedAction | None], Awaitable[bool]]
-    via_agent_key: bool = False
-    on_write: WriteHook | None = None
-
-
 def level_word(level: SettingLevel, platform: str | None) -> str:
     """The level as the platform's people say it: the server is a workspace on Slack."""
     return space_for(platform) if level == "server" else level
-
-
-def admin_word(platform: str | None) -> str:
-    return words_for(platform).admin if platform in CHAT_PLATFORMS else NEUTRAL_ADMIN
 
 
 async def actor_account(
@@ -253,7 +233,7 @@ def setting_refusal(
     space = space_for(place.platform)
     for failed, message, reason in (
         (value not in spec.values, f"{spec.name} can be {', '.join(spec.values)}.", "bad_value"),
-        (level not in LEVELS, "Choose the server, channel or thread level.", "bad_level"),
+        (level not in LEVELS, "Choose the server, agent, channel or thread level.", "bad_level"),
         (
             place.platform not in spec.platforms,
             f"{spec.name} isn't available here, so nothing was changed.",
@@ -261,14 +241,19 @@ def setting_refusal(
         ),
         (
             level not in spec.levels,
-            f"{spec.name} is set for the whole {space} only. Change it at the {space} level.",
-            "server_only",
+            f"{spec.name} can't be set for one {level}. Change it for the {space} or a channel.",
+            "wrong_level",
         ),
         (
             level not in place.levels(),
             f"This conversation has no {level_word(cast(SettingLevel, level), place.platform)}"
             " level to change.",
             "no_such_level",
+        ),
+        (
+            level == "thread" and value == "disabled",
+            f"{spec.name} can't be disabled for one thread. Use off to turn it off here.",
+            "thread_disabled",
         ),
     ):
         if failed:
@@ -290,49 +275,35 @@ def _effective_note(spec: SettingSpec, value: str, decided: str, platform: str) 
     )
 
 
-async def _read_one(
-    session: AsyncSession,
-    key: SettingKey,
-    *,
-    tenant_id: uuid.UUID,
-    place: SettingsPlace,
-    settings: Settings,
-) -> SettingView:
-    """Each key's own resolver gives its levels' own values, what is in effect and why."""
-    own: Mapping[str, str | None]
-    if key == "cost_footer":
-        effective = "shown" if await get_cost_footer(session, tenant_id=tenant_id) else "hidden"
-        own, decided = {"server": effective}, "server"
-    elif key == "approvals":
-        policy = await load_access_policy(session, tenant_id=tenant_id)
-        gate = resolve_approval_gate(
-            policy, platform=place.platform, channel_id=place.channel_id, thread_id=place.thread_id
-        )
-        rules = {level: policy.channel_rules.get(place.target(level) or "") for level in LEVELS}
-        own = {level: rule.approvals if rule else None for level, rule in rules.items()}
-        own = {**own, "server": policy.approvals}
-        inherited = gate.value == INHERIT
-        effective = "on" if inherited else gate.value
-        decided = "default" if inherited else gate.scope.split(":", 1)[0]
+def _legacy(setting: TierSetting) -> str:
+    """A tier's own value as people pick it: Off plus a Lock is ``disabled``."""
+    if setting.value == DEFAULT:
+        return INHERIT
+    return "disabled" if setting.locked and setting.value == "off" else setting.value
+
+
+def _feature_value(value: str) -> tuple[str, bool]:
+    """A picked value as (feature value, locked)."""
+    if value == "disabled":
+        return "off", True
+    return (DEFAULT if value == INHERIT else value), False
+
+
+def _feature_text(value: str) -> str:
+    """A picked value as `TierSetting.text`, for `expected`."""
+    found, locked = _feature_value(value)
+    return f"{found}:locked" if locked else found
+
+
+def _setting_view(feature: FeatureView, place: SettingsPlace, settings: Settings) -> SettingView:
+    key = cast(SettingKey, feature.spec.key)
+    spec, resolved = SPECS[key], feature.resolved
+    if key in _SWITCHES:
+        cascade = as_cascade(resolved)
+        effective, decider = cascade.mode.value, cascade.tier
     else:
-        modes = await get_switch_modes(
-            session,
-            key,
-            tenant_id=tenant_id,
-            platform=place.platform,
-            channel_id=place.channel_id,
-            thread_id=place.thread_key,
-        )
-        own = {
-            level: mode.value if mode else None
-            for level, mode in zip(
-                LEVELS, (modes.workspace, modes.channel, modes.thread), strict=True
-            )
-        }
-        resolved = resolve_modes(switch_default(settings, key, place.platform), modes)
-        effective = resolved.mode.value
-        decided = {"workspace": "server"}.get(resolved.tier, resolved.tier)
-    spec = SPECS[key]
+        effective, decider = resolved.value, resolved.tier
+    decided = _LEVEL.get(decider, decider)
     available = place.platform in spec.platforms
     active = settings.tool_safety.gate_overrides_active if key == "approvals" else available
     note = (
@@ -344,9 +315,9 @@ async def _read_one(
         key=key,
         name=spec.name,
         levels=tuple(
-            LevelValue(level, own.get(level) or INHERIT)
-            for level in place.levels()
-            if level in spec.levels
+            LevelValue(_LEVEL[own.tier], _legacy(own))
+            for own in feature.tiers
+            if own.tier in _LEVEL and _LEVEL[own.tier] in place.levels()
         ),
         effective=effective,
         effective_label=spec.label(effective),
@@ -354,6 +325,7 @@ async def _read_one(
         available=available,
         active=active,
         note=note if active or not available else f"{note} {OVERRIDES_OFF}",
+        locked=resolved.locked,
     )
 
 
@@ -366,40 +338,13 @@ async def read_settings(
     keys: tuple[SettingKey, ...] = SETTING_KEYS,
 ) -> tuple[SettingView, ...]:
     """Every key at `place`, in the group's order. Anyone may read them."""
-    async with sessionmaker() as session:
-        return tuple(
-            [
-                await _read_one(session, key, tenant_id=tenant_id, place=place, settings=settings)
-                for key in keys
-            ]
-        )
+    features = await read_features(
+        sessionmaker, settings, place.feature_place(tenant_id), keys=keys
+    )
+    return tuple(_setting_view(feature, place, settings) for feature in features)
 
 
 # ---------- Changing ----------
-
-
-def _needs_admin(spec: SettingSpec, platform: str) -> ChannelChangeRefused:
-    admin = admin_word(platform)
-    what = "approvals" if spec.key == "approvals" else f"{spec.name.lower()} here"
-    reason = "native_admin_required" if spec.key == "approvals" else "admin_required"
-    return _refused(f"Only {admin} can change {what}. Ask {admin}.", reason, "forbidden")
-
-
-async def _native_admin(
-    sessionmaker: Sessions, settings: Settings, actor: SettingsActor, platform: str
-) -> Subject:
-    """A live, uncached native admin check of the actor's chat identity, or a refusal."""
-    if not actor.via_agent_key and actor.native_user_id:
-        subject = await approval_admin(
-            sessionmaker, settings, tenant_id=actor.tenant_id, user_id=actor.native_user_id
-        )
-        if subject.is_admin:
-            return subject
-    raise _needs_admin(SPECS["approvals"], platform)
-
-
-async def _admin(actor: SettingsActor, spec: SettingSpec) -> bool:
-    return not actor.via_agent_key and await actor.admin_for(spec.admin_action)
 
 
 async def change_refusal(
@@ -410,18 +355,14 @@ async def change_refusal(
     key: SettingKey,
     level: SettingLevel,
     platform: str,
+    agent_id: str | None = None,
 ) -> ChannelChangeRefused | None:
     """Why the actor may not change `key` at `level`, an early answer before a card or a
     control is shown; `change_setting` decides again when it writes."""
-    spec = SPECS[key]
-    try:
-        if key == "approvals":
-            await _native_admin(sessionmaker, settings, actor, platform)
-        elif (level != "thread" or key == "cost_footer") and not await _admin(actor, spec):
-            raise _needs_admin(spec, platform)
-    except ChannelChangeRefused as exc:
-        return exc
-    return None
+    place = FeaturePlace(actor.tenant_id, platform, agent_id=agent_id)
+    return await feature_change_refusal(
+        sessionmaker, settings, actor, key=key, tier=_TIER[level], place=place
+    )
 
 
 async def change_setting(
@@ -434,42 +375,32 @@ async def change_setting(
     value: str,
     place: SettingsPlace,
     expected: Expected[str] | None = None,
+    locked: bool = False,
 ) -> SettingChange:
-    """Change one key at one level of `place`, refused before any write.
+    """Change one key at one level of `place`, refused before any write. `locked` (an
+    admin's, above the thread level) makes the value final below the level.
 
     Raises `ChannelChangeRefused` (its message is for people) or `StaleChannelValue` when
     `expected` is not the level's own value now."""
     if (refusal := setting_refusal(key, level, value, place=place)) is not None:
         raise refusal
     spec, lvl = SPECS[cast(SettingKey, key)], cast(SettingLevel, level)
-    if spec.key == "approvals":
-        subject = await _native_admin(sessionmaker, settings, actor, place.platform)
-        gate = await set_approval_gate(
+    found, lock = _feature_value(value)
+    try:
+        change = await change_feature(
             sessionmaker,
-            tenant_id=actor.tenant_id,
-            platform=place.platform,
-            target=place.target(lvl),
-            value=cast(Approvals, value),
-            subject=subject,
-            record=ApprovalChange(
-                place.channel_id if lvl != "server" else None,
-                place.thread_key if lvl == "thread" else None,
-                actor.account_id,
-                actor.surface,
-                actor.on_write,
-            ),
-            expected=cast(Approvals, expected.value) if expected is not None else None,
+            settings,
+            actor,
+            key=spec.key,
+            tier=_TIER[lvl],
+            value=found,
+            place=place.feature_place(actor.tenant_id),
+            locked=lock or locked,
+            expected=Expected(_feature_text(expected.value)) if expected is not None else None,
         )
-        before = gate.before or INHERIT
-    elif spec.key == "cost_footer":
-        before = await _change_footer(sessionmaker, actor, spec, value, place, expected)
-    else:
-        before = await _change_switch(
-            sessionmaker, actor, spec, lvl, value, place, settings, expected
-        )
-    (view,) = await read_settings(
-        sessionmaker, tenant_id=actor.tenant_id, place=place, settings=settings, keys=(spec.key,)
-    )
+    except StaleChannelValue as exc:
+        raise StaleChannelValue(spec.key, _legacy(TierSetting(_TIER[lvl], *_split(exc)))) from exc
+    view = _setting_view(change.view, place, settings)
     where = level_word(lvl, place.platform)
     note = (
         f"{spec.name} now inherits for this {where}."
@@ -480,91 +411,12 @@ async def change_setting(
         note = f"{note} {view.note}"
     elif not view.active:
         note = f"{note} {OVERRIDES_OFF}"
-    return SettingChange(spec.key, lvl, before, value, view, note)
+    return SettingChange(spec.key, lvl, _legacy(change.before), value, view, note)
 
 
-def _channel_actor(actor: SettingsActor, *, is_admin: bool) -> ChannelActor:
-    return ChannelActor(
-        tenant_id=actor.tenant_id,
-        account_id=actor.account_id,
-        subject=Subject(
-            is_admin=is_admin,
-            via_agent_key=actor.via_agent_key,
-            platform_user_id=actor.native_user_id,
-        ),
-        surface=actor.surface,
-        on_write=actor.on_write,
-    )
-
-
-async def _change_footer(
-    sessionmaker: Sessions,
-    actor: SettingsActor,
-    spec: SettingSpec,
-    value: str,
-    place: SettingsPlace,
-    expected: Expected[str] | None,
-) -> str:
-    if not await _admin(actor, spec):
-        raise _needs_admin(spec, place.platform)
-    async with sessionmaker.begin() as session:
-        before = "shown" if await get_cost_footer(session, tenant_id=actor.tenant_id) else "hidden"
-        if expected is not None and expected.value != before:
-            raise StaleChannelValue("cost_footer", before)
-        await set_cost_footer(session, tenant_id=actor.tenant_id, shown=value == "shown")
-        await record_change(
-            session,
-            tenant_id=actor.tenant_id,
-            platform=place.platform,
-            channel_id=WORKSPACE_ID,
-            setting="cost_footer",
-            before=before,
-            after=value,
-            actor_account_id=actor.account_id,
-            surface=actor.surface,
-        )
-        await after_write(session, _channel_actor(actor, is_admin=True), before != value)
-    return before
-
-
-async def _change_switch(
-    sessionmaker: Sessions,
-    actor: SettingsActor,
-    spec: SettingSpec,
-    level: SettingLevel,
-    value: str,
-    place: SettingsPlace,
-    settings: Settings,
-    expected: Expected[str] | None,
-) -> str:
-    """`set_switch` applies the switch rules (admin levels, the `disabled` lock)."""
-    switch = cast(Switch, spec.key)
-    is_admin = level != "thread" and await _admin(actor, spec)
-    target = {
-        "server": SwitchTarget.workspace,
-        "channel": lambda: SwitchTarget.channel(cast(str, place.channel_id)),
-        "thread": lambda: SwitchTarget.thread(cast(str, place.thread_key), place.channel_id),
-    }[level]()
-
-    def mode(raw: str) -> CascadeMode | None:
-        return None if raw == INHERIT else CascadeMode(raw)
-
-    try:
-        change = await set_switch(
-            sessionmaker,
-            _channel_actor(actor, is_admin=is_admin),
-            switch,
-            platform=place.platform,
-            deployment=switch_default(settings, switch, place.platform),
-            target=target,
-            mode=mode(value),
-            expected=Expected(mode(expected.value)) if expected is not None else None,
-        )
-    except ChannelChangeRefused as exc:
-        if exc.reason == "admin_required":
-            raise _needs_admin(spec, place.platform) from exc
-        raise
-    return INHERIT if change.before is None else change.before.value
+def _split(exc: StaleChannelValue) -> tuple[str, bool]:
+    text = str(exc.current)
+    return text.removesuffix(":locked"), text.endswith(":locked")
 
 
 # ---------- The `/settings` panel every chat platform draws ----------
@@ -610,7 +462,7 @@ def _row(view: SettingView, place: SettingsPlace, *, admin: bool, native: bool) 
         """Which controls to show; a press is checked again when it is applied."""
         if view.key == "approvals":
             return native
-        return admin or (level == "thread" and view.key != "cost_footer")
+        return admin or (level == "thread" and FEATURES[view.key].authority.thread_anyone)
 
     def word(level: SettingLevel) -> str:
         return level_word(level, place.platform).capitalize()
@@ -623,7 +475,7 @@ def _row(view: SettingView, place: SettingsPlace, *, admin: bool, native: bool) 
         if value != item.own and not (item.level == "thread" and value == "disabled")
     )
     own = ". ".join(f"{word(item.level)}: {spec.label(item.own)}" for item in view.levels)
-    plain = not view.available or view.key == "cost_footer"
+    plain = not view.available
     return SettingsRow(
         view.key,
         view.name,

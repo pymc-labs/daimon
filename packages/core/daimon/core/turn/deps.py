@@ -45,6 +45,7 @@ from daimon.core.config import (
 from daimon.core.context_provider import ContextProviders, ProviderConfig
 from daimon.core.defaults.loader import load_platform_skills
 from daimon.core.discord_membership import DiscordRestMembershipResolver
+from daimon.core.features.deployment import deployment_mode
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_resolver import ResolverCache
 from daimon.core.membership import MembershipResolver
@@ -265,8 +266,8 @@ def build_turn_deps(
         openai_daily_model_cap_usd=settings.billing.openai_daily_model_cap_usd,
         gemini_daily_model_cap_usd=settings.billing.gemini_daily_model_cap_usd,
         progress_plans=(
-            plans.mode
-            if isinstance(plans := cast(object, settings.progress_plans), ProgressPlansSettings)
+            deployment_mode(settings, "progress_plans")
+            if isinstance(cast(object, settings.progress_plans), ProgressPlansSettings)
             else CascadeMode.DISABLED
         ),
         turn_context=(
