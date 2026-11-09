@@ -15,6 +15,7 @@ from daimon.core.config import (
     Settings,
 )
 from daimon.core.features.deployment import deployment_value
+from daimon.core.features.model_input import SESSION_KEYS
 from daimon.core.features.registry import FEATURES, TIERS, FeatureSpec, parse_deployment
 from daimon.core.features.resolver import TierValue, resolve_feature
 from pydantic import PostgresDsn, SecretStr
@@ -129,3 +130,69 @@ def test_legacy_mode_fields_are_read_only_by_the_deployment_tier() -> None:
             ):
                 readers.add(path.name)
     assert readers <= {"deployment.py"}
+
+
+def _named_calls(path: Path, name: str) -> list[ast.Call]:
+    return [
+        node
+        for node in ast.walk(ast.parse(path.read_text()))
+        if isinstance(node, ast.Call)
+        and (getattr(node.func, "id", None) or getattr(node.func, "attr", "")) == name
+    ]
+
+
+def test_every_guidance_writer_asks_the_one_predicate() -> None:
+    """Each writer of the guidance block decides with `guidance_applies`, never alone."""
+    writers = {
+        path: calls
+        for path in _PRODUCT
+        if (calls := _named_calls(path, "apply_credential_guidance"))
+    }
+    assert writers, "the guidance writers moved; point this test at them"
+    for path, calls in writers.items():
+        assert "guidance_applies" in _calls(path), f"{path.name} must use guidance_applies"
+        for call in calls:
+            assert any(k.arg == "guidance" for k in call.keywords), (
+                f"{path.name}:{call.lineno} must pass guidance="
+            )
+
+
+def test_every_turn_origin_render_gets_the_turn_features() -> None:
+    """Each turn's controls follow `turn_controls` and `web_awareness` at its place."""
+    calls = [(p, c) for p in _PRODUCT for c in _named_calls(p, "render_turn_origin")]
+    assert len(calls) >= 10, "the turn-origin renderers moved; point this test at them"
+    for path, call in calls:
+        spread = [k.value for k in call.keywords if k.arg is None]
+        passes = any(k.arg == "features" for k in call.keywords) or any(
+            isinstance(v, ast.Call) and getattr(v.func, "id", "") == "backend_facts" for v in spread
+        )
+        assert passes, f"{path.name}:{call.lineno} must pass features= or **backend_facts()"
+
+
+def test_every_session_creation_gets_the_place_toolset() -> None:
+    """Every MA session, admitted or not (CLI, agent chat, routines), runs its place's tools."""
+    calls = [
+        (path, call)
+        for path in _PRODUCT
+        for call in _named_calls(path, "create_session")
+        if isinstance(call.func, ast.Name)
+    ]
+    assert len(calls) >= 4, "the session creators moved; point this test at them"
+    for path, call in calls:
+        assert any(k.arg == "toolset" for k in call.keywords), (
+            f"{path.name}:{call.lineno} must pass toolset="
+        )
+
+
+def test_session_bound_features_land_where_their_binding_says() -> None:
+    """A session_mutable feature lands in the tools hash, updated in place; none is identity yet."""
+    mutable = {key for key, spec in FEATURES.items() if spec.binds == "session_mutable"}
+    assert mutable == set(SESSION_KEYS), "session_mutable features must shape SessionToolset"
+    identity = [key for key, spec in FEATURES.items() if spec.binds == "session_identity"]
+    assert not identity, f"freeze {identity} in SessionSnapshot before binding them to identity"
+
+
+def test_a_dotted_feature_has_an_env_name() -> None:
+    """`DAIMON_FEATURES__TOOL_BASH` sets `tool.bash`; shells allow no dots in names."""
+    settings = _settings(features={"TOOL_BASH": "off:locked"})
+    assert settings.features == {"tool.bash": "off:locked"}, "env name maps to the dotted key"

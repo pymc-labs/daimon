@@ -48,6 +48,8 @@ from daimon.core.defaults.metadata import (
 )
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import AgentNameCollision, DaimonError, UserFacingError
+from daimon.core.features.model_input import guidance_applies
+from daimon.core.features.snapshot import resolve_agent_features
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_agent, create_agent, retrieve_agent
@@ -308,8 +310,16 @@ async def copy_agent(
     # A fork copies raw MA state past `dump_agent_spec`, so the base toolset is guaranteed here.
     fork_params["tools"] = merge_default_agent_toolset(toolset)
     # An isolated reader mounts no secrets; the guidance would send it looking for them.
-    if source_ma.metadata.get(MA_METADATA_KEY_ISOLATED) != "true":
-        fork_params["system"] = apply_credential_guidance(str(fork_params.get("system") or ""))
+    # A copy takes its source's `guidance` until someone sets the copy's own.
+    features = await resolve_agent_features(
+        sessionmaker, None, tenant_id=tenant_id, agent_id=source_ma.id, keys=("guidance",)
+    )
+    isolated = source_ma.metadata.get(MA_METADATA_KEY_ISOLATED) == "true"
+    fork_params["system"] = apply_credential_guidance(
+        str(fork_params.get("system") or ""),
+        guidance=guidance_applies(isolated=isolated, features=features),
+        isolated=isolated,
+    )
     servers, tools = await agent_lifecycle.strip_credentialed_mcp_servers(
         sessionmaker=sessionmaker,
         tenant_id=tenant_id,

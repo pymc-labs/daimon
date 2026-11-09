@@ -13,6 +13,7 @@ from typing import Literal
 
 import anthropic
 import structlog
+from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.resource_ports import mcp_scope, retrieve_session
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -20,6 +21,9 @@ from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
 from daimon.core.channel_backend import backend_selection_enabled
 from daimon.core.config import get_repo_memory_settings
 from daimon.core.confirmation import backend_switch_tools
+from daimon.core.features.model_input import DEFAULT_TOOLSET, SessionToolset
+from daimon.core.features.snapshot import FeaturePlace
+from daimon.core.features.toolset import place_toolset
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_personal_servers import visible_tools
 from daimon.core.mux_backend import resource_scope
@@ -161,6 +165,26 @@ def _without_configs(tools: Sequence[MaTool], names: frozenset[str]) -> list[MaT
     ]
 
 
+async def _candidate_toolsets(
+    runtime: McpRuntime, auth: AuthIdentity, live: ThreadSessionRow, agent: BetaManagedAgentsAgent
+) -> list[SessionToolset]:
+    """The default toolset and this place's, since a bind may predate a feature change."""
+    toolset = await place_toolset(
+        runtime.session_factory,
+        runtime.settings,
+        FeaturePlace.of(
+            auth.tenant_id,
+            live.platform,
+            live.channel_id,
+            live.thread_id,
+            agent_id=agent.id,
+            backend="anthropic",
+        ),
+        agent,
+    )
+    return [DEFAULT_TOOLSET] if toolset == DEFAULT_TOOLSET else [DEFAULT_TOOLSET, toolset]
+
+
 async def _recorded_as_gated(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -210,6 +234,7 @@ async def _recorded_as_gated(
     }:
         return False
     public_url = runtime.settings.mcp.public_url
+    toolsets = await _candidate_toolsets(runtime, auth, live, agent)
     # The bind may have been made with other rules than today's, so both the
     # current set and none are tried; neither matching reads as not gated.
     rule_tools = await daimon_rule_tools_for(
@@ -270,7 +295,9 @@ async def _recorded_as_gated(
         and (tool_name in watch_tools or tool_name != "update_watch")
         and (reach_tools or tool_name not in REACH_APPROVAL_TOOLS)
     ):
-        for asks_before_publishing in (False, True):
+        for asks_before_publishing, session_toolset in (
+            (asks, each) for asks in (False, True) for each in toolsets
+        ):
             for daimon_rule_tools in dict.fromkeys((frozenset[str](), rule_tools)):
                 tools = session_tools(
                     agent,
@@ -280,6 +307,7 @@ async def _recorded_as_gated(
                     asks_before_publishing=asks_before_publishing,
                     confirmed_tools=confirmed_tools,
                     daimon_rule_tools=daimon_rule_tools,
+                    toolset=session_toolset,
                     legacy_memory_servers=(
                         get_repo_memory_settings(runtime.settings).legacy_mcp_server_names
                         if get_repo_memory_settings(runtime.settings).enabled

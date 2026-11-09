@@ -36,7 +36,7 @@ def test_agent_spec_mirrors_sdk() -> None:
     # Excluded from the mirror comparison.
     # Context fragments are encoded into system at the SDK boundary. `template`
     # marks a web-app starting point that is never provisioned.
-    sibling = {"skills", "skill_repos", "isolated", "context_fragments", "template"}
+    sibling = {"skills", "skill_repos", "isolated", "features", "context_fragments", "template"}
     assert spec_fields - sibling == sdk_fields - exempt - sibling, (
         "AgentSpec drifted from the SDK. "
         f"spec-minus-sibling={spec_fields - sibling}, "

@@ -11,8 +11,13 @@ import uuid
 
 import structlog
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import BetaManagedAgentsAgent, SkillListResponse
+from anthropic.types.beta import (
+    BetaManagedAgentsAgent,
+    BetaManagedAgentsSkillParams,
+    SkillListResponse,
+)
 from daimon.core.agent_guidance import apply_credential_guidance
+from daimon.core.config import Settings
 from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
 from daimon.core.defaults.mcp_merge import (
     is_corrupted_daimon_mcp_entry,
@@ -33,6 +38,8 @@ from daimon.core.defaults.spec_merge import (
     merge_tools_with_ma,
 )
 from daimon.core.errors import DaimonError
+from daimon.core.features.model_input import guidance_applies
+from daimon.core.features.snapshot import Sessions, resolve_agent_features
 from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_agent, create_agent, update_agent
@@ -57,8 +64,13 @@ async def reconcile_agent(
     skills_view: list[SkillListResponse] | None = None,
     references: object = None,
     create_only: bool = False,
+    sessions: Sessions | None = None,
+    settings: Settings | None = None,
 ) -> ResourceOutcome:
     """Reconcile a single agent against MA.
+
+    With `sessions`, the agent's features (the `guidance` the prompt carries) are read
+    from the store and `spec.features` is saved as the agent's own level.
 
     `create_only` refuses with `AgentNameTaken` instead of updating an agent
     that already has the name, so creating an agent can never rewrite someone
@@ -84,17 +96,6 @@ async def reconcile_agent(
     the model at — attaching them would describe machinery the session does
     not have.
     """
-    # Prepend the credential-guidance block so every agent knows where its
-    # secrets live (mounted env file) vs MCP vault-bound auth, instead of
-    # hallucinating "no key" / hunting for non-existent MCP keys. Applied
-    # before the spec-hash computation so the block participates in the hash:
-    # existing agents update exactly once to gain it, then stabilise (the
-    # block is idempotent under re-application). Skipped for isolated specs:
-    # they have no MCP vault and no mounted env file, so the block's guidance
-    # would be actively wrong.
-    if not spec.isolated:
-        spec = spec.model_copy(update={"system": apply_credential_guidance(spec.system or "")})
-
     # Gate both merges on `spec.isolated` by passing None instead of
     # public_url — reuses the existing `public_url is None` early return
     # already built into both mcp_merge functions rather than adding a new
@@ -154,10 +155,58 @@ async def reconcile_agent(
                 duplicate_id=dup.id,
             )
             await archive_agent(client, dup.id, scope=resource_scope(tenant_id=str(tenant_id)))
+    # The safety preamble always, then the guidance unless it is Off or the agent is
+    # isolated (no vault, no mounted env: the guidance would be wrong). Applied before
+    # the hash, so a changed `guidance` updates the agent once, then stabilises.
+    features = await resolve_agent_features(
+        sessions,
+        settings,
+        tenant_id=tenant_id,
+        agent_id=ma_match.id if ma_match is not None else None,
+        keys=("guidance",),
+        spec_values=spec.features,
+    )
+    guidance = guidance_applies(isolated=spec.isolated, features=features)
+    system = apply_credential_guidance(spec.system or "", guidance=guidance, isolated=spec.isolated)
+    spec = spec.model_copy(update={"system": system})
+    outcome = await _write_agent(
+        client,
+        spec,
+        ma_match,
+        tenant_id=tenant_id,
+        dry_run=dry_run,
+        account_id=account_id,
+        public_url=public_url,
+        managed=managed,
+        resolved_skills=resolved_skills,
+    )
+    if sessions is not None and not dry_run and outcome.anthropic_id is not None:
+        # Imported here: the feature service reaches `authz`, which imports `defaults`.
+        from daimon.core.features.service import sync_agent_features
+
+        await sync_agent_features(
+            sessions, tenant_id=tenant_id, agent_id=outcome.anthropic_id, values=spec.features
+        )
+    return outcome
+
+
+async def _write_agent(
+    client: AsyncAnthropic,
+    spec: AgentSpec,
+    ma_match: BetaManagedAgentsAgent | None,
+    *,
+    tenant_id: uuid.UUID,
+    dry_run: bool,
+    account_id: uuid.UUID | None,
+    public_url: str | None,
+    managed: bool,
+    resolved_skills: list[BetaManagedAgentsSkillParams],
+) -> ResourceOutcome:
     spec_dump = dump_agent_spec(spec, mode="json")
     spec_hash = compute_spec_fingerprint(
         {
             "spec": spec_dump,
+            **({"features": spec.features} if spec.features else {}),
             "skills": resolved_skills,
             "account_id": str(account_id) if account_id else None,
         }

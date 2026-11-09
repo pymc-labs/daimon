@@ -11,7 +11,7 @@ drops the resolver's cache. Approvals are written to the access policy
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable, Collection
+from collections.abc import Awaitable, Callable, Collection, Mapping
 from dataclasses import dataclass
 from typing import Literal, cast
 
@@ -28,7 +28,14 @@ from daimon.core.channel_changes import (
 )
 from daimon.core.config import Settings
 from daimon.core.errors import StaleChannelValue
-from daimon.core.features.registry import DEFAULT, FEATURES, LOCKABLE, FeatureSpec, Tier
+from daimon.core.features.registry import (
+    BACKEND_NAMES,
+    DEFAULT,
+    FEATURES,
+    LOCKABLE,
+    FeatureSpec,
+    Tier,
+)
 from daimon.core.features.resolver import ResolvedFeature, TierValue, resolve_above
 from daimon.core.features.snapshot import (
     CACHE,
@@ -45,6 +52,7 @@ from daimon.core.stores.domain import CHAT_PLATFORMS, ChangeSurface, ChannelSett
 from daimon.core.stores.feature_values import (
     clear_feature_value,
     place_values,
+    replace_agent_values,
     set_feature_value,
 )
 from pydantic import JsonValue
@@ -62,7 +70,10 @@ _THREAD_SETTING: dict[str, ChannelSetting] = {
 class FeatureActor:
     """Who changes a feature. `native_user_id` is the chat identity checked live for
     approvals; `admin_for` answers for a delegated action as the surface decides it;
-    `owns_agent` answers whether the actor owns an agent (the agent tier's authority)."""
+    `owns_agent` answers whether the actor owns an agent (the agent tier's authority).
+    `write_builtin` turns one of the place's agent's built-in tools on or off in the
+    agent's own config, the agent tier of `tool.*`, and returns what it was;
+    `read_builtins` reads that config, so a write can check the caller's last read."""
 
     tenant_id: uuid.UUID
     account_id: uuid.UUID | None
@@ -72,6 +83,8 @@ class FeatureActor:
     via_agent_key: bool = False
     on_write: WriteHook | None = None
     owns_agent: Callable[[str], Awaitable[bool]] | None = None
+    write_builtin: Callable[[str, bool], Awaitable[bool | None]] | None = None
+    read_builtins: Callable[[], Awaitable[Mapping[str, bool | None]]] | None = None
 
 
 @dataclass(frozen=True)
@@ -158,8 +171,10 @@ async def read_features(
     place: FeaturePlace,
     *,
     keys: Collection[str] | None = None,
+    agent_builtins: Mapping[str, bool | None] | None = None,
 ) -> tuple[FeatureView, ...]:
-    """Every requested feature at `place`, registry order, read fresh. Anyone may read."""
+    """Every requested feature at `place`, registry order, read fresh. Anyone may read.
+    `agent_builtins` (`model_input.agent_builtins`) is the agent tier of each `tool.*`."""
     specs = [spec for key, spec in FEATURES.items() if keys is None or key in keys]
     async with sessions() as session:
         rows = await place_values(
@@ -180,9 +195,11 @@ async def read_features(
         if spec.key == "approvals":
             view = _approvals_view(cast(TenantAccessPolicy, policy), place)
         else:
-            values = tier_values(spec, settings, place, rows)
+            values = tier_values(spec, settings, place, rows, agent_builtins)
             view = FeatureView(
-                spec, _own(spec, place, values), resolve_one(spec, settings, place, rows, resolved)
+                spec,
+                _own(spec, place, values),
+                resolve_one(spec, settings, place, rows, resolved, agent_builtins),
             )
         resolved[spec.key] = view.resolved
         views.append(view)
@@ -215,6 +232,15 @@ def needs_admin(spec: FeatureSpec, platform: str) -> ChannelChangeRefused:
     )
 
 
+def backend_note(spec: FeatureSpec, backend: str | None) -> str:
+    """Why `spec` can't be set for an agent on `backend`, in words a person reads."""
+    name = BACKEND_NAMES.get(backend or "", backend or "this model provider")
+    fixed = spec.backend_fixed.get(backend or "")
+    if fixed is not None:
+        return f"{spec.name} can't be changed for {name} agents: it is always {spec.label(fixed)}."
+    return f"{spec.name} can't be set here for {name} agents, so nothing was changed."
+
+
 def feature_refusal(
     key: str,
     tier: str,
@@ -239,9 +265,14 @@ def feature_refusal(
             "bad_value",
         ),
         (
-            reason in ("platform", "backend"),
+            reason == "platform",
             f"{spec.name} isn't available here, so nothing was changed.",
             "wrong_platform",
+        ),
+        (
+            reason == "backend",
+            backend_note(spec, place.backend),
+            "wrong_backend",
         ),
         (
             reason == "requires",
@@ -410,9 +441,17 @@ async def change_feature(
     else:
         if not await may_change(actor, spec, tier, locked=locked, agent_id=place.agent_id):
             raise needs_admin(spec, place.platform)
-        before = await _write(sessions, settings, actor, spec, after, place, expected)
+        if tier == "agent" and key.startswith("tool."):
+            before = await _write_builtin(sessions, settings, actor, spec, after, place, expected)
+        else:
+            before = await _write(sessions, settings, actor, spec, after, place, expected)
     CACHE.clear()
-    (view,) = await read_features(sessions, settings, place, keys=(key,))
+    builtins = (
+        await actor.read_builtins()
+        if key.startswith("tool.") and actor.read_builtins is not None
+        else None
+    )
+    (view,) = await read_features(sessions, settings, place, keys=(key,), agent_builtins=builtins)
     return FeatureChange(key, tier, before, after, view)
 
 
@@ -478,3 +517,55 @@ async def _write(
         )
         await after_write(session, channel_actor, before != after)
     return before
+
+
+async def _write_builtin(
+    sessions: Sessions,
+    settings: Settings,
+    actor: FeatureActor,
+    spec: FeatureSpec,
+    after: TierSetting,
+    place: FeaturePlace,
+    expected: Expected[str] | None,
+) -> TierSetting:
+    """A `tool.*` agent tier is the agent's own tool config: written there, never stored.
+    `expected` is checked against that config, so it needs `FeatureActor.read_builtins`."""
+    if actor.write_builtin is None or place.agent_id is None:
+        raise _refused(
+            "An agent's built-in tools are changed where the agent is edited.", "agent_tools"
+        )
+    if after.value == DEFAULT or after.locked:
+        raise _refused("An agent's built-in tool is either on or off.", "invalid_value")
+    tool = spec.key.removeprefix("tool.")
+    if expected is not None:
+        if actor.read_builtins is None:
+            raise _refused(
+                "An agent's built-in tools are changed where the agent is edited.", "agent_tools"
+            )
+        current = (await actor.read_builtins()).get(tool)
+        now = DEFAULT if current is None else "on" if current else "off"
+        if expected.value != now:
+            raise StaleChannelValue(spec.key, now)
+    async with sessions() as session:
+        rows = await place_values(
+            session,
+            tenant_id=place.tenant_id,
+            agent_id=place.agent_id,
+            channel_id=place.channel_id,
+            thread_key=place.thread_key,
+            keys=(spec.key,),
+        )
+    above = resolve_above(spec, tier_values(spec, settings, place, rows), "agent")
+    if above.locked and after.value != above.value:
+        raise _locked_above(spec, above, place, "agent")
+    was = await actor.write_builtin(tool, after.value == "on")
+    return TierSetting("agent", DEFAULT if was is None else "on" if was else "off")
+
+
+async def sync_agent_features(
+    sessions: Sessions, *, tenant_id: uuid.UUID, agent_id: str, values: dict[str, str]
+) -> None:
+    """Make an agent's `AgentSpec.features` its agent-level values; a person's own stay."""
+    async with sessions.begin() as session:
+        await replace_agent_values(session, tenant_id=tenant_id, agent_id=agent_id, values=values)
+    CACHE.clear()

@@ -18,6 +18,7 @@ _TIER = {
     "channel": "Channel",
     "thread": "Thread",
 }
+_BACKEND = {"gemini": "Gemini", "openai": "OpenAI", "selfhosted": "self-hosted"}
 _COMBINE = {
     "most_specific": "Most specific wins",
     "ceiling": "Off above is a ceiling",
@@ -34,7 +35,8 @@ An admin can lock a value at the deployment, server, agent or channel level. Lev
 below then cannot change it. `disabled` means Off and locked.
 
 Set the deployment level with `DAIMON_FEATURES__<KEY>`, for example
-`DAIMON_FEATURES__PROGRESS_PLANS=on:locked`. Set the others with `/settings` in chat,
+`DAIMON_FEATURES__PROGRESS_PLANS=on:locked`; a dot in a key is an
+underscore (`DAIMON_FEATURES__TOOL_BASH`). Set the others with `/settings` in chat,
 the `change_setting` MCP tool or the web app.
 """
 
@@ -50,6 +52,9 @@ def render() -> str:
             ("Levels", ", ".join(_TIER[tier] for tier in spec.tiers)),
             ("Combines", _COMBINE[spec.combine]),
         ]
+        for backend, tiers in sorted(spec.backend_tiers.items()):
+            levels = ", ".join(_TIER[tier] for tier in tiers)
+            rows.append((f"Levels on {_BACKEND.get(backend, backend)}", levels))
         if spec.legacy_env:
             rows.append(("Deprecated", ", ".join(f"`{env}`" for env in spec.legacy_env)))
         table = "\n".join(f"| {name} | {value} |" for name, value in rows)

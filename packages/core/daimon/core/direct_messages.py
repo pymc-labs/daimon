@@ -659,6 +659,7 @@ async def _run_admitted_dm_turn(
             turn_origin_row,
             effective_is_admin=prepared.admission.is_admin,
             web=prepared.admission.web,
+            features=prepared.admission.features,
         )
         user_message = f"{controls}\n{prompt}"
 

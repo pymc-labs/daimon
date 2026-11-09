@@ -33,6 +33,7 @@ from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
 from anthropic.types.beta.beta_packages_params import BetaPackagesParams
 from daimon.core.context_prompt import ContextFragment, TurnContext, encode_fragments
 from daimon.core.errors import SpecError
+from daimon.core.features.registry import FEATURES
 from daimon.core.model_presets import ModelSelection, resolve_model
 from daimon.core.stores.domain import ChatPlatform
 from daimon.core.tool_safety import get_mcp_server_name_rejection
@@ -164,6 +165,19 @@ class AgentSpec(BaseModel):
     skill_repos: list[SkillRepo] = Field(default_factory=list[SkillRepo], exclude=True)
     isolated: bool = Field(default=False, exclude=True)
     template: bool = Field(default=False, exclude=True)
+    features: dict[str, str] = Field(default_factory=dict[str, str], exclude=True)
+
+    @model_validator(mode="after")
+    def _features_have_an_agent_level(self) -> AgentSpec:
+        """`features:` sets the agent level (docs/features.md); a built-in tool's agent
+        level is `tools:` itself, so `tool.*` is refused here rather than kept twice."""
+        for key, value in self.features.items():
+            spec = FEATURES.get(key)
+            if spec is None or "agent" not in spec.tiers or key.startswith("tool."):
+                raise ValueError(f"feature {key!r} cannot be set on an agent")
+            if value not in spec.values:
+                raise ValueError(f"feature {key!r} takes {', '.join(spec.values)}")
+        return self
 
     @model_validator(mode="after")
     def _resolve_model_preset(self) -> AgentSpec:

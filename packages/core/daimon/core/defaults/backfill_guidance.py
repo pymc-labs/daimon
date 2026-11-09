@@ -1,4 +1,4 @@
-"""Refresh credential guidance on existing user agents during tenant reconcile."""
+"""Refresh the safety preamble and guidance on existing user agents during tenant reconcile."""
 
 from __future__ import annotations
 
@@ -14,6 +14,8 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_NAME,
 )
+from daimon.core.features.model_input import guidance_applies
+from daimon.core.features.snapshot import Sessions, resolve_agent_features
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import update_agent_ignored
 
@@ -27,8 +29,10 @@ async def backfill_credential_guidance(
     seeded_agent_ids: set[str],
     seeded_agent_names: set[str],
     seeded_account_id: uuid.UUID | None,
+    sessions: Sessions | None = None,
 ) -> None:
-    """Update only ``system`` on live, non-isolated user agents; never fail boot."""
+    """Update only ``system`` on live user agents; never fail boot. An isolated agent
+    is left as written; the `guidance` feature decides the rest."""
     updated = skipped = failed = 0
     try:
         agents = await list_agents_by_tenant(client, tenant_id=tenant_id)
@@ -52,12 +56,16 @@ async def backfill_credential_guidance(
                 in (None, str(seeded_account_id) if seeded_account_id is not None else None)
             )
             or agent.archived_at is not None
-            or agent.metadata.get(MA_METADATA_KEY_ISOLATED) == "true"
             or agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
         ):
             skipped += 1
             continue
-        system = apply_credential_guidance(agent.system or "")
+        features = await resolve_agent_features(
+            sessions, None, tenant_id=tenant_id, agent_id=agent.id, keys=("guidance",)
+        )
+        isolated = agent.metadata.get(MA_METADATA_KEY_ISOLATED) == "true"
+        guidance = guidance_applies(isolated=isolated, features=features)
+        system = apply_credential_guidance(agent.system or "", guidance=guidance, isolated=isolated)
         if system == agent.system:
             skipped += 1
             continue

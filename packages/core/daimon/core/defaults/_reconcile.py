@@ -247,6 +247,7 @@ async def _reconcile_core(
                     account_id=account_id,
                     public_url=public_url,
                     skills_view=skills_view if dry_run else None,
+                    sessions=session_factory,
                 ),
                 kind="agent",
                 name=spec.name,
@@ -263,6 +264,7 @@ async def _reconcile_core(
                 seeded_agent_ids=seeded_agent_ids,
                 seeded_agent_names={spec.name for spec in agent_specs},
                 seeded_account_id=account_id,
+                sessions=session_factory,
             )
 
         # Sweep in reverse order. Skills sweep compares canonical tenant-scoped

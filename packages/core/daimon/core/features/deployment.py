@@ -6,10 +6,16 @@ The only reader of `progress_plans.mode` and `thread_participation.mode`
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from functools import cache
 
 import structlog
-from daimon.core.config import ProgressPlansSettings, Settings, ThreadParticipationSettings
+from daimon.core.config import (
+    FeatureEnvSettings,
+    ProgressPlansSettings,
+    Settings,
+    ThreadParticipationSettings,
+)
 from daimon.core.features.registry import FEATURES, FeatureSpec, parse_deployment
 from daimon.core.features.resolver import TierValue, as_cascade, from_mode, resolve_feature
 from daimon.core.scope_cascade import CascadeMode
@@ -30,12 +36,22 @@ def _legacy_mode(settings: Settings, key: str) -> CascadeMode | None:
     return None
 
 
-def deployment_value(settings: Settings, spec: FeatureSpec) -> TierValue | None:
-    """What the operator set for `spec`, or None to fall back to the registry default."""
-    raw = settings.features.get(spec.key)
+@cache
+def env_features() -> Mapping[str, str]:
+    """`DAIMON_FEATURES__*` read once, for writers handed no `Settings` (an agent edit)."""
+    return FeatureEnvSettings().features  # pyright: ignore[reportCallIssue]
+
+
+def deployment_value(settings: Settings | None, spec: FeatureSpec) -> TierValue | None:
+    """What the operator set for `spec`, or None to fall back to the registry default.
+    Without `settings` the process env answers, and deprecated variables are not read."""
+    features = settings.features if settings is not None else env_features()
+    raw = features.get(spec.key)
     if raw is not None:
         value, locked = parse_deployment(spec.key, raw)
         return TierValue("deployment", value, locked)
+    if settings is None:
+        return None
     mode = _legacy_mode(settings, spec.key)
     if mode is None:
         return None

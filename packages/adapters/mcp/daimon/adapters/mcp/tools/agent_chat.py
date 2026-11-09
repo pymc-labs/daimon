@@ -121,6 +121,8 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_SOURCE_RELEASE_URL,
     MA_METADATA_KEY_SPEC_HASH,
 )
+from daimon.core.features.snapshot import FeaturePlace
+from daimon.core.features.toolset import place_toolset
 from daimon.core.github_app_session import close_headless_app_session
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import find_agent_by_derived_uuid_cached
@@ -873,6 +875,18 @@ async def _start_turn_impl(
             runtime.client,
             agent=ma_agent,
             environment=environment,
+            toolset=await place_toolset(
+                runtime.session_factory,
+                runtime.settings,
+                FeaturePlace.of(
+                    auth.tenant_id,
+                    auth.platform or "mcp",
+                    channel_id,
+                    agent_id=ma_agent.id,
+                    backend="anthropic",
+                ),
+                ma_agent,
+            ),
             mcp_settings=runtime.settings.mcp,
             account_id=auth.account_id,
             tenant_id=auth.tenant_id,

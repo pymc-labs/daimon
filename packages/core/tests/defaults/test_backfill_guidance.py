@@ -77,7 +77,9 @@ async def test_backfill_updates_only_system_and_is_idempotent() -> None:
     assert agents[0]["system"] == apply_credential_guidance(OLD)
     assert agents[1]["system"] == CREDENTIAL_GUIDANCE_BLOCK + "\n\nMy own instructions"
     assert agents[0]["metadata"]["daimon_spec_hash"] == "old-hash"
-    assert all(agent["system"] == OLD for agent in agents[2:])
+    assert all(agent["system"] == OLD for agent in agents[2:]), (
+        "isolated and seeded agents stay as written"
+    )
 
     await backfill_credential_guidance(
         client,
@@ -86,7 +88,7 @@ async def test_backfill_updates_only_system_and_is_idempotent() -> None:
         seeded_agent_names={"seeded", "daimon"},
         seeded_account_id=TENANT,
     )
-    assert len(writes) == 2
+    assert len(writes) == 2, "a second pass writes nothing"
 
 
 async def test_backfill_continues_after_ma_failure() -> None:

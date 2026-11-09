@@ -467,6 +467,7 @@ async def create_ma_session(
             asks_before_publishing=admission.asks_before_publishing,
             confirmed_tools=await confirmed_tools_for_tenant(deps, tenant_id),
             daimon_rule_tools=admission.daimon_rule_tools,
+            toolset=admission.toolset,
             slack_turn_context_id=admission.slack_turn_context_id,
             # A held turn mounts its own channel-bound Daimon credential; a shared
             # thread has no caller account and so no credential to hold.

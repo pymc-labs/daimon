@@ -302,6 +302,13 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
             asks_before_publishing=preparation.admission.asks_before_publishing,
             rule_tools=preparation.admission.daimon_rule_tools,
         )
+        # The place's tool features can only take tools away here: deny never widens.
+        toolset = preparation.admission.toolset
+        host_policy.update(
+            {name: "deny" for name, enabled in toolset.builtins.items() if not enabled}
+        )
+        if not toolset.daimon_tools:
+            host_policy["daimon-mcp/*"] = "deny"
         from daimon.core.channel_skills import platform_skill_refs
         from daimon.core.stores.channel_skills import list_channel_skills
         from daimon.core.stores.neutral_catalog import PostgresNeutralCatalog
@@ -367,6 +374,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
             mcp_credential_bindings=settings.selfhosted.mcp_credential_bindings,
             single_tenant=settings.selfhosted.single_tenant,
             mcp_allowed_http_hosts=settings.selfhosted.mcp_allowed_http_hosts,
+            daimon_tools=toolset.daimon_tools,
             # The driver compiles permissions from the original pinned spec;
             # this builder only resolves credential-free connection fields.
             mcp_servers=tuple(

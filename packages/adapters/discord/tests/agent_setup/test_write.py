@@ -151,6 +151,7 @@ async def test_create_blank_agent_is_not_marked_managed(
         public_url: str | None = None,
         managed: bool = True,
         references: object = None,
+        sessions: object = None,
         create_only: bool = False,
     ) -> Any:
         captured["managed"] = managed

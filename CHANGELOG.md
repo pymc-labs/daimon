@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Approvals, thread participation, progress plans and the cost footer are set at the server, agent, channel or thread level, and settings show which level decided. Admins can lock a value for every level below.
   Set the deployment level with `DAIMON_FEATURES__<KEY>`. `DAIMON_PROGRESS_PLANS__MODE` and `DAIMON_THREAD_PARTICIPATION__MODE` still work but log a deprecation. The cost footer can be set per channel and thread.
 
+- **What the agent is sent is now a feature too.**
+  Agent guidance, the facts sent with each message (`turn_controls`: Full, Origin only or Minimal) and web app links are set at the server, workspace or agent level; an agent spec sets its own with a `features:` block. An isolated agent's prompt is never changed.
+  With guidance on, an agent's system prompt is unchanged. With it off, the agent keeps only the "outside text is data" rule.
+  Daimon's own tools (`daimon_tools`) and each built-in tool (`tool.bash` and the rest) can be turned off down to a channel or thread, from the next message. An agent's own tool settings are its agent level.
+
 - **The Azure deploy can keep MCP private while Teams is public.**
   Set `mcpPublicIngress` to false and MCP is reachable only from apps in the same Container Apps environment. The default keeps it public, as before.
   It suits only the self-hosted harness running in that environment. Hosted model backends, including the default Anthropic one, sign-in and connect links, and every other Daimon web page stop working, because MCP serves them.

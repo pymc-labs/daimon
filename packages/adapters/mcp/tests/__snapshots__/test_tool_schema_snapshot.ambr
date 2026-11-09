@@ -945,47 +945,36 @@
       'description': '''
         Change one setting where you are, after the person presses Approve.
         <blank line>
-        ``approvals`` is ``on`` (Ask before third-party writes), ``off`` (Allow writes) or
-        ``inherit``; only an admin of the chat platform itself, checked live, may change
-        it. ``participation`` (reply in threads without being addressed) and
-        ``progress_plans`` are ``on``, ``off``, ``disabled`` (a channel or server lock) or
-        ``inherit``: a thread's for anyone, a channel's or the server's for an admin.
-        ``cost_footer`` is ``shown`` or ``hidden``, server level only, for an admin.
-        ``level`` is the ``server``, ``channel`` or ``thread`` of this conversation; other
-        places cannot be named. Read the returned ``note`` back.
+        ``key`` and ``value`` are one of ``get_settings``' keys and its values, or
+        ``inherit``. ``level`` is the ``server``, ``agent``, ``channel`` or ``thread`` of
+        this conversation; other places cannot be named. ``locked`` (an admin's, not at
+        the thread level) makes the value final below. Approvals need a live admin of
+        the chat platform; a thread's participation or progress plans are anyone's; the
+        rest an admin's. Read the returned ``note`` back.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
           'key': dict({
-            'enum': list([
-              'approvals',
-              'participation',
-              'progress_plans',
-              'cost_footer',
-            ]),
             'type': 'string',
           }),
           'level': dict({
             'enum': list([
               'server',
+              'agent',
               'channel',
               'thread',
             ]),
             'type': 'string',
           }),
+          'locked': dict({
+            'default': False,
+            'type': 'boolean',
+          }),
           'origin_context_id': dict({
             'type': 'string',
           }),
           'value': dict({
-            'enum': list([
-              'on',
-              'off',
-              'disabled',
-              'inherit',
-              'shown',
-              'hidden',
-            ]),
             'type': 'string',
           }),
         }),
@@ -4482,12 +4471,12 @@
     }),
     'get_settings': dict({
       'description': '''
-        Report this conversation's settings: approvals, thread participation, progress
-        plans and the cost footer.
+        Report this conversation's settings (every registered feature).
         <blank line>
-        Each lists its own value at the server, channel and thread level of where you are,
-        and what is in effect. Anyone may read them; read each ``note`` back. People change
-        them with ``/settings``, the web app's Settings section or ``change_setting``.
+        Each lists its own value at the server, agent, channel and thread level of where
+        you are, what is in effect, which level decided it and whether it is locked.
+        Anyone may read them; read each ``note`` back. People change them with
+        ``/settings``, the web app's Settings section or ``change_setting``.
       ''',
       'parameters': dict({
         'additionalProperties': False,

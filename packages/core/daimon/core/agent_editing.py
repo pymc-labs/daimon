@@ -38,6 +38,7 @@ from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
 from daimon.core.defaults.mcp_merge import DAIMON_MCP_SERVER_NAME, get_reserved_mcp_rejection
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
+    MA_METADATA_KEY_ISOLATED,
     MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_NAME,
     MA_METADATA_KEY_TENANT,
@@ -47,6 +48,14 @@ from daimon.core.defaults.reconcile_agents import AgentNameTaken, reconcile_agen
 from daimon.core.defaults.report import Action as ReconcileAction
 from daimon.core.defaults.spec_merge import merge_mcp_servers_with_ma, merge_skills_with_ma
 from daimon.core.errors import DaimonError
+from daimon.core.features.model_input import (
+    TOOLSET_TYPE,
+    agent_builtins,
+    builtin_enabled,
+    guidance_applies,
+    with_builtin,
+)
+from daimon.core.features.snapshot import resolve_agent_features
 from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import ResolverCache
@@ -74,7 +83,6 @@ BuiltinToolName = Literal[
     "bash", "edit", "read", "write", "glob", "grep", "web_fetch", "web_search"
 ]
 BUILTIN_NAMES: Final[tuple[str, ...]] = get_args(BuiltinToolName)
-TOOLSET_TYPE: Final[str] = "agent_toolset_20260401"
 
 AgentEditRefusal = Literal[
     "forbidden", "invalid", "conflict", "stale", "not_found", "taken", "unavailable"
@@ -208,57 +216,6 @@ def union_tools(spec_tools: list[Tool], ma_agent: BetaManagedAgentsAgent) -> lis
             continue
         extras.append(ma_tool_to_param(entry))
     return list(spec_tools) + extras
-
-
-def builtin_enabled(tools: list[Tool], tool: str) -> bool | None:
-    """Whether any of the agent's toolsets turns `tool` on; None when it has none."""
-    found: bool | None = None
-    for entry in tools:
-        if not str(entry.get("type", "")).startswith("agent_toolset"):
-            continue
-        raw = cast(dict[str, Any], entry)
-        default = cast(dict[str, Any], raw.get("default_config") or {}).get("enabled")
-        on = default is not False
-        for config in raw.get("configs") or ():
-            if config.get("name") == tool:
-                enabled = config.get("enabled")
-                on = bool(enabled) if enabled is not None else default is not False
-                break
-        found = on or bool(found)
-    return found
-
-
-def with_builtin(tools: list[Tool], tool: str, enabled: bool) -> list[Tool]:
-    """`tools` with `tool` turned on or off; any permission policy it had is kept.
-
-    An agent with no toolset gains one holding only `tool`, never the defaults.
-    """
-    if builtin_enabled(tools, tool) is None:
-        only: Tool = cast(
-            Tool,
-            {
-                "type": TOOLSET_TYPE,
-                "default_config": {"enabled": False},
-                "configs": [{"name": tool, "enabled": enabled}],
-            },
-        )
-        return [*tools, only]
-    updated: list[Tool] = []
-    for entry in tools:
-        if not str(entry.get("type", "")).startswith("agent_toolset"):
-            updated.append(entry)
-            continue
-        raw = dict(cast(dict[str, Any], entry))
-        configs = [dict(config) for config in raw.get("configs") or ()]
-        for config in configs:
-            if config.get("name") == tool:
-                config["enabled"] = enabled
-                break
-        else:
-            configs.append({"name": tool, "enabled": enabled})
-        raw["configs"] = configs
-        updated.append(cast(Tool, raw))
-    return updated
 
 
 def explicitly_on(tools: list[Tool], tool: str) -> bool:
@@ -483,7 +440,19 @@ async def write_agent_patch(
         if value is not None
     }
     if "system" in scalar_patch:
-        scalar_patch["system"] = apply_credential_guidance(scalar_patch["system"])
+        features = await resolve_agent_features(
+            deps.session_factory,
+            None,
+            tenant_id=actor.tenant_id,
+            agent_id=agent.id,
+            keys=("guidance",),
+        )
+        isolated = agent.metadata.get(MA_METADATA_KEY_ISOLATED) == "true"
+        scalar_patch["system"] = apply_credential_guidance(
+            scalar_patch["system"],
+            guidance=guidance_applies(isolated=isolated, features=features),
+            isolated=isolated,
+        )
     replace = patch.merge == "replace"
 
     async def _apply(fresh: BetaManagedAgentsAgent) -> BetaManagedAgentsAgent:
@@ -619,6 +588,46 @@ async def write_builtin_tool(
         ) from exc
     _invalidate(deps, actor.tenant_id, updated.id)
     return updated
+
+
+def builtin_writer(
+    deps: AgentEditDeps, *, actor: AgentActor, ma_agent_id: str
+) -> Callable[[str, bool], Awaitable[bool | None]]:
+    """`FeatureActor.write_builtin` for one agent: the authorized `write_builtin_tool`."""
+
+    async def write(tool: str, enabled: bool) -> bool | None:
+        if tool not in BUILTIN_NAMES:
+            raise AgentEditError(f"unknown built-in tool {tool!r}", kind="invalid")
+        agent = await load_editable_agent(deps, actor=actor, ma_agent_id=ma_agent_id)
+        tools = [ma_tool_to_param(t) for t in agent.tools]
+        turned_on = forbidden_turned_on(
+            denied_builtins(deps.denied_tools), tools, with_builtin(tools, tool, enabled)
+        )
+        if turned_on:
+            raise AgentEditError(forbidden_builtins_message(turned_on), kind="forbidden")
+        was = builtin_enabled(tools, tool)
+        await write_builtin_tool(
+            deps,
+            actor=actor,
+            ma_agent_id=ma_agent_id,
+            tool=cast(BuiltinToolName, tool),
+            enabled=enabled,
+        )
+        return was
+
+    return write
+
+
+def builtin_reader(
+    deps: AgentEditDeps, *, actor: AgentActor, ma_agent_id: str
+) -> Callable[[], Awaitable[dict[str, bool | None]]]:
+    """`FeatureActor.read_builtins` for one agent: its built-in tools as `tool.*` reads them."""
+
+    async def read() -> dict[str, bool | None]:
+        agent = await load_editable_agent(deps, actor=actor, ma_agent_id=ma_agent_id)
+        return agent_builtins([ma_tool_to_param(t) for t in agent.tools])
+
+    return read
 
 
 # ---------- Authorized entry points ----------
@@ -893,6 +902,7 @@ async def create_agent(
                 # it is not in the seeded spec list.
                 managed=False,
                 references=deps.session_factory,
+                sessions=deps.session_factory,
                 # Never update an agent that took the name since the check above.
                 create_only=True,
             )

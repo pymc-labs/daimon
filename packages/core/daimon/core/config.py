@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Annotated, Literal, cast
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from daimon.core.features.registry import parse_deployment
+from daimon.core.features.registry import deployment_key, parse_deployment
 from daimon.core.mcp_server_url import ascii_mcp_url, canonical_mcp_url
 from daimon.core.outbound.reach import DEFAULT_MAX_PEOPLE
 from daimon.core.scope_cascade import CascadeMode
@@ -3059,10 +3059,7 @@ class Settings(BaseSettings):
     @field_validator("features")
     @classmethod
     def _features_are_registered(cls, value: dict[str, str]) -> dict[str, str]:
-        features = {key.lower(): raw for key, raw in value.items()}
-        for key, raw in features.items():
-            parse_deployment(key, raw)
-        return features
+        return _registered_features(value)
 
     @model_validator(mode="after")
     def _private_channel_messages_need_a_public_url(self) -> Settings:
@@ -3096,6 +3093,32 @@ def load_settings(*, _env_file: str | None = ".env") -> Settings:
 
         validate_configured_runtime_manifest()
     return settings
+
+
+def _registered_features(value: dict[str, str]) -> dict[str, str]:
+    features = {deployment_key(key): raw for key, raw in value.items()}
+    for key, raw in features.items():
+        parse_deployment(key, raw)
+    return features
+
+
+class FeatureEnvSettings(BaseSettings):
+    """Only `DAIMON_FEATURES__*`, for a feature writer handed no `Settings`."""
+
+    features: dict[str, str] = Field(default_factory=dict[str, str])
+
+    @field_validator("features")
+    @classmethod
+    def _features_are_registered(cls, value: dict[str, str]) -> dict[str, str]:
+        return _registered_features(value)
+
+    model_config = SettingsConfigDict(
+        env_prefix="DAIMON_",
+        env_nested_delimiter="__",
+        env_file=".env",
+        extra="ignore",
+        hide_input_in_errors=True,
+    )
 
 
 class _CryptoSettingsSource(BaseSettings):

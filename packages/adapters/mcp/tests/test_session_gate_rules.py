@@ -12,6 +12,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import _session_gate
 from daimon.core.config import RepoMemorySettings
+from daimon.core.features.model_input import DEFAULT_TOOLSET, SessionToolset
 from daimon.core.session_snapshot import hash_tools, session_tools
 from daimon.core.stores.domain import Role
 from daimon.core.tool_safety import ToolSafetyPolicy
@@ -60,6 +61,9 @@ def patch_session_gate_collaborators(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_session_gate, "backend_selection_enabled", backend_off)
     monkeypatch.setattr(
         _session_gate, "confirmation_tools", AsyncMock(return_value=frozenset[str]())
+    )
+    monkeypatch.setattr(
+        _session_gate, "_candidate_toolsets", AsyncMock(return_value=[DEFAULT_TOOLSET])
     )
 
 
@@ -541,3 +545,33 @@ async def test_a_session_bound_before_both_the_carded_and_reach_gates_proves_onl
     assert proven is (requested == "add_skill"), (
         f"{requested} should{'' if requested == 'add_skill' else ' not'} be proven by an older bind"
     )
+
+
+async def test_a_bind_made_with_the_places_toolset_proves_the_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session bound with a place's tool features still proves its recorded card."""
+    toolset = SessionToolset(daimon_tools=True, builtins={"bash": False})
+    monkeypatch.setattr(
+        _session_gate, "_candidate_toolsets", AsyncMock(return_value=[DEFAULT_TOOLSET, toolset])
+    )
+    monkeypatch.setattr(_session_gate, "daimon_rule_tools_for", AsyncMock(return_value=frozenset()))
+    recorded = session_tools(
+        AGENT,
+        frozenset[str](),
+        tool_safety=POLICY,
+        public_url="https://mcp.example/mcp",
+        asks_before_publishing=True,
+        toolset=toolset,
+    )
+    live = cast(
+        Any, SimpleNamespace(effective_config=SimpleNamespace(tools_sha256=hash_tools(recorded)))
+    )
+    assert await _session_gate._recorded_as_gated(  # pyright: ignore[reportPrivateUsage]
+        _runtime(),
+        AUTH,
+        live,
+        tool_name="publish_report",
+        ma_agent_id="agent",
+        reported_tools_sha256=hash_tools(AGENT.tools),
+    ), "a bind made with the place's toolset must prove the publish card"

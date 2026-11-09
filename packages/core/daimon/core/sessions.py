@@ -63,6 +63,7 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_TENANT,
 )
 from daimon.core.errors import StoreError
+from daimon.core.features.model_input import DEFAULT_TOOLSET, SessionToolset
 from daimon.core.github_app_auth import PermissionProfile, group_repository_access
 from daimon.core.github_app_session import (
     REQUESTER_CACHE,
@@ -666,6 +667,7 @@ async def create_session(
     legacy_memory_servers: tuple[str, ...] = (),
     confirmed_tools: frozenset[str] = frozenset(),
     daimon_rule_tools: frozenset[str] = frozenset(),
+    toolset: SessionToolset = DEFAULT_TOOLSET,
     slack_turn_context_id: uuid.UUID | None = None,
     hold: TurnHold | None = None,
     memory_hold: TurnHold | None = None,
@@ -1175,6 +1177,7 @@ async def create_session(
             legacy_memory_servers=legacy_memory_servers,
             confirmed_tools=confirmed_tools,
             daimon_rule_tools=daimon_rule_tools,
+            toolset=toolset,
         )
         if session_factory is not None and tenant_id is not None and agent_uuid is not None:
             await record_enabled_daimon_tools(
@@ -1191,6 +1194,7 @@ async def create_session(
             confirmed_tools=confirmed_tools,
             chat_session_id=chat_session_id,
             github_transport=github_transport,
+            toolset=toolset,
         )
         gated = list(tools) != list(visible_tools(agent, hidden))
         healed = list(servers) != list(visible_mcp_servers(agent, hidden))

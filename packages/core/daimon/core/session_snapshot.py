@@ -30,7 +30,7 @@ import hashlib
 import json
 from collections.abc import Collection, Sequence
 from datetime import datetime
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSession
 from anthropic.types.beta.beta_managed_agents_agent_toolset20260401 import (
@@ -62,6 +62,7 @@ from daimon.core.mcp_server_url import (
 from daimon.core.model_presets import model_choice_id
 from daimon.core.repo_memory_tools import suppress_legacy_readers
 from daimon.core.tool_safety import (
+    DAIMON_SERVER_NAME,
     ToolSafetyPolicy,
     heal_reserved_server,
     session_tools_for_policy,
@@ -76,6 +77,10 @@ from pydantic import (
     TypeAdapter,
     model_serializer,
 )
+
+if TYPE_CHECKING:
+    # Only the type: `stores.domain` imports this module, and `features` imports it.
+    from daimon.core.features.model_input import SessionToolset
 
 type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
 type TokenScope = (
@@ -552,6 +557,20 @@ def session_skills(
     return [*agent.skills, *channel_skills]
 
 
+def _with_toolset(
+    agent: BetaManagedAgentsAgent, hidden: frozenset[str], toolset: SessionToolset | None
+) -> tuple[BetaManagedAgentsAgent, frozenset[str]]:
+    """The agent and hidden servers as the session's features leave them."""
+    if toolset is None:
+        return agent, hidden
+    if not toolset.daimon_tools:
+        hidden = hidden | {DAIMON_SERVER_NAME}
+    if toolset.builtins:
+        tools = toolset.apply_builtins([tool.model_dump(mode="json") for tool in agent.tools])
+        agent = agent.model_copy(update={"tools": _TOOLS.validate_python(tools)})
+    return agent, hidden
+
+
 def session_tools(
     agent: BetaManagedAgentsAgent,
     hidden_mcp_server_names: frozenset[str],
@@ -562,6 +581,7 @@ def session_tools(
     confirmed_tools: frozenset[str] = frozenset(),
     daimon_rule_tools: frozenset[str] = frozenset(),
     legacy_memory_servers: tuple[str, ...] = (),
+    toolset: SessionToolset | None = None,
 ) -> Sequence[MaTool]:
     """The tools a session for this caller runs: the visible ones, tool safety applied,
     and the publish tools asking first when the turn's agent may not publish freely.
@@ -573,7 +593,9 @@ def session_tools(
     in-place update all use. Hashing or pushing the agent's raw tools instead
     read every gated session as drifted and wrote `always_allow` back onto it
     on its next turn, so third-party writes stopped asking after the first.
+    `toolset` is what the session's features change (`SessionToolset`).
     """
+    agent, hidden_mcp_server_names = _with_toolset(agent, hidden_mcp_server_names, toolset)
     visible = visible_tools(agent, hidden_mcp_server_names)
     gated = session_tools_for_policy(
         tool_safety,
@@ -600,13 +622,17 @@ def session_mcp_servers(
     confirmed_tools: frozenset[str] = frozenset(),
     chat_session_id: str | None = None,
     github_transport: GithubTransport = "direct",
+    toolset: SessionToolset | None = None,
 ) -> Sequence[BetaManagedAgentsMCPServerURLDefinition]:
     """The MCP servers a session for this caller runs, a foreign `daimon-mcp` re-pointed.
 
     With `github_transport="router"` (and a `public_url`), a server attached at
     GitHub's hosted MCP URL is re-pointed at the deployment's GitHub MCP router
     under the same name, so its toolset and permission policy are unchanged.
+    With Daimon tools off, `daimon-mcp` is left out like a hidden server.
     """
+    if toolset is not None and not toolset.daimon_tools:
+        hidden_mcp_server_names = hidden_mcp_server_names | {DAIMON_SERVER_NAME}
     visible = visible_mcp_servers(agent, hidden_mcp_server_names)
     healed = heal_reserved_server(
         tool_safety,
@@ -668,6 +694,7 @@ def desired_snapshot(
     public_url: str | None = None,
     channel_skills: Sequence[MaSkill] = (),
     system_override: str | None = None,
+    toolset: SessionToolset | None = None,
 ) -> SessionSnapshot:
     """What a session created right now, for this caller, would be running.
 
@@ -725,6 +752,7 @@ def desired_snapshot(
                 confirmed_tools=confirmed_tools,
                 daimon_rule_tools=daimon_rule_tools,
                 legacy_memory_servers=legacy_memory_servers,
+                toolset=toolset,
             )
         ),
         mcp_servers_sha256=hash_mcp_servers(
@@ -736,6 +764,7 @@ def desired_snapshot(
                 confirmed_tools=confirmed_tools,
                 chat_session_id=chat_session_id,
                 github_transport=github_transport,
+                toolset=toolset,
             )
         ),
         env_sha256=env_sha256,

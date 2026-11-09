@@ -960,6 +960,7 @@ async def _prepare_session_for_turn_locked(
             asks_before_publishing=admission.asks_before_publishing,
             confirmed_tools=await confirmed_tools_for_tenant(deps, tenant_id),
             daimon_rule_tools=admission.daimon_rule_tools,
+            toolset=admission.toolset,
             channel_skills=admission.channel_skills,
             system_override=system_for_platform(admission.agent.system, platform),
             # A shared thread's session mounts no caller credential, so no hold.
@@ -1194,6 +1195,7 @@ async def _prepare_session_for_turn_locked(
                 asks_before_publishing=admission.asks_before_publishing,
                 confirmed_tools=await confirmed_tools_for_tenant(deps, tenant_id),
                 daimon_rule_tools=admission.daimon_rule_tools,
+                toolset=admission.toolset,
                 mcp_vault_ids=deps.resolver_cache.mcp_vault_ids,
                 legacy_memory_servers=(
                     get_repo_memory_settings(deps).legacy_mcp_server_names

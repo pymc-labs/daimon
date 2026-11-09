@@ -59,6 +59,8 @@ from daimon.core.channel_skills import turn_channel_skills, turn_platform_skills
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
+from daimon.core.features.model_input import TOOL_KEYS, TURN_KEYS, SessionToolset, agent_toolset
+from daimon.core.features.snapshot import FeaturePlace, FeatureSnapshot, resolve_features
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import (
     MAResolverMissError,
@@ -406,6 +408,14 @@ class Admission:
     request: AdmitRequest | None = field(default=None, compare=False, repr=False)
     # This workspace's links into the web app for the admitted role; None with no web app.
     web: TenantLinks | None = field(default=None, compare=False, repr=False)
+    # The turn-bound and session-tool features (`model_input`) at this place; None only
+    # for hand-built admissions, which render every turn control and keep every tool.
+    features: FeatureSnapshot | None = field(default=None, compare=False, repr=False)
+
+    @property
+    def toolset(self) -> SessionToolset:
+        """What this place's features change in the agent's session tools."""
+        return agent_toolset(self.features, self.agent)
 
     @property
     def is_admin(self) -> bool:
@@ -1703,6 +1713,22 @@ async def _admit_gates(
         backend_switch_stale=backend_switch_stale,
         web=await _web_links(deps, tenant_id, principal.account_id, chat_admin=effective_admin),
     )
+    result = replace(
+        result,
+        features=await resolve_features(
+            deps.sessionmaker,
+            None,
+            FeaturePlace.of(
+                tenant_id,
+                platform,
+                channel_id,
+                thread_id,
+                agent_id=agent.id,
+                backend=running_on(result)["provider"],
+            ),
+            keys=(*TURN_KEYS, *TOOL_KEYS),
+        ),
+    )
     if follow_generation is not None:
         # Admitted: this conversation follows its agent (M03), only if its slot is
         # still the binding this message read (a concurrent move or card wins).
@@ -2527,6 +2553,7 @@ def backend_facts(admission: Admission) -> dict[str, Any]:
     follow = admission.backend_follow
     return {
         "web": admission.web,
+        "features": admission.features,
         "running_on": running_on(admission),
         # A later hand-off summary (#1434) slots in here beside the move.
         "moved": None

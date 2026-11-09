@@ -22,6 +22,8 @@ from daimon.adapters.cli.sessions_bootstrap import (
 )
 from daimon.adapters.cli.tenant import discover_tenant
 from daimon.core.config import get_repo_memory_settings, load_settings
+from daimon.core.features.snapshot import FeaturePlace
+from daimon.core.features.toolset import place_toolset
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import platform_scope
 from daimon.core.session_ports_compat import retrieve_session_record
@@ -91,6 +93,12 @@ async def sessions_create(
         account_id=principal.account_id,
         agent=agent_row,
         environment=env_row,
+        toolset=await place_toolset(
+            rt.sessionmaker,
+            rt.settings,
+            FeaturePlace(tenant_id, "cli", agent_id=agent_row.id, backend="anthropic"),
+            agent_row,
+        ),
         mcp_settings=rt.settings.mcp,
         agent_uuid=agent_uuid,
         session_factory=rt.sessionmaker,

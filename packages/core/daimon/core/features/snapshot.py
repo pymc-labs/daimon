@@ -12,8 +12,8 @@ import uuid
 from collections import OrderedDict
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
-from daimon.core.approval_gate import resolve_approval_gate
 from daimon.core.config import Settings
 from daimon.core.features.deployment import deployment_value
 from daimon.core.features.registry import FEATURES, FeatureSpec, Tier
@@ -23,7 +23,6 @@ from daimon.core.features.resolver import (
     Unavailable,
     resolve_feature,
 )
-from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import FeatureValueRow
 from daimon.core.stores.feature_values import feature_revision, place_values
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -73,7 +72,7 @@ def unavailable_reason(
 ) -> Unavailable | None:
     """Why `spec` cannot apply at `place`, or None. `depends_on` is checked by the caller;
     without `settings` (a reader of a feature with no deployment tier) `requires` is too."""
-    if place.platform not in spec.platforms:
+    if not spec.on_platform(place.platform):
         return "platform"
     if settings is not None and "platform_adapter" in spec.requires:
         adapters = {"discord": settings.discord, "slack": settings.slack, "teams": settings.teams}
@@ -89,16 +88,23 @@ def tier_values(
     settings: Settings | None,
     place: FeaturePlace,
     rows: Iterable[FeatureValueRow],
+    agent_builtins: Mapping[str, bool | None] | None = None,
 ) -> list[TierValue]:
-    """The deployment value plus this place's stored rows for `spec`, on its backend's tiers."""
+    """The deployment value plus this place's stored rows for `spec`, on its backend's tiers.
+    A `tool.*` agent tier is the agent's own tool config (`agent_builtins`), never a row."""
     tiers: tuple[Tier, ...] = spec.tiers_on(place.backend)
-    deployment = deployment_value(settings, spec) if settings is not None else None
+    deployment = deployment_value(settings, spec) if "deployment" in spec.tiers else None
     found = [deployment] if deployment is not None else []
     found += [
         TierValue(row.tier, row.value, row.locked)
         for row in rows
         if row.key == spec.key and row.tier in tiers
     ]
+    builtin = spec.key.removeprefix("tool.")
+    if agent_builtins is not None and "agent" in tiers and spec.key != builtin:
+        enabled = agent_builtins.get(builtin)
+        if enabled is not None:
+            found.append(TierValue("agent", "on" if enabled else "off"))
     return found
 
 
@@ -108,6 +114,7 @@ def resolve_one(
     place: FeaturePlace,
     rows: Iterable[FeatureValueRow],
     resolved: Mapping[str, ResolvedFeature] | None = None,
+    agent_builtins: Mapping[str, bool | None] | None = None,
 ) -> ResolvedFeature:
     """Pure: one feature at one place from its rows; `resolved` answers `depends_on`."""
     reason = unavailable_reason(spec, settings, place)
@@ -115,7 +122,9 @@ def resolve_one(
         resolved is not None and dep in resolved and not resolved[dep].on for dep in spec.depends_on
     ):
         reason = "depends_on"
-    return resolve_feature(spec, tier_values(spec, settings, place, rows), unavailable=reason)
+    fixed = spec.backend_fixed.get(place.backend) if reason == "backend" and place.backend else None
+    values = tier_values(spec, settings, place, rows, agent_builtins)
+    return resolve_feature(spec, values, unavailable=reason, fixed=fixed)
 
 
 @dataclass(frozen=True)
@@ -194,13 +203,19 @@ def approvals_from_gate(value: str, scope: str) -> ResolvedFeature:
 
 async def resolve_features(
     sessions: Sessions,
-    settings: Settings,
+    settings: Settings | None,
     place: FeaturePlace,
     *,
     keys: Collection[str] | None = None,
     cache: FeatureCache = CACHE,
 ) -> FeatureSnapshot:
-    """Resolve `keys` (every registered feature by default) for `place` in one read."""
+    """Resolve `keys` (every registered feature by default) for `place` in one read.
+    Without `settings` the deployment tier is the registry default."""
+    # Imported here: the access policy reaches `defaults`, whose agent writers resolve
+    # features through this module.
+    from daimon.core.approval_gate import resolve_approval_gate
+    from daimon.core.stores.access_policy import load_access_policy
+
     wanted = [key for key in FEATURES if keys is None or key in keys]
     resolved: dict[str, ResolvedFeature] = {}
     async with sessions() as session:
@@ -217,4 +232,53 @@ async def resolve_features(
     for key in wanted:
         if key != "approvals":
             resolved[key] = resolve_one(FEATURES[key], settings, place, rows, resolved)
+    return FeatureSnapshot(place, revision, resolved)
+
+
+async def resolve_agent_features(
+    sessions: Sessions | None,
+    settings: Settings | None,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: str | None,
+    keys: Collection[str],
+    spec_values: Mapping[str, str] | None = None,
+    backend: str | None = None,
+    cache: FeatureCache = CACHE,
+) -> FeatureSnapshot:
+    """`keys` for an agent alone (no channel): what an agent writer resolves before it saves.
+
+    `spec_values` are the agent's `AgentSpec.features`, the agent tier of an agent not yet
+    saved or synced; a person's own agent-tier value still wins over them."""
+    place = FeaturePlace(tenant_id, "", agent_id=agent_id, backend=backend)
+    revision, rows = 0, list[FeatureValueRow]()
+    if sessions is not None and agent_id is not None:
+        async with sessions() as session:
+            revision, rows = await _place_rows(session, place, cache)
+    if spec_values:
+        personal = {row.key for row in rows if row.tier == "agent" and row.surface != "spec"}
+        rows = [
+            row
+            for row in rows
+            if row.tier != "agent" or row.key not in spec_values or row.key in personal
+        ]
+        rows += [
+            FeatureValueRow(
+                tenant_id=tenant_id,
+                tier="agent",
+                agent_id=agent_id or "",
+                channel_id="",
+                thread_key="",
+                key=key,
+                value=value,
+                locked=False,
+                set_by=None,
+                surface="spec",
+                set_at=datetime.now(UTC),
+                revision=revision,
+            )
+            for key, value in spec_values.items()
+            if key not in personal
+        ]
+    resolved = {key: resolve_one(FEATURES[key], settings, place, rows) for key in keys}
     return FeatureSnapshot(place, revision, resolved)

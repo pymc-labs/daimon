@@ -7,6 +7,9 @@ from datetime import UTC, datetime
 import pytest
 from daimon.core._models import PendingSkillAdd
 from daimon.core.config import WebSettings
+from daimon.core.features.registry import FEATURES
+from daimon.core.features.resolver import ResolvedFeature
+from daimon.core.features.snapshot import FeaturePlace, FeatureSnapshot, resolve_one
 from daimon.core.stores import github_grant_proposals
 from daimon.core.stores.domain import Role, TurnOriginRow
 from daimon.core.stores.pending_skill_adds import (
@@ -716,3 +719,49 @@ def test_a_sender_from_another_organisation_gets_no_web_links() -> None:
 
     assert "web" not in _controls(rendered), "a foreign sender has no account to open it with"
     assert "web_url" not in rendered, "and the sentence about it is left out"
+
+
+def _features(**values: str) -> FeatureSnapshot:
+    place = FeaturePlace(uuid.uuid4(), "discord", agent_id="agt_stats", backend="anthropic")
+    found = {key: resolve_one(spec, None, place, []) for key, spec in FEATURES.items()}
+    found |= {key: ResolvedFeature(key, value, "workspace") for key, value in values.items()}
+    return FeatureSnapshot(place, 1, found)
+
+
+def test_origin_only_controls_keep_the_ids_and_drop_words_and_web() -> None:
+    """Origin only keeps what Daimon tools need and the honesty facts, nothing else."""
+    rendered = render_turn_origin(
+        _origin(),
+        effective_is_admin=False,
+        running_on={"provider": "anthropic", "model": "m"},
+        web=_web(),
+        features=_features(turn_controls="origin"),
+    )
+    controls = _controls(rendered)
+    assert controls["origin_context_id"] == "11111111-1111-1111-1111-111111111111", "ids stay"
+    assert "words" not in controls and "web" not in controls, "words and web links go"
+    assert controls["running_on"] == {"provider": "anthropic", "model": "m"}, "honesty stays"
+    assert "configuration_target." not in rendered, "the target prose goes"
+
+
+def test_minimal_controls_keep_only_the_honesty_facts() -> None:
+    """Minimal (with Daimon tools Off) sends only what keeps the agent honest."""
+    rendered = render_turn_origin(
+        _origin(),
+        effective_is_admin=True,
+        running_on={"provider": "anthropic", "model": "m"},
+        features=_features(turn_controls="minimal", daimon_tools="off"),
+    )
+    assert _controls(rendered) == {"running_on": {"provider": "anthropic", "model": "m"}}, (
+        "only running_on is left when nothing else is supplied"
+    )
+    assert "answer what model you are" in rendered, "the running_on rule stays"
+
+
+def test_web_awareness_off_drops_the_web_links() -> None:
+    """Web app links leave the controls when the feature is Off."""
+    rendered = render_turn_origin(
+        _origin(), effective_is_admin=False, web=_web(), features=_features(web_awareness="off")
+    )
+    assert "web" not in _controls(rendered), "no web block with web_awareness Off"
+    assert "Web links:" not in rendered, "no web sentence either"
