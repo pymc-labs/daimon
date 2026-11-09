@@ -16,6 +16,7 @@ from daimon.core.turn.errors import AdmissionDenialReason, BackendRefusalCause
 from daimon.core.turn.state import ToolUseBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
 from mux.contracts.config import DEFAULT_BACKEND
+from mux.drivers.selfhosted.wire import CLEANUP_EXHAUSTED
 from mux.errors import ProviderError
 from mux.profiles import INLINE_REUSE, MANAGED_AGENTS, PERSISTENT_WORKSPACE
 from mux.profiles.selfhosted import LOOP
@@ -482,6 +483,15 @@ def render_termination_notice(
         copy = _Copy(
             "Daimon has reached its usage limit.",
             "Ask the team running it to check the limit.",
+        )
+    elif any(
+        isinstance(cause, ProviderError) and cause.native_code == CLEANUP_EXHAUSTED
+        for cause in _error_chain(failure)
+    ):
+        # A self-hosted harness sealed this conversation: its tools would not stop.
+        copy = _Copy(
+            "This conversation's tools stopped responding.",
+            "Start a new conversation to carry on.",
         )
     elif is_stuck_session(reason, error or (state.error if state is not None else None)):
         copy = _Copy(

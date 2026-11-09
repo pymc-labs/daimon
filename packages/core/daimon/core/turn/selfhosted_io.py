@@ -42,6 +42,7 @@ from mux.contracts.ports import ManagedAgents
 from mux.contracts.receipts import CancelReceipt, OperationStatus, SendReceipt, StopObservation
 from mux.contracts.usage import UsageObservation
 from mux.drivers.selfhosted import SelfHostedUsage
+from mux.drivers.selfhosted.wire import CLEANUP_EXHAUSTED
 from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
 from pydantic import BaseModel, JsonValue, TypeAdapter
 
@@ -67,6 +68,12 @@ class SelfHostedPersistence(Protocol):
         status: Callable[[T], OperationStatus],
         /,
     ) -> T: ...
+
+
+def root_failed(native_reason: str | None) -> ProviderError:
+    """The error for an errored root; a sealed conversation keeps its reason."""
+    code = CLEANUP_EXHAUSTED if native_reason == CLEANUP_EXHAUSTED else "host_root_failed"
+    return ProviderError("upstream", retryable=False, native_code=code)
 
 
 def _timeout(value: float) -> float:
@@ -349,7 +356,7 @@ class SelfHostedTurnIO:
             if payload.outcome == "errored":
                 # accept_record durably journals this root before display.
                 # An SDK retries_exhausted idle is not a foreign failure.
-                raise ProviderError("upstream", retryable=False, native_code="host_root_failed")
+                raise root_failed(payload.native_reason)
         frames: list[TurnEvent] = []
         if event.type == "session.status_terminated":
             self._terminated = True
@@ -577,7 +584,18 @@ class SelfHostedTurnIO:
             # the legacy finalizer. Use its existing explicit failure/interrupt
             # paths; neither retries delivery or sends another cancel.
             if "errored" in outcomes:
-                raise ProviderError("upstream", retryable=False, native_code="host_root_failed")
+                raise root_failed(
+                    next(
+                        (
+                            TurnEndedPayload.model_validate(value.payload).native_reason
+                            for value in current
+                            if value.type == "session.turn_ended"
+                            and value.authority in ("record", "reconciled")
+                            and value.thread_id is None
+                        ),
+                        None,
+                    )
+                )
             if "interrupted" in outcomes:
                 from daimon.core.turn.driver import InterruptedDuringRecovery
 

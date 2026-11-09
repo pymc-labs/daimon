@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from mux.contracts.actions import UserToolConfirmation
 from mux.drivers.selfhosted.normalize import normalize
 from mux.drivers.selfhosted.wire import Event
@@ -235,3 +236,101 @@ async def test_narrowed_agent_omits_and_refuses_write(harness, monkeypatch):
         assert events[-1].payload["outcome"] == "completed"
     finally:
         await driver.aclose()
+
+
+async def test_sealed_multi_cleanup_heals_and_real_driver_codec_finishes(tmp_path, monkeypatch):
+    from contextlib import suppress
+
+    import httpx
+    from daimon.core.turn.selfhosted_codec import display_batch
+    from daimon_harness.runtime import TurnContext
+    from daimon_harness.service import create_app
+    from mux.errors import ProviderError
+
+    from .conftest import FakeModelAdapter
+
+    monkeypatch.setenv("HARNESS_SESSION_MODE", "multi")
+    monkeypatch.setattr("daimon_harness.service.CLEANUP_TIMEOUT", 0.03)
+    monkeypatch.setattr("daimon_harness.service.CANCEL_JOIN_TIMEOUT", 0.02)
+    monkeypatch.setattr("daimon_harness.service.CLEANUP_RETRY_DELAY", 0.01)
+    monkeypatch.setattr("daimon_harness.service.CLEANUP_BACKOFF_CAP", 0.03)
+    started, release = asyncio.Event(), asyncio.Event()
+    original_stop = TurnContext.stop_workers
+    attempts = []
+
+    async def transient(context):
+        attempts.append(context.request.turn_id)
+        if not release.is_set():
+            raise TimeoutError("transient verifier failure")
+        await original_stop(context)
+
+    class Model(FakeModelAdapter):
+        async def run(self, context, history):
+            history = await super().run(context, history)
+
+            async def resistant():
+                started.set()
+                while not release.is_set():
+                    with suppress(asyncio.CancelledError):
+                        await release.wait()
+                return "stopped"
+
+            await context.tool("resistant", "write", {}, resistant)
+            return history
+
+    monkeypatch.setattr(TurnContext, "stop_workers", transient)
+    app = create_app(home=tmp_path, token="test-token", adapter=Model())
+    supervisor = app.state.supervisor
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://localhost",
+            headers={"Authorization": "Bearer test-token", "Accept": "application/json"},
+        ) as client,
+    ):
+        driver, session = await driver_session(client)
+        try:
+            sent = await driver.events.send(SCOPE, session.ref, [message("hello")], key="send")
+            await started.wait()
+            await client.post(
+                f"/v0/turns/{sent.turn_id}/cancel", params={"session_id": session.ref.id}
+            )
+            async with asyncio.timeout(3):
+                while session.ref.id not in supervisor.sealed_sessions:
+                    await asyncio.sleep(0.01)
+            count = len(attempts)
+            async with asyncio.timeout(3):
+                while len(attempts) <= count:
+                    await asyncio.sleep(0.01)
+            release.set()
+            events = await collect(driver, session, after="0")
+            terminal = [event for event in events if event.type == "session.turn_ended"]
+            assert len(terminal) == 1
+            assert terminal[0].payload["outcome"] == "errored"
+            assert terminal[0].payload["native_reason"] == "cleanup_exhausted"
+            snapshot = await driver.events.reconcile(SCOPE, session.ref)
+            assert snapshot.state == "idle" and snapshot.active_root_turn is None, (
+                "sealed turn kept polling as running"
+            )
+            displayed = [
+                value
+                for event in events
+                for value in display_batch(event, session_id=session.ref.id)
+            ]
+            notices = [
+                item
+                for item in displayed
+                if item.type == "agent.message" and "Start a new conversation" in str(item.content)
+            ]
+            assert len(notices) == 1, "cleanup exhaustion hidden by core codec"
+            assert any(item.type == "session.status_idle" for item in displayed)
+            # The real driver must honor the structured non-retryable 503 too.
+            with pytest.raises(ProviderError) as error:
+                await driver.events.send(SCOPE, session.ref, [message("again")], key="again")
+            assert not error.value.retryable and error.value.native_code == "cleanup_exhausted"
+            assert not supervisor.unhealthy
+            assert sent.turn_id not in supervisor.contexts
+        finally:
+            release.set()
+            await driver.aclose()

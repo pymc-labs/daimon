@@ -424,3 +424,50 @@ def test_an_unnamed_quota_model_and_a_plain_rate_limit_keep_their_words() -> Non
         "Pick another model or ask an admin to upgrade it.",
     )
     assert provider_quota_copy(ProviderError("rate_limited", retryable=True)) is None
+
+
+@pytest.mark.parametrize("native_reason", ["cleanup_exhausted", None, "adapter_failed"])
+def test_a_sealed_selfhosted_conversation_says_to_start_a_new_one(
+    native_reason: str | None,
+) -> None:
+    """The harness seals a conversation whose tools would not stop. Its errored
+    root, live or replayed, keeps that reason up to the error card."""
+    from daimon.core.errors import TurnError
+    from daimon.core.turn.selfhosted_io import root_failed
+    from daimon.core.turn.termination import termination_reason
+
+    cause = root_failed(native_reason)
+    assert cause.category == "upstream" and cause.retryable is False
+    sealed = native_reason == "cleanup_exhausted"
+    assert cause.native_code == ("cleanup_exhausted" if sealed else "host_root_failed")
+    error = TurnError(kind="upstream", message=str(cause), cause=cause)
+    notice = render_termination_notice(termination_reason(error), state=TurnState(error=error))
+    assert notice is not None
+    if sealed:
+        assert (notice.title, notice.next_step) == (
+            "This conversation's tools stopped responding.",
+            "Start a new conversation to carry on.",
+        )
+    else:
+        assert notice.title != "This conversation's tools stopped responding."
+
+
+def test_a_refused_submit_to_a_sealed_conversation_shows_the_same_words() -> None:
+    """A new message to a sealed conversation is refused by the harness with a
+    non-retryable 503; the transport's error gets the same card."""
+    import httpx
+    from daimon.core.errors import TurnError
+    from daimon.core.turn.termination import termination_reason
+    from mux.drivers.selfhosted.transport import checked
+    from mux.errors import ProviderError
+
+    response = httpx.Response(
+        503,
+        json={"detail": {"kind": "cleanup_exhausted", "message": "x", "retryable": False}},
+        request=httpx.Request("POST", "https://harness.invalid/v0/turns"),
+    )
+    with pytest.raises(ProviderError) as caught:
+        checked(response)
+    error = TurnError(kind="upstream", message=str(caught.value), cause=caught.value)
+    notice = render_termination_notice(termination_reason(error), state=TurnState(error=error))
+    assert notice is not None and notice.next_step == "Start a new conversation to carry on."
