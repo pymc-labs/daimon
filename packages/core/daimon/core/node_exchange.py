@@ -107,9 +107,14 @@ def node_identity_key(settings: Settings) -> Ed25519PrivateKey | None:
 
 def tenant_workspace(tenant: TenantRow | None) -> str | None:
     """`<platform>:<workspace id>` of a chat workspace; None for any other."""
-    if tenant is None or tenant.platform not in CHAT_PLATFORMS:
+    return None if tenant is None else workspace_of(tenant.platform, tenant.external_id)
+
+
+def workspace_of(platform: str | None, external_id: str | None) -> str | None:
+    """`<platform>:<workspace id>` of a chat workspace; None for any other. Pure."""
+    if platform not in CHAT_PLATFORMS or external_id is None:
         return None
-    return f"{tenant.platform}:{tenant.external_id}"
+    return f"{platform}:{external_id}"
 
 
 def chat_workspace(platform: str, tenant: TenantRow | None) -> str | None:
@@ -122,6 +127,38 @@ def chat_workspace(platform: str, tenant: TenantRow | None) -> str | None:
 def serves(server: SignedIdentityServer, workspace: str | None) -> bool:
     """Whether a server takes people of `workspace`; the MCP relay's limit too."""
     return workspace is not None and (server.workspaces is None or workspace in server.workspaces)
+
+
+def visible_to(server: SignedIdentityServer, workspace: str | None) -> bool:
+    """Whether `workspace` may see the node of `server` at all: the one rule behind every
+    path that lists, routes to or answers about it. A workspace the server doesn't serve sees
+    no node, as if none were configured; an unrestricted server is seen by all."""
+    return server.workspaces is None or serves(server, workspace)
+
+
+#: Each tenant's workspace, which never changes for a tenant; read once per process.
+_WORKSPACES: dict[uuid.UUID, str | None] = {}
+_MAX_WORKSPACES = 4096
+
+
+async def serves_tenant(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    server: SignedIdentityServer,
+    tenant_id: uuid.UUID,
+) -> bool:
+    """`visible_to` for a tenant's workspace, with no database read for an unrestricted server
+    or a tenant already seen."""
+    if server.workspaces is None:
+        return True
+    if tenant_id not in _WORKSPACES:
+        async with sessionmaker() as db:
+            tenant = await tenants_store.get_tenant(db, tenant_id)
+        if tenant is None:
+            return False
+        if len(_WORKSPACES) >= _MAX_WORKSPACES:
+            _WORKSPACES.clear()
+        _WORKSPACES[tenant_id] = tenant_workspace(tenant)
+    return visible_to(server, _WORKSPACES[tenant_id])
 
 
 def node_token_key(server: SignedIdentityServer) -> str:

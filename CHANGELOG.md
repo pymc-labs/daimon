@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A workspace the data server node doesn't serve no longer sees the node.**
+  The agent editor lists no node and the node's routes answer "Not found." as if none were set up, even for an agent whose MCP server is the node's. The server-skill chat tools answer "Server skills aren't set up here."
+  Neither names the node's label. Workspaces listed in the identity server's `workspaces` are unchanged.
 - **Daimon no longer shows earlier Discord messages to someone who can't read a channel's history.**
   The read and search tools, a mention's channel context, and a reply to a message in another channel check the person's Read Message History, as watches already did.
 - **One Settings group for approvals, thread participation, progress plans and the cost footer.**

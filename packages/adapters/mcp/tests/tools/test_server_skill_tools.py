@@ -38,7 +38,10 @@ from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _NOW = datetime(2026, 1, 1, tzinfo=UTC)
-_NODE = cast(SkillsNode, SimpleNamespace(label="Data", server=SimpleNamespace(name="data")))
+_NODE = cast(
+    SkillsNode,
+    SimpleNamespace(label="Data", server=SimpleNamespace(name="data", workspaces=None)),
+)
 
 
 def make_auth(
@@ -49,6 +52,7 @@ def make_auth(
         tenant_id=tenant_id,
         role=Role.ADMIN if admin else Role.USER,
         platform="discord",
+        external_id="g-1",
         platform_user_id="u1",
         is_admin=admin,
         is_platform_admin=False,
@@ -438,3 +442,79 @@ async def test_tools_when_an_input_is_out_of_bounds_then_refused(
     async with Client(mcp) as client:
         with pytest.raises(ToolError):
             await client.call_tool(tool, args)
+
+
+# Tools that name no node and reach no server for an unserved workspace, with the reason.
+NODE_FREE_TOOLS = {
+    "fork_server_skill": "copies a library skill",
+    "apply_server_skill_update": "applies a held update from the library",
+    "set_server_skill_follow": "records a choice; fetches only when the node is served",
+}
+
+
+async def test_every_server_skill_tool_answers_an_unserved_workspace_as_unconfigured(
+    runtime: McpRuntime,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tools come from the registry; each refuses like an unset node, before any exchange."""
+    tenant = await make_tenant(db_session, workspace_id="g-1")
+    auth = await _member(db_session, tenant, "u-1", admin=True)
+    unserved = SimpleNamespace(
+        label="Zorblax", server=SimpleNamespace(name="data", workspaces=("discord:x",))
+    )
+
+    async def signed_in(_ctx: object) -> AuthIdentity:
+        return auth
+
+    async def never(*_a: object, **_k: object) -> None:
+        pytest.fail("an unserved workspace reached the node, a card or the server")
+
+    monkeypatch.setattr(tools, "_auth", signed_in)
+    monkeypatch.setattr(tools, "skills_node_of", lambda *_a: unserved)
+    for name in ("ask_node", "require_card", "check_mirror", "approve_update", "follow_now"):
+        monkeypatch.setattr(tools, name, never)
+    monkeypatch.setattr(ServesCache, "serves", never)
+
+    mcp = FastMCP("test")
+    tools.register_server_skill_tools(mcp, runtime)
+    async with Client(mcp) as client:
+        registered = {t.name: t for t in await client.list_tools()}
+        assert set(NODE_FREE_TOOLS) <= set(registered), "every allowed tool is still registered"
+        for name, tool in registered.items():
+            if name in NODE_FREE_TOOLS:
+                continue
+            required = tool.inputSchema.get("required", [])
+            args = {field: "x" for field in required}
+            with pytest.raises(ToolError) as refused:
+                await client.call_tool(name, args)
+            assert str(refused.value).endswith("Server skills aren't set up here."), (
+                f"{name} should answer as an unset node: {refused.value}"
+            )
+            assert "Zorblax" not in str(refused.value), f"{name} names the node"
+        assert len(registered) > len(NODE_FREE_TOOLS), "the node-facing tools were found"
+
+
+async def test_follow_when_the_workspace_is_unserved_does_not_fetch_from_the_node(
+    runtime: McpRuntime, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Following records the choice; only a served node is asked for the latest version."""
+    tenant = await make_tenant(db_session, workspace_id="g-1")
+    auth = await _member(db_session, tenant, "u-1")
+    unserved = SimpleNamespace(
+        label="Zorblax", server=SimpleNamespace(name="data", workspaces=("discord:x",))
+    )
+    followed: list[bool] = []
+
+    async def set_follow(*_a: object, follow: bool, **_k: object) -> None:
+        followed.append(follow)
+
+    async def never(*_a: object, **_k: object) -> None:
+        pytest.fail("the node was asked for a skill")
+
+    monkeypatch.setattr(tools, "skills_node_of", lambda *_a: unserved)
+    monkeypatch.setattr(tools, "set_agent_follow", set_follow)
+    monkeypatch.setattr(tools, "follow_now", never)
+    said = await _follow_impl(runtime, auth, "ag_1", "sk_1", True)
+    assert followed == [True], "the choice is kept"
+    assert "Zorblax" not in said, "the answer names no node"

@@ -461,7 +461,7 @@ async def test_a_workspace_the_server_does_not_serve_gets_no_token(
         detail = await c.get("/api/agents/ag_w")
         status = await c.get(_BASE_PATH)
     assert detail.json()["nodes"] == [], "the node is not offered"
-    assert status.json()["reachable"] is False, status.text
+    assert status.status_code == 404, "an unserved workspace sees no node route"
     assert server.subject_tokens == [], "no exchange is attempted"
 
 
