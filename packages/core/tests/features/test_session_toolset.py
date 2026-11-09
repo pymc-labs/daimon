@@ -18,6 +18,7 @@ from daimon.core.features.model_input import (
     builtin_enabled,
 )
 from daimon.core.features.registry import FEATURES
+from daimon.core.features.resolver import ResolvedFeature
 from daimon.core.features.service import (
     FeatureActor,
     change_feature,
@@ -25,6 +26,7 @@ from daimon.core.features.service import (
     read_features,
 )
 from daimon.core.features.snapshot import FeaturePlace, FeatureSnapshot, resolve_one
+from daimon.core.repo_memory_tools import REPO_MEMORY_TOOLS
 from daimon.core.session_snapshot import desired_snapshot, session_mcp_servers, session_tools
 from daimon.core.stores.feature_values import place_values
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
@@ -143,6 +145,27 @@ def test_the_drift_hash_follows_the_toolset() -> None:
     assert before.system_sha256 == after.system_sha256, "the system is untouched"
     off = snapshot(SessionToolset(daimon_tools=False))
     assert before.mcp_servers_sha256 != off.mcp_servers_sha256, "servers drift with Daimon tools"
+
+
+def test_repo_memory_off_turns_its_tools_off() -> None:
+    """A place turning repository memory off turns its four tools off on `daimon-mcp`."""
+    agent = _agent()
+    toolset = agent_toolset(_snapshot(repo_memory="off"), agent)
+    assert toolset.hidden_daimon_tools == REPO_MEMORY_TOOLS, "the place hides the memory tools"
+    tools = session_tools(
+        agent, frozenset(), tool_safety=OPEN_TOOL_SAFETY, public_url=PUBLIC, toolset=toolset
+    )
+    daimon = next(t for t in _dicts(tools) if t.get("mcp_server_name") == "daimon-mcp")
+    off = {c["name"] for c in daimon["configs"] if c.get("enabled") is False}
+    assert off == REPO_MEMORY_TOOLS, "each memory tool is turned off in the session"
+
+
+def test_repo_memory_off_at_the_deployment_hides_nothing() -> None:
+    """Off at the deployment registers no memory tools, so the session's tools are unchanged."""
+    base = _snapshot()
+    features = {**base.features, "repo_memory": ResolvedFeature("repo_memory", "off", "deployment")}
+    snapshot = FeatureSnapshot(base.place, 1, features)
+    assert agent_toolset(snapshot, _agent()) == DEFAULT_TOOLSET, "nothing to hide"
 
 
 def test_selfhosted_turn_tools_leave_out_the_daimon_server() -> None:

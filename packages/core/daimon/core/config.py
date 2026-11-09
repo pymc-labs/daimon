@@ -2866,9 +2866,17 @@ class RepoMemorySettings(BaseModel):
 
 
 def get_repo_memory_settings(settings: object) -> RepoMemorySettings:
-    """Absent or undeclared settings keep the optional feature disabled."""
+    """Absent or undeclared settings keep the optional feature disabled;
+    `DAIMON_FEATURES__REPO_MEMORY` decides over the deprecated `enabled`."""
     value = getattr(settings, "repo_memory", None)
-    return value if isinstance(value, RepoMemorySettings) else RepoMemorySettings()
+    found = value if isinstance(value, RepoMemorySettings) else RepoMemorySettings()
+    features = cast(object, getattr(settings, "features", None))
+    raw = (
+        cast(dict[str, object], features).get("repo_memory") if isinstance(features, dict) else None
+    )
+    if not isinstance(raw, str):
+        return found
+    return found.model_copy(update={"enabled": raw.strip().lower().partition(":")[0] == "on"})
 
 
 class Settings(BaseSettings):

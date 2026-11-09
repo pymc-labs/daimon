@@ -1282,7 +1282,9 @@ async def _repo_memory_state(
     origin: TurnContext,
     unattended: bool,
 ) -> MemoryState:
-    if not get_repo_memory_settings(deps).enabled:
+    if not get_repo_memory_settings(deps).enabled or not prepared.admission.feature_on(
+        "repo_memory"
+    ):
         return MemoryState()
     return await turn_memory_state(
         deps.sessionmaker,
@@ -1504,6 +1506,8 @@ async def run_prepared_turn_impl(
             return LoadedProvider(config, tenant.external_id)
 
     def context_hook_for(admission: Admission, model_id: str | None) -> ContextHook | None:
+        if not admission.feature_on("context_provider"):
+            return None
         revision = admission.backend_revision
         if revision is not None and revision.profile != MANAGED_AGENTS.profile_id:
             return None

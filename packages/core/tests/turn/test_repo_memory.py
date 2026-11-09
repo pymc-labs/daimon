@@ -28,6 +28,7 @@ from daimon.core.turn.prepare import PreparedTurn
         ("unresolved", False, True),
         ("routine", True, False),
         ("disabled", False, False),
+        ("feature_off", False, False),
     ],
 )
 async def test_turn_memory_eligibility_and_principal(
@@ -46,6 +47,7 @@ async def test_turn_memory_eligibility_and_principal(
             hold=object() if case == "hold" else None,
             shared_channel=case == "shared_channel",
             source_shared=case == "source_shared",
+            feature_on=lambda key: not (case == "feature_off" and key == "repo_memory"),  # pyright: ignore[reportUnknownLambdaType]
         ),
     )
     prepared = cast(
@@ -77,7 +79,7 @@ async def test_turn_memory_eligibility_and_principal(
         )
     finally:
         run.current_origin_id.reset(token)
-    if case == "disabled":
+    if case in {"disabled", "feature_off"}:
         assert result.prefix == ""
         prefix.assert_not_called()
         return

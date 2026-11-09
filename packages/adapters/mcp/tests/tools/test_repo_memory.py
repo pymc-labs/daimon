@@ -90,7 +90,31 @@ def setup_call(
         "effective_app_grant_view",
         AsyncMock(return_value=(((grant, target, "read"),), None, None, ())),
     )
+    monkeypatch.setattr(tools, "resolve_features", AsyncMock(return_value=_features("on")))
     return runtime, auth, origin
+
+
+def _features(value: str) -> SimpleNamespace:
+    def on(key: str) -> bool:
+        return key == "repo_memory" and value == "on"
+
+    return SimpleNamespace(on=on)
+
+
+async def test_repo_memory_off_at_the_place_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A place with repository memory off refuses the tools, whatever the session holds."""
+    runtime, auth, _ = setup_call(monkeypatch)
+    resolve = AsyncMock(return_value=_features("off"))
+    monkeypatch.setattr(tools, "resolve_features", resolve)
+    with pytest.raises(ToolError, match="off here"):
+        await tools.resolve_repo(runtime, auth, origin_context_id="origin")
+    assert resolve.await_args is not None, "the place's features were read"
+    place = resolve.await_args.args[2]
+    assert (place.channel_id, place.thread_id, place.agent_id) == (
+        "channel",
+        "thread",
+        "ma_agent",
+    ), "resolved at the origin's place"
 
 
 async def test_bound_repo_needs_no_personal_link(monkeypatch: pytest.MonkeyPatch) -> None:

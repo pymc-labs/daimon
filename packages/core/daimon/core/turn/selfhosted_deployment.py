@@ -309,6 +309,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
         )
         if not toolset.daimon_tools:
             host_policy["daimon-mcp/*"] = "deny"
+        host_policy.update({f"daimon-mcp/{name}": "deny" for name in toolset.hidden_daimon_tools})
         from daimon.core.channel_skills import platform_skill_refs
         from daimon.core.stores.channel_skills import list_channel_skills
         from daimon.core.stores.neutral_catalog import PostgresNeutralCatalog

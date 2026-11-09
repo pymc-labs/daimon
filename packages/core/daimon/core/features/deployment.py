@@ -1,6 +1,6 @@
 """The deployment tier: `DAIMON_FEATURES__<KEY>`, or a feature's deprecated variable.
 
-The only reader of `progress_plans.mode` and `thread_participation.mode`
+The only reader of `progress_plans.mode`, `thread_participation.mode` and `mcp_context.enabled`
 (`tests/features/test_feature_contracts.py` holds every other reader to that).
 """
 
@@ -15,6 +15,7 @@ from daimon.core.config import (
     ProgressPlansSettings,
     Settings,
     ThreadParticipationSettings,
+    get_repo_memory_settings,
 )
 from daimon.core.features.registry import FEATURES, FeatureSpec, parse_deployment
 from daimon.core.features.resolver import TierValue, as_cascade, from_mode, resolve_feature
@@ -33,7 +34,18 @@ def _legacy_mode(settings: Settings, key: str) -> CascadeMode | None:
         return settings.progress_plans.mode
     if key == "participation" and "mode" in settings.thread_participation.model_fields_set:
         return settings.thread_participation.mode
+    if key == "mcp_briefing" and "enabled" in settings.mcp_context.model_fields_set:
+        return CascadeMode.ON if settings.mcp_context.enabled else CascadeMode.OFF
     return None
+
+
+def _repo_memory(settings: Settings) -> TierValue:
+    """Repository memory is the operator's to turn on, with its tools: Off is locked."""
+    if "enabled" in get_repo_memory_settings(settings).model_fields_set:
+        _warn_legacy("DAIMON_REPO_MEMORY__ENABLED", "repo_memory")
+    if get_repo_memory_settings(settings).enabled:
+        return TierValue("deployment", "on")
+    return TierValue("deployment", "off", True)
 
 
 @cache
@@ -52,6 +64,8 @@ def deployment_value(settings: Settings | None, spec: FeatureSpec) -> TierValue 
         return TierValue("deployment", value, locked)
     if settings is None:
         return None
+    if spec.key == "repo_memory":
+        return _repo_memory(settings)
     mode = _legacy_mode(settings, spec.key)
     if mode is None:
         return None

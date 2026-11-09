@@ -62,6 +62,33 @@ Finished answers end with a footer naming the agent, the time taken, what the an
 | Levels | Server, Channel, Thread |
 | Combines | Most specific wins |
 
+## Repository memory
+
+Each message starts with the notes the agent keeps in its repository memory. The deployment turns it on, with the memory tools; below that it can only be turned off, which also turns the memory tools off.
+
+| | |
+| --- | --- |
+| Key | `repo_memory` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Server, Agent, Channel, Thread |
+| Combines | Off above is a ceiling |
+| Deprecated | `DAIMON_REPO_MEMORY__ENABLED` |
+
+## Context provider
+
+A context provider set up for this channel or agent adds what it knows to each message. Off skips it here. Managed Agents only.
+
+| | |
+| --- | --- |
+| Key | `context_provider` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Server, Agent, Channel, Thread |
+| Combines | Off above is a ceiling |
+| Levels on Gemini |  |
+| Levels on OpenAI |  |
+
 ## Setup guidance
 
 Instructions at the top of the agent's prompt on where its keys, repo, memory and files are and what it may share. Off leaves the agent's own prompt and the safety rules. Applies when the agent is next saved or synced.
@@ -76,7 +103,7 @@ Instructions at the top of the agent's prompt on where its keys, repo, memory an
 
 ## Daimon tools
 
-Daimon's own tools: chat, settings, routines, memory and the rest. On keeps at least the conversation ids in the turn controls, which the tools need. An isolated agent never has them, and Gemini and OpenAI agents keep them. Applies from the next message in a conversation.
+Daimon's own tools: chat, settings, routines, memory and the rest. On keeps at least the conversation ids in the turn controls, which the tools need. An isolated agent never has them. Gemini and OpenAI agents always have them, so it can't be changed there. Applies from the next message in a conversation.
 
 | | |
 | --- | --- |
@@ -85,8 +112,6 @@ Daimon's own tools: chat, settings, routines, memory and the rest. On keeps at l
 | Default | `on` |
 | Levels | Deployment, Server, Agent, Channel, Thread |
 | Combines | Most specific wins |
-| Levels on Gemini | Deployment, Server, Agent |
-| Levels on OpenAI | Deployment, Server, Agent |
 
 ## Built-in tool: bash
 
@@ -223,3 +248,18 @@ Each message tells the agent the web app's address and the pages it may link to.
 | Default | `on` |
 | Levels | Deployment, Server, Agent, Channel, Thread |
 | Combines | Most specific wins |
+
+## MCP server briefing
+
+Before each chat message, the agent's MCP servers that offer a context tool are sent the message, and their answers go in front of it as quoted data. Managed Agents only.
+
+| | |
+| --- | --- |
+| Key | `mcp_briefing` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Server, Agent, Channel, Thread |
+| Combines | Most specific wins |
+| Levels on Gemini |  |
+| Levels on OpenAI |  |
+| Deprecated | `DAIMON_MCP_CONTEXT__ENABLED` |

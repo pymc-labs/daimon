@@ -59,7 +59,13 @@ from daimon.core.channel_skills import turn_channel_skills, turn_platform_skills
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
-from daimon.core.features.model_input import TOOL_KEYS, TURN_KEYS, SessionToolset, agent_toolset
+from daimon.core.features.model_input import (
+    PER_TURN_KEYS,
+    TOOL_KEYS,
+    TURN_KEYS,
+    SessionToolset,
+    agent_toolset,
+)
 from daimon.core.features.snapshot import FeaturePlace, FeatureSnapshot, resolve_features
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import (
@@ -416,6 +422,11 @@ class Admission:
     def toolset(self) -> SessionToolset:
         """What this place's features change in the agent's session tools."""
         return agent_toolset(self.features, self.agent)
+
+    def feature_on(self, key: str) -> bool:
+        """`key` at this place; a hand-built admission, or a key not resolved, keeps it on."""
+        found = self.features.features.get(key) if self.features is not None else None
+        return found is None or found.on
 
     @property
     def is_admin(self) -> bool:
@@ -1717,7 +1728,7 @@ async def _admit_gates(
         result,
         features=await resolve_features(
             deps.sessionmaker,
-            None,
+            deps.settings,
             FeaturePlace.of(
                 tenant_id,
                 platform,
@@ -1726,7 +1737,7 @@ async def _admit_gates(
                 agent_id=agent.id,
                 backend=running_on(result)["provider"],
             ),
-            keys=(*TURN_KEYS, *TOOL_KEYS),
+            keys=(*TURN_KEYS, *TOOL_KEYS, *PER_TURN_KEYS),
         ),
     )
     if follow_generation is not None:

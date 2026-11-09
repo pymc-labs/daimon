@@ -106,6 +106,8 @@ class TurnDeps:
     # server through the router (`daimon.core.sessions.create_session`).
     github_mcp_router: bool = False
     repo_memory: RepoMemorySettings = field(default_factory=RepoMemorySettings)
+    # The deployment tier of every feature, legacy variables included; None reads the env.
+    settings: Settings | None = None
     # Required: safety off is the explicit `enabled=False` policy from settings.
     tool_safety: ToolSafetyPolicy = field(kw_only=True)
     preparation_gate: PreparationGate = field(default_factory=lambda: PreparationGate(1))
@@ -231,6 +233,7 @@ def build_turn_deps(
         ),
         direct_message_policies=settings.direct_message_policies,
         repo_memory=get_repo_memory_settings(settings),
+        settings=settings if isinstance(cast(object, settings), Settings) else None,
         anthropic=anthropic,
         messages=anthropic,
         turn_runtime_factory=build_channel_runtime,

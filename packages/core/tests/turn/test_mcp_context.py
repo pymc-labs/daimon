@@ -14,7 +14,17 @@ import httpx
 import pytest
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.agent_mcp_credentials import ResolvedMcpCredential
-from daimon.core.config import McpContextSettings
+from daimon.core.config import (
+    AnthropicSettings,
+    DatabaseSettings,
+    DiscordSettings,
+    McpContextSettings,
+    Settings,
+)
+from daimon.core.features.deployment import deployment_value
+from daimon.core.features.registry import FEATURES
+from daimon.core.features.resolver import ResolvedFeature, TierValue
+from daimon.core.features.snapshot import FeaturePlace, FeatureSnapshot
 from daimon.core.scope import ResolvedConfig
 from daimon.core.tool_safety import (
     OPEN_TOOL_SAFETY,
@@ -44,7 +54,7 @@ from daimon.core.turn.mcp_context import (
 )
 from daimon.core.turn_hold import TurnHold
 from daimon.testing.ma_models import ma_agent, ma_environment
-from pydantic import JsonValue
+from pydantic import JsonValue, PostgresDsn, SecretStr
 
 URL = "https://context.example.com/mcp"
 TENANT = uuid.UUID("00000000-0000-0000-0000-00000000000a")
@@ -499,13 +509,19 @@ async def test_fetch_only_for_listed_tenants() -> None:
     assert await rig.ask() != "", "a listed tenant is asked"
 
 
-def test_build_returns_none_when_disabled() -> None:
-    assert (
-        build_turn_context_fetch(
-            McpContextSettings(enabled=False), credentials=Loader(), id_key=KEY
-        )
-        is None
-    ), "the setting turns it off"
+def test_the_legacy_switch_is_the_features_deployment_tier() -> None:
+    """`DAIMON_MCP_CONTEXT__ENABLED=false` is `mcp_briefing` Off at the deployment."""
+    off = McpContextSettings(enabled=False)
+    assert build_turn_context_fetch(off, credentials=Loader(), id_key=KEY) is not None
+    settings = Settings.model_validate(
+        {
+            "database": DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
+            "anthropic": AnthropicSettings(api_key=SecretStr("test")),
+            "discord": DiscordSettings(bot_token=SecretStr("test")),
+            "mcp_context": off,
+        }
+    )
+    assert deployment_value(settings, FEATURES["mcp_briefing"]) == TierValue("deployment", "off")
     assert McpContextSettings().enabled, "on by default"
 
 
@@ -614,6 +630,12 @@ async def test_prefix_asks_about_a_persons_chat_message_only() -> None:
     assert await _prefix(fetch, _admission(shared_channel=True)) == "", "a shared channel"
     assert await _prefix(fetch, _admission(origin_seal_ids=frozenset({"C1"}))) == "", "sealed"
     assert await _prefix(fetch, _admission(), cancel=stopped) == "", "already stopped"
+    off = FeatureSnapshot(
+        FeaturePlace(TENANT, "slack"),
+        0,
+        {"mcp_briefing": ResolvedFeature("mcp_briefing", "off", "channel")},
+    )
+    assert await _prefix(fetch, _admission(features=off)) == "", "mcp_briefing Off here"
     assert fetch.calls == [], "none of those reach a server"
 
     assert await _prefix(fetch, _admission()) == "<mcp_context>ok</mcp_context>\n\n", "chat"

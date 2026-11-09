@@ -60,7 +60,7 @@ from daimon.core.mcp_server_url import (
     session_mcp_url,
 )
 from daimon.core.model_presets import model_choice_id
-from daimon.core.repo_memory_tools import suppress_legacy_readers
+from daimon.core.repo_memory_tools import disable_mcp_tools, suppress_legacy_readers
 from daimon.core.tool_safety import (
     DAIMON_SERVER_NAME,
     ToolSafetyPolicy,
@@ -608,9 +608,14 @@ def session_tools(
         daimon_rule_tools=daimon_rule_tools,
     )
     payload = gated if gated is not None else [tool.model_dump(mode="json") for tool in visible]
+    hidden_tools = frozenset[str]() if toolset is None else toolset.hidden_daimon_tools
+    if not legacy_memory_servers and not hidden_tools:
+        return visible if gated is None else _TOOLS.validate_python(gated)
     if legacy_memory_servers:
-        return _TOOLS.validate_python(suppress_legacy_readers(payload, legacy_memory_servers))
-    return visible if gated is None else _TOOLS.validate_python(gated)
+        payload = suppress_legacy_readers(payload, legacy_memory_servers)
+    if hidden_tools:
+        payload = disable_mcp_tools(payload, (DAIMON_SERVER_NAME,), hidden_tools)
+    return _TOOLS.validate_python(payload)
 
 
 def session_mcp_servers(

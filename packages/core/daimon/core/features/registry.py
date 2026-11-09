@@ -44,6 +44,8 @@ _PROVIDER_ONLY: Final[Mapping[str, tuple[Tier, ...]]] = {
     "openai": ("deployment", "workspace", "agent"),
 }
 """Gemini and OpenAI compile one revision per agent, so a model feature stops at the agent."""
+_MANAGED_AGENTS_ONLY: Final[Mapping[str, tuple[Tier, ...]]] = {"gemini": (), "openai": ()}
+"""Runs only on Managed Agents turns; Gemini and OpenAI agents never get it."""
 BACKEND_NAMES: Final[Mapping[str, str]] = {
     "anthropic": "Managed Agents",
     "gemini": "Gemini",
@@ -210,6 +212,24 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     ),
+    FeatureSpec(
+        key="mcp_briefing",
+        name="MCP server briefing",
+        category="model_input",
+        effect="model",
+        values=_ON_OFF,
+        default="on",
+        tiers=("deployment", "workspace", "agent", "channel", "thread"),
+        binds="turn",
+        doc=(
+            "Before each chat message, the agent's MCP servers that offer a context tool "
+            "are sent the message, and their answers go in front of it as quoted data. "
+            "Managed Agents only."
+        ),
+        backend_tiers=_MANAGED_AGENTS_ONLY,
+        authority=Authority(DelegatedAction.AGENT_SETTINGS),
+        legacy_env=("DAIMON_MCP_CONTEXT__ENABLED",),
+    ),
 )
 
 
@@ -285,6 +305,40 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
             "Finished answers end with a footer naming the agent, the time taken, what the "
             "answer cost and the money left."
         ),
+        authority=Authority(DelegatedAction.AGENT_SETTINGS),
+    ),
+    FeatureSpec(
+        key="repo_memory",
+        name="Repository memory",
+        category="capabilities",
+        effect="capability",
+        values=_ON_OFF,
+        default="off",
+        tiers=("deployment", "workspace", "agent", "channel", "thread"),
+        binds="turn",
+        doc=(
+            "Each message starts with the notes the agent keeps in its repository memory. "
+            "The deployment turns it on, with the memory tools; below that it can only be "
+            "turned off, which also turns the memory tools off."
+        ),
+        platforms=EVERY_PLATFORM,
+        authority=Authority(DelegatedAction.AGENT_SETTINGS),
+        legacy_env=("DAIMON_REPO_MEMORY__ENABLED",),
+    ),
+    FeatureSpec(
+        key="context_provider",
+        name="Context provider",
+        category="capabilities",
+        effect="capability",
+        values=_ON_OFF,
+        default="on",
+        tiers=("deployment", "workspace", "agent", "channel", "thread"),
+        binds="turn",
+        doc=(
+            "A context provider set up for this channel or agent adds what it knows to "
+            "each message. Off skips it here. Managed Agents only."
+        ),
+        backend_tiers=_MANAGED_AGENTS_ONLY,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     ),
     *_MODEL_INPUT,
