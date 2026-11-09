@@ -35,7 +35,11 @@ incremental deployment.
 Discord and scheduler have HTTP liveness probes on their event-loop responders,
 ports 8081 and 8082 respectively. These ports have no public ingress.
 MCP (8765) and Teams (3978) have public HTTPS ingress; Discord and scheduler
-have none. Serving commands override the image entrypoint, matching Compose:
+have none. Set `mcpPublicIngress` to false to keep MCP reachable only from apps
+in the same Container Apps environment while Teams stays public. Its URL
+(`DAIMON_MCP__PUBLIC_URL`) then uses the environment's `internal` hostname. Use
+this only when the harness runs in that environment: a hosted model backend,
+and a coding tool on someone's computer, cannot reach a private MCP. Serving commands override the image entrypoint, matching Compose:
 seeding belongs to the init job. No notebook/report host, Slack, harness image
 or hosted-agent version is deployed by this stack. The Azure Bot for Teams is
 optional (`deployTeamsBot`); see [Teams bot](#teams-bot).

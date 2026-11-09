@@ -42,6 +42,8 @@ param vaultPurgeProtection bool = false
 @allowed(['discord', 'teams', 'mcp', 'scheduler'])
 @description('Serving apps to create. Removing an entry does not stop an existing app.')
 param services array = ['discord', 'teams', 'mcp', 'scheduler']
+@description('False keeps MCP reachable only from apps in this Container Apps environment, while Teams stays public. Backends and coding tools outside the environment then cannot reach MCP.')
+param mcpPublicIngress bool = true
 
 @description('Optional nonsecret environment variables, common to all services. Put credentials in secretNames instead.')
 param appEnvironment object = {}
@@ -127,7 +129,9 @@ module ai './modules/ai.bicep' = if (deployAi) {
 
 var commonEnvironment = union(
   {
-    DAIMON_MCP__PUBLIC_URL: 'https://${stem}-mcp.${foundation.outputs.defaultDomain}/mcp'
+    DAIMON_MCP__PUBLIC_URL: mcpPublicIngress
+      ? 'https://${stem}-mcp.${foundation.outputs.defaultDomain}/mcp'
+      : 'https://${stem}-mcp.internal.${foundation.outputs.defaultDomain}/mcp'
     // Four processes on a burstable database: bound their combined connection budget.
     DAIMON_DATABASE__POOL_SIZE: '3'
     DAIMON_DATABASE__MAX_OVERFLOW: '2'
@@ -215,6 +219,7 @@ module apps './modules/app.bicep' = [
       image: containerImage
       command: service.command
       port: service.port
+      externalIngress: service.name != 'mcp' || mcpPublicIngress
       environment: union(
         service.name == 'mcp' ? artifactsEnvironment : {},
         commonEnvironment,

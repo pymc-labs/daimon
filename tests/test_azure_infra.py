@@ -965,3 +965,52 @@ def test_bootstrap_without_a_vault_makes_no_azure_call(outside_git: Path) -> Non
     assert _az_calls(env) == []
     again = _run("bootstrap_secrets.py", env, "--state", str(outside_git / "b"))
     assert again.returncode != 0 and "never regenerates" in again.stderr
+
+
+def _apps(snapshot: dict) -> dict[str, dict]:
+    return {
+        r["name"].rsplit("-", 1)[-1]: r
+        for r in snapshot["predictedResources"]
+        if r["type"] == "Microsoft.App/containerApps"
+    }
+
+
+def _mcp_urls(apps: dict[str, dict]) -> set[str]:
+    return {
+        e["value"]
+        for app in apps.values()
+        for e in app["properties"]["template"]["containers"][0]["env"]
+        if e["name"] == "DAIMON_MCP__PUBLIC_URL"
+    }
+
+
+SERVING = (
+    "containerImage = 'example.azurecr.io/daimon@sha256:" + "0" * 64 + "'",
+    "deployServices = true",
+)
+
+
+def test_mcp_can_stay_private_while_teams_is_public(
+    templates: dict[str, dict], tmp_path: Path
+) -> None:
+    for entrypoint in ("main.bicep", "azd/main.bicep"):
+        assert templates[entrypoint]["parameters"]["mcpPublicIngress"]["defaultValue"] is True
+    assert templates["modules/app.bicep"]["parameters"]["externalIngress"]["defaultValue"] is True
+
+    code, diagnostics, default = _snapshot(tmp_path, *SERVING)
+    assert code == 0, diagnostics
+    apps = _apps(default)
+    assert set(apps) == {"discord", "teams", "mcp", "scheduler"}
+    assert apps["mcp"]["properties"]["configuration"]["ingress"]["external"] is True
+    assert apps["teams"]["properties"]["configuration"]["ingress"]["external"] is True
+    [url] = _mcp_urls(apps)
+    assert "-mcp.{" in url and ".internal." not in url, "current installs keep a public MCP"
+
+    code, diagnostics, private = _snapshot(tmp_path, *SERVING, "mcpPublicIngress = false")
+    assert code == 0, diagnostics
+    apps = _apps(private)
+    assert apps["mcp"]["properties"]["configuration"]["ingress"]["external"] is False
+    assert apps["teams"]["properties"]["configuration"]["ingress"]["external"] is True
+    assert apps["discord"]["properties"]["configuration"].get("ingress") is None
+    [url] = _mcp_urls(apps)
+    assert "-mcp.internal.{" in url, "every process uses the environment-internal MCP URL"
