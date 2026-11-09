@@ -1,13 +1,14 @@
-"""`/settings`: the shared Settings panel (`daimon.core.scope_settings`) for this channel or
-thread, one select per row. Every press is applied by the core writer, which re-checks
-the presser live.
+"""`/settings`: the shared Settings panel (`daimon.core.settings_panel`) for this channel or
+thread. One message: a select per control and a Back button, redrawn on each press. Every
+change is applied by the core writer, which re-checks the presser live.
 
 PEP-563 deferred evaluation breaks discord.py 2.x slash-param introspection
 for some signatures, so this module does NOT enable annotations futures.
 """
 
 import uuid
-from typing import cast
+from collections.abc import Callable, Coroutine
+from typing import Any, cast
 
 from daimon.adapters.discord.checks import (
     is_guild_admin,
@@ -17,18 +18,12 @@ from daimon.adapters.discord.checks import (
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.adapters.discord.theme import COLOR_BLURPLE
+from daimon.adapters.discord.theme import COLOR_BLURPLE, COLOR_RED
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.platform_words import DESCRIPTIONS
-from daimon.core.scope_settings import (
-    SettingsActor,
-    SettingsPanel,
-    SettingsPlace,
-    apply_choice,
-    chat_actor,
-    load_panel,
-)
+from daimon.core.scope_settings import SettingsActor, SettingsPlace, chat_actor
+from daimon.core.settings_panel import PanelScreen, open_panel, press, tenant_agents
 
 import discord
 from discord import Interaction, app_commands
@@ -66,42 +61,82 @@ def place_of(interaction: BotInteraction) -> SettingsPlace:
 
 
 class SettingsView(discord.ui.View):
+    """One screen of the panel: its selects (each one control) and a way back."""
+
     def __init__(
         self,
         runtime: DiscordRuntime,
         tenant_id: uuid.UUID,
         place: SettingsPlace,
-        panel: SettingsPanel,
+        screen: PanelScreen,
     ) -> None:
         super().__init__(timeout=300)
         self.runtime, self.tenant_id, self.place = runtime, tenant_id, place
-        for row in panel.rows:
-            if row.choices:
-                select: discord.ui.Select[SettingsView] = discord.ui.Select(
-                    placeholder=row.placeholder,
-                    options=[
-                        discord.SelectOption(label=text, value=v) for v, text in row.choices[:25]
-                    ],
-                )
-                select.callback = self.change
-                self.add_item(select)
+        for control in screen.selects:
+            select: discord.ui.Select[SettingsView] = discord.ui.Select(
+                placeholder=control.placeholder,
+                options=[
+                    discord.SelectOption(
+                        label=o.label[:100], value=o.value, description=o.description[:100] or None
+                    )
+                    for o in control.options
+                ],
+            )
+            select.callback = self.change
+            self.add_item(select)
+        if screen.back is not None:
+            back: discord.ui.Button[SettingsView] = discord.ui.Button(label=screen.back.label)
+            back.callback = self._go(screen.back.value)  # type: ignore[method-assign]
+            self.add_item(back)
+
+    def _go(self, op: str) -> Callable[[BotInteraction], Coroutine[Any, Any, None]]:
+        async def go(interaction: BotInteraction) -> None:
+            await self.pressed(interaction, op)
+
+        return go
 
     async def change(self, interaction: BotInteraction) -> None:
-        await interaction.response.defer(ephemeral=True)
+        values = cast("list[object]", (interaction.data or {}).get("values") or [None])
+        await self.pressed(interaction, values[0])
+
+    async def pressed(self, interaction: BotInteraction, raw: object) -> None:
+        await interaction.response.defer()
         if await resolve_tenant_for_interaction(interaction.client, interaction) != self.tenant_id:
             await interaction.followup.send(embed=build_notice_embed(OTHER_SERVER), ephemeral=True)
             return
-        values = cast("list[object]", (interaction.data or {}).get("values") or [None])
-        done = await apply_choice(
+        screen = await press(
             self.runtime.sessionmaker,
             self.runtime.settings,
             await _actor(self.runtime, interaction, self.tenant_id),
-            values[0],
+            raw,
             self.place,
+            agents=tenant_agents(self.runtime.anthropic, self.tenant_id),
         )
-        if done is not None:
-            embed = build_notice_embed(done[1], neutral=done[0])
-            await interaction.followup.send(embed=embed, ephemeral=True)
+        if screen is not None:
+            await _draw(interaction, self.runtime, self.tenant_id, self.place, screen)
+
+
+def screen_embed(screen: PanelScreen) -> discord.Embed:
+    text = "\n".join(screen.lines)
+    if screen.notice:
+        text = f"{text}\n\n{screen.notice}"
+    color = COLOR_BLURPLE if screen.ok else COLOR_RED
+    return discord.Embed(title=screen.title, description=text[:4096], color=color)
+
+
+async def _draw(
+    interaction: BotInteraction,
+    runtime: DiscordRuntime,
+    tenant_id: uuid.UUID,
+    place: SettingsPlace,
+    screen: PanelScreen,
+) -> None:
+    view = SettingsView(runtime, tenant_id, place, screen)
+    await interaction.edit_original_response(
+        embed=screen_embed(screen),
+        view=view if view.children else None,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
 
 
 @app_commands.guild_only()
@@ -121,16 +156,14 @@ class SettingsCog(commands.Cog):
                 raise UserFacingError(RUN_IN_CHANNEL)
             place = place_of(interaction)
             actor = await _actor(runtime, interaction, tenant_id)
-            panel = await load_panel(runtime.sessionmaker, runtime.settings, actor, place)
-            embed = discord.Embed(title=panel.title, description=panel.subline, color=COLOR_BLURPLE)
-            for row in panel.rows:
-                embed.add_field(name=row.name, value=row.summary[:1024], inline=False)
-            view = SettingsView(runtime, tenant_id, place, panel)
-            await interaction.edit_original_response(
-                embed=embed,
-                view=view if view.children else None,
-                allowed_mentions=discord.AllowedMentions.none(),
+            screen = await open_panel(
+                runtime.sessionmaker,
+                runtime.settings,
+                actor,
+                place,
+                agents=tenant_agents(runtime.anthropic, tenant_id),
             )
+            await _draw(interaction, runtime, tenant_id, place, screen)
         except (DaimonError, discord.HTTPException) as exc:
             await interaction.edit_original_response(
                 content=None,

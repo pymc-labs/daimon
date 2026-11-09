@@ -37,7 +37,7 @@ below then cannot change it. `disabled` means Off and locked.
 Set the deployment level with `DAIMON_FEATURES__<KEY>`, for example
 `DAIMON_FEATURES__PROGRESS_PLANS=on:locked`; a dot in a key is an
 underscore (`DAIMON_FEATURES__TOOL_BASH`). Set the others with `/settings` in chat,
-the `change_setting` MCP tool or the web app.
+the `change_setting` MCP tool, the web app or `daimon features`.
 """
 
 

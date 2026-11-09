@@ -8,7 +8,6 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
-from daimon.core import scope_settings as core
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Subject
 from daimon.core.channel_changes import ChannelChangeRefused, Expected
@@ -20,14 +19,10 @@ from daimon.core.scope_cascade import CascadeMode
 from daimon.core.scope_settings import (
     OVERRIDES_OFF,
     SPECS,
-    LevelValue,
     SettingsActor,
     SettingsPlace,
-    SettingView,
     apply_choice,
-    build_settings_panel,
     change_setting,
-    decode_choice,
     moved_to_settings,
     read_settings,
     setting_refusal,
@@ -240,53 +235,6 @@ async def test_a_lock_above_rules_out_other_values_below(
     assert approvals.value.reason == "bad_lock"
 
 
-def _view(
-    key: Any, *, own: tuple[str, ...] = ("server", "channel", "thread"), available: bool = True
-) -> SettingView:
-    levels = tuple(LevelValue(level, "inherit") for level in own)  # type: ignore[arg-type]
-    return SettingView(
-        key, SPECS[key].name, levels, "on", "Ask", "default", available, True, "Note."
-    )
-
-
-@pytest.mark.parametrize(
-    ("admin", "native", "place", "expected"),
-    [
-        (False, False, THREAD, {"participation": ["Thread: On", "Thread: Off"]}),
-        (True, True, THREAD, {
-            "approvals": [f"{lv}: {v}" for lv in ("Server", "Channel", "Thread") for v in ("Ask", "Allow writes")],
-            "participation": [f"{lv}: {v}" for lv in ("Server", "Channel") for v in ("On", "Off", "Disabled")]
-            + ["Thread: On", "Thread: Off"],
-            "cost_footer": [f"{lv}: {v}" for lv in ("Server", "Channel", "Thread") for v in ("Shown", "Hidden")],
-        }),
-        (True, True, SettingsPlace.of("slack", "C1", None), {"approvals": ["Workspace: Ask", "Workspace: Allow writes", "Channel: Ask", "Channel: Allow writes"]}),
-    ],
-)  # fmt: skip
-def test_the_panel_offers_each_viewer_their_choices(
-    admin: bool, native: bool, place: SettingsPlace, expected: dict[str, list[str]]
-) -> None:
-    levels = tuple(place.levels())
-    views = [
-        _view("approvals", own=levels),
-        _view("participation", own=levels),
-        _view("cost_footer", own=levels),
-    ]
-    if place.platform == "slack":
-        views = views[:1]
-    panel = build_settings_panel(views, place=place, admin=admin, native_admin=native)
-    offered = {row.key: [label for _, label in row.choices] for row in panel.rows if row.choices}
-    assert offered == expected
-    assert panel.subline == core.PICK
-    nobody = build_settings_panel(
-        [_view("approvals")], place=THREAD, admin=True, native_admin=False
-    )
-    assert nobody.subline == "Only a server admin can change these. Ask a server admin."
-    off = build_settings_panel(
-        [_view("participation", available=False)], place=THREAD, admin=True, native_admin=True
-    )
-    assert off.rows[0].choices == ()
-
-
 @pytest.mark.parametrize(
     "raw", ["approvals:thread:maybe", "colour:server:on", "a:b", "approvals:server:off:x", None, 3]
 )
@@ -294,7 +242,6 @@ async def test_a_forged_choice_writes_and_says_nothing(
     db_session: AsyncSession, db_session_factory: Sessions, native: AsyncMock, raw: object
 ) -> None:
     tenant = await _tenant(db_session)
-    assert decode_choice(raw) is None
     assert (
         await apply_choice(db_session_factory, _settings(), _actor(tenant, "admin"), raw, THREAD)
         is None

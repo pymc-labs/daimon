@@ -621,16 +621,32 @@ def builtin_writer(
 def builtin_reader(
     deps: AgentEditDeps, *, actor: AgentActor, ma_agent_id: str
 ) -> Callable[[], Awaitable[dict[str, bool | None]]]:
-    """`FeatureActor.read_builtins` for one agent: its built-in tools as `tool.*` reads them."""
+    """`FeatureActor.read_builtins` for one agent: its built-in tools as `tool.*` reads them.
+    Anyone in the tenant may read them, as the agent's page shows them."""
 
     async def read() -> dict[str, bool | None]:
-        agent = await load_editable_agent(deps, actor=actor, ma_agent_id=ma_agent_id)
+        agent = await load_tenant_agent(deps, actor=actor, ma_agent_id=ma_agent_id)
         return agent_builtins([ma_tool_to_param(t) for t in agent.tools])
 
     return read
 
 
 # ---------- Authorized entry points ----------
+
+
+async def load_tenant_agent(
+    deps: AgentEditDeps, *, actor: AgentActor, ma_agent_id: str
+) -> BetaManagedAgentsAgent:
+    """The tenant's live agent ``ma_agent_id``, for reading."""
+    try:
+        agent = await retrieve_agent(deps.client, ma_agent_id, scope=actor.scope())
+    except (anthropic.NotFoundError, ScopeViolation) as exc:
+        raise AgentEditError("No such agent.", kind="not_found") from exc
+    if agent.archived_at is not None or agent.metadata.get(MA_METADATA_KEY_TENANT) != str(
+        actor.tenant_id
+    ):
+        raise AgentEditError("No such agent.", kind="not_found")
+    return agent
 
 
 async def load_editable_agent(
@@ -641,14 +657,7 @@ async def load_editable_agent(
     The owner (or a co-owner) or an admin, on an agent that is not defaults-managed
     (`Action.CHANGE_SHARED_AGENT`, spec family).
     """
-    try:
-        agent = await retrieve_agent(deps.client, ma_agent_id, scope=actor.scope())
-    except (anthropic.NotFoundError, ScopeViolation) as exc:
-        raise AgentEditError("No such agent.", kind="not_found") from exc
-    if agent.archived_at is not None or agent.metadata.get(MA_METADATA_KEY_TENANT) != str(
-        actor.tenant_id
-    ):
-        raise AgentEditError("No such agent.", kind="not_found")
+    agent = await load_tenant_agent(deps, actor=actor, ma_agent_id=ma_agent_id)
     await check_may_edit(deps, actor=actor, agent=agent)
     return agent
 

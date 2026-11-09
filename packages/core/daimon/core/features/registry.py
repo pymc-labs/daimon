@@ -171,8 +171,8 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         binds="session_mutable",
         doc=(
             "Daimon's own tools: chat, settings, routines, memory and the rest. "
-            "On keeps at least the conversation ids in the turn controls, which the tools "
-            "need. An isolated agent never has them. Gemini and OpenAI agents always have "
+            "On keeps at least the conversation ids the tools need. An isolated agent "
+            "never has them. Gemini and OpenAI agents always have "
             "them, so it can't be changed there. Applies from the next message in a "
             "conversation."
         ),
@@ -183,7 +183,7 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
     *(_builtin(tool) for tool in BUILTIN_TOOLS),
     FeatureSpec(
         key="turn_controls",
-        name="Turn controls",
+        name="Message controls",
         category="model_input",
         effect="model",
         values={"full": "Full", "origin": "Origin only", "minimal": "Minimal"},
@@ -214,7 +214,7 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
     ),
     FeatureSpec(
         key="mcp_briefing",
-        name="MCP server briefing",
+        name="Connected server briefing",
         category="model_input",
         effect="model",
         values=_ON_OFF,
@@ -222,7 +222,7 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment", "workspace", "agent", "channel", "thread"),
         binds="turn",
         doc=(
-            "Before each chat message, the agent's MCP servers that offer a context tool "
+            "Before each chat message, the agent's connected servers that offer a context tool "
             "are sent the message, and their answers go in front of it as quoted data. "
             "Managed Agents only."
         ),
@@ -374,10 +374,9 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
         tiers=("workspace", "channel", "thread"),
         binds="turn",
         doc=(
-            "Ask before an agent writes to a third-party service. Kept in the access policy "
-            "and decided most specific first, as before the registry: only a native "
-            "platform admin, checked live, may change it, and it applies only once the "
-            "operator enables approval overrides."
+            "Ask before an agent writes to a third-party service. Decided most specific first: "
+            "only a native platform admin, checked live, may change it, and it applies "
+            "only once the operator enables approval overrides."
         ),
         authority=Authority(native=True),
         combine_override="most_specific",
@@ -444,8 +443,8 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
         binds="turn",
         doc=(
             "Each message starts with the notes the agent keeps in its repository memory. "
-            "The deployment turns it on, with the memory tools; below that it can only be "
-            "turned off, which also turns the memory tools off."
+            "The operator turns it on, with the memory tools; below that it can only be "
+            "turned off, which also switches the memory tools off."
         ),
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),

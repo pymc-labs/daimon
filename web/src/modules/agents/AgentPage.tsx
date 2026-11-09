@@ -1,5 +1,5 @@
 import { ReactFlowProvider } from "@xyflow/react"
-import { Eye, History as HistoryIcon, MessagesSquare, Plug, Plus, Blocks, Sparkles, Users } from "lucide-react"
+import { Eye, History as HistoryIcon, MessagesSquare, Plug, Plus, Blocks, SlidersHorizontal, Sparkles, Users } from "lucide-react"
 import { useMemo } from "react"
 import { Link, useParams } from "react-router"
 
@@ -68,6 +68,9 @@ export function AgentPage() {
               </DropdownMenuContent>
             </DropdownMenu>
           )}
+          <Button variant={node === "features" ? "secondary" : "outline"} size="sm" onClick={() => setNode(node === "features" ? null : "features")}>
+            <SlidersHorizontal />Features
+          </Button>
           <Button variant={node === "history" ? "secondary" : "outline"} size="sm" onClick={() => setNode(node === "history" ? null : "history")}>
             <HistoryIcon />History
           </Button>

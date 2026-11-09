@@ -1,7 +1,8 @@
-"""Slack `/settings`: the shared Settings panel (`daimon.core.scope_settings`) for the
-channel it is run in, for its caller only. The channel and the person come from Slack's
-signed envelope, never from the pick. Slash commands do not say which thread they were
-run in, so there is no thread level here; a thread is changed by asking Daimon in it.
+"""Slack `/settings`: the shared panel (`daimon.core.settings_panel`) for the channel it is
+run in, for its caller only. A pick replaces the message with the next screen. The channel
+and the person come from Slack's signed envelope, never from the pick. Slash commands do
+not say which thread they were run in, so there is no thread level here; a thread is
+changed on the web or by asking Daimon in it.
 """
 
 from __future__ import annotations
@@ -9,7 +10,7 @@ from __future__ import annotations
 from typing import Any, Final, cast
 
 from daimon.adapters.slack.admin import resolve_is_admin
-from daimon.adapters.slack.credential_submissions import post_ephemeral
+from daimon.adapters.slack.blockkit import notice_attachments
 from daimon.adapters.slack.errors import generate_request_id, surface_command_error
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
@@ -17,45 +18,57 @@ from daimon.core.admin_actions import DelegatedAction
 from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.scope_settings import (
-    SettingsActor,
-    SettingsPanel,
-    SettingsPlace,
-    apply_choice,
-    chat_actor,
-    load_panel,
-)
+from daimon.core.scope_settings import SettingsActor, SettingsPlace, chat_actor
+from daimon.core.settings_panel import PanelScreen, open_panel, press, tenant_agents
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
+from slack_sdk.webhook.async_client import AsyncWebhookClient
 
 ACTION_ID: Final = "settings_change"
 NOTIFICATION_TEXT: Final = "Settings"
 IN_A_CHANNEL: Final = "Settings belong to a channel. Run `/settings` in a channel."
 
 
-def build_settings_blocks(panel: SettingsPanel) -> list[dict[str, Any]]:
-    """The panel as Block Kit: a header line, then each row with its select."""
-    blocks: list[dict[str, Any]] = [
-        {"type": "section", "text": {"type": "mrkdwn", "text": f"*{panel.title}*\n{panel.subline}"}}
-    ]
-    for row in panel.rows:
-        section: dict[str, Any] = {
-            "type": "section",
-            "block_id": f"settings_{row.key}",
-            "text": {"type": "mrkdwn", "text": f"*{row.name}*\n{row.summary}"},
+def _text(text: str) -> dict[str, Any]:
+    return {"type": "section", "text": {"type": "mrkdwn", "text": text[:3000]}}
+
+
+def build_settings_blocks(screen: PanelScreen) -> list[dict[str, Any]]:
+    """A screen as Block Kit: its title and lines, a select per control, a Back button."""
+    blocks = [_text(f"*{screen.title}*\n" + "\n".join(screen.lines))]
+    for index, control in enumerate(screen.selects):
+        select: dict[str, Any] = {
+            "type": "static_select",
+            "action_id": ACTION_ID,
+            "placeholder": {"type": "plain_text", "text": control.placeholder[:150]},
+            "options": [
+                {"text": {"type": "plain_text", "text": o.label[:75]}, "value": o.value}
+                | (
+                    {"description": {"type": "plain_text", "text": o.description[:75]}}
+                    if o.description
+                    else {}
+                )
+                for o in control.options
+            ],
         }
-        if row.choices:
-            section["accessory"] = {
-                "type": "static_select",
-                "action_id": ACTION_ID,
-                "placeholder": {"type": "plain_text", "text": row.placeholder[:150]},
-                "options": [
-                    {"text": {"type": "plain_text", "text": label[:75]}, "value": value}
-                    for value, label in row.choices
-                ],
-            }
-        blocks.append(section)
+        blocks.append({"type": "actions", "block_id": f"settings_{index}", "elements": [select]})
+    if screen.back is not None:
+        back = {
+            "type": "button",
+            "action_id": ACTION_ID,
+            "text": {"type": "plain_text", "text": screen.back.label},
+            "value": screen.back.value,
+        }
+        blocks.append({"type": "actions", "block_id": "settings_back", "elements": [back]})
     return blocks
+
+
+def screen_fields(screen: PanelScreen) -> dict[str, Any]:
+    """The message fields for a screen: its blocks, and the result of a change as a notice."""
+    fields: dict[str, Any] = {"text": NOTIFICATION_TEXT, "blocks": build_settings_blocks(screen)}
+    if screen.notice:
+        fields["attachments"] = notice_attachments(screen.notice, neutral=screen.ok)
+    return fields
 
 
 async def _actor(
@@ -84,19 +97,20 @@ async def handle_settings_command(runtime: SlackRuntime, payload: dict[str, Any]
     try:
         if not channel_id or channel_id.startswith("D"):
             raise ChannelChangeRefused(IN_A_CHANNEL, kind="invalid")
-        panel = await load_panel(
+        actor = await _actor(runtime, client, team_id, user_id)
+        screen = await open_panel(
             runtime.sessionmaker,
             runtime.settings,
-            await _actor(runtime, client, team_id, user_id),
+            actor,
             SettingsPlace.of("slack", channel_id, None),
+            agents=tenant_agents(runtime.anthropic, actor.tenant_id),
         )
         await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
             channel=channel_id,
             user=user_id,
-            text=NOTIFICATION_TEXT,
-            blocks=build_settings_blocks(panel),
             parse="none",
             link_names=False,
+            **screen_fields(screen),
         )
     except (SlackApiError, DaimonError) as exc:
         await surface_command_error(
@@ -111,26 +125,34 @@ async def handle_settings_command(runtime: SlackRuntime, payload: dict[str, Any]
 
 
 async def handle_settings_change(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
-    """A pick from the panel: place and person from the signed envelope; re-checked on write."""
+    """A pick from the panel: place and person from the signed envelope; re-checked on write.
+    The message becomes the screen the pick leads to."""
     team_id, user_id, channel_id = (
         str(cast(dict[str, Any], payload.get(part) or {}).get("id") or "")
         for part in ("team", "user", "channel")
     )
-    actions = cast(list[dict[str, Any]], payload.get("actions") or [{}])
-    raw = cast(dict[str, Any], actions[0].get("selected_option") or {}).get("value")
+    element = cast(list[dict[str, Any]], payload.get("actions") or [{}])[0]
+    raw = cast(dict[str, Any], element.get("selected_option") or {}).get("value") or element.get(
+        "value"
+    )
+    response_url = str(payload.get("response_url") or "")
     if not team_id or not user_id or not channel_id or channel_id.startswith("D"):
+        return
+    if not response_url:
         return
     client = await resolve_web_client(runtime, team_id=team_id)
     if client is None:
         return
-    done = await apply_choice(
+    actor = await _actor(runtime, client, team_id, user_id)
+    screen = await press(
         runtime.sessionmaker,
         runtime.settings,
-        await _actor(runtime, client, team_id, user_id),
+        actor,
         raw,
         SettingsPlace.of("slack", channel_id, None),
+        agents=tenant_agents(runtime.anthropic, actor.tenant_id),
     )
-    if done is not None:
-        await post_ephemeral(
-            client, channel_id=channel_id, user_id=user_id, text=done[1], error=not done[0]
+    if screen is not None:
+        await AsyncWebhookClient(response_url).send_dict(
+            {"replace_original": True, "parse": "none", **screen_fields(screen)}
         )

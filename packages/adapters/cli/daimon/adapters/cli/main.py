@@ -19,6 +19,7 @@ from daimon.adapters.cli.commands.context_provider import context_provider_app
 from daimon.adapters.cli.commands.crypto import crypto_app
 from daimon.adapters.cli.commands.defaults import defaults_app
 from daimon.adapters.cli.commands.environments import environments_app
+from daimon.adapters.cli.commands.features import features_app
 from daimon.adapters.cli.commands.github import github_app
 from daimon.adapters.cli.commands.help import help_app
 from daimon.adapters.cli.commands.leads import leads_app
@@ -67,6 +68,7 @@ app.add_typer(promo_app, name="promo")
 app.add_typer(github_app, name="github")
 app.add_typer(routines_app, name="routines")
 app.add_typer(watches_app, name="watches")
+app.add_typer(features_app, name="features")
 app.command("run")(run_command)
 app.command("smoke")(smoke_command)
 

@@ -21,6 +21,7 @@ _PATHS = {
     "mcp": "mcp/daimon/adapters/mcp/tools/scope_settings.py",
     "web": "web/daimon/adapters/web/channel_settings.py",
 }
+_CORE_MODULES = {"daimon.core.scope_settings", "daimon.core.settings_panel"}
 _RETIRED = "a retired control, kept for one release; it records the change"
 _DIRECT_WRITERS = {
     "discord/daimon/adapters/discord/commands/here.py": _RETIRED,
@@ -29,16 +30,20 @@ _DIRECT_WRITERS = {
     "mcp/daimon/adapters/mcp/tools/progress_plans.py": "deprecated set_progress_plans",
     "mcp/daimon/adapters/mcp/tools/thread_participation.py": "deprecated set_thread_participation",
     "teams/daimon/adapters/teams/channel_settings.py": "the Teams channel dialog's own switches",
+    "cli/daimon/adapters/cli/commands/features.py": "`daimon features set`, over the core service",
+    "web/daimon/adapters/web/features.py": "`PUT /api/features`, over the core service",
 }
-#: Slack slash commands do not say which thread they ran in; a thread is set by asking there.
+#: Deliberate gap. A Slack slash command carries no thread, and a message shortcut needs an
+#: entry in the app manifest, which lives outside this repo. A Slack thread is set on the web
+#: (the thread page), by the agent's tool, or by asking Daimon in it.
 _SLACK_HAS_NO_THREAD_LEVEL = True
 
 
 def _names(tree: ast.AST) -> set[str]:
-    """Every name imported from `daimon.core.scope_settings` or called."""
+    """Every name imported from the core settings modules or called."""
     found: set[str] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "daimon.core.scope_settings":
+        if isinstance(node, ast.ImportFrom) and node.module in _CORE_MODULES:
             found |= {alias.name for alias in node.names}
         elif isinstance(node, ast.Call):
             found.add(getattr(node.func, "id", None) or getattr(node.func, "attr", ""))
@@ -49,7 +54,7 @@ def test_every_path_has_the_command_and_writes_through_the_core() -> None:
     assert all(WORDS[platform].command("settings") for platform in CHAT_PLATFORMS)
     for name, path in _PATHS.items():
         used = _names(ast.parse((_ADAPTERS / path).read_text()))
-        core_writer = {"change_setting", "apply_choice"} & used
+        core_writer = {"change_setting", "apply_choice", "press"} & used
         assert core_writer, f"{name} must write through daimon.core.scope_settings"
 
 

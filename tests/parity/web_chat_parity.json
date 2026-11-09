@@ -350,6 +350,14 @@
   "PUT /api/channels/{channel_id}/tool-rules": {
    "tool": "set_agent_tool_rule"
   },
+  "PUT /api/features": {
+   "tool": "change_setting",
+   "panel": {
+    "discord": "daimon.adapters.discord.commands.settings",
+    "slack": "daimon.adapters.slack.settings",
+    "teams": "daimon.adapters.teams.settings"
+   }
+  },
   "PUT /{path:path}": {
    "exempt": "serves the web app's own pages"
   }

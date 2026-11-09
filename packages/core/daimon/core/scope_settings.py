@@ -3,17 +3,17 @@
 `/settings` in Discord, Slack and Teams, the agent's `get_settings` and `change_setting`
 tools and the web app all read with `read_settings` and write with `change_setting`,
 which wrap `daimon.core.features.service` (`read_features`, `change_feature`).
-The chat platforms draw the same `SettingsPanel` (`load_panel`); each control carries one
-``key:level:value`` choice, applied by `apply_choice`. Levels are the tiers people name:
-``server`` (the workspace), ``agent``, ``channel`` and ``thread``. A switch's
-``disabled`` is Off plus a Lock, final below its level.
+Every registered feature is a key. The chat platforms draw `daimon.core.settings_panel`; each
+control carries one choice (`features.surface.parse_choice`), applied by `apply_choice`. Levels
+are the tiers people name: ``server`` (the workspace), ``agent``, ``channel`` and ``thread``.
+An on/off switch's ``disabled`` is Off plus a Lock, final below its level.
 """
 
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, replace
 from typing import Final, Literal, cast, get_args
 
 from daimon.core.admin_actions import DelegatedAction
@@ -26,20 +26,21 @@ from daimon.core.features.service import (
     FeatureActor,
     FeatureView,
     TierSetting,
-    admin_word,
     change_feature,
     read_features,
 )
 from daimon.core.features.service import change_refusal as feature_change_refusal
 from daimon.core.features.snapshot import FeaturePlace, resolve_one
+from daimon.core.features.surface import parse_choice
 from daimon.core.platform_words import space_for, words_for
 from daimon.core.scope_cascade import CascadeMode
 from daimon.core.stores.identity import find_platform_principal
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-SettingKey = Literal["approvals", "participation", "progress_plans", "cost_footer"]
+SettingKey = str
+"""A registry key: every registered feature is one."""
 SettingLevel = Literal["server", "agent", "channel", "thread"]
-SETTING_KEYS: Final[tuple[SettingKey, ...]] = get_args(SettingKey)
+SETTING_KEYS: Final[tuple[SettingKey, ...]] = tuple(FEATURES)
 LEVELS: Final[tuple[SettingLevel, ...]] = get_args(SettingLevel)
 INHERIT: Final = "inherit"
 OVERRIDES_OFF: Final = "Saved but ignored until the operator enables approval overrides."
@@ -52,7 +53,12 @@ _TIER: Final[dict[SettingLevel, Tier]] = {
     "thread": "thread",
 }
 _LEVEL: Final[dict[str, SettingLevel]] = {tier: level for level, tier in _TIER.items()}
-_SWITCHES: Final = ("participation", "progress_plans")
+_SWITCHES: Final = frozenset(
+    key
+    for key, feature in FEATURES.items()
+    if set(feature.values) == {"on", "off"} and not feature.authority.native
+)
+"""The on/off features an admin may Lock: their `disabled` is Off plus a Lock."""
 
 
 @dataclass(frozen=True)
@@ -78,7 +84,7 @@ def _spec(key: SettingKey) -> SettingSpec:
     feature = FEATURES[key]
     labels = dict(feature.values)
     if key in _SWITCHES:
-        labels = {"on": "On", "off": "Off", "disabled": "Disabled"}
+        labels = {**labels, "disabled": "Disabled"}
     return SettingSpec(
         key,
         feature.name,
@@ -224,7 +230,7 @@ def setting_refusal(
     key: str, level: str, value: str, *, place: SettingsPlace
 ) -> ChannelChangeRefused | None:
     """Why the names, platform or level rule out the change, before any read; None if not."""
-    spec = SPECS.get(cast(SettingKey, key))
+    spec = SPECS.get(key)
     if spec is None:
         return _refused(
             f"There is no setting called {key}. Choose one of: {', '.join(SETTING_KEYS)}.",
@@ -296,7 +302,7 @@ def _feature_text(value: str) -> str:
 
 
 def _setting_view(feature: FeatureView, place: SettingsPlace, settings: Settings) -> SettingView:
-    key = cast(SettingKey, feature.spec.key)
+    key = feature.spec.key
     spec, resolved = SPECS[key], feature.resolved
     if key in _SWITCHES:
         cascade = as_cascade(resolved)
@@ -384,7 +390,7 @@ async def change_setting(
     `expected` is not the level's own value now."""
     if (refusal := setting_refusal(key, level, value, place=place)) is not None:
         raise refusal
-    spec, lvl = SPECS[cast(SettingKey, key)], cast(SettingLevel, level)
+    spec, lvl = SPECS[key], cast(SettingLevel, level)
     found, lock = _feature_value(value)
     try:
         change = await change_feature(
@@ -419,100 +425,7 @@ def _split(exc: StaleChannelValue) -> tuple[str, bool]:
     return text.removesuffix(":locked"), text.endswith(":locked")
 
 
-# ---------- The `/settings` panel every chat platform draws ----------
-
-TITLE: Final = "Settings"
-PICK: Final = "Pick a new value below. It applies from the next message."
-_KEYS: Final[dict[str, SettingKey]] = {key: key for key in SETTING_KEYS}
-_LEVELS: Final[dict[str, SettingLevel]] = {level: level for level in LEVELS}
-
-
-@dataclass(frozen=True)
-class SettingsRow:
-    key: SettingKey
-    name: str
-    summary: str
-    """What is in effect and where it comes from, then each level's own value."""
-    choices: tuple[tuple[str, str], ...]
-    """``(encoded choice, label)``; empty when the viewer may change no level here."""
-    placeholder: str
-
-
-@dataclass(frozen=True)
-class SettingsPanel:
-    title: str
-    subline: str
-    rows: tuple[SettingsRow, ...]
-
-
-def decode_choice(raw: object) -> tuple[SettingKey, SettingLevel, str] | None:
-    """A pressed choice, or None when it names no key, level or value of the group."""
-    parts = raw.split(":") if isinstance(raw, str) else []
-    key, level, value = parts if len(parts) == 3 else ("", "", "")
-    found_key, found_level = _KEYS.get(key), _LEVELS.get(level)
-    if found_key is None or found_level is None or value not in SPECS[found_key].values:
-        return None
-    return found_key, found_level, value
-
-
-def _row(view: SettingView, place: SettingsPlace, *, admin: bool, native: bool) -> SettingsRow:
-    spec = SPECS[view.key]
-
-    def may(level: SettingLevel) -> bool:
-        """Which controls to show; a press is checked again when it is applied."""
-        if view.key == "approvals":
-            return native
-        return admin or (level == "thread" and FEATURES[view.key].authority.thread_anyone)
-
-    def word(level: SettingLevel) -> str:
-        return level_word(level, place.platform).capitalize()
-
-    choices = tuple(
-        (f"{view.key}:{item.level}:{value}", f"{word(item.level)}: {spec.label(value)}")
-        for item in view.levels
-        if view.available and may(item.level)
-        for value in spec.values
-        if value != item.own and not (item.level == "thread" and value == "disabled")
-    )
-    own = ". ".join(f"{word(item.level)}: {spec.label(item.own)}" for item in view.levels)
-    plain = not view.available
-    return SettingsRow(
-        view.key,
-        view.name,
-        view.note if plain else f"{view.note}\n{own}.",
-        choices,
-        f"Change {view.name.lower()}",
-    )
-
-
-def build_settings_panel(
-    views: Sequence[SettingView], *, place: SettingsPlace, admin: bool, native_admin: bool
-) -> SettingsPanel:
-    """The panel for a viewer who is (or is not) an admin and a native admin. Pure."""
-    rows = tuple(_row(view, place, admin=admin, native=native_admin) for view in views)
-    who = admin_word(place.platform)
-    subline = (
-        PICK if any(row.choices for row in rows) else f"Only {who} can change these. Ask {who}."
-    )
-    return SettingsPanel(TITLE, subline, rows)
-
-
-async def load_panel(
-    sessionmaker: Sessions, settings: Settings, actor: SettingsActor, place: SettingsPlace
-) -> SettingsPanel:
-    """Read the place's settings and build the panel for this viewer."""
-    views = await read_settings(
-        sessionmaker,
-        tenant_id=actor.tenant_id,
-        place=place,
-        settings=settings,
-    )
-    native = await change_refusal(
-        sessionmaker, settings, actor, key="approvals", level="server", platform=place.platform
-    )
-    return build_settings_panel(
-        views, place=place, admin=await actor.admin_for(None), native_admin=native is None
-    )
+# ---------- A pressed control ----------
 
 
 async def apply_choice(
@@ -522,14 +435,23 @@ async def apply_choice(
     raw: object,
     place: SettingsPlace,
 ) -> tuple[bool, str] | None:
-    """Apply a pressed choice: ``(True, what changed)``, ``(False, why not)``, or None for a
-    forged choice, which changes nothing and says nothing."""
-    if (choice := decode_choice(raw)) is None:
+    """Apply a pressed choice (`features.surface.parse_choice`): ``(True, what changed)``,
+    ``(False, why not)``, or None for a forged choice, which changes nothing and says nothing."""
+    if (choice := parse_choice(raw)) is None:
         return None
-    key, level, value = choice
+    value = INHERIT if choice.value == DEFAULT else choice.value
+    if choice.agent:
+        place = replace(place, agent_id=choice.agent)
     try:
         change = await change_setting(
-            sessionmaker, settings, actor, key=key, level=level, value=value, place=place
+            sessionmaker,
+            settings,
+            actor,
+            key=choice.key,
+            level=_LEVEL[choice.tier],
+            value=value,
+            place=place,
+            locked=choice.locked,
         )
     except (ChannelChangeRefused, StaleChannelValue) as exc:
         return False, str(exc)

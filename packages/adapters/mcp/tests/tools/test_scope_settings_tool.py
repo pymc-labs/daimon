@@ -20,6 +20,7 @@ from daimon.core import scope_settings as core
 from daimon.core.authz import Subject
 from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
 from daimon.core.features import service
+from daimon.core.features.registry import FEATURES
 from daimon.core.stores.channel_changes import WORKSPACE_ID, list_changes
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.testing.factories import make_account, make_tenant
@@ -174,12 +175,7 @@ async def test_get_settings_reads_the_origin_place_and_no_tool_names_a_place(
     world: dict[str, Any],
 ) -> None:
     result = await tool._get_settings_impl(_runtime(), _as(world, make_auth(admin=False)), "ctx")  # pyright: ignore[reportPrivateUsage]
-    assert [s.key for s in result.settings] == [
-        "approvals",
-        "participation",
-        "progress_plans",
-        "cost_footer",
-    ]
+    assert [s.key for s in result.settings] == list(FEATURES), "every registered key"
     assert [lv.level for lv in result.settings[0].levels] == ["server", "channel", "thread"]
     assert [lv.level for lv in result.settings[1].levels] == [
         "server",

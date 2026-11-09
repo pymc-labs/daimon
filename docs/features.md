@@ -10,11 +10,11 @@ below then cannot change it. `disabled` means Off and locked.
 Set the deployment level with `DAIMON_FEATURES__<KEY>`, for example
 `DAIMON_FEATURES__PROGRESS_PLANS=on:locked`; a dot in a key is an
 underscore (`DAIMON_FEATURES__TOOL_BASH`). Set the others with `/settings` in chat,
-the `change_setting` MCP tool or the web app.
+the `change_setting` MCP tool, the web app or `daimon features`.
 
 ## Approvals
 
-Ask before an agent writes to a third-party service. Kept in the access policy and decided most specific first, as before the registry: only a native platform admin, checked live, may change it, and it applies only once the operator enables approval overrides.
+Ask before an agent writes to a third-party service. Decided most specific first: only a native platform admin, checked live, may change it, and it applies only once the operator enables approval overrides.
 
 | | |
 | --- | --- |
@@ -64,7 +64,7 @@ Finished answers end with a footer naming the agent, the time taken, what the an
 
 ## Repository memory
 
-Each message starts with the notes the agent keeps in its repository memory. The deployment turns it on, with the memory tools; below that it can only be turned off, which also turns the memory tools off.
+Each message starts with the notes the agent keeps in its repository memory. The operator turns it on, with the memory tools; below that it can only be turned off, which also switches the memory tools off.
 
 | | |
 | --- | --- |
@@ -115,7 +115,7 @@ Instructions at the top of the agent's prompt on where its keys, repo, memory an
 
 ## Daimon tools
 
-Daimon's own tools: chat, settings, routines, memory and the rest. On keeps at least the conversation ids in the turn controls, which the tools need. An isolated agent never has them. Gemini and OpenAI agents always have them, so it can't be changed there. Applies from the next message in a conversation.
+Daimon's own tools: chat, settings, routines, memory and the rest. On keeps at least the conversation ids the tools need. An isolated agent never has them. Gemini and OpenAI agents always have them, so it can't be changed there. Applies from the next message in a conversation.
 
 | | |
 | --- | --- |
@@ -237,7 +237,7 @@ The agent's built-in web search tool. The agent level is the agent's own tool se
 | Levels on Gemini | Deployment, Server, Agent |
 | Levels on OpenAI | Deployment, Server, Agent |
 
-## Turn controls
+## Message controls
 
 Facts sent with each message: where it was sent, who is answering, and how to use them. Origin only keeps the ids and the honesty facts; Minimal keeps only the facts about the model and the conversation. Daimon tools keep it at Origin only or more.
 
@@ -261,9 +261,9 @@ Each message tells the agent the web app's address and the pages it may link to.
 | Levels | Deployment, Server, Agent, Channel, Thread |
 | Combines | Most specific wins |
 
-## MCP server briefing
+## Connected server briefing
 
-Before each chat message, the agent's MCP servers that offer a context tool are sent the message, and their answers go in front of it as quoted data. Managed Agents only.
+Before each chat message, the agent's connected servers that offer a context tool are sent the message, and their answers go in front of it as quoted data. Managed Agents only.
 
 | | |
 | --- | --- |

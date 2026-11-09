@@ -1,4 +1,5 @@
 import { useState } from "react"
+import { Link } from "react-router"
 
 import { AgentLink, ChannelLink } from "@/components/links"
 import { PanelSection } from "@/components/panel"
@@ -31,6 +32,9 @@ export function Threads({ c, s }: { c: ChannelDetail; s: ChannelSettings }) {
                   {who ? <AgentLink id={who.id} name={who.name} avatar={who.avatar} /> : <span className="truncate">{threadValue(t.kind, t.value, labels)}</span>}
                 </span>
               </span>
+              <Button size="xs" variant="ghost" asChild aria-label={`Settings of ${name}`}>
+                <Link to={`/channels/${encodeURIComponent(c.id)}/threads/${encodeURIComponent(t.thread_id)}`}>Settings</Link>
+              </Button>
               {c.can_manage && (
                 <Button size="xs" variant="ghost" disabled={save.pending} aria-label={`Clear ${THREAD_KINDS[t.kind]} in ${name}`}
                   onClick={async () => setOut(await save.run("post", "threads/clear", { thread_id: t.thread_id, kind: t.kind }))}>Clear</Button>
