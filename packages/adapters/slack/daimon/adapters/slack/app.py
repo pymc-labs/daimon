@@ -243,6 +243,7 @@ from daimon.core.continuity.wakes import WakeThread, run_wake_poller
 from daimon.core.credential_requests import SLACK_ACTION_ID as SLACK_CREDENTIAL_ACTION_ID
 from daimon.core.defaults.provisioning import teardown_slack_install
 from daimon.core.errors import DaimonError, UserFacingError
+from daimon.core.features.snapshot import FeaturePlace, place_feature
 from daimon.core.github_connect_delivery import run_connect_notice_poller
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.github_request_expiry import run_request_expiry_poller
@@ -265,7 +266,7 @@ from daimon.core.stores.slack_turn_contexts import (
     create_slack_turn_context,
     delete_slack_turn_context,
 )
-from daimon.core.stores.tenants import get_plain_text_mentions, get_tenant, get_turn_cap
+from daimon.core.stores.tenants import get_tenant, get_turn_cap
 from daimon.core.stores.thread_agent_bindings import get_binding as get_setup_binding
 from daimon.core.stores.thread_sessions import (
     clear_active_turn,
@@ -1749,14 +1750,14 @@ class SlackApp:
             log.debug("slack.event_dropped.duplicate", team_id=team_id, event_ts=event_ts)
         return is_new
 
-    async def _plain_text_mentions_on(self, tenant_id: uuid.UUID) -> bool:
-        """Read the tenant's switch for a message that already names the bot as text."""
-        try:
-            return await get_plain_text_mentions(self.runtime.sessionmaker, tenant_id=tenant_id)
-        except SQLAlchemyError as exc:
-            # A failed read leaves the message unaddressed, as with the switch off.
-            log.warning("plain_text_mention.lookup_failed", error_type=type(exc).__name__)
-            return False
+    async def _plain_text_mentions_on(self, tenant_id: uuid.UUID, channel_id: str) -> bool:
+        """Read the typed-mention setting for a message that already names the bot as text.
+        A failed read leaves the message unaddressed, as with the setting off."""
+        place = FeaturePlace.of(tenant_id, "slack", channel_id)
+        found = await place_feature(
+            self.runtime.sessionmaker, self.runtime.settings, place, "plain_text_mentions"
+        )
+        return found.on
 
     async def _handle_app_mention(
         self,
@@ -1805,7 +1806,9 @@ class SlackApp:
         tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
         # Most named messages meet a switch that is off: one read, then nothing.
         # It posts nothing, so the may-post rule below still holds.
-        if by_name and not await self._plain_text_mentions_on(tenant_id):
+        if by_name and not await self._plain_text_mentions_on(
+            tenant_id, str(event.get("channel") or "")
+        ):
             return
 
         await self._wait_for_orphan_recovery()
@@ -2634,7 +2637,7 @@ class SlackApp:
             ask_human=slack_support_enabled(self.runtime.settings.support),
             tenant_id=tenant_id,
             budget_channel_id=admission.budget_channel_id,
-            render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
+            render_tables=admission.shown("table_rendering", "slack"),
             client=web_client,
             channel=channel,
             thread_ts=thread_id,
@@ -2642,8 +2645,7 @@ class SlackApp:
             author_id=str(event.get("user") or ""),
             requester_is_admin=is_admin,
             requester_foreign=standing.foreign,
-            notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
-            is True,
+            notify_on_completion=admission.shown("completion_pings", "slack"),
             trigger_ts=str(event.get("_reaction_ts") or event.get("ts") or "") or None,
             agent_name=_lc_agent_name,
             model_id=_lc_model_id,
@@ -3095,8 +3097,7 @@ class SlackApp:
                     ask_human=slack_support_enabled(self.runtime.settings.support),
                     tenant_id=tenant_id,
                     budget_channel_id=admission.budget_channel_id,
-                    render_tables=self.runtime.settings.table_rendering.get(tenant_id, False)
-                    is True,
+                    render_tables=admission.shown("table_rendering", "slack"),
                     client=web_client,
                     channel=channel,
                     thread_ts=thread_id,
@@ -3104,10 +3105,7 @@ class SlackApp:
                     author_id=str(event.get("user") or ""),
                     requester_is_admin=is_admin,
                     requester_foreign=standing.foreign,
-                    notify_on_completion=self.runtime.settings.completion_pings.get(
-                        tenant_id, False
-                    )
-                    is True,
+                    notify_on_completion=admission.shown("completion_pings", "slack"),
                     trigger_ts=str(event.get("_reaction_ts") or event.get("ts") or "") or None,
                     agent_name=_lc_agent_name,
                     model_id=_lc_model_id,
@@ -3553,7 +3551,7 @@ class SlackApp:
             ask_human=slack_support_enabled(self.runtime.settings.support),
             tenant_id=tenant_id,
             budget_channel_id=follow_admission.budget_channel_id,
-            render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
+            render_tables=follow_admission.shown("table_rendering", "slack"),
             client=web_client,
             channel=channel,
             thread_ts=thread_id,
@@ -3561,8 +3559,7 @@ class SlackApp:
             author_id=row.requester_external_user_id,
             requester_is_admin=follow_admission.is_admin,
             requester_foreign=standing.foreign,
-            notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
-            is True,
+            notify_on_completion=follow_admission.shown("completion_pings", "slack"),
             agent_name=follow_admission.agent.name,
             model_id=follow_admission.agent.model.id,
             markup=self.runtime.turn_deps.markup,
@@ -3654,7 +3651,7 @@ class SlackApp:
                 ask_human=slack_support_enabled(self.runtime.settings.support),
                 tenant_id=tenant_id,
                 budget_channel_id=follow_admission.budget_channel_id,
-                render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
+                render_tables=follow_admission.shown("table_rendering", "slack"),
                 client=web_client,
                 channel=channel,
                 thread_ts=thread_id,
@@ -3662,8 +3659,7 @@ class SlackApp:
                 author_id=row.requester_external_user_id,
                 requester_is_admin=follow_admission.is_admin,
                 requester_foreign=standing.foreign,
-                notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
-                is True,
+                notify_on_completion=follow_admission.shown("completion_pings", "slack"),
                 agent_name=follow_admission.agent.name,
                 model_id=follow_admission.agent.model.id,
                 markup=self.runtime.turn_deps.markup,

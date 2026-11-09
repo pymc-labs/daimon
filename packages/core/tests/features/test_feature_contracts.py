@@ -16,7 +16,13 @@ from daimon.core.config import (
 )
 from daimon.core.features.deployment import deployment_value
 from daimon.core.features.model_input import SESSION_KEYS, TOOL_KEYS
-from daimon.core.features.registry import FEATURES, TIERS, FeatureSpec, parse_deployment
+from daimon.core.features.registry import (
+    FEATURES,
+    TIERS,
+    WEB_MODULES,
+    FeatureSpec,
+    parse_deployment,
+)
 from daimon.core.features.resolver import TierValue, resolve_feature
 from daimon.core.features.session_identity import IDENTITY_KEYS
 from pydantic import PostgresDsn, SecretStr
@@ -225,7 +231,15 @@ def test_a_dotted_feature_has_an_env_name() -> None:
     assert settings.features == {"tool.bash": "off:locked"}, "env name maps to the dotted key"
 
 
-_KEY_READERS = {"feature_on": 0, "feature": 0, "switch_default": 1}
+_KEY_READERS = {
+    "feature_on": 0,
+    "feature": 0,
+    "switch_default": 1,
+    "shown": 0,
+    "_feature_on": 0,
+    "place_feature": 3,
+    "feature_in": 3,
+}
 """Calls that read a feature key, and the position of the key among their arguments."""
 _SNAPSHOT_READS = {"on", "value", "get"}
 
@@ -249,7 +263,8 @@ def _read_key(node: ast.AST) -> str | None:
 def test_every_feature_key_read_is_registered_and_every_registered_key_is_read() -> None:
     """A typo in a read fails here, and so does a registered control nothing obeys."""
     read: dict[str, str] = {}
-    named: set[str] = set(TOOL_KEYS)  # built from BUILTIN_TOOLS, so no literal names them
+    # Both are built from a list, so no literal names them.
+    named: set[str] = set(TOOL_KEYS) | {f"web.{module}" for module in WEB_MODULES}
     for path in _PRODUCT:
         for node in ast.walk(ast.parse(path.read_text())):
             if (key := _read_key(node)) is not None:
@@ -279,10 +294,10 @@ _CONFIG_SWITCHES: dict[str, str] = {
     "McpContextSettings.enabled": _LEGACY,
     "ThreadParticipationSettings.mode": _LEGACY,
     "RepoMemorySettings.enabled": _LEGACY,
-    "DiscordSettings.writers_none_notice": _ROLLOUT,
+    "DiscordSettings.writers_none_notice": _LEGACY,
     "DiscordSettings.credential_form_expiry": _ROLLOUT,
-    "DiscordSettings.unmentioned_reply_hint": _ROLLOUT,
-    "DiscordSettings.tenant_cap_waiting_card": _ROLLOUT,
+    "DiscordSettings.unmentioned_reply_hint": _LEGACY,
+    "DiscordSettings.tenant_cap_waiting_card": _LEGACY,
     "TeamsSettings.enabled": _SERVICE,
     "WebSettings.manual_topup": _OPS,
     "WebSettings.dev": _OPS,
@@ -292,13 +307,13 @@ _CONFIG_SWITCHES: dict[str, str] = {
     "SelfHostedSettings.admission_enabled": _OPS,
     "SelfHostedSettings.single_tenant": _OPS,
     "NotebookSettings.allow_editable": _OPS,
-    "TurnSettings.native_footer_cost": _ROLLOUT,
+    "TurnSettings.native_footer_cost": _LEGACY,
     "TurnSettings.channel_backends": _ROLLOUT,
     "TurnSettings.agent_backends": _ROLLOUT,
     "TurnSettings.status_log": _ROLLOUT,
-    "ThreadNamingSettings.enabled": _SERVICE,
+    "ThreadNamingSettings.enabled": _LEGACY,
     "OutboundSettings.reach_budget_enabled": _OPS,
-    "PrivateChannelMessagesSettings.enabled": _SERVICE,
+    "PrivateChannelMessagesSettings.enabled": _LEGACY,
     "PrivacySettings.delete_enabled": _OPS,
     "ArtifactsSettings.embed_images": _OPS,
     "DirectMessagePolicy.mode": _OPS,

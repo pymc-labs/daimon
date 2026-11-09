@@ -118,6 +118,7 @@ from daimon.core.continuity.messages import (
 from daimon.core.continuity.wakes import WakeThread, run_wake_poller
 from daimon.core.errors import DaimonError
 from daimon.core.features.model_input import FULL_HISTORY, HistoryDepth
+from daimon.core.features.snapshot import FeaturePlace, place_feature
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.mux_backend import resource_scope
@@ -135,7 +136,7 @@ from daimon.core.stores.domain import (
     TurnCardIntentRow,
 )
 from daimon.core.stores.teams_installations import list_teams_installations
-from daimon.core.stores.tenants import get_plain_text_mentions, get_tenant, get_turn_cap
+from daimon.core.stores.tenants import get_tenant, get_turn_cap
 from daimon.core.stores.thread_sessions import (
     clear_active_turn,
     get_live_thread_session,
@@ -767,7 +768,7 @@ class TeamsApp:
     async def _hold_inbound(self, parsed: TeamsInbound) -> None:
         """Admit and hold a message parsed while draining, if it would start a turn."""
         if parsed.by_name:
-            if not await self._plain_text_mentions_on():
+            if not await self._plain_text_mentions_on(parsed.channel_id):
                 return
             parsed = _as_mention(parsed)
         # Unaddressed chatter is not held: the participation it could feed is cancelled.
@@ -1083,20 +1084,18 @@ class TeamsApp:
             log.debug("teams.message.ignored", conversation_type="channel", reason="disabled")
         return unwanted
 
-    async def _plain_text_mentions_on(self) -> bool:
-        """Read the tenant's switch for a message that already names the bot as text."""
-        try:
-            return await get_plain_text_mentions(
-                self.runtime.sessionmaker, tenant_id=self._tenant_id
-            )
-        except SQLAlchemyError as exc:
-            # A failed read leaves the message unaddressed, as with the switch off.
-            log.warning("plain_text_mention.lookup_failed", error_type=type(exc).__name__)
-            return False
+    async def _plain_text_mentions_on(self, channel_id: str | None = None) -> bool:
+        """Read the typed-mention setting for a message that already names the bot as text.
+        A failed read leaves the message unaddressed, as with the setting off."""
+        place = FeaturePlace.of(self._tenant_id, "teams", channel_id)
+        found = await place_feature(
+            self.runtime.sessionmaker, self.runtime.settings, place, "plain_text_mentions"
+        )
+        return found.on
 
     async def _route_by_name(self, inbound: TeamsInbound) -> None:
         """A typed "@<bot name>": a mention with the tenant's switch on, else as before."""
-        if await self._plain_text_mentions_on():
+        if await self._plain_text_mentions_on(inbound.channel_id):
             log.info("plain_text_mention.accepted", conversation_type="channel")
             await self._handle(_as_mention(inbound))
             return
@@ -1560,7 +1559,7 @@ class TeamsApp:
                 tenant_id=tenant_id,
                 alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                 unprompted=inbound.unprompted,
-                completion_ping=self.runtime.settings.completion_pings.get(tenant_id) is True,
+                completion_ping=admission.shown("completion_pings", "teams"),
                 requester=requester,
                 requester_user_id=inbound.user_id,
                 agent_name_prefix=_agent_name_prefix(

@@ -31,6 +31,7 @@ from daimon.core.errors import StaleChannelValue
 from daimon.core.features.registry import (
     BACKEND_NAMES,
     DEFAULT,
+    ENV_IMPORTED,
     FEATURES,
     LOCKABLE,
     FeatureSpec,
@@ -51,6 +52,7 @@ from daimon.core.stores.channel_changes import WORKSPACE_ID, WriteHook, record_c
 from daimon.core.stores.domain import CHAT_PLATFORMS, ChangeSurface, ChannelSetting, FeatureTarget
 from daimon.core.stores.feature_values import (
     clear_feature_value,
+    list_feature_values,
     place_values,
     replace_agent_values,
     set_feature_value,
@@ -248,7 +250,7 @@ def feature_refusal(
     *,
     locked: bool,
     place: FeaturePlace,
-    settings: Settings,
+    settings: Settings | None,
 ) -> ChannelChangeRefused | None:
     """Why the names, place or lock rule out the change, before any read; None if not. Pure."""
     spec = FEATURES.get(key)
@@ -464,59 +466,140 @@ async def _write(
     place: FeaturePlace,
     expected: Expected[str] | None,
 ) -> TierSetting:
-    tier = after.tier
     async with sessions.begin() as session:
-        rows = await place_values(
+        return await _write_in(session, settings, actor, spec, after, place, expected)
+
+
+async def _write_in(
+    session: AsyncSession,
+    settings: Settings | None,
+    actor: FeatureActor,
+    spec: FeatureSpec,
+    after: TierSetting,
+    place: FeaturePlace,
+    expected: Expected[str] | None,
+) -> TierSetting:
+    """One tier's write in the caller's transaction: the lock check, the row, the record."""
+    tier = after.tier
+    rows = await place_values(
+        session,
+        tenant_id=place.tenant_id,
+        agent_id=place.agent_id,
+        channel_id=place.channel_id,
+        thread_key=place.thread_key,
+        keys=(spec.key, ENV_IMPORTED),
+    )
+    values = tier_values(spec, settings, place, rows)
+    before = next((s for s in _own(spec, place, values) if s.tier == tier), TierSetting(tier))
+    if expected is not None and expected.value != before.text:
+        raise StaleChannelValue(spec.key, before.text)
+    above = resolve_above(spec, values, tier)
+    if above.locked and after.value not in (DEFAULT, above.value):
+        raise _locked_above(spec, above, place, tier)
+    target = _target(tier, place)
+    if after.value == DEFAULT:
+        await clear_feature_value(session, tenant_id=place.tenant_id, target=target, key=spec.key)
+    else:
+        await set_feature_value(
             session,
             tenant_id=place.tenant_id,
-            agent_id=place.agent_id,
-            channel_id=place.channel_id,
-            thread_key=place.thread_key,
-            keys=(spec.key,),
-        )
-        values = tier_values(spec, settings, place, rows)
-        before = next((s for s in _own(spec, place, values) if s.tier == tier), TierSetting(tier))
-        if expected is not None and expected.value != before.text:
-            raise StaleChannelValue(spec.key, before.text)
-        above = resolve_above(spec, values, tier)
-        if above.locked and after.value not in (DEFAULT, above.value):
-            raise _locked_above(spec, above, place, tier)
-        target = _target(tier, place)
-        if after.value == DEFAULT:
-            await clear_feature_value(
-                session, tenant_id=place.tenant_id, target=target, key=spec.key
-            )
-        else:
-            await set_feature_value(
-                session,
-                tenant_id=place.tenant_id,
-                target=target,
-                key=spec.key,
-                value=after.value,
-                locked=after.locked,
-                set_by=actor.account_id,
-                surface=actor.surface,
-            )
-        await record_change(
-            session,
-            tenant_id=place.tenant_id,
-            platform=place.platform,
-            channel_id=place.channel_id
-            if tier in ("channel", "thread") and place.channel_id
-            else WORKSPACE_ID,
-            setting=_THREAD_SETTING.get(spec.key, cast(ChannelSetting, spec.key))
-            if tier == "thread"
-            else cast(ChannelSetting, spec.key),
-            before=_history(before, place),
-            after=_history(after, place),
-            actor_account_id=actor.account_id,
+            target=target,
+            key=spec.key,
+            value=after.value,
+            locked=after.locked,
+            set_by=actor.account_id,
             surface=actor.surface,
         )
-        channel_actor = ChannelActor(
-            actor.tenant_id, actor.account_id, Subject(), actor.surface, actor.on_write
-        )
-        await after_write(session, channel_actor, before != after)
+    await record_change(
+        session,
+        tenant_id=place.tenant_id,
+        platform=place.platform,
+        channel_id=place.channel_id
+        if tier in ("channel", "thread") and place.channel_id
+        else WORKSPACE_ID,
+        setting=_THREAD_SETTING.get(spec.key, cast(ChannelSetting, spec.key))
+        if tier == "thread"
+        else cast(ChannelSetting, spec.key),
+        before=_history(before, place),
+        after=_history(after, place),
+        actor_account_id=actor.account_id,
+        surface=actor.surface,
+    )
+    channel_actor = ChannelActor(
+        actor.tenant_id, actor.account_id, Subject(), actor.surface, actor.on_write
+    )
+    await after_write(session, channel_actor, before != after)
     return before
+
+
+async def set_workspace_feature(
+    session: AsyncSession,
+    settings: Settings | None,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    key: str,
+    value: str,
+    account_id: uuid.UUID | None,
+    surface: ChangeSurface,
+) -> TierSetting:
+    """Set `key` at the workspace tier inside the caller's transaction, for the older
+    settings writers (typed mentions, direct messages, web modules) that have already
+    checked their admin. Same refusals and records as `change_feature`; returns what it was."""
+    place = FeaturePlace(tenant_id, platform)
+    refusal = feature_refusal(key, "workspace", value, locked=False, place=place, settings=settings)
+    if refusal is not None:
+        raise refusal
+
+    async def _nobody(_: DelegatedAction | None) -> bool:
+        return False
+
+    actor = FeatureActor(tenant_id, account_id, surface, None, _nobody)
+    return await _write_in(
+        session, settings, actor, FEATURES[key], TierSetting("workspace", value), place, None
+    )
+
+
+async def import_env(session: AsyncSession, settings: Settings) -> int:
+    """Copy each workspace's deprecated per-workspace env values into workspace-tier rows.
+    A workspace is imported once: its marker row ends the env map's say, and a value
+    already stored is kept. Returns how many workspaces were imported."""
+    workspace = FeatureTarget("workspace")
+    specs = [spec for spec in FEATURES.values() if spec.env_map is not None]
+    maps = {
+        spec.key: cast("Mapping[uuid.UUID, bool]", getattr(settings, cast(str, spec.env_map)))
+        for spec in specs
+    }
+    imported = 0
+    for tenant_id in sorted({tenant for values in maps.values() for tenant in values}, key=str):
+        stored = await list_feature_values(
+            session, tenant_id=tenant_id, keys=[ENV_IMPORTED, *maps], tier="workspace"
+        )
+        if any(row.key == ENV_IMPORTED for row in stored):
+            continue
+        have = {row.key for row in stored}
+        for key, values in maps.items():
+            if tenant_id in values and key not in have:
+                await set_feature_value(
+                    session,
+                    tenant_id=tenant_id,
+                    target=workspace,
+                    key=key,
+                    value="on" if values[tenant_id] else "off",
+                    set_by=None,
+                    surface="cli",
+                )
+        await set_feature_value(
+            session,
+            tenant_id=tenant_id,
+            target=workspace,
+            key=ENV_IMPORTED,
+            value="done",
+            set_by=None,
+            surface="cli",
+        )
+        imported += 1
+    return imported
 
 
 async def _write_builtin(

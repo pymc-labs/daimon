@@ -20,12 +20,14 @@ from daimon.core import workspace_settings as access_settings
 from daimon.core.authz import Subject, build_agent_ref
 from daimon.core.config import WebSettings
 from daimon.core.errors import DaimonError
+from daimon.core.features.service import set_workspace_feature
 from daimon.core.permissions import agent_permissions
 from daimon.core.stores import tenants, web_audit, web_invites, web_people, web_roles
 from daimon.core.stores import web_agent_grants as grants_store
 from daimon.core.stores import web_workspace_settings as workspace_settings
 from daimon.core.stores.access_policy import PolicyBusyError, load_access_policy
 from daimon.core.stores.domain import (
+    ChangeSurface,
     WebAgentWho,
     WebInviteKind,
     WebInviteRole,
@@ -523,6 +525,7 @@ async def change_settings(
     dm_enabled: bool | None = None,
     dm_memory_read_only: bool | None = None,
     plain_text_mentions: bool | None = None,
+    surface: ChangeSurface = "web",
 ) -> list[tuple[str, str]]:
     """Change the workspace's web modules, web chat agent and who may start turns, and the
     direct-message and mention rules. Returns what changed, as (setting, new value)."""
@@ -532,10 +535,18 @@ async def change_settings(
     try:
         async with sessionmaker.begin() as db:
             chosen = await workspace_settings.get_settings(db, tenant_id=tenant_id)
-            modules_off = set(chosen.modules_off)
             for module, on in (modules or {}).items():
-                if on == (module in modules_off):
-                    (modules_off.discard if on else modules_off.add)(module)
+                if on == (module in chosen.modules_off):
+                    await set_workspace_feature(
+                        db,
+                        None,
+                        tenant_id=tenant_id,
+                        platform="web",
+                        key=f"web.{module}",
+                        value="on" if on else "off",
+                        account_id=admin.account_id,
+                        surface=surface,
+                    )
                     changes.append(("Modules", f"{module.title()} {'on' if on else 'off'}"))
             default = chosen.default_agent
             if default_agent is not None and default_agent != default:
@@ -546,7 +557,6 @@ async def change_settings(
             await workspace_settings.save_settings(
                 db,
                 tenant_id=tenant_id,
-                modules_off=sorted(modules_off),
                 default_agent=default,
                 now=now,
             )
@@ -567,12 +577,23 @@ async def change_settings(
                 )
             if dm_enabled is not None:
                 await access_settings.set_dms(
-                    db, tenant_id=tenant_id, subject=subject, platform=platform, enabled=dm_enabled
+                    db,
+                    tenant_id=tenant_id,
+                    subject=subject,
+                    platform=platform,
+                    enabled=dm_enabled,
+                    account_id=admin.account_id,
+                    surface=surface,
                 )
                 changes.append(("Direct messages", _on(dm_enabled)))
             if dm_memory_read_only is not None:
                 await access_settings.set_dm_memory_read_only(
-                    db, tenant_id=tenant_id, subject=subject, enabled=dm_memory_read_only
+                    db,
+                    tenant_id=tenant_id,
+                    subject=subject,
+                    enabled=dm_memory_read_only,
+                    account_id=admin.account_id,
+                    surface=surface,
                 )
                 changes.append(("Read-only memory in direct messages", _on(dm_memory_read_only)))
             if plain_text_mentions is not None:
@@ -582,6 +603,8 @@ async def change_settings(
                     subject=subject,
                     platform=platform,
                     enabled=plain_text_mentions,
+                    account_id=admin.account_id,
+                    surface=surface,
                 )
                 changes.append(("Typed mentions", _on(plain_text_mentions)))
             for target, detail in changes:

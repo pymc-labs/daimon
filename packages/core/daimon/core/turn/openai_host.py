@@ -510,7 +510,7 @@ async def _prepare_with_runtime(
         NativeFooterCostContext(
             request.deps.sessionmaker, request.scope, binding, ref, request.deps.markup
         )
-        if request.deps.native_footer_cost
+        if request.admission.shown("native_footer_cost", request.platform)
         else None
     )
 

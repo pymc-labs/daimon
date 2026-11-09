@@ -27,6 +27,9 @@ replacement (system prompt, skills, memory). ``provision``: on the agent's next 
 Category = Literal["model_input", "chat", "capabilities", "guardrails"]
 Requirement = Literal["platform_adapter"]
 """``platform_adapter``: the chat platform's adapter is set up in this deployment."""
+ENV_IMPORTED: Final = "env_imported"
+"""A workspace-tier row (not a feature) that marks the workspace's deprecated env maps as
+copied into rows by `daimon features import-env`."""
 DEFAULT: Final = "default"
 """The value a control writes to drop its own setting and inherit."""
 
@@ -101,6 +104,14 @@ class FeatureSpec:
     combine_override: Combine | None = None
     backend_fixed: Mapping[str, str] = field(default_factory=dict[str, str])
     """The value a backend always runs with: no tier can change it there."""
+    platform_defaults: Mapping[str, str] = field(default_factory=dict[str, str])
+    """A platform whose default differs from `default`, kept as it was before the registry."""
+    env_map: str | None = None
+    """The `Settings` field of a deprecated per-workspace map (workspace id to on/off) that
+    stands for the workspace tier until `daimon features import-env` copies it into rows."""
+
+    def default_for(self, platform: str) -> str:
+        return self.platform_defaults.get(platform, self.default)
 
     @property
     def combine(self) -> Combine:
@@ -418,6 +429,196 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
     ),
 )
 
+_DM_PLATFORMS: Final = frozenset({"discord", "slack"})
+_DISCORD: Final = frozenset({"discord"})
+_SETTINGS: Final = Authority(DelegatedAction.AGENT_SETTINGS)
+_CHANNELS: Final[tuple[Tier, ...]] = ("deployment", "workspace", "channel")
+_ADMIN: Final = Authority(DelegatedAction.CHANNEL_PERMISSIONS)
+WEB_MODULES: Final[tuple[str, ...]] = (
+    "chat", "agents", "channels", "routines", "credits", "integrations",
+)  # fmt: skip
+
+
+def _shown(
+    key: str,
+    name: str,
+    doc: str,
+    *,
+    tiers: tuple[Tier, ...] = _CHANNELS,
+    default: str = "off",
+    platforms: frozenset[str] = frozenset(CHAT_PLATFORMS),
+    authority: Authority = _SETTINGS,
+    **more: object,
+) -> FeatureSpec:
+    """A display feature: what a chat shows, most specific tier first."""
+    return FeatureSpec(
+        key=key,
+        name=name,
+        category="chat",
+        effect="display",
+        values=_ON_OFF,
+        default=default,
+        tiers=tiers,
+        binds="turn",
+        doc=doc,
+        platforms=platforms,
+        authority=authority,
+        **more,  # pyright: ignore[reportArgumentType]
+    )
+
+
+_CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
+    FeatureSpec(
+        key="thread_naming",
+        name="Thread titles",
+        category="chat",
+        effect="capability",
+        values=_ON_OFF,
+        default="on",
+        tiers=_CHANNELS,
+        binds="turn",
+        doc="A thread Daimon starts is titled from its opening message by a short model call.",
+        platforms=_DISCORD,
+        authority=_ADMIN,
+        legacy_env=("DAIMON_THREAD_NAMING__ENABLED",),
+    ),
+    _shown(
+        "plain_text_mentions",
+        "Typed mentions",
+        'A message with "@" and the agent\'s name typed as plain text is answered like a real '
+        "mention. Direct messages and bots are unchanged.",
+        authority=_ADMIN,
+    ),
+    _shown(
+        "completion_pings",
+        "Completion pings",
+        "The person who asked is pinged when a long answer is finished.",
+        legacy_env=("DAIMON_COMPLETION_PINGS",),
+        env_map="completion_pings",
+    ),
+    _shown(
+        "table_rendering",
+        "Table images",
+        "Tables in an answer are drawn as an image (Discord) or a native table (Slack) "
+        "instead of text.",
+        platforms=_DM_PLATFORMS,
+        default="on",
+        platform_defaults={"slack": "off"},
+        legacy_env=("DAIMON_TABLE_RENDERING",),
+        env_map="table_rendering",
+    ),
+    _shown(
+        "budget_notices",
+        "Budget notices",
+        "Admins are told in a direct message when a channel's budget is nearly used or spent.",
+        tiers=("deployment", "workspace"),
+        default="on",
+        legacy_env=("DAIMON_BUDGET_NOTICES",),
+        env_map="budget_notices",
+    ),
+    _shown(
+        "native_footer_cost",
+        "Cost on hosted-model footers",
+        "A finished answer from an OpenAI or Gemini agent shows what it cost, or that the "
+        "cost is unknown or partial. Managed Agents footers are unchanged.",
+        tiers=("deployment", "workspace"),
+        legacy_env=("DAIMON_TURN__NATIVE_FOOTER_COST",),
+    ),
+    _shown(
+        "message_feedback",
+        "Vote buttons",
+        "Finished answers get thumbs up and down for feedback.",
+        default="on",
+        platforms=_DISCORD,
+    ),
+    _shown(
+        "unmentioned_reply_hint",
+        "Reply hint",
+        "A short reminder that a reply needs a mention, where an unmentioned message is skipped.",
+        platforms=_DISCORD,
+        tiers=_CHANNELS,
+        legacy_env=("DAIMON_DISCORD__UNMENTIONED_REPLY_HINT",),
+    ),
+    _shown(
+        "writers_none_notice",
+        "No-writers notice",
+        "Says so when a channel's write access is set to no one and a message is skipped.",
+        platforms=_DISCORD,
+        legacy_env=("DAIMON_DISCORD__WRITERS_NONE_NOTICE",),
+    ),
+    _shown(
+        "waiting_card",
+        "Waiting card",
+        "A card shows in a channel whose turn is waiting on the workspace's turn cap.",
+        platforms=_DISCORD,
+        tiers=("deployment", "workspace"),
+        legacy_env=("DAIMON_DISCORD__TENANT_CAP_WAITING_CARD",),
+    ),
+    FeatureSpec(
+        key="private_channel_messages",
+        name="Private channel messages",
+        category="capabilities",
+        effect="capability",
+        values=_ON_OFF,
+        default="off",
+        tiers=_CHANNELS,
+        binds="turn",
+        doc=(
+            "Every message in Teams private and shared channels is read through Microsoft "
+            "Graph, not only the ones that mention the agent."
+        ),
+        platforms=frozenset({"teams"}),
+        authority=_ADMIN,
+        legacy_env=("DAIMON_PRIVATE_CHANNEL_MESSAGES__ENABLED",),
+    ),
+    FeatureSpec(
+        key="direct_messages",
+        name="Direct messages",
+        category="capabilities",
+        effect="capability",
+        values=_ON_OFF,
+        default="off",
+        tiers=("deployment", "workspace"),
+        binds="turn",
+        doc=(
+            "Conversations may move to a direct message with the agent. The agent that answers "
+            "there is the workspace's DM agent, which is chosen apart from this."
+        ),
+        platforms=_DM_PLATFORMS,
+        authority=_ADMIN,
+    ),
+    FeatureSpec(
+        key="dm_memory_read_only",
+        name="Read-only memory in direct messages",
+        category="guardrails",
+        effect="guardrail",
+        values={"off": "Writable", "on": "Read-only"},
+        default="off",
+        tiers=("deployment", "workspace"),
+        binds="turn",
+        doc="A turn started from a direct message can read the agent's memory but not change it.",
+        platforms=_DM_PLATFORMS,
+        authority=_ADMIN,
+    ),
+)
+
+_WORKSPACE: Final[tuple[FeatureSpec, ...]] = tuple(
+    FeatureSpec(
+        key=f"web.{module}",
+        name=f"Web app: {module}",
+        category="capabilities",
+        effect="capability",
+        values=_ON_OFF,
+        default="on",
+        tiers=("deployment", "workspace"),
+        binds="turn",
+        doc=f"The {module} pages of the web app. Off hides them for everyone in the workspace.",
+        platforms=EVERY_PLATFORM,
+        authority=_ADMIN,
+    )
+    for module in WEB_MODULES
+)
+
 
 def _features(*specs: FeatureSpec) -> Mapping[str, FeatureSpec]:
     return {spec.key: spec for spec in specs}
@@ -550,6 +751,8 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
     ),
     *_MODEL_INPUT,
     *_SESSION_IDENTITY,
+    *_CHAT_BEHAVIOUR,
+    *_WORKSPACE,
 )
 FEATURE_KEYS: Final[tuple[str, ...]] = tuple(FEATURES)
 

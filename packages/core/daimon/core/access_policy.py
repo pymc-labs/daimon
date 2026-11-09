@@ -145,7 +145,7 @@ class TenantAccessPolicy(BaseModel):
     channel_rules: dict[str, ChannelRule] = Field(default_factory=dict)
     # Discord category id -> its rule; only `writers: none` applies.
     category_rules: dict[str, ChannelRule] = Field(default_factory=dict)
-    # Whether turns started from a DM get read-only memory mounts.
+    # Read by nothing: `dm_memory_read_only` is a feature value now. Kept so stored policies load.
     dm_memory_read_only: bool = False
     # Agent name -> its rule. An agent not named here runs wherever the cascade sends it.
     agent_rules: dict[str, AgentRule] = Field(default_factory=dict)

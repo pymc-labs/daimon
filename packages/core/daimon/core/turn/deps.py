@@ -115,7 +115,6 @@ class TurnDeps:
     budget_notifier: BudgetNotifier | None = None
     # The notice's server admins, where the stored role is not the source (Teams).
     server_admins: ServerAdminIds | None = None
-    budget_notices_off: frozenset[uuid.UUID] = frozenset()
     # Native MA client remains during the rollout; ancillary Messages calls
     # have a separate injection point and never go through Events/Sessions.
     messages: AsyncAnthropic | None = None
@@ -125,7 +124,6 @@ class TurnDeps:
     # `DAIMON_TURN__CHANNEL_BACKENDS`: admission reads channel backend configuration.
     channel_backends: bool = False
     agent_backends: bool = False
-    native_footer_cost: bool = False
     # Microsoft accounts are configured, so sessions ask before `microsoft_send`.
     microsoft_send: bool = False
     # Provider owners supply transports and durable stores; no credentials
@@ -196,14 +194,6 @@ def _preparation_limit(settings: Settings) -> int:
     return max(1, pool_size // 2) if isinstance(pool_size, int) else 1
 
 
-def _notices_off(settings: Settings) -> frozenset[uuid.UUID]:
-    """Tenants that turned the budget notice off; tolerate settings mocks in adapter tests."""
-    configured = cast(object, settings.budget_notices)
-    if not isinstance(configured, dict):
-        return frozenset()
-    return frozenset(t for t, on in cast("dict[uuid.UUID, bool]", configured).items() if not on)
-
-
 def _github_mcp_router(settings: Settings) -> bool:
     """`DAIMON_GITHUB__MCP_ROUTER`; tolerate settings mocks in adapter tests."""
     github: object = getattr(settings, "github", None)
@@ -244,9 +234,6 @@ def build_turn_deps(
         agent_backends=(
             turn_settings.agent_backends if isinstance(turn_settings, TurnSettings) else False
         ),
-        native_footer_cost=(
-            turn_settings.native_footer_cost if isinstance(turn_settings, TurnSettings) else False
-        ),
         sessionmaker=sessionmaker,
         deployment_default=deployment_default,
         resolver_cache=resolver_cache,
@@ -265,7 +252,6 @@ def build_turn_deps(
         tool_safety=settings.tool_safety,
         microsoft_send=settings.microsoft_accounts.configured,
         preparation_gate=PreparationGate(_preparation_limit(settings)),
-        budget_notices_off=_notices_off(settings),
         openai_daily_model_cap_usd=settings.billing.openai_daily_model_cap_usd,
         gemini_daily_model_cap_usd=settings.billing.gemini_daily_model_cap_usd,
         progress_plans=(

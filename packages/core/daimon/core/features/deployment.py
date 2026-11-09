@@ -1,12 +1,13 @@
 """The deployment tier: `DAIMON_FEATURES__<KEY>`, or a feature's deprecated variable.
 
-The only reader of `progress_plans.mode`, `thread_participation.mode` and `mcp_context.enabled`
-(`tests/features/test_feature_contracts.py` holds every other reader to that).
+The only reader of the deprecated deployment-wide fields (`progress_plans.mode`,
+`thread_participation.mode`, `mcp_context.enabled`, `_LEGACY_FLAG`); `tests/features/
+test_feature_contracts.py` holds every other reader to that.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from functools import cache
 
 import structlog
@@ -39,6 +40,24 @@ def _legacy_mode(settings: Settings, key: str) -> CascadeMode | None:
     return None
 
 
+def _set(block: object | None, name: str) -> bool | None:
+    """A deprecated bool field of a settings block, or None while the operator left it unset."""
+    if block is None or name not in getattr(block, "model_fields_set", ()):
+        return None
+    return bool(getattr(block, name))
+
+
+_LEGACY_FLAG: Mapping[str, Callable[[Settings], bool | None]] = {
+    "thread_naming": lambda s: _set(s.thread_naming, "enabled"),
+    "private_channel_messages": lambda s: _set(s.private_channel_messages, "enabled"),
+    "native_footer_cost": lambda s: _set(s.turn, "native_footer_cost"),
+    "writers_none_notice": lambda s: _set(s.discord, "writers_none_notice"),
+    "unmentioned_reply_hint": lambda s: _set(s.discord, "unmentioned_reply_hint"),
+    "waiting_card": lambda s: _set(s.discord, "tenant_cap_waiting_card"),
+}
+"""A feature's deprecated deployment-wide bool, read nowhere but here."""
+
+
 def _repo_memory(settings: Settings) -> TierValue:
     """Repository memory is the operator's to turn on, with its tools: Off is locked."""
     if "enabled" in get_repo_memory_settings(settings).model_fields_set:
@@ -66,6 +85,11 @@ def deployment_value(settings: Settings | None, spec: FeatureSpec) -> TierValue 
         return None
     if spec.key == "repo_memory":
         return _repo_memory(settings)
+    flag = _LEGACY_FLAG.get(spec.key)
+    if flag is not None and (enabled := flag(settings)) is not None:
+        for env in spec.legacy_env:
+            _warn_legacy(env, spec.key)
+        return TierValue("deployment", "on" if enabled else "off")
     mode = _legacy_mode(settings, spec.key)
     if mode is None:
         return None

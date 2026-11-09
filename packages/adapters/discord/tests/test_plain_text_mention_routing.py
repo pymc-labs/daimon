@@ -16,7 +16,7 @@ import pytest_asyncio
 from daimon.adapters.discord import thread_participation
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.core.defaults.provisioning import provision_tenant
-from daimon.core.stores.tenants import set_plain_text_mentions
+from daimon.core.features.service import set_workspace_feature
 from daimon.core.thread_participation import ParticipationMode
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -55,7 +55,16 @@ async def _switch(
     sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, *, on: bool
 ) -> None:
     async with sessionmaker() as session, session.begin():
-        await set_plain_text_mentions(session, tenant_id=tenant_id, enabled=on)
+        await set_workspace_feature(
+            session,
+            None,
+            tenant_id=tenant_id,
+            platform="discord",
+            key="plain_text_mentions",
+            value="on" if on else "off",
+            account_id=None,
+            surface="cli",
+        )
 
 
 def _bot(sessionmaker: async_sessionmaker[AsyncSession], **kwargs: float) -> DaimonBot:

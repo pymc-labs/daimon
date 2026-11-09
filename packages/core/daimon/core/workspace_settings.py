@@ -7,9 +7,10 @@ only, and whether a typed "@<bot name>" starts a turn. Server admins only
 (`authorize(SET_WORKSPACE_SETTINGS)`). Each write runs in the caller's
 transaction, so a surface records its audit row in the same commit.
 
-The invoker list and DM memory live in the access policy, so they are written
-under the policy lock like every other rule; DMs and typed mentions are plain
-tenant rows.
+The invoker list lives in the access policy, so it is written under the policy lock like
+every other rule; DMs, DM memory and typed mentions are workspace-tier feature values
+(`direct_messages`, `dm_memory_read_only`, `plain_text_mentions`), written through the
+feature service so they are recorded like any other change.
 """
 
 from __future__ import annotations
@@ -23,14 +24,16 @@ from typing import Final
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Subject, authorize
 from daimon.core.errors import UserFacingError
-from daimon.core.stores import direct_messages, identity, tenants, web_people
+from daimon.core.features.service import set_workspace_feature
+from daimon.core.features.snapshot import FeaturePlace, feature_in
+from daimon.core.stores import identity, web_people
 from daimon.core.stores.access_policy import (
     load_access_policy,
     lock_access_policy,
     lock_policy_writes_exclusive,
     set_access_policy,
 )
-from daimon.core.stores.domain import WebPersonRow
+from daimon.core.stores.domain import ChangeSurface, WebPersonRow
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -93,15 +96,37 @@ async def load_access(session: AsyncSession, *, tenant_id: uuid.UUID) -> Workspa
     policy = await load_access_policy(session, tenant_id=tenant_id)
     return WorkspaceAccess(
         invoker_user_ids=policy.invoker_user_ids,
-        dm_enabled=await direct_messages.dm_enabled(session, tenant_id=tenant_id),
-        dm_memory_read_only=policy.dm_memory_read_only,
-        plain_text_mentions=await _mentions_on(session, tenant_id),
+        dm_enabled=await _on(session, tenant_id, "direct_messages"),
+        dm_memory_read_only=await _on(session, tenant_id, "dm_memory_read_only"),
+        plain_text_mentions=await _on(session, tenant_id, "plain_text_mentions"),
     )
 
 
-async def _mentions_on(session: AsyncSession, tenant_id: uuid.UUID) -> bool:
-    row = await tenants.get_tenant(session, tenant_id)
-    return row is not None and row.plain_text_mentions
+async def _on(session: AsyncSession, tenant_id: uuid.UUID, key: str) -> bool:
+    """A workspace-wide setting; "discord" stands for any platform that offers it."""
+    return (await feature_in(session, None, FeaturePlace(tenant_id, "discord"), key)).on
+
+
+async def _set(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    key: str,
+    enabled: bool,
+    account_id: uuid.UUID | None,
+    surface: ChangeSurface,
+) -> None:
+    await set_workspace_feature(
+        session,
+        None,
+        tenant_id=tenant_id,
+        platform=platform,
+        key=key,
+        value="on" if enabled else "off",
+        account_id=account_id,
+        surface=surface,
+    )
 
 
 async def _change_policy(
@@ -143,16 +168,26 @@ async def set_invokers(
 
 
 async def set_dm_memory_read_only(
-    session: AsyncSession, *, tenant_id: uuid.UUID, subject: Subject, enabled: bool
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    subject: Subject,
+    enabled: bool,
+    account_id: uuid.UUID | None = None,
+    surface: ChangeSurface = "web",
 ) -> bool:
     """Give turns started from a DM read-only memory (or not)."""
-    policy = await _change_policy(
+    _require_admin(await load_access_policy(session, tenant_id=tenant_id), subject)
+    await _set(
         session,
         tenant_id=tenant_id,
-        subject=subject,
-        build=lambda _: {"dm_memory_read_only": enabled},
+        platform="discord",
+        key="dm_memory_read_only",
+        enabled=enabled,
+        account_id=account_id,
+        surface=surface,
     )
-    return policy.dm_memory_read_only
+    return enabled
 
 
 async def set_dms(
@@ -162,12 +197,22 @@ async def set_dms(
     subject: Subject,
     platform: str,
     enabled: bool,
+    account_id: uuid.UUID | None = None,
+    surface: ChangeSurface = "chat",
 ) -> None:
     """Allow or stop moving conversations to a DM. Discord and Slack only."""
     if platform not in DM_PLATFORMS:
         raise SettingRefused("Private chats aren't available here. Nothing changed.")
     _require_admin(await load_access_policy(session, tenant_id=tenant_id), subject)
-    await direct_messages.set_dm_enabled(session, tenant_id=tenant_id, enabled=enabled)
+    await _set(
+        session,
+        tenant_id=tenant_id,
+        platform=platform,
+        key="direct_messages",
+        enabled=enabled,
+        account_id=account_id,
+        surface=surface,
+    )
 
 
 async def set_plain_text_mentions(
@@ -177,12 +222,22 @@ async def set_plain_text_mentions(
     subject: Subject,
     platform: str,
     enabled: bool,
+    account_id: uuid.UUID | None = None,
+    surface: ChangeSurface = "chat",
 ) -> None:
     """Let a typed "@<bot name>" start a turn, workspace-wide."""
     if platform not in MENTION_PLATFORMS:
         raise SettingRefused("Typed mentions aren't available here. Nothing changed.")
     _require_admin(await load_access_policy(session, tenant_id=tenant_id), subject)
-    await tenants.set_plain_text_mentions(session, tenant_id=tenant_id, enabled=enabled)
+    await _set(
+        session,
+        tenant_id=tenant_id,
+        platform=platform,
+        key="plain_text_mentions",
+        enabled=enabled,
+        account_id=account_id,
+        surface=surface,
+    )
 
 
 @dataclass(frozen=True)

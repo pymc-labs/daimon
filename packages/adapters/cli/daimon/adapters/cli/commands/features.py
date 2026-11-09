@@ -33,7 +33,13 @@ from daimon.core.config import load_settings
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import StaleChannelValue, StoreError
 from daimon.core.features.registry import DEFAULT, FEATURES, Tier
-from daimon.core.features.service import FeatureActor, FeatureView, change_feature, read_features
+from daimon.core.features.service import (
+    FeatureActor,
+    FeatureView,
+    change_feature,
+    import_env,
+    read_features,
+)
 from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.features.surface import source_text, view_json
 from daimon.core.stores.identity import get_or_create_cli_principal
@@ -396,5 +402,23 @@ def features_diff_command(
                 agent_b=agent_b,
                 as_json=as_json,
             )
+
+    run_cli(run(), console=console)
+
+
+@features_app.command("import-env")
+def features_import_env_command() -> None:
+    """Copy the deprecated per-workspace env maps into workspace settings, once.
+
+    Until a workspace is imported its env map still applies; afterwards the variable is
+    ignored and logged. Safe to re-run: imported workspaces and stored values are kept.
+    """
+    console = Console(highlight=False)
+
+    async def run() -> None:
+        settings = load_settings()
+        async with build_runtime(settings) as rt, rt.sessionmaker() as session, session.begin():
+            count = await import_env(session, settings)
+        console.print(f"imported {count} workspace(s)")
 
     run_cli(run(), console=console)

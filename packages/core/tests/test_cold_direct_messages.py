@@ -15,6 +15,7 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.direct_messages import admit_cold_dm, start_cold_dm
+from daimon.core.features.service import set_workspace_feature
 from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.scope import ChannelScopeRef, ResolvedConfig
 from daimon.core.stores.access_policy import set_access_policy
@@ -248,8 +249,15 @@ async def test_read_only_change_is_rechecked_before_session_use(db_session_facto
     assert admission.config.agent_name == "private"
     assert not admission.memory_read_only
     async with db_session_factory.begin() as session:
-        await set_access_policy(
-            session, tenant_id=tenant.id, policy=TenantAccessPolicy(dm_memory_read_only=True)
+        await set_workspace_feature(
+            session,
+            None,
+            tenant_id=tenant.id,
+            platform="discord",
+            key="dm_memory_read_only",
+            value="on",
+            account_id=None,
+            surface="cli",
         )
     assert (await reauthorize(deps, admission)).memory_read_only
     await client.close()
@@ -262,7 +270,14 @@ async def test_dm_agent_migration_round_trip_preserves_enablement(db_session):
     migration = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(migration)
     tenant = await make_tenant(db_session)
-    await set_dm_enabled(db_session, tenant_id=tenant.id, enabled=True)
+    # The migration copies the legacy column, which nothing writes any more.
+    await db_session.execute(
+        text(
+            "INSERT INTO direct_message_policies (tenant_id, enabled) VALUES (:id, true) "
+            "ON CONFLICT (tenant_id) DO UPDATE SET enabled = true"
+        ),
+        {"id": tenant.id},
+    )
     await set_dm_agent_name(db_session, tenant_id=tenant.id, agent_name="private")
     connection = await db_session.connection()
 

@@ -37,6 +37,7 @@ from daimon.core.direct_messages import (
     reply_to_dm_result,
     start_cold_dm,
 )
+from daimon.core.features.service import set_workspace_feature
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.mcp_vault import add_external_mcp_credential
@@ -680,10 +681,15 @@ async def harness(
 async def test_routine_session_is_the_owners_live_dm_session(harness: Harness, read_only: bool):
     if read_only:
         async with harness.factory.begin() as session:
-            await set_access_policy(
+            await set_workspace_feature(
                 session,
+                None,
                 tenant_id=harness.tenant.id,
-                policy=TenantAccessPolicy(dm_memory_read_only=True),
+                platform="discord",
+                key="dm_memory_read_only",
+                value="on",
+                account_id=None,
+                surface="cli",
             )
     assert await harness.live_dm("hello", "m1") == "private answer"
     live = await harness.live_session_id()

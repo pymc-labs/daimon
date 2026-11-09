@@ -77,7 +77,6 @@ from daimon.adapters.discord.queue_card import queue_card_ticket, tenant_slot_wa
 from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.startup_replay import completed_orphan_text
-from daimon.adapters.discord.tables import tables_enabled
 from daimon.adapters.discord.thread_gone import ThreadStops, TurnThreadWatch, stop_reason_of
 from daimon.adapters.discord.thread_naming import generate_thread_name
 from daimon.adapters.discord.thread_participation import ThreadParticipant
@@ -134,6 +133,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import provision_tenant, reconcile_tenant_defaults
 from daimon.core.defaults.report import compose_failure_reason
 from daimon.core.errors import DaimonError, TurnError, UserFacingError
+from daimon.core.features.snapshot import FeaturePlace, place_feature
 from daimon.core.github_connect_delivery import run_connect_notice_poller
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.github_request_expiry import run_request_expiry_poller
@@ -175,7 +175,6 @@ from daimon.core.stores.pending_skill_adds import is_affirmative
 from daimon.core.stores.promo_codes import has_redeemable_promo_code
 from daimon.core.stores.tenant_ledger import get_prepaid_balance
 from daimon.core.stores.tenants import (
-    get_plain_text_mentions,
     get_tenant_liveness,
     get_turn_cap,
     list_tenants_by_platform,
@@ -2801,16 +2800,26 @@ class DaimonBot(commands.Bot):
         # skipped rather than failing on_message.
         return tuple(name for name in candidates if isinstance(name, str))
 
+    async def _feature_on(
+        self, key: str, tenant_id: uuid.UUID, channel_id: str | None = None
+    ) -> bool:
+        """A chat-behaviour feature here; a failed read keeps the registry default."""
+        place = FeaturePlace.of(tenant_id, "discord", channel_id)
+        return (
+            await place_feature(self.runtime.sessionmaker, self.runtime.settings, place, key)
+        ).on
+
     async def _plain_text_mentions_on(self, message: discord.Message) -> bool:
         """Read the tenant's switch for a message that already names the bot as text."""
         assert message.guild is not None
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(message.guild.id))
-        try:
-            enabled = await get_plain_text_mentions(self.runtime.sessionmaker, tenant_id=tenant_id)
-        except SQLAlchemyError as exc:
-            # A failed read leaves the message unaddressed, as with the switch off.
-            log.warning("plain_text_mention.lookup_failed", error_type=type(exc).__name__)
-            return False
+        # A failed read leaves the message unaddressed, as with the switch off.
+        place = FeaturePlace.of(tenant_id, "discord", str(message.channel.id))
+        enabled = (
+            await place_feature(
+                self.runtime.sessionmaker, self.runtime.settings, place, "plain_text_mentions"
+            )
+        ).on
         if enabled:
             log.info(
                 "plain_text_mention.accepted",
@@ -2838,8 +2847,13 @@ class DaimonBot(commands.Bot):
         thread = message.channel
         if not isinstance(thread, discord.Thread):
             return
+        hint_tenant = derive_tenant_uuid(platform="discord", workspace_id=str(message.guild.id))
         if not is_unmentioned_reply_hint_candidate(
-            enabled=discord_settings.unmentioned_reply_hint,
+            enabled=await self._feature_on(
+                "unmentioned_reply_hint",
+                hint_tenant,
+                str(thread.parent_id) if thread.parent_id else None,
+            ),
             author_is_bot=message.author.bot,
             author_is_webhook=isinstance(message.webhook_id, int),
             bot_mentioned=bot_mentioned,
@@ -2989,7 +3003,6 @@ class DaimonBot(commands.Bot):
         settings = self.runtime.settings.discord
         if (
             settings is None
-            or settings.writers_none_notice is not True
             or self.wake_poller_enabled is not True
             or self.user is None
             or message.guild is None
@@ -3005,6 +3018,7 @@ class DaimonBot(commands.Bot):
                 self_user_id=str(self.user.id),
                 qa_bot_user_ids=settings.qa_bot_user_ids,
             )
+            or not await self._feature_on("writers_none_notice", tenant_id, str(message.channel.id))
         ):
             return
         channel = message.channel
@@ -3237,9 +3251,10 @@ class DaimonBot(commands.Bot):
             # reaction instead, so one mention never gets both signals.
             if (
                 post_state is ProtectionState.PROTECTED
-                and discord_settings is not None
-                and discord_settings.writers_none_notice is True
                 and self.wake_poller_enabled is True
+                and await self._feature_on(
+                    "writers_none_notice", tenant_id, str(message.channel.id)
+                )
             ):
                 await self._notice_writers_none(message, tenant_id)
             elif post_state is ProtectionState.PROTECTED and not startup_replay:
@@ -3373,7 +3388,7 @@ class DaimonBot(commands.Bot):
             with (
                 holding(ticket),
                 queue_card_ticket(ticket, cap=cap)
-                if self.runtime.settings.discord.tenant_cap_waiting_card
+                if await self._feature_on("waiting_card", tenant_id)
                 else contextlib.nullcontext(),
             ):
                 # Channel-level mentions each open their own thread + MA session, so
@@ -4434,9 +4449,8 @@ class DaimonBot(commands.Bot):
                 requester_id=int(row.requester_external_user_id),
                 requester_is_admin=admission.is_admin,
                 in_dm=isinstance(thread, discord.DMChannel),
-                notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
-                is True,
-                render_tables=tables_enabled(self.runtime.settings.table_rendering, tenant_id),
+                notify_on_completion=admission.shown("completion_pings"),
+                render_tables=admission.shown("table_rendering"),
                 send=recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport),
                 edit=_edit_message,
                 urgent_edit=_urgent_edit_message,
@@ -4611,9 +4625,8 @@ class DaimonBot(commands.Bot):
                 requester_id=int(row.requester_external_user_id),
                 requester_is_admin=admission.is_admin,
                 in_dm=isinstance(thread, discord.DMChannel),
-                notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
-                is True,
-                render_tables=tables_enabled(self.runtime.settings.table_rendering, tenant_id),
+                notify_on_completion=admission.shown("completion_pings"),
+                render_tables=admission.shown("table_rendering"),
                 send=recorder.sender(
                     thread, turn_card_intent_id=turn_card_intent.id, transport=transport
                 ),
@@ -4754,7 +4767,11 @@ class DaimonBot(commands.Bot):
                         delivered_answer_chunk_ids=final_lifecycle.delivered_answer_chunk_ids,
                     )
                     await session.commit()
-            if final_lifecycle.was_answered and final_lifecycle.feedback_message_id is not None:
+            if (
+                final_lifecycle.was_answered
+                and final_lifecycle.feedback_message_id is not None
+                and prepared.admission.shown("message_feedback")
+            ):
                 await seed_feedback_reactions(
                     thread, message_id=final_lifecycle.feedback_message_id
                 )
@@ -5225,11 +5242,8 @@ class DaimonBot(commands.Bot):
                     channel_id=parent_channel_id,
                     user_id=str(message.author.id),
                 )
-                notice_settings = self.runtime.settings.discord
-                if (
-                    notice_settings is not None
-                    and notice_settings.writers_none_notice is True
-                    and self.wake_poller_enabled is True
+                if self.wake_poller_enabled is True and await self._feature_on(
+                    "writers_none_notice", tenant_id, parent_channel_id
                 ):
                     await self._notice_writers_none(message, tenant_id)
                 else:
@@ -5359,7 +5373,7 @@ class DaimonBot(commands.Bot):
                 )
                 try:
                     if (
-                        naming.enabled
+                        await self._feature_on("thread_naming", tenant_id, parent_channel_id)
                         and opening_text
                         and not (
                             admission.backend_revision is not None
@@ -5462,6 +5476,8 @@ class DaimonBot(commands.Bot):
         self._thread_stops.watch(thread.id, cancel)
         self._typed_stops.watch(thread.id, requester_id=message.author.id, cancel=cancel)
 
+        waiting_card = await self._feature_on("waiting_card", tenant_id)
+
         def _make_lifecycle(
             turn_id: uuid.UUID, on_first_post: Callable[[discord.Message], Awaitable[None]]
         ) -> DiscordTurnLifecycle:
@@ -5472,11 +5488,10 @@ class DaimonBot(commands.Bot):
                 budget_channel_id=admission.budget_channel_id,
                 requester_id=message.author.id,
                 requester_is_admin=is_admin,
-                notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
-                is True,
+                notify_on_completion=admission.shown("completion_pings"),
                 trigger_message=message,
                 acknowledgment_managed=True,
-                render_tables=tables_enabled(self.runtime.settings.table_rendering, tenant_id),
+                render_tables=admission.shown("table_rendering"),
                 send=recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport),
                 edit=_edit_message,
                 urgent_edit=_urgent_edit_message,
@@ -5496,10 +5511,7 @@ class DaimonBot(commands.Bot):
                     thread, msg, turn_card_intent_id=turn_id
                 ),
                 waiting_for_tenant_slot=(
-                    tenant_slot_waiter(self.turn_queue, tenant_id)
-                    if self.runtime.settings.discord is not None
-                    and self.runtime.settings.discord.tenant_cap_waiting_card
-                    else None
+                    tenant_slot_waiter(self.turn_queue, tenant_id) if waiting_card else None
                 ),
             )
 
@@ -5607,7 +5619,7 @@ class DaimonBot(commands.Bot):
             )
             return
 
-        if self.runtime.settings.discord.tenant_cap_waiting_card:
+        if waiting_card:
             await lifecycle.on_slot_started()
 
         # The per-turn ceiling clock starts here, once admission
@@ -6006,11 +6018,10 @@ class DaimonBot(commands.Bot):
                 budget_channel_id=admission.budget_channel_id,
                 requester_id=message.author.id,
                 requester_is_admin=is_admin,
-                notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
-                is True,
+                notify_on_completion=admission.shown("completion_pings"),
                 trigger_message=message,
                 acknowledgment_managed=True,
-                render_tables=tables_enabled(self.runtime.settings.table_rendering, tenant_id),
+                render_tables=admission.shown("table_rendering"),
                 send=turn_send,
                 edit=_edit_message,
                 urgent_edit=_urgent_edit_message,
@@ -6188,7 +6199,11 @@ class DaimonBot(commands.Bot):
             # the vote affordance under a cancellation notice is exactly what
             # this guard prevents. Not gated on mapping_id, which is about
             # session mapping, not whether the turn actually answered.
-            if final_lifecycle.was_answered and final_lifecycle.feedback_message_id is not None:
+            if (
+                final_lifecycle.was_answered
+                and final_lifecycle.feedback_message_id is not None
+                and prepared.admission.shown("message_feedback")
+            ):
                 await seed_feedback_reactions(
                     thread, message_id=final_lifecycle.feedback_message_id
                 )

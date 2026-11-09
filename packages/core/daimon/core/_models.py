@@ -103,8 +103,8 @@ class Tenant(Base):
         Text, nullable=False, server_default=text("'prepaid'")
     )
     turn_cap: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    # A plain-text "@<bot name>" in a channel or thread starts a turn like a
-    # real mention (daimon.core.name_mentions). Off until an admin opts in.
+    # Read by nothing: typed mentions are the `plain_text_mentions` feature now (migration
+    # 0188 copied this value). Kept so an older build still starts.
     plain_text_mentions: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
     )

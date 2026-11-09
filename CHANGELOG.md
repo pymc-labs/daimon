@@ -33,6 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Each turn records what it ran with.**
   Turn outcomes and conversations store an `eval_key`: the session's fingerprint and tools, hashes of the safety block, guidance and turn controls, the platform, and every feature with the level that decided it. Older rows keep it empty.
 
+- **Chat behaviour and display settings join the same system.**
+  Typed `@name` mentions, direct messages, read-only memory in direct messages, completion pings, table rendering, message feedback buttons, budget notices, cost shown with native models, thread naming, the unmentioned-reply hint, the "no writers" notice and the waiting card are set at the server level and, where the platform allows it, down to a channel. Each web app module is a setting too (`web.chat`, `web.agents` and so on).
+  The old per-workspace variables (`DAIMON_COMPLETION_PINGS`, `DAIMON_TABLE_RENDERING`, `DAIMON_BUDGET_NOTICES`) keep working until you run `daimon features import-env`, which copies them into workspace settings once; after that a variable left set is ignored and logged. The other old variables still work but log a deprecation.
+  The old controls (the typed-mention and web settings tools, `PATCH /api/admin/settings` and the direct-message commands) behave as before and now change the same stored values, so the two never disagree.
+
 - **The Azure deploy can keep MCP private while Teams is public.**
   Set `mcpPublicIngress` to false and MCP is reachable only from apps in the same Container Apps environment. The default keeps it public, as before.
   It suits only the self-hosted harness running in that environment. Hosted model backends, including the default Anthropic one, sign-in and connect links, and every other Daimon web page stop working, because MCP serves them.

@@ -66,11 +66,13 @@ def resolve_feature(
     *,
     unavailable: Unavailable | None = None,
     fixed: str | None = None,
+    default: str | None = None,
 ) -> ResolvedFeature:
     """Walk `values` broadest tier first; tiers the spec does not offer are ignored.
-    An unavailable feature is Off, or `fixed` when its backend always runs that value."""
+    An unavailable feature is Off, or `fixed` when its backend always runs that value.
+    `default` is the platform's own default where it differs from the spec's."""
     by_tier = {value.tier: value for value in values if value.tier in spec.tiers}
-    effective = ResolvedFeature(spec.key, spec.default, "default")
+    effective = ResolvedFeature(spec.key, default or spec.default, "default")
     for tier in TIERS:
         if effective.locked:
             break

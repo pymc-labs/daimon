@@ -54,7 +54,7 @@ async def resolve_repo(
             origin.thread_id,
             agent_id=origin.responder_ma_agent_id,
         ),
-        keys=("repo_memory",),
+        keys=("repo_memory", "dm_memory_read_only"),
     )
     if not features.on("repo_memory"):
         raise ToolError("Repository memory is off here.")
@@ -67,7 +67,8 @@ async def resolve_repo(
         ),
         held=auth.hold is not None,
         foreign=auth.client or origin.sender_foreign or origin.shared_channel,
-        read_only=origin.memory_read_only is not False or (is_dm and policy.dm_memory_read_only),
+        read_only=origin.memory_read_only is not False
+        or (is_dm and features.on("dm_memory_read_only")),
     )
     try:
         facts.require(write=write)

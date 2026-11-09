@@ -25,7 +25,7 @@ from daimon.adapters.mcp.tools._ctx import (
 )
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.errors import StoreError
-from daimon.core.stores.tenants import get_plain_text_mentions
+from daimon.core.features.snapshot import FeaturePlace, place_feature
 from daimon.core.workspace_settings import SettingRefused, set_plain_text_mentions
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -70,6 +70,7 @@ async def _set_plain_text_mentions_impl(
                 subject=mcp_subject(auth, is_admin=True),
                 platform=auth.platform,
                 enabled=enabled,
+                account_id=auth.account_id,
             )
         except SettingRefused as exc:
             raise ToolError(str(exc)) from exc
@@ -81,7 +82,10 @@ async def _set_plain_text_mentions_impl(
 async def _get_plain_text_mentions_impl(
     runtime: McpRuntime, auth: AuthIdentity
 ) -> PlainTextMentionsStatus:
-    enabled = await get_plain_text_mentions(runtime.session_factory, tenant_id=auth.tenant_id)
+    place = FeaturePlace(auth.tenant_id, auth.platform or "")  # no platform: the default
+    enabled = (
+        await place_feature(runtime.session_factory, runtime.settings, place, "plain_text_mentions")
+    ).on
     return PlainTextMentionsStatus(enabled=enabled, note=_note(enabled))
 
 

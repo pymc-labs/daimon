@@ -14,10 +14,11 @@ from daimon.adapters.mcp.tools.plain_text_mentions import (
     _set_plain_text_mentions_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
+from daimon.core.features.snapshot import FeaturePlace, place_feature
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
-from daimon.core.stores.tenants import get_plain_text_mentions
-from daimon.testing.factories import make_tenant
+from daimon.core.stores.tenants import get_tenant
+from daimon.testing.factories import make_account, make_tenant
 from fastmcp.exceptions import ToolError
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -36,9 +37,15 @@ def _runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> McpRuntime:
     )
 
 
-def _auth(tenant_id: uuid.UUID, *, admin: bool, platform: str = "teams") -> AuthIdentity:
+def _auth(
+    tenant_id: uuid.UUID,
+    *,
+    admin: bool,
+    platform: str = "teams",
+    account_id: uuid.UUID | None = None,
+) -> AuthIdentity:
     return AuthIdentity(
-        account_id=uuid.uuid4(),
+        account_id=account_id or uuid.uuid4(),
         tenant_id=tenant_id,
         role=Role.ADMIN if admin else Role.USER,
         platform=platform,
@@ -51,6 +58,23 @@ async def _seed(sessionmaker: async_sessionmaker[AsyncSession], platform: str) -
         return (await make_tenant(session, platform=platform)).id  # type: ignore[arg-type]
 
 
+async def _admin_auth(
+    sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, platform: str
+) -> AuthIdentity:
+    """An admin whose account row exists, so the stored value can name who set it."""
+    async with sessionmaker.begin() as session:
+        tenant = await get_tenant(session, tenant_id)
+        assert tenant is not None, "the seeded workspace must exist"
+        account = await make_account(session, tenant=tenant)
+    return _auth(tenant_id, admin=True, platform=platform, account_id=account.id)
+
+
+async def _mentions_on(sessions: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID) -> bool:
+    """The stored `plain_text_mentions` value at the workspace."""
+    place = FeaturePlace(tenant_id, "discord")
+    return (await place_feature(sessions, None, place, "plain_text_mentions")).on
+
+
 @pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
 async def test_admin_turns_plain_text_mentions_on_and_off(
     committing_sessionmaker: async_sessionmaker[AsyncSession], platform: str
@@ -58,18 +82,16 @@ async def test_admin_turns_plain_text_mentions_on_and_off(
     """An admin's write is committed and the note says what changed."""
     tenant_id = await _seed(committing_sessionmaker, platform)
     runtime = _runtime(committing_sessionmaker)
-    auth = _auth(tenant_id, admin=True, platform=platform)
+    auth = await _admin_auth(committing_sessionmaker, tenant_id, platform)
 
     on = await _set_plain_text_mentions_impl(runtime, auth, True)
     assert on.enabled is True, "the result must echo the new value"
     assert "plain text" in on.note, "the note must describe the plain-text trigger"
-    assert await get_plain_text_mentions(committing_sessionmaker, tenant_id=tenant_id), (
-        "the flag must be committed on"
-    )
+    assert await _mentions_on(committing_sessionmaker, tenant_id), "the flag must be committed on"
 
     off = await _set_plain_text_mentions_impl(runtime, auth, False)
     assert off.enabled is False, "the result must echo the value turned off"
-    assert not await get_plain_text_mentions(committing_sessionmaker, tenant_id=tenant_id), (
+    assert not await _mentions_on(committing_sessionmaker, tenant_id), (
         "the flag must be committed off"
     )
 
@@ -85,7 +107,7 @@ async def test_non_admin_is_refused_and_nothing_is_written(
             _runtime(committing_sessionmaker), _auth(tenant_id, admin=False), True
         )
 
-    assert not await get_plain_text_mentions(committing_sessionmaker, tenant_id=tenant_id), (
+    assert not await _mentions_on(committing_sessionmaker, tenant_id), (
         "the refused call must leave the flag off"
     )
 
@@ -114,7 +136,7 @@ async def test_member_reads_the_current_value(
     assert "does not" in before.note, "the off note must say plain text does not trigger"
 
     await _set_plain_text_mentions_impl(
-        runtime, _auth(tenant_id, admin=True, platform="slack"), True
+        runtime, await _admin_auth(committing_sessionmaker, tenant_id, "slack"), True
     )
     after = await _get_plain_text_mentions_impl(runtime, _auth(tenant_id, admin=False))
     assert after.enabled is True, "a member must see the admin's change"

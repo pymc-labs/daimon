@@ -21,6 +21,8 @@ from daimon.core.channel_budget_notice import BudgetNotice, drain_budget_notices
 from daimon.core.config import McpSettings
 from daimon.core.direct_messages import start_dm
 from daimon.core.errors import DaimonError
+from daimon.core.features.registry import DEFAULT
+from daimon.core.features.service import set_workspace_feature
 from daimon.core.ma_resolver import MAResolverMissError, ResolverCache, new_resolver_cache
 from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
@@ -328,13 +330,35 @@ async def test_a_budget_refusal_sends_the_notice_unless_the_tenant_opted_out(
         "external_user_id": "user-1",
         "requester_org": RequesterOrg.HOST,
     }
-    opted_out = replace(base, budget_notifier=notifier, budget_notices_off=frozenset({tenant.id}))
+    await set_workspace_feature(
+        db_session,
+        None,
+        tenant_id=tenant.id,
+        platform="discord",
+        key="budget_notices",
+        value="off",
+        account_id=None,
+        surface="cli",
+    )
+    await db_session.commit()
+    opted_out = replace(base, budget_notifier=notifier)
     with pytest.raises(AdmissionDenied):
         await admit(opted_out, origin="chat", **args, channel_id="chan-1", now=_NOW)
     release.set()
     await drain_budget_notices()
     assert sent == [], "an opted-out tenant gets no notice"
 
+    await set_workspace_feature(
+        db_session,
+        None,
+        tenant_id=tenant.id,
+        platform="discord",
+        key="budget_notices",
+        value=DEFAULT,
+        account_id=None,
+        surface="cli",
+    )
+    await db_session.commit()
     release.clear()
     with pytest.raises(AdmissionDenied) as exc_info:
         await admit(
@@ -1522,8 +1546,8 @@ async def test_admit_refuses_when_the_stored_policy_is_unreadable(
         (TenantAccessPolicy(sealed_channel_ids=("vault",)), "vault", None, False, True),
         (TenantAccessPolicy(sealed_channel_ids=("vault",)), "vault", "thr-1", False, True),
         (TenantAccessPolicy(sealed_channel_ids=("vault",)), "chan-1", "thr-1", False, False),
-        (TenantAccessPolicy(dm_memory_read_only=True), "dm-1", None, True, True),
-        (TenantAccessPolicy(dm_memory_read_only=True), "chan-1", None, False, False),
+        (TenantAccessPolicy(), "dm-1", None, True, True),
+        (TenantAccessPolicy(), "chan-1", None, False, False),
         (None, "dm-1", None, True, False),
         (
             TenantAccessPolicy(sealed_channel_ids=("C1:1700000000.000100",)),
@@ -1563,6 +1587,19 @@ async def test_admit_marks_memory_read_only_for_sealed_channels_and_policy_dms(
     expected: bool,
 ) -> None:
     tenant = await _seed_admittable_tenant(db_session, policy=policy)
+    if is_dm and expected:
+        # The only DM case expected read-only is the one with the workspace feature on.
+        await set_workspace_feature(
+            db_session,
+            None,
+            tenant_id=tenant.id,
+            platform="discord",
+            key="dm_memory_read_only",
+            value="on",
+            account_id=None,
+            surface="cli",
+        )
+        await db_session.commit()
     deps = _deps(
         native_member_admin=False,
         sessionmaker=db_session_factory,

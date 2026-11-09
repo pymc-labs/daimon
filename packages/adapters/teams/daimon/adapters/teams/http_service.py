@@ -65,6 +65,8 @@ from daimon.adapters.teams.thread_handoff import TeamsThreadHandoff
 from daimon.adapters.teams.thread_reader import ThreadReader
 from daimon.adapters.teams.wizard import TeamsWizards
 from daimon.core.config import TeamsSettings
+from daimon.core.features.deployment import deployment_value
+from daimon.core.features.registry import FEATURES
 from daimon.core.logging_setup import mark_shutting_down
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.outbound.opt_out import tag_opt_outs
@@ -324,7 +326,13 @@ def create_teams_http_service(
         SupportCommand(runtime, direct, spawn=spawn) if support_enabled(runtime.settings) else None
     )
     subscriptions = None
-    if runtime.settings.private_channel_messages.enabled and settings.public_url is not None:
+    # Channel subscriptions are process machinery, so the operator's value gates them.
+    private_channel = deployment_value(runtime.settings, FEATURES["private_channel_messages"])
+    if (
+        private_channel is not None
+        and private_channel.value == "on"
+        and (settings.public_url is not None)
+    ):
 
         async def deliver(
             message: GraphMessage, channel: TeamsChannelSubscriptionRow, *, mentions: bool = False

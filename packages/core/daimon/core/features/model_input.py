@@ -24,6 +24,13 @@ PER_TURN_KEYS: Final[tuple[str, ...]] = (
 MODEL_INPUT_KEYS: Final[tuple[str, ...]] = ("guidance", *SESSION_KEYS, *TURN_KEYS[1:])
 
 HISTORY_KEYS: Final[tuple[str, ...]] = ("history_depth",)
+CHAT_KEYS: Final[tuple[str, ...]] = (
+    "completion_pings",
+    "table_rendering",
+    "message_feedback",
+    "native_footer_cost",
+)
+"""Chat display settings the adapters read from the turn's admission."""
 CHANNEL_BACKFILL: Final[int] = 25
 """The most channel messages around a new thread any chat adapter reads."""
 

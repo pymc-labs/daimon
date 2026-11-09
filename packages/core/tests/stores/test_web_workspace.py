@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 
+from daimon.core.features.service import set_workspace_feature
 from daimon.core.stores import web_audit
 from daimon.core.stores import web_roles as roles
 from daimon.core.stores import web_workspace_settings as settings
@@ -15,31 +16,32 @@ from sqlalchemy.ext.asyncio import AsyncSession
 _NOW = datetime(2026, 5, 1, tzinfo=UTC)
 
 
-async def test_settings_default_to_everything_on_and_save_once_per_workspace(
+async def test_settings_default_to_everything_on_and_modules_come_from_features(
     db_session: AsyncSession,
 ) -> None:
+    """The saved row holds the default agent; which modules are off is the `web.*` features."""
     tenant = await make_tenant(db_session)
     fresh = await settings.get_settings(db_session, tenant_id=tenant.id)
-
-    await settings.save_settings(
-        db_session,
-        tenant_id=tenant.id,
-        modules_off=["agents", "agents"],
-        default_agent="a1",
-        now=_NOW,
-    )
+    for module in ("agents", "credits"):
+        await set_workspace_feature(
+            db_session,
+            None,
+            tenant_id=tenant.id,
+            platform="web",
+            key=f"web.{module}",
+            value="off",
+            account_id=None,
+            surface="web",
+        )
     saved = await settings.save_settings(
-        db_session,
-        tenant_id=tenant.id,
-        modules_off=["credits"],
-        default_agent=None,
-        now=_NOW,
+        db_session, tenant_id=tenant.id, default_agent="a1", now=_NOW
     )
 
     assert (fresh.modules_off, fresh.default_agent) == ((), None), (
         "a workspace that chose nothing has everything on"
     )
-    assert saved.modules_off == ("credits",), "the last save wins"
+    assert saved.modules_off == ("agents", "credits"), "the modules switched off are listed"
+    assert saved.default_agent == "a1", "the default agent is saved"
     assert await settings.get_settings(db_session, tenant_id=tenant.id) == saved, "it is kept"
 
 

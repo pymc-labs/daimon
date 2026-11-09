@@ -252,7 +252,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
             session_ref,
             request.deps.markup,
         )
-        if request.deps.native_footer_cost
+        if request.admission.shown("native_footer_cost", request.platform)
         else None
     )
 

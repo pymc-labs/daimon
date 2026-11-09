@@ -6,6 +6,7 @@ from dataclasses import replace
 import pytest
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Surface, build_agent_ref, build_subject, build_turn_place
+from daimon.core.features.service import set_workspace_feature
 from daimon.core.session_preparation import PreparedReplacement
 from daimon.core.session_preparation_stages import lock_preparation
 from daimon.core.stores.access_policy import set_access_policy
@@ -77,7 +78,18 @@ async def setup(db_session, db_committing_engine):
         if change == "pin":
             value = TenantAccessPolicy(agent_channel_pins={"daimon": ("elsewhere",)})
         elif change == "dm_read_only":
-            value = TenantAccessPolicy(dm_memory_read_only=True)
+            async with factory.begin() as session:
+                await set_workspace_feature(
+                    session,
+                    None,
+                    tenant_id=tenant.id,
+                    platform="discord",
+                    key="dm_memory_read_only",
+                    value="on",
+                    account_id=None,
+                    surface="cli",
+                )
+            return
         else:
             value = TenantAccessPolicy(sealed_channel_ids=("vault",))
         async with factory.begin() as session:

@@ -13,10 +13,13 @@ from collections import OrderedDict
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import cache
+from typing import cast
 
+import structlog
 from daimon.core.config import Settings
 from daimon.core.features.deployment import deployment_value
-from daimon.core.features.registry import FEATURES, FeatureSpec, Tier
+from daimon.core.features.registry import ENV_IMPORTED, FEATURES, FeatureSpec, Tier
 from daimon.core.features.resolver import (
     ResolvedFeature,
     TierValue,
@@ -28,6 +31,7 @@ from daimon.core.stores.feature_values import feature_revision, place_values
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 Sessions = async_sessionmaker[AsyncSession]
+log = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -83,6 +87,29 @@ def unavailable_reason(
     return None
 
 
+@cache
+def _warn_ignored(env: str, key: str) -> None:
+    log.warning("features.legacy_env_ignored", env=env, imported_to=key)
+
+
+def _env_map_value(
+    spec: FeatureSpec,
+    settings: Settings | None,
+    place: FeaturePlace,
+    rows: Iterable[FeatureValueRow],
+) -> TierValue | None:
+    """A deprecated per-workspace env map as the workspace tier, until it is imported."""
+    if spec.env_map is None or settings is None:
+        return None
+    raw = cast(Mapping[uuid.UUID, bool], getattr(settings, spec.env_map)).get(place.tenant_id)
+    if raw is None:
+        return None
+    if any(row.key == ENV_IMPORTED for row in rows):
+        _warn_ignored(spec.legacy_env[0], spec.key)
+        return None
+    return TierValue("workspace", "on" if raw else "off")
+
+
 def tier_values(
     spec: FeatureSpec,
     settings: Settings | None,
@@ -95,6 +122,9 @@ def tier_values(
     tiers: tuple[Tier, ...] = spec.tiers_on(place.backend)
     deployment = deployment_value(settings, spec) if "deployment" in spec.tiers else None
     found = [deployment] if deployment is not None else []
+    rows = list(rows)
+    from_env = _env_map_value(spec, settings, place, rows) if "workspace" in tiers else None
+    found += [from_env] if from_env is not None else []
     found += [
         TierValue(row.tier, row.value, row.locked)
         for row in rows
@@ -124,7 +154,9 @@ def resolve_one(
         reason = "depends_on"
     fixed = spec.backend_fixed.get(place.backend) if reason == "backend" and place.backend else None
     values = tier_values(spec, settings, place, rows, agent_builtins)
-    return resolve_feature(spec, values, unavailable=reason, fixed=fixed)
+    return resolve_feature(
+        spec, values, unavailable=reason, fixed=fixed, default=spec.default_for(place.platform)
+    )
 
 
 @dataclass(frozen=True)
@@ -282,3 +314,32 @@ async def resolve_agent_features(
         ]
     resolved = {key: resolve_one(FEATURES[key], settings, place, rows) for key in keys}
     return FeatureSnapshot(place, revision, resolved)
+
+
+async def place_feature(
+    sessions: Sessions, settings: Settings | None, place: FeaturePlace, key: str
+) -> ResolvedFeature:
+    """One feature at `place`, for a reader with no admission in hand (a delivery, a
+    notice). A read that fails keeps the registry default, as `cost_footer_shown` does."""
+    try:
+        return (await resolve_features(sessions, settings, place, keys=(key,))).get(key)
+    except Exception:
+        log.warning("features.place_read_failed", key=key, exc_info=True)
+        spec = FEATURES[key]
+        return ResolvedFeature(key, spec.default_for(place.platform), "default")
+
+
+async def feature_in(
+    session: AsyncSession, settings: Settings | None, place: FeaturePlace, key: str
+) -> ResolvedFeature:
+    """One feature at `place` inside the caller's open session, for a reader already in a
+    transaction (a gate that also reads other rows). Not cached; a failed read raises."""
+    rows = await place_values(
+        session,
+        tenant_id=place.tenant_id,
+        agent_id=place.agent_id,
+        channel_id=place.channel_id,
+        thread_key=place.thread_key,
+        keys=(key, ENV_IMPORTED),
+    )
+    return resolve_one(FEATURES[key], settings, place, rows)

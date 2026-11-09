@@ -44,6 +44,7 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import McpSettings, load_turn_settings
 from daimon.core.credential_env import assemble_env_bytes
 from daimon.core.features.resolver import ResolvedFeature
+from daimon.core.features.service import set_workspace_feature
 from daimon.core.features.snapshot import FeaturePlace, FeatureSnapshot
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
@@ -2660,8 +2661,17 @@ async def test_admission_origin_controls_the_actual_memory_mount(
         tenant_id=tenant.id,
         policy=TenantAccessPolicy(
             sealed_channel_ids=("channel-1",) if sealed else (),
-            dm_memory_read_only=dm_read_only,
         ),
+    )
+    await set_workspace_feature(
+        db_session,
+        None,
+        tenant_id=tenant.id,
+        platform="discord",
+        key="dm_memory_read_only",
+        value="on" if dm_read_only else "off",
+        account_id=None,
+        surface="cli",
     )
     await db_session.commit()
     agent = ma_agent(id=_AGENT_ID, name="daimon", tenant_id=tenant.id)
