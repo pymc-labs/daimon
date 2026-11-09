@@ -114,6 +114,7 @@ def test_operator_names_and_policy_urls_replace_the_defaults() -> None:
         ({"name": "x" * 31}, "name short"),
         ({"developer": " "}, "developer name"),
         ({"version": "2"}, "--version"),
+        ({"version": "01.0.0"}, "--version"),
     ],
 )
 def test_refuses_input_teams_would_reject(overrides: dict[str, str], message: str) -> None:

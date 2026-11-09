@@ -269,7 +269,9 @@ the app package's name, set when [building the package](../../docs/teams.md).
 
 1. Create the application, once, as someone allowed to register applications.
    It requests no API permissions; Teams grants channel access at install.
-   Keep `uniqueName` the same on every later deployment.
+   Keep `uniqueName` the same on every later deployment. Each deployment resets
+   the app's permissions and redirects to none, so add optional Graph
+   permissions after the last one.
 
    ```bash
    az deployment group create -g "$RG" --name daimon-bot-identity \
@@ -279,7 +281,8 @@ the app package's name, set when [building the package](../../docs/teams.md).
      --query properties.outputs
    ```
 
-2. Add a client secret. Without `--create` it only checks its inputs. The
+2. Add a client secret, as an owner of the application or an Application
+   Administrator. Without `--create` it only checks its inputs. The
    secret lands in `client-secret.txt` in the new state directory, never on screen.
    It expires after `--valid-days` (default 90): renew it by running the script
    again with a new `--state`, then replace `teams-client-secret`.
@@ -318,7 +321,7 @@ az keyvault secret set --vault-name "$VAULT" --name teams-client-secret \
 
 `scripts/azure/bootstrap_secrets.py --state <new dir> --vault "$VAULT"` does the
 first two for a fresh install: it generates them into a new owner-only
-directory and sets them, refusing if either already exists. Add
+directory and sets them, refusing if any already exists or is deleted but recoverable. Add
 `--teams-client-secret-file` to set `teams-client-secret` as well.
 `mcp-jwt-secret` is the shared signing secret. `crypto-keys` is a Fernet key
 ring in the format described in [self-hosting](../../docs/self-hosting.md).

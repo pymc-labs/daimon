@@ -72,12 +72,16 @@ var checkedTeamsBot = deployTeamsBot && !contains(services, 'teams')
   ? fail('deployTeamsBot needs teams in services')
   : deployTeamsBot
 // Checked only when the bot is wanted, so default deployments never evaluate fail().
-var teamsBotClientId = checkedTeamsBot
-  ? (serviceEnvironment.?teams.?DAIMON_TEAMS__CLIENT_ID ?? fail('deployTeamsBot needs serviceEnvironment.teams.DAIMON_TEAMS__CLIENT_ID'))
-  : ''
-var teamsBotTenantId = checkedTeamsBot
-  ? (serviceEnvironment.?teams.?DAIMON_TEAMS__TENANT_ID ?? fail('deployTeamsBot needs serviceEnvironment.teams.DAIMON_TEAMS__TENANT_ID'))
-  : ''
+var teamsBotClientId = !checkedTeamsBot
+  ? ''
+  : empty(serviceEnvironment.?teams.?DAIMON_TEAMS__CLIENT_ID ?? '')
+      ? fail('deployTeamsBot needs serviceEnvironment.teams.DAIMON_TEAMS__CLIENT_ID')
+      : serviceEnvironment.teams.DAIMON_TEAMS__CLIENT_ID
+var teamsBotTenantId = !checkedTeamsBot
+  ? ''
+  : empty(serviceEnvironment.?teams.?DAIMON_TEAMS__TENANT_ID ?? '')
+      ? fail('deployTeamsBot needs serviceEnvironment.teams.DAIMON_TEAMS__TENANT_ID')
+      : serviceEnvironment.teams.DAIMON_TEAMS__TENANT_ID
 var suffix = uniqueString(resourceGroup().id)
 var stem = '${checkedNamePrefix}-${suffix}'
 var tags = { application: 'daimon' }

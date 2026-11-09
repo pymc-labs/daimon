@@ -763,6 +763,14 @@ def test_teams_bot_is_off_by_default_and_follows_the_teams_app(
         (
             (
                 "deployTeamsBot = true",
+                "serviceEnvironment = { teams: { DAIMON_TEAMS__CLIENT_ID: '', "
+                "DAIMON_TEAMS__TENANT_ID: '00000000-0000-4000-8000-000000000002' } }",
+            ),
+            "DAIMON_TEAMS__CLIENT_ID",
+        ),
+        (
+            (
+                "deployTeamsBot = true",
                 "services = ['discord', 'mcp', 'scheduler']",
                 f"serviceEnvironment = {{ teams: {TEAMS_IDS} }}",
             ),

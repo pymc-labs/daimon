@@ -31,7 +31,7 @@ CLIENT_ID_PLACEHOLDER = "${DAIMON_TEAMS__CLIENT_ID}"
 HOST_PLACEHOLDER = "DAIMON_HOST"
 ICONS = {"color.png": 192, "outline.png": 32}
 _HOST = re.compile(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}")
-_SEMVER = re.compile(r"\d+\.\d+\.\d+")
+_SEMVER = re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)")
 #: Teams manifest v1.30 length limits for the fields an operator replaces.
 _MAX_LENGTH = {
     ("name", "short"): 30,
@@ -123,10 +123,14 @@ def write_package(manifest: dict[str, Any], icons: dict[str, bytes], output: Pat
         fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
         raise PackageError(f"{output} exists; choose a new file name") from None
-    with os.fdopen(fd, "wb") as stream, zipfile.ZipFile(stream, "w") as package:
-        package.writestr("manifest.json", json.dumps(manifest, indent=2) + "\n")
-        for filename, data in checked.items():
-            package.writestr(filename, data)
+    try:
+        with os.fdopen(fd, "wb") as stream, zipfile.ZipFile(stream, "w") as package:
+            package.writestr("manifest.json", json.dumps(manifest, indent=2) + "\n")
+            for filename, data in checked.items():
+                package.writestr(filename, data)
+    except BaseException:
+        output.unlink(missing_ok=True)  # never leave a partial zip
+        raise
 
 
 def main(argv: list[str] | None = None) -> None:
