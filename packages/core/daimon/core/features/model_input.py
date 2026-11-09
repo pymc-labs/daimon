@@ -8,12 +8,18 @@ from typing import Any, Final, Literal, cast
 
 from anthropic.types.beta import BetaManagedAgentsAgent
 from anthropic.types.beta.agent_create_params import Tool
+from daimon.core.capability_tools import CAPABILITY_KEYS, CAPABILITY_TOOLS
 from daimon.core.features.registry import BUILTIN_TOOLS
 from daimon.core.features.snapshot import FeatureSnapshot
 from daimon.core.repo_memory_tools import REPO_MEMORY_TOOLS
 
 TOOL_KEYS: Final[tuple[str, ...]] = tuple(f"tool.{tool}" for tool in BUILTIN_TOOLS)
-SESSION_KEYS: Final[tuple[str, ...]] = ("daimon_tools", *TOOL_KEYS, "agent_env_file")
+SESSION_KEYS: Final[tuple[str, ...]] = (
+    "daimon_tools",
+    *TOOL_KEYS,
+    "agent_env_file",
+    *CAPABILITY_KEYS,
+)
 TOOLSET_KEYS: Final[tuple[str, ...]] = (*SESSION_KEYS, "repo_memory")
 """What `SessionToolset.of` reads: `repo_memory` also hides its tools, while it binds per turn."""
 TURN_KEYS: Final[tuple[str, ...]] = ("daimon_tools", "turn_controls", "web_awareness")
@@ -83,6 +89,8 @@ class SessionToolset:
     repo_memory: bool = True
     env_file: bool = True
     """`agent_env_file`: the agent's keys are mounted as `.env`."""
+    off_capabilities: frozenset[str] = frozenset()
+    """Capabilities a tier turned Off or whose setup is missing: their tools are not offered."""
 
     @classmethod
     def of(
@@ -116,6 +124,13 @@ class SessionToolset:
             builtins=builtins,
             repo_memory=not hides_memory,
             env_file=env is None or env.on,
+            off_capabilities=frozenset(
+                key
+                for key in CAPABILITY_KEYS
+                if (cap := features.features.get(key)) is not None
+                and not cap.on
+                and (cap.tier != "default" or cap.unavailable == "requires")
+            ),
         )
 
     @property
@@ -125,12 +140,14 @@ class SessionToolset:
             or bool(self.builtins)
             or not self.repo_memory
             or not self.env_file
+            or bool(self.off_capabilities)
         )
 
     @property
     def hidden_daimon_tools(self) -> frozenset[str]:
         """Daimon tools this place turns off on the session's `daimon-mcp` toolset."""
-        return frozenset() if self.repo_memory else REPO_MEMORY_TOOLS
+        hidden: frozenset[str] = frozenset() if self.repo_memory else REPO_MEMORY_TOOLS
+        return hidden.union(*(CAPABILITY_TOOLS[key] for key in self.off_capabilities))
 
     def apply_builtins(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """`tools` with the overrides applied; turning off a tool the agent lacks adds nothing."""

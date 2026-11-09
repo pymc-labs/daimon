@@ -18,7 +18,8 @@ from datetime import UTC, datetime, timedelta
 import pytest
 import structlog
 from daimon.core.scheduler import run_one_tick
-from daimon.core.stores.domain import RoutineRow
+from daimon.core.stores.domain import FeatureTarget, RoutineRow
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.routines import create_routine, get_routine, record_result
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -545,3 +546,39 @@ async def test_checks_after_claim_record_failure_completion(
     assert stored.last_finished_at is not None
     assert stored.last_finished_claim_at == stored.last_fired_at == now
     assert stored.last_error == "routine_configuration_check_failed"
+
+
+async def test_run_one_tick_skips_a_routine_its_workspace_turned_off(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    now = datetime(2026, 5, 8, 12, 0, 0, tzinfo=UTC)
+    row = await _seed_due_routine(db_session, now=now)
+    await set_feature_value(
+        db_session,
+        tenant_id=row.tenant_id,
+        target=FeatureTarget("workspace"),
+        key="routines",
+        value="off",
+        set_by=None,
+        surface="chat",
+    )
+    await db_session.commit()
+
+    async def fire(_r: RoutineRow) -> None:
+        raise AssertionError("a routine its workspace turned off must not run")
+
+    await run_one_tick(
+        now=now,
+        sm=db_session_factory,
+        fire=fire,
+        max_age=timedelta(minutes=15),
+        max_concurrent_fires=10,
+        dispatch_timeout_s=5.0,
+        wait_for_completion=True,
+    )
+
+    async with db_session_factory() as s:
+        fetched = await get_routine(s, row.id, tenant_id=row.tenant_id)
+    assert fetched is not None
+    assert fetched.last_error == "routines_turned_off", "the owner can see why it did not run"

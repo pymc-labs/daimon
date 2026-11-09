@@ -121,7 +121,7 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_SOURCE_RELEASE_URL,
     MA_METADATA_KEY_SPEC_HASH,
 )
-from daimon.core.features.snapshot import FeaturePlace
+from daimon.core.features.snapshot import FeaturePlace, place_feature
 from daimon.core.features.toolset import place_session
 from daimon.core.github_app_session import close_headless_app_session
 from daimon.core.ma_identity import derive_agent_uuid
@@ -1275,6 +1275,14 @@ async def _get_turn_cost_impl(
     }
 
 
+async def _images_embedded(runtime: McpRuntime, auth: AuthIdentity) -> bool:
+    """Whether the workspace lets chart images ride along with an answer (`artifact_images`)."""
+    place = FeaturePlace(auth.tenant_id, auth.platform or "mcp")
+    return (
+        await place_feature(runtime.session_factory, runtime.settings, place, "artifact_images")
+    ).on
+
+
 async def _require_live_result_access(runtime: McpRuntime, auth: AuthIdentity) -> None:
     """A private Discord result requires current membership, even after a long turn."""
     if auth.platform == "discord" and auth.platform_user_id is not None:
@@ -1414,6 +1422,7 @@ async def _deliver_turn_charts_impl(
         turn_started_at=turn_started_at,
         message=final_text,
         store=runtime.artifact_store,
+        embed_images=await _images_embedded(runtime, auth),
     )
     result = AskResult(
         handle=handle,
@@ -1534,6 +1543,7 @@ async def _ask_impl(
                     turn_started_at=turn_started_at,
                     message=final_text,
                     store=runtime.artifact_store,
+                    embed_images=await _images_embedded(runtime, auth),
                 )
                 if (observation := current_outcome.get()) is not None:
                     observation.finish(reason=TerminationReason.COMPLETED)

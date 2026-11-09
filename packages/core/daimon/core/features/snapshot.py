@@ -10,16 +10,22 @@ from __future__ import annotations
 
 import uuid
 from collections import OrderedDict
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import cache
-from typing import cast
+from typing import Final, cast
 
 import structlog
 from daimon.core.config import Settings
 from daimon.core.features.deployment import deployment_value
-from daimon.core.features.registry import ENV_IMPORTED, FEATURES, FeatureSpec, Tier
+from daimon.core.features.registry import (
+    ENV_IMPORTED,
+    FEATURES,
+    FeatureSpec,
+    Requirement,
+    Tier,
+)
 from daimon.core.features.resolver import (
     ResolvedFeature,
     TierValue,
@@ -71,6 +77,32 @@ class FeaturePlace:
         return f"{self.channel_id}:{self.thread_id}"
 
 
+def _adapter_set_up(settings: Settings, platform: str) -> bool:
+    adapters = {"discord": settings.discord, "slack": settings.slack, "teams": settings.teams}
+    return adapters.get(platform) is not None
+
+
+_SETUP: Final[Mapping[Requirement, Callable[[Settings], bool]]] = {
+    "compute_setup": lambda s: (
+        s.compute.enabled
+        and bool(s.compute.deployment_id)
+        and s.compute.api_token is not None
+        and bool(s.compute.org_slug)
+    ),
+    "notebook_host": lambda s: (
+        s.notebook.host_url is not None and s.notebook.admin_secret is not None
+    ),
+    "report_host": lambda s: (
+        s.report_host.host_url is not None and s.report_host.admin_secret is not None
+    ),
+    "gemini_key": lambda s: s.gemini.api_key is not None,
+    "microsoft_accounts": lambda s: s.microsoft_accounts_enabled and bool(s.crypto.keys),
+}
+"""One integration's setup, exactly the condition its tools need to run. Unmet, the session is not
+offered them, so a check here must never be stricter than the tools. Watches and GitHub have none:
+their tools work (and list or remove what exists) without the operator gate or the App."""
+
+
 def unavailable_reason(
     spec: FeatureSpec, settings: Settings | None, place: FeaturePlace
 ) -> Unavailable | None:
@@ -78,10 +110,11 @@ def unavailable_reason(
     without `settings` (a reader of a feature with no deployment tier) `requires` is too."""
     if not spec.on_platform(place.platform):
         return "platform"
-    if settings is not None and "platform_adapter" in spec.requires:
-        adapters = {"discord": settings.discord, "slack": settings.slack, "teams": settings.teams}
-        if adapters.get(place.platform) is None:
-            return "requires"
+    if settings is not None and (
+        ("platform_adapter" in spec.requires and not _adapter_set_up(settings, place.platform))
+        or not all(_SETUP[need](settings) for need in spec.requires if need in _SETUP)
+    ):
+        return "requires"
     if not spec.tiers_on(place.backend):
         return "backend"
     return None

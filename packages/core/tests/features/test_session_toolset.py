@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 from anthropic.types.beta import BetaManagedAgentsAgent
+from daimon.core.capability_tools import CAPABILITY_KEYS, CAPABILITY_TOOLS
 from daimon.core.channel_changes import Expected
 from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
 from daimon.core.errors import StaleChannelValue
@@ -172,6 +173,70 @@ def test_repo_memory_off_at_the_deployment_hides_nothing() -> None:
     features = {**base.features, "repo_memory": ResolvedFeature("repo_memory", "off", "deployment")}
     snapshot = FeatureSnapshot(base.place, 1, features)
     assert agent_toolset(snapshot, _agent()) == DEFAULT_TOOLSET, "nothing to hide"
+
+
+def test_capabilities_change_nothing_at_their_defaults() -> None:
+    """No tier set: every capability's tools stay offered, set up or not."""
+    assert agent_toolset(_snapshot(), _agent()) == DEFAULT_TOOLSET, "byte-identical by default"
+
+
+@pytest.mark.parametrize("key", CAPABILITY_KEYS)
+def test_a_capability_off_turns_exactly_its_tools_off(key: str) -> None:
+    agent = _agent()
+    toolset = agent_toolset(_snapshot(**{key: "off"}), agent)
+    assert toolset.hidden_daimon_tools == CAPABILITY_TOOLS[key]
+    tools = session_tools(
+        agent, frozenset(), tool_safety=OPEN_TOOL_SAFETY, public_url=PUBLIC, toolset=toolset
+    )
+    daimon = next(t for t in _dicts(tools) if t.get("mcp_server_name") == "daimon-mcp")
+    assert {c["name"] for c in daimon["configs"] if c.get("enabled") is False} == (
+        CAPABILITY_TOOLS[key]
+    ), "each tool is off in the session"
+
+
+def test_a_capability_off_at_the_deployment_hides_its_tools_too() -> None:
+    """The server registers these tools whatever the operator chose, so Off must hide them."""
+    base = _snapshot()
+    features = {**base.features, "lead_intake": ResolvedFeature("lead_intake", "off", "deployment")}
+    toolset = agent_toolset(FeatureSnapshot(base.place, 1, features), _agent())
+    assert toolset.hidden_daimon_tools == CAPABILITY_TOOLS["lead_intake"]
+
+
+def test_a_capability_without_setup_is_unavailable_with_a_reason() -> None:
+    place = FeaturePlace(uuid.uuid4(), "web")
+    off = resolve_one(FEATURES["notebooks"], SETTINGS, place, [])
+    assert (off.on, off.unavailable) == (False, "requires"), "no notebook host set up"
+    on = resolve_one(FEATURES["lead_intake"], SETTINGS, place, [])
+    assert on.on, "lead intake needs no setup"
+    ready = SETTINGS.model_copy(
+        update={
+            "notebook": SETTINGS.notebook.model_copy(
+                update={"host_url": "http://nb:8001", "admin_secret": SecretStr("s" * 32)}
+            )
+        }
+    )
+    assert resolve_one(FEATURES["notebooks"], ready, place, []).on
+
+
+def test_a_capability_without_setup_hides_its_tools_and_only_those() -> None:
+    """Display and behaviour agree: unmet setup resolves Off and the tools are not offered."""
+    place = FeaturePlace(uuid.uuid4(), "web", agent_id="agent_tools", backend="anthropic")
+    features = {key: resolve_one(spec, SETTINGS, place, []) for key, spec in FEATURES.items()}
+    toolset = agent_toolset(FeatureSnapshot(place, 1, features), _agent())
+    unset = {"notebooks", "report_publish", "media", "microsoft_365", "compute"}
+    assert toolset.off_capabilities == unset, "exactly the features whose setup is missing"
+    for key in ("watches", "github", "routines", "long_jobs", "lead_intake"):
+        assert features[key].on, f"{key} has no setup condition its tools share"
+
+
+def test_the_old_enabled_variables_are_the_deployment_tier() -> None:
+    place = FeaturePlace(uuid.uuid4(), "web")
+    untouched = resolve_one(FEATURES["watches"], SETTINGS, place, [])
+    assert untouched.tier == "default", "an unset variable decides nothing"
+    for enabled in (False, True):
+        set_to = SETTINGS.model_copy(update={"watches": type(SETTINGS.watches)(enabled=enabled)})
+        got = resolve_one(FEATURES["watches"], set_to, place, [])
+        assert (got.on, got.tier) == (enabled, "deployment"), "the variable is the deployment tier"
 
 
 def test_selfhosted_turn_tools_leave_out_the_daimon_server() -> None:

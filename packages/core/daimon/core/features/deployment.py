@@ -54,6 +54,9 @@ _LEGACY_FLAG: Mapping[str, Callable[[Settings], bool | None]] = {
     "writers_none_notice": lambda s: _set(s.discord, "writers_none_notice"),
     "unmentioned_reply_hint": lambda s: _set(s.discord, "unmentioned_reply_hint"),
     "waiting_card": lambda s: _set(s.discord, "tenant_cap_waiting_card"),
+    "watches": lambda s: _set(s.watches, "enabled"),
+    "compute": lambda s: _set(s.compute, "enabled"),
+    "artifact_images": lambda s: _set(s.artifacts, "embed_images"),
 }
 """A feature's deprecated deployment-wide bool, read nowhere but here."""
 

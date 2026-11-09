@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable, Coroutine
 from datetime import UTC, datetime, timedelta
 
 import structlog
+from daimon.core.features.snapshot import FeaturePlace, place_feature
 from daimon.core.ids import generate_request_id
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.routine_delivery import record_routine_failure
@@ -174,6 +175,11 @@ async def run_one_tick(
         try:
             async with sem:
                 try:
+                    place = FeaturePlace(row.tenant_id, "", row.channel_id, agent_id=row.agent_id)
+                    if not (await place_feature(sm, None, place, "routines")).on:
+                        # Routines turned Off here: the schedule does not run.
+                        await _record_fire_error(sm, row, "routines_turned_off", None)
+                        return
                     with observation.activate():
                         async with routine_execution(
                             sm,

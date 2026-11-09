@@ -25,8 +25,16 @@ Binding = Literal["turn", "session_mutable", "session_identity", "provision"]
 in place on the next message. ``session_identity``: held by the live session until ``/new`` or a
 replacement (system prompt, skills, memory). ``provision``: on the agent's next save or sync."""
 Category = Literal["model_input", "chat", "capabilities", "guardrails"]
-Requirement = Literal["platform_adapter"]
-"""``platform_adapter``: the chat platform's adapter is set up in this deployment."""
+Requirement = Literal[
+    "platform_adapter",
+    "compute_setup",
+    "notebook_host",
+    "report_host",
+    "gemini_key",
+    "microsoft_accounts",
+]
+"""``platform_adapter``: the chat platform's adapter is set up in this deployment. The rest
+name one integration's setup: its operator switch or host address, credentials and keys."""
 ENV_IMPORTED: Final = "env_imported"
 """A workspace-tier row (not a feature) that marks the workspace's deprecated env maps as
 copied into rows by `daimon features import-env`."""
@@ -624,6 +632,124 @@ def _features(*specs: FeatureSpec) -> Mapping[str, FeatureSpec]:
     return {spec.key: spec for spec in specs}
 
 
+def _capability(
+    key: str,
+    name: str,
+    doc: str,
+    *,
+    tiers: tuple[Tier, ...] = ("deployment", "workspace", "agent", "channel"),
+    requires: tuple[Requirement, ...] = (),
+    legacy_env: tuple[str, ...] = (),
+) -> FeatureSpec:
+    """A capability that is On unless a tier turns it Off; off, the session is not offered its
+    tools (`CAPABILITY_TOOLS`) and what it does in the background stops."""
+    return FeatureSpec(
+        key=key,
+        name=name,
+        category="capabilities",
+        effect="capability",
+        values=_ON_OFF,
+        default="on",
+        tiers=tiers,
+        binds="session_mutable",
+        doc=doc,
+        platforms=EVERY_PLATFORM,
+        requires=requires,
+        authority=_SETTINGS,
+        legacy_env=legacy_env,
+    )
+
+
+_CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
+    _capability(
+        "watches",
+        "Watches",
+        "The agent can watch a page or feed and start a conversation when it changes. "
+        "Off removes the watch tools here and stops the watches made here.",
+        legacy_env=("DAIMON_WATCHES__ENABLED",),
+    ),
+    _capability(
+        "routines",
+        "Routines",
+        "The agent can set up and run routines: tasks that run on a schedule. Off removes "
+        "the routine tools here.",
+    ),
+    _capability(
+        "long_jobs",
+        "Long jobs",
+        "The agent can start a long job that keeps working after the chat moves on. Off "
+        "removes the long-job tools here.",
+        tiers=("deployment", "workspace", "agent"),
+    ),
+    _capability(
+        "compute",
+        "Cloud computers",
+        "The agent can start a short-lived cloud computer to run code and keep files. Off "
+        "removes the computer tools here.",
+        tiers=("deployment", "workspace", "agent"),
+        requires=("compute_setup",),
+        legacy_env=("DAIMON_COMPUTE__ENABLED",),
+    ),
+    _capability(
+        "notebooks",
+        "Notebooks",
+        "The agent can publish and manage notebooks. Off removes the notebook tools here.",
+        requires=("notebook_host",),
+    ),
+    _capability(
+        "report_publish",
+        "Report publishing",
+        "The agent can publish a report as a web page and delete it later. Off removes "
+        "the report tools here.",
+        requires=("report_host",),
+    ),
+    _capability(
+        "media",
+        "Video transcripts",
+        "The agent can fetch the transcript of a video. Off removes that tool here.",
+        requires=("gemini_key",),
+    ),
+    _capability(
+        "microsoft_365",
+        "Microsoft 365",
+        "People can connect a Microsoft account and the agent can search, read, write and "
+        "send with it. Off removes the Microsoft tools here.",
+        tiers=("deployment", "workspace", "agent"),
+        requires=("microsoft_accounts",),
+    ),
+    FeatureSpec(
+        key="artifact_images",
+        name="Chart images in answers",
+        category="capabilities",
+        effect="capability",
+        values=_ON_OFF,
+        default="on",
+        tiers=("deployment", "workspace"),
+        binds="turn",
+        doc=(
+            "Charts the agent makes come back inside its answer to a connected app as "
+            "pictures the app can see. Off sends the links only, for an app that cannot "
+            "take pictures."
+        ),
+        platforms=EVERY_PLATFORM,
+        authority=_SETTINGS,
+        legacy_env=("DAIMON_ARTIFACTS__EMBED_IMAGES",),
+    ),
+    _capability(
+        "github",
+        "GitHub access",
+        "The agent can ask for access to GitHub repositories, connect an account and pick "
+        "its working repository. Off removes those tools here.",
+    ),
+    _capability(
+        "lead_intake",
+        "Lead intake",
+        "The agent can take in sales leads and look them up. Off removes the lead tools here.",
+        tiers=("deployment", "workspace", "agent"),
+    ),
+)
+
+
 FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
     FeatureSpec(
         key="approvals",
@@ -753,6 +879,7 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
     *_SESSION_IDENTITY,
     *_CHAT_BEHAVIOUR,
     *_WORKSPACE,
+    *_CAPABILITIES,
 )
 FEATURE_KEYS: Final[tuple[str, ...]] = tuple(FEATURES)
 

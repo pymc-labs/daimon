@@ -325,7 +325,7 @@ async def test_embedding_can_be_disabled_without_disabling_urls() -> None:
     client, _transport = _client()
     store = FakeStore()
     output = _ChartOutput(file_id="file-1", filename="chart.png", size_bytes=len(_PNG))
-    settings = _settings().model_copy(update={"embed_images": False})
+    settings = _settings()
 
     with patch(
         "daimon.adapters.mcp.hosted_artifacts._discover_chart_outputs",
@@ -340,6 +340,7 @@ async def test_embedding_can_be_disabled_without_disabling_urls() -> None:
             turn_started_at=_NOW,
             message="Answer",
             store=store,
+            embed_images=False,
         )
 
     assert len(result.chart_urls) == 1

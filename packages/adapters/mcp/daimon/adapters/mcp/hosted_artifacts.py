@@ -222,6 +222,7 @@ async def _deliver_hosted_charts_impl(
     store: ArtifactStore | None = None,
     record_failure: Callable[..., None],
     upload_deadline: float,
+    embed_images: bool,
 ) -> HostedChartDelivery:
     """Embed charts by default and add URLs only when storage is configured."""
     if settings is not None and store is None:
@@ -244,7 +245,6 @@ async def _deliver_hosted_charts_impl(
     lines: list[str] = []
     chart_urls: list[ChartUrl] = []
     image_blocks: list[ImageContent] = []
-    embed_images = settings is None or settings.embed_images
     ttl_minutes = max(1, (settings.url_ttl_seconds + 59) // 60) if settings is not None else None
 
     charts = outputs[:_MAX_CHARTS]
@@ -346,8 +346,11 @@ async def deliver_hosted_charts(
     turn_started_at: dt.datetime,
     message: str,
     store: ArtifactStore | None = None,
+    embed_images: bool = True,
 ) -> HostedChartDelivery:
-    """Deliver bounded chart images and optional URLs without blocking text."""
+    """Deliver bounded chart images and optional URLs without blocking text.
+
+    `embed_images` is the `artifact_images` feature at the caller's workspace."""
     failure_count = 0
     first_failure: tuple[str, str | None, str] | None = None
 
@@ -383,6 +386,7 @@ async def deliver_hosted_charts(
                 store=store,
                 record_failure=record_failure,
                 upload_deadline=upload_deadline,
+                embed_images=embed_images,
             )
     except TimeoutError as exc:
         record_failure(stage="timeout", key=None, exc=exc)

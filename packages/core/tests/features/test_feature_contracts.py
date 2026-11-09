@@ -315,13 +315,13 @@ _CONFIG_SWITCHES: dict[str, str] = {
     "OutboundSettings.reach_budget_enabled": _OPS,
     "PrivateChannelMessagesSettings.enabled": _LEGACY,
     "PrivacySettings.delete_enabled": _OPS,
-    "ArtifactsSettings.embed_images": _OPS,
+    "ArtifactsSettings.embed_images": _LEGACY,
     "DirectMessagePolicy.mode": _OPS,
     "AgentIdentitySettings.enabled": _SERVICE,
     "TurnQueueSettings.enabled": _SERVICE,
     "PollableTool.returns_chat": _SHAPE,
-    "WatchesSettings.enabled": _SERVICE,
-    "ComputeSettings.enabled": _SERVICE,
+    "WatchesSettings.enabled": _LEGACY,
+    "ComputeSettings.enabled": _LEGACY,
 }
 """Every on/off or mode field `config.py` already has, and why it is not a feature."""
 

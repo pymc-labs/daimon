@@ -252,6 +252,26 @@ async def test_permanent_needs_an_approver_and_owners_get_five(permanent_watch):
 
 
 @pytest.mark.fresh_schema
+async def test_a_workspace_turning_watches_off_stops_its_watches(permanent_watch):
+    from daimon.core.stores.domain import FeatureTarget
+    from daimon.core.stores.feature_values import set_feature_value
+
+    factory, watch, _ = permanent_watch
+    async with factory.begin() as db:
+        assert await watches.is_watch_enabled(db, watch)
+        await set_feature_value(
+            db,
+            tenant_id=watch.tenant_id,
+            target=FeatureTarget("workspace"),
+            key="watches",
+            value="off",
+            set_by=None,
+            surface="chat",
+        )
+        assert not await watches.is_watch_enabled(db, watch), "Off here stops the watch"
+
+
+@pytest.mark.fresh_schema
 async def test_ceilings_read_tenant_then_global_then_defaults(permanent_watch):
     factory, watch, _ = permanent_watch
     async with factory.begin() as db:
