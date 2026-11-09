@@ -57,6 +57,8 @@ _BY_EFFECT: Final[Mapping[Effect, Combine]] = {
     "limit": "minimum",
 }
 _ON_OFF: Final[Mapping[str, str]] = {"on": "On", "off": "Off"}
+_OFF_ON: Final[Mapping[str, str]] = {"off": "Off", "on": "On"}
+"""A guardrail's on/off: On is the stricter value, so it comes last."""
 EVERY_PLATFORM: Final[frozenset[str]] = frozenset({"*"})
 """`platforms` for a feature that applies wherever a turn runs, chat or not (web, CLI, MCP)."""
 _PROVIDER_ONLY: Final[Mapping[str, tuple[Tier, ...]]] = {
@@ -648,6 +650,78 @@ _WORKSPACE: Final[tuple[FeatureSpec, ...]] = tuple(
     for module in WEB_MODULES
 )
 
+_GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
+    FeatureSpec(
+        key="tool_safety",
+        name="Tool safety",
+        category="guardrails",
+        effect="guardrail",
+        values=_OFF_ON,
+        default="off",
+        tiers=("deployment",),
+        binds="turn",
+        doc=(
+            "A change through a connected tool waits for the person to press Approve. In a "
+            "routine or other run nobody watches, it is refused unless the operator allowed "
+            "that tool. Reads always run."
+        ),
+        platforms=EVERY_PLATFORM,
+        authority=_ADMIN,
+        legacy_env=("DAIMON_TOOL_SAFETY__ENABLED",),
+    ),
+    FeatureSpec(
+        key="reach_budget",
+        name="Reach check",
+        category="guardrails",
+        effect="guardrail",
+        values=_OFF_ON,
+        default="on",
+        tiers=("deployment", "workspace", "agent", "channel"),
+        binds="turn",
+        doc=(
+            "Before one reply posts in more places, opens more threads or tags more people "
+            "than the limits allow, the person approves it on a card. Where no card can be "
+            "shown, the post is refused."
+        ),
+        platforms=EVERY_PLATFORM,
+        authority=_ADMIN,
+        legacy_env=("DAIMON_OUTBOUND__REACH_BUDGET_ENABLED",),
+    ),
+    FeatureSpec(
+        key="unattended_capabilities",
+        name="Built-in tools in routines",
+        category="guardrails",
+        effect="guardrail",
+        values={"on": "Per routine", "off": "Off"},
+        default="on",
+        tiers=("deployment", "workspace", "agent"),
+        binds="turn",
+        doc=(
+            "Per routine lets an admin turn on built-in tools for one routine. Off keeps "
+            "them off in every routine, even one an admin turned them on for."
+        ),
+        platforms=EVERY_PLATFORM,
+        authority=_ADMIN,
+    ),
+    FeatureSpec(
+        key="require_routine_destination",
+        name="Routines must say where they post",
+        category="guardrails",
+        effect="guardrail",
+        values={"off": "Optional", "on": "Required"},
+        default="off",
+        tiers=("deployment", "workspace"),
+        binds="turn",
+        doc=(
+            "A routine the agent makes must name where its results go, or it is not made. "
+            "Existing routines are not changed."
+        ),
+        platforms=EVERY_PLATFORM,
+        authority=_ADMIN,
+        legacy_env=("DAIMON_MCP__REQUIRE_ROUTINE_DESTINATION",),
+    ),
+)
+
 
 def _features(*specs: FeatureSpec) -> Mapping[str, FeatureSpec]:
     return {spec.key: spec for spec in specs}
@@ -1017,6 +1091,7 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
     *_CHAT_BEHAVIOUR,
     *_WORKSPACE,
     *_CAPABILITIES,
+    *_GUARDRAILS,
 )
 FEATURE_KEYS: Final[tuple[str, ...]] = tuple(FEATURES)
 

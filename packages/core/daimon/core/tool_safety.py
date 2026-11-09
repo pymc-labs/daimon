@@ -516,6 +516,7 @@ class ToolSafetyPolicy(BaseModel):
     enabled: bool = Field(
         default=False,
         description=(
+            "Deprecated: use DAIMON_FEATURES__TOOL_SAFETY. "
             "Classify attached (third-party) MCP tools as read or write and gate the writes: "
             "a write in chat waits for the requester to press Approve on a confirmation card, "
             "and a write in a routine or other unattended run is refused unless listed in "

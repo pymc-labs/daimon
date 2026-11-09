@@ -58,6 +58,9 @@ _LEGACY_FLAG: Mapping[str, Callable[[Settings], bool | None]] = {
     "watches": lambda s: _set(s.watches, "enabled"),
     "compute": lambda s: _set(s.compute, "enabled"),
     "artifact_images": lambda s: _set(s.artifacts, "embed_images"),
+    "tool_safety": lambda s: _set(s.tool_safety, "enabled"),
+    "reach_budget": lambda s: _set(s.outbound, "reach_budget_enabled"),
+    "require_routine_destination": lambda s: _set(s.mcp, "require_routine_destination"),
 }
 """A feature's deprecated deployment-wide bool, read nowhere but here."""
 

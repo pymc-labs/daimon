@@ -72,8 +72,9 @@ from daimon.core.config import (
 )
 from daimon.core.context_prompt import TurnContext, context_prompt
 from daimon.core.features.model_input import DEFAULT_TOOLSET
+from daimon.core.features.registry import FEATURES
 from daimon.core.features.session_identity import DEFAULT_IDENTITY
-from daimon.core.features.snapshot import FeaturePlace, resolve_features
+from daimon.core.features.snapshot import FeaturePlace, place_guardrail, resolve_features
 from daimon.core.features.toolset import place_session
 from daimon.core.github_app_session import close_headless_app_session
 from daimon.core.model_presets import model_choice_id
@@ -271,6 +272,22 @@ async def run_turn(
             observation.finish(error=exc)
         raise
     return result
+
+
+async def _routine_builtins_allowed(
+    session_factory: async_sessionmaker[AsyncSession] | None,
+    settings: Settings | None,
+    tenant_id: uuid.UUID | None,
+    platform: str | None,
+    agent_id: str,
+) -> bool:
+    """Whether `unattended_capabilities` lets an opted-in routine keep its built-ins.
+    With no store nothing is set, so the default applies; unreadable, they stay off."""
+    if session_factory is None or tenant_id is None:
+        return FEATURES["unattended_capabilities"].default == "on"
+    place = FeaturePlace.of(tenant_id, platform or "routine", None, agent_id=agent_id)
+    found = await place_guardrail(session_factory, settings, place, "unattended_capabilities")
+    return found.on
 
 
 def _outside_turn_persistence[**P, R](run: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
@@ -619,6 +636,11 @@ async def run_turn_impl(
                     environment_id=session.environment_id,
                 )
                 await sandbox.on_drift()
+            if sandbox_tools and not await _routine_builtins_allowed(
+                session_factory, feature_settings, tenant_id, platform, session.agent.id
+            ):
+                log.info("headless.sandbox_tools_off", session_id=session.id)
+                sandbox_tools = False
 
         billing: BillingPosture
         if usage_record is not None:

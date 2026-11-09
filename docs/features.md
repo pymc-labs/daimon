@@ -904,3 +904,54 @@ The most the team may spend on one OpenAI or Gemini model in a day, at list pric
 | Default | `20` |
 | Levels | Deployment, Server, Agent |
 | Combines | Lowest wins |
+
+## Tool safety
+
+A change through a connected tool waits for the person to press Approve. In a routine or other run nobody watches, it is refused unless the operator allowed that tool. Reads always run.
+
+| | |
+| --- | --- |
+| Key | `tool_safety` |
+| Values | `off` (Off), `on` (On) |
+| Default | `off` |
+| Levels | Deployment |
+| Combines | Stricter wins |
+| Deprecated | `DAIMON_TOOL_SAFETY__ENABLED` |
+
+## Reach check
+
+Before one reply posts in more places, opens more threads or tags more people than the limits allow, the person approves it on a card. Where no card can be shown, the post is refused.
+
+| | |
+| --- | --- |
+| Key | `reach_budget` |
+| Values | `off` (Off), `on` (On) |
+| Default | `on` |
+| Levels | Deployment, Server, Agent, Channel |
+| Combines | Stricter wins |
+| Deprecated | `DAIMON_OUTBOUND__REACH_BUDGET_ENABLED` |
+
+## Built-in tools in routines
+
+Per routine lets an admin turn on built-in tools for one routine. Off keeps them off in every routine, even one an admin turned them on for.
+
+| | |
+| --- | --- |
+| Key | `unattended_capabilities` |
+| Values | `on` (Per routine), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Server, Agent |
+| Combines | Stricter wins |
+
+## Routines must say where they post
+
+A routine the agent makes must name where its results go, or it is not made. Existing routines are not changed.
+
+| | |
+| --- | --- |
+| Key | `require_routine_destination` |
+| Values | `off` (Optional), `on` (Required) |
+| Default | `off` |
+| Levels | Deployment, Server |
+| Combines | Stricter wins |
+| Deprecated | `DAIMON_MCP__REQUIRE_ROUTINE_DESTINATION` |

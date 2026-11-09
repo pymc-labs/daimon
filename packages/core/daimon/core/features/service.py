@@ -37,7 +37,12 @@ from daimon.core.features.registry import (
     FeatureSpec,
     Tier,
 )
-from daimon.core.features.resolver import ResolvedFeature, TierValue, resolve_above
+from daimon.core.features.resolver import (
+    ResolvedFeature,
+    TierValue,
+    resolve_above,
+    stricter_than,
+)
 from daimon.core.features.snapshot import (
     CACHE,
     FeaturePlace,
@@ -334,18 +339,39 @@ async def change_refusal(
     tier: Tier,
     place: FeaturePlace,
     locked: bool = False,
+    value: str | None = None,
 ) -> ChannelChangeRefused | None:
-    """Why the actor may not change `key` at `tier`, an early answer before a card or a
-    control is shown; `change_feature` decides again when it writes."""
+    """Why the actor may not change `key` at `tier` (to `value`, when given), an early
+    answer before a card or a control is shown; `change_feature` decides again when it writes."""
     spec = FEATURES[key]
     try:
         if spec.authority.native:
             await _native_admin(sessions, settings, actor, place.platform)
         elif not await may_change(actor, spec, tier, locked=locked, agent_id=place.agent_id):
             raise needs_admin(spec, place.platform)
+        if value is not None and spec.combine == "stricter":
+            async with sessions() as session:
+                values = await _values_at(session, settings, spec, place)
+            above = resolve_above(spec, values, tier)
+            if _loosens(spec, TierSetting(tier, value), above):
+                raise _looser_than_above(spec, above, place, tier)
     except ChannelChangeRefused as exc:
         return exc
     return None
+
+
+async def _values_at(
+    session: AsyncSession, settings: Settings | None, spec: FeatureSpec, place: FeaturePlace
+) -> list[TierValue]:
+    rows = await place_values(
+        session,
+        tenant_id=place.tenant_id,
+        agent_id=place.agent_id,
+        channel_id=place.channel_id,
+        thread_key=place.thread_key,
+        keys=(spec.key, ENV_IMPORTED),
+    )
+    return tier_values(spec, settings, place, rows)
 
 
 def _target(tier: Tier, place: FeaturePlace) -> FeatureTarget:
@@ -417,6 +443,29 @@ def _locked_above(
     )
 
 
+def _loosens(spec: FeatureSpec, after: TierSetting, above: ResolvedFeature) -> bool:
+    """A guardrail below the deployment can only tighten what applies above it."""
+    return (
+        spec.combine == "stricter"
+        and after.tier != "deployment"
+        and after.value != DEFAULT
+        and stricter_than(spec, after.value, above.value) < 0
+    )
+
+
+def _looser_than_above(
+    spec: FeatureSpec, above: ResolvedFeature, place: FeaturePlace, tier: Tier
+) -> ChannelChangeRefused:
+    where = (
+        "everywhere" if above.tier in ("deployment", "default") else f"at the {above.tier} level"
+    )
+    return _refused(
+        f"{spec.name} is {spec.label(above.value)} {where}, so this {tier} can only make it "
+        f"stricter. Ask {admin_word(place.platform)}.",
+        "looser_than_above",
+    )
+
+
 async def change_feature(
     sessions: Sessions,
     settings: Settings,
@@ -481,21 +530,15 @@ async def _write_in(
 ) -> TierSetting:
     """One tier's write in the caller's transaction: the lock check, the row, the record."""
     tier = after.tier
-    rows = await place_values(
-        session,
-        tenant_id=place.tenant_id,
-        agent_id=place.agent_id,
-        channel_id=place.channel_id,
-        thread_key=place.thread_key,
-        keys=(spec.key, ENV_IMPORTED),
-    )
-    values = tier_values(spec, settings, place, rows)
+    values = await _values_at(session, settings, spec, place)
     before = next((s for s in _own(spec, place, values) if s.tier == tier), TierSetting(tier))
     if expected is not None and expected.value != before.text:
         raise StaleChannelValue(spec.key, before.text)
     above = resolve_above(spec, values, tier)
     if above.locked and after.value not in (DEFAULT, above.value):
         raise _locked_above(spec, above, place, tier)
+    if _loosens(spec, after, above):
+        raise _looser_than_above(spec, above, place, tier)
     target = _target(tier, place)
     if after.value == DEFAULT:
         await clear_feature_value(session, tenant_id=place.tenant_id, target=target, key=spec.key)

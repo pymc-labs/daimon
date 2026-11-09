@@ -38,6 +38,7 @@ CHAT_KEYS: Final[tuple[str, ...]] = (
     "support_escalation",
     "status_log",
     "outbound_people",
+    "reach_budget",
     "daily_model_cap",
 )
 """Chat display settings the adapters read from the turn's admission."""

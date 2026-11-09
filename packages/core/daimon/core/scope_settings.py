@@ -20,7 +20,7 @@ from daimon.core.admin_actions import DelegatedAction
 from daimon.core.channel_changes import ChannelChangeRefused, Expected
 from daimon.core.config import Settings
 from daimon.core.errors import StaleChannelValue
-from daimon.core.features.registry import DEFAULT, FEATURES, Tier
+from daimon.core.features.registry import DEFAULT, EVERY_PLATFORM, FEATURES, Tier
 from daimon.core.features.resolver import as_cascade
 from daimon.core.features.service import (
     FeatureActor,
@@ -78,6 +78,9 @@ class SettingSpec:
 
     def label(self, value: str) -> str:
         return self.labels.get(value, value)
+
+    def on_platform(self, platform: str) -> bool:
+        return platform in self.platforms or self.platforms >= EVERY_PLATFORM
 
 
 def _spec(key: SettingKey) -> SettingSpec:
@@ -241,7 +244,7 @@ def setting_refusal(
         (value not in spec.values, f"{spec.name} can be {', '.join(spec.values)}.", "bad_value"),
         (level not in LEVELS, "Choose the server, agent, channel or thread level.", "bad_level"),
         (
-            place.platform not in spec.platforms,
+            not spec.on_platform(place.platform),
             f"{spec.name} isn't available here, so nothing was changed.",
             "wrong_platform",
         ),
@@ -310,7 +313,7 @@ def _setting_view(feature: FeatureView, place: SettingsPlace, settings: Settings
     else:
         effective, decider = resolved.value, resolved.tier
     decided = _LEVEL.get(decider, decider)
-    available = place.platform in spec.platforms
+    available = spec.on_platform(place.platform)
     active = settings.tool_safety.gate_overrides_active if key == "approvals" else available
     note = (
         _effective_note(spec, effective, decided, place.platform)
@@ -362,12 +365,13 @@ async def change_refusal(
     level: SettingLevel,
     platform: str,
     agent_id: str | None = None,
+    value: str | None = None,
 ) -> ChannelChangeRefused | None:
-    """Why the actor may not change `key` at `level`, an early answer before a card or a
-    control is shown; `change_setting` decides again when it writes."""
+    """Why the actor may not change `key` at `level` (to `value`, when given), an early
+    answer before a card or a control is shown; `change_setting` decides again when it writes."""
     place = FeaturePlace(actor.tenant_id, platform, agent_id=agent_id)
     return await feature_change_refusal(
-        sessionmaker, settings, actor, key=key, tier=_TIER[level], place=place
+        sessionmaker, settings, actor, key=key, tier=_TIER[level], place=place, value=value
     )
 
 

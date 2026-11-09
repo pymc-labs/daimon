@@ -622,6 +622,10 @@ ChannelSetting = Literal[
     "approvals",
     "thread_approvals",
     "cost_footer",
+    "tool_safety",
+    "reach_budget",
+    "unattended_capabilities",
+    "require_routine_destination",
 ]
 """What a change record names. The `thread_*` settings are a thread's own, recorded under
 its channel with the thread id in the values."""

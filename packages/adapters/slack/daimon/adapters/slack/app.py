@@ -3349,7 +3349,7 @@ class SlackApp:
     def _reply_people_cap(self, admission: Admission, attended: bool = True) -> int | None:
         """People an automatic reply may ping besides its author; None leaves it uncapped."""
         outbound = self.runtime.settings.outbound
-        if not (attended and outbound.reach_budget_enabled):
+        if not (attended and admission.feature_on("reach_budget")):
             return None
         found = admission.resolved("outbound_people")
         return outbound.max_people if found is None else int(found.value)

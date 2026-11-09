@@ -283,6 +283,7 @@ _KEY_READERS = {
     "shown": 0,
     "_feature_on": 0,
     "place_feature": 3,
+    "place_guardrail": 3,
     "feature_in": 3,
 }
 """Calls that read a feature key, and the position of the key among their arguments."""
@@ -333,7 +334,7 @@ _ROLLOUT = "staged rollout of one behaviour, removed once it is the only behavio
 _SHAPE = "describes a configured object, not something a place turns on or off"
 _CONFIG_SWITCHES: dict[str, str] = {
     "McpSettings.allow_legacy_tokens": _OPS,
-    "McpSettings.require_routine_destination": _OPS,
+    "McpSettings.require_routine_destination": _LEGACY,
     "McpOAuthClientSettings.send_resource": _OPS,
     "ProgressPlansSettings.mode": _LEGACY,
     "McpContextSettings.enabled": _LEGACY,
@@ -357,7 +358,7 @@ _CONFIG_SWITCHES: dict[str, str] = {
     "TurnSettings.agent_backends": _ROLLOUT,
     "TurnSettings.status_log": _LEGACY,
     "ThreadNamingSettings.enabled": _LEGACY,
-    "OutboundSettings.reach_budget_enabled": _OPS,
+    "OutboundSettings.reach_budget_enabled": _LEGACY,
     "PrivateChannelMessagesSettings.enabled": _LEGACY,
     "PrivacySettings.delete_enabled": _OPS,
     "ArtifactsSettings.embed_images": _LEGACY,

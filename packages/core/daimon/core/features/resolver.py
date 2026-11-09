@@ -45,7 +45,17 @@ class ResolvedFeature:
         return self.value not in ("off", "hidden")
 
 
-def _wins(spec: FeatureSpec, current: ResolvedFeature, candidate: str) -> bool:
+def stricter_than(spec: FeatureSpec, candidate: str, current: str) -> int:
+    """How much stricter `candidate` is than `current` (negative: looser)."""
+    order = list(spec.values)
+    return order.index(candidate) - order.index(current)
+
+
+def _wins(spec: FeatureSpec, current: ResolvedFeature, candidate: str, tier: Tier) -> bool:
+    if spec.combine == "stricter" and tier != "deployment":
+        # The default is the deployment's floor: below it a guardrail only tightens.
+        stricter = stricter_than(spec, candidate, current.value)
+        return stricter > 0 or (stricter == 0 and current.tier == "default")
     if current.tier == "default":
         return True
     match spec.combine:
@@ -54,8 +64,7 @@ def _wins(spec: FeatureSpec, current: ResolvedFeature, candidate: str) -> bool:
         case "ceiling":
             return current.value != spec.off
         case "stricter":
-            order = list(spec.values)
-            return order.index(candidate) > order.index(current.value)
+            return stricter_than(spec, candidate, current.value) > 0
         case "minimum":
             return float(candidate) < float(current.value)
 
@@ -79,7 +88,7 @@ def resolve_feature(
         setting = by_tier.get(tier)
         if setting is None or not spec.accepts(setting.value, tier):
             continue
-        if _wins(spec, effective, setting.value):
+        if _wins(spec, effective, setting.value, tier):
             effective = ResolvedFeature(spec.key, setting.value, tier, setting.locked)
         elif setting.locked:
             effective = ResolvedFeature(spec.key, effective.value, effective.tier, True)

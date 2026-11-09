@@ -91,6 +91,10 @@ async def _view() -> CallView:
     return CallView(viewer=RuleViewer(policy=OPEN_ACCESS_POLICY))
 
 
+async def _required() -> bool:
+    return True
+
+
 def _env(
     sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, **overrides: object
 ) -> RoutineEnv:
@@ -252,7 +256,7 @@ async def test_required_destination_and_origin_budget(
     tenant_id = await _tenant(db_session)
     with pytest.raises(RoutineRefused, match="No destination"):
         await create_routine(
-            _env(db_session_factory, tenant_id, require_destination=True),
+            _env(db_session_factory, tenant_id, require_destination=_required),
             _caller(tenant_id),
             _new(),
         )

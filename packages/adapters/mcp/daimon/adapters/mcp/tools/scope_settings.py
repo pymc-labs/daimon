@@ -121,6 +121,7 @@ async def _change_setting_impl(
         level=cast(SettingLevel, level),
         platform=place.platform,
         agent_id=place.agent_id,
+        value=value,
     )
     if refusal is not None:
         raise ToolError(str(refusal))

@@ -244,12 +244,7 @@ class McpSettings(BaseModel):
 
     require_routine_destination: bool = Field(
         default=False,
-        description=(
-            "Require an explicit destination when the MCP create_routine tool is called. "
-            "When enabled, a missing destination is refused before agent lookup or creation, "
-            "with a warning that the routine would not post. Default false preserves "
-            "record-only routines; existing routines and updates are unaffected."
-        ),
+        description=("Deprecated: use DAIMON_FEATURES__REQUIRE_ROUTINE_DESTINATION."),
     )
     public_url: HttpUrl | None = Field(
         default=None,
@@ -2132,11 +2127,7 @@ class OutboundSettings(BaseModel):
 
     reach_budget_enabled: bool = Field(
         default=True,
-        description=(
-            "Ask the requester on an approval card before one interactive turn opens "
-            "more threads, posts into more places or tags more people than the limits "
-            "below. Where no card can be shown, the post is refused instead."
-        ),
+        description=("Deprecated: use DAIMON_FEATURES__REACH_BUDGET."),
     )
     max_threads: int = Field(
         default=2,
@@ -3068,6 +3059,14 @@ class Settings(BaseSettings):
     @classmethod
     def _features_are_registered(cls, value: dict[str, str]) -> dict[str, str]:
         return _registered_features(value)
+
+    @model_validator(mode="after")
+    def _tool_safety_feature(self) -> Settings:
+        """`DAIMON_FEATURES__TOOL_SAFETY` sets the policy every tool-safety reader holds."""
+        if (raw := self.features.get("tool_safety")) is not None:
+            enabled = parse_deployment("tool_safety", raw)[0] == "on"
+            self.tool_safety = self.tool_safety.model_copy(update={"enabled": enabled})
+        return self
 
     @model_validator(mode="after")
     def _private_channel_messages_need_a_public_url(self) -> Settings:

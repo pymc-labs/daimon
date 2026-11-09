@@ -105,9 +105,11 @@ class OutboundRules:
     people: int
     length: int
     own_threads: int
+    budget: bool = True
 
 
 _OUTBOUND_KEYS = (
+    "reach_budget",
     "outbound_reach",
     "outbound_threads",
     "outbound_places",
@@ -119,7 +121,8 @@ _OUTBOUND_KEYS = (
 async def outbound_rules(
     runtime: McpRuntime, auth: AuthIdentity, scope: TurnScope
 ) -> OutboundRules:
-    """What the turn's workspace, agent and channel allow. A failed read keeps the config."""
+    """What the turn's workspace, agent and channel allow. A failed read keeps the config,
+    with the reach budget on."""
     config = runtime.settings.outbound
     try:
         origin = scope.origin
@@ -152,6 +155,7 @@ async def outbound_rules(
         # The operator's 0 means no limit: it stays so until a tier picks a length.
         length=int(length.value) if config.max_length or length.tier != "default" else 0,
         own_threads=config.max_own_threads,
+        budget=found.on("reach_budget"),
     )
 
 
@@ -419,13 +423,13 @@ async def prepare_posts(
     )
     if not (reaching or call.people or call.own_threads):
         return rendered
-    if plan is None and reaching and settings.reach_budget_enabled:
+    if plan is None and reaching and rules.budget:
         # The own conversation never needs a plan; reaching others does, so the card shows it all.
         record_denial("reach_no_plan")
         raise ToolError(NO_PLAN)
     async with runtime.session_factory() as session, session.begin():
         so_far, approved = await lock_tally(session, tenant_id=auth.tenant_id, turn_key=scope.key)
-        if settings.reach_budget_enabled:
+        if rules.budget:
             _gate(scope, so_far, approved, call, plan or call.counts(), rules, auth)
         await save_tally(
             session, tenant_id=auth.tenant_id, turn_key=scope.key, tally=so_far.plus(call)

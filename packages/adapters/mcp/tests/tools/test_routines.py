@@ -94,7 +94,7 @@ def _runtime(
         session_factory=sessionmaker,
         client=client if client is not None else MagicMock(),  # type: ignore[arg-type]
         settings=MagicMock(  # type: ignore[arg-type]
-            mcp=McpSettings(require_routine_destination=require_destination)
+            mcp=McpSettings(require_routine_destination=require_destination), features={}
         ),
         deployment_default=DeploymentDefault(),
     )

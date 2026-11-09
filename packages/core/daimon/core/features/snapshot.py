@@ -380,6 +380,22 @@ async def place_feature(
         return ResolvedFeature(key, spec.default_for(place.platform), "default")
 
 
+async def place_guardrail(
+    sessions: Sessions, settings: Settings | None, place: FeaturePlace, key: str
+) -> ResolvedFeature:
+    """`place_feature` for a guardrail: a read that fails applies its strictest value.
+    A deployment already at the strictest decides without a read."""
+    strictest = list(FEATURES[key].values)[-1]
+    try:
+        floor = deployment_value(settings, FEATURES[key])
+        if floor is not None and floor.value == strictest:
+            return ResolvedFeature(key, strictest, "deployment", floor.locked)
+        return (await resolve_features(sessions, settings, place, keys=(key,))).get(key)
+    except Exception:
+        log.warning("features.guardrail_read_failed", key=key, exc_info=True)
+        return ResolvedFeature(key, strictest, "default")
+
+
 async def feature_in(
     session: AsyncSession, settings: Settings | None, place: FeaturePlace, key: str
 ) -> ResolvedFeature:

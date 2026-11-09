@@ -48,6 +48,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The old per-workspace variables (`DAIMON_COMPLETION_PINGS`, `DAIMON_TABLE_RENDERING`, `DAIMON_BUDGET_NOTICES`) keep working until you run `daimon features import-env`, which copies them into workspace settings once; after that a variable left set is ignored and logged. The other old variables still work but log a deprecation.
   The old controls (the typed-mention and web settings tools, `PATCH /api/admin/settings` and the direct-message commands) behave as before and now change the same stored values, so the two never disagree.
 
+- **Guardrails are features too, and a lower level can only make them stricter.**
+  Tool safety (`tool_safety`), the reach check (`reach_budget`), built-in tools in routines (`unattended_capabilities`) and requiring a routine destination (`require_routine_destination`) are set from the deployment down, and a level below can tighten but never loosen them. An agent asking to change one gets a confirmation card, or a refusal where no card can be shown.
+  `DAIMON_TOOL_SAFETY__ENABLED`, `DAIMON_OUTBOUND__REACH_BUDGET_ENABLED` and `DAIMON_MCP__REQUIRE_ROUTINE_DESTINATION` still work but log a deprecation. Nothing changes until a level sets one.
+
 - **The Azure deploy can keep MCP private while Teams is public.**
   Set `mcpPublicIngress` to false and MCP is reachable only from apps in the same Container Apps environment. The default keeps it public, as before.
   It suits only the self-hosted harness running in that environment. Hosted model backends, including the default Anthropic one, sign-in and connect links, and every other Daimon web page stop working, because MCP serves them.
