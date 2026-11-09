@@ -12,6 +12,8 @@ from typing import Protocol
 
 from daimon.adapters.web.caller import WebCaller
 from daimon.adapters.web.runtime import WebRuntime
+from daimon.core.config import SignedIdentityServer
+from daimon.core.node_exchange import serves
 from fastapi import APIRouter
 from pydantic import BaseModel
 
@@ -35,6 +37,11 @@ class ConnectionNode(Protocol):
     @property
     def label(self) -> str: ...
 
+    @property
+    def server(self) -> SignedIdentityServer:
+        """The identity server the node reaches; it decides which workspaces see the node."""
+        ...
+
     def claims(self, server_url: str) -> bool:
         """Whether an agent MCP server at `server_url` is this node."""
         ...
@@ -55,9 +62,15 @@ class ConnectionNode(Protocol):
 def agent_nodes(
     nodes: Iterable[ConnectionNode], *, server_urls: Mapping[str, str], workspace: str | None
 ) -> list[AgentNode]:
-    """Each node the agent has, by the server key it claims, then each it can add. Pure."""
+    """Each node the agent has, by the server key it claims, then each it can add. Pure.
+
+    A node whose server does not serve `workspace` is never listed, even when an agent's
+    MCP server URL claims it: there it is a plain MCP server.
+    """
     found: list[AgentNode] = []
     for node in nodes:
+        if not serves(node.server, workspace):
+            continue
         key = next((k for k, url in server_urls.items() if node.claims(url)), None)
         if key is not None or node.offered(workspace):
             found.append(AgentNode(kind=node.kind, label=node.label, server=key))

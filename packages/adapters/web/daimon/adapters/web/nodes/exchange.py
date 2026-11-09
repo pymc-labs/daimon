@@ -3,6 +3,7 @@ asked as the chat account the person runs as."""
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -20,10 +21,12 @@ from daimon.core.node_exchange import (
     node_token_key,
     server_base,
     serves,
+    serves_tenant,
     tenant_workspace,
 )
 from daimon.core.stores.domain import WebPersonRow
 from daimon.core.token_exchange import ExchangeClient
+from fastapi import HTTPException
 
 __all__ = [
     "NODE_TIMEOUT_S",
@@ -36,9 +39,19 @@ __all__ = [
     "node_token",
     "node_token_key",
     "server_base",
+    "require_served",
     "serves",
+    "serves_tenant",
     "tenant_workspace",
 ]
+
+
+async def require_served(
+    runtime: WebRuntime, server: SignedIdentityServer, tenant_id: uuid.UUID
+) -> None:
+    """404 for a workspace the server does not serve, before any work or any mention of it."""
+    if not await serves_tenant(runtime.sessionmaker, server, tenant_id):
+        raise HTTPException(status_code=404, detail="Not found.")
 
 
 def node_exchange_of(runtime: WebRuntime) -> NodeExchange:

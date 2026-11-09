@@ -15,8 +15,14 @@ import httpx
 import structlog
 from daimon.adapters.web.agent_access import Editor, Viewer, actor_of, change_deps, edit_refusal
 from daimon.adapters.web.agent_audit import recorded
+from daimon.adapters.web.caller import WebCaller
 from daimon.adapters.web.nodes.data_server import DataServerNode
-from daimon.adapters.web.nodes.exchange import NodeAccessError, node_exchange_of
+from daimon.adapters.web.nodes.exchange import (
+    NodeAccessError,
+    node_exchange_of,
+    require_served,
+    serves_tenant,
+)
 from daimon.adapters.web.nodes.kinds import build_nodes
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.agent_admin import require_admin
@@ -145,10 +151,12 @@ def server_skills_router(runtime: WebRuntime) -> APIRouter:
     router = APIRouter(prefix="/api/agents")
     served = ServesCache()
 
-    def node_or_404() -> DataServerNode:
+    async def node_or_404(caller: WebCaller) -> DataServerNode:
+        """The node, or 404 as when none is configured: also for a workspace it doesn't serve."""
         node = server_skills_node(runtime)
         if node is None:
             raise HTTPException(status_code=404, detail="Not found.")
+        await require_served(runtime, node.server, caller.person.tenant_id)
         return node
 
     async def _answered[T](
@@ -198,7 +206,7 @@ def server_skills_router(runtime: WebRuntime) -> APIRouter:
 
     @router.get("/server-skills")
     async def menu(caller: Editor) -> ServerSkillMenu:  # pyright: ignore[reportUnusedFunction]
-        node = node_or_404()
+        node = await node_or_404(caller)
         if not await _serves(node, caller.person):
             raise HTTPException(status_code=404, detail="Not found.")
 
@@ -215,7 +223,7 @@ def server_skills_router(runtime: WebRuntime) -> APIRouter:
 
     @router.post("/server-skills", status_code=201)
     async def add(caller: Editor, body: AddServerSkillBody) -> SkillRef:  # pyright: ignore[reportUnusedFunction]
-        node = node_or_404()
+        node = await node_or_404(caller)
 
         async def fetch(http: httpx.AsyncClient, endpoint: Endpoint) -> ServerSkill:
             try:
@@ -238,7 +246,7 @@ def server_skills_router(runtime: WebRuntime) -> APIRouter:
 
     @router.post("/skills/{skill_id}/check")
     async def check(caller: Editor, skill_id: str) -> MirrorCheck:  # pyright: ignore[reportUnusedFunction]
-        node = node_or_404()
+        node = await node_or_404(caller)
         try:
             require_admin(actor_of(caller), "The skill library")
         except AgentEditError as exc:
@@ -250,7 +258,7 @@ def server_skills_router(runtime: WebRuntime) -> APIRouter:
 
     @router.post("/skills/{skill_id}/approve")
     async def approve(caller: Editor, skill_id: str, body: ApproveBody) -> MirrorCheck:  # pyright: ignore[reportUnusedFunction]
-        node = node_or_404()
+        node = await node_or_404(caller)
         try:
             require_admin(actor_of(caller), "The skill library")
         except AgentEditError as exc:
@@ -300,7 +308,12 @@ def server_skills_router(runtime: WebRuntime) -> APIRouter:
         except AgentEditError as exc:
             raise edit_refusal(exc) from exc
         node = server_skills_node(runtime)
-        if body.follow and node is not None:
+        # Without the node (or its server serving this workspace) there is nothing to fetch.
+        if (
+            body.follow
+            and node is not None
+            and await serves_tenant(runtime.sessionmaker, node.server, caller.person.tenant_id)
+        ):
             await follow_now(
                 sync_deps(runtime, node.skills_node()),
                 tenant_id=actor_of(caller).tenant_id,
