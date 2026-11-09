@@ -117,6 +117,7 @@ from daimon.core.continuity.messages import (
 )
 from daimon.core.continuity.wakes import WakeThread, run_wake_poller
 from daimon.core.errors import DaimonError
+from daimon.core.features.model_input import FULL_HISTORY, HistoryDepth
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.mux_backend import resource_scope
@@ -1779,7 +1780,8 @@ class TeamsApp:
         # The messages this turn answers and its status card are not history.
         skip = frozenset(filter(None, (*inbound.message_ids, lifecycle.message_id)))
         watermark = prepared.watermark if prepared.reused else None
-        history = await self._history(inbound, watermark=watermark, skip_ids=skip)
+        depth = admission.history_depth
+        history = await self._history(inbound, watermark=watermark, skip_ids=skip, depth=depth)
         read = [history]
         # An unprompted turn without its thread has nothing to answer: it stays silent.
         if (bare or inbound.unprompted) and (history is None or history.unavailable):
@@ -1866,7 +1868,9 @@ class TeamsApp:
                 # A recreated session has seen nothing: replay the whole thread.
                 images = (history.attached if history else NOTHING_ATTACHED).images
                 read.append(
-                    await self._history(inbound, watermark=None, skip_ids=skip, images=images)
+                    await self._history(
+                        inbound, watermark=None, skip_ids=skip, images=images, depth=depth
+                    )
                 )
                 return render(history=read[-1])
 
@@ -2003,11 +2007,12 @@ class TeamsApp:
         watermark: str | None,
         skip_ids: frozenset[str],
         images: Mapping[str, int] | None = None,
+        depth: HistoryDepth = FULL_HISTORY,
     ) -> HistoryBlock | None:
         if self._reader is None:
             return None
         return await self._reader.read(
-            inbound, watermark=watermark, skip_ids=skip_ids, images=images
+            inbound, watermark=watermark, skip_ids=skip_ids, images=images, depth=depth
         )
 
     async def _key_names(

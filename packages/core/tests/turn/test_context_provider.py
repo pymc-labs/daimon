@@ -130,7 +130,7 @@ async def test_denied_before_send_does_not_acknowledge_context() -> None:
     assert "context_cards" in batch[0]["content"][0]["text"]
 
 
-@pytest.mark.parametrize("place_kind", ["channel", "thread", "dm", "unknown"])
+@pytest.mark.parametrize("place_kind", ["channel", "thread", "dm", "unknown", "feature_off"])
 @pytest.mark.parametrize("older_session", [False, True])
 async def test_prepared_path_loads_tenant_binding_and_trusted_request_fields(
     db_session,
@@ -144,6 +144,8 @@ async def test_prepared_path_loads_tenant_binding_and_trusted_request_fields(
 
     from daimon.core import context_provider as context_module
     from daimon.core.authz import AgentRef, Place, Subject, Surface, build_turn_place
+    from daimon.core.features.resolver import ResolvedFeature
+    from daimon.core.features.snapshot import FeaturePlace, FeatureSnapshot
     from daimon.core.stores.context_providers import set_provider
     from daimon.core.turn.admission import AdmissionGrant
     from daimon.core.turn.run import run_prepared_turn
@@ -225,6 +227,11 @@ async def test_prepared_path_loads_tenant_binding_and_trusted_request_fields(
             human_invocation=True,
         ),
     )
+    if place_kind == "feature_off":
+        # The context provider feature turned off at this channel skips the provider.
+        feature_place = FeaturePlace(tenant.id, "discord", "staff", agent_id="ag_1")
+        off = {"context_provider": ResolvedFeature("context_provider", "off", "channel")}
+        admission = replace(admission, features=FeatureSnapshot(feature_place, 1, off))
     prepared = _prepared_turn(
         deps=deps,
         admission=admission,
@@ -255,8 +262,8 @@ async def test_prepared_path_loads_tenant_binding_and_trusted_request_fields(
         render_interval_s=0.001,
     )
     assert outcome.state.error is None
-    if place_kind == "unknown":
-        assert not provider.requests
+    if place_kind in ("unknown", "feature_off"):
+        assert not provider.requests, f"{place_kind}: the provider must not be asked"
         return
     assert len(provider.requests) == 1
     request = provider.requests[0]

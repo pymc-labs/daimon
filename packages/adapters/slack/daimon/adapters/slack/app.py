@@ -2984,6 +2984,7 @@ class SlackApp:
                         author_name=author_name,
                         proxy=proxy_ctx,
                         key_names=key_names,
+                        limit=admission.history_depth.backfill,
                     )
                 return await build_context_xml(
                     web_client,
@@ -2995,7 +2996,7 @@ class SlackApp:
                     author_name=author_name,
                     proxy=proxy_ctx,
                     key_names=key_names,
-                    page_limit=self._history_page_limit(),
+                    page_limit=min(self._history_page_limit(), admission.history_depth.replay),
                     status_ts=lifecycle.status_ts,
                 )
 

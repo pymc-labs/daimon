@@ -233,6 +233,132 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
 )
 
 
+_KEPT = "A conversation keeps what it started with until /new."
+_FIXED_ON: Final[Mapping[str, str]] = {"gemini": "on", "openai": "on"}
+_SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
+    FeatureSpec(
+        key="platform_prompt",
+        name="Platform prompt",
+        category="model_input",
+        effect="model",
+        values=_ON_OFF,
+        default="on",
+        tiers=("deployment", "workspace", "agent"),
+        binds="session_identity",
+        doc=(
+            "The agent's prompt is adjusted to the chat platform's words and formatting. "
+            f"Off sends the agent's own prompt as written. {_KEPT} OpenAI agents always "
+            "get their own prompt."
+        ),
+        backend_fixed={"openai": "off"},
+        authority=Authority(DelegatedAction.AGENT_SETTINGS),
+    ),
+    FeatureSpec(
+        key="platform_skills",
+        name="Platform skills",
+        category="model_input",
+        effect="model",
+        values=_ON_OFF,
+        default="on",
+        tiers=("deployment", "workspace", "agent", "channel"),
+        binds="session_identity",
+        doc=(
+            "The skills Daimon adds for the chat platform, such as its formatting. "
+            f"{_KEPT} Managed Agents only."
+        ),
+        backend_tiers=_MANAGED_AGENTS_ONLY,
+        platforms=EVERY_PLATFORM,
+        authority=Authority(DelegatedAction.SKILLS),
+    ),
+    FeatureSpec(
+        key="agent_skills",
+        name="Agent skills",
+        category="model_input",
+        effect="model",
+        values=_ON_OFF,
+        default="on",
+        tiers=("deployment", "workspace", "agent", "channel"),
+        binds="session_identity",
+        doc=(
+            "The skills listed on the agent. Off leaves them out of new conversations; "
+            f"the agent keeps its list. {_KEPT} Always on for Gemini and OpenAI agents."
+        ),
+        backend_fixed=_FIXED_ON,
+        platforms=EVERY_PLATFORM,
+        authority=Authority(DelegatedAction.SKILLS),
+    ),
+    FeatureSpec(
+        key="channel_skills",
+        name="Channel skills",
+        category="model_input",
+        effect="model",
+        values=_ON_OFF,
+        default="on",
+        tiers=("workspace", "agent", "channel"),
+        binds="session_identity",
+        doc=(
+            "The skills added to a channel. They need the read tool, so they are off "
+            f"wherever it is. {_KEPT} Managed Agents only."
+        ),
+        backend_tiers=_MANAGED_AGENTS_ONLY,
+        platforms=EVERY_PLATFORM,
+        depends_on=("tool.read",),
+        authority=Authority(DelegatedAction.SKILLS),
+    ),
+    FeatureSpec(
+        key="memory_personal",
+        name="Personal memory",
+        category="capabilities",
+        effect="capability",
+        values=_ON_OFF,
+        default="on",
+        tiers=("deployment", "workspace", "agent", "channel"),
+        binds="session_identity",
+        doc=(
+            "Each person's own memory with the agent, in conversations only they can read. "
+            f"On never adds it anywhere else. {_KEPT} Off for Gemini and OpenAI agents."
+        ),
+        backend_fixed={"gemini": "off", "openai": "off"},
+        platforms=EVERY_PLATFORM,
+        authority=Authority(DelegatedAction.AGENT_SETTINGS),
+    ),
+    FeatureSpec(
+        key="memory_shared",
+        name="Shared memory",
+        category="capabilities",
+        effect="capability",
+        values=_ON_OFF,
+        default="on",
+        tiers=("deployment", "workspace", "agent", "channel"),
+        binds="session_identity",
+        doc=(
+            "The agent's memory shared by everyone who talks to it. "
+            f"{_KEPT} Always on for Gemini and OpenAI agents."
+        ),
+        backend_fixed=_FIXED_ON,
+        platforms=EVERY_PLATFORM,
+        authority=Authority(DelegatedAction.AGENT_SETTINGS),
+    ),
+    FeatureSpec(
+        key="memory_channel",
+        name="Channel memory",
+        category="capabilities",
+        effect="capability",
+        values=_ON_OFF,
+        default="on",
+        tiers=("workspace", "agent", "channel"),
+        binds="session_identity",
+        doc=(
+            "The memory a restricted channel keeps for itself in place of the shared one. "
+            f"{_KEPT} Managed Agents only."
+        ),
+        backend_tiers=_MANAGED_AGENTS_ONLY,
+        platforms=EVERY_PLATFORM,
+        authority=Authority(DelegatedAction.AGENT_SETTINGS),
+    ),
+)
+
+
 def _features(*specs: FeatureSpec) -> Mapping[str, FeatureSpec]:
     return {spec.key: spec for spec in specs}
 
@@ -341,7 +467,30 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
         backend_tiers=_MANAGED_AGENTS_ONLY,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     ),
+    FeatureSpec(
+        key="history_depth",
+        name="Chat history",
+        category="model_input",
+        effect="limit",
+        values={
+            "100": "100 messages",
+            "50": "50 messages",
+            "25": "25 messages",
+            "10": "10 messages",
+            "0": "None",
+        },
+        default="100",
+        tiers=("deployment", "workspace", "agent", "channel"),
+        binds="turn",
+        doc=(
+            "How many earlier chat messages a new conversation reads, up to 100 from the "
+            "thread and 25 from the channel around it. The smallest setting wins."
+        ),
+        platforms=frozenset({"discord", "slack", "teams"}),
+        authority=Authority(DelegatedAction.AGENT_SETTINGS),
+    ),
     *_MODEL_INPUT,
+    *_SESSION_IDENTITY,
 )
 FEATURE_KEYS: Final[tuple[str, ...]] = tuple(FEATURES)
 

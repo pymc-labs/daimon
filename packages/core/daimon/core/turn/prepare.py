@@ -51,7 +51,6 @@ from daimon.core.mux_backend import TurnRuntime, managed_agents, resource_ref, r
 from daimon.core.mux_compat import legacy_call
 from daimon.core.native_footer_cost import NativeFooterCostContext
 from daimon.core.permissions import any_readers_limited
-from daimon.core.platform_system import system_for_platform
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.session_compat import DEFAULT_MA_CAPABILITIES, ChangeReason, MaCapabilities
 from daimon.core.session_seal import inherited_seal_ids, origin_stamp, seal_ids
@@ -434,6 +433,9 @@ async def create_ma_session(
 
     mapping_id = uuid.uuid4()
 
+    # A new session takes this place's current identity features and keeps them.
+    identity = admission.identity
+
     async def create(skills: tuple[MaSkill, ...]) -> BetaManagedAgentsSession:
         return await create_session(
             deps.anthropic,
@@ -456,7 +458,7 @@ async def create_ma_session(
             extra_resources=extra_resources,
             memory_read_only=admission.memory_read_only,
             # A chat session is keyed on the caller's account, so it belongs to one
-            # person and may carry that person's own memory.
+            # person and may carry that person's own memory, unless it is off here.
             personal_memory=True,
             tool_safety=deps.tool_safety,
             legacy_memory_servers=(
@@ -481,10 +483,11 @@ async def create_ma_session(
             origin_seal_ids=frozenset(seal),
             before_create=fence,
             on_app_access=capture_app_access,
-            channel_skills=skills,
+            channel_skills=identity.extra_skills(skills, admission.platform_skill_ids),
             model_override=admission.model_override,
-            system_override=system_for_platform(admission.agent.system, platform),
+            system_override=identity.system(admission.agent.system, platform),
             relay_session_key=mapping_id,
+            identity=identity,
         )
 
     while True:
@@ -551,14 +554,19 @@ async def create_ma_session(
                 if github_mode == "app" and ma_session.vault_ids
                 else next(iter(ma_session.vault_ids), None)
             ),
-            sent_skills=session_skills(admission.agent, admission.channel_skills),
-            sent_system=system_for_platform(admission.agent.system, platform),
+            sent_skills=session_skills(
+                admission.agent,
+                identity.extra_skills(admission.channel_skills, admission.platform_skill_ids),
+                agent_skills=identity.agent_skills,
+            ),
+            sent_system=identity.system(admission.agent.system, platform),
             github_mode=github_mode,
             personal_memory_store_ids=(
                 () if personal_memory_store_id is None else (personal_memory_store_id,)
             ),
             mcp_hold=None if admission.shared_owner is not None else hold_key(admission.hold),
             memory_scope=memory_scope(admission.hold),
+            identity_features=identity.stored(),
         ).model_copy(
             update={
                 "token_repo_urls": token_repo_urls,

@@ -48,12 +48,12 @@ from daimon.core.config import get_repo_memory_settings
 from daimon.core.confirmation import confirmed_tools_for_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_BUDGET_CHANNEL
 from daimon.core.errors import DaimonError
+from daimon.core.features.session_identity import SessionIdentity
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_hold import hold_key
 from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import managed_agents, resource_ref
 from daimon.core.mux_compat import legacy_call
-from daimon.core.platform_system import system_for_platform
 from daimon.core.session_compat import (
     DEFAULT_MA_CAPABILITIES,
     ChangeReason,
@@ -933,6 +933,13 @@ async def _prepare_session_for_turn_locked(
             )
         admission = await restrict_inherited_memory(deps, admission, inherited)
         agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(admission.agent.id))
+        # A live session keeps the identity features it was created with; a new one
+        # (`/new`, a hand-over) is built with this place's current values.
+        built_with = (
+            SessionIdentity.frozen(recorded.identity_features)
+            if recorded is not None and not fresh_start and not handed_over
+            else admission.identity
+        )
         desired = await desired_snapshot_for(
             deps.sessionmaker,
             agent=admission.agent,
@@ -961,8 +968,11 @@ async def _prepare_session_for_turn_locked(
             confirmed_tools=await confirmed_tools_for_tenant(deps, tenant_id),
             daimon_rule_tools=admission.daimon_rule_tools,
             toolset=admission.toolset,
-            channel_skills=admission.channel_skills,
-            system_override=system_for_platform(admission.agent.system, platform),
+            channel_skills=built_with.extra_skills(
+                admission.channel_skills, admission.platform_skill_ids
+            ),
+            system_override=built_with.system(admission.agent.system, platform),
+            identity=built_with,
             # A shared thread's session mounts no caller credential, so no hold.
             mcp_hold=hold_key(admission.hold) if admission.shared_owner is None else None,
             # A held place's memory is its channel's, shared thread or not.

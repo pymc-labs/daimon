@@ -64,6 +64,7 @@ from daimon.core.defaults.metadata import (
 )
 from daimon.core.errors import StoreError
 from daimon.core.features.model_input import DEFAULT_TOOLSET, SessionToolset
+from daimon.core.features.session_identity import DEFAULT_IDENTITY, SessionIdentity
 from daimon.core.github_app_auth import PermissionProfile, group_repository_access
 from daimon.core.github_app_session import (
     REQUESTER_CACHE,
@@ -683,6 +684,7 @@ async def create_session(
     system_override: str | None = None,
     relay_session_key: uuid.UUID | None = None,
     github_mcp_router: bool = False,
+    identity: SessionIdentity = DEFAULT_IDENTITY,
 ) -> BetaManagedAgentsSession:
     """Create an MA session. Returns the SDK session object directly.
 
@@ -719,6 +721,11 @@ async def create_session(
     ``channel_skills`` are the turn's extra skills (the platform's, then the
     channel's), added after the agent's own (`session_skills`, the shape the
     drift check hashes too).
+
+    ``identity`` is the session's identity features: a memory store whose feature
+    is off is not mounted (personal memory still needs ``personal_memory``), and
+    agent skills off leaves the agent's own out. The caller filters
+    ``channel_skills`` and ``system_override`` by it (`SessionIdentity`).
 
     ``model_override`` replaces the model for this session through
     ``agent_with_overrides``. It never changes the stored agent.
@@ -1064,30 +1071,31 @@ async def create_session(
             if memory_hold is not None:
                 # A held turn mounts only its channel's store, shared with
                 # everyone there, so nothing agent-wide or personal can leak in.
-                try:
-                    resources.append(
-                        await ensure_channel_memory_store_and_mount(
-                            anthropic,
-                            session_factory,
-                            tenant_id=tenant_id,
-                            agent_id=agent_uuid,
-                            platform=memory_hold.platform,
-                            channel_id=memory_hold.channel_id,
-                            agent_name=resource_agent.name,
-                            read_only=memory_read_only,
+                if identity.channel_memory:
+                    try:
+                        resources.append(
+                            await ensure_channel_memory_store_and_mount(
+                                anthropic,
+                                session_factory,
+                                tenant_id=tenant_id,
+                                agent_id=agent_uuid,
+                                platform=memory_hold.platform,
+                                channel_id=memory_hold.channel_id,
+                                agent_name=resource_agent.name,
+                                read_only=memory_read_only,
+                            )
                         )
-                    )
-                except (anthropic_pkg.APIError, StoreError) as exc:
-                    _log.warning(
-                        "memory_store.channel_mount_failed",
-                        tenant_id=str(tenant_id),
-                        agent_uuid=str(agent_uuid),
-                        agent_name=resource_agent.name,
-                        error=str(exc),
-                    )
+                    except (anthropic_pkg.APIError, StoreError) as exc:
+                        _log.warning(
+                            "memory_store.channel_mount_failed",
+                            tenant_id=str(tenant_id),
+                            agent_uuid=str(agent_uuid),
+                            agent_name=resource_agent.name,
+                            error=str(exc),
+                        )
             else:
                 personal_mount: BetaManagedAgentsMemoryStoreResourceParam | None = None
-                if personal_memory and account_id is not None:
+                if personal_memory and identity.personal_memory and account_id is not None:
                     try:
                         personal_mount = await ensure_personal_memory_store_and_mount(
                             anthropic,
@@ -1106,26 +1114,27 @@ async def create_session(
                             agent_name=agent.name,
                             error=str(exc),
                         )
-                try:
-                    memory_resource = await ensure_memory_store_and_mount(
-                        anthropic,
-                        session_factory,
-                        tenant_id=tenant_id,
-                        agent_id=agent_uuid,
-                        agent_name=resource_agent.name,
-                        read_only=memory_read_only,
-                        personal_mounted=personal_mount is not None,
-                        expected_memory_store_id=None,
-                    )
-                    resources.append(memory_resource)
-                except (anthropic_pkg.APIError, StoreError) as exc:
-                    _log.warning(
-                        "memory_store.mount_failed",
-                        tenant_id=str(tenant_id),
-                        agent_uuid=str(agent_uuid),
-                        agent_name=resource_agent.name,
-                        error=str(exc),
-                    )
+                if identity.shared_memory:
+                    try:
+                        memory_resource = await ensure_memory_store_and_mount(
+                            anthropic,
+                            session_factory,
+                            tenant_id=tenant_id,
+                            agent_id=agent_uuid,
+                            agent_name=resource_agent.name,
+                            read_only=memory_read_only,
+                            personal_mounted=personal_mount is not None,
+                            expected_memory_store_id=None,
+                        )
+                        resources.append(memory_resource)
+                    except (anthropic_pkg.APIError, StoreError) as exc:
+                        _log.warning(
+                            "memory_store.mount_failed",
+                            tenant_id=str(tenant_id),
+                            agent_uuid=str(agent_uuid),
+                            agent_name=resource_agent.name,
+                            error=str(exc),
+                        )
                 if personal_mount is not None:
                     resources.append(personal_mount)
 
@@ -1203,6 +1212,7 @@ async def create_session(
             or gated
             or healed
             or channel_skills
+            or (agent.skills and not identity.agent_skills)
             or model_override is not None
             or system_override is not None
         ):
@@ -1226,11 +1236,13 @@ async def create_session(
                 overrides["model"] = model_override
             if system_override is not None:
                 overrides["system"] = system_override
-            if channel_skills:
+            if channel_skills or not identity.agent_skills:
                 # A full replacement too: the agent's own at the versions it pins.
                 overrides["skills"] = [
                     cast(BetaManagedAgentsSkillParams, skill.model_dump(mode="json"))
-                    for skill in session_skills(agent, channel_skills)
+                    for skill in session_skills(
+                        agent, channel_skills, agent_skills=identity.agent_skills
+                    )
                 ]
                 _log.info("session.channel_skills_applied", agent_id=agent.id)
             agent_argument = overrides
@@ -1375,10 +1387,13 @@ async def create_session(
                         env_file_id=None,
                         repo_token_issued_at=None,
                         vault_id=vault_id,
-                        sent_skills=session_skills(agent, channel_skills),
+                        sent_skills=session_skills(
+                            agent, channel_skills, agent_skills=identity.agent_skills
+                        ),
                         github_mode="app",
                         mcp_hold=hold_key(hold) if account_id is not None else None,
                         memory_scope=memory_scope(memory_hold),
+                        identity_features=identity.stored(),
                     )
                     if app_session_unmapped
                     else None

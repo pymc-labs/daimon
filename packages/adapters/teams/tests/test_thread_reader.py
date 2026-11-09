@@ -9,6 +9,7 @@ import pytest
 import structlog
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.thread_reader import ThreadReader, root_id
+from daimon.core.features.model_input import HistoryDepth
 from daimon.core.teams_graph import GraphClient, GraphUnavailable, TeamGroups
 
 from .conftest import CHANNEL_ID, make_inbound
@@ -339,3 +340,41 @@ async def test_hand_over_seed_without_a_readable_boundary_uses_no_history() -> N
         )
         is None
     )
+
+
+@pytest.mark.parametrize(("replay", "top"), [(10, "10"), (100, "50")])
+async def test_a_thread_reply_reads_at_most_the_chat_history_setting(replay: int, top: str) -> None:
+    """The Chat history feature caps the replies a first read asks Graph for."""
+    queries: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        queries.append(dict(request.url.params))
+        return httpx.Response(200, json={"value": [_message("1700000000002")], "id": ROOT})
+
+    await _reader(httpx.MockTransport(handler)).read(
+        _inbound("1700000000010"),
+        watermark=None,
+        skip_ids=frozenset(),
+        depth=HistoryDepth(replay),
+    )
+    assert queries[0] == {"$top": top}, "replies are capped by the setting and Graph's page"
+
+
+async def test_a_chat_history_of_none_reads_no_earlier_messages() -> None:
+    """At 0 a new thread reads no channel posts and a reply no replies, nor the root."""
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        return httpx.Response(200, json=_message(ROOT))
+
+    reader = _reader(httpx.MockTransport(handler))
+    none = HistoryDepth(0)
+    started = await reader.read(_inbound(ROOT), watermark=None, skip_ids=frozenset(), depth=none)
+    assert paths == [], "starting a thread reads no channel posts"
+    assert started is not None and started.attrs == {"count": "0"}, "the block is empty"
+    reply = await reader.read(
+        _inbound("1700000000010"), watermark=None, skip_ids=frozenset(), depth=none
+    )
+    assert not any(path.endswith("/replies") for path in paths), "no replies are read"
+    assert reply is not None and reply.lines == (), "nor the thread's root"

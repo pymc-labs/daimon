@@ -60,12 +60,15 @@ from daimon.core.config import DirectMessagePolicy
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.features.model_input import (
+    HISTORY_KEYS,
     PER_TURN_KEYS,
     TOOL_KEYS,
     TURN_KEYS,
+    HistoryDepth,
     SessionToolset,
     agent_toolset,
 )
+from daimon.core.features.session_identity import IDENTITY_KEYS, SessionIdentity
 from daimon.core.features.snapshot import FeaturePlace, FeatureSnapshot, resolve_features
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import (
@@ -414,7 +417,7 @@ class Admission:
     request: AdmitRequest | None = field(default=None, compare=False, repr=False)
     # This workspace's links into the web app for the admitted role; None with no web app.
     web: TenantLinks | None = field(default=None, compare=False, repr=False)
-    # The turn-bound and session-tool features (`model_input`) at this place; None only
+    # The turn-bound, session-tool and session-identity features at this place; None only
     # for hand-built admissions, which render every turn control and keep every tool.
     features: FeatureSnapshot | None = field(default=None, compare=False, repr=False)
 
@@ -422,6 +425,16 @@ class Admission:
     def toolset(self) -> SessionToolset:
         """What this place's features change in the agent's session tools."""
         return agent_toolset(self.features, self.agent)
+
+    @property
+    def identity(self) -> SessionIdentity:
+        """What a session created now at this place is built with."""
+        return SessionIdentity.of(self.features)
+
+    @property
+    def history_depth(self) -> HistoryDepth:
+        """How much earlier chat a context builder reads at this place."""
+        return HistoryDepth.of(self.features)
 
     def feature_on(self, key: str) -> bool:
         """`key` at this place; a hand-built admission, or a key not resolved, keeps it on."""
@@ -1737,7 +1750,7 @@ async def _admit_gates(
                 agent_id=agent.id,
                 backend=running_on(result)["provider"],
             ),
-            keys=(*TURN_KEYS, *TOOL_KEYS, *PER_TURN_KEYS),
+            keys=(*TURN_KEYS, *TOOL_KEYS, *PER_TURN_KEYS, *IDENTITY_KEYS, *HISTORY_KEYS),
         ),
     )
     if follow_generation is not None:

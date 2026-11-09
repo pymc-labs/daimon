@@ -5,12 +5,14 @@ from __future__ import annotations
 import uuid
 
 from daimon.core.features.model_input import (
+    FULL_HISTORY,
+    HistoryDepth,
     SessionToolset,
     guidance_applies,
     turn_controls,
 )
 from daimon.core.features.registry import FEATURES
-from daimon.core.features.resolver import ResolvedFeature
+from daimon.core.features.resolver import ResolvedFeature, TierValue, resolve_feature
 from daimon.core.features.snapshot import FeaturePlace, FeatureSnapshot, resolve_one
 
 PLACE = FeaturePlace(uuid.uuid4(), "web", agent_id="agent_1", backend="anthropic")
@@ -69,3 +71,18 @@ def test_isolated_agent_tools_only_shrink() -> None:
     channel_on = ResolvedFeature("tool.bash", "on", "channel")
     toolset = SessionToolset.of(_snapshot(channel_on), {"bash": False}, isolated=True)
     assert toolset.builtins == {}, "isolated agents never gain a tool from a place"
+
+
+def test_chat_history_takes_the_smallest_setting_and_caps_the_channel() -> None:
+    """Chat history is a limit: the smallest tier wins, and the channel reads at most 25."""
+    spec = FEATURES["history_depth"]
+    values = [TierValue("workspace", "25"), TierValue("channel", "50")]
+    found = resolve_feature(spec, values)
+    assert (found.value, found.tier) == ("25", "workspace"), "a channel cannot raise the limit"
+    depth = HistoryDepth.of(_snapshot(found))
+    assert (depth.replay, depth.backfill) == (25, 25), "the channel backfill follows the limit"
+    ten = HistoryDepth.of(_snapshot(ResolvedFeature("history_depth", "10", "channel")))
+    assert (ten.replay, ten.backfill) == (10, 10), "under 25 the backfill shrinks with it"
+    assert (FULL_HISTORY.replay, FULL_HISTORY.backfill) == (100, 25), "the default reads 100"
+    assert HistoryDepth.of(None) == FULL_HISTORY, "a hand-built admission keeps the default"
+    assert all(int(value) >= 0 for value in spec.values), "limit values are counts"

@@ -15,9 +15,10 @@ from daimon.core.config import (
     Settings,
 )
 from daimon.core.features.deployment import deployment_value
-from daimon.core.features.model_input import SESSION_KEYS
+from daimon.core.features.model_input import SESSION_KEYS, TOOL_KEYS
 from daimon.core.features.registry import FEATURES, TIERS, FeatureSpec, parse_deployment
 from daimon.core.features.resolver import TierValue, resolve_feature
+from daimon.core.features.session_identity import IDENTITY_KEYS
 from pydantic import PostgresDsn, SecretStr
 
 _ROOT = Path(__file__).resolve().parents[4]
@@ -184,15 +185,148 @@ def test_every_session_creation_gets_the_place_toolset() -> None:
         )
 
 
+#: Session creators that build with the default identity, with the reason.
+_DEFAULT_IDENTITY_CREATORS = {
+    # An operator's debugging session from the command line has no place to read.
+    "sessions.py": "the CLI's own session, outside any chat place",
+}
+
+
+def test_every_session_creation_gets_the_place_identity() -> None:
+    """Every MA session is built with its place's prompt, skills and memory features."""
+    calls = [
+        (path, call)
+        for path in _PRODUCT
+        for call in _named_calls(path, "create_session")
+        if isinstance(call.func, ast.Name)
+    ]
+    assert len(calls) >= 4, "the session creators moved; point this test at them"
+    for path, call in calls:
+        passes = any(k.arg == "identity" for k in call.keywords)
+        assert passes or path.name in _DEFAULT_IDENTITY_CREATORS, (
+            f"{path.name}:{call.lineno} must pass identity="
+        )
+
+
 def test_session_bound_features_land_where_their_binding_says() -> None:
-    """A session_mutable feature lands in the tools hash, updated in place; none is identity yet."""
+    """A session_mutable feature lands in the tools hash, updated in place; a session_identity
+    one is frozen in the session's snapshot (`SessionIdentity`)."""
     mutable = {key for key, spec in FEATURES.items() if spec.binds == "session_mutable"}
     assert mutable == set(SESSION_KEYS), "session_mutable features must shape SessionToolset"
-    identity = [key for key, spec in FEATURES.items() if spec.binds == "session_identity"]
-    assert not identity, f"freeze {identity} in SessionSnapshot before binding them to identity"
+    identity = {key for key, spec in FEATURES.items() if spec.binds == "session_identity"}
+    assert identity == set(IDENTITY_KEYS), "session_identity features must shape SessionIdentity"
 
 
 def test_a_dotted_feature_has_an_env_name() -> None:
     """`DAIMON_FEATURES__TOOL_BASH` sets `tool.bash`; shells allow no dots in names."""
     settings = _settings(features={"TOOL_BASH": "off:locked"})
     assert settings.features == {"tool.bash": "off:locked"}, "env name maps to the dotted key"
+
+
+_KEY_READERS = {"feature_on": 0, "feature": 0, "switch_default": 1}
+"""Calls that read a feature key, and the position of the key among their arguments."""
+_SNAPSHOT_READS = {"on", "value", "get"}
+
+
+def _read_key(node: ast.AST) -> str | None:
+    """The feature key `node` reads, when it is a known reader called with a literal key."""
+    if isinstance(node, ast.Subscript) and getattr(node.value, "id", "") == "FEATURES":
+        key = node.slice
+    elif isinstance(node, ast.Call):
+        name = getattr(node.func, "id", None) or getattr(node.func, "attr", "")
+        receiver = node.func.value if isinstance(node.func, ast.Attribute) else None
+        named = getattr(receiver, "id", None) or getattr(receiver, "attr", "") or ""
+        snapshot = name in _SNAPSHOT_READS and named.endswith("features")
+        at = _KEY_READERS.get(name, 0 if snapshot else None)
+        key = node.args[at] if at is not None and len(node.args) > at else None
+    else:
+        return None
+    return key.value if isinstance(key, ast.Constant) and isinstance(key.value, str) else None
+
+
+def test_every_feature_key_read_is_registered_and_every_registered_key_is_read() -> None:
+    """A typo in a read fails here, and so does a registered control nothing obeys."""
+    read: dict[str, str] = {}
+    named: set[str] = set(TOOL_KEYS)  # built from BUILTIN_TOOLS, so no literal names them
+    for path in _PRODUCT:
+        for node in ast.walk(ast.parse(path.read_text())):
+            if (key := _read_key(node)) is not None:
+                read.setdefault(key, f"{path.name}:{getattr(node, 'lineno', 0)}")
+            if (
+                path.name != "registry.py"
+                and isinstance(node, ast.Constant)
+                and node.value in FEATURES
+            ):
+                named.add(node.value)
+    assert len(read) >= 10, "the feature readers moved; point this test at them"
+    unknown = {key: where for key, where in read.items() if key not in FEATURES}
+    assert not unknown, f"feature keys read but not registered: {unknown}"
+    assert set(FEATURES) <= named, f"registered but never read: {set(FEATURES) - named}"
+
+
+_OPS = "operator switch for security, billing or a deployment, not a per-place control"
+_SERVICE = "turns a whole service on in this deployment; per-place control is a feature"
+_LEGACY = "legacy variable the deployment tier reads in place of DAIMON_FEATURES__*"
+_ROLLOUT = "staged rollout of one behaviour, removed once it is the only behaviour"
+_SHAPE = "describes a configured object, not something a place turns on or off"
+_CONFIG_SWITCHES: dict[str, str] = {
+    "McpSettings.allow_legacy_tokens": _OPS,
+    "McpSettings.require_routine_destination": _OPS,
+    "McpOAuthClientSettings.send_resource": _OPS,
+    "ProgressPlansSettings.mode": _LEGACY,
+    "McpContextSettings.enabled": _LEGACY,
+    "ThreadParticipationSettings.mode": _LEGACY,
+    "RepoMemorySettings.enabled": _LEGACY,
+    "DiscordSettings.writers_none_notice": _ROLLOUT,
+    "DiscordSettings.credential_form_expiry": _ROLLOUT,
+    "DiscordSettings.unmentioned_reply_hint": _ROLLOUT,
+    "DiscordSettings.tenant_cap_waiting_card": _ROLLOUT,
+    "TeamsSettings.enabled": _SERVICE,
+    "WebSettings.manual_topup": _OPS,
+    "WebSettings.dev": _OPS,
+    "GithubSettings.mcp_router": _SERVICE,
+    "CryptoSettings.allow_plaintext": _OPS,
+    "HarnessAuthBinding.auth_mode": _SHAPE,
+    "SelfHostedSettings.admission_enabled": _OPS,
+    "SelfHostedSettings.single_tenant": _OPS,
+    "NotebookSettings.allow_editable": _OPS,
+    "TurnSettings.native_footer_cost": _ROLLOUT,
+    "TurnSettings.channel_backends": _ROLLOUT,
+    "TurnSettings.agent_backends": _ROLLOUT,
+    "TurnSettings.status_log": _ROLLOUT,
+    "ThreadNamingSettings.enabled": _SERVICE,
+    "OutboundSettings.reach_budget_enabled": _OPS,
+    "PrivateChannelMessagesSettings.enabled": _SERVICE,
+    "PrivacySettings.delete_enabled": _OPS,
+    "ArtifactsSettings.embed_images": _OPS,
+    "DirectMessagePolicy.mode": _OPS,
+    "AgentIdentitySettings.enabled": _SERVICE,
+    "TurnQueueSettings.enabled": _SERVICE,
+    "PollableTool.returns_chat": _SHAPE,
+    "WatchesSettings.enabled": _SERVICE,
+    "ComputeSettings.enabled": _SERVICE,
+}
+"""Every on/off or mode field `config.py` already has, and why it is not a feature."""
+
+
+def test_config_grows_no_new_product_switch() -> None:
+    """A new behaviour a place might turn on or off is a registry feature, not a setting."""
+    tree = ast.parse((_ROOT / "packages/core/daimon/core/config.py").read_text())
+    switches = {
+        f"{cls.name}.{field.target.id}"
+        for cls in tree.body
+        if isinstance(cls, ast.ClassDef)
+        for field in cls.body
+        if isinstance(field, ast.AnnAssign)
+        and isinstance(field.target, ast.Name)
+        and (
+            ast.unparse(field.annotation) in ("bool", "bool | None")
+            or field.target.id == "mode"
+            or field.target.id.endswith("_mode")
+            or ast.unparse(field.annotation).endswith("Mode")
+        )
+    }
+    assert switches - set(_CONFIG_SWITCHES) == set(), (
+        "new on/off or mode setting: register a feature instead, or allow-list it with a reason"
+    )
+    assert set(_CONFIG_SWITCHES) - switches == set(), "allow-listed settings that no longer exist"

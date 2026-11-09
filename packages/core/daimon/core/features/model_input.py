@@ -21,6 +21,10 @@ PER_TURN_KEYS: Final[tuple[str, ...]] = ("mcp_briefing", "repo_memory", "context
 """What each turn adds in front of the message, checked by `Admission.feature_on`."""
 MODEL_INPUT_KEYS: Final[tuple[str, ...]] = ("guidance", *SESSION_KEYS, *TURN_KEYS[1:])
 
+HISTORY_KEYS: Final[tuple[str, ...]] = ("history_depth",)
+CHANNEL_BACKFILL: Final[int] = 25
+"""The most channel messages around a new thread any chat adapter reads."""
+
 TurnControls = Literal["full", "origin", "minimal"]
 TOOLSET_TYPE: Final[str] = "agent_toolset_20260401"
 
@@ -36,6 +40,26 @@ def turn_controls(features: FeatureSnapshot) -> TurnControls:
     if level == "minimal" and features.on("daimon_tools"):
         return "origin"
     return "full" if level == "full" else "origin" if level == "origin" else "minimal"
+
+
+@dataclass(frozen=True)
+class HistoryDepth:
+    """How many earlier messages a chat adapter reads: the thread's, and the channel's."""
+
+    replay: int = 100
+
+    @property
+    def backfill(self) -> int:
+        return min(CHANNEL_BACKFILL, self.replay)
+
+    @classmethod
+    def of(cls, features: FeatureSnapshot | None) -> HistoryDepth:
+        """From a snapshot; none, or one without the key (a hand-built admission), reads 100."""
+        found = features.features.get("history_depth") if features is not None else None
+        return cls() if found is None else cls(int(found.value))
+
+
+FULL_HISTORY: Final[HistoryDepth] = HistoryDepth()
 
 
 @dataclass(frozen=True)

@@ -43,6 +43,8 @@ from daimon.core._models import TenantLedger, UsageEvent
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import McpSettings, load_turn_settings
 from daimon.core.credential_env import assemble_env_bytes
+from daimon.core.features.resolver import ResolvedFeature
+from daimon.core.features.snapshot import FeaturePlace, FeatureSnapshot
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, ResolvedConfig
@@ -1399,6 +1401,53 @@ async def test_a_channels_skills_are_added_at_create_and_read_as_current_on_the_
     assert isinstance(third, PreparedTurn)
     assert third.ma_session_id != first.ma_session_id, "a removed channel skill leaves the session"
     assert transport.state.sessions[third.ma_session_id].agent.skills == []
+
+
+def _with_features(admission: Admission, **values: str) -> Admission:
+    """`admission` whose place sets each identity feature in `values` at the channel."""
+    place = FeaturePlace(uuid.uuid4(), "discord", "c1", agent_id=admission.agent.id)
+    resolved = {key: ResolvedFeature(key, value, "channel") for key, value in values.items()}
+    return replace(admission, features=FeatureSnapshot(place, 1, resolved))
+
+
+async def test_identity_features_keep_a_live_session_and_apply_on_new(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Turning channel skills off never replaces a running session; `/new` builds without them."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    extra = (BetaManagedAgentsCustomSkill(type="custom", skill_id="skill_team", version="v7"),)
+    on = replace(_admission(account=account), channel_skills=extra)
+    off = _with_features(on, channel_skills="off")
+
+    first = await _prepare(deps, on, tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn)
+    kept = await _prepare(deps, off, tenant=tenant, account=account)
+    assert isinstance(kept, PreparedTurn)
+    assert kept.ma_session_id == first.ma_session_id, "a live session keeps its identity"
+    assert transport.state.sessions[kept.ma_session_id].agent.skills, "still has the skill"
+
+    row = await _live_row(db_session_factory, tenant=tenant, account=account)
+    assert row is not None
+    async with db_session_factory() as session, session.begin():
+        await request_fresh_start(session, id=row.id, at=_NOW)
+    fresh = await _prepare(deps, off, tenant=tenant, account=account)
+    assert isinstance(fresh, PreparedTurn)
+    assert fresh.ma_session_id != first.ma_session_id, "/new starts a new session"
+    assert transport.state.sessions[fresh.ma_session_id].agent.skills == [], "built without"
+    recorded = await _live_row(db_session_factory, tenant=tenant, account=account)
+    assert recorded is not None and recorded.effective_config is not None
+    assert recorded.effective_config.identity_features == (("channel_skills", "off"),), (
+        "the new session records what it was built with"
+    )
+
+    again = await _prepare(deps, off, tenant=tenant, account=account)
+    assert isinstance(again, PreparedTurn)
+    assert again.ma_session_id == fresh.ma_session_id, "the frozen values read as current"
 
 
 async def test_a_fresh_start_retires_the_old_row_and_carries_nothing(

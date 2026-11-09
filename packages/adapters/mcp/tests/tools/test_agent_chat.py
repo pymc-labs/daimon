@@ -76,6 +76,7 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_SEALED,
 )
 from daimon.core.features.model_input import DEFAULT_TOOLSET
+from daimon.core.features.session_identity import DEFAULT_IDENTITY
 from daimon.core.github_app_session import prepare_app_access as mint_app_access
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_agent_uuid
@@ -128,10 +129,10 @@ _ACCOUNT_ID = uuid.uuid4()
 
 @pytest.fixture(autouse=True)
 def default_place_toolset(monkeypatch: pytest.MonkeyPatch) -> None:
-    """These fakes hold no feature rows: every new session runs the default toolset."""
+    """These fakes hold no feature rows: every new session runs the default toolset and identity."""
     monkeypatch.setattr(
-        "daimon.adapters.mcp.tools.agent_chat.place_toolset",
-        AsyncMock(return_value=DEFAULT_TOOLSET),
+        "daimon.adapters.mcp.tools.agent_chat.place_session",
+        AsyncMock(return_value=(DEFAULT_TOOLSET, DEFAULT_IDENTITY)),
     )
 
 
@@ -2661,6 +2662,7 @@ async def test_start_turn_returns_the_accepted_events_boundary(
         "agent_chat",
         "tool_safety",
         "toolset",
+        "identity",
         "github_fallback_pat",
         "github_app_id",
         "github_app_private_key",

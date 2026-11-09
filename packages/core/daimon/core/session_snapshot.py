@@ -149,6 +149,7 @@ class SessionSnapshot(BaseModel):
             "github_repo_script_resource_id",
             "mcp_hold",
             "memory_scope",
+            "identity_features",
         ):
             if not data.get(name):
                 data.pop(name, None)
@@ -208,6 +209,11 @@ class SessionSnapshot(BaseModel):
     # Kept apart from `memory_store_id` so the scope is known even when the
     # store failed to provision and nothing mounted.
     memory_scope: str | None = None
+    # The session-identity features off their default when the session was created
+    # (`daimon.core.features.session_identity`). The session keeps them until `/new`
+    # or a replacement; they already show in the system, skills and memory fields,
+    # so they are never fingerprinted themselves.
+    identity_features: tuple[tuple[str, str], ...] = ()
     # How the session reaches GitHub's MCP server, fixed at creation from the
     # session's own metadata. Never fingerprinted and never re-derived: the
     # desired `mcp_servers` follow the recorded mode, so turning the router
@@ -371,6 +377,7 @@ def snapshot_from_created_session(
     personal_memory_store_ids: Collection[str] = (),
     mcp_hold: str | None = None,
     memory_scope: str | None = None,
+    identity_features: tuple[tuple[str, str], ...] = (),
 ) -> SessionSnapshot:
     """Snapshot a session we just created, from the response plus what we sent.
 
@@ -406,7 +413,13 @@ def snapshot_from_created_session(
         github_mode=github_mode,
         personal_memory_store_ids=personal_memory_store_ids,
     )
-    snapshot = snapshot.model_copy(update={"mcp_hold": mcp_hold, "memory_scope": memory_scope})
+    snapshot = snapshot.model_copy(
+        update={
+            "mcp_hold": mcp_hold,
+            "memory_scope": memory_scope,
+            "identity_features": identity_features,
+        }
+    )
     if sent_system is None:
         return snapshot
     return snapshot.model_copy(update={"system_sha256": hash_system(sent_system)})
@@ -545,16 +558,20 @@ def _snapshot_from_session(
 
 
 def session_skills(
-    agent: BetaManagedAgentsAgent, channel_skills: Sequence[MaSkill] = ()
+    agent: BetaManagedAgentsAgent,
+    channel_skills: Sequence[MaSkill] = (),
+    *,
+    agent_skills: bool = True,
 ) -> list[MaSkill]:
     """The skills a session runs: the agent's own, then the turn's extra ones.
 
     The one definition `create_session` and the drift check both use, so a
     session started with a channel's skills reads as current on its next turn.
     The extra ones, the platform's then the channel's, are decided at
-    admission (`daimon.core.channel_skills`).
+    admission (`daimon.core.channel_skills`). `agent_skills` False (the feature
+    off) leaves the agent's own out.
     """
-    return [*agent.skills, *channel_skills]
+    return [*(agent.skills if agent_skills else ()), *channel_skills]
 
 
 def _with_toolset(
@@ -700,6 +717,8 @@ def desired_snapshot(
     channel_skills: Sequence[MaSkill] = (),
     system_override: str | None = None,
     toolset: SessionToolset | None = None,
+    agent_skills: bool = True,
+    identity_features: tuple[tuple[str, str], ...] = (),
 ) -> SessionSnapshot:
     """What a session created right now, for this caller, would be running.
 
@@ -717,14 +736,15 @@ def desired_snapshot(
     turn's channel's extra skills, hashed with the agent's (`session_skills`).
     `system_override` is the prompt sent in place of the agent's own, hashed
     instead of it. `github_transport` is the recorded session's own mode (absent
-    means direct), never the router setting's current value.
+    means direct), never the router setting's current value. `agent_skills` and
+    `identity_features` come from the session's `SessionIdentity`.
     """
     return SessionSnapshot(
         ma_agent_id=agent.id,
         model_id=agent.model.id,
         model_speed=getattr(agent.model, "speed", None) or "standard",
         system_sha256=hash_system(agent.system if system_override is None else system_override),
-        skills_sha256=hash_skills(session_skills(agent, channel_skills)),
+        skills_sha256=hash_skills(session_skills(agent, channel_skills, agent_skills=agent_skills)),
         environment_id=environment_id,
         github_mode=github_mode,
         repo_urls=repo_urls if github_mode == "app" else (),
@@ -746,6 +766,7 @@ def desired_snapshot(
         chat_session_id=chat_session_id,
         mcp_hold=mcp_hold,
         memory_scope=memory_scope,
+        identity_features=identity_features,
         github_transport=github_transport,
         tools_sha256=hash_tools(
             session_tools(

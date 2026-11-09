@@ -475,8 +475,9 @@ async def build_context_xml(
     ``excluded_message_ids`` lists messages to keep out of the history, such as
     the turn's own status card.
     """
-    # Earlier messages only for a person who may read them in Discord.
-    may_read_history = _may_read_history(thread, trigger.author, posted_here=True)
+    # Earlier messages only for a person who may read them in Discord; a chat history
+    # limit of 0 reads none, the thread's starter included.
+    may_read_history = limit > 0 and _may_read_history(thread, trigger.author, posted_here=True)
     messages = [m async for m in thread.history(limit=limit)] if may_read_history else []
     messages.sort(key=lambda m: m.created_at)
     excluded_ids = {
@@ -728,7 +729,7 @@ async def build_channel_context_xml(
     try:
         recent = (
             [m async for m in channel.history(limit=limit)]
-            if _may_read_history(channel, trigger.author, posted_here=True)
+            if limit > 0 and _may_read_history(channel, trigger.author, posted_here=True)
             else []
         )
     except discord.HTTPException:

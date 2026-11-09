@@ -72,13 +72,13 @@ from daimon.core.config import (
 )
 from daimon.core.context_prompt import TurnContext, context_prompt
 from daimon.core.features.model_input import DEFAULT_TOOLSET
+from daimon.core.features.session_identity import DEFAULT_IDENTITY
 from daimon.core.features.snapshot import FeaturePlace
-from daimon.core.features.toolset import place_toolset
+from daimon.core.features.toolset import place_session
 from daimon.core.github_app_session import close_headless_app_session
 from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
 from daimon.core.mux_compat import legacy_call, sdk_agent, sdk_environment
-from daimon.core.platform_system import system_for_platform
 from daimon.core.routine_sandbox import RoutineSandbox, run_matches_pin
 from daimon.core.rule_views import RoutineOrigin
 from daimon.core.sessions import create_session
@@ -500,9 +500,9 @@ async def run_turn_impl(
                 )
             )
         )
-        toolset = DEFAULT_TOOLSET
+        toolset, identity = DEFAULT_TOOLSET, DEFAULT_IDENTITY
         if session_factory is not None and tenant_id is not None:
-            toolset = await place_toolset(
+            toolset, identity = await place_session(
                 session_factory,
                 feature_settings,
                 FeaturePlace.of(
@@ -553,7 +553,8 @@ async def run_turn_impl(
             origin_seal_ids=origin_place.seal_ids if origin_place is not None else (),
             private_dm_id=origin_place.private_dm_id if origin_place is not None else None,
             model_override=model_override,
-            system_override=system_for_platform(agent.system, platform),
+            system_override=identity.system(agent.system, platform),
+            identity=identity,
         )
 
     try:

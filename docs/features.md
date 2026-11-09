@@ -89,6 +89,18 @@ A context provider set up for this channel or agent adds what it knows to each m
 | Levels on Gemini |  |
 | Levels on OpenAI |  |
 
+## Chat history
+
+How many earlier chat messages a new conversation reads, up to 100 from the thread and 25 from the channel around it. The smallest setting wins.
+
+| | |
+| --- | --- |
+| Key | `history_depth` |
+| Values | `100` (100 messages), `50` (50 messages), `25` (25 messages), `10` (10 messages), `0` (None) |
+| Default | `100` |
+| Levels | Deployment, Server, Agent, Channel |
+| Combines | Lowest wins |
+
 ## Setup guidance
 
 Instructions at the top of the agent's prompt on where its keys, repo, memory and files are and what it may share. Off leaves the agent's own prompt and the safety rules. Applies when the agent is next saved or synced.
@@ -263,3 +275,93 @@ Before each chat message, the agent's MCP servers that offer a context tool are 
 | Levels on Gemini |  |
 | Levels on OpenAI |  |
 | Deprecated | `DAIMON_MCP_CONTEXT__ENABLED` |
+
+## Platform prompt
+
+The agent's prompt is adjusted to the chat platform's words and formatting. Off sends the agent's own prompt as written. A conversation keeps what it started with until /new. OpenAI agents always get their own prompt.
+
+| | |
+| --- | --- |
+| Key | `platform_prompt` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Server, Agent |
+| Combines | Most specific wins |
+
+## Platform skills
+
+The skills Daimon adds for the chat platform, such as its formatting. A conversation keeps what it started with until /new. Managed Agents only.
+
+| | |
+| --- | --- |
+| Key | `platform_skills` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Server, Agent, Channel |
+| Combines | Most specific wins |
+| Levels on Gemini |  |
+| Levels on OpenAI |  |
+
+## Agent skills
+
+The skills listed on the agent. Off leaves them out of new conversations; the agent keeps its list. A conversation keeps what it started with until /new. Always on for Gemini and OpenAI agents.
+
+| | |
+| --- | --- |
+| Key | `agent_skills` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Server, Agent, Channel |
+| Combines | Most specific wins |
+
+## Channel skills
+
+The skills added to a channel. They need the read tool, so they are off wherever it is. A conversation keeps what it started with until /new. Managed Agents only.
+
+| | |
+| --- | --- |
+| Key | `channel_skills` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Server, Agent, Channel |
+| Combines | Most specific wins |
+| Levels on Gemini |  |
+| Levels on OpenAI |  |
+
+## Personal memory
+
+Each person's own memory with the agent, in conversations only they can read. On never adds it anywhere else. A conversation keeps what it started with until /new. Off for Gemini and OpenAI agents.
+
+| | |
+| --- | --- |
+| Key | `memory_personal` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Server, Agent, Channel |
+| Combines | Off above is a ceiling |
+
+## Shared memory
+
+The agent's memory shared by everyone who talks to it. A conversation keeps what it started with until /new. Always on for Gemini and OpenAI agents.
+
+| | |
+| --- | --- |
+| Key | `memory_shared` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Server, Agent, Channel |
+| Combines | Off above is a ceiling |
+
+## Channel memory
+
+The memory a restricted channel keeps for itself in place of the shared one. A conversation keeps what it started with until /new. Managed Agents only.
+
+| | |
+| --- | --- |
+| Key | `memory_channel` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Server, Agent, Channel |
+| Combines | Off above is a ceiling |
+| Levels on Gemini |  |
+| Levels on OpenAI |  |

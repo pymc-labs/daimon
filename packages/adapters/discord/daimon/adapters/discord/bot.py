@@ -5882,7 +5882,7 @@ class DaimonBot(commands.Bot):
                 user_message, _ = await build_context_xml(
                     thread,
                     trigger=message,
-                    limit=100,
+                    limit=admission.history_depth.replay,
                     bot_user_id=self.user.id if self.user else None,
                     bot_display_name=discord_settings.bot_display_name,
                     is_admin=is_admin,
@@ -5899,6 +5899,7 @@ class DaimonBot(commands.Bot):
                     message.channel,
                     trigger=message,
                     thread=thread,
+                    limit=admission.history_depth.backfill,
                     bot_user_id=self.user.id if self.user else None,
                     bot_display_name=discord_settings.bot_display_name,
                     is_admin=is_admin,
@@ -5956,7 +5957,7 @@ class DaimonBot(commands.Bot):
             full_message, _ = await build_context_xml(
                 thread,
                 trigger=message,
-                limit=100,
+                limit=admission.history_depth.replay,
                 bot_user_id=self.user.id if self.user else None,
                 bot_display_name=discord_settings.bot_display_name,
                 omit_oversized_image_urls=True,

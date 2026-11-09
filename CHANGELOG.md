@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Daimon's own tools (`daimon_tools`) and each built-in tool (`tool.bash` and the rest) can be turned off down to a channel or thread, from the next message. An agent's own tool settings are its agent level. Gemini and OpenAI agents always have Daimon's tools, and the setting says so there.
   MCP server briefing (`mcp_briefing`), repository memory (`repo_memory`) and context providers (`context_provider`) can be turned off down to a channel or thread. `DAIMON_MCP_CONTEXT__ENABLED` and `DAIMON_REPO_MEMORY__ENABLED` still work but log a deprecation. Briefing and context providers run only on Managed Agents.
 
+- **What a conversation starts with, and how much chat it reads, are features too.**
+  The platform prompt, platform, agent and channel skills, and personal, shared and channel memory can be turned off from the deployment down to a channel; the platform prompt down to an agent.
+  A conversation keeps what it started with until `/new`, so a change never replaces a running session. Gemini and OpenAI agents show the ones they cannot change as unavailable, with the reason.
+  Chat history (`history_depth`) sets how many earlier messages a new Discord, Slack or Teams conversation reads: 100, 50, 25, 10 or none, and the smallest setting wins.
+  The channel around a new thread is read up to 25 messages, or fewer when the setting is lower.
+  With repository memory off, its tools are gone too.
+
 - **The Azure deploy can keep MCP private while Teams is public.**
   Set `mcpPublicIngress` to false and MCP is reachable only from apps in the same Container Apps environment. The default keeps it public, as before.
   It suits only the self-hosted harness running in that environment. Hosted model backends, including the default Anthropic one, sign-in and connect links, and every other Daimon web page stop working, because MCP serves them.
