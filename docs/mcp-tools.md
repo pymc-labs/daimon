@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 224 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 218 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -223,15 +223,6 @@ get_cli_token MCP tool.
 | --- | --- | --- |
 | `get_cli_token` | all callers | Mint a short-lived CLI access token for the named service. |
 
-## `cost_footer`
-
-Cost footer tools: show or hide the line under each finished answer, workspace-wide.
-
-| Tool | Who can call it | Purpose |
-| --- | --- | --- |
-| `get_cost_footer` | all callers | Deprecated: use ``get_settings``. |
-| `set_cost_footer` | admin only | Deprecated: use ``change_setting`` with ``key="cost_footer"``. |
-
 ## `credential_requests`
 
 Post requester-only private forms for agent keys, MCP tokens and GitHub access.
@@ -438,13 +429,10 @@ Plain-text mention tools: let a typed "@<bot name>" start a turn, workspace-wide
 
 ## `progress_plans`
 
-Progress-plan tools: the switch (`set_progress_plans`, `get_progress_plans`) and the
-plan.
+The `update_plan` tool: a checklist of a longer task's steps on the progress card.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `get_progress_plans` | Discord callers, Slack callers, Teams callers | Deprecated: use ``get_settings``. |
-| `set_progress_plans` | Discord callers, Slack callers, Teams callers | Deprecated: use ``change_setting`` with ``key="progress_plans"``. |
 | `update_plan` | Discord callers, Slack callers, Teams callers | Show the task's plan as a checklist on the progress card. |
 
 ## `promo_codes`
@@ -642,15 +630,6 @@ Thread settings that differ from their channel, and clearing one.
 | --- | --- | --- |
 | `clear_thread_override` | admin only, operator tokens with channels:write | Drop one thread's own setting so it follows its channel again. |
 | `list_thread_overrides` | admin only, operator tokens with tenant:read | List the threads of a channel that keep their own participation, progress plan, access rule or handoff. |
-
-## `thread_participation`
-
-Thread-participation tools: follow a thread (or a channel, or the workspace).
-
-| Tool | Who can call it | Purpose |
-| --- | --- | --- |
-| `get_thread_participation` | Discord callers, Teams callers | Deprecated: use ``get_settings``. |
-| `set_thread_participation` | Discord callers, Teams callers | Deprecated: use ``change_setting`` with ``key="participation"``. |
 
 ## `tidy`
 

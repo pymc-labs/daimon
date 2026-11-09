@@ -262,7 +262,7 @@ def test_only_a_direct_chat_turn_hears_about_preview_outputs() -> None:
 
 
 def test_a_channel_turn_names_its_thread_and_channel() -> None:
-    """The ids `set_thread_participation` keys on, as Discord's `<thread>` and `<channel>`."""
+    """The ids `change_setting` keys on, as Discord's `<thread>` and `<channel>`."""
     inbound = make_inbound("hi", conversation="19:c@thread.tacv2;messageid=1", kind="channel")
     message = render_user_message(
         "<controls/>", inbound, is_admin=False, keys="", prefix="", history=None

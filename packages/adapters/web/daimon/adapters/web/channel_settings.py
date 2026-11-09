@@ -3,10 +3,9 @@
 A channel's further settings (following threads, progress plans, sandbox, skills,
 tool rules, provider pin, its copy, its threads' own settings) and what its page
 reads beyond the row (spend three ways, routines, link, Teams subscription). Every
-write goes through `daimon.core.channel_settings` or, for the Settings group (approvals,
-thread participation, progress plans, the cost footer), `daimon.core.scope_settings`
-with the value the admin last read; members read only. Approvals need the person's
-linked chat account to be a native admin of the platform, checked live on each write.
+write goes through `daimon.core.channel_settings`, with the value the admin last
+read; members read only. Approvals, thread participation, progress plans and the
+cost footer are read here and changed through the Features routes.
 """
 
 from __future__ import annotations
@@ -30,7 +29,6 @@ from daimon.adapters.web.channels import (
 from daimon.adapters.web.routines import routine_title
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core import routine_service
-from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.channel_changes import Expected
 from daimon.core.channel_directory import WEB_ROW_ID, ValueSource, load_channel_directory
@@ -61,19 +59,15 @@ from daimon.core.errors import SkillsListTruncatedError
 from daimon.core.routine_service import RoutineCaller, RoutineRefused
 from daimon.core.scope_cascade import CascadeMode, CascadeScope, CascadeTier, resolve_modes
 from daimon.core.scope_settings import (
-    INHERIT,
     LEVELS,
-    SettingKey,
-    SettingsActor,
     SettingsPlace,
-    change_setting,
     read_settings,
     switch_default,
 )
 from daimon.core.stores import agent_tool_rules as tool_rules
 from daimon.core.stores.channel_changes import WORKSPACE_ID
 from daimon.core.stores.channel_skills import list_channel_skills
-from daimon.core.stores.domain import CHAT_PLATFORMS, RoutineRow
+from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.platform_names import get_channel_names, get_user_names
 from daimon.core.stores.switch_modes import Switch, get_switch_modes
 from daimon.core.stores.tenants import get_tenant
@@ -220,21 +214,6 @@ class DefaultsJson(BaseModel):
     progress_plans: SwitchJson
     approvals: ApprovalsJson
     cost_footer: CostFooterJson
-
-
-class SwitchChange(BaseModel):
-    mode: Mode | None
-    expected: Mode | None
-
-
-class ApprovalsChange(BaseModel):
-    mode: ApprovalMode | None
-    expected: ApprovalMode | None
-
-
-class CostFooterChange(BaseModel):
-    shown: bool
-    expected: bool
 
 
 class EnvironmentChange(BaseModel):
@@ -568,65 +547,6 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
             ),
         )
 
-    async def put_setting(
-        caller: WebCaller, key: SettingKey, channel_id: str | None, value: str, expected: str
-    ) -> None:
-        """One Settings-group write through the core writer, as every surface makes it."""
-        platform = await (platform_row(caller, channel_id) if channel_id else home(caller))
-
-        async def admin_for(action: DelegatedAction | None) -> bool:
-            needed = "workspace.manage" if key == "cost_footer" else "channels.manage"
-            return needed in caller.capabilities and is_admin(caller.role)
-
-        actor = SettingsActor(
-            caller.person.tenant_id,
-            caller.person.account_id,
-            "web",
-            await native_user_id(caller, platform) if platform in CHAT_PLATFORMS else None,
-            admin_for,
-            on_write=actor_of(caller, channel_id or WORKSPACE_ID, platform, key).on_write,
-        )
-        with channel_refusals():
-            await change_setting(
-                runtime.sessionmaker,
-                settings,
-                actor,
-                key=key,
-                level="channel" if channel_id else "server",
-                value=value,
-                place=SettingsPlace(platform, channel_id),
-                expected=Expected(expected),
-            )
-
-    async def put_switch(
-        caller: WebCaller,
-        key: SettingKey,
-        channel_id: str | None,
-        body: SwitchChange | ApprovalsChange,
-    ) -> None:
-        await put_setting(caller, key, channel_id, body.mode or INHERIT, body.expected or INHERIT)
-
-    @router.put("/api/channels/{channel_id}/approvals")
-    async def put_channel_approvals(  # pyright: ignore[reportUnusedFunction]
-        caller: ChannelAdmin, channel_id: str, body: ApprovalsChange
-    ) -> ChangeResultJson:
-        await put_switch(caller, "approvals", channel_id, body)
-        return await changed(caller, channel_id)
-
-    @router.put("/api/channels/{channel_id}/participation")
-    async def put_participation(  # pyright: ignore[reportUnusedFunction]
-        caller: ChannelAdmin, channel_id: str, body: SwitchChange
-    ) -> ChangeResultJson:
-        await put_switch(caller, "participation", channel_id, body)
-        return await changed(caller, channel_id)
-
-    @router.put("/api/channels/{channel_id}/progress-plans")
-    async def put_plans(  # pyright: ignore[reportUnusedFunction]
-        caller: ChannelAdmin, channel_id: str, body: SwitchChange
-    ) -> ChangeResultJson:
-        await put_switch(caller, "progress_plans", channel_id, body)
-        return await changed(caller, channel_id)
-
     async def put_env(caller: WebCaller, channel_id: str | None, body: EnvironmentChange) -> None:
         platform = await platform_row(caller, channel_id) if channel_id else await home(caller)
         with channel_refusals():
@@ -831,35 +751,6 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
         caller: ChannelAdmin, body: EnvironmentChange
     ) -> DefaultsJson:
         await put_env(caller, None, body)
-        return await defaults(caller)
-
-    @router.put("/api/channel-defaults/participation")
-    async def put_default_participation(  # pyright: ignore[reportUnusedFunction]
-        caller: ChannelAdmin, body: SwitchChange
-    ) -> DefaultsJson:
-        await put_switch(caller, "participation", None, body)
-        return await defaults(caller)
-
-    @router.put("/api/channel-defaults/progress-plans")
-    async def put_default_plans(  # pyright: ignore[reportUnusedFunction]
-        caller: ChannelAdmin, body: SwitchChange
-    ) -> DefaultsJson:
-        await put_switch(caller, "progress_plans", None, body)
-        return await defaults(caller)
-
-    @router.put("/api/channel-defaults/approvals")
-    async def put_default_approvals(  # pyright: ignore[reportUnusedFunction]
-        caller: ChannelAdmin, body: ApprovalsChange
-    ) -> DefaultsJson:
-        await put_switch(caller, "approvals", None, body)
-        return await defaults(caller)
-
-    @router.put("/api/channel-defaults/cost-footer")
-    async def put_default_cost_footer(  # pyright: ignore[reportUnusedFunction]
-        caller: WorkspaceAdmin, body: CostFooterChange
-    ) -> DefaultsJson:
-        shown, expected = ("shown" if v else "hidden" for v in (body.shown, body.expected))
-        await put_setting(caller, "cost_footer", None, shown, expected)
         return await defaults(caller)
 
     return router

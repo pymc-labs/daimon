@@ -97,7 +97,6 @@ class HereCard(BaseModel):
     foreign: bool = False
     text: str
     approval_gate_note: str | None = None
-    approval_gate_admin: bool = False
     web_url: str | None = None
 
 
@@ -689,7 +688,6 @@ async def load_here_card(
     card = card.model_copy(
         update={
             "approval_gate_note": note,
-            "approval_gate_admin": is_admin and not is_dm,
             "web_url": None if web is None or is_dm else web.channel(channel_id),
         }
     )

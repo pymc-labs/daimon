@@ -334,9 +334,7 @@ PERMISSION_SETTER_TOOLS: Final[frozenset[str]] = frozenset(
         "set_agent_backend",
         "set_agent_default",
         "clear_agent_default",
-        "set_thread_participation",
         "set_plain_text_mentions",
-        "set_cost_footer",
         "change_setting",
         "grant_admin",
         "revoke_admin",
@@ -542,7 +540,7 @@ class ToolSafetyPolicy(BaseModel):
         default=False,
         exclude_if=lambda value: not value,
         description=(
-            "Let native server admins change third-party MCP write approvals from /here "
+            "Let native server admins change third-party MCP write approvals from /settings "
             "at server, channel or thread scope. The most specific explicit on/off setting wins. "
             "Stored settings are ignored while off. Fixed confirmation and permission-setter "
             "names never receive an override, regardless of server host. Deny rules, direct "

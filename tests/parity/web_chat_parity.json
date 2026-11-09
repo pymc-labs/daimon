@@ -305,29 +305,11 @@
   "PUT /api/channel-defaults/agent": {
    "tool": "set_agent_default"
   },
-  "PUT /api/channel-defaults/approvals": {
-   "tool": "change_setting"
-  },
-  "PUT /api/channel-defaults/cost-footer": {
-   "tool": "change_setting"
-  },
   "PUT /api/channel-defaults/environment": {
    "tool": "set_channel_environment"
   },
-  "PUT /api/channel-defaults/participation": {
-   "tool": "change_setting",
-   "not_on": {
-    "slack": "participation runs on Discord and Teams only"
-   }
-  },
-  "PUT /api/channel-defaults/progress-plans": {
-   "tool": "change_setting"
-  },
   "PUT /api/channels/{channel_id}/access": {
    "tool": "set_channel_rule"
-  },
-  "PUT /api/channels/{channel_id}/approvals": {
-   "tool": "change_setting"
   },
   "PUT /api/channels/{channel_id}/budget": {
    "tool": "set_channel_budget"
@@ -337,15 +319,6 @@
   },
   "PUT /api/channels/{channel_id}/environment": {
    "tool": "set_channel_environment"
-  },
-  "PUT /api/channels/{channel_id}/participation": {
-   "tool": "change_setting",
-   "not_on": {
-    "slack": "participation runs on Discord and Teams only"
-   }
-  },
-  "PUT /api/channels/{channel_id}/progress-plans": {
-   "tool": "change_setting"
   },
   "PUT /api/channels/{channel_id}/tool-rules": {
    "tool": "set_agent_tool_rule"

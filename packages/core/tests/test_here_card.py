@@ -676,7 +676,6 @@ async def test_loader_names_a_teams_setter_from_the_stored_name_never_a_mention(
             caller_account_id=None,
         )
         assert card.approval_gate_note == expected
-        assert card.approval_gate_admin is (not is_dm)
         # The compact card text omits provenance; the structured facts keep it.
         return card.set_by_label or ""
 

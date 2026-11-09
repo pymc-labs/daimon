@@ -4,8 +4,8 @@ import type { EntityRef } from "@/lib/types"
 import { fromCron, WEEKDAYS } from "@/modules/routines/cron"
 import type { TreeRow } from "@/components/tree-state"
 import type {
-  AgentRefs, ApprovalMode, ApprovalsChange, Channel, ChannelApprovals, ChannelBudget, ChannelDetail, ChannelHistoryEntry, ChannelSwitch, ChannelTag, Choice, PathNode, Readers, SpendAmount, Sourced,
-  SwitchChange, SwitchMode, ThreadOverrideKind, ToolRule, ToolRuleChange, Writers,
+  AgentRefs, ApprovalMode, Channel, ChannelApprovals, ChannelBudget, ChannelDetail, ChannelHistoryEntry, ChannelSwitch, ChannelTag, Choice, PathNode, Readers, SpendAmount, Sourced,
+  SwitchMode, ThreadOverrideKind, ToolRule, ToolRuleChange, Writers,
 } from "./types"
 
 export const PLATFORMS: Record<string, string> = { web: "Web chat", discord: "Discord", slack: "Slack", teams: "Teams" }
@@ -258,13 +258,6 @@ export const APPROVAL_OPTIONS = (Object.keys(APPROVAL_VALUE) as ApprovalMode[]).
 /** Where an inherited value comes from, as the default item reads it. */
 export const switchFrom = (s: ChannelSwitch) => (s.source === "deployment" ? "Built-in" : "Workspace") as "Built-in" | "Workspace"
 export const approvalsFrom = (a: ChannelApprovals) => (a.source === "server" ? "Workspace" : "Built-in") as "Built-in" | "Workspace"
-
-export const approvalsChange = (mode: ApprovalMode | null, a: Pick<ChannelApprovals, "own">): ApprovalsChange =>
-  ({ mode, expected: a.own })
-
-/** The write for a pick; `inherit` clears this tier's own value. `expected` is the own value as read. */
-export const switchChange = (choice: SwitchChoice, s: Pick<ChannelSwitch, "own">): SwitchChange =>
-  ({ mode: choice === "inherit" ? null : choice, expected: s.own })
 
 /** What "not available" reads as for a switch: participation is on Discord and Teams only. */
 export const unavailableText = (what: "participation" | "progress_plans", platform: string) =>

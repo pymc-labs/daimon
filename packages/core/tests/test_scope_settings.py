@@ -23,7 +23,6 @@ from daimon.core.scope_settings import (
     SettingsPlace,
     apply_choice,
     change_setting,
-    moved_to_settings,
     read_settings,
     setting_refusal,
     switch_default,
@@ -261,14 +260,6 @@ async def test_apply_choice_answers_with_the_change_or_the_refusal(
         db_session_factory, _settings(), member, "participation:channel:on", THREAD
     )
     assert refused is not None and not refused[0] and "Ask a server admin" in refused[1]
-
-
-@pytest.mark.parametrize(
-    ("platform", "said"),
-    [("discord", "run `/settings`"), ("slack", "run `/settings`"), ("teams", "send `settings`")],
-)
-def test_retired_controls_point_to_settings(platform: str, said: str) -> None:
-    assert moved_to_settings(platform) == f"Next time, {said}."
 
 
 @pytest.mark.parametrize(

@@ -32,7 +32,7 @@ from daimon.core.features.service import (
 from daimon.core.features.service import change_refusal as feature_change_refusal
 from daimon.core.features.snapshot import FeaturePlace, resolve_one
 from daimon.core.features.surface import parse_choice
-from daimon.core.platform_words import space_for, words_for
+from daimon.core.platform_words import space_for
 from daimon.core.scope_cascade import CascadeMode
 from daimon.core.stores.identity import find_platform_principal
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -456,10 +456,3 @@ async def apply_choice(
     except (ChannelChangeRefused, StaleChannelValue) as exc:
         return False, str(exc)
     return True, change.note
-
-
-def moved_to_settings(platform: str) -> str:
-    """The pointer a retired control adds to its answer: where the setting lives now."""
-    if platform not in ("discord", "slack", "teams"):
-        return "Next time, use Settings."
-    return f"Next time, {words_for(platform).say('settings', place='channel')}."

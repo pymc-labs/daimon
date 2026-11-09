@@ -2,8 +2,8 @@
 import { http, HttpResponse, type HttpHandler } from "msw"
 
 import type {
-  AccessChange, AgentRefs, ApprovalsChange, ChannelApprovals, CostFooterChange, BudgetChange, Channel, ChannelDefaults, ChannelDetail, ChannelHistoryEntry, ChannelList, ChannelSettings, ChannelSwitch,
-  CopyRetire, DefaultAgentChange, EnvironmentChange, KeptAgentChange, PathNode, PinClear, Readers, SkillChange, SwitchChange, ThreadClear,
+  AccessChange, AgentRefs, ChannelApprovals, BudgetChange, Channel, ChannelDefaults, ChannelDetail, ChannelHistoryEntry, ChannelList, ChannelSettings, ChannelSwitch,
+  CopyRetire, DefaultAgentChange, EnvironmentChange, KeptAgentChange, PathNode, PinClear, Readers, SkillChange, ThreadClear,
   ToolRuleChange, WorkspaceAgentChange, Writers,
 } from "@/modules/channels/types"
 import { roster } from "./agents"
@@ -189,27 +189,6 @@ export const channelsHandlers: HttpHandler[] = [
     const s = settingsFor(c)
     return HttpResponse.json({ ...withAgents(s), spend: manage() ? s.spend : null, tool_rules: { ...s.tool_rules, editable: s.tool_rules.editable && manage() } })
   }),
-  ...(["participation", "progress-plans"] as const).map((path) => http.put(`/api/channels/:id/${path}`, async ({ params, request }) => {
-    const c = find(params.id as string)
-    if (!c) return notFound()
-    if (c.id === "web") return invalid("Web chat has no such setting.")
-    const body = (await request.json()) as SwitchChange
-    const key = path === "participation" ? "participation" : "progress_plans"
-    const s = settingsFor(c)
-    if (body.expected !== s[key].own) return stale()
-    s[key] = body.mode ? sw(body.mode, "channel", body.mode) : sw(defaults[key].value, defaults[key].source)
-    return changed(c, {}, key, body.expected, body.mode)
-  })),
-  http.put("/api/channels/:id/approvals", async ({ params, request }) => {
-    const c = find(params.id as string)
-    if (!c) return notFound()
-    if (c.id === "web") return invalid("Web chat has no such setting.")
-    const body = (await request.json()) as ApprovalsChange
-    const s = settingsFor(c)
-    if (body.expected !== s.approvals.own) return stale()
-    s.approvals = body.mode ? ap(body.mode, "channel", body.mode) : ap(defaults.approvals.value, defaults.approvals.own ? "server" : "default")
-    return changed(c, {}, "approvals", body.expected ?? "inherit", body.mode ?? "inherit")
-  }),
   http.put("/api/channels/:id/environment", async ({ params, request }) => {
     const c = find(params.id as string)
     if (!c) return notFound()
@@ -338,19 +317,6 @@ export const channelsHandlers: HttpHandler[] = [
       const body = (await request.json()) as EnvironmentChange
       if (body.expected !== (defaults.environment.source === "workspace" ? defaults.environment.value : null)) return stale()
       defaults.environment = body.environment ? { value: body.environment, source: "workspace" } : { value: "default", source: "deployment" }
-    } else if (what === "participation" || what === "progress-plans") {
-      const key = what === "participation" ? "participation" : "progress_plans"
-      const body = (await request.json()) as SwitchChange
-      if (body.expected !== defaults[key].own) return stale()
-      defaults[key] = body.mode ? sw(body.mode, "workspace", body.mode) : sw("off", "deployment")
-    } else if (what === "approvals") {
-      const body = (await request.json()) as ApprovalsChange
-      if (body.expected !== defaults.approvals.own) return stale()
-      defaults.approvals = body.mode ? ap(body.mode, "server", body.mode) : ap("on", "default")
-    } else if (what === "cost-footer") {
-      const body = (await request.json()) as CostFooterChange
-      if (body.expected !== defaults.cost_footer.shown) return stale()
-      defaults.cost_footer = { ...defaults.cost_footer, shown: body.shown }
     } else return notFound()
     return HttpResponse.json(defaults)
   }),

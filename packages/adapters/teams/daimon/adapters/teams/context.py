@@ -481,7 +481,7 @@ def render_user_message(
 
     A group chat is one `role="group_chat"` place without files. A channel turn
     names its thread too, the id thread-scoped settings such as
-    `set_thread_participation` key on, and says with `files` whether a file
+    `change_setting` key on, and says with `files` whether a file
     saved now reaches the channel (`channel_files`; None in a chat). Where it
     does not, `files_hint` says an admin must grant the permission. In a 1:1
     chat `files_hint` says how to picture a document inline.

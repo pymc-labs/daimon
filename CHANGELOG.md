@@ -66,8 +66,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Admins reach it with `/settings` on Discord and Slack, `settings` on Teams, the web app's Settings section, or by asking Daimon (`get_settings`, `change_setting`).
   Every surface uses the same names, values and rules. Approvals need a platform admin, checked live; asking Daimon to change one shows an Approve card.
   Approvals and cost footer changes now appear in the channel history. Existing Slack installs must update their app to get `/settings`.
-- **Deprecated, to be removed in a later release:** `/cost-footer`, the approvals menu on `/here`, and the agent tools `set_cost_footer`, `get_cost_footer`, `set_progress_plans`, `get_progress_plans`, `set_thread_participation` and `get_thread_participation`.
-  They still work; each points to `/settings` or `change_setting`.
+- **Removed: the older ways to change these settings.**
+  The Discord `/cost-footer` command, the approvals menu on `/here` (Discord, Slack and Teams), and the agent tools `set_cost_footer`, `get_cost_footer`, `set_progress_plans`, `get_progress_plans`, `set_thread_participation` and `get_thread_participation` are gone. Use `/settings` (`settings` on Teams) or ask Daimon, which calls `change_setting` and `get_settings`.
+  The web app's per-channel and workspace-default save routes for these four settings are gone too; the web Settings section uses the same routes as before.
 - **Routines no longer post their own run summaries.**
   A routine with nothing to do could post a "nothing to do" note with a messaging tool, and later runs copied it. Routines now post only what their instructions ask for. Their final reply is delivered as before.
 - **A Slack routine no longer posts in a channel Daimon was removed from.**

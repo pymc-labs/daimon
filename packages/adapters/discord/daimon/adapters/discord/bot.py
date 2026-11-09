@@ -1270,7 +1270,6 @@ class DaimonBot(commands.Bot):
                 )
         from daimon.adapters.discord.commands.agent_setup import AgentSetupCog
         from daimon.adapters.discord.commands.billing import BillingCog
-        from daimon.adapters.discord.commands.cost_footer import CostFooterCog
         from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
         from daimon.adapters.discord.commands.github import GitHubCog
         from daimon.adapters.discord.commands.help import HelpCog
@@ -1291,7 +1290,6 @@ class DaimonBot(commands.Bot):
         await self.add_cog(RoutinesCog(self))
         await self.add_cog(LeadsCog(self))
         await self.add_cog(BillingCog(self))
-        await self.add_cog(CostFooterCog(self))
         await self.add_cog(SettingsCog(self))
         await self.add_cog(PrivacyCog(self))
         await self.add_cog(MemoryCog(self))

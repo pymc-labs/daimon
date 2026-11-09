@@ -794,6 +794,7 @@ async def test_dm_turn_card_rechecks_delivery_access_before_every_write(
     admission = SimpleNamespace(
         grant=row_reply.grant,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
+        shown=lambda *_args, **_kwargs: False,
         is_admin=False,
         budget_channel_id=None,
     )
@@ -817,6 +818,7 @@ async def test_unknown_membership_does_not_close_the_dm_turn_card(db_session_fac
     admission = SimpleNamespace(
         grant=private_reply(await conversation(db_session_factory)).grant,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
+        shown=lambda *_args, **_kwargs: False,
         is_admin=False,
         budget_channel_id=None,
     )
@@ -857,6 +859,7 @@ async def test_unknown_membership_still_closes_the_card_on_a_proved_denial(
     admission = SimpleNamespace(
         grant=private_reply(await conversation(db_session_factory)).grant,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
+        shown=lambda *_args, **_kwargs: False,
         is_admin=False,
         budget_channel_id=None,
     )
@@ -880,6 +883,7 @@ async def test_unknown_membership_refuses_a_write_once_the_source_is_sealed(
     admission = SimpleNamespace(
         grant=private_reply(await conversation(db_session_factory)).grant,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
+        shown=lambda *_args, **_kwargs: False,
         is_admin=False,
         budget_channel_id=None,
     )
@@ -900,6 +904,7 @@ async def test_recipient_policy_closes_the_dm_turn_card(db_session_factory, monk
     admission = SimpleNamespace(
         grant=grant,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
+        shown=lambda *_args, **_kwargs: False,
         is_admin=False,
         budget_channel_id=None,
     )
@@ -943,6 +948,7 @@ async def test_answer_is_sent_as_text_only_when_the_card_shows_no_outcome(
             SimpleNamespace(
                 grant=None,
                 agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="m")),
+                shown=lambda *_args, **_kwargs: False,
                 is_admin=False,
                 budget_channel_id=None,
             ),
@@ -973,6 +979,7 @@ async def test_failed_turn_adds_no_second_error_under_an_ended_card(
             SimpleNamespace(
                 grant=None,
                 agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="m")),
+                shown=lambda *_args, **_kwargs: False,
                 is_admin=False,
                 budget_channel_id=None,
             ),
@@ -1045,6 +1052,7 @@ async def test_dm_card_edit_drops_the_transport_only_replacement_flag(
             SimpleNamespace(
                 grant=None,
                 agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="m")),
+                shown=lambda *_args, **_kwargs: False,
                 is_admin=False,
                 budget_channel_id=None,
             ),

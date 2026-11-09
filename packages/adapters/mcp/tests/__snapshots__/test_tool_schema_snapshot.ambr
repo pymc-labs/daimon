@@ -4137,20 +4137,6 @@
         'type': 'object',
       }),
     }),
-    'get_cost_footer': dict({
-      'description': '''
-        Deprecated: use ``get_settings``. Report whether finished answers here end with
-        the cost footer. Removed in a later release.
-        <blank line>
-        Reading needs no admin; changing it does. Read the returned ``note`` back to the user.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-        }),
-        'type': 'object',
-      }),
-    }),
     'get_credits_overview': dict({
       'description': '''
         The workspace's credit balance, spend over the last 30 days and this month with
@@ -4377,44 +4363,6 @@
         'type': 'object',
       }),
     }),
-    'get_progress_plans': dict({
-      'description': '''
-        Deprecated: use ``get_settings``. Report whether progress plans are on for a
-        thread or channel, and which tier decided it. Removed in a later release.
-        <blank line>
-        Scope: ``thread_id`` and ``channel_id`` for a thread; ``channel_id``
-        alone for a channel; neither for the workspace. Reading
-        needs no admin. Read the returned ``explanation`` back to the user.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-          'channel_id': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-          }),
-          'thread_id': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-          }),
-        }),
-        'type': 'object',
-      }),
-    }),
     'get_routine': dict({
       'description': '''
         Get a routine by id. Raises if not found, cross-tenant, or someone else's and you
@@ -4534,49 +4482,6 @@
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
-        }),
-        'type': 'object',
-      }),
-    }),
-    'get_thread_participation': dict({
-      'description': '''
-        Deprecated: use ``get_settings``. Report whether you follow a thread or channel,
-        and which tier decided it. Removed in a later release.
-        <blank line>
-        Scope: ``thread_id`` from ``<thread role="current_thread">`` for a
-        thread (its parent is looked up, so ``channel_id`` is optional);
-        ``channel_id`` from ``<channel role="parent_channel">`` alone for a
-        channel; neither for the workspace. Reading needs no admin; changing
-        channel or workspace scope does.
-        <blank line>
-        Reports every tier (deployment, workspace, channel, thread) plus the
-        winner. Read the returned ``explanation`` back to the user.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-          'channel_id': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-          }),
-          'thread_id': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-          }),
         }),
         'type': 'object',
       }),
@@ -9601,29 +9506,6 @@
         'type': 'object',
       }),
     }),
-    'set_cost_footer': dict({
-      'description': '''
-        Deprecated: use ``change_setting`` with ``key="cost_footer"``. Show or hide the
-        footer under each finished answer. Admin-only. Removed in a later release.
-        <blank line>
-        For the whole workspace. The footer is one line naming the agent, the
-        time taken, what the turn cost and the money left. With ``shown``
-        false, answers end without it; the answer itself and the billing
-        panel are unchanged. On by default. Read the returned ``note`` back to the user.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-          'shown': dict({
-            'type': 'boolean',
-          }),
-        }),
-        'required': list([
-          'shown',
-        ]),
-        'type': 'object',
-      }),
-    }),
     'set_display_identity': dict({
       'description': '''
         Change how Daimon appears in this Discord server: its display name,
@@ -9725,64 +9607,6 @@
         }),
         'required': list([
           'enabled',
-        ]),
-        'type': 'object',
-      }),
-    }),
-    'set_progress_plans': dict({
-      'description': '''
-        Deprecated: use ``change_setting`` with ``key="progress_plans"``. Turn progress
-        plans on or off where you are asked to. Removed in a later release.
-        <blank line>
-        A progress plan is a short checklist of a longer task's steps on the
-        progress card. Call this when someone asks, for example "turn on
-        progress plans here".
-        <blank line>
-        Scope: ``thread_id`` and ``channel_id`` (this turn's thread and channel
-        ids) for a thread; ``channel_id`` alone for a channel; neither for the
-        workspace. Channel and workspace scope need an admin.
-        <blank line>
-        Modes: ``on``, ``off``, ``disabled`` (lock a channel or workspace so
-        nothing below can turn it on; not valid for a thread), ``inherit``
-        (drop this scope's setting). Read the returned ``note`` back to the user.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-          'channel_id': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-          }),
-          'mode': dict({
-            'enum': list([
-              'on',
-              'off',
-              'disabled',
-              'inherit',
-            ]),
-            'type': 'string',
-          }),
-          'thread_id': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-          }),
-        }),
-        'required': list([
-          'mode',
         ]),
         'type': 'object',
       }),
@@ -9912,63 +9736,6 @@
         'required': list([
           'origin_context_id',
           'model',
-        ]),
-        'type': 'object',
-      }),
-    }),
-    'set_thread_participation': dict({
-      'description': '''
-        Deprecated: use ``change_setting`` with ``key="participation"``. Start or stop
-        replying in a thread without being addressed each time. Removed in a later release.
-        <blank line>
-        Scope: ``thread_id`` from ``<thread role="current_thread">`` for a
-        thread (its parent is looked up, so ``channel_id`` is optional);
-        ``channel_id`` from ``<channel role="parent_channel">`` alone for a
-        channel; neither for the workspace. Channel and workspace scope need an
-        admin.
-        <blank line>
-        Modes: ``on`` follow, ``off`` do not, ``disabled`` lock a channel or
-        workspace so nothing below can turn it on (not valid for a thread),
-        ``inherit`` drop this scope's setting. Read the returned ``note`` back
-        to the user.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-          'channel_id': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-          }),
-          'mode': dict({
-            'enum': list([
-              'on',
-              'off',
-              'disabled',
-              'inherit',
-            ]),
-            'type': 'string',
-          }),
-          'thread_id': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-          }),
-        }),
-        'required': list([
-          'mode',
         ]),
         'type': 'object',
       }),

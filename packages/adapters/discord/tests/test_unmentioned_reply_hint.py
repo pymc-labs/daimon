@@ -49,7 +49,7 @@ QA_BOT_ID = 333
 def _make_runtime(
     sessionmaker: async_sessionmaker[AsyncSession], *, hint: bool = True
 ) -> DiscordRuntime:
-    settings = mock_settings()
+    settings = mock_settings(unmentioned_reply_hint="on" if hint else "off")
     settings.mcp = McpSettings()
     discord_settings = MagicMock()
     discord_settings.max_concurrent_turns_per_tenant = 100

@@ -2,7 +2,7 @@
 
 The Discord visibility lookup is patched on `_channel_target`; the resolver
 is covered in `tools/test_channel_target.py`, the Discord lookup in
-`tools/test_thread_participation_verify.py`.
+`tools/test_discord_visible_channel.py`.
 """
 
 from __future__ import annotations

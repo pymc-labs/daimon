@@ -6,9 +6,8 @@ switch on, the Discord, Slack and Teams adapters treat such text in a channel
 or thread like a real mention (``daimon.core.name_mentions``).
 
 ``set_plain_text_mentions`` changes the whole tenant, so it is admin-tagged and
-gated. ``get_plain_text_mentions`` stays readable by anyone, like
-``get_thread_participation``, so a member who asks hears the answer and who
-can change it.
+gated. ``get_plain_text_mentions`` stays readable by anyone, so a member who asks
+hears the answer and who can change it.
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""`verify_participation_scope`: the thread-participation tools trust no caller-supplied id.
+"""`resolve_visible_channel`: a channel-targeted tool trusts no caller-supplied id.
 
 Same transport-level Discord HTTP patching as `test_discord_visibility.py`, so
 discord.py's real constructors run on the stub payloads.
@@ -17,11 +17,10 @@ import discord.http
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools.discord import resolve_visible_channel, verify_participation_scope
+from daimon.adapters.mcp.tools.discord import resolve_visible_channel
 from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
-from daimon.core.thread_participation import ParticipationScope
 from fastmcp.exceptions import ToolError
 from pydantic import SecretStr
 
@@ -174,41 +173,6 @@ def _handler(*, thread_guild: str = GUILD, thread_type: int = 11, member_of_thre
         raise AssertionError(f"unexpected route {route.method} {route.path}")
 
     return handler
-
-
-async def test_a_visible_thread_yields_its_real_parent(monkeypatch: pytest.MonkeyPatch) -> None:
-    patch_discord_http(monkeypatch, _handler())
-    parent = await verify_participation_scope(
-        _runtime(), _auth(), ParticipationScope.THREAD, THREAD
-    )
-    assert parent == PARENT, "the cascade must resolve against the parent Discord reports"
-
-
-async def test_a_thread_in_another_guild_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    patch_discord_http(monkeypatch, _handler(thread_guild="555"))
-    with pytest.raises(ToolError, match="not in this guild"):
-        await verify_participation_scope(_runtime(), _auth(), ParticipationScope.THREAD, THREAD)
-
-
-async def test_a_private_thread_the_caller_is_not_in_is_refused(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    patch_discord_http(monkeypatch, _handler(thread_type=12, member_of_thread=False))
-    with pytest.raises(ToolError, match="missing view_channel permission"):
-        await verify_participation_scope(_runtime(), _auth(), ParticipationScope.THREAD, THREAD)
-
-
-async def test_channel_scope_rejects_a_thread_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    patch_discord_http(monkeypatch, _handler())
-    with pytest.raises(ToolError, match="names a thread"):
-        await verify_participation_scope(_runtime(), _auth(), ParticipationScope.CHANNEL, THREAD)
-
-
-async def test_workspace_scope_needs_no_lookup() -> None:
-    assert (
-        await verify_participation_scope(_runtime(), _auth(), ParticipationScope.WORKSPACE, None)
-        is None
-    )
 
 
 async def test_a_budget_on_a_thread_resolves_to_its_parent(monkeypatch: pytest.MonkeyPatch) -> None:

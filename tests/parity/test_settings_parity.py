@@ -19,16 +19,10 @@ _PATHS = {
     "slack": "slack/daimon/adapters/slack/settings.py",
     "teams": "teams/daimon/adapters/teams/settings.py",
     "mcp": "mcp/daimon/adapters/mcp/tools/scope_settings.py",
-    "web": "web/daimon/adapters/web/channel_settings.py",
+    "web": "web/daimon/adapters/web/features.py",
 }
 _CORE_MODULES = {"daimon.core.scope_settings", "daimon.core.settings_panel"}
-_RETIRED = "a retired control, kept for one release; it records the change"
 _DIRECT_WRITERS = {
-    "discord/daimon/adapters/discord/commands/here.py": _RETIRED,
-    "slack/daimon/adapters/slack/here.py": _RETIRED,
-    "teams/daimon/adapters/teams/here.py": _RETIRED,
-    "mcp/daimon/adapters/mcp/tools/progress_plans.py": "deprecated set_progress_plans",
-    "mcp/daimon/adapters/mcp/tools/thread_participation.py": "deprecated set_thread_participation",
     "teams/daimon/adapters/teams/channel_settings.py": "the Teams channel dialog's own switches",
     "cli/daimon/adapters/cli/commands/features.py": "`daimon features set`, over the core service",
     "web/daimon/adapters/web/features.py": "`PUT /api/features`, over the core service",
@@ -54,7 +48,7 @@ def test_every_path_has_the_command_and_writes_through_the_core() -> None:
     assert all(WORDS[platform].command("settings") for platform in CHAT_PLATFORMS)
     for name, path in _PATHS.items():
         used = _names(ast.parse((_ADAPTERS / path).read_text()))
-        core_writer = {"change_setting", "apply_choice", "press"} & used
+        core_writer = {"change_setting", "change_feature", "apply_choice", "press"} & used
         assert core_writer, f"{name} must write through daimon.core.scope_settings"
 
 

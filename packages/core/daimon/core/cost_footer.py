@@ -1,7 +1,6 @@
 """The finished-turn cost footer: whether a workspace shows it, and how it is described.
 
-The note is shared by the `/cost-footer` command and the cost footer MCP tools,
-so the slash command and the agent describe the setting alike.
+The setting itself is changed in `/settings` (`change_setting`), on every surface.
 """
 
 from __future__ import annotations
@@ -46,15 +45,3 @@ async def cost_footer_shown(
     except Exception:
         log.warning("turn.cost_footer_read_failed", exc_info=True)
         return True
-
-
-def cost_footer_note(shown: bool) -> str:
-    if shown:
-        return (
-            "Finished answers here end with a footer naming the agent, the time "
-            "taken, what the answer cost and the money left."
-        )
-    return (
-        "Finished answers here end without the footer: no agent name, time, cost "
-        "or money left under them. The billing panel still shows usage and credit."
-    )
