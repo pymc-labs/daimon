@@ -124,6 +124,21 @@ def serves(server: SignedIdentityServer, workspace: str | None) -> bool:
     return workspace is not None and (server.workspaces is None or workspace in server.workspaces)
 
 
+async def serves_tenant(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    server: SignedIdentityServer,
+    tenant_id: uuid.UUID,
+) -> bool:
+    """Whether a server takes the tenant's workspace.
+
+    Every path that shows or reaches the node asks this first: a workspace the server
+    does not serve sees no node, as if none were configured.
+    """
+    async with sessionmaker() as db:
+        tenant = await tenants_store.get_tenant(db, tenant_id)
+    return serves(server, tenant_workspace(tenant))
+
+
 def node_token_key(server: SignedIdentityServer) -> str:
     """Where a token is stored: per issuer and server, so two servers never share one."""
     return f"{server.issuer}#{server.name}"
