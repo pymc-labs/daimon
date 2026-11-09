@@ -533,6 +533,43 @@ async def test_transfer_skips_the_billed_turn_when_the_session_never_answered(
     assert turn_io_used.classes == [], "no checkpoint turn was driven, so no turn I/O was built"
 
 
+async def test_checkpoint_prompt_off_carries_only_the_conversation(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    turn_io_used: TurnIOSpy,
+) -> None:
+    """`checkpoint_prompt` Off: a session with work to save is not asked to save it."""
+    state = FakeSessionsState(ma=FakeMAState())
+    client = _client(state)
+    old_session = await _make_session(client)
+    _seed_conversation(state, old_session, with_reply=True)
+
+    outcome = await transfer_workspace(
+        client,
+        db_session_factory,
+        old_session_id=old_session,
+        old_snapshot=_snapshot(),
+        tenant_id=TENANT_ID,
+        account_id=ACCOUNT_ID,
+        external_user_id="U123",
+        transfer_id=TRANSFER_ID,
+        markup=Decimal("1.0"),
+        checkpoint_deadline=DEADLINE,
+        from_agent_name="analysis-bot",
+        sleep=_no_sleep,
+        now=_now,
+        tool_safety=OPEN_TOOL_SAFETY,
+        public_url=None,
+        platform="discord",
+        checkpoint=False,
+    )
+
+    assert isinstance(outcome, TranscriptOnly)
+    assert outcome.gap_reason == "checkpoint_off"
+    assert "hierarchical model" in outcome.transcript, "the conversation still crosses"
+    assert state.sent_batches == [], "no checkpoint turn was sent or billed"
+    assert turn_io_used.classes == []
+
+
 async def test_transfer_degrades_to_transcript_when_the_old_session_is_archived(
     db_session_factory: async_sessionmaker[AsyncSession],
     env_turn_path: TurnPath,

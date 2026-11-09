@@ -375,6 +375,47 @@ async def test_env_replacement_finds_the_mounted_env_when_no_resource_id_was_rec
     assert len(remaining) == 1, "and replaced by exactly one new mount"
 
 
+async def test_env_replacement_that_keeps_nothing_only_removes_the_mount(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """`agent_env_file` Off: the saved keys stay, the session's `.env` goes."""
+    tenant = await make_tenant(db_session)
+    agent_uuid = uuid.uuid4()
+    await put_agent_file(
+        db_session,
+        tenant_id=tenant.id,
+        agent_id=agent_uuid,
+        key="KEY",
+        content="v",
+        set_by_account_id=None,
+    )
+    await db_session.commit()
+
+    state = FakeSessionsState(ma=FakeMAState())
+    _register_agent(state.ma)
+    client = _build_client(state)
+    session_id, recorded = await _session_with_env(client, content=b"OLD=1\n")
+
+    result = await _apply(
+        client,
+        db_session_factory,
+        ops=(
+            ReplaceEnvFile(old_resource_id=recorded.env_resource_id, old_file_id=None, keep=False),
+        ),
+        session_id=session_id,
+        recorded=recorded,
+        tenant_id=tenant.id,
+        agent_uuid=agent_uuid,
+    )
+
+    assert isinstance(result, AppliedOps)
+    assert not [
+        r for r in state.resources[session_id] if isinstance(r, BetaManagedAgentsFileResource)
+    ], "no .env is mounted"
+    assert result.snapshot.env_sha256 is None
+
+
 async def test_env_replacement_clears_the_recorded_env_when_the_add_fails_after_the_delete(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],

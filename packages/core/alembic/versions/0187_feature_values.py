@@ -9,7 +9,9 @@ workspace rows for several platforms, the tenant's own platform wins. `tenants` 
 Revision ID: 0187_feature_values
 Revises: 0186_github_router_sessions
 
-downgrade: destructive (agent-tier rows and a Lock on an On are dropped)
+Downgrading drops agent-tier rows and a Lock on an On.
+
+downgrade: destructive
 """
 
 from collections.abc import Sequence

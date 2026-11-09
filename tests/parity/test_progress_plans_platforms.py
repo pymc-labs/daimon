@@ -26,6 +26,7 @@ from daimon.core.stores.domain import Role
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from daimon.core.turn.outcomes import TurnObservation
 from daimon.core.turn.state import ToolUseBlock, TurnState
+from daimon.testing.settings_mock import mock_settings
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -95,6 +96,7 @@ async def test_slack_is_covered_and_a_bare_thread_timestamp_is_refused() -> None
         is_admin=False,
     )
     runtime = MagicMock()
+    runtime.settings = mock_settings()
     runtime.session_factory = MagicMock(side_effect=AssertionError("no DB read may happen"))
     with pytest.raises(ToolError, match="channel_id"):
         await _set_progress_plans_impl(runtime, caller, "on", "1700000000.000100", None)

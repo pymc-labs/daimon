@@ -1465,7 +1465,11 @@ async def run_prepared_turn_impl(
     # A replacement session's first user message opens with daimon's framing
     # for the work it inherited (`daimon.core.handoff_context`). Empty for
     # every ordinary turn, which then sends byte-identical bytes to before.
-    context = context_prompt(origin, system=prepared.admission.agent.system)
+    context = context_prompt(
+        origin,
+        fragments=prepared.admission.feature_on("origin_fragments"),
+        system=prepared.admission.agent.system,
+    )
     plans = await progress_plans_prefix(
         deps.sessionmaker,
         deployment=deps.progress_plans,

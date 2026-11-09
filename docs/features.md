@@ -86,8 +86,8 @@ A context provider set up for this channel or agent adds what it knows to each m
 | Default | `on` |
 | Levels | Deployment, Server, Agent, Channel, Thread |
 | Combines | Off above is a ceiling |
-| Levels on Gemini |  |
-| Levels on OpenAI |  |
+| Levels on Gemini | Not available |
+| Levels on OpenAI | Not available |
 
 ## Chat history
 
@@ -272,9 +272,49 @@ Before each chat message, the agent's connected servers that offer a context too
 | Default | `on` |
 | Levels | Deployment, Server, Agent, Channel, Thread |
 | Combines | Most specific wins |
-| Levels on Gemini |  |
-| Levels on OpenAI |  |
+| Levels on Gemini | Not available |
+| Levels on OpenAI | Not available |
 | Deprecated | `DAIMON_MCP_CONTEXT__ENABLED` |
+
+## Run instructions
+
+A short note in front of a message that did not come from chat: a routine, a relayed draft, a handoff or another agent's request, with any wording the agent's spec adds. Off sends the message alone.
+
+| | |
+| --- | --- |
+| Key | `origin_fragments` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Agent |
+| Combines | Most specific wins |
+
+## Keys file
+
+The agent's saved keys as a .env file in its working files. Off leaves the file out; the keys stay saved. Applies from the next message in a conversation. Managed Agents only.
+
+| | |
+| --- | --- |
+| Key | `agent_env_file` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Agent |
+| Combines | Most specific wins |
+| Levels on Gemini | Not available |
+| Levels on OpenAI | Not available |
+
+## Carry working files
+
+When a long conversation starts over, the agent is first asked to save its working files to carry across. Off carries only the conversation and skips that extra paid step. Managed Agents only.
+
+| | |
+| --- | --- |
+| Key | `checkpoint_prompt` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Server, Agent |
+| Combines | Most specific wins |
+| Levels on Gemini | Not available |
+| Levels on OpenAI | Not available |
 
 ## Platform prompt
 
@@ -299,8 +339,8 @@ The skills Daimon adds for the chat platform, such as its formatting. A conversa
 | Default | `on` |
 | Levels | Deployment, Server, Agent, Channel |
 | Combines | Most specific wins |
-| Levels on Gemini |  |
-| Levels on OpenAI |  |
+| Levels on Gemini | Not available |
+| Levels on OpenAI | Not available |
 
 ## Agent skills
 
@@ -325,8 +365,8 @@ The skills added to a channel. They need the read tool, so they are off wherever
 | Default | `on` |
 | Levels | Server, Agent, Channel |
 | Combines | Most specific wins |
-| Levels on Gemini |  |
-| Levels on OpenAI |  |
+| Levels on Gemini | Not available |
+| Levels on OpenAI | Not available |
 
 ## Personal memory
 
@@ -363,5 +403,5 @@ The memory a restricted channel keeps for itself in place of the shared one. A c
 | Default | `on` |
 | Levels | Server, Agent, Channel |
 | Combines | Off above is a ceiling |
-| Levels on Gemini |  |
-| Levels on OpenAI |  |
+| Levels on Gemini | Not available |
+| Levels on OpenAI | Not available |

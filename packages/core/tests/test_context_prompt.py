@@ -1,5 +1,10 @@
 import pytest
-from daimon.core.context_prompt import DEFAULT_FRAGMENTS, context_prompt
+from daimon.core.context_prompt import (
+    DEFAULT_FRAGMENTS,
+    ContextFragment,
+    context_prompt,
+    encode_fragments,
+)
 from daimon.core.specs import AgentSpec, dump_agent_spec
 
 
@@ -65,3 +70,8 @@ def test_routine_framing_limits_messaging_posts_to_requested_ones():
     assert "run summary or status note of your own" in text
     assert "do not copy earlier ones" in text
     assert "put any blockers there" in text
+
+
+def test_origin_fragments_off_sends_no_origin_note() -> None:
+    system = encode_fragments("Base", {"routine": ContextFragment(text="Mine", mode="extend")})
+    assert context_prompt("routine", fragments=False, system=system) == ""

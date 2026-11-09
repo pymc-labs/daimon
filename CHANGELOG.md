@@ -26,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Chat history (`history_depth`) sets how many earlier messages a new Discord, Slack or Teams conversation reads: 100, 50, 25, 10 or none, and the smallest setting wins.
   The channel around a new thread is read up to 25 messages, or fewer when the setting is lower.
   With repository memory off, its tools are gone too.
+  An agent can leave out its run instructions (`origin_fragments`), the note sent with a routine, relayed draft, handoff or helper request, and its keys file (`agent_env_file`), the `.env` of its saved keys.
+  When a conversation moves to a new session, `checkpoint_prompt` Off carries only the conversation and skips the paid step that saves the working files.
+  `daimon sessions create` builds its session with the agent's features, as chat does.
 
 - **The Azure deploy can keep MCP private while Teams is public.**
   Set `mcpPublicIngress` to false and MCP is reachable only from apps in the same Container Apps environment. The default keeps it public, as before.

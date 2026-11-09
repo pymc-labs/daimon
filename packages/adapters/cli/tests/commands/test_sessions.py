@@ -53,6 +53,7 @@ class _FakeSettings:
     mcp = _FakeMcp()
     github_app = GithubAppSettings()
     defaults_root = Path("defaults")
+    features: dict[str, str] = {}
 
 
 def _session_body(
@@ -332,6 +333,7 @@ class _ConfiguredSettings:
     mcp = _ConfiguredMcp()
     github_app = GithubAppSettings()
     defaults_root = Path("defaults")
+    features: dict[str, str] = {}
 
 
 def _create_router_with_vault(

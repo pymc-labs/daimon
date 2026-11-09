@@ -160,6 +160,12 @@ def test_repo_memory_off_turns_its_tools_off() -> None:
     assert off == REPO_MEMORY_TOOLS, "each memory tool is turned off in the session"
 
 
+def test_agent_env_file_off_leaves_the_keys_file_out() -> None:
+    assert agent_toolset(_snapshot(), _agent()).env_file
+    toolset = agent_toolset(_snapshot(agent_env_file="off"), _agent())
+    assert not toolset.env_file and toolset.changes
+
+
 def test_repo_memory_off_at_the_deployment_hides_nothing() -> None:
     """Off at the deployment registers no memory tools, so the session's tools are unchanged."""
     base = _snapshot()

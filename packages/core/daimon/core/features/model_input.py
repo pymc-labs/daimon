@@ -13,12 +13,14 @@ from daimon.core.features.snapshot import FeatureSnapshot
 from daimon.core.repo_memory_tools import REPO_MEMORY_TOOLS
 
 TOOL_KEYS: Final[tuple[str, ...]] = tuple(f"tool.{tool}" for tool in BUILTIN_TOOLS)
-SESSION_KEYS: Final[tuple[str, ...]] = ("daimon_tools", *TOOL_KEYS)
+SESSION_KEYS: Final[tuple[str, ...]] = ("daimon_tools", *TOOL_KEYS, "agent_env_file")
 TOOLSET_KEYS: Final[tuple[str, ...]] = (*SESSION_KEYS, "repo_memory")
 """What `SessionToolset.of` reads: `repo_memory` also hides its tools, while it binds per turn."""
 TURN_KEYS: Final[tuple[str, ...]] = ("daimon_tools", "turn_controls", "web_awareness")
-PER_TURN_KEYS: Final[tuple[str, ...]] = ("mcp_briefing", "repo_memory", "context_provider")
-"""What each turn adds in front of the message, checked by `Admission.feature_on`."""
+PER_TURN_KEYS: Final[tuple[str, ...]] = (
+    "mcp_briefing", "repo_memory", "context_provider", "origin_fragments", "checkpoint_prompt",
+)  # fmt: skip
+"""Turn-bound switches each turn checks with `Admission.feature_on`."""
 MODEL_INPUT_KEYS: Final[tuple[str, ...]] = ("guidance", *SESSION_KEYS, *TURN_KEYS[1:])
 
 HISTORY_KEYS: Final[tuple[str, ...]] = ("history_depth",)
@@ -72,6 +74,8 @@ class SessionToolset:
     daimon_tools: bool = True
     builtins: Mapping[str, bool] = field(default_factory=dict[str, bool])
     repo_memory: bool = True
+    env_file: bool = True
+    """`agent_env_file`: the agent's keys are mounted as `.env`."""
 
     @classmethod
     def of(
@@ -95,6 +99,7 @@ class SessionToolset:
             builtins[tool] = found.on
         found = features.features.get("daimon_tools")
         memory = features.features.get("repo_memory")
+        env = features.features.get("agent_env_file")
         # Off at the deployment registers no memory tools, so there is nothing to hide.
         hides_memory = (
             memory is not None and not memory.on and memory.tier not in ("default", "deployment")
@@ -103,11 +108,17 @@ class SessionToolset:
             daimon_tools=not isolated and (found is None or found.on),
             builtins=builtins,
             repo_memory=not hides_memory,
+            env_file=env is None or env.on,
         )
 
     @property
     def changes(self) -> bool:
-        return not self.daimon_tools or bool(self.builtins) or not self.repo_memory
+        return (
+            not self.daimon_tools
+            or bool(self.builtins)
+            or not self.repo_memory
+            or not self.env_file
+        )
 
     @property
     def hidden_daimon_tools(self) -> frozenset[str]:

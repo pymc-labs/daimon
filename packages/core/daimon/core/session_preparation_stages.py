@@ -434,7 +434,9 @@ async def desired_snapshot_for(
         github_repo_script_sha256=(
             github_repo_script_sha256() if has_multi_installation_tokens else None
         ),
-        env_sha256=hash_env_bytes(assemble_env_bytes(rows)) if rows else None,
+        env_sha256=(
+            hash_env_bytes(assemble_env_bytes(rows)) if rows and toolset.env_file else None
+        ),
         repo_url=None,
         repo_branch=None,
         memory_store_id=memory_store_id,

@@ -115,6 +115,8 @@ class ReplaceEnvFile:
     old_resource_id: str | None
     old_file_id: str | None
     mount_path: str = ".env"
+    keep: bool = True
+    """False when the session should have no `.env` (`agent_env_file` Off): remove only."""
 
 
 type UpdateOp = (
@@ -360,6 +362,7 @@ def decide_session_compatibility(
                 ReplaceEnvFile(
                     old_resource_id=recorded.env_resource_id,
                     old_file_id=recorded.env_file_id,
+                    keep=desired.env_sha256 is not None,
                 )
             )
         else:

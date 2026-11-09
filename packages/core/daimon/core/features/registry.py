@@ -13,6 +13,7 @@ from typing import Final, Literal, get_args
 
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.stores.domain import CHAT_PLATFORMS
+from mux.profiles import INLINE_REUSE, MANAGED_AGENTS, PERSISTENT_WORKSPACE
 
 Tier = Literal["deployment", "workspace", "agent", "channel", "thread"]
 TIERS: Final[tuple[Tier, ...]] = get_args(Tier)
@@ -29,6 +30,12 @@ Requirement = Literal["platform_adapter"]
 DEFAULT: Final = "default"
 """The value a control writes to drop its own setting and inherit."""
 
+_ANTHROPIC, _GEMINI, _OPENAI = (
+    MANAGED_AGENTS.provider,
+    INLINE_REUSE.provider,
+    PERSISTENT_WORKSPACE.provider,
+)
+
 _BY_EFFECT: Final[Mapping[Effect, Combine]] = {
     "model": "most_specific",
     "display": "most_specific",
@@ -40,16 +47,16 @@ _ON_OFF: Final[Mapping[str, str]] = {"on": "On", "off": "Off"}
 EVERY_PLATFORM: Final[frozenset[str]] = frozenset({"*"})
 """`platforms` for a feature that applies wherever a turn runs, chat or not (web, CLI, MCP)."""
 _PROVIDER_ONLY: Final[Mapping[str, tuple[Tier, ...]]] = {
-    "gemini": ("deployment", "workspace", "agent"),
-    "openai": ("deployment", "workspace", "agent"),
+    _GEMINI: ("deployment", "workspace", "agent"),
+    _OPENAI: ("deployment", "workspace", "agent"),
 }
 """Gemini and OpenAI compile one revision per agent, so a model feature stops at the agent."""
-_MANAGED_AGENTS_ONLY: Final[Mapping[str, tuple[Tier, ...]]] = {"gemini": (), "openai": ()}
+_MANAGED_AGENTS_ONLY: Final[Mapping[str, tuple[Tier, ...]]] = {_GEMINI: (), _OPENAI: ()}
 """Runs only on Managed Agents turns; Gemini and OpenAI agents never get it."""
 BACKEND_NAMES: Final[Mapping[str, str]] = {
-    "anthropic": "Managed Agents",
-    "gemini": "Gemini",
-    "openai": "OpenAI",
+    _ANTHROPIC: "Managed Agents",
+    _GEMINI: "Gemini",
+    _OPENAI: "OpenAI",
 }
 BUILTIN_TOOLS: Final[tuple[str, ...]] = (
     "bash", "read", "edit", "write", "grep", "glob", "web_fetch", "web_search",
@@ -176,7 +183,7 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
             "them, so it can't be changed there. Applies from the next message in a "
             "conversation."
         ),
-        backend_fixed={"gemini": "on", "openai": "on"},
+        backend_fixed={_GEMINI: "on", _OPENAI: "on"},
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     ),
@@ -230,11 +237,64 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
         legacy_env=("DAIMON_MCP_CONTEXT__ENABLED",),
     ),
+    FeatureSpec(
+        key="origin_fragments",
+        name="Run instructions",
+        category="model_input",
+        effect="model",
+        values=_ON_OFF,
+        default="on",
+        tiers=("agent",),
+        binds="turn",
+        doc=(
+            "A short note in front of a message that did not come from chat: a routine, a "
+            "relayed draft, a handoff or another agent's request, with any wording the "
+            "agent's spec adds. Off sends the message alone."
+        ),
+        platforms=EVERY_PLATFORM,
+        authority=Authority(DelegatedAction.AGENT_SETTINGS),
+    ),
+    FeatureSpec(
+        key="agent_env_file",
+        name="Keys file",
+        category="model_input",
+        effect="model",
+        values=_ON_OFF,
+        default="on",
+        tiers=("agent",),
+        binds="session_mutable",
+        doc=(
+            "The agent's saved keys as a .env file in its working files. Off leaves the file "
+            "out; the keys stay saved. Applies from the next message in a conversation. "
+            "Managed Agents only."
+        ),
+        backend_tiers=_MANAGED_AGENTS_ONLY,
+        platforms=EVERY_PLATFORM,
+        authority=Authority(DelegatedAction.AGENT_SETTINGS),
+    ),
+    FeatureSpec(
+        key="checkpoint_prompt",
+        name="Carry working files",
+        category="model_input",
+        effect="model",
+        values=_ON_OFF,
+        default="on",
+        tiers=("deployment", "workspace", "agent"),
+        binds="turn",
+        doc=(
+            "When a long conversation starts over, the agent is first asked to save its "
+            "working files to carry across. Off carries only the conversation and skips "
+            "that extra paid step. Managed Agents only."
+        ),
+        backend_tiers=_MANAGED_AGENTS_ONLY,
+        platforms=EVERY_PLATFORM,
+        authority=Authority(DelegatedAction.AGENT_SETTINGS),
+    ),
 )
 
 
 _KEPT = "A conversation keeps what it started with until /new."
-_FIXED_ON: Final[Mapping[str, str]] = {"gemini": "on", "openai": "on"}
+_FIXED_ON: Final[Mapping[str, str]] = {_GEMINI: "on", _OPENAI: "on"}
 _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
     FeatureSpec(
         key="platform_prompt",
@@ -250,7 +310,7 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
             f"Off sends the agent's own prompt as written. {_KEPT} OpenAI agents always "
             "get their own prompt."
         ),
-        backend_fixed={"openai": "off"},
+        backend_fixed={_OPENAI: "off"},
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     ),
     FeatureSpec(
@@ -318,7 +378,7 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
             "Each person's own memory with the agent, in conversations only they can read. "
             f"On never adds it anywhere else. {_KEPT} Off for Gemini and OpenAI agents."
         ),
-        backend_fixed={"gemini": "off", "openai": "off"},
+        backend_fixed={_GEMINI: "off", _OPENAI: "off"},
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     ),

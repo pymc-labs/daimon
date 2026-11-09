@@ -170,6 +170,16 @@ def test_every_turn_origin_render_gets_the_turn_features() -> None:
         assert passes, f"{path.name}:{call.lineno} must pass features= or **backend_facts()"
 
 
+def test_every_origin_note_follows_origin_fragments() -> None:
+    """Each turn's origin note (`context_prompt`) obeys `origin_fragments` at its place."""
+    calls = [(p, c) for p in _PRODUCT for c in _named_calls(p, "context_prompt")]
+    assert len(calls) >= 2, "the origin-note callers moved; point this test at them"
+    for path, call in calls:
+        assert any(k.arg == "fragments" for k in call.keywords), (
+            f"{path.name}:{call.lineno} must pass fragments="
+        )
+
+
 def test_every_session_creation_gets_the_place_toolset() -> None:
     """Every MA session, admitted or not (CLI, agent chat, routines), runs its place's tools."""
     calls = [
@@ -185,13 +195,6 @@ def test_every_session_creation_gets_the_place_toolset() -> None:
         )
 
 
-#: Session creators that build with the default identity, with the reason.
-_DEFAULT_IDENTITY_CREATORS = {
-    # An operator's debugging session from the command line has no place to read.
-    "sessions.py": "the CLI's own session, outside any chat place",
-}
-
-
 def test_every_session_creation_gets_the_place_identity() -> None:
     """Every MA session is built with its place's prompt, skills and memory features."""
     calls = [
@@ -202,15 +205,14 @@ def test_every_session_creation_gets_the_place_identity() -> None:
     ]
     assert len(calls) >= 4, "the session creators moved; point this test at them"
     for path, call in calls:
-        passes = any(k.arg == "identity" for k in call.keywords)
-        assert passes or path.name in _DEFAULT_IDENTITY_CREATORS, (
+        assert any(k.arg == "identity" for k in call.keywords), (
             f"{path.name}:{call.lineno} must pass identity="
         )
 
 
 def test_session_bound_features_land_where_their_binding_says() -> None:
-    """A session_mutable feature lands in the tools hash, updated in place; a session_identity
-    one is frozen in the session's snapshot (`SessionIdentity`)."""
+    """A session_mutable feature lands in the tools or `.env` hash, updated in place; a
+    session_identity one is frozen in the session's snapshot (`SessionIdentity`)."""
     mutable = {key for key, spec in FEATURES.items() if spec.binds == "session_mutable"}
     assert mutable == set(SESSION_KEYS), "session_mutable features must shape SessionToolset"
     identity = {key for key, spec in FEATURES.items() if spec.binds == "session_identity"}

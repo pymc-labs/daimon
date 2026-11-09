@@ -53,7 +53,7 @@ def render() -> str:
             ("Combines", _COMBINE[spec.combine]),
         ]
         for backend, tiers in sorted(spec.backend_tiers.items()):
-            levels = ", ".join(_TIER[tier] for tier in tiers)
+            levels = ", ".join(_TIER[tier] for tier in tiers) or "Not available"
             rows.append((f"Levels on {_BACKEND.get(backend, backend)}", levels))
         if spec.legacy_env:
             rows.append(("Deprecated", ", ".join(f"`{env}`" for env in spec.legacy_env)))

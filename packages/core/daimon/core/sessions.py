@@ -1059,12 +1059,16 @@ async def create_session(
         app_access: AppSessionAccess | None = None
         provisional_session_id = f"pending:{uuid.uuid4()}"
         if tenant_id is not None and agent_uuid is not None and session_factory is not None:
-            mount = await upload_env_and_mount(
-                anthropic,
-                session_factory,
-                tenant_id=tenant_id,
-                agent_id=agent_uuid,
-                exclude_github=app_mode,
+            mount = (
+                await upload_env_and_mount(
+                    anthropic,
+                    session_factory,
+                    tenant_id=tenant_id,
+                    agent_id=agent_uuid,
+                    exclude_github=app_mode,
+                )
+                if toolset.env_file
+                else None
             )
             if mount is not None:
                 resources.append(mount)

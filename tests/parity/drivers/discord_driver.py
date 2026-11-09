@@ -79,6 +79,7 @@ from daimon.core.stores.tenants import set_provision_status
 from daimon.core.stores.turn_origins import create_origin
 from daimon.core.turn.deps import build_turn_deps
 from daimon.testing.membership import FixtureMembershipResolver
+from daimon.testing.settings_mock import mock_settings
 from daimon.testing.turn_fakes import deps_for
 from daimon.testing.turn_leg import turn_leg
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
@@ -321,7 +322,7 @@ class DiscordDriver:
         *,
         billing_config: object | None = None,
     ) -> DiscordRuntime:
-        settings = MagicMock()
+        settings = mock_settings()
         settings.agent_identity.enabled = True
         settings.mcp = McpSettings()
         settings.turn = turn_leg()  # the selected leg, a real TurnSettings
@@ -588,7 +589,7 @@ class DiscordDriver:
         daimon-mcp settings and a real Fernet (the MCP form stores an
         agent-scoped copy of the token), and a turn needs neither.
         """
-        settings = MagicMock()
+        settings = mock_settings()
         settings.agent_identity.enabled = True
         settings.mcp.public_url = _MCP_PUBLIC_URL
         settings.mcp.jwt_secret = SecretStr(_MCP_JWT_SECRET)

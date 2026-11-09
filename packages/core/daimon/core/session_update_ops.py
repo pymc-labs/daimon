@@ -83,6 +83,7 @@ from daimon.core.session_snapshot import (
 from daimon.core.stores import github_router_sessions
 from daimon.core.stores.agent_daimon_tools import record_enabled_daimon_tools
 from daimon.core.stores.agent_files import list_agent_files
+from daimon.core.stores.domain import AgentFileRow
 from daimon.core.tool_safety import ToolSafetyPolicy
 from mux.contracts.ids import Revision, Scope
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -180,10 +181,12 @@ async def _replace_env_file(
     Delete-then-add, in that order: MA rejects a second resource at an occupied
     mount path (P0.f/P3.a), and the vacated path is visible to the same turn
     (P3.c). An agent whose last secret was removed keeps no `.env` at all,
-    which is what a fresh session for it would mount.
+    which is what a fresh session for it would mount, as does `agent_env_file` Off.
     """
-    async with sessionmaker() as session:
-        rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_uuid)
+    rows: list[AgentFileRow] = []
+    if op.keep:
+        async with sessionmaker() as session:
+            rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_uuid)
     if snapshot.github_mode == "app":
         rows = [row for row in rows if row.key not in ("GH_TOKEN", "GITHUB_TOKEN")]
 

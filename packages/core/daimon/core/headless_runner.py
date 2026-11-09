@@ -73,7 +73,7 @@ from daimon.core.config import (
 from daimon.core.context_prompt import TurnContext, context_prompt
 from daimon.core.features.model_input import DEFAULT_TOOLSET
 from daimon.core.features.session_identity import DEFAULT_IDENTITY
-from daimon.core.features.snapshot import FeaturePlace
+from daimon.core.features.snapshot import FeaturePlace, resolve_features
 from daimon.core.features.toolset import place_session
 from daimon.core.github_app_session import close_headless_app_session
 from daimon.core.model_presets import model_choice_id
@@ -462,7 +462,10 @@ async def run_turn_impl(
         else frozenset[str]()
     )
 
+    fragments = True  # `origin_fragments` where the session is placed
+
     async def _assemble_session() -> BetaManagedAgentsSession:
+        nonlocal fragments
         scope = (
             resource_scope(
                 tenant_id=str(tenant_id),
@@ -502,19 +505,20 @@ async def run_turn_impl(
         )
         toolset, identity = DEFAULT_TOOLSET, DEFAULT_IDENTITY
         if session_factory is not None and tenant_id is not None:
-            toolset, identity = await place_session(
-                session_factory,
-                feature_settings,
-                FeaturePlace.of(
-                    tenant_id,
-                    platform or "routine",
-                    origin_place.channel_id if origin_place is not None else budget_channel_id,
-                    origin_place.thread_id if origin_place is not None else None,
-                    agent_id=agent.id,
-                    backend="anthropic",
-                ),
-                agent,
+            place = FeaturePlace.of(
+                tenant_id,
+                platform or "routine",
+                origin_place.channel_id if origin_place is not None else budget_channel_id,
+                origin_place.thread_id if origin_place is not None else None,
+                agent_id=agent.id,
+                backend=MANAGED_AGENTS.provider,
             )
+            toolset, identity = await place_session(session_factory, feature_settings, place, agent)
+            fragments = (
+                await resolve_features(
+                    session_factory, feature_settings, place, keys=("origin_fragments",)
+                )
+            ).on("origin_fragments")
         return await create_session(
             anthropic,
             agent=agent,
@@ -711,7 +715,7 @@ async def run_turn_impl(
                 scope=turn_scope,
                 session_id=session.id,
                 user_message=(
-                    context_prompt(origin, system=session.agent.system)
+                    context_prompt(origin, fragments=fragments, system=session.agent.system)
                     + routine_memory
                     + trigger_message
                 ),

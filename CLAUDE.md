@@ -69,11 +69,13 @@ copy of a rule that was left behind. Before you change a behaviour:
 
 ## Features
 
-A per-place setting is a feature in `daimon.core.features.registry`, never a new
-column or table. Read it with `read_features` or `resolve_features`, write it with
-`change_feature` (`packages/core/tests/features/test_feature_contracts.py` checks writes). Add the
-key to the registry, give it an effect, then run
-`scripts/generate_feature_reference.py` for `docs/features.md`.
+Anything a person or operator may want on or off is a feature in
+`daimon.core.features.registry`: never a new env bool, tenant column or spec flag.
+Declare its effect, tiers (per backend), binding, `requires` and `depends_on`.
+Read it from the `FeatureSnapshot` that `resolve_features` builds on every session
+and turn path; write it with `change_feature`.
+`packages/core/tests/features/test_feature_contracts.py` checks reads, writes and
+paths. Then run `scripts/generate_feature_reference.py` for `docs/features.md`.
 
 ## Documentation
 

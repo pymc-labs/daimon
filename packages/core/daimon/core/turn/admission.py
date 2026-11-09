@@ -62,7 +62,7 @@ from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.features.model_input import (
     HISTORY_KEYS,
     PER_TURN_KEYS,
-    TOOL_KEYS,
+    SESSION_KEYS,
     TURN_KEYS,
     HistoryDepth,
     SessionToolset,
@@ -1750,7 +1750,11 @@ async def _admit_gates(
                 agent_id=agent.id,
                 backend=running_on(result)["provider"],
             ),
-            keys=(*TURN_KEYS, *TOOL_KEYS, *PER_TURN_KEYS, *IDENTITY_KEYS, *HISTORY_KEYS),
+            keys=tuple(
+                dict.fromkeys(
+                    (*TURN_KEYS, *SESSION_KEYS, *PER_TURN_KEYS, *IDENTITY_KEYS, *HISTORY_KEYS)
+                )
+            ),
         ),
     )
     if follow_generation is not None:

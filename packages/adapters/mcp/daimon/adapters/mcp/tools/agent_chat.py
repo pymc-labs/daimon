@@ -153,6 +153,7 @@ from fastmcp.exceptions import ToolError
 from fastmcp.tools import ToolResult
 from mux.contracts.ids import Scope
 from mux.errors import ScopeViolation
+from mux.profiles import MANAGED_AGENTS
 from pydantic import BaseModel, Field, JsonValue
 from pydantic.json_schema import SkipJsonSchema
 from sqlalchemy.exc import SQLAlchemyError
@@ -879,7 +880,7 @@ async def _start_turn_impl(
                 auth.platform or "mcp",
                 channel_id,
                 agent_id=ma_agent.id,
-                backend="anthropic",
+                backend=MANAGED_AGENTS.provider,
             ),
             ma_agent,
         )

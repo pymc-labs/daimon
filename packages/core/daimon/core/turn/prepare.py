@@ -422,7 +422,11 @@ async def create_ma_session(
 
     agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(admission.agent.id))
     github_mode = "app"
-    env_sha256 = await _env_bytes_sha256(deps, tenant_id=tenant_id, agent_uuid=agent_uuid)
+    env_sha256 = (
+        await _env_bytes_sha256(deps, tenant_id=tenant_id, agent_uuid=agent_uuid)
+        if admission.toolset.env_file
+        else None
+    )
     excluded_repo_urls: tuple[str, ...] = ()
     delivered_app_access: AppSessionAccess | None = None
 
@@ -1248,6 +1252,7 @@ async def bind_session_impl(
             platform=platform,
             channel_id=admission.budget_channel_id,
             turn_path=deps.turn_path,
+            checkpoint=admission.feature_on("checkpoint_prompt"),
         )
 
         # `SessionOps` is built here rather than at import time so that

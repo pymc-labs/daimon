@@ -43,6 +43,7 @@ from daimon.core.tool_safety import (
 )
 from daimon.core.turn.approvals import daimon_rule_tools_for
 from mux.errors import ScopeViolation
+from mux.profiles import MANAGED_AGENTS
 
 _log = structlog.get_logger(__name__)
 
@@ -178,7 +179,7 @@ async def _candidate_toolsets(
             live.channel_id,
             live.thread_id,
             agent_id=agent.id,
-            backend="anthropic",
+            backend=MANAGED_AGENTS.provider,
         ),
         agent,
     )
