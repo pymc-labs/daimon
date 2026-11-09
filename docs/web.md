@@ -130,7 +130,7 @@ The web app acts on the server as the signed-in person. It gets their token by
 RFC 8693 exchange at the server's `/oauth/token`, as the OAuth client above.
 The subject token is a JWT signed with the identity key: `iss` is the entry's
 `issuer`, `aud` its `audience`, `sub` the Discord account and `ws` the
-workspace, such as `discord:123`. Only workspaces the entry serves get a token.
+workspace, such as `discord:123`. Only workspaces the entry serves get a token or see the node at all.
 A refused exchange is tried again after five minutes.
 
 ## Agent setup beyond the config
