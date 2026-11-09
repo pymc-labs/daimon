@@ -72,6 +72,7 @@ from daimon.adapters.slack.place_access import (
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.authz import Action, Place, Subject, authorize
 from daimon.core.config import SupportSettings
+from daimon.core.features.snapshot import FeaturePlace, place_feature
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.permissions import readers_limited_at
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
@@ -339,6 +340,18 @@ async def _decide_click(
     )
 
 
+async def _escalation_offered(runtime: SlackRuntime, team_id: str) -> bool:
+    """Whether the workspace's `support_escalation` feature is on."""
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+    placed = await place_feature(
+        runtime.sessionmaker,
+        runtime.settings,
+        FeaturePlace.of(tenant_id, "slack", None),
+        "support_escalation",
+    )
+    return placed.on
+
+
 async def handle_ask_human_click(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
     """Open the note form, or say why not. Spends nothing.
 
@@ -373,7 +386,7 @@ async def handle_ask_human_click(runtime: SlackRuntime, payload: dict[str, Any])
         return
 
     support = runtime.settings.support
-    if not slack_support_enabled(support):
+    if not slack_support_enabled(support) or not await _escalation_offered(runtime, team_id):
         log.info("support.disabled", platform="slack")
         await post_ephemeral(
             client,
@@ -465,7 +478,11 @@ async def run_support_submission(runtime: SlackRuntime, submission: SupportSubmi
 
     support = runtime.settings.support
     dest_channel = support.slack_escalation_channel_id
-    if dest_channel is None or not slack_support_enabled(support):
+    if (
+        dest_channel is None
+        or not slack_support_enabled(support)
+        or not await _escalation_offered(runtime, s.team_id)
+    ):
         # Disabled between the click and the submit. Nothing is spent.
         await reply(UNAVAILABLE)
         return

@@ -77,7 +77,7 @@ def resolve_feature(
         if effective.locked:
             break
         setting = by_tier.get(tier)
-        if setting is None or setting.value not in spec.values:
+        if setting is None or not spec.accepts(setting.value, tier):
             continue
         if _wins(spec, effective, setting.value):
             effective = ResolvedFeature(spec.key, setting.value, tier, setting.locked)

@@ -33,13 +33,18 @@ async def check_daily_model_cap(
     price: ProviderPrice | None,
     cap: Decimal | None,
 ) -> None:
-    """Refuse once the tenant's spend today on `model` reaches `cap`.
+    """Refuse once the tenant's spend today on `model` reaches `cap`, or the lower cap a
+    workspace or agent chose (`daily_model_cap`).
 
     An agent turn starts only while some of the cap remains. With no current
     tariff the spend can't be known, so the turn is refused (fail closed).
     """
     from daimon.core.stores.model_spend import SpendUnpriced, model_spend_today
 
+    chosen = request.admission.resolved("daily_model_cap")
+    if chosen is not None and chosen.tier != "default":
+        # A tier can only lower the operator's provider cap.
+        cap = Decimal(chosen.value) if cap is None else min(cap, Decimal(chosen.value))
     if cap is None or model is None:
         return
     try:

@@ -229,6 +229,18 @@ def test_a_capability_without_setup_hides_its_tools_and_only_those() -> None:
         assert features[key].on, f"{key} has no setup condition its tools share"
 
 
+def test_support_escalation_needs_the_platforms_own_channel() -> None:
+    support = SETTINGS.support.model_copy(
+        update={"slack_escalation_channel_id": "C123", "credits_per_user": 5}
+    )
+    ready = SETTINGS.model_copy(update={"support": support})
+    tenant = uuid.uuid4()
+    slack = resolve_one(FEATURES["support_escalation"], ready, FeaturePlace(tenant, "slack"), [])
+    teams = resolve_one(FEATURES["support_escalation"], ready, FeaturePlace(tenant, "teams"), [])
+    assert slack.on, "Slack has its channel"
+    assert (teams.on, teams.unavailable) == (False, "requires"), "Teams has none"
+
+
 def test_the_old_enabled_variables_are_the_deployment_tier() -> None:
     place = FeaturePlace(uuid.uuid4(), "web")
     untouched = resolve_one(FEATURES["watches"], SETTINGS, place, [])

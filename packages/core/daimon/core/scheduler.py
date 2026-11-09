@@ -180,6 +180,12 @@ async def run_one_tick(
                         # Routines turned Off here: the schedule does not run.
                         await _record_fire_error(sm, row, "routines_turned_off", None)
                         return
+                    if (row.tenant_id, row.id) in intake_bindings and not (
+                        await place_feature(sm, None, place, "lead_intake")
+                    ).on:
+                        # Lead intake turned Off here: its routines do not run.
+                        await _record_fire_error(sm, row, "lead_intake_turned_off", None)
+                        return
                     with observation.activate():
                         async with routine_execution(
                             sm,

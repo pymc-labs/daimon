@@ -51,6 +51,7 @@ _LEGACY_FLAG: Mapping[str, Callable[[Settings], bool | None]] = {
     "thread_naming": lambda s: _set(s.thread_naming, "enabled"),
     "private_channel_messages": lambda s: _set(s.private_channel_messages, "enabled"),
     "native_footer_cost": lambda s: _set(s.turn, "native_footer_cost"),
+    "status_log": lambda s: _set(s.turn, "status_log"),
     "writers_none_notice": lambda s: _set(s.discord, "writers_none_notice"),
     "unmentioned_reply_hint": lambda s: _set(s.discord, "unmentioned_reply_hint"),
     "waiting_card": lambda s: _set(s.discord, "tenant_cap_waiting_card"),
@@ -59,6 +60,26 @@ _LEGACY_FLAG: Mapping[str, Callable[[Settings], bool | None]] = {
     "artifact_images": lambda s: _set(s.artifacts, "embed_images"),
 }
 """A feature's deprecated deployment-wide bool, read nowhere but here."""
+
+
+def _number(block: object | None, name: str, *, zero_off: bool = False) -> str | None:
+    """A deprecated number field of a settings block as text, or None while it is unset
+    (or 0 where 0 means no limit, which a limit cannot say)."""
+    if block is None or name not in getattr(block, "model_fields_set", ()):
+        return None
+    value = getattr(block, name)
+    return None if zero_off and not value else str(value)
+
+
+_LEGACY_LIMIT: Mapping[str, Callable[[Settings], str | None]] = {
+    "long_jobs_max_usd": lambda s: _number(s.long_jobs, "max_usd"),
+    "long_jobs_max_deadline": lambda s: _number(s.long_jobs, "max_deadline_minutes"),
+    "outbound_threads": lambda s: _number(s.outbound, "max_threads"),
+    "outbound_places": lambda s: _number(s.outbound, "max_places"),
+    "outbound_people": lambda s: _number(s.outbound, "max_people"),
+    "outbound_length": lambda s: _number(s.outbound, "max_length", zero_off=True),
+}
+"""A limit's deprecated deployment-wide number, read nowhere but here."""
 
 
 def _repo_memory(settings: Settings) -> TierValue:
@@ -93,6 +114,11 @@ def deployment_value(settings: Settings | None, spec: FeatureSpec) -> TierValue 
         for env in spec.legacy_env:
             _warn_legacy(env, spec.key)
         return TierValue("deployment", "on" if enabled else "off")
+    limit = _LEGACY_LIMIT.get(spec.key)
+    if limit is not None and (number := limit(settings)) is not None:
+        for env in spec.legacy_env:
+            _warn_legacy(env, spec.key)
+        return TierValue("deployment", number)
     mode = _legacy_mode(settings, spec.key)
     if mode is None:
         return None

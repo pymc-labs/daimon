@@ -18,6 +18,7 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Subject, authorize
 from daimon.core.config import LongJobsSettings
 from daimon.core.errors import StoreError
+from daimon.core.features.snapshot import FeaturePlace, feature_in
 from daimon.core.long_job_models import (
     ACTIVE_STATES,
     LongJob,
@@ -52,14 +53,27 @@ async def get_policy(
         .limit(1)
     )
     policy = LongJobPolicy() if row is None else LongJobPolicy.model_validate(row)
+    place = FeaturePlace(tenant_id, "", agent_id=agent_id)
+    max_usd = min(policy.max_usd, ceilings.max_usd)
     maximum = min(policy.max_deadline_minutes, ceilings.max_deadline_minutes)
+    # A tier's setting only lowers: the default step is not a setting.
+    if (usd := await _chosen(session, place, "long_jobs_max_usd")) is not None:
+        max_usd = min(max_usd, Decimal(usd))
+    if (minutes := await _chosen(session, place, "long_jobs_max_deadline")) is not None:
+        maximum = min(maximum, int(minutes))
     return policy.model_copy(
         update={
             "max_deadline_minutes": maximum,
             "default_deadline_minutes": min(policy.default_deadline_minutes, maximum),
-            "max_usd": min(policy.max_usd, ceilings.max_usd),
+            "max_usd": max_usd,
         }
     )
+
+
+async def _chosen(session: AsyncSession, place: FeaturePlace, key: str) -> str | None:
+    """What a tier chose for a long-job limit, or None while none did."""
+    found = await feature_in(session, None, place, key)
+    return None if found.tier == "default" else found.value
 
 
 async def set_policy(
@@ -315,6 +329,10 @@ async def claim(
     result: list[LongJob] = []
     for row in rows:
         if row.state == "queued" and not row.cancel_requested:
+            place = FeaturePlace(tenant_id, "", agent_id=row.agent_id)
+            if not (await feature_in(session, None, place, "long_jobs")).on:
+                # Long jobs turned Off here: a queued job waits, and launches once On again.
+                continue
             active = select(LongJobRecord).where(
                 LongJobRecord.tenant_id == tenant_id,
                 LongJobRecord.state.in_(("launching", "running")),

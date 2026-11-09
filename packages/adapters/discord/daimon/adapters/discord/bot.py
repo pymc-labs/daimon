@@ -4773,7 +4773,9 @@ class DaimonBot(commands.Bot):
                 and prepared.admission.shown("message_feedback")
             ):
                 await seed_feedback_reactions(
-                    thread, message_id=final_lifecycle.feedback_message_id
+                    thread,
+                    message_id=final_lifecycle.feedback_message_id,
+                    escalate=prepared.admission.feature_on("support_escalation"),
                 )
         self._schedule_output_sweep(
             outcome,
@@ -6205,7 +6207,9 @@ class DaimonBot(commands.Bot):
                 and prepared.admission.shown("message_feedback")
             ):
                 await seed_feedback_reactions(
-                    thread, message_id=final_lifecycle.feedback_message_id
+                    thread,
+                    message_id=final_lifecycle.feedback_message_id,
+                    escalate=prepared.admission.feature_on("support_escalation"),
                 )
             # A change queued behind this turn (it was already running when the
             # change landed) applies at the caller's NEXT message, not this one

@@ -281,7 +281,13 @@ from daimon.core.stores.turn_card_intents import (
 )
 from daimon.core.stores.turn_origins import get_active_origin
 from daimon.core.turn import turn_deadline
-from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit, backend_facts
+from daimon.core.turn.admission import (
+    Admission,
+    AdmissionDenied,
+    MissingTurnConfigError,
+    admit,
+    backend_facts,
+)
 from daimon.core.turn.errors import (
     SessionAgentMismatch,
     SessionBusyError,
@@ -2632,9 +2638,10 @@ class SlackApp:
         cancel_event = asyncio.Event()
         lifecycle = SlackTurnLifecycle(
             sessionmaker=self.runtime.sessionmaker,
-            reply_people_cap=self._reply_people_cap(),
+            reply_people_cap=self._reply_people_cap(admission),
             alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
-            ask_human=slack_support_enabled(self.runtime.settings.support),
+            ask_human=slack_support_enabled(self.runtime.settings.support)
+            and admission.feature_on("support_escalation"),
             tenant_id=tenant_id,
             budget_channel_id=admission.budget_channel_id,
             render_tables=admission.shown("table_rendering", "slack"),
@@ -3092,9 +3099,10 @@ class SlackApp:
             def _recovery_lifecycle(cancel: asyncio.Event) -> TurnLifecycle:
                 new_lifecycle = SlackTurnLifecycle(
                     sessionmaker=self.runtime.sessionmaker,
-                    reply_people_cap=self._reply_people_cap(),
+                    reply_people_cap=self._reply_people_cap(admission),
                     alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
-                    ask_human=slack_support_enabled(self.runtime.settings.support),
+                    ask_human=slack_support_enabled(self.runtime.settings.support)
+                    and admission.feature_on("support_escalation"),
                     tenant_id=tenant_id,
                     budget_channel_id=admission.budget_channel_id,
                     render_tables=admission.shown("table_rendering", "slack"),
@@ -3348,10 +3356,13 @@ class SlackApp:
                         await clear_active_turn(_clear_session, id=_marker_id)
                         await _clear_session.commit()
 
-    def _reply_people_cap(self, attended: bool = True) -> int | None:
+    def _reply_people_cap(self, admission: Admission, attended: bool = True) -> int | None:
         """People an automatic reply may ping besides its author; None leaves it uncapped."""
         outbound = self.runtime.settings.outbound
-        return outbound.max_people if attended and outbound.reach_budget_enabled else None
+        if not (attended and outbound.reach_budget_enabled):
+            return None
+        found = admission.resolved("outbound_people")
+        return outbound.max_people if found is None else int(found.value)
 
     async def _run_continuation_turn(
         self,
@@ -3545,10 +3556,12 @@ class SlackApp:
         follow_lifecycle = SlackTurnLifecycle(
             sessionmaker=self.runtime.sessionmaker,
             reply_people_cap=self._reply_people_cap(
-                attended=row.reason != "watch_fired" and continuation_attended(row)
+                follow_admission,
+                attended=row.reason != "watch_fired" and continuation_attended(row),
             ),
             alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
-            ask_human=slack_support_enabled(self.runtime.settings.support),
+            ask_human=slack_support_enabled(self.runtime.settings.support)
+            and follow_admission.feature_on("support_escalation"),
             tenant_id=tenant_id,
             budget_channel_id=follow_admission.budget_channel_id,
             render_tables=follow_admission.shown("table_rendering", "slack"),
@@ -3645,10 +3658,12 @@ class SlackApp:
             new_lifecycle = SlackTurnLifecycle(
                 sessionmaker=self.runtime.sessionmaker,
                 reply_people_cap=self._reply_people_cap(
-                    attended=row.reason != "watch_fired" and continuation_attended(row)
+                    follow_admission,
+                    attended=row.reason != "watch_fired" and continuation_attended(row),
                 ),
                 alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
-                ask_human=slack_support_enabled(self.runtime.settings.support),
+                ask_human=slack_support_enabled(self.runtime.settings.support)
+                and follow_admission.feature_on("support_escalation"),
                 tenant_id=tenant_id,
                 budget_channel_id=follow_admission.budget_channel_id,
                 render_tables=follow_admission.shown("table_rendering", "slack"),

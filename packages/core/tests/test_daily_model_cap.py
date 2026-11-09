@@ -11,6 +11,7 @@ from typing import Any, cast
 import pytest
 import pytest_asyncio
 from daimon.core.accounting_outbox import record_observation_usage
+from daimon.core.features.resolver import ResolvedFeature
 from daimon.core.pricing import ProviderPrice, minimum_cost_of
 from daimon.core.stores import mux_state
 from daimon.core.stores.model_spend import model_spend_today, utc_midnight
@@ -153,8 +154,11 @@ async def test_today_counts_only_this_tenants_model_since_midnight_utc(sessions)
     assert await spent(sessions, "gpt-6-astra", now=NOW + timedelta(days=1)) == 0, "it resets"
 
 
-def _request(sm, *, cap: Decimal | None, worker: bool = False) -> Any:
+def _request(
+    sm, *, cap: Decimal | None, worker: bool = False, chosen: ResolvedFeature | None = None
+) -> Any:
     return SimpleNamespace(
+        admission=SimpleNamespace(resolved=lambda key: chosen),
         tenant_id=TENANT,
         worker=SimpleNamespace() if worker else None,
         now=lambda: NOW,
@@ -183,6 +187,32 @@ async def test_the_cap_refuses_a_model_at_its_limit_and_leaves_others_alone(sess
     await _check_daily_model_cap(_request(sessions, cap=used + 1), runtime(model), _revision(model))
     other = "gpt-6-luna" if model == "gpt-6-astra" else "gpt-6-astra"
     await _check_daily_model_cap(_request(sessions, cap=used), runtime(other), _revision(other))
+
+
+async def test_a_workspace_choice_lowers_the_operators_cap_and_never_raises_it(sessions):
+    model = "gpt-6-astra"
+    await record(sessions, "astra", usage(BINDINGS["astra"][1], model))
+    used = await spent(sessions, model)
+    lower = ResolvedFeature("daily_model_cap", str(used), "workspace")
+    with pytest.raises(AdmissionDenied):
+        await _check_daily_model_cap(
+            _request(sessions, cap=used + 100, chosen=lower), runtime(model), _revision(model)
+        )
+    higher = ResolvedFeature("daily_model_cap", str(used + 100), "workspace")
+    with pytest.raises(AdmissionDenied):
+        await _check_daily_model_cap(
+            _request(sessions, cap=used, chosen=higher), runtime(model), _revision(model)
+        )
+    # The built-in step is not a choice: the operator's cap alone decides.
+    unset = ResolvedFeature("daily_model_cap", "1", "default")
+    await _check_daily_model_cap(
+        _request(sessions, cap=used + 1, chosen=unset), runtime(model), _revision(model)
+    )
+    # With no provider cap, a choice is the cap.
+    with pytest.raises(AdmissionDenied):
+        await _check_daily_model_cap(
+            _request(sessions, cap=None, chosen=lower), runtime(model), _revision(model)
+        )
 
 
 async def test_no_cap_configured_checks_nothing(sessions):
@@ -353,6 +383,7 @@ async def test_a_fallback_without_a_tariff_never_runs_and_the_503_stands():
         yield None
 
     request = SimpleNamespace(
+        admission=SimpleNamespace(resolved=lambda key: None),
         tenant_id=TENANT,
         now=lambda: NOW,
         deps=SimpleNamespace(sessionmaker=no_db, markup=Decimal(1)),

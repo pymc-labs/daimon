@@ -24,7 +24,7 @@ Binding = Literal["turn", "session_mutable", "session_identity", "provision"]
 """When a change lands. ``session_mutable``: the live session's tools and servers are updated
 in place on the next message. ``session_identity``: held by the live session until ``/new`` or a
 replacement (system prompt, skills, memory). ``provision``: on the agent's next save or sync."""
-Category = Literal["model_input", "chat", "capabilities", "guardrails"]
+Category = Literal["model_input", "chat", "capabilities", "limits", "guardrails"]
 Requirement = Literal[
     "platform_adapter",
     "compute_setup",
@@ -32,9 +32,11 @@ Requirement = Literal[
     "report_host",
     "gemini_key",
     "microsoft_accounts",
+    "support_channel",
 ]
-"""``platform_adapter``: the chat platform's adapter is set up in this deployment. The rest
-name one integration's setup: its operator switch or host address, credentials and keys."""
+"""``platform_adapter``: the chat platform's adapter is set up in this deployment.
+``support_channel``: the platform has an escalation channel and people have credits to ask.
+The rest name one integration's setup: its operator switch or host address, credentials and keys."""
 ENV_IMPORTED: Final = "env_imported"
 """A workspace-tier row (not a feature) that marks the workspace's deprecated env maps as
 copied into rows by `daimon features import-env`."""
@@ -132,6 +134,19 @@ class FeatureSpec:
 
     def on_platform(self, platform: str) -> bool:
         return self.platforms == EVERY_PLATFORM or platform in self.platforms
+
+    def accepts(self, value: str, tier: Tier) -> bool:
+        """Whether `value` may be stored at `tier`. A limit's deployment tier also takes any
+        non-negative number, so an operator's variable keeps its exact value; lower tiers
+        choose from the listed steps."""
+        if value in self.values:
+            return True
+        if self.effect == "limit" and tier == "deployment":
+            try:
+                return float(value) >= 0 and float(value) == float(value)
+            except ValueError:
+                return False
+        return False
 
     def label(self, value: str) -> str:
         return self.values.get(value, "Default" if value == DEFAULT else value)
@@ -525,6 +540,13 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         env_map="budget_notices",
     ),
     _shown(
+        "status_log",
+        "Keep messages apart",
+        "An answer made of several agent messages keeps each one, set apart by a blank "
+        "line, instead of joining them into one block.",
+        legacy_env=("DAIMON_TURN__STATUS_LOG",),
+    ),
+    _shown(
         "native_footer_cost",
         "Cost on hosted-model footers",
         "A finished answer from an OpenAI or Gemini agent shows what it cost, or that the "
@@ -640,6 +662,7 @@ def _capability(
     tiers: tuple[Tier, ...] = ("deployment", "workspace", "agent", "channel"),
     requires: tuple[Requirement, ...] = (),
     legacy_env: tuple[str, ...] = (),
+    binds: Binding = "session_mutable",
 ) -> FeatureSpec:
     """A capability that is On unless a tier turns it Off; off, the session is not offered its
     tools (`CAPABILITY_TOOLS`) and what it does in the background stops."""
@@ -651,10 +674,40 @@ def _capability(
         values=_ON_OFF,
         default="on",
         tiers=tiers,
-        binds="session_mutable",
+        binds=binds,
         doc=doc,
         platforms=EVERY_PLATFORM,
         requires=requires,
+        authority=_SETTINGS,
+        legacy_env=legacy_env,
+    )
+
+
+_OUTBOUND_TIERS: Final[tuple[Tier, ...]] = ("deployment", "workspace", "agent", "channel")
+
+
+def _limit(
+    key: str,
+    name: str,
+    doc: str,
+    steps: Mapping[str, str],
+    *,
+    tiers: tuple[Tier, ...],
+    legacy_env: tuple[str, ...] = (),
+) -> FeatureSpec:
+    """A limit: the smallest tier setting wins. `steps` run from the built-in default, the
+    first, down to the strictest; a tier can only lower what the operator allows."""
+    return FeatureSpec(
+        key=key,
+        name=name,
+        category="limits",
+        effect="limit",
+        values=steps,
+        default=next(iter(steps)),
+        tiers=tiers,
+        binds="turn",
+        doc=doc,
+        platforms=EVERY_PLATFORM,
         authority=_SETTINGS,
         legacy_env=legacy_env,
     )
@@ -735,6 +788,23 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         authority=_SETTINGS,
         legacy_env=("DAIMON_ARTIFACTS__EMBED_IMAGES",),
     ),
+    FeatureSpec(
+        key="support_escalation",
+        name="Ask a person",
+        category="capabilities",
+        effect="capability",
+        values=_ON_OFF,
+        default="on",
+        tiers=("deployment", "workspace"),
+        binds="turn",
+        doc=(
+            "Answers offer a way to ask the Daimon team for help, which posts the request in "
+            "the operator's support channel. Off removes the button and the form. The "
+            "operator sets the channel and each person's credits."
+        ),
+        requires=("support_channel",),
+        authority=_SETTINGS,
+    ),
     _capability(
         "github",
         "GitHub access",
@@ -745,6 +815,74 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "lead_intake",
         "Lead intake",
         "The agent can take in sales leads and look them up. Off removes the lead tools here.",
+        tiers=("deployment", "workspace", "agent"),
+    ),
+    _limit(
+        "long_jobs_max_usd",
+        "Long job dollar cap",
+        "The most one long job may spend. The smallest setting wins, and the workspace's "
+        "long-job policy still applies.",
+        {"20": "$20", "10": "$10", "5": "$5", "2": "$2", "1": "$1"},
+        tiers=("deployment", "workspace", "agent"),
+        legacy_env=("DAIMON_LONG_JOBS__MAX_USD",),
+    ),
+    _limit(
+        "long_jobs_max_deadline",
+        "Long job time limit",
+        "The longest one long job may run. The smallest setting wins, and the workspace's "
+        "long-job policy still applies.",
+        {"70": "70 minutes", "60": "60 minutes", "30": "30 minutes", "15": "15 minutes"},
+        tiers=("deployment", "workspace", "agent"),
+        legacy_env=("DAIMON_LONG_JOBS__MAX_DEADLINE_MINUTES",),
+    ),
+    _capability(
+        "outbound_reach",
+        "Posting to others",
+        "The agent can post where other people are: other channels, new threads and "
+        "direct messages. Off keeps it to the conversation it is in.",
+        binds="turn",
+    ),
+    _limit(
+        "outbound_threads",
+        "New threads per turn",
+        "How many new threads or forum posts outside its own channel, or tagging someone "
+        "else, one turn may open without approval. The smallest setting wins.",
+        {"2": "2", "1": "1", "0": "None"},
+        tiers=_OUTBOUND_TIERS,
+        legacy_env=("DAIMON_OUTBOUND__MAX_THREADS",),
+    ),
+    _limit(
+        "outbound_places",
+        "Places per turn",
+        "How many channels, threads and direct-message recipients outside its own "
+        "conversation one turn may post into without approval. The smallest setting wins.",
+        {"2": "2", "1": "1", "0": "None"},
+        tiers=_OUTBOUND_TIERS,
+        legacy_env=("DAIMON_OUTBOUND__MAX_PLACES",),
+    ),
+    _limit(
+        "outbound_people",
+        "People tagged per turn",
+        "How many different people one turn may tag without approval. The smallest setting wins.",
+        {"5": "5", "3": "3", "1": "1", "0": "None"},
+        tiers=_OUTBOUND_TIERS,
+        legacy_env=("DAIMON_OUTBOUND__MAX_PEOPLE",),
+    ),
+    _limit(
+        "outbound_length",
+        "Post length outside the conversation",
+        "The longest post, in characters, a turn may send outside its own conversation. "
+        "The smallest setting wins.",
+        {"1500": "1500", "1000": "1000", "500": "500", "250": "250"},
+        tiers=_OUTBOUND_TIERS,
+        legacy_env=("DAIMON_OUTBOUND__MAX_LENGTH",),
+    ),
+    _limit(
+        "daily_model_cap",
+        "Daily spend per model",
+        "The most the workspace may spend on one OpenAI or Gemini model in a day, at list "
+        "price. The smallest setting wins, and the operator's provider cap still applies.",
+        {"20": "$20", "10": "$10", "5": "$5", "2": "$2", "1": "$1"},
         tiers=("deployment", "workspace", "agent"),
     ),
 )
@@ -904,6 +1042,7 @@ def parse_deployment(key: str, raw: str) -> tuple[str, bool]:
     value, _, flag = raw.strip().lower().partition(":")
     if value == "disabled" and spec.off is not None and not flag:
         return spec.off, True
-    if value not in spec.values or flag not in ("", "locked"):
-        raise ValueError(f"feature {key!r} takes {', '.join(spec.values)}, optionally ':locked'")
+    if not spec.accepts(value, "deployment") or flag not in ("", "locked"):
+        takes = ", ".join(spec.values) + (" or a number" if spec.effect == "limit" else "")
+        raise ValueError(f"feature {key!r} takes {takes}, optionally ':locked'")
     return value, flag == "locked"

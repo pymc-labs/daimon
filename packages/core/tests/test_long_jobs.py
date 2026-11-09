@@ -276,6 +276,41 @@ async def test_claim_caps_and_expired_lease_reclaim(db_engine, db_clean):
         assert await store.transition(db, rows[0], state="running") is None
 
 
+async def test_a_queued_job_waits_while_long_jobs_is_off_for_its_workspace(db_engine, db_clean):
+    from daimon.core.stores.domain import FeatureTarget
+    from daimon.core.stores.feature_values import set_feature_value
+
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    job = await seed(sm)
+    async with sm.begin() as db:
+        await store.register(db, job, ceilings=LIMITS)
+        await set_feature_value(
+            db,
+            tenant_id=job.tenant_id,
+            target=FeatureTarget("workspace"),
+            key="long_jobs",
+            value="off",
+            set_by=None,
+            surface="chat",
+        )
+    async with sm.begin() as db:
+        held = await store.claim(db, tenant_id=job.tenant_id, owner="e", now=NOW, ceilings=LIMITS)
+    assert held == []
+    async with sm.begin() as db:
+        await set_feature_value(
+            db,
+            tenant_id=job.tenant_id,
+            target=FeatureTarget("workspace"),
+            key="long_jobs",
+            value="on",
+            set_by=None,
+            surface="chat",
+        )
+    async with sm.begin() as db:
+        rows = await store.claim(db, tenant_id=job.tenant_id, owner="e", now=NOW, ceilings=LIMITS)
+    assert len(rows) == 1
+
+
 async def test_finish_cas_publishes_one_unattended_wake(db_engine, db_clean):
     sm = async_sessionmaker(db_engine, expire_on_commit=False)
     job = await claimed(sm, await seed(sm))
@@ -1014,3 +1049,30 @@ async def test_account_purge_cascades_owned_jobs_and_cancel_audit(db_engine, db_
                 )
             )
         ).all()
+
+
+async def test_a_workspace_and_an_agent_can_only_lower_the_long_job_limits(db_session):
+    from daimon.core.stores.domain import FeatureTarget
+    from daimon.core.stores.feature_values import set_feature_value
+
+    tenant = await make_tenant(db_session)
+    kw = dict(tenant_id=tenant.id, ceilings=LIMITS)
+
+    async def choose(target, key, value):
+        await set_feature_value(
+            db_session,
+            tenant_id=tenant.id,
+            target=target,
+            key=key,
+            value=value,
+            set_by=None,
+            surface="chat",
+        )
+
+    await choose(FeatureTarget("workspace"), "long_jobs_max_usd", "5")
+    await choose(FeatureTarget("workspace"), "long_jobs_max_deadline", "30")
+    workspace = await store.get_policy(db_session, agent_id="a", **kw)
+    assert (workspace.max_usd, workspace.max_deadline_minutes) == (Decimal("5"), 30)
+    await choose(FeatureTarget("agent", agent_id="a"), "long_jobs_max_usd", "1")
+    assert (await store.get_policy(db_session, agent_id="a", **kw)).max_usd == Decimal("1")
+    assert (await store.get_policy(db_session, agent_id="b", **kw)).max_usd == Decimal("5")

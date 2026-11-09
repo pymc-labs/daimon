@@ -142,6 +142,7 @@ from daimon.core.turn.provider_actions import (
     ProviderActionRequester,
 )
 from daimon.core.turn.state import TurnState
+from daimon.core.turn.status_log import status_log_override
 from daimon.core.turn.termination import TerminationReason, termination_reason
 from daimon.core.turn.unattended import (
     dm_session_authority,
@@ -2399,8 +2400,16 @@ async def run_prepared_turn_impl(
     # Set for the whole turn, so anything inside it (a card posted mid-turn, in this
     # task or one it starts) reads the deadline and never promises a time past it.
     deadline_token = current_turn_deadline.set(effective_deadline)
+    # The reducers and answer extractors read the status log through the turn's context,
+    # so the value this place resolved reaches them without a parameter on each.
+    status_log = prepared.admission.resolved("status_log")
     try:
-        outcome = await _run_within_ceiling()
+        with (
+            status_log_override(status_log.on)
+            if status_log is not None
+            else contextlib.nullcontext()
+        ):
+            outcome = await _run_within_ceiling()
     finally:
         current_turn_deadline.reset(deadline_token)
     # Turn end: anything this session billed nowhere -- calls MA made while no

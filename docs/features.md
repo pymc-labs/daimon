@@ -405,3 +405,502 @@ The memory a restricted channel keeps for itself in place of the shared one. A c
 | Combines | Off above is a ceiling |
 | Levels on Gemini | Not available |
 | Levels on OpenAI | Not available |
+
+## Thread titles
+
+A thread Daimon starts is titled from its opening message by a short model call.
+
+| | |
+| --- | --- |
+| Key | `thread_naming` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Server, Channel |
+| Combines | Off above is a ceiling |
+| Deprecated | `DAIMON_THREAD_NAMING__ENABLED` |
+
+## Typed mentions
+
+A message with "@" and the agent's name typed as plain text is answered like a real mention. Direct messages and bots are unchanged.
+
+| | |
+| --- | --- |
+| Key | `plain_text_mentions` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Server, Channel |
+| Combines | Most specific wins |
+
+## Completion pings
+
+The person who asked is pinged when a long answer is finished.
+
+| | |
+| --- | --- |
+| Key | `completion_pings` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Server, Channel |
+| Combines | Most specific wins |
+| Deprecated | `DAIMON_COMPLETION_PINGS` |
+
+## Table images
+
+Tables in an answer are drawn as an image (Discord) or a native table (Slack) instead of text.
+
+| | |
+| --- | --- |
+| Key | `table_rendering` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Server, Channel |
+| Combines | Most specific wins |
+| Deprecated | `DAIMON_TABLE_RENDERING` |
+
+## Budget notices
+
+Admins are told in a direct message when a channel's budget is nearly used or spent.
+
+| | |
+| --- | --- |
+| Key | `budget_notices` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Server |
+| Combines | Most specific wins |
+| Deprecated | `DAIMON_BUDGET_NOTICES` |
+
+## Keep messages apart
+
+An answer made of several agent messages keeps each one, set apart by a blank line, instead of joining them into one block.
+
+| | |
+| --- | --- |
+| Key | `status_log` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Server, Channel |
+| Combines | Most specific wins |
+| Deprecated | `DAIMON_TURN__STATUS_LOG` |
+
+## Cost on hosted-model footers
+
+A finished answer from an OpenAI or Gemini agent shows what it cost, or that the cost is unknown or partial. Managed Agents footers are unchanged.
+
+| | |
+| --- | --- |
+| Key | `native_footer_cost` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Server |
+| Combines | Most specific wins |
+| Deprecated | `DAIMON_TURN__NATIVE_FOOTER_COST` |
+
+## Vote buttons
+
+Finished answers get thumbs up and down for feedback.
+
+| | |
+| --- | --- |
+| Key | `message_feedback` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Server, Channel |
+| Combines | Most specific wins |
+
+## Reply hint
+
+A short reminder that a reply needs a mention, where an unmentioned message is skipped.
+
+| | |
+| --- | --- |
+| Key | `unmentioned_reply_hint` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Server, Channel |
+| Combines | Most specific wins |
+| Deprecated | `DAIMON_DISCORD__UNMENTIONED_REPLY_HINT` |
+
+## No-writers notice
+
+Says so when a channel's write access is set to no one and a message is skipped.
+
+| | |
+| --- | --- |
+| Key | `writers_none_notice` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Server, Channel |
+| Combines | Most specific wins |
+| Deprecated | `DAIMON_DISCORD__WRITERS_NONE_NOTICE` |
+
+## Waiting card
+
+A card shows in a channel whose turn is waiting on the workspace's turn cap.
+
+| | |
+| --- | --- |
+| Key | `waiting_card` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Server |
+| Combines | Most specific wins |
+| Deprecated | `DAIMON_DISCORD__TENANT_CAP_WAITING_CARD` |
+
+## Private channel messages
+
+Every message in Teams private and shared channels is read through Microsoft Graph, not only the ones that mention the agent.
+
+| | |
+| --- | --- |
+| Key | `private_channel_messages` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Server, Channel |
+| Combines | Off above is a ceiling |
+| Deprecated | `DAIMON_PRIVATE_CHANNEL_MESSAGES__ENABLED` |
+
+## Direct messages
+
+Conversations may move to a direct message with the agent. The agent that answers there is the workspace's DM agent, which is chosen apart from this.
+
+| | |
+| --- | --- |
+| Key | `direct_messages` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Server |
+| Combines | Off above is a ceiling |
+
+## Read-only memory in direct messages
+
+A turn started from a direct message can read the agent's memory but not change it.
+
+| | |
+| --- | --- |
+| Key | `dm_memory_read_only` |
+| Values | `off` (Writable), `on` (Read-only) |
+| Default | `off` |
+| Levels | Deployment, Server |
+| Combines | Stricter wins |
+
+## Web app: chat
+
+The chat pages of the web app. Off hides them for everyone in the workspace.
+
+| | |
+| --- | --- |
+| Key | `web.chat` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Server |
+| Combines | Off above is a ceiling |
+
+## Web app: agents
+
+The agents pages of the web app. Off hides them for everyone in the workspace.
+
+| | |
+| --- | --- |
+| Key | `web.agents` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Server |
+| Combines | Off above is a ceiling |
+
+## Web app: channels
+
+The channels pages of the web app. Off hides them for everyone in the workspace.
+
+| | |
+| --- | --- |
+| Key | `web.channels` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Server |
+| Combines | Off above is a ceiling |
+
+## Web app: routines
+
+The routines pages of the web app. Off hides them for everyone in the workspace.
+
+| | |
+| --- | --- |
+| Key | `web.routines` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Server |
+| Combines | Off above is a ceiling |
+
+## Web app: credits
+
+The credits pages of the web app. Off hides them for everyone in the workspace.
+
+| | |
+| --- | --- |
+| Key | `web.credits` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Server |
+| Combines | Off above is a ceiling |
+
+## Web app: integrations
+
+The integrations pages of the web app. Off hides them for everyone in the workspace.
+
+| | |
+| --- | --- |
+| Key | `web.integrations` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Server |
+| Combines | Off above is a ceiling |
+
+## Watches
+
+The agent can watch a page or feed and start a conversation when it changes. Off removes the watch tools here and stops the watches made here.
+
+| | |
+| --- | --- |
+| Key | `watches` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Server, Agent, Channel |
+| Combines | Off above is a ceiling |
+| Deprecated | `DAIMON_WATCHES__ENABLED` |
+
+## Routines
+
+The agent can set up and run routines: tasks that run on a schedule. Off removes the routine tools here.
+
+| | |
+| --- | --- |
+| Key | `routines` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Server, Agent, Channel |
+| Combines | Off above is a ceiling |
+
+## Long jobs
+
+The agent can start a long job that keeps working after the chat moves on. Off removes the long-job tools here.
+
+| | |
+| --- | --- |
+| Key | `long_jobs` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Server, Agent |
+| Combines | Off above is a ceiling |
+
+## Cloud computers
+
+The agent can start a short-lived cloud computer to run code and keep files. Off removes the computer tools here.
+
+| | |
+| --- | --- |
+| Key | `compute` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Server, Agent |
+| Combines | Off above is a ceiling |
+| Deprecated | `DAIMON_COMPUTE__ENABLED` |
+
+## Notebooks
+
+The agent can publish and manage notebooks. Off removes the notebook tools here.
+
+| | |
+| --- | --- |
+| Key | `notebooks` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Server, Agent, Channel |
+| Combines | Off above is a ceiling |
+
+## Report publishing
+
+The agent can publish a report as a web page and delete it later. Off removes the report tools here.
+
+| | |
+| --- | --- |
+| Key | `report_publish` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Server, Agent, Channel |
+| Combines | Off above is a ceiling |
+
+## Video transcripts
+
+The agent can fetch the transcript of a video. Off removes that tool here.
+
+| | |
+| --- | --- |
+| Key | `media` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Server, Agent, Channel |
+| Combines | Off above is a ceiling |
+
+## Microsoft 365
+
+People can connect a Microsoft account and the agent can search, read, write and send with it. Off removes the Microsoft tools here.
+
+| | |
+| --- | --- |
+| Key | `microsoft_365` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Server, Agent |
+| Combines | Off above is a ceiling |
+
+## Chart images in answers
+
+Charts the agent makes come back inside its answer to a connected app as pictures the app can see. Off sends the links only, for an app that cannot take pictures.
+
+| | |
+| --- | --- |
+| Key | `artifact_images` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Server |
+| Combines | Off above is a ceiling |
+| Deprecated | `DAIMON_ARTIFACTS__EMBED_IMAGES` |
+
+## Ask a person
+
+Answers offer a way to ask the Daimon team for help, which posts the request in the operator's support channel. Off removes the button and the form. The operator sets the channel and each person's credits.
+
+| | |
+| --- | --- |
+| Key | `support_escalation` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Server |
+| Combines | Off above is a ceiling |
+
+## GitHub access
+
+The agent can ask for access to GitHub repositories, connect an account and pick its working repository. Off removes those tools here.
+
+| | |
+| --- | --- |
+| Key | `github` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Server, Agent, Channel |
+| Combines | Off above is a ceiling |
+
+## Lead intake
+
+The agent can take in sales leads and look them up. Off removes the lead tools here.
+
+| | |
+| --- | --- |
+| Key | `lead_intake` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Server, Agent |
+| Combines | Off above is a ceiling |
+
+## Long job dollar cap
+
+The most one long job may spend. The smallest setting wins, and the workspace's long-job policy still applies.
+
+| | |
+| --- | --- |
+| Key | `long_jobs_max_usd` |
+| Values | `20` ($20), `10` ($10), `5` ($5), `2` ($2), `1` ($1) |
+| Default | `20` |
+| Levels | Deployment, Server, Agent |
+| Combines | Lowest wins |
+| Deprecated | `DAIMON_LONG_JOBS__MAX_USD` |
+
+## Long job time limit
+
+The longest one long job may run. The smallest setting wins, and the workspace's long-job policy still applies.
+
+| | |
+| --- | --- |
+| Key | `long_jobs_max_deadline` |
+| Values | `70` (70 minutes), `60` (60 minutes), `30` (30 minutes), `15` (15 minutes) |
+| Default | `70` |
+| Levels | Deployment, Server, Agent |
+| Combines | Lowest wins |
+| Deprecated | `DAIMON_LONG_JOBS__MAX_DEADLINE_MINUTES` |
+
+## Posting to others
+
+The agent can post where other people are: other channels, new threads and direct messages. Off keeps it to the conversation it is in.
+
+| | |
+| --- | --- |
+| Key | `outbound_reach` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Server, Agent, Channel |
+| Combines | Off above is a ceiling |
+
+## New threads per turn
+
+How many new threads or forum posts outside its own channel, or tagging someone else, one turn may open without approval. The smallest setting wins.
+
+| | |
+| --- | --- |
+| Key | `outbound_threads` |
+| Values | `2` (2), `1` (1), `0` (None) |
+| Default | `2` |
+| Levels | Deployment, Server, Agent, Channel |
+| Combines | Lowest wins |
+| Deprecated | `DAIMON_OUTBOUND__MAX_THREADS` |
+
+## Places per turn
+
+How many channels, threads and direct-message recipients outside its own conversation one turn may post into without approval. The smallest setting wins.
+
+| | |
+| --- | --- |
+| Key | `outbound_places` |
+| Values | `2` (2), `1` (1), `0` (None) |
+| Default | `2` |
+| Levels | Deployment, Server, Agent, Channel |
+| Combines | Lowest wins |
+| Deprecated | `DAIMON_OUTBOUND__MAX_PLACES` |
+
+## People tagged per turn
+
+How many different people one turn may tag without approval. The smallest setting wins.
+
+| | |
+| --- | --- |
+| Key | `outbound_people` |
+| Values | `5` (5), `3` (3), `1` (1), `0` (None) |
+| Default | `5` |
+| Levels | Deployment, Server, Agent, Channel |
+| Combines | Lowest wins |
+| Deprecated | `DAIMON_OUTBOUND__MAX_PEOPLE` |
+
+## Post length outside the conversation
+
+The longest post, in characters, a turn may send outside its own conversation. The smallest setting wins.
+
+| | |
+| --- | --- |
+| Key | `outbound_length` |
+| Values | `1500` (1500), `1000` (1000), `500` (500), `250` (250) |
+| Default | `1500` |
+| Levels | Deployment, Server, Agent, Channel |
+| Combines | Lowest wins |
+| Deprecated | `DAIMON_OUTBOUND__MAX_LENGTH` |
+
+## Daily spend per model
+
+The most the workspace may spend on one OpenAI or Gemini model in a day, at list price. The smallest setting wins, and the operator's provider cap still applies.
+
+| | |
+| --- | --- |
+| Key | `daily_model_cap` |
+| Values | `20` ($20), `10` ($10), `5` ($5), `2` ($2), `1` ($1) |
+| Default | `20` |
+| Levels | Deployment, Server, Agent |
+| Combines | Lowest wins |

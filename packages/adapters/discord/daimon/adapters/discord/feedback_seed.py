@@ -38,8 +38,10 @@ import discord
 log = structlog.get_logger()
 
 
-async def seed_feedback_reactions(channel: discord.abc.Messageable, *, message_id: str) -> None:
-    """Add the two vote emoji, then the escalate emoji, to `message_id`'s message.
+async def seed_feedback_reactions(
+    channel: discord.abc.Messageable, *, message_id: str, escalate: bool = True
+) -> None:
+    """Add the two vote emoji, then the escalate emoji unless `escalate` is off, to `message_id`.
 
     The positive emoji is added first so the two always render in the same
     order. Best-effort: never raises. `discord.abc.Messageable` itself does
@@ -60,7 +62,8 @@ async def seed_feedback_reactions(channel: discord.abc.Messageable, *, message_i
         # The escalate emoji is seeded LAST so the two vote emoji keep the
         # order they have always rendered in. It is not a vote and never
         # reaches message_feedback -- `vote_for_reaction` does not match it.
-        await partial.add_reaction(ESCALATE)
+        if escalate:
+            await partial.add_reaction(ESCALATE)
     except Exception as exc:
         # best-effort affordance running after the answer was delivered; a seed failure must never
         # surface as a turn failure (see module docstring)

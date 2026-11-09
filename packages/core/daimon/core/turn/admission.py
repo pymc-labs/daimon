@@ -70,6 +70,7 @@ from daimon.core.features.model_input import (
     agent_toolset,
 )
 from daimon.core.features.registry import FEATURES
+from daimon.core.features.resolver import ResolvedFeature
 from daimon.core.features.session_identity import IDENTITY_KEYS, SessionIdentity
 from daimon.core.features.snapshot import (
     FeaturePlace,
@@ -448,6 +449,10 @@ class Admission:
         """`key` at this place; a hand-built admission, or a key not resolved, keeps it on."""
         found = self.features.features.get(key) if self.features is not None else None
         return found is None or found.on
+
+    def resolved(self, key: str) -> ResolvedFeature | None:
+        """`key` as resolved at this place; None for a hand-built admission or an unresolved key."""
+        return self.features.features.get(key) if self.features is not None else None
 
     def shown(self, key: str, platform: str = "") -> bool:
         """A display feature at this place; a hand-built admission, or a key not resolved,

@@ -35,6 +35,10 @@ CHAT_KEYS: Final[tuple[str, ...]] = (
     "table_rendering",
     "message_feedback",
     "native_footer_cost",
+    "support_escalation",
+    "status_log",
+    "outbound_people",
+    "daily_model_cap",
 )
 """Chat display settings the adapters read from the turn's admission."""
 CHANNEL_BACKFILL: Final[int] = 25

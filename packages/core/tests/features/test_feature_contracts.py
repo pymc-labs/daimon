@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import replace
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -11,8 +12,11 @@ from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
     DiscordSettings,
+    LongJobsSettings,
+    OutboundSettings,
     ProgressPlansSettings,
     Settings,
+    TurnSettings,
 )
 from daimon.core.features.deployment import deployment_value
 from daimon.core.features.model_input import SESSION_KEYS, TOOL_KEYS
@@ -104,6 +108,47 @@ def test_deployment_env_and_its_legacy_variable() -> None:
     legacy = _settings(progress_plans=ProgressPlansSettings.model_validate({"mode": "disabled"}))
     assert deployment_value(legacy, plans) == TierValue("deployment", "off", True)
     assert deployment_value(_settings(), plans) is None
+
+
+def test_status_log_keeps_the_operators_old_switch_as_its_deployment_value() -> None:
+    spec = FEATURES["status_log"]
+    assert deployment_value(_settings(), spec) is None
+    assert deployment_value(_settings(turn=TurnSettings(status_log=True)), spec) == TierValue(
+        "deployment", "on"
+    )
+
+
+def test_a_limit_takes_the_operators_number_and_lower_tiers_only_its_steps() -> None:
+    usd = FEATURES["long_jobs_max_usd"]
+    assert parse_deployment("long_jobs_max_usd", "35.5") == ("35.5", False)
+    for bad in ("-1", "nan", "lots"):
+        with pytest.raises(ValueError, match="long_jobs_max_usd"):
+            parse_deployment("long_jobs_max_usd", bad)
+    with pytest.raises(ValueError, match="takes"):
+        parse_deployment("outbound_reach", "7")
+    got = resolve_feature(usd, [TierValue("deployment", "35.5"), TierValue("workspace", "5")])
+    assert (got.value, got.tier) == ("5", "workspace")
+    assert resolve_feature(usd, [TierValue("workspace", "35")]).value == usd.default
+    legacy = _settings(long_jobs=LongJobsSettings(max_usd=Decimal("7")))
+    assert deployment_value(legacy, usd) == TierValue("deployment", "7")
+    assert deployment_value(_settings(), usd) is None
+    length = FEATURES["outbound_length"]
+    off = _settings(outbound=OutboundSettings(max_length=0))
+    assert deployment_value(off, length) is None, "0 means no limit, which a limit cannot say"
+
+
+def test_a_limit_defaults_are_the_built_in_values() -> None:
+    outbound, jobs = OutboundSettings(), LongJobsSettings()
+    built_in = {
+        "outbound_threads": outbound.max_threads,
+        "outbound_places": outbound.max_places,
+        "outbound_people": outbound.max_people,
+        "outbound_length": outbound.max_length,
+        "long_jobs_max_usd": jobs.max_usd,
+        "long_jobs_max_deadline": jobs.max_deadline_minutes,
+    }
+    for key, value in built_in.items():
+        assert Decimal(FEATURES[key].default) == value, key
 
 
 def _calls(path: Path) -> set[str]:
@@ -310,7 +355,7 @@ _CONFIG_SWITCHES: dict[str, str] = {
     "TurnSettings.native_footer_cost": _LEGACY,
     "TurnSettings.channel_backends": _ROLLOUT,
     "TurnSettings.agent_backends": _ROLLOUT,
-    "TurnSettings.status_log": _ROLLOUT,
+    "TurnSettings.status_log": _LEGACY,
     "ThreadNamingSettings.enabled": _LEGACY,
     "OutboundSettings.reach_budget_enabled": _OPS,
     "PrivateChannelMessagesSettings.enabled": _LEGACY,

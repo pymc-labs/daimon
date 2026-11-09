@@ -103,6 +103,21 @@ offered them, so a check here must never be stricter than the tools. Watches and
 their tools work (and list or remove what exists) without the operator gate or the App."""
 
 
+def support_channel_set(settings: Settings, platform: str) -> bool:
+    """Whether `platform` has an escalation channel it can post in and credits to spend."""
+    support = settings.support
+    channel = {
+        "discord": support.escalation_channel_id,
+        "slack": support.slack_escalation_channel_id,
+        "teams": support.teams_escalation_channel_id,
+    }.get(platform)
+    return (
+        bool(channel)
+        and not (platform == "discord" and (channel or "").startswith("19:"))
+        and (support.credits_per_user > 0)
+    )
+
+
 def unavailable_reason(
     spec: FeatureSpec, settings: Settings | None, place: FeaturePlace
 ) -> Unavailable | None:
@@ -112,6 +127,9 @@ def unavailable_reason(
         return "platform"
     if settings is not None and (
         ("platform_adapter" in spec.requires and not _adapter_set_up(settings, place.platform))
+        or (
+            "support_channel" in spec.requires and not support_channel_set(settings, place.platform)
+        )
         or not all(_SETUP[need](settings) for need in spec.requires if need in _SETUP)
     ):
         return "requires"

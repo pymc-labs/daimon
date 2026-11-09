@@ -582,3 +582,44 @@ async def test_run_one_tick_skips_a_routine_its_workspace_turned_off(
         fetched = await get_routine(s, row.id, tenant_id=row.tenant_id)
     assert fetched is not None
     assert fetched.last_error == "routines_turned_off", "the owner can see why it did not run"
+
+
+async def test_run_one_tick_skips_an_intake_routine_when_lead_intake_is_off(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    import daimon.core.scheduler as scheduler
+
+    now = datetime(2026, 5, 8, 12, 0, 0, tzinfo=UTC)
+    row = await _seed_due_routine(db_session, now=now)
+    await set_feature_value(
+        db_session,
+        tenant_id=row.tenant_id,
+        target=FeatureTarget("workspace"),
+        key="lead_intake",
+        value="off",
+        set_by=None,
+        surface="chat",
+    )
+    await db_session.commit()
+    monkeypatch.setattr(
+        scheduler, "configured_routines", AsyncMock(return_value={(row.tenant_id, row.id)})
+    )
+    fire = AsyncMock()
+    await run_one_tick(
+        now=now,
+        sm=db_session_factory,
+        fire=fire,
+        max_age=timedelta(minutes=15),
+        max_concurrent_fires=10,
+        dispatch_timeout_s=5.0,
+        wait_for_completion=True,
+    )
+    fire.assert_not_awaited()
+    async with db_session_factory() as s:
+        fetched = await get_routine(s, row.id, tenant_id=row.tenant_id)
+    assert fetched is not None
+    assert fetched.last_error == "lead_intake_turned_off"

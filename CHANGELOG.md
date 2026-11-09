@@ -38,6 +38,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Turning off watches stops the watches made there, and turning off routines stops their scheduled runs. A capability whose setup is missing, such as a notebook host or the GitHub app, shows as unavailable with the reason.
   `DAIMON_WATCHES__ENABLED`, `DAIMON_COMPUTE__ENABLED` and `DAIMON_ARTIFACTS__EMBED_IMAGES` still work but log a deprecation. Nothing changes until a level sets one.
 
+- **Limits and the last switches are features too.**
+  Long job cost and run time, how far an agent may post outside its conversation (`outbound_reach`), how many threads, places and people one post may reach, the longest post, and a daily model spend cap are set at the server, workspace or lower level, and the lowest limit wins. A level can only pick a step at or below the one above it.
+  Ask a person (`support_escalation`) and keeping an answer's messages apart (`status_log`) can be set per workspace and channel. Turning off long jobs, cloud computers or lead intake also stops their queued and scheduled work; running work finishes.
+  A capability that lacks its setup no longer offers its tools. `DAIMON_TURN__STATUS_LOG`, `DAIMON_LONG_JOBS__MAX_USD`, `DAIMON_LONG_JOBS__MAX_DEADLINE_MINUTES` and the outbound limits still work but log a deprecation. Nothing changes until a level sets one.
+
 - **Chat behaviour and display settings join the same system.**
   Typed `@name` mentions, direct messages, read-only memory in direct messages, completion pings, table rendering, message feedback buttons, budget notices, cost shown with native models, thread naming, the unmentioned-reply hint, the "no writers" notice and the waiting card are set at the server level and, where the platform allows it, down to a channel. Each web app module is a setting too (`web.chat`, `web.agents` and so on).
   The old per-workspace variables (`DAIMON_COMPLETION_PINGS`, `DAIMON_TABLE_RENDERING`, `DAIMON_BUDGET_NOTICES`) keep working until you run `daimon features import-env`, which copies them into workspace settings once; after that a variable left set is ignored and logged. The other old variables still work but log a deprecation.

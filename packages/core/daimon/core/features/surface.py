@@ -31,6 +31,7 @@ CATEGORIES: Final[Mapping[Category, str]] = {
     "model_input": "What the agent sees",
     "chat": "Chat",
     "capabilities": "Capabilities",
+    "limits": "Limits",
     "guardrails": "Safety",
 }
 _UNAVAILABLE: Final[Mapping[str, str]] = {
