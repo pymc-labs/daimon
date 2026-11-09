@@ -13,7 +13,7 @@ from typing import Protocol
 from daimon.adapters.web.caller import WebCaller
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.config import SignedIdentityServer
-from daimon.core.node_exchange import serves
+from daimon.core.node_exchange import visible_to
 from fastapi import APIRouter
 from pydantic import BaseModel
 
@@ -69,7 +69,7 @@ def agent_nodes(
     """
     found: list[AgentNode] = []
     for node in nodes:
-        if not serves(node.server, workspace):
+        if not visible_to(node.server, workspace):
             continue
         key = next((k for k, url in server_urls.items() if node.claims(url)), None)
         if key is not None or node.offered(workspace):

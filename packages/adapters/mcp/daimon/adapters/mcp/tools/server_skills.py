@@ -29,7 +29,8 @@ from daimon.core.node_exchange import (
     NodeAsker,
     NodeExchange,
     asker_of_account,
-    serves_tenant,
+    visible_to,
+    workspace_of,
 )
 from daimon.core.server_skills.follows import apply_held_update, set_agent_follow
 from daimon.core.server_skills.mirror import add_server_skill
@@ -110,19 +111,17 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
-async def _served_node(runtime: McpRuntime, auth: AuthIdentity) -> SkillsNode | None:
+def _served_node(runtime: McpRuntime, auth: AuthIdentity) -> SkillsNode | None:
     """The node, unless none is set up or its server doesn't serve the caller's workspace."""
     node = skills_node_of(runtime.settings)
-    if node is None or not await serves_tenant(
-        runtime.session_factory, node.server, auth.tenant_id
-    ):
+    if node is None or not visible_to(node.server, workspace_of(auth.platform, auth.external_id)):
         return None
     return node
 
 
-async def _node(runtime: McpRuntime, auth: AuthIdentity) -> SkillsNode:
+def _node(runtime: McpRuntime, auth: AuthIdentity) -> SkillsNode:
     """As `_served_node`, refused alike for both: an unserved workspace sees no node."""
-    node = await _served_node(runtime, auth)
+    node = _served_node(runtime, auth)
     if node is None:
         raise ToolError("Server skills aren't set up here.")
     return node
@@ -235,7 +234,7 @@ async def _add_impl(
     origin_context_id: str | None = None,
 ) -> ServerSkills:
     # First, so a workspace the server doesn't serve is never asked to confirm anything.
-    node = await _node(runtime, auth)
+    node = _node(runtime, auth)
     await _require_editor(runtime, auth)
     if skill is not None:
         # Adding reaches the whole library, so a person confirms it; listing changes nothing.
@@ -291,7 +290,7 @@ async def _add_impl(
 
 
 async def _check_impl(runtime: McpRuntime, auth: AuthIdentity, skill_id: str) -> ServerSkillCheck:
-    node = await _node(runtime, auth)
+    node = _node(runtime, auth)
     await _require_editor(runtime, auth)
     _require_library_admin(auth)
     mirror = await _mirror(runtime, auth, skill_id)
@@ -303,7 +302,7 @@ async def _check_impl(runtime: McpRuntime, auth: AuthIdentity, skill_id: str) ->
 async def _approve_impl(
     runtime: McpRuntime, auth: AuthIdentity, skill_id: str, digest: str, origin_context_id: str
 ) -> ServerSkillCheck:
-    node = await _node(runtime, auth)
+    node = _node(runtime, auth)
     await _require_editor(runtime, auth)
     _require_library_admin(auth)
     # An approved update puts new scripts and allowed tools in front of everyone.
@@ -369,7 +368,7 @@ async def _follow_impl(
         )
     except AgentEditError as err:
         raise ToolError(str(err)) from err
-    node = await _served_node(runtime, auth)
+    node = _served_node(runtime, auth)
     if follow and node is not None:
         await follow_now(
             _sync_deps(runtime, node),

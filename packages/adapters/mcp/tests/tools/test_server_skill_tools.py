@@ -52,6 +52,7 @@ def make_auth(
         tenant_id=tenant_id,
         role=Role.ADMIN if admin else Role.USER,
         platform="discord",
+        external_id="g-1",
         platform_user_id="u1",
         is_admin=admin,
         is_platform_admin=False,

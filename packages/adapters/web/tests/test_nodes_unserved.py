@@ -7,9 +7,14 @@ from typing import Any
 
 import httpx
 import pytest
+from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.web.nodes.base import agent_nodes
 from daimon.adapters.web.nodes.data_server import DataServerNode
+from daimon.adapters.web.static import NOT_FOUND
+from daimon.core import node_exchange
 from daimon.core.mcp_identity import generate_signing_key
+from daimon.core.node_exchange import serves_tenant
+from daimon.testing.factories import make_tenant
 from daimon.testing.mcp_skills import SkillsServer, skill_md
 from fastapi.routing import APIRoute
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -81,16 +86,19 @@ async def test_every_node_route_is_not_found_for_an_unserved_workspace(
                 res = await client.request(
                     method, _fill(route.path), json=_BODIES.get(key_, {}), headers=_OWN
                 )
-                assert (res.status_code, res.json()) == (404, {"detail": "Not found."}), (
+                assert (res.status_code, res.json()) == (404, {"detail": NOT_FOUND}), (
                     f"{key_} answered {res.status_code} {res.text}"
                 )
                 assert _LABEL not in res.text, f"{key_} names the node"
                 covered += 1
     assert covered >= 10, "the node's routes were found"
+    paths = {(m, r.path) for r in routes for m in r.methods}
+    assert {
+        ("POST", "/api/agents/skills/{skill_id}/check"),
+        ("POST", "/api/agents/skills/{skill_id}/approve"),
+    } <= paths - set(NODE_FREE), "check and approve are covered, not allowed through"
     assert node.subject_tokens == [] and node.skills.requests == [], "the server is never asked"
-    assert {k for k in NODE_FREE} <= {(m, r.path) for r in routes for m in r.methods}, (
-        "every allowed route still exists"
-    )
+    assert set(NODE_FREE) <= paths, "every allowed route still exists"
 
 
 async def test_node_routes_still_answer_a_workspace_the_server_serves(
@@ -110,6 +118,26 @@ async def test_node_routes_still_answer_a_workspace_the_server_serves(
     assert menu.json()["label"] == _LABEL, menu.text
 
 
+async def test_an_agent_claiming_the_node_by_url_still_lists_no_node_when_unserved(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The agent's MCP server URL is the node's relay; the unserved workspace sees a plain server."""
+    agents, owner, _ = await _setup(db_session)
+    data = agents.agent.model_dump(mode="json")
+    data["mcp_servers"] = [{"type": "url", "name": "data", "url": _RELAY}]
+    agents.agent = BetaManagedAgentsAgent.model_validate(data)
+    key = generate_signing_key()
+    node = _Node(SkillsServer(skills={}))
+    settings = _settings(key, workspaces=["discord:x"], node={**_NODE, "label": _LABEL})
+    async with _client(
+        agents, node, db_session_factory, owner, key=key, settings=settings
+    ) as client:
+        detail = await client.get("/api/agents/ag_w")
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["nodes"] == [], "the claimed node is not listed"
+    assert _LABEL not in detail.text, "the node's label is not shown"
+
+
 def _node(workspaces: list[str] | None) -> DataServerNode:
     settings = _settings(generate_signing_key(), workspaces=workspaces)
     assert settings.web is not None and settings.web.nodes.data_server is not None
@@ -123,8 +151,9 @@ def _node(workspaces: list[str] | None) -> DataServerNode:
         (None, "discord:g-1", True),
         (["discord:x"], "discord:g-1", False),
         (["discord:g-1"], None, False),
+        (None, None, True),
     ],
-    ids=["listed", "unrestricted", "unlisted", "no-chat-workspace"],
+    ids=["listed", "unrestricted", "unlisted", "no-chat-workspace", "unrestricted-no-workspace"],
 )
 def test_an_unserved_node_is_never_listed_even_when_the_agent_uses_its_url(
     workspaces: list[str] | None, workspace: str | None, listed: bool
@@ -137,3 +166,30 @@ def test_an_unserved_node_is_never_listed_even_when_the_agent_uses_its_url(
     )
     assert bool(claiming) is listed, f"claimed node listed={bool(claiming)} for {workspace}"
     assert all(n.label != "" for n in claiming), "a listed node keeps its label"
+
+
+async def test_an_unrestricted_server_reads_no_tenant_and_a_seen_tenant_is_read_once(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The workspace of a tenant never changes: one read serves every later check."""
+    monkeypatch.setattr(node_exchange, "_WORKSPACES", {})
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="g-1")
+    await db_session.commit()
+    server = _node(["discord:g-1"]).server
+    open_ = _node(None).server
+    reads: list[object] = []
+
+    class Counting:
+        def __call__(self) -> AsyncSession:
+            reads.append(1)
+            return db_session_factory()
+
+    assert await serves_tenant(Counting(), open_, tenant.id)  # pyright: ignore[reportArgumentType]
+    assert reads == [], "an unrestricted server needs no tenant"
+    assert await serves_tenant(Counting(), server, tenant.id)  # pyright: ignore[reportArgumentType]
+    assert await serves_tenant(Counting(), server, tenant.id)  # pyright: ignore[reportArgumentType]
+    assert len(reads) == 1, "the tenant is read once"
+    assert not await serves_tenant(Counting(), _node(["discord:x"]).server, tenant.id)  # pyright: ignore[reportArgumentType]
+    assert len(reads) == 1, "and then not again for another server"

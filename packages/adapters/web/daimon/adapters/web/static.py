@@ -13,6 +13,8 @@ PACKAGE_STATIC_DIR = Path(__file__).parent / "static"
 _API_ROOTS = frozenset({"api", "auth"})
 _METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"]
 _IMMUTABLE = "public, max-age=31536000, immutable"
+#: The answer for any path nothing serves; a node hidden from a workspace answers with it too.
+NOT_FOUND = "Not found"
 
 
 def static_dir(web: WebSettings) -> Path:
@@ -36,7 +38,7 @@ def spa_router(web: WebSettings) -> APIRouter:
     async def page(path: str, request: Request) -> Response:  # pyright: ignore[reportUnusedFunction]
         # Only reads get pages; anything else, and any unknown api or auth path, is a 404.
         if request.method not in ("GET", "HEAD") or path.split("/", 1)[0] in _API_ROOTS:
-            raise HTTPException(status_code=404, detail="Not found")
+            raise HTTPException(status_code=404, detail=NOT_FOUND)
         file = _file_inside(root, path) if path else None
         if file is not None:
             # Built assets carry a content hash in their name, so they never change.
@@ -44,7 +46,7 @@ def spa_router(web: WebSettings) -> APIRouter:
             return FileResponse(file, headers={"Cache-Control": cache})
         index = _file_inside(root, "index.html")
         if index is None:
-            raise HTTPException(status_code=404, detail="Not found")
+            raise HTTPException(status_code=404, detail=NOT_FOUND)
         return FileResponse(index, headers={"Cache-Control": "no-cache"})
 
     return router

@@ -25,6 +25,7 @@ from daimon.adapters.web.nodes.exchange import (
 )
 from daimon.adapters.web.nodes.kinds import build_nodes
 from daimon.adapters.web.runtime import WebRuntime
+from daimon.adapters.web.static import NOT_FOUND
 from daimon.core.agent_admin import require_admin
 from daimon.core.agent_editing import AgentEditError
 from daimon.core.mcp_rpc import McpStatusError
@@ -155,7 +156,7 @@ def server_skills_router(runtime: WebRuntime) -> APIRouter:
         """The node, or 404 as when none is configured: also for a workspace it doesn't serve."""
         node = server_skills_node(runtime)
         if node is None:
-            raise HTTPException(status_code=404, detail="Not found.")
+            raise HTTPException(status_code=404, detail=NOT_FOUND)
         await require_served(runtime, node.server, caller.person.tenant_id)
         return node
 
@@ -208,7 +209,7 @@ def server_skills_router(runtime: WebRuntime) -> APIRouter:
     async def menu(caller: Editor) -> ServerSkillMenu:  # pyright: ignore[reportUnusedFunction]
         node = await node_or_404(caller)
         if not await _serves(node, caller.person):
-            raise HTTPException(status_code=404, detail="Not found.")
+            raise HTTPException(status_code=404, detail=NOT_FOUND)
 
         exchange, skills = node_exchange_of(runtime), node.skills_node()
         edit, actor = change_deps(runtime).edit, actor_of(caller)

@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from daimon.adapters.web.runtime import WebRuntime
+from daimon.adapters.web.static import NOT_FOUND
 from daimon.core import node_exchange
 from daimon.core.config import SignedIdentityServer
 from daimon.core.node_exchange import (
@@ -51,7 +52,7 @@ async def require_served(
 ) -> None:
     """404 for a workspace the server does not serve, before any work or any mention of it."""
     if not await serves_tenant(runtime.sessionmaker, server, tenant_id):
-        raise HTTPException(status_code=404, detail="Not found.")
+        raise HTTPException(status_code=404, detail=NOT_FOUND)
 
 
 def node_exchange_of(runtime: WebRuntime) -> NodeExchange:
