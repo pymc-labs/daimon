@@ -6,7 +6,7 @@ Teams host, applies optional names, descriptions and policy URLs, checks the
 icons, and writes manifest.json, color.png and outline.png at the zip's top
 level. The zip is created new with mode 0600; an existing file is refused.
 
-Run from a checkout with PyYAML available, e.g. `uv run python scripts/teams/build_package.py`.
+Run from a checkout with Python 3 and PyYAML: `python3 scripts/teams/build_package.py`.
 """
 
 from __future__ import annotations

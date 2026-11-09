@@ -73,6 +73,9 @@ def apply(vault: str, files: dict[str, Path]) -> None:
             raise Refusal(f"{name} already exists in the vault; nothing was set")
         if "SecretNotFound" not in shown.stderr:
             raise Refusal("Could not read the vault; check your sign-in and Key Vault role")
+        deleted = _az(["keyvault", "secret", "show-deleted", "--vault-name", vault, "--name", name])
+        if deleted.returncode == 0:
+            raise Refusal(f"{name} is deleted but recoverable; recover or purge it first")
     for name, path in files.items():
         result = _az(
             ["keyvault", "secret", "set", "--vault-name", vault, "--name", name]

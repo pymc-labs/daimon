@@ -24,10 +24,10 @@ class Refusal(ValueError):
     """A fixed message that contains no secret or identifying input."""
 
 
-def _az(args: list[str]) -> str:
+def _az(args: list[str], failure: str) -> str:
     result = subprocess.run(["az", *args], capture_output=True, text=True, check=False)
     if result.returncode:
-        raise Refusal("Azure CLI call failed; check the saved request before retrying")
+        raise Refusal(failure)
     return result.stdout
 
 
@@ -49,14 +49,17 @@ def _write_private(path: Path, text: str) -> None:
 
 
 def create(client_id: str, tenant_id: str, valid_days: int, state_dir: Path, apply: bool) -> str:
-    client_id = str(uuid.UUID(client_id))
-    tenant_id = str(uuid.UUID(tenant_id))
+    try:
+        client_id, tenant_id = str(uuid.UUID(client_id)), str(uuid.UUID(tenant_id))
+    except ValueError:
+        raise Refusal("--client-id and --tenant-id must be GUIDs") from None
     if not 1 <= valid_days <= 365:
         raise Refusal("--valid-days must be between 1 and 365")
     state = _new_state_dir(state_dir)
     if not apply:
         return "Plan: add one expiring secret to the bot application. No Azure call made."
-    if _az(["account", "show", "--query", "tenantId", "-o", "tsv"]).strip() != tenant_id:
+    signed_in = "Could not read the Azure CLI sign-in; run az login"
+    if _az(["account", "show", "--query", "tenantId", "-o", "tsv"], signed_in).strip() != tenant_id:
         raise Refusal("The Azure CLI is signed in to another tenant; nothing created")
     state.mkdir(mode=0o700, parents=True)
     expires = datetime.now(UTC) + timedelta(days=valid_days)
@@ -82,7 +85,8 @@ def create(client_id: str, tenant_id: str, valid_days: int, state_dir: Path, app
                 json.dumps(request),
                 "-o",
                 "json",
-            ]
+            ],
+            "Graph call failed; look for a key named as in request.json before retrying",
         )
     )
     secret = response.get("secretText")

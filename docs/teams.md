@@ -135,10 +135,10 @@ Teams installs apps from a zip with `manifest.json`, `color.png` (192x192,
 full colour) and `outline.png` (32x32, white on transparent) at its top level.
 The builder fills the template [`teams-app-manifest.yaml`](teams-app-manifest.yaml)
 with your client ID and hostname, checks the icons and writes the zip. From the
-repository root:
+repository root, with Python 3 and PyYAML:
 
 ```bash
-uv run python scripts/teams/build_package.py \
+python3 scripts/teams/build_package.py \
   --client-id <application (client) ID> --host teams.example.com \
   --color color.png --outline outline.png --output daimon-teams.zip \
   --privacy-url https://example.com/privacy --terms-url https://example.com/terms

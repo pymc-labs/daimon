@@ -60,7 +60,7 @@ param deployTeamsBot bool = false
 param teamsBotDisplayName string = 'daimon'
 @description('Public HTTPS base URL of the Teams adapter, for a custom domain. Empty uses the Teams app\'s Container Apps hostname.')
 param teamsBaseUrl string = ''
-@description('Set true only after the tenant owner has accepted the Microsoft Teams channel terms.')
+@description('True accepts the Microsoft Teams channel terms for your organisation and adds the channel. Set it only with authority to accept them.')
 param teamsChannelTermsAccepted bool = false
 @allowed(['F0', 'S1'])
 param teamsBotSku string = 'F0'
@@ -71,6 +71,13 @@ var checkedChartStorage = validateChartStorage(chartStorage, secretNames, servic
 var checkedTeamsBot = deployTeamsBot && !contains(services, 'teams')
   ? fail('deployTeamsBot needs teams in services')
   : deployTeamsBot
+// Checked only when the bot is wanted, so default deployments never evaluate fail().
+var teamsBotClientId = checkedTeamsBot
+  ? (serviceEnvironment.?teams.?DAIMON_TEAMS__CLIENT_ID ?? fail('deployTeamsBot needs serviceEnvironment.teams.DAIMON_TEAMS__CLIENT_ID'))
+  : ''
+var teamsBotTenantId = checkedTeamsBot
+  ? (serviceEnvironment.?teams.?DAIMON_TEAMS__TENANT_ID ?? fail('deployTeamsBot needs serviceEnvironment.teams.DAIMON_TEAMS__TENANT_ID'))
+  : ''
 var suffix = uniqueString(resourceGroup().id)
 var stem = '${checkedNamePrefix}-${suffix}'
 var tags = { application: 'daimon' }
@@ -225,8 +232,8 @@ module teamsBot './modules/bot.bicep' = if (checkedTeamsBot) {
   params: {
     name: '${stem}-bot'
     displayName: teamsBotDisplayName
-    clientId: serviceEnvironment.?teams.?DAIMON_TEAMS__CLIENT_ID ?? fail('deployTeamsBot needs serviceEnvironment.teams.DAIMON_TEAMS__CLIENT_ID')
-    tenantId: serviceEnvironment.?teams.?DAIMON_TEAMS__TENANT_ID ?? fail('deployTeamsBot needs serviceEnvironment.teams.DAIMON_TEAMS__TENANT_ID')
+    clientId: teamsBotClientId
+    tenantId: teamsBotTenantId
     teamsBaseUrl: empty(teamsBaseUrl) ? 'https://${stem}-teams.${foundation.outputs.defaultDomain}' : teamsBaseUrl
     sku: teamsBotSku
     teamsChannelTermsAccepted: teamsChannelTermsAccepted

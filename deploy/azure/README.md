@@ -65,7 +65,9 @@ scripts/azure/validate.sh
 
 The script builds and lints every module and both entrypoints, fails on warnings
 as well as errors, and removes generated ARM JSON from its temporary directory.
-It never invokes Azure. For individual checks:
+It never invokes Azure. Building `teams/bot-identity.bicep` downloads the
+Microsoft Graph Bicep extension from `mcr.microsoft.com`, so it needs network
+access. For individual checks:
 
 ```bash
 bicep build deploy/azure/main.bicep --outfile /tmp/daimon-azure.json
@@ -279,6 +281,8 @@ the app package's name, set when [building the package](../../docs/teams.md).
 
 2. Add a client secret. Without `--create` it only checks its inputs. The
    secret lands in `client-secret.txt` in the new state directory, never on screen.
+   It expires after `--valid-days` (default 90): renew it by running the script
+   again with a new `--state`, then replace `teams-client-secret`.
 
    ```bash
    python3 scripts/azure/create_bot_credential.py --client-id "$CLIENT_ID" \
@@ -290,9 +294,9 @@ the app package's name, set when [building the package](../../docs/teams.md).
    true. The Bot's messaging endpoint is the Teams app's hostname plus
    `/api/messages` (output `teamsMessagingEndpoint`); set `teamsBaseUrl` for a
    custom domain.
-4. Once the tenant owner has accepted the Microsoft Teams channel terms, set
-   `teamsChannelTermsAccepted` to true and deploy again to add the channel.
-   False leaves an existing channel as it is.
+4. Setting `teamsChannelTermsAccepted` to true accepts the Microsoft Teams
+   channel terms for your organisation and adds the channel. Set it only with
+   authority to accept them. False leaves an existing channel as it is.
 
 ## Configure and initialize
 

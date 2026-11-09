@@ -9,6 +9,7 @@ import shutil
 import ssl
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -724,7 +725,10 @@ def test_teams_bot_is_off_by_default_and_follows_the_teams_app(
     properties = bots["botServices"]["properties"]
     assert properties["msaAppId"] == "00000000-0000-4000-8000-000000000001"
     assert properties["msaAppTenantId"] == "00000000-0000-4000-8000-000000000002"
-    assert "-teams.{1}" in properties["endpoint"], "points at the Teams app's own hostname"
+    endpoint = properties["endpoint"]
+    assert "https://" in endpoint and "-teams." in endpoint and "/api/messages" in endpoint, (
+        "points at the Teams app's own hostname"
+    )
 
     code, diagnostics, snapshot = _snapshot(
         tmp_path,
@@ -748,6 +752,14 @@ def test_teams_bot_is_off_by_default_and_follows_the_teams_app(
     ("params", "error"),
     [
         (("deployTeamsBot = true",), "DAIMON_TEAMS__CLIENT_ID"),
+        (
+            (
+                "deployTeamsBot = true",
+                "serviceEnvironment = { teams: "
+                "{ DAIMON_TEAMS__CLIENT_ID: '00000000-0000-4000-8000-000000000001' } }",
+            ),
+            "DAIMON_TEAMS__TENANT_ID",
+        ),
         (
             (
                 "deployTeamsBot = true",
@@ -797,7 +809,7 @@ def _az_calls(env: dict[str, str]) -> list[list[str]]:
 
 def _run(script: str, env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["python3", str(ROOT / "scripts/azure" / script), *args],
+        [sys.executable, str(ROOT / "scripts/azure" / script), *args],
         capture_output=True,
         text=True,
         env=env,
@@ -852,6 +864,10 @@ def test_bot_credential_plans_by_default_and_saves_the_secret_privately(
     again = _run("create_bot_credential.py", env, *ids, "--state", str(state), "--create")
     assert again.returncode != 0 and "must not exist" in again.stderr
 
+    bad = ["--client-id", "not-a-guid", "--tenant-id", BOT_TENANT_ID]
+    refused = _run("create_bot_credential.py", env, *bad, "--state", str(outside_git / "x"))
+    assert refused.returncode != 0 and "must be GUIDs" in refused.stderr
+
 
 def test_bot_credential_refuses_another_tenant(outside_git: Path) -> None:
     env = _fake_az(outside_git, GRAPH_REPLY)
@@ -874,6 +890,11 @@ VAULT_REPLY = (
     "    if name in os.environ.get('AZ_EXISTING', '').split(','):\n"
     "        print('{}')\n"
     "    else:\n"
+    "        sys.stderr.write('(SecretNotFound) not found')\n"
+    "        sys.exit(3)\n"
+    "if args[:3] == ['keyvault', 'secret', 'show-deleted']:\n"
+    "    name = args[args.index('--name') + 1]\n"
+    "    if name not in os.environ.get('AZ_DELETED', '').split(','):\n"
     "        sys.stderr.write('(SecretNotFound) not found')\n"
     "        sys.exit(3)\n"
 )
@@ -909,6 +930,14 @@ def test_bootstrap_never_overwrites_an_existing_secret(outside_git: Path) -> Non
     env["AZ_EXISTING"] = "crypto-keys"
     result = _run("bootstrap_secrets.py", env, "--state", str(outside_git / "s"), "--vault", "v")
     assert result.returncode != 0 and "already exists" in result.stderr
+    assert not [call for call in _az_calls(env) if "set" in call], "nothing set"
+
+
+def test_bootstrap_refuses_a_deleted_but_recoverable_secret(outside_git: Path) -> None:
+    env = _fake_az(outside_git, VAULT_REPLY)
+    env["AZ_DELETED"] = "mcp-jwt-secret"
+    result = _run("bootstrap_secrets.py", env, "--state", str(outside_git / "s"), "--vault", "v")
+    assert result.returncode != 0 and "recover or purge" in result.stderr
     assert not [call for call in _az_calls(env) if "set" in call], "nothing set"
 
 

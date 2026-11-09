@@ -12,12 +12,12 @@ param displayName string = 'daimon'
 param clientId string
 @description('Directory (tenant) ID of that single-tenant application.')
 param tenantId string
-@description('Public HTTPS base URL of the Teams adapter, without a trailing slash or path.')
+@description('Public HTTPS base URL of the Teams adapter, without a trailing slash.')
 @minLength(9)
 param teamsBaseUrl string
 @allowed(['F0', 'S1'])
 param sku string = 'F0'
-@description('Set true only after the tenant owner has accepted the Microsoft Teams channel terms. False leaves any existing channel untouched.')
+@description('True accepts the Microsoft Teams channel terms for your organisation and adds the channel. False leaves any existing channel untouched.')
 param teamsChannelTermsAccepted bool = false
 param tags object = {}
 
