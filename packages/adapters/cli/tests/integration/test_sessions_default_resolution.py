@@ -83,6 +83,7 @@ def _build_settings(defaults_root: Path) -> Settings:
         cli = _Cli()
         mcp = _Mcp()
         github_app = GithubAppSettings()
+        features: dict[str, str] = {}
 
     settings = _Settings()
     settings.defaults_root = defaults_root  # type: ignore[attr-defined]

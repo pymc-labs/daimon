@@ -650,6 +650,8 @@ class ThreadSession(Base):
     effective_config: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     identity_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
     mutable_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # What the session was created with (`EvalKey`); NULL on older rows.
+    eval_key: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     # The provider-neutral binding this row backs (`provider_binding`), and its
     # generation. NULL until `stores.mux_state.link_legacy_thread_sessions`
     # fills backfilled rows (in batches, never under the migration's lock) or
@@ -3133,6 +3135,9 @@ class TurnOutcome(Base):
     cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(20, 10))
     unpriced_calls: Mapped[int | None] = mapped_column(Integer)
     billing_posture: Mapped[str | None] = mapped_column(Text)
+    # What the turn ran with (`daimon.core.features.eval_key.EvalKey`), for
+    # grouping eval results. NULL on turns without a session snapshot.
+    eval_key: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
 
 class TenantGitHubRepo(Base):

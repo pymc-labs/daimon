@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import anthropic
 import httpx
@@ -59,6 +59,7 @@ from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent
 from daimon.testing.mcp_skills import SkillsServer, skill_md
+from daimon.testing.settings_mock import mock_settings
 from fastmcp.exceptions import ToolError
 from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
@@ -166,7 +167,7 @@ async def _world(factory: async_sessionmaker[AsyncSession], *, managed: bool = F
             return not_found_response(f"no such session: {found['id']}")
         return httpx.Response(200, json=sessions[found["id"]])
 
-    settings = MagicMock()
+    settings = mock_settings()
     settings.tool_safety = ToolSafetyPolicy(enabled=True)
     settings.mcp.public_url = None
     settings.mcp.app_root_url = "https://daimon.example"

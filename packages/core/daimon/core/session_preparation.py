@@ -754,6 +754,7 @@ async def _prepare_session_for_turn_locked(
         reused: bool,
         continuity: ContinuityOutcome,
         decided: Admission | None = None,
+        snapshot: SessionSnapshot | None = None,
     ) -> PreparedTurn:
         current = decided or admission
         return PreparedTurn(
@@ -774,6 +775,7 @@ async def _prepare_session_for_turn_locked(
             ),
             continuity=continuity,
             session_model_id=model_id,
+            snapshot=snapshot,
         )
 
     async def from_fresh(
@@ -812,6 +814,7 @@ async def _prepare_session_for_turn_locked(
             continuity=continuity,
             # The admission decided again right before the session was created.
             decided=fresh.admission,
+            snapshot=snapshot,
         )
 
     stamp_observation = (
@@ -1052,6 +1055,7 @@ async def _prepare_session_for_turn_locked(
                 watermark=row.watermark_message_id,
                 reused=True,
                 continuity=continuity,
+                snapshot=snapshot,
             )
 
         current_model = (

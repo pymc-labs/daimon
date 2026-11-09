@@ -42,6 +42,7 @@ from daimon.core.thread_participation import (
     ParticipationMode,
     ParticipationScope,
 )
+from daimon.testing.settings_mock import mock_settings
 from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -62,7 +63,7 @@ def _make_runtime(
     quiet_seconds: float = 0.2,
     cap: int = 100,
 ) -> DiscordRuntime:
-    settings = MagicMock()
+    settings = mock_settings()
     settings.mcp = McpSettings()
     discord_settings = MagicMock()
     discord_settings.max_concurrent_turns_per_tenant = cap

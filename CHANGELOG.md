@@ -30,6 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   When a conversation moves to a new session, `checkpoint_prompt` Off carries only the conversation and skips the paid step that saves the working files.
   `daimon sessions create` builds its session with the agent's features, as chat does.
 
+- **Each turn records what it ran with.**
+  Turn outcomes and conversations store an `eval_key`: the session's fingerprint and tools, hashes of the safety block, guidance and turn controls, the platform, and every feature with the level that decided it. Older rows keep it empty.
+
 - **The Azure deploy can keep MCP private while Teams is public.**
   Set `mcpPublicIngress` to false and MCP is reachable only from apps in the same Container Apps environment. The default keeps it public, as before.
   It suits only the self-hosted harness running in that environment. Hosted model backends, including the default Anthropic one, sign-in and connect links, and every other Daimon web page stop working, because MCP serves them.

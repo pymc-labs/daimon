@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 from daimon.adapters.mcp.tools.channel_rules import register_channel_rule_tools
 from daimon.adapters.mcp.tools.scope_settings import register_scope_settings_tools
+from daimon.core.features.registry import FEATURES
 from daimon.core.tool_safety import CARDED_TOOLS, PERMISSION_SETTER_TOOLS, gate_protected_tool
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
@@ -30,7 +31,8 @@ async def test_the_approvals_setter_is_carded_and_protected() -> None:
     mcp = FastMCP("settings")
     register_scope_settings_tools(mcp, MagicMock())
     tools = {tool.name: tool for tool in await mcp.local_provider.list_tools()}
-    assert "approvals" in tools["change_setting"].parameters["properties"]["key"]["enum"]
+    assert tools["change_setting"].parameters["properties"]["key"]["type"] == "string"
+    assert FEATURES["approvals"].tiers, "approvals is a feature `change_setting` names"
     assert CARDED_TOOLS["change_setting"] == "origin_context_id"
     assert "change_setting" in PERMISSION_SETTER_TOOLS
     assert gate_protected_tool("change_setting")

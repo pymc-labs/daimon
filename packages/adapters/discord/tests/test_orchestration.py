@@ -48,6 +48,7 @@ from daimon.core.turn.protection import ConfirmedProtection, ProtectionState
 from daimon.core.turn_queue import TurnTicket
 from daimon.testing.factories import make_channel_budget
 from daimon.testing.ma_models import ma_agent, ma_environment
+from daimon.testing.settings_mock import mock_settings
 from mux.testing.drivers.anthropic.ma_models import DEFAULT_MODEL_ID, ma_session
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -85,7 +86,7 @@ def _make_runtime(
     BetaEnvironment instances downstream.
     """
     _ = tenant_id  # runtime no longer carries tenant_id; bot.py threads it
-    settings = MagicMock()
+    settings = mock_settings()
     settings.mcp = McpSettings()
     settings.billing.markup = Decimal("1.0")
     settings.billing.signup_credit = Decimal("0")

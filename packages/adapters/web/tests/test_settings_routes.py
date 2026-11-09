@@ -10,8 +10,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from daimon.core import scope_settings, web_identity
+from daimon.core import web_identity
 from daimon.core.authz import Subject
+from daimon.core.features import service as feature_service
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import PUBLIC_URL, WebClientFactory
@@ -36,7 +37,7 @@ def _linked(monkeypatch: pytest.MonkeyPatch, *, admin: bool) -> list[str]:
         return Subject(is_admin=admin, platform_user_id=user_id)
 
     monkeypatch.setattr(web_identity, "chat_identity", chat_identity)
-    monkeypatch.setattr(scope_settings, "approval_admin", approval_admin)
+    monkeypatch.setattr(feature_service, "approval_admin", approval_admin)
     return checked
 
 

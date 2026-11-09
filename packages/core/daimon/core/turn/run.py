@@ -36,6 +36,7 @@ from daimon.core.confirmation import (
 from daimon.core.context_prompt import TurnContext, context_prompt
 from daimon.core.context_provider import ContextHook, ContextRequest, LoadedProvider
 from daimon.core.errors import TurnError
+from daimon.core.features.eval_key import EvalKey
 from daimon.core.handoff_context import (
     render_lost_workspace_framing,
     render_previous_session,
@@ -1149,6 +1150,9 @@ async def run_prepared_turn(
     observation.agent_id = prepared.admission.agent.id
     observation.session_id = prepared.ma_session_id
     observation.origin = origin
+    observation.eval_key = EvalKey.of(
+        prepared.snapshot, prepared.admission.features, platform
+    ).to_json()
     observation.backend_profile = (
         prepared.admission.backend_footer_profile
         if prepared.admission.backend_footer_profile is not None and deps.backend_selection_enabled

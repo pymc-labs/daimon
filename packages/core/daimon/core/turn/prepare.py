@@ -43,6 +43,7 @@ from daimon.core.channel_skills import PLATFORM_SKILL_RETRY_AFTER
 from daimon.core.config import get_repo_memory_settings, load_turn_settings
 from daimon.core.confirmation import confirmed_tools_for_tenant
 from daimon.core.credential_env import assemble_env_bytes
+from daimon.core.features.eval_key import EvalKey
 from daimon.core.github_app_session import AppSessionAccess, token_scopes_for_tokens
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_hold import hold_key
@@ -204,6 +205,8 @@ class PreparedTurn:
     continuity: ContinuityOutcome = CONTINUED
     # Capability decisions follow the session snapshot, including reused sessions.
     session_model_id: str | None = field(default=None, kw_only=True)
+    # The configuration the session froze, where the backend records one.
+    snapshot: SessionSnapshot | None = field(default=None, kw_only=True, compare=False, repr=False)
     _finalize: Callable[[], Awaitable[None]] | None = field(
         default=None, kw_only=True, compare=False, repr=False
     )
@@ -652,6 +655,7 @@ async def insert_mapping(
         seal_ids=created.seal_ids,
         identity_fingerprint=fingerprint_identity(snapshot),
         mutable_fingerprint=fingerprint_mutable(snapshot),
+        eval_key=EvalKey.of(snapshot, admission.features, platform).to_json(),
         predecessor_id=predecessor_id,
         transfer_file_id=transfer_file_id,
         transfer_kind=transfer_kind,

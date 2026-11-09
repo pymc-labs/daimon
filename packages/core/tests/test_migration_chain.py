@@ -150,6 +150,7 @@ TAIL = (
     "0185_agent_post_role",
     "0186_github_router_sessions",
     "0187_feature_values",
+    "0188_eval_key",
 )
 HEAD = TAIL[-1]
 
@@ -399,7 +400,16 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
         # 0187: tenants gains feature_revision and loses cost_footer; the scope index goes.
         if kind == "index" and name == "ix_progress_plan_scopes_parent":
             return False
-        if expected != HEAD and kind == "column" and name in {"feature_revision", "cost_footer"}:
+        if (
+            expected != HEAD
+            and kind == "column"
+            and name
+            in {
+                "feature_revision",
+                "cost_footer",
+                "eval_key",
+            }
+        ):
             return False
         # Added by the channel settings migration (0173), after PREVIEW_HEAD.
         if expected not in TAIL and (
