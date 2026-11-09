@@ -210,9 +210,9 @@ settings.
 The repository holds Bicep templates in `deploy/azure/` and an `azure.yaml`
 for the Azure Developer CLI. They provision Container Apps for Discord, Teams,
 MCP and the scheduler, plus a migration job, PostgreSQL, Key Vault, Blob
-storage, a container registry and optionally an Azure OpenAI deployment. The
-templates are validated offline, and live deployments are not verified end to
-end.
+storage, a container registry, and optionally an Azure OpenAI deployment and
+the Azure Bot for Teams. The templates are validated offline, and live
+deployments are not verified end to end.
 
 Deployment runs in stages: foundation, image publication and init, then the
 serving apps. Endpoints are public, and private networking is not

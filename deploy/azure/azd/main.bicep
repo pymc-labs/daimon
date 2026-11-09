@@ -36,6 +36,12 @@ param serviceEnvironment object = {}
 param secretNames object = {}
 param serviceSecretNames object = {}
 param postgresFirewallRules array = []
+param deployTeamsBot bool = false
+param teamsBotDisplayName string = 'daimon'
+param teamsBaseUrl string = ''
+param teamsChannelTermsAccepted bool = false
+@allowed(['F0', 'S1'])
+param teamsBotSku string = 'F0'
 
 var checkedModelDeploymentName = validateModelDeploymentName(modelName, modelDeploymentName)
 var checkedNamePrefix = validateNamePrefix(namePrefix)
@@ -70,6 +76,11 @@ module stack '../main.bicep' = {
     secretNames: secretNames
     serviceSecretNames: serviceSecretNames
     postgresFirewallRules: postgresFirewallRules
+    deployTeamsBot: deployTeamsBot
+    teamsBotDisplayName: teamsBotDisplayName
+    teamsBaseUrl: teamsBaseUrl
+    teamsChannelTermsAccepted: teamsChannelTermsAccepted
+    teamsBotSku: teamsBotSku
   }
 }
 output AZURE_RESOURCE_GROUP string = group.name
@@ -80,4 +91,5 @@ output AZURE_AI_PROJECT_ENDPOINT string = deployAi ? stack.outputs.harnessEnviro
 output AZURE_OPENAI_ENDPOINT string = deployAi ? stack.outputs.harnessEnvironment.AZURE_OPENAI_ENDPOINT : ''
 output AZURE_OPENAI_DEPLOYMENT string = deployAi ? stack.outputs.harnessEnvironment.AZURE_OPENAI_DEPLOYMENT : ''
 output AZURE_CLIENT_ID string = stack.outputs.harnessEnvironment.AZURE_CLIENT_ID
+output DAIMON_TEAMS_MESSAGING_ENDPOINT string = stack.outputs.teamsMessagingEndpoint
 output DAIMON_MCP_ARTIFACTS_ENVIRONMENT object = stack.outputs.mcpArtifactsEnvironment

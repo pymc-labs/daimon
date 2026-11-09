@@ -58,6 +58,8 @@ RULES: tuple[tuple[str, str], ...] = (
     ("deploy/azure/", "repo"),
     ("deploy/lanes/", "repo"),
     ("scripts/azure/", "repo"),
+    # The Teams package builder is tested beside the manifest it fills in.
+    ("scripts/teams/", "teams-manifest"),
     ("tests/test_", "repo"),
     ("web/", "spa"),
     ("tests/parity/", "parity"),

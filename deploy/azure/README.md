@@ -36,8 +36,9 @@ Discord and scheduler have HTTP liveness probes on their event-loop responders,
 ports 8081 and 8082 respectively. These ports have no public ingress.
 MCP (8765) and Teams (3978) have public HTTPS ingress; Discord and scheduler
 have none. Serving commands override the image entrypoint, matching Compose:
-seeding belongs to the init job. No notebook/report host, Slack, Teams Bot
-registration, harness image or hosted-agent version is deployed by this stack.
+seeding belongs to the init job. No notebook/report host, Slack, harness image
+or hosted-agent version is deployed by this stack. The Azure Bot for Teams is
+optional (`deployTeamsBot`); see [Teams bot](#teams-bot).
 
 `enablePrivateNetworking` accepts **false only**. This baseline uses public
 service endpoints. Postgres allows Azure-service connections through its
@@ -257,6 +258,42 @@ is operator-configured, with no built-in model price table; unpriced
 deployments are refused before harness calls. Use rates verified for your
 Azure region, SKU and contract; changing the model default does not supply a tariff.
 
+## Teams bot
+
+Teams needs a single-tenant Entra application, a client secret for it and an
+Azure Bot pointing at the Teams app. These templates and scripts make all three.
+Their names default to `daimon`; set your own display names. People in Teams see
+the app package's name, set when [building the package](../../docs/teams.md).
+
+1. Create the application, once, as someone allowed to register applications.
+   It requests no API permissions; Teams grants channel access at install.
+   Keep `uniqueName` the same on every later deployment.
+
+   ```bash
+   az deployment group create -g "$RG" --name daimon-bot-identity \
+     --template-file deploy/azure/teams/bot-identity.bicep \
+     --parameters uniqueName=daimon-teams-bot displayName=daimon --output none
+   az deployment group show -g "$RG" --name daimon-bot-identity \
+     --query properties.outputs
+   ```
+
+2. Add a client secret. Without `--create` it only checks its inputs. The
+   secret lands in `client-secret.txt` in the new state directory, never on screen.
+
+   ```bash
+   python3 scripts/azure/create_bot_credential.py --client-id "$CLIENT_ID" \
+     --tenant-id "$TENANT_ID" --state /secure/teams-bot-credential --create
+   ```
+
+3. Set `teams-client-secret` from that file (or pass it to `bootstrap_secrets.py`),
+   and put both IDs under `serviceEnvironment.teams`. Set `deployTeamsBot` to
+   true. The Bot's messaging endpoint is the Teams app's hostname plus
+   `/api/messages` (output `teamsMessagingEndpoint`); set `teamsBaseUrl` for a
+   custom domain.
+4. Once the tenant owner has accepted the Microsoft Teams channel terms, set
+   `teamsChannelTermsAccepted` to true and deploy again to add the channel.
+   False leaves an existing channel as it is.
+
 ## Configure and initialize
 
 Grant the operator data-plane roles described above and wait for RBAC to
@@ -275,6 +312,10 @@ az keyvault secret set --vault-name "$VAULT" --name teams-client-secret \
   --file /secure/teams-client-secret --output none
 ```
 
+`scripts/azure/bootstrap_secrets.py --state <new dir> --vault "$VAULT"` does the
+first two for a fresh install: it generates them into a new owner-only
+directory and sets them, refusing if either already exists. Add
+`--teams-client-secret-file` to set `teams-client-secret` as well.
 `mcp-jwt-secret` is the shared signing secret. `crypto-keys` is a Fernet key
 ring in the format described in [self-hosting](../../docs/self-hosting.md).
 The database URL is written to Key Vault by the database module, with TLS
@@ -297,10 +338,8 @@ IMAGE="$ACR.azurecr.io/daimon@$IMAGE_DIGEST"
 
 Add `containerImage` = `$IMAGE` to your local parameters; keep `deployServices`
 false. When Teams is selected, add these **nonsecret** values under `serviceEnvironment.teams`:
-`DAIMON_TEAMS__CLIENT_ID` and `DAIMON_TEAMS__TENANT_ID` for an existing single-tenant
-Bot registration. Use port 3978. The code creates no Entra application or Bot
-registration. An operator must set the Bot messaging endpoint to the Teams
-app's HTTPS URL plus `/api/messages` once serving is enabled.
+`DAIMON_TEAMS__CLIENT_ID` and `DAIMON_TEAMS__TENANT_ID` of the bot application
+(see [Teams bot](#teams-bot)). Use port 3978.
 
 **M1 on the existing backend requires Anthropic configuration before init.**
 Map `DAIMON_ANTHROPIC__API_KEY` to `anthropic-api-key` in the common `secretNames`
