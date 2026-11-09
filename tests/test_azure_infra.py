@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import shutil
 import ssl
 import stat
@@ -965,3 +966,56 @@ def test_bootstrap_without_a_vault_makes_no_azure_call(outside_git: Path) -> Non
     assert _az_calls(env) == []
     again = _run("bootstrap_secrets.py", env, "--state", str(outside_git / "b"))
     assert again.returncode != 0 and "never regenerates" in again.stderr
+
+
+def _apps(snapshot: dict) -> dict[str, dict]:
+    return {
+        r["name"].rsplit("-", 1)[-1]: r
+        for r in snapshot["predictedResources"]
+        if r["type"] == "Microsoft.App/containerApps"
+    }
+
+
+def _mcp_urls(snapshot: dict) -> set[str]:
+    """The MCP URL each serving app and the init job is given."""
+    return {
+        e["value"]
+        for r in snapshot["predictedResources"]
+        if r["type"] in ("Microsoft.App/containerApps", "Microsoft.App/jobs")
+        for e in r["properties"]["template"]["containers"][0]["env"]
+        if e["name"] == "DAIMON_MCP__PUBLIC_URL"
+    }
+
+
+SERVING = (
+    "containerImage = 'example.azurecr.io/daimon@sha256:" + "0" * 64 + "'",
+    "deployServices = true",
+)
+
+
+def test_mcp_can_stay_private_while_teams_is_public(
+    templates: dict[str, dict], tmp_path: Path
+) -> None:
+    for entrypoint in ("main.bicep", "azd/main.bicep"):
+        assert templates[entrypoint]["parameters"]["mcpPublicIngress"]["defaultValue"] is True
+    assert templates["modules/app.bicep"]["parameters"]["externalIngress"]["defaultValue"] is True
+
+    code, diagnostics, default = _snapshot(tmp_path, *SERVING)
+    assert code == 0, diagnostics
+    apps = _apps(default)
+    assert set(apps) == {"discord", "teams", "mcp", "scheduler"}
+    assert apps["mcp"]["properties"]["configuration"]["ingress"]["external"] is True
+    assert apps["teams"]["properties"]["configuration"]["ingress"]["external"] is True
+    assert sum(r["type"] == "Microsoft.App/jobs" for r in default["predictedResources"]) == 1
+    [url] = _mcp_urls(default)
+    assert re.search(r"-mcp\.\S*/mcp", url) and ".internal." not in url, "MCP stays public"
+
+    code, diagnostics, private = _snapshot(tmp_path, *SERVING, "mcpPublicIngress = false")
+    assert code == 0, diagnostics
+    apps = _apps(private)
+    assert apps["mcp"]["properties"]["configuration"]["ingress"]["external"] is False
+    assert apps["teams"]["properties"]["configuration"]["ingress"]["external"] is True
+    for worker in ("discord", "scheduler"):
+        assert apps[worker]["properties"]["configuration"].get("ingress") is None
+    [url] = _mcp_urls(private)
+    assert re.search(r"-mcp\.internal\.\S*/mcp", url), "every process uses the internal URL"

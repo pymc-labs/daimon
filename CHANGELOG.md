@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The Azure deploy can keep MCP private while Teams is public.**
+  Set `mcpPublicIngress` to false and MCP is reachable only from apps in the same Container Apps environment. The default keeps it public, as before.
+  It suits only the self-hosted harness running in that environment. Hosted model backends, including the default Anthropic one, sign-in and connect links, and every other Daimon web page stop working, because MCP serves them.
 - **The Azure deploy can register the Teams bot, and one script builds the Teams app package.**
   `deployTeamsBot` (off by default) adds the Azure Bot; a template and scripts create its Entra app and secret, and set a fresh install's secrets without overwriting any. `scripts/teams/build_package.py` builds the Teams zip with your own name and policy URLs.
 - **A workspace the data server node doesn't serve no longer sees the node.**

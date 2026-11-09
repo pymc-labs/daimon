@@ -9,6 +9,8 @@ param vaultUri string
 param image string
 param command array
 param port int
+@description('False limits ingress to apps in the same Container Apps environment.')
+param externalIngress bool = true
 param environment object
 param secretNames object
 
@@ -32,7 +34,7 @@ resource app 'Microsoft.App/containerApps@2025-01-01' = {
       activeRevisionsMode: 'Single'
       ingress: port > 0
         ? {
-            external: true
+            external: externalIngress
             targetPort: port
             transport: 'http'
             allowInsecure: false
