@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager
 from io import StringIO
 from typing import Any
 
@@ -28,6 +29,7 @@ from daimon.testing.factories import make_tenant
 from mux.testing.drivers.anthropic.ma import MARouter, list_response
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from typer.testing import CliRunner
 
 from .test_agents import _agent_json  # pyright: ignore[reportPrivateUsage]
 
@@ -223,3 +225,60 @@ async def test_the_cli_has_no_approvals_setter(
             channel=None,
             thread=None,
         )
+
+
+async def test_set_refuses_a_stale_expected_value(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    rt = _runtime(db_session_factory, [])
+    selector = await _tenant(db_session_factory)
+    console, _ = _console()
+    kw: dict[str, Any] = {"rt": rt, "console": console, "selector": selector}
+    place: dict[str, Any] = {"tier": None, "agent": None, "channel": "c1", "thread": None}
+    await features_set(**kw, key="progress_plans", value="on", **place, expected="default")
+    with pytest.raises(StoreError, match="changed"):
+        await features_set(**kw, key="progress_plans", value="off", **place, expected="default")
+    row = _row(await _rows(rt, selector, channel="c1"), "progress_plans")
+    assert [t["text"] for t in row["tiers"] if t["tier"] == "channel"] == ["on"], "not written"
+
+
+def test_the_set_command_passes_expected_to_the_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+
+    async def fake_set(**kwargs: Any) -> None:
+        seen.update(kwargs)
+
+    @asynccontextmanager
+    async def fake_runtime(_settings: object) -> AsyncIterator[None]:
+        yield None
+
+    monkeypatch.setattr(features_cmd, "features_set", fake_set)
+    monkeypatch.setattr(features_cmd, "build_runtime", fake_runtime)
+    monkeypatch.setattr(features_cmd, "load_settings", lambda: None)
+    result = CliRunner().invoke(
+        features_cmd.features_app,
+        ["set", "progress_plans", "on", "--channel", "c1", "--expected", "off:locked"],
+    )
+    assert result.exit_code == 0, result.output
+    assert seen["expected"] == "off:locked", "the CLI write must carry the stale-write check"
+
+
+async def test_get_names_the_level_that_decides_over_a_lower_one(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A channel's On under a workspace Off reads as Off, set for the workspace."""
+    rt = _runtime(db_session_factory, [])
+    selector = await _tenant(db_session_factory)
+    console, out = _console()
+    kw: dict[str, Any] = {"rt": rt, "console": console, "selector": selector}
+    await features_set(
+        **kw, key="watches", value="on", tier=None, agent=None, channel="c1", thread=None
+    )
+    await features_set(
+        **kw, key="watches", value="off", tier="workspace", agent=None, channel=None, thread=None
+    )
+    await features_list(
+        **kw, agent=None, channel="c1", thread=None, keys=["watches"], as_json=False
+    )
+    text = " ".join(out.getvalue().split())
+    assert "Off, set for the" in text and "channel=on" in text, text

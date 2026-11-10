@@ -357,6 +357,14 @@ def features_set_command(
     channel: Annotated[str | None, _CHANNEL] = None,
     thread: Annotated[str | None, _THREAD] = None,
     lock: Annotated[bool, typer.Option("--lock", help="Lower tiers cannot change it.")] = False,
+    expected: Annotated[
+        str | None,
+        typer.Option(
+            "--expected",
+            help="Refuse if the level no longer holds this value (`default`, `<value>` or "
+            "`<value>:locked`), as `features get` showed it.",
+        ),
+    ] = None,
 ) -> None:
     """Set (or clear) one feature at one tier."""
     _check_key(key)
@@ -377,6 +385,7 @@ def features_set_command(
                 channel=channel,
                 thread=thread,
                 locked=lock,
+                expected=expected,
             )
 
     run_cli(run(), console=console)
