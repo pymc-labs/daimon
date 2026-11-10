@@ -132,6 +132,7 @@ from daimon.core.agent_identity import (
 from daimon.core.agent_ownership import owns_agent
 from daimon.core.answering_map import AnsweringMap, routed_agent_names
 from daimon.core.authz import build_subject
+from daimon.core.backend_refusals import refusal_card
 from daimon.core.channel_rules import as_readers, as_writers, channel_rule_status
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.errors import DaimonError
@@ -1030,7 +1031,7 @@ async def _dispatch_panel_action(
                 client,
                 channel_id=meta.channel_id or user_id,
                 user_id=user_id,
-                text=str(exc),
+                text=refusal_card(exc)[0],
                 error=True,
             )
         else:

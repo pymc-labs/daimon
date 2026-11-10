@@ -319,6 +319,7 @@ async def _apply(
     place_word: str,
 ) -> SwitchCardPress:
     from daimon.core.authz import Place, build_subject
+    from daimon.core.backend_refusals import refusal_card
     from daimon.core.channel_backend import (
         AgentBackendRefused,
         BackendActor,
@@ -431,15 +432,12 @@ async def _apply(
                 )
                 + " Nothing changed.",
             )
-        return await end(
-            "refused", "This switch was refused when it was confirmed. Nothing changed."
-        )
-    except BackendUnsupported:
+        line, _ = refusal_card(exc, provider=reference.target_backend, admin=is_admin)
+        return await end("refused", f"{line} Nothing changed.")
+    except BackendUnsupported as unsupported:
         log.warning("switch_card.unsupported", card_id=str(card_id))
-        return await end(
-            "refused",
-            f"{provider_name(reference.target_backend)} can't run here right now. Nothing changed.",
-        )
+        line, _ = refusal_card(unsupported, provider=reference.target_backend)
+        return await end("refused", f"{line} Nothing changed.")
     pin = await channel_pin_line(
         sessionmaker, tenant_id=tenant_id, platform=claimed.platform, channel_id=claimed.channel_id
     )

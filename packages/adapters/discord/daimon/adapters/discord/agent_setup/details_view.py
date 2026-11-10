@@ -52,6 +52,7 @@ from daimon.core.agent_detail_lists import (
 from daimon.core.agent_details import AgentDetails, RepoBinding
 from daimon.core.agent_identity import identity_enabled_for, is_builtin_agent
 from daimon.core.authz import Subject, build_subject
+from daimon.core.backend_refusals import refusal_card
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.errors import DaimonError
 from daimon.core.github_repo_auth import RepoAccess, normalize_owner_repo
@@ -674,7 +675,9 @@ class DetailsView(PanelViewBase):
                 )
         except channel_backend.AgentBackendRefused as exc:
             await self._backend_audit(interaction, outcome="denied", reason=exc.reason)
-            await interaction.followup.send(embed=build_notice_embed(str(exc)), ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(refusal_card(exc)[0]), ephemeral=True
+            )
             return
         await self._backend_audit(interaction, outcome="allowed", reason="completed")
         self.state.backend_selection = revision.backend

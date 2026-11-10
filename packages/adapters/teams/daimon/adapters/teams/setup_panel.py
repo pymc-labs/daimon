@@ -62,6 +62,7 @@ from daimon.core.agent_ownership import owns_agent
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
 from daimon.core.answering_map import AnsweringMap, load_answering_map, routed_agent_names
 from daimon.core.authz import AgentRef, build_agent_ref, build_subject
+from daimon.core.backend_refusals import refusal_card
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import DaimonError
@@ -739,7 +740,7 @@ class SetupPanel:
                     reason=exc.reason,
                     agent_name=name,
                 )
-                return toast(str(exc))
+                return toast(refusal_card(exc)[0])
             await record_panel_write(
                 self._runtime.sessionmaker,
                 tenant_id=actor.tenant_id,
