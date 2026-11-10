@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import JsonValue, model_validator
+from pydantic import Field, JsonValue, model_validator
 
 from mux.contracts._base import Contract, FrozenMap
 from mux.contracts.errors import ExtensionVersionError, UnsupportedCapability
@@ -131,6 +131,9 @@ class Profile(Contract):
     meters_cache_writes: bool = True
     """The usage meter counts cache-write input. False where the provider bills cache
     writes but its usage has no such count: the host then prices none, an estimate."""
+    carries_caller_resources: bool = Field(default=False, exclude=True)
+    """The host carries the caller's seals, Slack turn context and private DM on its
+    per-turn credential, not as a native resource. Excluded from dumps: digests hold."""
 
     @model_validator(mode="after")
     def _check(self) -> Profile:

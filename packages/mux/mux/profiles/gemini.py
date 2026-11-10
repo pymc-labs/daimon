@@ -17,6 +17,7 @@ ARGON_MODEL = "gemini-4-argon"
 INLINE_REUSE = Profile(
     provider="gemini",
     profile_id="gemini.inline_reuse",
+    carries_caller_resources=True,
     schema_version="1",
     accounting_mode=AccountingMode.NATIVE_TOTALS,
     sdk_pin="google-genai>=2.7.0,<3",
