@@ -31,7 +31,7 @@ LEGACY_SERVER_NAME = "mcp_server_name"
 @dataclass(frozen=True)
 class Binding:
     scope: Scope
-    connection: MCPConnection
+    connections: tuple[MCPConnection, ...]
     resolver: MCPSecretResolver
     request_json: str
     gcs_resolver: GCSSecretResolver | None = None
@@ -91,11 +91,12 @@ def server_names(connections: Sequence[MCPConnection]) -> dict[str, str]:
 
 def compile_mcp(connections: Sequence[MCPConnection], *, enabled: bool) -> list[JsonValue]:
     bound = any(c.credential_ref is not None for c in connections)
-    if bound and (not enabled or len(connections) != 1):
+    # Several servers may bind only when they share one reference (a host's own routes).
+    if bound and (not enabled or len({c.credential_ref for c in connections}) != 1):
         refuse("one_resolver_bound_mcp_server")
     tools: list[JsonValue] = []
     native_names: set[str] = set()
-    for connection in connections:
+    for index, connection in enumerate(connections):
         if (
             connection.transport != "streamable_http"
             or not destination(connection.url)
@@ -117,6 +118,10 @@ def compile_mcp(connections: Sequence[MCPConnection], *, enabled: bool) -> list[
                 refuse("mcp_credential_reference")
             policy = connection.tool_policy
             allowed = policy.get("allowed_tools")
+            if index and not policy:
+                # A shared server after the first may expose its whole catalogue.
+                tools.append(tool)
+                continue
             if (
                 set(policy) != {"allowed_tools"}
                 or not isinstance(allowed, list)
@@ -184,20 +189,9 @@ async def authenticated_template(
         if gcs_secrets is not None:
             refuse("gcs_mount_requires_authenticated_source")
         return request
-    if len(bound) != 1 or resolver is None:
+    if len(bound) != len(connections) or resolver is None:
         refuse("one_resolver_bound_mcp_server")
-    connection = bound[0]
-    reference = connection.credential_ref
-    if reference is None:
-        refuse("mcp_credential_reference")
-    try:
-        secret = credential(await resolver(scope, reference, connection.url))
-    except Exception:
-        raise ProviderError(
-            "permission", retryable=False, native_code="mcp_secret_unavailable"
-        ) from None
-    if contains_secret(request, secret):
-        raise ProviderError("permission", retryable=False, native_code="mcp_secret_outside_binding")
+    secrets = await _secrets(scope, tuple(bound), resolver, request)
     tools = request["tools"]
     if not isinstance(tools, list):
         refuse("mcp_tool_list")
@@ -205,14 +199,41 @@ async def authenticated_template(
     if gcs_secrets is not None and not sources:
         refuse("gcs_mount_sources")
     binding = Binding(
-        scope, connection, resolver, json.dumps(request, sort_keys=True), gcs_secrets, sources
+        scope, tuple(bound), resolver, json.dumps(request, sort_keys=True), gcs_secrets, sources
     )
     if gcs_secrets is not None:
         await authenticate_storage(request, binding, bound=True)
     for tool in tools:
         if isinstance(tool, dict) and tool.get("type") == "mcp_server":
+            secret = secrets[str(tool.get("url"))]
             tool["headers"] = {"Authorization": BoundCredential("Bearer " + secret, binding)}
     return request
+
+
+async def _secrets(
+    scope: Scope,
+    connections: tuple[MCPConnection, ...],
+    resolver: MCPSecretResolver,
+    request: Object,
+) -> dict[str, str]:
+    """One bearer per destination; the host authorizes each reference and URL together."""
+    secrets: dict[str, str] = {}
+    for connection in connections:
+        reference = connection.credential_ref
+        if reference is None:
+            refuse("mcp_credential_reference")
+        try:
+            secret = credential(await resolver(scope, reference, connection.url))
+        except Exception:
+            raise ProviderError(
+                "permission", retryable=False, native_code="mcp_secret_unavailable"
+            ) from None
+        if contains_secret(request, secret):
+            raise ProviderError(
+                "permission", retryable=False, native_code="mcp_secret_outside_binding"
+            )
+        secrets[connection.url] = secret
+    return secrets
 
 
 def gcs_sources(request: Object) -> tuple[str, ...]:
@@ -397,50 +418,37 @@ async def refresh_bound_request(request: Object) -> Object:
             refuse("unbound_gcs_authentication")
         validate_tools(tools)
         return request
-    if len(marked) != 1:
-        refuse("one_resolver_bound_mcp_server")
     binding = marked[0].binding
+    if len(marked) != len(binding.connections) or any(m.binding is not binding for m in marked):
+        refuse("one_resolver_bound_mcp_server")
     fresh = copy.deepcopy(request)
     fresh_tools = fresh.get("tools")
     if not isinstance(fresh_tools, list):
         refuse("mcp_tool_list")
-    target: Object | None = None
+    targets: list[Object] = []
     for tool in fresh_tools:
         if isinstance(tool, dict) and "headers" in tool:
             headers = tool["headers"]
             if (
-                target is not None
-                or not isinstance(headers, dict)
+                not isinstance(headers, dict)
                 or set(headers) != {"Authorization"}
                 or not isinstance(headers["Authorization"], BoundCredential)
             ):
                 refuse("unbound_mcp_authentication")
-            target = tool
+            targets.append(tool)
             del tool["headers"]
     validate_tools(fresh_tools)
     strip_storage_authentication(fresh, binding)
     expected = cast(Object, json.loads(binding.request_json))
-    if (
-        stable_request(fresh) != stable_request(expected)
-        or target is None
-        or target.get("type") != "mcp_server"
-        or target.get("url") != binding.connection.url
-    ):
+    if stable_request(fresh) != stable_request(expected) or [
+        (t.get("type"), t.get("url")) for t in targets
+    ] != [("mcp_server", c.url) for c in binding.connections]:
         refuse("changed_mcp_request_intent")
-    try:
-        secret = credential(
-            await binding.resolver(
-                binding.scope, binding.connection.credential_ref or "", binding.connection.url
-            )
-        )
-    except Exception:
-        raise ProviderError(
-            "permission", retryable=False, native_code="mcp_secret_unavailable"
-        ) from None
-    if contains_secret(fresh, secret):
-        raise ProviderError("permission", retryable=False, native_code="mcp_secret_outside_binding")
+    secrets = await _secrets(binding.scope, binding.connections, binding.resolver, fresh)
     await authenticate_storage(fresh, binding, bound=False)
-    target["headers"] = {"Authorization": RedactedCredential("Bearer " + secret)}
+    for target in targets:
+        secret = secrets[str(target.get("url"))]
+        target["headers"] = {"Authorization": RedactedCredential("Bearer " + secret)}
     return fresh
 
 
