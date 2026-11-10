@@ -25,7 +25,7 @@ import asyncio
 import re
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
-from typing import TypedDict, cast
+from typing import TYPE_CHECKING, TypedDict, cast
 
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, resolve_role
@@ -58,6 +58,9 @@ from fastmcp.server.dependencies import get_access_token
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.server.transforms.visibility import disable_components, enable_components
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
+
+if TYPE_CHECKING:
+    from daimon.adapters.mcp.middleware.host_call_gate import HostCallGate
 
 #: Audit reason for a call a held credential made to a tool off the allowlist.
 HELD_DENIAL_REASON = "held_tool_not_allowed"
@@ -182,6 +185,7 @@ class IdentityMiddleware(Middleware):
         self._audit_timeout = 2.0
         self._audit_max_pending = 128
         self._audit_slots = asyncio.Semaphore(2)
+        self._host_call_gate: HostCallGate | None = None
 
     async def on_request(self, context: MiddlewareContext, call_next: CallNext) -> object:
         if context.method not in {"tools/call", "tools/list"}:
@@ -346,7 +350,14 @@ class IdentityMiddleware(Middleware):
         # Dropping a malformed execution marker would make it look like a
         # personal credential. Reject its shape before constructing identity.
         if _token is not None:
-            for binding in ("chat_agent_id", "routine_id", "execution_id", "slack_turn_context_id"):
+            for binding in (
+                "chat_agent_id",
+                "routine_id",
+                "execution_id",
+                "slack_turn_context_id",
+                "confirmed_call",
+                "requester_account_id",
+            ):
                 if _token.claims.get(binding) is not None and signed_uuid(binding) is None:
                     raise AuthorizationError("malformed execution binding")
             raw_session = _token.claims.get("chat_session_id")
@@ -443,6 +454,14 @@ class IdentityMiddleware(Middleware):
             no_confirmation_surface=(
                 _token is not None and _token.claims.get("no_confirmation_surface") is True
             ),
+            confirmed_call_id=(
+                signed_uuid("confirmed_call") if agent_id is None and not internal_claim else None
+            ),
+            requester_account_id=(
+                signed_uuid("requester_account_id")
+                if agent_id is None and not internal_claim
+                else None
+            ),
             slack_turn_context_id=slack_turn_context_id,
             chat_session_id=(
                 _token.claims.get("chat_session_id")
@@ -510,6 +529,12 @@ class IdentityMiddleware(Middleware):
     ) -> object:
         if context.method not in {"tools/call", "resources/read", "prompts/get"}:
             return await call_next(context)
+        if identity.confirmed_call_id is not None:
+            # A one-shot credential runs only its approved call (`host_call_gate`).
+            gate = self._require_host_call_gate()
+            return await gate.run_confirmed(
+                context, lambda context: self._run_backend(context, call_next, identity), identity
+            )
         if identity.no_confirmation_surface and context.method == "tools/call":
             from daimon.core.tool_safety import confirmation_gated_tools, self_carded_tools
 
@@ -518,9 +543,24 @@ class IdentityMiddleware(Middleware):
             if str(getattr(context.message, "name", "")) in (
                 confirmation_gated_tools() - self_carded_tools()
             ):
-                raise ToolError(
-                    "This tool needs a confirmation card, which this conversation can't show."
-                )
+                return await self._require_host_call_gate().ask(context, identity)
+        return await self._run_backend(context, call_next, identity)
+
+    def attach_host_call_gate(self, gate: HostCallGate) -> None:
+        """Set once the runtime exists; the middleware is built before it."""
+        self._host_call_gate = gate
+
+    def _require_host_call_gate(self) -> HostCallGate:
+        if self._host_call_gate is None:
+            # No gate wired (tests, partial servers): refuse as before, never run.
+            raise ToolError(
+                "This tool needs a confirmation card, which this conversation can't show."
+            )
+        return self._host_call_gate
+
+    async def _run_backend(
+        self, context: MiddlewareContext, call_next: CallNext, identity: AuthIdentity
+    ) -> object:
         selfhosted = identity.anthropic_disabled
         if identity.bound_channel_id is not None and identity.platform is not None:
             async with self._sessionmaker() as session:

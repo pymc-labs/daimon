@@ -526,6 +526,11 @@ def create_mcp_app(
         microsoft=microsoft,
         identity_key=node_identity_key(effective_settings),
     )
+    from daimon.adapters.mcp.middleware.host_call_gate import HostCallGate
+
+    identity_middleware.attach_host_call_gate(
+        HostCallGate(runtime, public_url=str(effective_settings.mcp.public_url or ""))
+    )
     agents.register_agent_tools(mcp, runtime)
     register_agent_removal_tools(mcp, runtime)
     environments.register_environment_tools(mcp, runtime)

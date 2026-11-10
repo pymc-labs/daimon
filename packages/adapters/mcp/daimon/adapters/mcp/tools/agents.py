@@ -25,6 +25,7 @@ from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
     BetaManagedAgentsURLMCPServerParams,
 )
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.confirmed_call import card_satisfied
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import reachability
 from daimon.adapters.mcp.tools._authz_facts import mcp_subject
@@ -2005,7 +2006,7 @@ async def _request_agent_backend_switch_impl(
 
     # A provider turn with no card of its own (OpenAI, Gemini): Daimon posts the
     # card itself. Decided by the verified token's surface, never by the model.
-    self_card = auth.no_confirmation_surface
+    self_card = auth.no_confirmation_surface and not card_satisfied(auth)
     on_now: Provider | None = None
     # A new copy of this conversation's responder, made here: the confirmed switch
     # hands it this conversation too.

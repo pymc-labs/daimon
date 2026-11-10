@@ -15,6 +15,7 @@ import anthropic
 import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.confirmed_call import card_satisfied
 from daimon.adapters.mcp.resource_ports import mcp_scope, retrieve_session
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
@@ -78,6 +79,9 @@ async def session_card_gap(
     """
     if origin is None:
         return "no_origin"
+    if card_satisfied(auth):
+        # The person pressed Approve on Daimon's own card for exactly this call.
+        return None
     if tool_name == "lead_intake_resolve" and (
         not origin.attended
         or not auth.chat_session_id
