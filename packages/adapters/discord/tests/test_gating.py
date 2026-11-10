@@ -10,7 +10,6 @@ from daimon.adapters.discord.gating import (
     is_unmentioned_reply_hint_candidate,
     should_process_message,
 )
-from daimon.core.thread_participation import ParticipationMode
 
 DAIMON_ID = "111"
 HUMAN_ID = "222"
@@ -187,7 +186,7 @@ def test_gate_rejects_qa_bot_in_dm() -> None:
 
 def test_participation_candidate_is_an_unmentioned_human_in_a_guild_thread() -> None:
     assert is_participation_candidate(
-        deployment_mode=ParticipationMode.OFF,
+        may_turn_on=True,
         author_is_bot=False,
         bot_mentioned=False,
         in_thread=True,
@@ -195,9 +194,9 @@ def test_participation_candidate_is_an_unmentioned_human_in_a_guild_thread() -> 
     ), "an unmentioned human message in a guild thread is what the feature screens"
 
 
-def test_participation_candidate_is_refused_by_a_disabled_deployment() -> None:
+def test_participation_candidate_is_refused_when_nothing_can_turn_it_on() -> None:
     assert not is_participation_candidate(
-        deployment_mode=ParticipationMode.DISABLED,
+        may_turn_on=False,
         author_is_bot=False,
         bot_mentioned=False,
         in_thread=True,
@@ -207,14 +206,14 @@ def test_participation_candidate_is_refused_by_a_disabled_deployment() -> None:
 
 def test_participation_candidate_never_a_bot_and_never_a_mention() -> None:
     assert not is_participation_candidate(
-        deployment_mode=ParticipationMode.ON,
+        may_turn_on=True,
         author_is_bot=True,
         bot_mentioned=False,
         in_thread=True,
         guild_id="g1",
     ), "bots never trigger organic turns, QA allow-list included"
     assert not is_participation_candidate(
-        deployment_mode=ParticipationMode.ON,
+        may_turn_on=True,
         author_is_bot=False,
         bot_mentioned=True,
         in_thread=True,
@@ -224,14 +223,14 @@ def test_participation_candidate_never_a_bot_and_never_a_mention() -> None:
 
 def test_participation_candidate_only_in_guild_threads() -> None:
     assert not is_participation_candidate(
-        deployment_mode=ParticipationMode.ON,
+        may_turn_on=True,
         author_is_bot=False,
         bot_mentioned=False,
         in_thread=False,
         guild_id="g1",
     ), "top-level channel messages are never screened"
     assert not is_participation_candidate(
-        deployment_mode=ParticipationMode.ON,
+        may_turn_on=True,
         author_is_bot=False,
         bot_mentioned=False,
         in_thread=True,

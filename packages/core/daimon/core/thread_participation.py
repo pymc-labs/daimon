@@ -17,11 +17,6 @@ from enum import StrEnum
 from typing import Final, Literal, cast
 from xml.sax.saxutils import escape, quoteattr
 
-from daimon.core.scope_cascade import CascadeMode
-
-ParticipationMode = CascadeMode
-"""The deprecated deployment variable's mode (`ThreadParticipationSettings.mode`)."""
-
 
 class SkipReason(StrEnum):
     NOT_ON = "not_on"

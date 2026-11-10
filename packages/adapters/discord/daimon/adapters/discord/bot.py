@@ -133,7 +133,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import provision_tenant, reconcile_tenant_defaults
 from daimon.core.defaults.report import compose_failure_reason
 from daimon.core.errors import DaimonError, TurnError, UserFacingError
-from daimon.core.features.snapshot import FeaturePlace, place_feature, switch_default
+from daimon.core.features.snapshot import FeaturePlace, may_turn_on, place_feature
 from daimon.core.github_connect_delivery import run_connect_notice_poller
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.github_request_expiry import run_request_expiry_poller
@@ -3198,7 +3198,7 @@ class DaimonBot(commands.Bot):
             # organic thread participation, which has its own gates.
             if not startup_replay and is_participation_candidate(
                 # No Discord settings block means no bot to follow anything.
-                deployment_mode=switch_default(self.runtime.settings, "participation", "discord"),
+                may_turn_on=may_turn_on(self.runtime.settings, "participation", "discord"),
                 author_is_bot=message.author.bot,
                 bot_mentioned=bot_mentioned,
                 in_thread=isinstance(message.channel, discord.Thread),

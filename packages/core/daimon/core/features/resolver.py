@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from typing import Literal
 
 from daimon.core.features.registry import TIERS, FeatureSpec, Tier
-from daimon.core.scope_cascade import CascadeMode, ResolvedCascade
 
 Decider = Tier | Literal["default"]
 Unavailable = Literal["platform", "backend", "requires", "depends_on"]
@@ -101,11 +100,3 @@ def resolve_above(spec: FeatureSpec, values: Iterable[TierValue], tier: Tier) ->
     """Resolve only the tiers broader than `tier`: what a write there lives under."""
     cut = TIERS.index(tier)
     return resolve_feature(spec, (v for v in values if TIERS.index(v.tier) < cut))
-
-
-def as_cascade(resolved: ResolvedFeature) -> ResolvedCascade:
-    """The on/off/disabled view the participation gate and the chat notes read."""
-    tier = "deployment" if resolved.tier == "default" else resolved.tier
-    if resolved.unavailable is not None or (resolved.locked and not resolved.on):
-        return ResolvedCascade(CascadeMode.DISABLED, tier)
-    return ResolvedCascade(CascadeMode.ON if resolved.on else CascadeMode.OFF, tier)

@@ -29,10 +29,8 @@ from daimon.core.features.resolver import (
     ResolvedFeature,
     TierValue,
     Unavailable,
-    as_cascade,
     resolve_feature,
 )
-from daimon.core.scope_cascade import CascadeMode
 from daimon.core.stores.domain import FeatureValueRow
 from daimon.core.stores.feature_values import feature_revision, place_values
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -211,11 +209,12 @@ def resolve_one(
     )
 
 
-def switch_default(settings: Settings, key: str, platform: str) -> CascadeMode:
-    """A switch where no tier sets it: the deployment tier or the registry default; off
-    for good where the feature cannot run (participation without its adapter)."""
+def may_turn_on(settings: Settings, key: str, platform: str) -> bool:
+    """Whether any narrower tier could still turn the feature on: false where it cannot
+    run (participation without its adapter) or the deployment locks it Off."""
     place = FeaturePlace(uuid.UUID(int=0), platform)
-    return as_cascade(resolve_one(FEATURES[key], settings, place, ())).mode
+    resolved = resolve_one(FEATURES[key], settings, place, ())
+    return resolved.unavailable is None and (resolved.on or not resolved.locked)
 
 
 @dataclass(frozen=True)

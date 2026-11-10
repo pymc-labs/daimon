@@ -11,10 +11,10 @@ import pytest
 from daimon.core.config import ThreadParticipationSettings
 from daimon.core.features.resolver import ResolvedFeature
 from daimon.core.participation_gates import ParticipationGates
+from daimon.core.scope_cascade import CascadeMode
 from daimon.core.stores import spend_allowances
 from daimon.core.thread_participation import (
     ClassifierMessage,
-    ParticipationMode,
 )
 from daimon.testing.factories import make_ledger_entry, make_tenant
 from mux.testing.isolated_sdk import build_async_anthropic
@@ -53,7 +53,7 @@ async def test_an_exhausted_allowance_skips_the_classifier(
     recent = AsyncMock(return_value=[])
     gates = ParticipationGates(
         platform="discord",
-        settings=ThreadParticipationSettings(mode=ParticipationMode.ON),
+        settings=ThreadParticipationSettings(mode=CascadeMode.ON),
         sessionmaker=db_session_factory,
         anthropic=client,
         bot_display_name="Daimon",

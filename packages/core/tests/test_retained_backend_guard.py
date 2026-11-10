@@ -11,10 +11,10 @@ from daimon.core.channel_backend import channel_ref, set_channel_backend
 from daimon.core.config import ThreadParticipationSettings
 from daimon.core.features.resolver import ResolvedFeature
 from daimon.core.participation_gates import ParticipationGates
+from daimon.core.scope_cascade import CascadeMode
 from daimon.core.stores import mux_state
 from daimon.core.thread_participation import (
     ClassifierMessage,
-    ParticipationMode,
 )
 from daimon.testing.factories import (
     make_account,
@@ -101,7 +101,7 @@ async def test_participation_uses_retained_backend_before_history_and_classifier
     recent = AsyncMock(return_value=[ClassifierMessage("person", "private history", False)])
     gates = ParticipationGates(
         platform=platform,
-        settings=ThreadParticipationSettings(mode=ParticipationMode.ON),
+        settings=ThreadParticipationSettings(mode=CascadeMode.ON),
         sessionmaker=db_session_factory,
         anthropic=client,
         bot_display_name="Daimon",

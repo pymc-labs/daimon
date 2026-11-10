@@ -28,9 +28,9 @@ from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
+from daimon.core.scope_cascade import CascadeMode
 from daimon.core.stores.domain import FeatureTarget
 from daimon.core.stores.feature_values import set_feature_value
-from daimon.core.thread_participation import ParticipationMode
 from daimon.core.turn.protection import ProtectionState
 from daimon.testing.settings_mock import mock_settings
 from daimon.testing.turn_fakes import deps_for
@@ -62,7 +62,7 @@ def _make_runtime(
     settings.discord = discord_settings
     settings.billing.markup = Decimal("1.0")
     settings.thread_participation = ThreadParticipationSettings(
-        mode=ParticipationMode.OFF, quiet_seconds=0.2
+        mode=CascadeMode.OFF, quiet_seconds=0.2
     )
     return DiscordRuntime(
         settings=settings,

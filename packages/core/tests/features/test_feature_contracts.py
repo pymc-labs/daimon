@@ -30,6 +30,7 @@ from daimon.core.features.registry import (
 )
 from daimon.core.features.resolver import TierValue, resolve_feature
 from daimon.core.features.session_identity import IDENTITY_KEYS
+from daimon.core.features.snapshot import may_turn_on
 from pydantic import PostgresDsn, SecretStr
 
 _ROOT = Path(__file__).resolve().parents[4]
@@ -315,7 +316,7 @@ def test_a_dotted_feature_has_an_env_name() -> None:
 _KEY_READERS = {
     "feature_on": 0,
     "feature": 0,
-    "switch_default": 1,
+    "may_turn_on": 1,
     "shown": 0,
     "_feature_on": 0,
     "place_feature": 3,
@@ -446,3 +447,15 @@ def test_config_grows_no_new_product_switch() -> None:
         "new on/off or mode setting: register a feature instead, or allow-list it with a reason"
     )
     assert set(_CONFIG_SWITCHES) - switches == set(), "allow-listed settings that no longer exist"
+
+
+def test_may_turn_on_is_false_only_when_nothing_narrower_could_turn_it_on() -> None:
+    assert may_turn_on(_settings(), "participation", "discord"), (
+        "default Off can still be turned on"
+    )
+    locked = _settings(features={"participation": "off:locked"})
+    assert not may_turn_on(locked, "participation", "discord"), "a deployment lock keeps it Off"
+    assert may_turn_on(
+        _settings(features={"participation": "on:locked"}), "participation", "discord"
+    ), "a lock On is not a bar"
+    assert not may_turn_on(_settings(), "participation", "slack"), "no adapter, no feature"

@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Collection, Hashable, Iterable
 
 from daimon.core.name_mentions import mentions_by_name
-from daimon.core.thread_participation import ParticipationMode
 
 
 def should_process_message(
@@ -84,7 +83,7 @@ def is_plain_text_mention_candidate(
 
 def is_participation_candidate(
     *,
-    deployment_mode: ParticipationMode,
+    may_turn_on: bool,
     author_is_bot: bool,
     bot_mentioned: bool,
     in_thread: bool,
@@ -93,12 +92,12 @@ def is_participation_candidate(
     """Pre-DB gate for organic thread participation: may this unmentioned message be screened?
 
     Only human-authored, unmentioned messages inside a guild thread qualify,
-    and only while the deployment does not say `disabled` -- the one mode no
-    narrower scope can override, so it is decidable here, before any read.
+    and only while a narrower scope could still turn it on (`may_turn_on`: not
+    unavailable, not locked Off by the deployment), so it is decidable before any read.
     Bots never qualify, allow-listed QA bots included: they can start only
     addressed turns.
     """
-    if deployment_mode is ParticipationMode.DISABLED or author_is_bot or bot_mentioned:
+    if not may_turn_on or author_is_bot or bot_mentioned:
         return False
     return in_thread and guild_id is not None
 

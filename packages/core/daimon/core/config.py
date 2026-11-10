@@ -24,7 +24,6 @@ from daimon.core.features.registry import deployment_key, parse_deployment
 from daimon.core.mcp_server_url import ascii_mcp_url, canonical_mcp_url
 from daimon.core.outbound.reach import DEFAULT_MAX_PEOPLE
 from daimon.core.scope_cascade import CascadeMode
-from daimon.core.thread_participation import ParticipationMode
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolSafetyPolicy
 from pydantic import (
     AwareDatetime,
@@ -644,8 +643,8 @@ class ThreadParticipationSettings(BaseModel):
     requests. `on` follows every thread unless a lower tier says otherwise.
     """
 
-    mode: ParticipationMode = Field(
-        default=ParticipationMode.OFF,
+    mode: CascadeMode = Field(
+        default=CascadeMode.OFF,
         description=(
             "Deprecated: use DAIMON_FEATURES__PARTICIPATION. "
             "Deployment default for replying in threads unprompted. off: mention-only "
