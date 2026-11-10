@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 from daimon.core.continuity.continuation import ContinuationRequest
+from daimon.core.errors import WatchFeatureUnreadable
 from daimon.core.stores import watches
 from daimon.core.stores.domain import WatchRow
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -271,16 +272,103 @@ async def test_a_workspace_turning_watches_off_stops_its_watches(permanent_watch
         assert not await watches.is_watch_enabled(db, watch), "Off here stops the watch"
 
 
-@pytest.mark.fresh_schema
-async def test_a_watch_whose_feature_cannot_be_read_does_not_run(permanent_watch, monkeypatch):
+def _unreadable(monkeypatch):
     from unittest.mock import AsyncMock
 
     from daimon.core.features import snapshot
 
+    monkeypatch.setattr(snapshot, "place_values", AsyncMock(side_effect=RuntimeError("down")))
+
+
+@pytest.mark.fresh_schema
+async def test_a_watch_whose_feature_cannot_be_read_is_retried_not_disabled(
+    permanent_watch, monkeypatch
+):
     factory, watch, _ = permanent_watch
+    (claimed,) = await _claim(factory, watch.id)
     async with factory.begin() as db:
-        monkeypatch.setattr(snapshot, "place_values", AsyncMock(side_effect=RuntimeError("down")))
-        assert not await watches.is_watch_enabled(db, watch), "unreadable counts as Off"
+        _unreadable(monkeypatch)
+        with pytest.raises(WatchFeatureUnreadable):
+            await watches.is_watch_enabled(db, watch)
+        with pytest.raises(WatchFeatureUnreadable):
+            await watches.leased_poll(db, watch.id, claimed["lease"], now=datetime.now(UTC))
+
+
+@pytest.mark.fresh_schema
+async def test_a_report_whose_feature_cannot_be_read_stays_pending_and_off_settles_it(
+    permanent_watch, monkeypatch
+):
+    from daimon.core.continuity.watch_reports import dispatch_watch_report
+    from daimon.core.stores.domain import FeatureTarget
+    from daimon.core.stores.feature_values import set_feature_value
+    from daimon.core.stores.task_continuations import get_continuation
+    from sqlalchemy import text
+
+    factory, _, binding = permanent_watch
+    async with factory.begin() as db:
+        watch = await watches.register_poll_watch(
+            db,
+            binding,
+            instructions="Report changes.",
+            tool="read_thread",
+            arguments={"thread_id": "4444"},
+            projection=".rows",
+            rule="change",
+            interval=60,
+            expires_at=None,
+            now=datetime.now(UTC),
+            delivery="new_thread",
+            permanent_approved_by=binding.requester_account_id,
+        )
+    wake = None
+    for version in (1, 2):
+        (claimed,) = await _claim(factory, watch.id)
+        async with factory.begin() as db:
+            leased = await watches.leased_poll(
+                db, watch.id, claimed["lease"], now=datetime.now(UTC)
+            )
+            assert leased is not None
+            wake = await watches.finish_poll(
+                db,
+                leased,
+                claimed["lease"],
+                value={"v": version},
+                payload="x" if version == 2 else None,
+            )
+    assert wake is not None, "the second read fires"
+    async with factory() as db:
+        row = await get_continuation(db, idempotency_key=wake)
+    assert row is not None and row.reason == "watch_report"
+    ran: list[str] = []
+
+    async def run_report(_row, seed: str) -> None:
+        ran.append(seed)
+
+    async def status() -> tuple[str, str | None, int]:
+        async with factory() as db:
+            current = await get_continuation(db, idempotency_key=wake)
+        assert current is not None
+        return current.status, current.skip_reason, current.attempts
+
+    with monkeypatch.context() as unreadable:
+        _unreadable(unreadable)
+        await dispatch_watch_report(factory, row, run_report=run_report)
+    assert not ran, "nothing ran"
+    assert await status() == ("pending", None, 0), "an unreadable feature leaves it to retry"
+    async with factory.begin() as db:
+        await db.execute(text("UPDATE task_continuations SET available_at=now() WHERE true"))
+        await set_feature_value(
+            db,
+            tenant_id=watch.tenant_id,
+            target=FeatureTarget("workspace"),
+            key="watches",
+            value="off",
+            set_by=None,
+            surface="chat",
+        )
+    await dispatch_watch_report(factory, row, run_report=run_report)
+    assert not ran, "Off still stops it"
+    assert await status() == ("skipped", "skip_target_changed", 1), "a real Off settles it"
 
 
 @pytest.mark.fresh_schema

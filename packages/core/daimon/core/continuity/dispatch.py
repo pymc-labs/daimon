@@ -38,7 +38,7 @@ from daimon.core.continuity.wakes import (
     settle_wake,
     start_wake,
 )
-from daimon.core.errors import DaimonError
+from daimon.core.errors import DaimonError, WatchFeatureUnreadable
 from daimon.core.stores.domain import ChatPlatform, TaskContinuationRow
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.turn.errors import (
@@ -234,6 +234,11 @@ async def dispatch_pending_continuations(
             except AnthropicDisabled:
                 log.warning("continuation.provider_guard_denied", row_id=str(row.id))
                 await release_wake(sessionmaker, claim, retry_at=busy_retry_at(row, now=now()))
+                continue
+            except WatchFeatureUnreadable:
+                # Unread, not Off: the wake stays pending and is offered again.
+                log.warning("continuation.watch_feature_unreadable", row_id=str(row.id))
+                await release_wake(sessionmaker, claim, retry_at=now() + WAKE_RETRY_DELAY)
                 continue
             except ContinuationContextUnavailable as exc:
                 # An incomplete history must never authorize a stale handoff.

@@ -39,6 +39,10 @@ class UserFacingError(DaimonError):
     """
 
 
+class WatchFeatureUnreadable(DaimonError):
+    """A watch's `watches` feature could not be read; retry later, never treat it as Off."""
+
+
 class AgentNameCollision(DaimonError):
     """An agent already uses the requested name in this workspace."""
 

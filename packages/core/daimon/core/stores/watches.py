@@ -26,6 +26,7 @@ from daimon.core._models import (
 from daimon.core.config import load_watches_settings
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.continuity.page_events import SignedPageEvent, verify_page_event
+from daimon.core.errors import WatchFeatureUnreadable
 from daimon.core.features.snapshot import FeaturePlace, feature_in_or_none
 from daimon.core.stores import watch_credentials
 from daimon.core.stores.direct_messages import DM_SCOPE_PREFIX
@@ -413,7 +414,8 @@ async def set_watch_control(session: AsyncSession, *, scope: str, enabled: bool)
 
 
 async def is_watch_enabled(session: AsyncSession, watch: WatchRow) -> bool:
-    """Whether a watch may run now; a feature that cannot be read counts as Off."""
+    """Whether a watch may run now. A feature that cannot be read raises
+    `WatchFeatureUnreadable`, so the caller retries instead of settling the watch as Off."""
     if not load_watches_settings().enabled:
         return False
     place = FeaturePlace.of(
@@ -424,7 +426,9 @@ async def is_watch_enabled(session: AsyncSession, watch: WatchRow) -> bool:
         agent_id=watch.agent_id,
     )
     found = await feature_in_or_none(session, None, place, "watches")
-    if found is None or not found.on:
+    if found is None:
+        raise WatchFeatureUnreadable("watches feature unreadable")
+    if not found.on:
         return False
     controls = dict(
         (
@@ -524,7 +528,8 @@ async def record_delivery_session(
 async def watch_seed(
     session: AsyncSession, wake: TaskContinuationRow, *, now: datetime
 ) -> str | None:
-    """Recheck registration on every dispatch. Live policy/spend is checked by admission."""
+    """Recheck registration on every dispatch. Live policy/spend is checked by admission.
+    Raises `WatchFeatureUnreadable` when the feature read fails; the caller retries."""
     firing = await get_firing(session, wake.idempotency_key)
     if firing is None:
         return None
@@ -1250,7 +1255,8 @@ class PollBindingRevoked(ValueError):
 async def leased_poll(
     session: AsyncSession, watch_id: uuid.UUID, lease: str, *, now: datetime
 ) -> WatchRow | None:
-    """Scheduling races return None; revoked identity raises PollBindingRevoked."""
+    """Scheduling races return None; revoked identity raises PollBindingRevoked; an
+    unreadable feature raises WatchFeatureUnreadable, which keeps the watch for a retry."""
     watch = await get_watch(session, watch_id)
     if (
         watch is None

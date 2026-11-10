@@ -66,6 +66,7 @@ from daimon.core.continuity.watch_projection import (
 from daimon.core.continuity.watch_projection import (
     payload as evidence_payload,
 )
+from daimon.core.errors import WatchFeatureUnreadable
 from daimon.core.github_credentials import decrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_server_url import ascii_mcp_url, same_ascii_mcp_url
@@ -636,6 +637,11 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
         until = datetime.now(UTC) + timedelta(seconds=BUSY_DEFER_S + random.uniform(0, 30))
         async with runtime.session_factory.begin() as db:
             await defer_busy_poll(db, watch_id, lease, until=until)
+        return False
+    except WatchFeatureUnreadable:
+        # The feature could not be read, which is not Off: keep the watch, retry next claim.
+        async with runtime.session_factory.begin() as db:
+            await release_poll_lease(db, watch_id, lease)
         return False
     except ToolUnlisted:
         # The operator took the tool off the registry: pause and tell the owner.
