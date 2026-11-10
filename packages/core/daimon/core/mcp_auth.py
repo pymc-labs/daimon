@@ -143,47 +143,61 @@ async def resolve_agent_mcp_credential(
         claims = pyjwt.decode(token, secret, algorithms=["HS256"], options={"verify_exp": False})
         return pyjwt.encode({**claims, "chat_session_id": grant}, secret, algorithm="HS256")
     if chat_execution:
-        from daimon.core.ma_identity import derive_agent_uuid
-        from daimon.core.stores.accounts import get_account_with_tenant
-        from daimon.core.stores.turn_origins import bind_origin_session, get_active_origin
-        from daimon.core.turn_origin import current_execution_origin_id
+        token = await bind_execution_session(
+            sessionmaker, token=token, secret=secret, scope=scope, agent_id=agent_id, now=now
+        )
+    return token
 
-        origin_id = current_execution_origin_id.get()
-        if origin_id is not None:
-            # Send-time native runtimes resolve inside the executing turn.
-            # run_prepared_turn exposes execution_origin only inside the acquired
-            # lease; its execution cleanup also revokes this origin-unique grant.
-            # Derive a grant from that trusted context, keeping the SAME registry
-            # owner, expiry and revocation as the validated source credential.
-            async with sessionmaker.begin() as db:
-                identity = await get_account_with_tenant(db, account_id=uuid.UUID(scope.account_id))
-                origin = (
-                    None
-                    if identity is None
-                    else await get_active_origin(
-                        db,
-                        origin_id=origin_id,
-                        tenant_id=uuid.UUID(scope.tenant_id),
-                        account_id=uuid.UUID(scope.account_id),
-                        platform=identity.platform,
-                        now=now,
-                    )
+
+async def bind_execution_session(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    token: str,
+    secret: bytes,
+    scope: Scope,
+    agent_id: uuid.UUID,
+    now: dt.datetime,
+) -> str:
+    """Add the executing turn's origin as `chat_session_id`; unchanged outside a turn."""
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores.accounts import get_account_with_tenant
+    from daimon.core.stores.turn_origins import bind_origin_session, get_active_origin
+    from daimon.core.turn_origin import current_execution_origin_id
+
+    origin_id = current_execution_origin_id.get()
+    if origin_id is not None:
+        # Send-time native runtimes resolve inside the executing turn.
+        # run_prepared_turn exposes execution_origin only inside the acquired
+        # lease; its execution cleanup also revokes this origin-unique grant.
+        # Derive a grant from that trusted context, keeping the SAME registry
+        # owner, expiry and revocation as the validated source credential.
+        async with sessionmaker.begin() as db:
+            identity = await get_account_with_tenant(db, account_id=uuid.UUID(scope.account_id))
+            origin = (
+                None
+                if identity is None
+                else await get_active_origin(
+                    db,
+                    origin_id=origin_id,
+                    tenant_id=uuid.UUID(scope.tenant_id),
+                    account_id=uuid.UUID(scope.account_id),
+                    platform=identity.platform,
+                    now=now,
                 )
-                if (
-                    origin is None
-                    or derive_agent_uuid(
-                        tenant_id=origin.tenant_id, ma_agent_id=origin.responder_ma_agent_id
-                    )
-                    != agent_id
-                ):
-                    raise ValueError("native MCP origin has no executing session grant")
-                await bind_origin_session(db, origin_id=origin_id, chat_session_id=str(origin_id))
-            claims = pyjwt.decode(
-                token, secret, algorithms=["HS256"], options={"verify_exp": False}
             )
-            token = pyjwt.encode(
-                {**claims, "chat_session_id": str(origin_id)}, secret, algorithm="HS256"
-            )
+            if (
+                origin is None
+                or derive_agent_uuid(
+                    tenant_id=origin.tenant_id, ma_agent_id=origin.responder_ma_agent_id
+                )
+                != agent_id
+            ):
+                raise ValueError("native MCP origin has no executing session grant")
+            await bind_origin_session(db, origin_id=origin_id, chat_session_id=str(origin_id))
+        claims = pyjwt.decode(token, secret, algorithms=["HS256"], options={"verify_exp": False})
+        token = pyjwt.encode(
+            {**claims, "chat_session_id": str(origin_id)}, secret, algorithm="HS256"
+        )
     return token
 
 

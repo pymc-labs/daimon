@@ -69,7 +69,12 @@ class TemplateMCPCredential:
 
     async def resolve(self, authorized: Scope, reference: str, destination: str) -> str:
         from daimon.core.ma_identity import derive_agent_uuid
-        from daimon.core.mcp_auth import mint_agent_mcp_token, token_jti, validate_agent_mcp_token
+        from daimon.core.mcp_auth import (
+            bind_execution_session,
+            mint_agent_mcp_token,
+            token_jti,
+            validate_agent_mcp_token,
+        )
         from daimon.core.mcp_oauth.discovery import list_mcp_tools
         from daimon.core.stores.accounts import get_account_with_tenant
 
@@ -125,6 +130,16 @@ class TemplateMCPCredential:
             )
             if await list_mcp_tools(destination, token) != self.catalogue:
                 raise ValueError("target MCP catalogue differs from captured source")
+            # The host call gate finds the turn's origin through this claim.
+            token = await bind_execution_session(
+                request.deps.sessionmaker,
+                token=token,
+                secret=secret,
+                scope=scope,
+                agent_id=agent_id,
+                now=now,
+            )
+            self._minted = token, self._minted[1]
         except (OSError, ValueError):
             await self.finalize()
             raise ScopeViolation("mcp-credential", "invalid scoped MCP credential") from None
