@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import uuid
 from io import StringIO
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -21,41 +20,37 @@ from daimon.adapters.cli.commands.sessions import (
     sessions_get,
 )
 from daimon.adapters.cli.runtime import CliRuntime
-from daimon.core.config import GithubAppSettings, Settings
+from daimon.core.config import (
+    AnthropicSettings,
+    CLISettings,
+    DatabaseSettings,
+    McpSettings,
+    Settings,
+)
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault, TenantScopeRef
 from daimon.core.stores.scoped_config_write import set_fields
-from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.testing.ma_models import ma_environment
 from mux.testing.drivers.anthropic.ma import MARouter, list_response
 from mux.testing.drivers.anthropic.ma_models import EMPTY_SESSION_STATS, EMPTY_SESSION_USAGE
-from pydantic import HttpUrl, SecretStr
+from pydantic import HttpUrl, PostgresDsn, SecretStr
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..harness import build_cli_runtime
 
 
-class _FakeCli:
-    local_user = "testuser"
-
-
-class _FakeMcp:
-    jwt_secret = None
-    public_url = None
-
-
-def _fake_settings(mcp: object | None = None) -> Settings:
-    """Real defaults for every settings block; only what the command reads is replaced."""
-    return Settings.model_construct(
-        tool_safety=ToolSafetyPolicy(),
-        cli=_FakeCli(),
-        mcp=mcp or _FakeMcp(),
-        github_app=GithubAppSettings(),
-        defaults_root=Path("defaults"),
-        features={},
+def _fake_settings(mcp: McpSettings | None = None) -> Settings:
+    """Validated settings with real defaults; only what the command reads is set."""
+    return Settings.model_validate(
+        {
+            "database": DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@localhost/d")),
+            "anthropic": AnthropicSettings(api_key=SecretStr("test")),
+            "cli": CLISettings(local_user="testuser"),
+            "mcp": mcp or McpSettings(),
+        }
     )
 
 
@@ -325,13 +320,12 @@ async def test_sessions_get_missing_raises_api_error(
         await sessions_get(rt=rt, console=console, session_id="sess_missing", as_json=True)
 
 
-class _ConfiguredMcp:
-    jwt_secret = SecretStr("x" * 32)
-    public_url = HttpUrl("https://mcp.example.com/mcp")
-
-
 def _configured_settings() -> Settings:
-    return _fake_settings(_ConfiguredMcp())
+    return _fake_settings(
+        McpSettings(
+            jwt_secret=SecretStr("x" * 32), public_url=HttpUrl("https://mcp.example.com/mcp")
+        )
+    )
 
 
 def _create_router_with_vault(
