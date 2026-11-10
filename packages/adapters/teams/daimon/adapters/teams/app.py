@@ -1945,13 +1945,15 @@ class TeamsApp:
         *,
         selfhosted: bool,
     ) -> None:
-        """Release controls immediately when no Anthropic file sweep applies."""
-        if not selfhosted and any(
-            isinstance(block, ToolUseBlock) for block in outcome.state.content
+        """Release controls immediately when no file sweep applies."""
+        if (
+            not selfhosted
+            and outcome.outputs is not None
+            and any(isinstance(block, ToolUseBlock) for block in outcome.state.content)
         ):
             sweep = self.outputs.sweep(
                 inbound,
-                outcome.ma_session_id,
+                outcome.outputs,
                 append=final.append_to_answer,
                 quiet_s=final.outputs_quiet_s(),
             )
