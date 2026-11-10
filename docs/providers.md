@@ -51,7 +51,9 @@ stop.
 
 OpenAI needs no Anthropic account. Leave
 [`DAIMON_ANTHROPIC__API_KEY`](configuration.md#daimon_anthropic__api_key)
-unset and `init` skips the Anthropic defaults. Two limits apply beyond the
+unset and `init` seeds the default agents on OpenAI, at its default model.
+Agents created later also run on OpenAI. An agent kept on Anthropic is refused
+with a card that offers a copy on another provider. Two limits apply beyond the
 table: no mid-session resource changes (initial file mounts work), and fixed model and
 container defaults with no Daimon model settings.
 

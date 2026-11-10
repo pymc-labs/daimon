@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Daimon runs with only an OpenAI or Gemini key.** With no Anthropic key,
+  setup seeds the default agents and environment on the keyed provider, at
+  its default model, and agents you create or edit live on that provider too.
+  Each one is pinned to its provider, so a turn never falls back to Anthropic.
+  Turns go to that provider without any Anthropic request. An agent still on
+  Anthropic gets a clear card instead of an error: ask for a copy on another
+  provider, or ask whoever runs Daimon to add the Anthropic key.
+
 - **A refused model switch now says why and what to do next.** Each cause has
   one plain line, whichever place you switch from: a provider that isn't turned
   on, a self-hosted model that isn't enabled, a shared thread that needs an
