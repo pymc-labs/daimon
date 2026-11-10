@@ -10,10 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A refused model switch now says why and what to do next.** Each cause has
   one plain line, whichever place you switch from: a provider that isn't turned
   on, a self-hosted model that isn't enabled, a shared thread that needs an
-  admin, a price window that ended, or a switch to review or confirm again. A
-  provider that can't run points back to Claude, which clears the channel's pin
-  when it has one, or else moves the agent to the default Claude model. Setup
-  panels and switch cards no longer show an internal label as the reason.
+  admin, a price window that ended, or a switch to review or confirm again.
+  Setup panels and switch cards no longer show an internal label as the reason.
 - **Agents on OpenAI, Gemini or a self-hosted harness answer in shared and external channels.**
   A turn held to a Slack Connect or other shared channel used to be refused on
   these backends. It now runs with the same limits as on Anthropic: it sees only
