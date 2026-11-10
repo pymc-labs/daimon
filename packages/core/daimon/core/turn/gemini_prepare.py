@@ -69,12 +69,12 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         # Refused before any key, transport or journal is touched.
         raise UnsupportedCapability(("daimon_tool_rules",), PROFILE)
     target = request.target_spec
-    # Shared ownership, seals, mounts and transfer require a separate complete
-    # deployment adapter. Never silently drop those obligations in this slice.
+    # Shared ownership, mounts and transfer require a separate complete deployment
+    # adapter. Never silently drop those obligations in this slice. Seals ride the
+    # turn credential (`template_mcp`).
     if (
         config.thread_mode != "per_caller"
         or admission.shared_owner is not None
-        or admission.origin_seal_ids
         or (
             admission.memory_read_only and (target is None or "memory" not in target.declared_drops)
         )

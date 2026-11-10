@@ -501,7 +501,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
                 memory_read_only=origin_read_only(admission),
             )
             if needs_turn_credential(admission):
-                # The pinned file cannot carry this turn's hold or Slack context:
+                # The pinned file cannot carry this turn's hold, seals or Slack context:
                 # once it is proven, the turn runs on its own minted credential.
                 template_mcp.catalogue = frozenset(plan.source_capabilities.mcp_tools)
                 token = await template_mcp.mint(destination, agent_id=plan.source_agent_id)

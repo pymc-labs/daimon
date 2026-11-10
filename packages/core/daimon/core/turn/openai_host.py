@@ -400,14 +400,8 @@ async def _prepare_with_runtime(
     ):
         raise ScopeViolation("preparation", "OpenAI thread differs from admitted scope")
     current = await reauthorize(request.deps, request.admission)
-    # A read-only turn's origin is stamped read-only (`turn.run`). A sealed turn's
-    # transcript stamp has no provider representation yet.
-    if (
-        current.origin_seal_ids
-        or current.source_sealed
-        or current.slack_turn_context_id is not None
-    ):
-        raise AdmissionDenied(reason="backend_unsupported")
+    # A read-only or sealed turn's origin is stamped read-only (`turn.run`); its
+    # seals and Slack context ride its turn credential (`template_mcp`).
     if current.daimon_rules_need_driver:
         # Daimon tool rules need an approval pause this backend does not have.
         # Refused before any plan, key or transport is touched.
