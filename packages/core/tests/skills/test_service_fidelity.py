@@ -23,6 +23,7 @@ from anthropic.types.beta.agent_create_params import (
     Model,
     Tool,
 )
+from daimon.core.agent_guidance import apply_credential_guidance
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ISOLATED,
     build_metadata,
@@ -264,7 +265,8 @@ async def test_fork_create_preserves_pre_refactor_sdk_bytes_and_face_metadata(
             name="copy",
             model=cast(Model, source.model.model_dump(mode="json")),
             description=None,
-            system="Preserve this prompt.",
+            # An isolated source's copy keeps the safety rule over its own prompt.
+            system=apply_credential_guidance("Preserve this prompt.", isolated=True),
             metadata=metadata,
             tools=tools,
             mcp_servers=servers,
