@@ -3,7 +3,8 @@
 A record is Daimon-owned when the tenant's row exists in the Daimon tables; its
 calls never reach Anthropic. Every other id keeps today's Managed Agents request.
 Only Daimon ids (`sh_`, `dm_` prefixes) are looked up, so MA calls add no reads.
-Lists and walks return both sources; with Anthropic disabled they return Daimon only.
+Lists and walks return both sources; with Anthropic disabled or no key they return
+Daimon only. With no key, every Managed Agents call raises `AnthropicUnconfigured`.
 """
 
 from __future__ import annotations
@@ -14,7 +15,12 @@ from uuid import UUID
 
 from anthropic import AsyncAnthropic
 from daimon.core.agent_record_facts import agent_facts, environment_facts
-from daimon.core.anthropic_guard import anthropic_disabled, require_anthropic_allowed
+from daimon.core.anthropic_guard import (
+    ANTHROPIC_UNCONFIGURED_PLACEHOLDER,
+    anthropic_configured,
+    anthropic_disabled,
+    require_anthropic,
+)
 from daimon.core.stores.selfhosted_resources import SelfHostedAgents, SelfHostedEnvironments
 from mux.contracts.ids import Page, PageRequest, ResourceRef, Revision, Scope
 from mux.contracts.ports import Artifacts, Events, Models, Sessions, Skills, Usage
@@ -101,6 +107,10 @@ def _environment(scope: Scope, environment: Environment) -> Environment:
     return environment.model_copy(update={"native": native})
 
 
+def _local_only(client: AsyncAnthropic) -> bool:
+    return anthropic_disabled() or not anthropic_configured(client)
+
+
 async def _merged_page[R: (Agent, Environment)](
     scope: Scope,
     page: PageRequest,
@@ -109,13 +119,14 @@ async def _merged_page[R: (Agent, Environment)](
     owned: Callable[[PageRequest], Awaitable[Page[R]]],
     wrap: Callable[[Scope, R], R],
     authorize: Callable[[], None],
+    client: AsyncAnthropic,
 ) -> Page[R]:
     """MA pages first with their own cursors, then Daimon pages behind `dm:` cursors."""
     cursor = page.cursor
     resumed = cursor is not None and cursor.startswith(_DAIMON_CURSOR)
     data: tuple[R, ...] = ()
-    if not _tenant_scoped(scope) or (not resumed and (cursor or not anthropic_disabled())):
-        require_anthropic_allowed()
+    if not _tenant_scoped(scope) or (not resumed and (cursor or not _local_only(client))):
+        require_anthropic(client)
         listed = await remote()
         if not _tenant_scoped(scope) or listed.has_more:
             return listed
@@ -141,9 +152,10 @@ async def _merged_walk[R: (Agent, Environment)](
     owned: Callable[[PageRequest], Awaitable[Page[R]]],
     wrap: Callable[[Scope, R], R],
     authorize: Callable[[], None],
+    client: AsyncAnthropic,
 ) -> AsyncIterator[R]:
-    if not _tenant_scoped(scope) or not anthropic_disabled():
-        require_anthropic_allowed()
+    if not _tenant_scoped(scope) or not _local_only(client):
+        require_anthropic(client)
         async for item in remote():
             yield item
     if not _tenant_scoped(scope):
@@ -172,6 +184,7 @@ class RoutedAgents(AnthropicAgents):
         super().__init__(client, account_scope_id, authorization)
         self._store = store
         self._grant = authorization
+        self._ma_client = client
 
     async def create_owned(self, scope: Scope, spec: AgentSpec, *, key: str) -> Agent:
         """Create a Daimon-owned agent; `create` stays Managed Agents."""
@@ -179,14 +192,14 @@ class RoutedAgents(AnthropicAgents):
         return _agent(scope, await self._store.create(scope, spec, key=key))
 
     async def create(self, scope: Scope, spec: AgentSpec, *, key: str) -> Agent:
-        require_anthropic_allowed()
+        require_anthropic(self._ma_client)
         return await super().create(scope, spec, key=key)
 
     async def retrieve(self, scope: Scope, ref: ResourceRef) -> Agent:
         local = await _local_ref(self._store, self._grant, scope, ref)
         if local is not None:
             return _agent(scope, await self._store.retrieve(scope, local))
-        require_anthropic_allowed()
+        require_anthropic(self._ma_client)
         return await super().retrieve(scope, ref)
 
     async def retrieve_version(
@@ -197,7 +210,7 @@ class RoutedAgents(AnthropicAgents):
             stored = await self._store.retrieve_version(scope, local, version)
             facts = agent_facts(stored, tenant_id=scope.tenant_id)
             return NativeSnapshot(native=facts.model_dump(mode="json"))
-        require_anthropic_allowed()
+        require_anthropic(self._ma_client)
         return await super().retrieve_version(scope, ref, version)
 
     async def list_versions(
@@ -218,6 +231,7 @@ class RoutedAgents(AnthropicAgents):
             owned=lambda local: self._store.list(scope, filters=filters, page=local),
             wrap=_agent,
             authorize=lambda: _authorize(self._grant, scope, "agent", None),
+            client=self._ma_client,
         )
 
     async def update(
@@ -229,21 +243,21 @@ class RoutedAgents(AnthropicAgents):
                 scope, local, patch, expected=Revision(local=expected.local), key=key
             )
             return _agent(scope, updated)
-        require_anthropic_allowed()
+        require_anthropic(self._ma_client)
         return await super().update(scope, ref, patch, expected=expected, key=key)
 
     async def archive(self, scope: Scope, ref: ResourceRef, *, key: str) -> Operation:
         local = await _local_ref(self._store, self._grant, scope, ref)
         if local is not None:
             return await self._store.archive(scope, local, key=key)
-        require_anthropic_allowed()
+        require_anthropic(self._ma_client)
         return await super().archive(scope, ref, key=key)
 
     async def delete(self, scope: Scope, ref: ResourceRef, *, key: str) -> DeletionReceipt:
         local = await _local_ref(self._store, self._grant, scope, ref)
         if local is not None:
             return await self._store.delete(scope, local, key=key)
-        require_anthropic_allowed()
+        require_anthropic(self._ma_client)
         return await super().delete(scope, ref, key=key)
 
     def walk(self, scope: Scope, *, filters: AgentFilter) -> AsyncIterator[Agent]:
@@ -253,6 +267,7 @@ class RoutedAgents(AnthropicAgents):
             owned=lambda local: self._store.list(scope, filters=filters, page=local),
             wrap=_agent,
             authorize=lambda: _authorize(self._grant, scope, "agent", None),
+            client=self._ma_client,
         )
 
 
@@ -269,6 +284,7 @@ class RoutedEnvironments(AnthropicEnvironments):
         super().__init__(client, account_scope_id, authorization)
         self._store = store
         self._grant = authorization
+        self._ma_client = client
 
     async def create_owned(self, scope: Scope, spec: EnvironmentSpec, *, key: str) -> Environment:
         """Create a Daimon-owned environment; `create` stays Managed Agents."""
@@ -276,14 +292,14 @@ class RoutedEnvironments(AnthropicEnvironments):
         return _environment(scope, await self._store.create(scope, spec, key=key))
 
     async def create(self, scope: Scope, spec: EnvironmentSpec, *, key: str) -> Environment:
-        require_anthropic_allowed()
+        require_anthropic(self._ma_client)
         return await super().create(scope, spec, key=key)
 
     async def retrieve(self, scope: Scope, ref: ResourceRef) -> Environment:
         local = await _local_ref(self._store, self._grant, scope, ref)
         if local is not None:
             return _environment(scope, await self._store.retrieve(scope, local))
-        require_anthropic_allowed()
+        require_anthropic(self._ma_client)
         return await super().retrieve(scope, ref)
 
     async def retrieve_native(self, scope: Scope, ref: ResourceRef) -> NativeSnapshot:
@@ -292,7 +308,7 @@ class RoutedEnvironments(AnthropicEnvironments):
             stored = await self._store.retrieve(scope, local)
             facts = environment_facts(stored, tenant_id=scope.tenant_id)
             return NativeSnapshot(native=facts.model_dump(mode="json"))
-        require_anthropic_allowed()
+        require_anthropic(self._ma_client)
         return await super().retrieve_native(scope, ref)
 
     async def list(
@@ -305,6 +321,7 @@ class RoutedEnvironments(AnthropicEnvironments):
             owned=lambda local: self._store.list(scope, filters=filters, page=local),
             wrap=_environment,
             authorize=lambda: _authorize(self._grant, scope, "environment", None),
+            client=self._ma_client,
         )
 
     async def update(
@@ -326,21 +343,21 @@ class RoutedEnvironments(AnthropicEnvironments):
             )
             updated = await self._store.update(scope, local, patch, expected=current, key=key)
             return _environment(scope, updated)
-        require_anthropic_allowed()
+        require_anthropic(self._ma_client)
         return await super().update(scope, ref, patch, expected=expected, key=key)
 
     async def archive(self, scope: Scope, ref: ResourceRef, *, key: str) -> Operation:
         local = await _local_ref(self._store, self._grant, scope, ref)
         if local is not None:
             return await self._store.archive(scope, local, key=key)
-        require_anthropic_allowed()
+        require_anthropic(self._ma_client)
         return await super().archive(scope, ref, key=key)
 
     async def delete(self, scope: Scope, ref: ResourceRef, *, key: str) -> DeletionReceipt:
         local = await _local_ref(self._store, self._grant, scope, ref)
         if local is not None:
             return await self._store.delete(scope, local, key=key)
-        require_anthropic_allowed()
+        require_anthropic(self._ma_client)
         return await super().delete(scope, ref, key=key)
 
     def walk(self, scope: Scope, *, filters: EnvironmentFilter) -> AsyncIterator[Environment]:
@@ -350,6 +367,7 @@ class RoutedEnvironments(AnthropicEnvironments):
             owned=lambda local: self._store.list(scope, filters=filters, page=local),
             wrap=_environment,
             authorize=lambda: _authorize(self._grant, scope, "environment", None),
+            client=self._ma_client,
         )
 
 
@@ -357,11 +375,16 @@ class RoutedResourceWalk:
     """Agent and environment walks merge both sources; skill walks stay MA."""
 
     def __init__(
-        self, agents: RoutedAgents, environments: RoutedEnvironments, ma: ResourceWalk
+        self,
+        agents: RoutedAgents,
+        environments: RoutedEnvironments,
+        ma: ResourceWalk,
+        client: AsyncAnthropic,
     ) -> None:
         self._agents = agents
         self._environments = environments
         self._ma = ma
+        self._ma_client = client
 
     def agents(self, scope: Scope, *, filters: AgentFilter) -> AsyncIterator[Agent]:
         return self._agents.walk(scope, filters=filters)
@@ -372,13 +395,13 @@ class RoutedResourceWalk:
         return self._environments.walk(scope, filters=filters)
 
     def skill_pages(self, scope: Scope, *, limit: int) -> AsyncIterator[Page[Skill]]:
-        require_anthropic_allowed()
+        require_anthropic(self._ma_client)
         return self._ma.skill_pages(scope, limit=limit)
 
     def skill_versions(
         self, scope: Scope, skill_id: str, *, limit: int | None = None
     ) -> AsyncIterator[SkillVersion]:
-        require_anthropic_allowed()
+        require_anthropic(self._ma_client)
         return self._ma.skill_versions(scope, skill_id, limit=limit)
 
 
@@ -391,12 +414,17 @@ class RecordRoutedManagedAgents(AnthropicManagedAgents):
 
     def __init__(
         self,
-        client: AsyncAnthropic,
+        client: AsyncAnthropic | None,
         *,
         records: async_sessionmaker[AsyncSession],
         authorization: ResourceAuthorization | None = None,
         secrets: SecretResolver | None = None,
     ) -> None:
+        # Keyless installs pass None: a placeholder client that every MA call refuses
+        # before any request, so Daimon-owned records work with no Anthropic account.
+        if client is None:
+            client = AsyncAnthropic(api_key=ANTHROPIC_UNCONFIGURED_PLACEHOLDER, max_retries=0)
+        self._ma_client = client
         super().__init__(client, authorization=authorization, secrets=secrets)
         self.routed_agents = RoutedAgents(
             client, self.account_scope_id, authorization, SelfHostedAgents(records)
@@ -408,7 +436,7 @@ class RecordRoutedManagedAgents(AnthropicManagedAgents):
         self.environments = self.routed_environments
         ma_walk = cast(ResourceWalk, self._extensions[_WALK])
         self._extensions[_WALK] = RoutedResourceWalk(
-            self.routed_agents, self.routed_environments, ma_walk
+            self.routed_agents, self.routed_environments, ma_walk, client
         )
         self._extensions[(AgentVersions, AGENT_VERSIONS_NAMESPACE, 1)] = self.routed_agents
         self._extensions[(EnvironmentReads, "anthropic.environment_reads", 1)] = (
@@ -418,35 +446,35 @@ class RecordRoutedManagedAgents(AnthropicManagedAgents):
     def extension[T](self, port: type[T], *, namespace: str, version: int) -> T:
         implementation = super().extension(port, namespace=namespace, version=version)
         if port not in _RECORD_PORTS:
-            require_anthropic_allowed()
+            require_anthropic(self._ma_client)
         return implementation
 
     @property
     def sessions(self) -> Sessions:
-        require_anthropic_allowed()
+        require_anthropic(self._ma_client)
         return super().sessions
 
     @property
     def events(self) -> Events:
-        require_anthropic_allowed()
+        require_anthropic(self._ma_client)
         return super().events
 
     @property
     def artifacts(self) -> Artifacts:
-        require_anthropic_allowed()
+        require_anthropic(self._ma_client)
         return super().artifacts
 
     @property
     def skills(self) -> Skills:
-        require_anthropic_allowed()
+        require_anthropic(self._ma_client)
         return super().skills
 
     @property
     def models(self) -> Models:
-        require_anthropic_allowed()
+        require_anthropic(self._ma_client)
         return super().models
 
     @property
     def usage(self) -> Usage:
-        require_anthropic_allowed()
+        require_anthropic(self._ma_client)
         return super().usage

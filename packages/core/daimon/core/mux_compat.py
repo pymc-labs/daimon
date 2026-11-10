@@ -57,6 +57,7 @@ from mux.drivers.anthropic import (
 )
 from mux.drivers.anthropic import update_agent_ignored as native_update_agent_ignored
 from mux.errors import ProviderError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
     from anthropic.types.beta import BetaManagedAgentsVault
@@ -293,9 +294,13 @@ def sdk_environment(record: Environment) -> BetaEnvironment:
 
 
 async def list_agents(
-    client: AsyncAnthropic, *, include_archived: bool = False, scope: Scope
+    client: AsyncAnthropic | None,
+    *,
+    include_archived: bool = False,
+    scope: Scope,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> AsyncIterator[BetaManagedAgentsAgent]:
-    backend = managed_agents(client, scope=scope)
+    backend = managed_agents(client, records=records, scope=scope)
     port = backend.extension(ResourceWalk, namespace="anthropic.resource_walk", version=1)
     async for record in legacy_iter(
         port.agents(scope, filters=AgentFilter(include_archived=include_archived))
@@ -304,9 +309,13 @@ async def list_agents(
 
 
 async def list_environments(
-    client: AsyncAnthropic, *, include_archived: bool = False, scope: Scope
+    client: AsyncAnthropic | None,
+    *,
+    include_archived: bool = False,
+    scope: Scope,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> AsyncIterator[BetaEnvironment]:
-    backend = managed_agents(client, scope=scope)
+    backend = managed_agents(client, records=records, scope=scope)
     port = backend.extension(ResourceWalk, namespace="anthropic.resource_walk", version=1)
     async for record in legacy_iter(
         port.environments(scope, filters=EnvironmentFilter(include_archived=include_archived))
@@ -315,9 +324,15 @@ async def list_environments(
 
 
 async def retrieve_agent(
-    client: AsyncAnthropic, agent_id: str, *, scope: Scope
+    client: AsyncAnthropic | None,
+    agent_id: str,
+    *,
+    scope: Scope,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> BetaManagedAgentsAgent:
-    backend = managed_agents(client, scope=scope, resources=frozenset({("agent", agent_id)}))
+    backend = managed_agents(
+        client, records=records, scope=scope, resources=frozenset({("agent", agent_id)})
+    )
     return sdk_agent(
         await legacy_call(
             backend.agents.retrieve(scope, resource_ref(backend, "agent", agent_id, scope=scope))
@@ -326,10 +341,17 @@ async def retrieve_agent(
 
 
 async def retrieve_agent_version(
-    client: AsyncAnthropic, agent_id: str, version: int, *, scope: Scope
+    client: AsyncAnthropic | None,
+    agent_id: str,
+    version: int,
+    *,
+    scope: Scope,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> BetaManagedAgentsAgent:
     """One stored version of an agent, such as the one a session started on."""
-    backend = managed_agents(client, scope=scope, resources=frozenset({("agent", agent_id)}))
+    backend = managed_agents(
+        client, records=records, scope=scope, resources=frozenset({("agent", agent_id)})
+    )
     port = backend.extension(AgentVersions, namespace=AGENT_VERSIONS_NAMESPACE, version=1)
     record = await legacy_call(
         port.retrieve_version(scope, resource_ref(backend, "agent", agent_id, scope=scope), version)
@@ -338,13 +360,14 @@ async def retrieve_agent_version(
 
 
 async def create_agent(
-    client: AsyncAnthropic,
+    client: AsyncAnthropic | None,
     payload: Mapping[str, object] | AgentSpec,
     *,
     scope: Scope,
     key: str | None = None,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> BetaManagedAgentsAgent:
-    backend = managed_agents(client, scope=scope)
+    backend = managed_agents(client, records=records, scope=scope)
     return sdk_agent(
         await legacy_call(
             backend.agents.create(
@@ -356,15 +379,50 @@ async def create_agent(
     )
 
 
+async def create_owned_agent(
+    client: AsyncAnthropic | None,
+    spec: AgentSpec,
+    *,
+    scope: Scope,
+    records: async_sessionmaker[AsyncSession],
+    key: str | None = None,
+) -> BetaManagedAgentsAgent:
+    """Create a Daimon-owned agent record; it never reaches Managed Agents."""
+    backend = managed_agents(client, records=records, scope=scope)
+    created = await backend.routed_agents.create_owned(
+        scope, spec, key=key if key is not None else str(uuid4())
+    )
+    return sdk_agent(created)
+
+
+async def create_owned_environment(
+    client: AsyncAnthropic | None,
+    spec: EnvironmentSpec,
+    *,
+    scope: Scope,
+    records: async_sessionmaker[AsyncSession],
+    key: str | None = None,
+) -> BetaEnvironment:
+    """Create a Daimon-owned environment record; it never reaches Managed Agents."""
+    backend = managed_agents(client, records=records, scope=scope)
+    created = await backend.routed_environments.create_owned(
+        scope, spec, key=key if key is not None else str(uuid4())
+    )
+    return BetaEnvironment.model_validate(created.native)
+
+
 async def update_agent(
-    client: AsyncAnthropic,
+    client: AsyncAnthropic | None,
     agent_id: str,
     *,
     version: int,
     payload: Mapping[str, object],
     scope: Scope,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> BetaManagedAgentsAgent:
-    backend = managed_agents(client, scope=scope, resources=frozenset({("agent", agent_id)}))
+    backend = managed_agents(
+        client, records=records, scope=scope, resources=frozenset({("agent", agent_id)})
+    )
     return sdk_agent(
         await legacy_call(
             backend.agents.update(
@@ -399,8 +457,16 @@ async def update_agent_ignored(
     )
 
 
-async def archive_agent(client: AsyncAnthropic, agent_id: str, *, scope: Scope) -> None:
-    backend = managed_agents(client, scope=scope, resources=frozenset({("agent", agent_id)}))
+async def archive_agent(
+    client: AsyncAnthropic | None,
+    agent_id: str,
+    *,
+    scope: Scope,
+    records: async_sessionmaker[AsyncSession] | None = None,
+) -> None:
+    backend = managed_agents(
+        client, records=records, scope=scope, resources=frozenset({("agent", agent_id)})
+    )
     await legacy_call(
         backend.agents.archive(
             scope, resource_ref(backend, "agent", agent_id, scope=scope), key=str(uuid4())
@@ -408,9 +474,15 @@ async def archive_agent(client: AsyncAnthropic, agent_id: str, *, scope: Scope) 
     )
 
 
-async def archive_environment(client: AsyncAnthropic, environment_id: str, *, scope: Scope) -> None:
+async def archive_environment(
+    client: AsyncAnthropic | None,
+    environment_id: str,
+    *,
+    scope: Scope,
+    records: async_sessionmaker[AsyncSession] | None = None,
+) -> None:
     backend = managed_agents(
-        client, scope=scope, resources=frozenset({("environment", environment_id)})
+        client, records=records, scope=scope, resources=frozenset({("environment", environment_id)})
     )
     await legacy_call(
         backend.environments.archive(
@@ -422,9 +494,13 @@ async def archive_environment(client: AsyncAnthropic, environment_id: str, *, sc
 
 
 async def create_environment(
-    client: AsyncAnthropic, payload: Mapping[str, object], *, scope: Scope
+    client: AsyncAnthropic | None,
+    payload: Mapping[str, object],
+    *,
+    scope: Scope,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> BetaEnvironment:
-    backend = managed_agents(client, scope=scope)
+    backend = managed_agents(client, records=records, scope=scope)
     return sdk_environment(
         await legacy_call(
             backend.environments.create(scope, environment_spec(payload), key=str(uuid4()))
@@ -433,10 +509,15 @@ async def create_environment(
 
 
 async def update_environment(
-    client: AsyncAnthropic, environment_id: str, payload: Mapping[str, object], *, scope: Scope
+    client: AsyncAnthropic | None,
+    environment_id: str,
+    payload: Mapping[str, object],
+    *,
+    scope: Scope,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> BetaEnvironment:
     backend = managed_agents(
-        client, scope=scope, resources=frozenset({("environment", environment_id)})
+        client, records=records, scope=scope, resources=frozenset({("environment", environment_id)})
     )
     return sdk_environment(
         await legacy_call(
@@ -880,10 +961,16 @@ async def archive_session(client: AsyncAnthropic, session_id: str, *, scope: Sco
 
 
 def _memory_port(
-    client: AsyncAnthropic, store_id: str | None, *, scope: Scope
+    client: AsyncAnthropic | None,
+    records: async_sessionmaker[AsyncSession] | None,
+    store_id: str | None,
+    *,
+    scope: Scope,
 ) -> tuple[AnthropicManagedAgents, NativeMemoryStores]:
+    # Memory stays Managed Agents: the routed backend refuses it on a keyless install.
     backend = managed_agents(
         client,
+        records=records,
         scope=scope,
         resources=frozenset({("memory_store", store_id)}) if store_id is not None else frozenset(),
     )
@@ -893,9 +980,13 @@ def _memory_port(
 
 
 async def create_memory_store(
-    client: AsyncAnthropic, payload: Mapping[str, object], *, scope: Scope
+    client: AsyncAnthropic | None,
+    payload: Mapping[str, object],
+    *,
+    scope: Scope,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> BetaManagedAgentsMemoryStore:
-    _backend, port = _memory_port(client, None, scope=scope)
+    _backend, port = _memory_port(client, records, None, scope=scope)
     record = await legacy_call(
         port.create_native(scope, StoreCreate.model_validate(payload), key=str(uuid4()))
     )
@@ -903,9 +994,13 @@ async def create_memory_store(
 
 
 async def retrieve_memory_store(
-    client: AsyncAnthropic, store_id: str, *, scope: Scope
+    client: AsyncAnthropic | None,
+    store_id: str,
+    *,
+    scope: Scope,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> BetaManagedAgentsMemoryStore:
-    backend, port = _memory_port(client, store_id, scope=scope)
+    backend, port = _memory_port(client, records, store_id, scope=scope)
     record = await legacy_call(
         port.retrieve(scope, resource_ref(backend, "memory_store", store_id, scope=scope))
     )
@@ -913,9 +1008,14 @@ async def retrieve_memory_store(
 
 
 async def list_memory_entries(
-    client: AsyncAnthropic, store_id: str, *, path_prefix: str, scope: Scope
+    client: AsyncAnthropic | None,
+    store_id: str,
+    *,
+    path_prefix: str,
+    scope: Scope,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> AsyncIterator[BetaManagedAgentsMemoryListItem]:
-    backend, port = _memory_port(client, store_id, scope=scope)
+    backend, port = _memory_port(client, records, store_id, scope=scope)
     async for entry in legacy_iter(
         port.walk_native(
             scope,
@@ -930,9 +1030,14 @@ async def list_memory_entries(
 
 
 async def read_memory(
-    client: AsyncAnthropic, store_id: str, memory_id: str, *, scope: Scope
+    client: AsyncAnthropic | None,
+    store_id: str,
+    memory_id: str,
+    *,
+    scope: Scope,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> BetaManagedAgentsMemory:
-    backend, port = _memory_port(client, store_id, scope=scope)
+    backend, port = _memory_port(client, records, store_id, scope=scope)
     record = await legacy_call(
         port.read_native(
             scope, resource_ref(backend, "memory_store", store_id, scope=scope), memory_id
@@ -942,14 +1047,15 @@ async def read_memory(
 
 
 async def delete_memory(
-    client: AsyncAnthropic,
+    client: AsyncAnthropic | None,
     store_id: str,
     memory_id: str,
     *,
     expected_content_sha256: str,
     scope: Scope,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> None:
-    backend, port = _memory_port(client, store_id, scope=scope)
+    backend, port = _memory_port(client, records, store_id, scope=scope)
     await legacy_call(
         port.delete_memory(
             scope,
@@ -961,8 +1067,14 @@ async def delete_memory(
     )
 
 
-async def delete_memory_store(client: AsyncAnthropic, store_id: str, *, scope: Scope) -> None:
-    backend, port = _memory_port(client, store_id, scope=scope)
+async def delete_memory_store(
+    client: AsyncAnthropic | None,
+    store_id: str,
+    *,
+    scope: Scope,
+    records: async_sessionmaker[AsyncSession] | None = None,
+) -> None:
+    backend, port = _memory_port(client, records, store_id, scope=scope)
     await legacy_call(
         port.delete(
             scope, resource_ref(backend, "memory_store", store_id, scope=scope), key=str(uuid4())
@@ -970,8 +1082,14 @@ async def delete_memory_store(client: AsyncAnthropic, store_id: str, *, scope: S
     )
 
 
-async def archive_memory_store(client: AsyncAnthropic, store_id: str, *, scope: Scope) -> None:
-    backend, port = _memory_port(client, store_id, scope=scope)
+async def archive_memory_store(
+    client: AsyncAnthropic | None,
+    store_id: str,
+    *,
+    scope: Scope,
+    records: async_sessionmaker[AsyncSession] | None = None,
+) -> None:
+    backend, port = _memory_port(client, records, store_id, scope=scope)
     await legacy_call(
         port.archive(
             scope, resource_ref(backend, "memory_store", store_id, scope=scope), key=str(uuid4())
@@ -980,10 +1098,14 @@ async def archive_memory_store(client: AsyncAnthropic, store_id: str, *, scope: 
 
 
 async def retrieve_environment(
-    client: AsyncAnthropic, environment_id: str, *, scope: Scope
+    client: AsyncAnthropic | None,
+    environment_id: str,
+    *,
+    scope: Scope,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> BetaEnvironment:
     backend = managed_agents(
-        client, scope=scope, resources=frozenset({("environment", environment_id)})
+        client, records=records, scope=scope, resources=frozenset({("environment", environment_id)})
     )
     port = backend.extension(EnvironmentReads, namespace="anthropic.environment_reads", version=1)
     record = await legacy_call(

@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, overload
 from uuid import uuid4
 
 from anthropic import AsyncAnthropic
-from daimon.core.anthropic_guard import require_anthropic_allowed
+from daimon.core.anthropic_guard import AnthropicUnconfigured, require_anthropic_allowed
 from mux.contracts.config import ConfigRevision
 from mux.contracts.events import Event
 from mux.contracts.ids import ResourceRef, Scope
@@ -183,7 +183,7 @@ def managed_agents(
 ) -> AnthropicManagedAgents: ...
 @overload
 def managed_agents(
-    client: AsyncAnthropic,
+    client: AsyncAnthropic | None,
     *,
     scope: Scope | None = None,
     resources: frozenset[tuple[str, str]] = frozenset(),
@@ -191,7 +191,7 @@ def managed_agents(
     records: async_sessionmaker[AsyncSession],
 ) -> RecordRoutedManagedAgents: ...
 def managed_agents(
-    client: AsyncAnthropic,
+    client: AsyncAnthropic | None,
     *,
     scope: Scope | None = None,
     resources: frozenset[tuple[str, str]] = frozenset(),
@@ -201,7 +201,8 @@ def managed_agents(
     """The one Managed Agents constructor for host code.
 
     With `records`, agent and environment ports serve Daimon-owned records from
-    the database and refuse Anthropic only for calls that reach it.
+    the database and refuse Anthropic only for calls that reach it; `client` may
+    then be None (a keyless install).
     """
     authorization = ResourceAuthorization(scope, resources) if scope is not None else None
     if records is not None:
@@ -212,6 +213,8 @@ def managed_agents(
             client, records=records, authorization=authorization, secrets=secrets
         )
     require_anthropic_allowed()
+    if client is None:
+        raise AnthropicUnconfigured("No Anthropic key is configured on this Daimon install.")
     return AnthropicManagedAgents(client, authorization=authorization, secrets=secrets)
 
 
