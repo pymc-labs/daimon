@@ -122,7 +122,7 @@ from daimon.adapters.slack.setup_conversations import (
     setup_link,
     setup_reply_button,
 )
-from daimon.core import channel_backend
+from daimon.core import backend_capture, channel_backend
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_identity import (
     CUSTOM_PICTURES_OFF,
@@ -747,7 +747,9 @@ async def load_details_view(
     backend_options: tuple[Provider, ...] = ()
     backend_selection: Provider | None = None
     if is_admin and channel_backend.backend_selection_enabled(runtime.settings.turn):
-        service = channel_backend.make_backend_service(runtime.sessionmaker, runtime.settings.turn)
+        service = channel_backend.make_backend_service(
+            runtime.sessionmaker, runtime.settings.turn, capture_source=channel_backend.NO_CAPTURE
+        )
         selection = await service.read_selection(
             runtime.anthropic, tenant_id=tenant_id, agent_name=agent_name
         )
@@ -906,7 +908,18 @@ async def _dispatch_panel_action(
                     view_id=view_id, hash=view_hash, view=view
                 )
             return
-        service = channel_backend.make_backend_service(runtime.sessionmaker, runtime.settings.turn)
+        async with runtime.sessionmaker.begin() as session:
+            principal = await get_or_create_platform_principal(
+                session, tenant_id=tenant_id, platform="slack", external_id=user_id
+            )
+        subject = build_subject(is_admin=is_admin, platform_user_id=user_id)
+        service = channel_backend.make_backend_service(
+            runtime.sessionmaker,
+            runtime.settings.turn,
+            capture_source=backend_capture.for_agent(
+                runtime.turn_deps, account_id=principal.account_id, subject=subject
+            ),
+        )
         if action_id != panel_views.ACTION_BACKEND_SELECT and (
             meta.backend_revision is None
             or meta.backend_digest is None
@@ -974,10 +987,6 @@ async def _dispatch_panel_action(
             if _is_hash_conflict(exc):
                 return
             raise
-        async with runtime.sessionmaker.begin() as session:
-            principal = await get_or_create_platform_principal(
-                session, tenant_id=tenant_id, platform="slack", external_id=user_id
-            )
         is_admin = await resolve_is_admin(
             client, user_id=user_id, host_team_id=team_id, action=DelegatedAction.AGENT_SETTINGS
         )
@@ -1004,6 +1013,7 @@ async def _dispatch_panel_action(
                     cast(int, meta.backend_revision),
                     actor,
                     expected_preview_digest=meta.backend_digest,
+                    accepted_drops=preview.declared_drops,
                 )
         except channel_backend.AgentBackendRefused as exc:
             await record_panel_write(
