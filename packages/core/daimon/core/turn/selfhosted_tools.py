@@ -15,7 +15,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlsplit
 
 from anthropic.types.beta import BetaManagedAgentsCustomSkill
@@ -44,6 +44,9 @@ from mux.profiles.anthropic import is_builtin_skill
 from mux.state.operations import request_digest
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+if TYPE_CHECKING:
+    from daimon.core.turn_hold import TurnHold
 
 DAIMON_MCP_SERVER = "daimon-mcp"
 DAIMON_MCP_AUTH_ENV = "DAIMON_MCP_AUTHORIZATION"
@@ -343,8 +346,12 @@ async def mint_turn_mcp_authorization(
     deadline_s: float,
     now: datetime | None = None,
     slack_turn_context_id: uuid.UUID | None = None,
+    hold: TurnHold | None = None,
 ) -> MintedMcpAuthorization:
-    """Register a live agent's token; the host revokes jti in its turn-finally path."""
+    """Register a live agent's token; the host revokes jti in its turn-finally path.
+
+    A `hold` binds it to the held channel as MA's chat credential does; the server
+    then lists only the held allowlist."""
     from daimon.core.ma_identity import derive_agent_uuid
     from daimon.core.mcp_auth import CHAT_TOKEN_TTL, mint_chat_mcp_token
     from daimon.core.stores.accounts import get_account_with_tenant
@@ -392,6 +399,7 @@ async def mint_turn_mcp_authorization(
             ttl=timedelta(seconds=deadline_s + 60),
             anthropic_disabled=True,
             slack_turn_context_id=slack_turn_context_id,
+            hold=hold,
         )
     return MintedMcpAuthorization(SecretStr(f"Bearer {token}"), jti, expires_at)
 

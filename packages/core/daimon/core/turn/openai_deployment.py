@@ -318,7 +318,12 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
     root_agent: ResourceRef | None = None
     allocating = False
     counterpart_verified = False
-    from daimon.core.turn.template_mcp import TemplateMCPCredential, template_mcp_kept
+    from daimon.core.turn.template_mcp import (
+        TemplateMCPCredential,
+        needs_turn_credential,
+        origin_read_only,
+        template_mcp_kept,
+    )
 
     mcp_template = deployment.template_capabilities == "mcp"
     template_mcp = TemplateMCPCredential(request, scope, label=OPENAI_TEMPLATE_MCP_LABEL)
@@ -467,8 +472,9 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
             or deployment.mcp_credential_file is None
         ):
             raise ScopeViolation("mcp-credential", "MCP credential has no verified source binding")
+        admission = request.admission
         try:
-            return await resolve_agent_mcp_credential(
+            token = await resolve_agent_mcp_credential(
                 request.deps.sessionmaker,
                 path=deployment.mcp_credential_file,
                 secret=request.deps.mcp.jwt_secret.get_secret_value().encode(),
@@ -481,7 +487,14 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
                 # must be one the server refuses gated and publishing tools for.
                 surface="provider_turn",
                 now=request.now(),
+                memory_read_only=origin_read_only(admission),
             )
+            if needs_turn_credential(admission):
+                # The pinned file cannot carry this turn's hold or Slack context:
+                # once it is proven, the turn runs on its own minted credential.
+                template_mcp.catalogue = frozenset(capabilities.mcp_tools)
+                token = await template_mcp.mint(destination, agent_id=deployment.source_agent_id)
+            return token
         except (OSError, ValueError):
             raise ScopeViolation("mcp-credential", "invalid scoped MCP credential") from None
 
@@ -532,7 +545,9 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
         else template_mcp.resolve
         if mcp_template
         else None,
-        end_of_turn=template_mcp.finalize if mcp_template else None,
+        end_of_turn=template_mcp.finalize
+        if mcp_template or needs_turn_credential(request.admission)
+        else None,
         controls=SessionControls(
             model=revision.model,
             multi_agent_enabled=False,

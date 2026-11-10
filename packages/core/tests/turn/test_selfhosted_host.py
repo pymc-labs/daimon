@@ -260,18 +260,16 @@ async def composed(request, db_committing_engine, db_clean, monkeypatch, pinned_
         yield request, wire, store, observations
 
 
-async def test_a_held_admission_is_refused_before_any_io(composed):
-    from daimon.core.turn.errors import AdmissionDenied
-
+async def test_a_held_admission_prepares_without_io(composed):
+    """The hold travels on the turn's minted credential (`mint_turn_mcp_authorization`)."""
     request, wire, _, _ = composed
     held = TurnHold(platform="slack", channel_id="C-SYN-1", client=True)
     request = replace(request, admission=replace(request.admission, hold=held))
 
-    with pytest.raises(AdmissionDenied) as refused:
-        await prepare_selfhosted(request)
+    prepared = await prepare_selfhosted(request)
 
-    assert refused.value.reason == "backend_unsupported"
-    assert wire.posts == 0 and wire.turns == {}
+    assert prepared.session_ref is not None, "a held turn prepares its session"
+    assert wire.posts == 0 and wire.turns == {}, "preparation sends nothing"
 
 
 async def test_prepare_reuses_same_tenant_bound_session_without_a_turn(composed):

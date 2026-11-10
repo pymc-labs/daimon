@@ -260,12 +260,7 @@ async def capture_preparation_source(
     from daimon.core.channel_backend import load_backend_agent
     from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
     from daimon.core.sessions import project_session_resources
-    from mux.errors import ScopeViolation
 
-    if request.admission.hold is not None:
-        # The source records the agent-wide memory store; a held turn mounts its
-        # channel's store only, so it never has a source to capture.
-        raise ScopeViolation("source-preparation", "a held turn cannot capture an unheld source")
     if fresh:
         from daimon.core.mux_compat import retrieve_agent, retrieve_environment
 
@@ -315,7 +310,8 @@ async def capture_preparation_source(
         agent_github_app=request.deps.agent_github_app,
         hide_personal_for=request.admission.shared_owner,
         slack_turn_context_id=request.admission.slack_turn_context_id,
-        hold=None if request.admission.shared_owner is not None else request.admission.hold,
+        # A held turn captures its channel's store only, shared thread or not.
+        hold=request.admission.hold,
         private_dm_id=request.admission.private_dm_id,
         origin_seal_ids=request.admission.origin_seal_ids,
     )

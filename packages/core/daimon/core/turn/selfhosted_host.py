@@ -353,7 +353,6 @@ async def _prepare_selfhosted(request: ProviderPreparationRequest) -> PreparedTu
         not request.deps.channel_backends
         or request.deps.turn_path != "mux"
         or request.admission.shared_owner is not None
-        or request.admission.hold is not None
         or request.admission.backend_revision_origin != "channel"
         or revision.thread_mode != "per_caller"
     ):

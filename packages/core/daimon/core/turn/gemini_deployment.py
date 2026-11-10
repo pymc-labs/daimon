@@ -482,6 +482,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             or plan.source_agent_id is None
         ):
             raise ScopeViolation("mcp-credential", "MCP credential has no verified source binding")
+        admission = request.admission
         try:
             assert plan.source_capabilities is not None
             token = await resolve_agent_mcp_credential(
@@ -497,7 +498,13 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
                 # must be one the server refuses gated and publishing tools for.
                 surface="provider_turn",
                 now=request.now(),
+                memory_read_only=origin_read_only(admission),
             )
+            if needs_turn_credential(admission):
+                # The pinned file cannot carry this turn's hold or Slack context:
+                # once it is proven, the turn runs on its own minted credential.
+                template_mcp.catalogue = frozenset(plan.source_capabilities.mcp_tools)
+                token = await template_mcp.mint(destination, agent_id=plan.source_agent_id)
             await verify_storage()
             return token
         except (OSError, ValueError):
@@ -505,7 +512,11 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
 
     mcp_template = plan.template_capabilities == "mcp"
     from daimon.core.mcp_auth import NO_CONFIRMATION_LABEL
-    from daimon.core.turn.template_mcp import TemplateMCPCredential
+    from daimon.core.turn.template_mcp import (
+        TemplateMCPCredential,
+        needs_turn_credential,
+        origin_read_only,
+    )
 
     template_mcp = TemplateMCPCredential(request, scope, label=NO_CONFIRMATION_LABEL)
 
@@ -623,7 +634,9 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         transport_factory=transport,
         read_agent_counterpart=read,
         materialize_root=materialize_root if plan.root_materialization else None,
-        end_of_turn=template_mcp.finalize if mcp_template else None,
+        end_of_turn=template_mcp.finalize
+        if mcp_template or needs_turn_credential(request.admission)
+        else None,
         journal=GeminiJournal(
             records,
             request.deps.state_store,

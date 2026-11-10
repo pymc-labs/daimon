@@ -385,11 +385,8 @@ async def _prepare_with_runtime(
     revision = request.admission.backend_revision
     if revision is None or not request.deps.channel_backends or request.deps.turn_path != "mux":
         raise AdmissionDenied(reason="backend_unsupported")
-    if (
-        request.admission.shared_owner is not None
-        or request.admission.hold is not None
-        or revision.thread_mode != "per_caller"
-    ):
+    # A held turn runs on a per-turn held credential (`template_mcp`).
+    if request.admission.shared_owner is not None or revision.thread_mode != "per_caller":
         raise AdmissionDenied(reason="backend_unsupported")
     if (
         revision.channel.tenant_id != request.scope.tenant_id
@@ -398,9 +395,10 @@ async def _prepare_with_runtime(
     ):
         raise ScopeViolation("preparation", "OpenAI thread differs from admitted scope")
     current = await reauthorize(request.deps, request.admission)
+    # A read-only turn's origin is stamped read-only (`turn.run`). A sealed turn's
+    # transcript stamp has no provider representation yet.
     if (
-        current.memory_read_only
-        or current.origin_seal_ids
+        current.origin_seal_ids
         or current.source_sealed
         or current.asks_before_publishing
         or current.slack_turn_context_id is not None

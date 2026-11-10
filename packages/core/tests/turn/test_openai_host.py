@@ -875,11 +875,9 @@ async def test_origin_approval_has_separate_claim_and_native_response(composed):
 @pytest.mark.parametrize(
     ("policy", "value"),
     [
-        ("memory_read_only", True),
         ("source_sealed", True),
         ("asks_before_publishing", True),
         ("daimon_rules_need_driver", True),
-        ("hold", TurnHold(platform="slack", channel_id="C-SYN-1", client=True)),
     ],
 )
 async def test_unimplemented_restricted_policy_refuses_before_transport(composed, policy, value):
@@ -895,6 +893,22 @@ async def test_unimplemented_restricted_policy_refuses_before_transport(composed
         assert isinstance(refused.value.__cause__, UnsupportedCapability)
         assert refused.value.__cause__.missing == ("daimon_tool_rules",)
     assert wire.requests == []
+
+
+@pytest.mark.parametrize("composed", ["postgres"], indirect=True)
+@pytest.mark.parametrize(
+    ("policy", "value"),
+    [
+        ("memory_read_only", True),
+        ("hold", TurnHold(platform="slack", channel_id="C-SYN-1", client=True)),
+    ],
+)
+async def test_held_and_read_only_turns_prepare(composed, policy, value):
+    """A held turn runs on a per-turn held credential, a read-only one on a read-only origin."""
+    request, *_ = composed
+    request = replace(request, admission=replace(request.admission, **{policy: value}))
+    prepared = await prepare_openai(request)
+    assert prepared.session_ref is not None, f"a {policy} turn prepares its session"
 
 
 @pytest.mark.parametrize("missing_runtime", [True, False])

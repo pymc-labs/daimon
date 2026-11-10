@@ -74,7 +74,6 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
     if (
         config.thread_mode != "per_caller"
         or admission.shared_owner is not None
-        or admission.hold is not None
         or admission.origin_seal_ids
         or (
             admission.memory_read_only and (target is None or "memory" not in target.declared_drops)

@@ -2359,6 +2359,63 @@ async def test_read_only_source_projection_keeps_implicit_memory_without_provisi
     assert not transport.requests and not transport.violations
 
 
+@pytest.mark.parametrize("held", [True, False])
+async def test_a_held_source_projection_captures_its_channel_store_alone(
+    db_preflight, db_committing_engine, held
+):
+    """A provider turn held to a channel captures that channel's store, never the
+    agent-wide one; an unheld turn is unchanged."""
+    from daimon.core.channel_backend import load_backend_agent
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.mux_backend import resource_scope
+    from daimon.core.sessions import project_session_resources
+    from daimon.core.stores import agent_memory_stores
+    from daimon.testing.db import require_owned_sessionmaker
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
+
+    sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
+    require_owned_sessionmaker(sessions)
+    async with sessions.begin() as db:
+        tenant = await make_tenant(db)
+        account = await make_account(db, tenant=tenant)
+    agent = ma_agent(id="agent-held", tenant_id=str(tenant.id), name="source")
+    agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=agent.id)
+    async with sessions.begin() as db:
+        await agent_memory_stores.insert_memory_store(
+            db, tenant_id=tenant.id, agent_id=agent_uuid, memory_store_id="mem-agent"
+        )
+        await agent_memory_stores.insert_channel_memory_store(
+            db,
+            tenant_id=tenant.id,
+            agent_id=agent_uuid,
+            platform="slack",
+            channel_id="C-SYN-1",
+            memory_store_id="mem-channel",
+        )
+    transport = ScriptedTransport()
+    async with transport.client() as client:
+        source = await load_backend_agent(
+            client, sessions, tenant_id=tenant.id, agent_name="source", actual_agent=agent
+        )
+        projected = await project_session_resources(
+            source,
+            agent=agent,
+            environment=ma_environment(tenant_id=str(tenant.id)),
+            session_factory=sessions,
+            tenant_id=tenant.id,
+            agent_uuid=agent_uuid,
+            account_id=account.id,
+            memory_read_only=True,
+            resource_scope=resource_scope(tenant_id=str(tenant.id), account_id=str(account.id)),
+            tool_safety=OPEN_TOOL_SAFETY,
+            hold=TurnHold(platform="slack", channel_id="C-SYN-1", client=True) if held else None,
+        )
+    assert projected.memory_store_id == ("mem-channel" if held else "mem-agent"), (
+        "a held turn sees its channel's store only"
+    )
+    assert not transport.requests and not transport.violations, "projection is read-only"
+
+
 async def test_source_projection_requires_app_vault_only_for_a_live_grant(
     db_preflight, db_committing_engine
 ):

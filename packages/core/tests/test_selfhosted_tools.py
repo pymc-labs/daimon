@@ -371,6 +371,31 @@ async def test_minted_token_is_registered_expiring_redacted_and_tenant_bound(
         now=NOW,
     )
     assert maximum.expires_at == NOW + dt.timedelta(hours=1)
+    from daimon.core.mcp_hold import HOLD_CLAIM, hold_claim
+    from daimon.core.turn_hold import TurnHold
+
+    hold = TurnHold(platform="discord", channel_id="C-SYN-1", client=True)
+    held = await mint_turn_mcp_authorization(
+        db_session_factory,
+        scope=scope,
+        agent=agent,
+        agents=agents,
+        deadline_s=300,
+        secret=b"t" * 32,
+        now=NOW,
+        hold=hold,
+    )
+    held_claims = jwt.decode(
+        held.header.get_secret_value().removeprefix("Bearer "),
+        b"t" * 32,
+        algorithms=["HS256"],
+        options={"verify_exp": False},
+    )
+    assert held_claims[HOLD_CLAIM] == hold_claim(hold), "a held turn's credential signs its hold"
+    async with db_session_factory() as session:
+        held_row = await get_mcp_token(session, jti=held.jti)
+    assert held_row is not None, "the held credential is registered"
+    assert (held_row.platform, held_row.channel_id) == ("discord", "C-SYN-1"), "row is bound"
     token = header.header.get_secret_value().removeprefix("Bearer ")
     assert token not in repr(header)
     claims = jwt.decode(token, b"t" * 32, algorithms=["HS256"], options={"verify_exp": False})

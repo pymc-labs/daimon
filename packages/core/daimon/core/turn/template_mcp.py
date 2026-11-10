@@ -7,6 +7,12 @@ chat-execution authority (no admin elevation; roles are re-read live by the
 server), surface `provider_turn` (the server refuses it gated and publishing tools),
 living at most min(turn deadline + 60 s, 900 s). It is checked against the
 consented catalogue before use, and `finalize` revokes it and reads that back.
+
+An operator-pinned credential file cannot carry a turn's own flags, so a held or
+Slack DM context turn on such a row mints the same per-turn credential once the
+file is proven (`mint`). It carries the flags as MA's chat credential does: the
+hold (held label, channel-bound row, signed claim; the server then lists only
+the held allowlist), the Slack turn context, and the origin's read-only stamp.
 """
 
 from __future__ import annotations
@@ -19,10 +25,21 @@ from mux.errors import ScopeViolation
 
 if TYPE_CHECKING:
     from daimon.core.stores.domain import BackendAgent
+    from daimon.core.turn.admission import Admission
     from daimon.core.turn.prepare import ProviderPreparationRequest
     from mux.contracts.ids import Scope
     from mux.contracts.resources import AgentSpec
     from pydantic import JsonValue
+
+
+def needs_turn_credential(admission: Admission) -> bool:
+    """Whether the turn's flags must travel on a credential minted for this turn."""
+    return admission.hold is not None or admission.slack_turn_context_id is not None
+
+
+def origin_read_only(admission: Admission) -> bool | None:
+    """The origin stamp a sealed or read-only turn's credential binds; None keeps it."""
+    return True if admission.memory_read_only or admission.source_sealed else None
 
 
 def template_mcp_kept(target: AgentSpec | None) -> bool:
@@ -69,26 +86,37 @@ class TemplateMCPCredential:
 
     async def resolve(self, authorized: Scope, reference: str, destination: str) -> str:
         from daimon.core.ma_identity import derive_agent_uuid
+
+        request, scope = self._request, self._scope
+        agent_id = derive_agent_uuid(
+            tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id
+        )
+        if (
+            authorized != scope
+            or reference != f"caller-mcp:{scope.tenant_id}:{scope.account_id}:{agent_id}"
+        ):
+            raise ScopeViolation("mcp-credential", "MCP credential has no verified source binding")
+        return await self.mint(destination, agent_id=agent_id)
+
+    async def mint(self, destination: str, *, agent_id: UUID) -> str:
+        """Mint (once) and check this turn's credential for `agent_id`'s Daimon MCP."""
         from daimon.core.mcp_auth import (
             bind_execution_session,
             mint_agent_mcp_token,
             token_jti,
             validate_agent_mcp_token,
         )
+        from daimon.core.mcp_hold import held_catalogue
         from daimon.core.mcp_oauth.discovery import list_mcp_tools
         from daimon.core.stores.accounts import get_account_with_tenant
 
         request, scope = self._request, self._scope
-        agent_id = derive_agent_uuid(
-            tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id
-        )
+        admission = request.admission
         public_url = request.deps.mcp.public_url
         if (
             self.catalogue is None
-            or authorized != scope
             or scope.is_platform
             or scope.is_legacy_host_authorized
-            or reference != f"caller-mcp:{scope.tenant_id}:{scope.account_id}:{agent_id}"
             or public_url is None
             or destination.rstrip("/") != str(public_url).rstrip("/")
             or request.deps.mcp.jwt_secret is None
@@ -96,6 +124,8 @@ class TemplateMCPCredential:
             raise ScopeViolation("mcp-credential", "MCP credential has no verified source binding")
         if self._minted is not None:
             return self._minted[0]
+        # A held credential lists only the held allowlist (`daimon.core.mcp_hold`).
+        expected = self.catalogue if admission.hold is None else held_catalogue(self.catalogue)
         now = request.now()
         ttl_s = min(int(max((request.deadline - now).total_seconds(), 0.0)) + 60, 900)
         secret = request.deps.mcp.jwt_secret.get_secret_value().encode()
@@ -115,6 +145,8 @@ class TemplateMCPCredential:
                 ttl_days=ttl_s / 86400,  # pyright: ignore[reportArgumentType]
                 chat_execution=True,
                 surface="provider_turn",
+                hold=admission.hold,
+                slack_turn_context_id=admission.slack_turn_context_id,
             )
         self._minted = token, token_jti(token)
         try:
@@ -128,9 +160,10 @@ class TemplateMCPCredential:
                 max_ttl_s=ttl_s,
                 chat_execution=True,
             )
-            if await list_mcp_tools(destination, token) != self.catalogue:
+            if await list_mcp_tools(destination, token) != expected:
                 raise ValueError("target MCP catalogue differs from captured source")
-            # The host call gate finds the turn's origin through this claim.
+            # The host call gate finds the turn's origin through this claim, and
+            # the server reads a sealed or read-only turn's memory posture from it.
             token = await bind_execution_session(
                 request.deps.sessionmaker,
                 token=token,
@@ -138,6 +171,7 @@ class TemplateMCPCredential:
                 scope=scope,
                 agent_id=agent_id,
                 now=now,
+                memory_read_only=origin_read_only(admission),
             )
             self._minted = token, self._minted[1]
         except (OSError, ValueError):

@@ -475,6 +475,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
                         now=request.now(),
                         deadline_s=token_deadline_s,
                         slack_turn_context_id=request.admission.slack_turn_context_id,
+                        hold=request.admission.hold,
                     )
 
             async def token_provider() -> str:
