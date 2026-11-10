@@ -718,7 +718,7 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
     ),
     FeatureSpec(
         key="mcp_connector_relay",
-        name="MCP connectors on OpenAI and Gemini",
+        name="Connectors on OpenAI and Gemini",
         category="guardrails",
         effect="guardrail",
         values=_OFF_ON,
@@ -726,7 +726,7 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment",),
         binds="turn",
         doc=(
-            "An agent's own MCP connectors work on OpenAI and Gemini agents: Daimon calls "
+            "An agent's own connectors work on OpenAI and Gemini agents: Daimon calls "
             "them for the agent with the person's sign-in. Off leaves them out there."
         ),
         platforms=_CALL_GATE_PLATFORMS,

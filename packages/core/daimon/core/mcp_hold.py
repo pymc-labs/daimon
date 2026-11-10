@@ -74,7 +74,6 @@ def held_catalogue(tools: Collection[str]) -> frozenset[str]:
     return frozenset(tools) & {*HELD_TOOL_ALLOWLIST, *HELD_PROXY_TOOLS}
 
 
-
 #: Relayed connectors a held turn may use, by server key. A connector is the
 #: agent's own, never vetted against the hold, so none is: it fails closed.
 HELD_CONNECTOR_ALLOWLIST: Final[frozenset[str]] = frozenset()
@@ -83,6 +82,7 @@ HELD_CONNECTOR_ALLOWLIST: Final[frozenset[str]] = frozenset()
 def held_connectors(keys: Collection[str]) -> frozenset[str]:
     """The relayed connectors a held credential reaches (`daimon.core.connector_relay`)."""
     return frozenset(keys) & HELD_CONNECTOR_ALLOWLIST
+
 
 _CLAIM_KEYS: Final = frozenset({"platform", "channel_id", "client"})
 
