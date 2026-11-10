@@ -48,8 +48,13 @@ from daimon.core.ma import replay_events
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_tool_annotations import agent_mcp_token_for, mcp_annotation_lookup
 from daimon.core.model_presets import model_choice_id
-from daimon.core.mux_backend import TurnBackendRequest, TurnRuntime
+from daimon.core.mux_backend import TurnBackendRequest, TurnRuntime, turn_backend
 from daimon.core.mux_compat import legacy_call
+from daimon.core.output_runtime import (
+    AnthropicOutputRuntime,
+    ArtifactOutputRuntime,
+    OutputRuntime,
+)
 from daimon.core.repo_memory import (
     MemoryState,
     record_memory_prefix,
@@ -291,6 +296,45 @@ def _turn_port_kwargs(
     return result
 
 
+def _turn_output_runtime(
+    deps: TurnDeps,
+    admission: Admission,
+    session_id: str,
+    prepared: PreparedTurn,
+    *,
+    tenant_id: uuid.UUID,
+) -> OutputRuntime | None:
+    """The finished turn's outputs on its own provider, or None when it has none."""
+    try:
+        kwargs = _turn_port_kwargs(
+            deps,
+            admission,
+            session_id,
+            tenant_id=tenant_id,
+            provider_backend=prepared.backend,
+            provider_session=prepared.session_ref,
+            provider_runtime=prepared.runtime,
+            provider_scope=prepared._scope,  # pyright: ignore[reportPrivateUsage]
+        )
+        scope = kwargs.get("scope")
+        if scope is None:
+            return None
+        if "profile" not in kwargs:
+            return AnthropicOutputRuntime(deps.anthropic, session_id, scope=scope)
+        backend = kwargs.get("backend")
+        session = kwargs.get("session_ref")
+        request = kwargs.get("backend_request")
+        if backend is None and request is not None:
+            bound = turn_backend(request)
+            backend, session = bound.backend, bound.session
+        if backend is None or session is None:
+            return None
+        return ArtifactOutputRuntime(backend.artifacts, session, scope=scope)
+    except (UnsupportedCapability, ScopeViolation):
+        log.info("output_delivery.no_runtime", session_id=session_id)
+        return None
+
+
 log = structlog.get_logger(__name__)
 #: How long a turn waits for its end-of-turn finalizer (credential revocation)
 #: before returning; a slower finalizer keeps running in the background.
@@ -365,6 +409,9 @@ class RunOutcome:
     recovered: bool
     continuity: ContinuityOutcome = ContinuityOutcome()
     loss_told: bool = False
+    # Where this turn's output files live; None when its provider has none to
+    # deliver (self-hosted) or the turn never reached a provider.
+    outputs: OutputRuntime | None = None
 
     @property
     def termination(self) -> TerminationReason:
@@ -2461,4 +2508,9 @@ async def run_prepared_turn_impl(
             ),
             record=cast(UsageRecorder, active_record_cell[0]),
         )
-    return outcome
+    return replace(
+        outcome,
+        outputs=_turn_output_runtime(
+            deps, active_admission, active_session_id_cell[0], prepared, tenant_id=tenant_id
+        ),
+    )
