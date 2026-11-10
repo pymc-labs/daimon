@@ -40,7 +40,7 @@ from daimon.core.authz import Place
 from daimon.core.continuity.messages import ConfigurationChange
 from daimon.core.github_app_auth import build_app_install_url
 from daimon.core.media.filenames import sanitize_title
-from daimon.core.posted_controls import CardState, RefusalReason, card_for_request
+from daimon.core.posted_controls import CardState, PostedCard, RefusalReason, card_for_request
 from daimon.core.posted_controls.teams_card import build_adaptive_card
 from daimon.core.stores.domain import CredentialRequestRow
 from daimon.core.teams_sharepoint import file_link, version_of
@@ -341,3 +341,15 @@ async def edit_teams_card_state(
         _log.warning(
             "posted_card.edit_failed", kind=row.kind, state=state, err_type=type(err).__name__
         )
+
+
+async def post_teams_control_card(
+    runtime: McpRuntime, auth: AuthIdentity, *, thread_id: str, card: PostedCard, origin: Place
+) -> str:
+    """Post a call or switch card into the origin's conversation. Returns its id."""
+    conversation_id = conversation_of(thread_id)
+    client = await _authorize(runtime, auth, conversation_id, origin)
+    try:
+        return await client.send_card(conversation_id, build_adaptive_card(card))
+    except (httpx.HTTPError, ValueError) as err:
+        raise _post_failed(err) from err

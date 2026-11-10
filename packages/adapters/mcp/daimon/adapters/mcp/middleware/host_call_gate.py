@@ -135,8 +135,7 @@ class HostCallGate:
 
     async def ask(self, context: MiddlewareContext, identity: AuthIdentity) -> ToolResult:
         """Record the gated call and post its card; fail closed on anything missing."""
-        from daimon.adapters.mcp.tools._channel_policy import turn_origin_place
-        from daimon.adapters.mcp.tools.discord._switch_card import post_switch_card
+        from daimon.adapters.mcp.tools._own_card import post_own_card
         from daimon.core.turn.approvals import tool_call_verdict
         from daimon.core.turn.unattended_capabilities import protected_tools
 
@@ -144,7 +143,6 @@ class HostCallGate:
         settings = self._runtime.settings
         platform = identity.platform or ""
         if not deployment_on(settings, "host_call_gate", platform):
-            # TODO(G2): Slack, Teams and web presses.
             raise _refuse("off")
         if name in REACH_APPROVAL_TOOLS:
             # A reach approval is tallied under the asking turn, which is gone by the press.
@@ -229,13 +227,7 @@ class HostCallGate:
             posted = await host_calls.post_call_card(
                 self._runtime.session_factory,
                 created.row,
-                post=lambda card: post_switch_card(
-                    self._runtime,
-                    identity,
-                    channel_id=origin.thread_id,
-                    card=card,
-                    origin=turn_origin_place(origin),
-                ),
+                post=lambda card: post_own_card(self._runtime, identity, origin=origin, card=card),
             )
             if not posted:
                 raise _refuse("post_failed", host_calls.NOT_RUN_TEXT)

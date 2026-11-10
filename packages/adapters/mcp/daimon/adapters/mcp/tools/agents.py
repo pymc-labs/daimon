@@ -1950,6 +1950,9 @@ class AgentBackendSwitchInfo(BaseModel):
     channel_pin: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
+_OWN_CARD_PLATFORMS: Final = frozenset({"discord", "slack", "teams", "web"})
+
+
 async def _post_own_switch_card(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -1963,14 +1966,13 @@ async def _post_own_switch_card(
     can press it (`daimon.core.switch_cards.press_switch_card`). Nothing changes
     here; the press re-verifies everything before applying.
     """
-    from daimon.adapters.mcp.tools._channel_policy import turn_origin_place
     from daimon.core.confirmation import CardRefusal, ConfirmationPrompt, backend_switch_callbacks
     from daimon.core.stores import backend_switch_cards as cards
     from daimon.core.switch_cards import SWITCH_CARD_MAX_S, requested_switch_card
 
-    if auth.platform != "discord" or auth.platform_user_id is None:
+    if auth.platform not in _OWN_CARD_PLATFORMS or auth.platform_user_id is None:
         raise ToolError(
-            "I can't post a confirmation card from this conversation here yet. An admin can "
+            "I can't post a confirmation card from this conversation. An admin can "
             "switch the agent from its Details. Nothing changed."
         )
     now = datetime.datetime.now(datetime.UTC)
@@ -2049,11 +2051,9 @@ async def _post_own_switch_card(
         requester_platform_user_id=auth.platform_user_id,
         expires_at=expires_at,
     )
-    from daimon.adapters.mcp.tools.discord._switch_card import post_switch_card
+    from daimon.adapters.mcp.tools._own_card import post_own_card
 
-    message_id = await post_switch_card(
-        runtime, auth, channel_id=origin.thread_id, card=card, origin=turn_origin_place(origin)
-    )
+    message_id = await post_own_card(runtime, auth, origin=origin, card=card)
     async with runtime.session_factory.begin() as session:
         await cards.mark_posted(session, card_id=row.id, message_id=message_id)
     return (
