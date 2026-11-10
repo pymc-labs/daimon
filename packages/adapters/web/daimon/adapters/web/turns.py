@@ -17,6 +17,7 @@ from typing import Any
 import anthropic
 import structlog
 from daimon.adapters.web.cards import WebCards
+from daimon.adapters.web.control_cards import WebControlCards
 from daimon.adapters.web.credential_cards import WebCredentialCards
 from daimon.adapters.web.files import attachment_prompt, keep_output, seal_attachment
 from daimon.adapters.web.lifecycle import WebTurnLifecycle
@@ -56,6 +57,7 @@ from daimon.core.stores.turn_card_intents import (
     record_turn_card_message,
     retire_turn_card_intent,
 )
+from daimon.core.stores.web_notices import WebControlNotice, WebNotice
 from daimon.core.turn import turn_deadline
 from daimon.core.turn.admission import (
     Admission,
@@ -100,9 +102,17 @@ class WebTurns:
         self.credentials = WebCredentialCards(
             deps.sessionmaker, deps.anthropic, self.lifecycles.get
         )
+        self.controls = WebControlCards(settings, deps, self.lifecycles.get)
         self.draining = False
         self._cancels: dict[uuid.UUID, asyncio.Event] = {}
         self._tasks: set[asyncio.Task[None]] = set()
+
+    async def on_notice(self, notice: WebNotice) -> None:
+        """Raise the card an MCP process's notice names."""
+        if isinstance(notice, WebControlNotice):
+            await self.controls.raise_card(notice)
+        else:
+            await self.credentials.raise_card(notice)
 
     @property
     def sessionmaker(self) -> async_sessionmaker[AsyncSession]:

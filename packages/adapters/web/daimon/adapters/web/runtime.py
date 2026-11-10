@@ -143,9 +143,7 @@ async def build_runtime(settings: Settings) -> AsyncIterator[WebRuntime]:
                 billing_config=billing_config,
             )
             turns = WebTurns(settings, web, deps)
-            listener = asyncio.create_task(
-                NoticeListener(engine, turns.credentials.raise_card).run()
-            )
+            listener = asyncio.create_task(NoticeListener(engine, turns.on_notice).run())
             try:
                 yield WebRuntime(
                     settings=settings,
