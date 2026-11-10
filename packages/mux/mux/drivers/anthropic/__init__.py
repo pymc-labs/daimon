@@ -27,6 +27,7 @@ from mux.drivers.anthropic.credential_schemas import CredentialCreate, Credentia
 from mux.drivers.anthropic.normalize import EventNormalizer, object_json
 from mux.drivers.anthropic.outputs import AnthropicOutputs, Outputs
 from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
+from mux.drivers.anthropic.resources._native import NativeSnapshot
 from mux.drivers.anthropic.resources._secrets import CredentialFileUpload, SecretResolver
 from mux.drivers.anthropic.resources.agents import (
     AGENT_VERSIONS_NAMESPACE,
@@ -294,6 +295,7 @@ __all__ = [
     "MemoryMount",
     "NativeArtifacts",
     "NativeMemoryStores",
+    "NativeSnapshot",
     "NativeSessionResources",
     "NativeSkillVersions",
     "Outputs",
