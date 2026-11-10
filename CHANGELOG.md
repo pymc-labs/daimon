@@ -12,8 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   these backends. It now runs with the same limits as on Anthropic: it sees only
   that channel's memory, never a caller's personal stores, and Daimon lists only
   the tools a held turn may use. A turn whose memory is read-only also runs on
-  OpenAI or a self-hosted harness, and its memory tools stay read-only. Sealed
-  channels and Slack DM context still refuse these backends.
+  OpenAI or a self-hosted harness, and its memory tools stay read-only.
+- **Sealed channels and Slack DM context run on OpenAI, Gemini and self-hosted
+  harnesses.** The turn's credential carries its seal and Slack context, so it
+  reads only the sealed conversations its own seal covers, as on Anthropic.
 - **Shared threads run on OpenAI.** Everyone in the thread continues one session.
   It runs without Daimon's tools or any caller's personal stores, so nobody's
   credentials reach the others. Gemini and self-hosted harnesses still refuse

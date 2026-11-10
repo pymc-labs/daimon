@@ -12,6 +12,7 @@ Read this if you self-host and do not want every turn on Anthropic.
 | Models | The agent's own model | `gpt-6-luna`, `gpt-6-astra` | `gemini-3.8-flash`, `gemini-4-argon` (priced through 2026-11-30, then refused) | The deployment you name (default `gpt-6.1-sol`) |
 | Shared threads | Yes | Yes, without Daimon's tools | No | No |
 | Tools that need a confirmation | Yes | Daimon's own card in chat | Daimon's own card in chat | Not documented |
+| Sealed channels and Slack DM context | Yes | Yes | Yes | Yes |
 | Multi-agent delegation | Yes | No | Not documented | Not documented |
 | Memory across turns | Yes | No | Not documented | No |
 | Workspace export and import | Yes | No | Not documented | No |
