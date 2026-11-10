@@ -334,7 +334,6 @@ PERMISSION_SETTER_TOOLS: Final[frozenset[str]] = frozenset(
         "set_agent_backend",
         "set_agent_default",
         "clear_agent_default",
-        "set_plain_text_mentions",
         "change_setting",
         "grant_admin",
         "revoke_admin",

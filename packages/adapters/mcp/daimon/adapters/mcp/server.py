@@ -90,7 +90,6 @@ from daimon.adapters.mcp.tools.models import register_model_tools
 from daimon.adapters.mcp.tools.my_data import register_my_data_tools
 from daimon.adapters.mcp.tools.never_tag import register_never_tag_tools
 from daimon.adapters.mcp.tools.notebook import register_notebook_tools
-from daimon.adapters.mcp.tools.plain_text_mentions import register_plain_text_mentions_tools
 from daimon.adapters.mcp.tools.progress_plans import register_progress_plan_tools
 from daimon.adapters.mcp.tools.promo_codes import register_promo_code_tools
 from daimon.adapters.mcp.tools.promo_issuing import register_promo_issuing_tools
@@ -581,7 +580,6 @@ def create_mcp_app(
     register_channel_environment_tools(mcp, runtime)  # which environment a channel runs in
     register_progress_plan_tools(mcp, runtime)  # the plan on the progress card, and its switch
     register_scope_settings_tools(mcp, runtime)  # the Settings group: get_settings, change_setting
-    register_plain_text_mentions_tools(mcp, runtime)  # typed "@<name>" starts a turn
     register_agent_coding_key_tools(mcp, runtime)
     register_my_data_tools(mcp, runtime)
     register_routine_run_tool(mcp, runtime)

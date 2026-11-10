@@ -112,10 +112,6 @@ CHAT_TURN_TOOL_REACHABILITY: dict[str, ExpectedOutcome] = {
     # routines.py — ungated by design; needs a platform user identity, which
     # this Discord-shaped session carries.
     "create_routine": ExpectedOutcome(discoverable=True),
-    # plain_text_mentions.py — the tenant-wide write is admin-tagged; the
-    # read stays open so a member hears whether it is on and who can change it.
-    "set_plain_text_mentions": ExpectedOutcome(discoverable=False),
-    "get_plain_text_mentions": ExpectedOutcome(discoverable=True),
 }
 """Source of truth for what the seeded prompt may claim a chat turn can do.
 The four chat-removal tools land in a later plan and are covered by the
@@ -151,7 +147,6 @@ _CALL_ARGS: dict[str, dict[str, object]] = {
         "timezone": "UTC",
         "trigger_message": "ping",
     },
-    "get_plain_text_mentions": {},
 }
 
 

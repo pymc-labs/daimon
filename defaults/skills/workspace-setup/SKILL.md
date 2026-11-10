@@ -338,9 +338,9 @@ isn't available yet, the tool says so.
 Off by default, an admin can let a person's message in a
 channel or thread that contains "@" followed by your name as plain text (any
 case) start a reply, as a real mention does: useful on phones and for pasted
-prompts. `set_plain_text_mentions(enabled)` changes it for everyone in this `words.space`
-(admin only); `get_plain_text_mentions()` reads it. Read the returned
-`note` back. Direct messages, bots and webhooks are unaffected. A name followed
+prompts. `change_setting(key="plain_text_mentions", level="server", value="on")` changes it
+for everyone in this `words.space` (admin only); `get_settings` reads it. Read the
+returned `note` back. Direct messages, bots and webhooks are unaffected. A name followed
 by "(" or by a dot and a letter is ignored ("@Daimon (urgent)", "@Daimon.Thanks").
 
 ## The cost footer

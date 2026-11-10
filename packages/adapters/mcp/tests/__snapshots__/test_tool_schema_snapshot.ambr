@@ -4348,21 +4348,6 @@
         'type': 'object',
       }),
     }),
-    'get_plain_text_mentions': dict({
-      'description': '''
-        Report whether a typed "@<your name>" in a channel or thread starts a reply here.
-        <blank line>
-        Reading needs no admin; changing it does (``set_plain_text_mentions``,
-        an admin). Read the returned ``note`` back to the
-        user.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-        }),
-        'type': 'object',
-      }),
-    }),
     'get_routine': dict({
       'description': '''
         Get a routine by id. Raises if not found, cross-tenant, or someone else's and you
@@ -9581,33 +9566,6 @@
             'type': 'boolean',
           }),
         }),
-        'type': 'object',
-      }),
-    }),
-    'set_plain_text_mentions': dict({
-      'description': '''
-        Let a typed "@<your name>" in a channel or thread start a reply. Admin-only.
-        <blank line>
-        For the whole workspace. When
-        ``enabled`` is true, a person's message in a channel or thread that
-        contains your name after "@" as plain text (any case, for example a
-        pasted prompt or a mention typed on a phone without picking you from
-        the list) is answered as if they had mentioned you. Messages from
-        bots and webhooks never count, and direct messages are unchanged. So
-        that suffixes and domains never match, a name followed by "(" or by a
-        dot and a letter is ignored ("@Daimon (urgent)", "@Daimon.Thanks"). Off
-        by default. Read the returned ``note`` back to the user.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-          'enabled': dict({
-            'type': 'boolean',
-          }),
-        }),
-        'required': list([
-          'enabled',
-        ]),
         'type': 'object',
       }),
     }),
