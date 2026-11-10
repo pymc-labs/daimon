@@ -79,6 +79,18 @@ def test_fable_5_2_is_selectable_but_never_the_default() -> None:
     )
 
 
+def test_fable_5_2_is_not_the_first_picker_option() -> None:
+    """Pickers list ALLOWED_MODEL_IDS in order, so the top option is the first row.
+
+    Fable 5.2 is the priciest model offered; it sits below Opus 5.5 so it is never
+    the first thing someone sees in the list.
+    """
+    assert ALLOWED_MODEL_IDS[0] == "claude-opus-5-5", "Opus 5.5 leads the picker list"
+    assert ALLOWED_MODEL_IDS.index("claude-fable-5-2") > ALLOWED_MODEL_IDS.index(
+        "claude-opus-5-5"
+    ), "fable 5.2 must be listed below opus 5.5"
+
+
 def test_default_agent_model_matches_the_seeded_agent() -> None:
     """The default new agents get must equal the model `defaults/` ships.
 

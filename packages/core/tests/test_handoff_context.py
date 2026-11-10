@@ -39,6 +39,14 @@ def test_supports_system_message_accepts_every_listed_family() -> None:
     )
 
 
+def test_fable_5_2_is_gated_open_as_observed_live() -> None:
+    """Fable 5.2 inherits the `claude-fable-5` rule; a live Managed Agents session on
+    2026-11-10 accepted `[user.message, system.message]` in one request and followed
+    the system message, while the same request on claude-haiku-4-5 was refused with 400.
+    """
+    assert supports_system_message("claude-fable-5-2"), "fable 5.2 accepts system.message"
+
+
 def test_supports_system_message_rejects_the_models_observed_to_400() -> None:
     for model_id in ("claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-1", ""):
         assert not supports_system_message(model_id), (

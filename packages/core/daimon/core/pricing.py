@@ -121,10 +121,10 @@ class UsageCounts(Protocol):
 AGENT_PRICING_SOURCE = "https://platform.claude.com/docs/en/about-claude/pricing"
 AGENT_PRICING_CHECKED_ON = "2026-11-10"
 AGENT_MODEL_PRICING: dict[str, ModelRates] = {
-    "claude-fable-5-2": ModelRates(input=8.0, output=40.0, cache_write=10.0, cache_read=0.20),
     "claude-opus-5-5": ModelRates(input=4.0, output=20.0, cache_write=5.0, cache_read=0.20),
     # Local preset/tariff key, resolved before provider I/O.
     "claude-opus-5-5-fast": ModelRates(input=8.0, output=40.0, cache_write=10.0, cache_read=0.40),
+    "claude-fable-5-2": ModelRates(input=8.0, output=40.0, cache_write=10.0, cache_read=0.20),
     "claude-opus-5": ModelRates(input=5.0, output=25.0, cache_write=6.25, cache_read=0.50),
     "claude-opus-4-8": ModelRates(input=5.0, output=25.0, cache_write=6.25, cache_read=0.50),
     "claude-opus-4-7": ModelRates(input=5.0, output=25.0, cache_write=6.25, cache_read=0.50),
