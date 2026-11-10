@@ -341,7 +341,7 @@ function seed(): Rec[] {
     id, owner, co_owners: co, versions, last_used_at: used == null ? null : ago(used), spend_usd: usd, drafts: {},
   })
   return [
-    rec("ag_daimon", "p_maya", ["p_jonas"], daimon, 0.2, 412.6),
+    rec("ag_default", "p_maya", ["p_jonas"], daimon, 0.2, 412.6),
     rec("ag_mmm", "p_maya", ["p_priya"], mmm, 0.3, 286.15),
     rec("ag_pricing", "p_priya", [], pricing, 1, 64.9),
     rec("ag_review", "p_jonas", [], review, 26, 38.4),
