@@ -59,7 +59,7 @@ Where each feature can be set, and its default.
 | Personal memory | `memory_personal` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Always Off on Gemini, OpenAI |
 | Shared memory | `memory_shared` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Always On on Gemini, OpenAI |
 | Channel memory | `memory_channel` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
-| Private channel messages | `private_channel_messages` | Capability | Off | ✓ |  |  |  |  | Only Teams |
+| Private channel messages | `private_channel_messages` | Capability | On | ✓ |  |  |  |  | Needs the operator's setup; Only Teams |
 | Direct messages | `direct_messages` | Capability | Off | ✓ | ✓ |  |  |  | Only Discord, Slack |
 | Web app: chat | `web.chat` | Capability | On | ✓ | ✓ |  |  |  |  |
 | Web app: agents | `web.agents` | Capability | On | ✓ | ✓ |  |  |  |  |
@@ -89,7 +89,7 @@ Where each feature can be set, and its default.
 | Daily spend per model | `daily_model_cap` | Limit | $20 | ✓ | ✓ | ✓ |  |  |  |
 | Approvals | `approvals` | Guardrail | Ask |  | ✓ |  | ✓ | ✓ |  |
 | Read-only memory in direct messages | `dm_memory_read_only` | Guardrail | Writable | ✓ | ✓ |  |  |  | Only Discord, Slack |
-| Tool safety | `tool_safety` | Guardrail | Off | ✓ |  |  |  |  |  |
+| Tool safety | `tool_safety` | Guardrail | On | ✓ |  |  |  |  |  |
 | Reach check | `reach_budget` | Guardrail | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Built-in tools in routines | `unattended_capabilities` | Guardrail | Per routine | ✓ | ✓ | ✓ |  |  |  |
 | Routines must say where they post | `require_routine_destination` | Guardrail | Optional | ✓ | ✓ |  |  |  |  |
@@ -630,13 +630,13 @@ A card shows in a channel whose reply is waiting on the team's limit on replies 
 
 ## Private channel messages
 
-Every message in private and shared channels is read through Microsoft Graph, not only the ones that mention the agent. Read once at startup, so only the server operator sets it and a restart applies it.
+Every message in private and shared channels is read through Microsoft Graph, not only the ones that mention the agent. Needs the public address the bot is reached at. Read once at startup, so only the server operator sets it and a restart applies it.
 
 | | |
 | --- | --- |
 | Key | `private_channel_messages` |
 | Values | `on` (On), `off` (Off) |
-| Default | `off` |
+| Default | `on` |
 | Levels | Deployment |
 | Combines | Off above is a ceiling |
 | Deprecated | `DAIMON_PRIVATE_CHANNEL_MESSAGES__ENABLED` |
@@ -739,7 +739,7 @@ The integrations pages of the web app. Off hides them for everyone on the team.
 
 ## Watches
 
-The agent can watch a page or feed and start a conversation when it changes. Off removes the watch tools here and stops the watches made here.
+The agent can watch a page or feed and start a conversation when it changes. Off removes the watch tools here and stops the watches made here. Watches fire only once the operator enables them, whatever this says.
 
 | | |
 | --- | --- |
@@ -993,7 +993,7 @@ A change through a connected tool waits for the person to press Approve. In a ro
 | --- | --- |
 | Key | `tool_safety` |
 | Values | `off` (Off), `on` (On) |
-| Default | `off` |
+| Default | `on` |
 | Levels | Deployment |
 | Combines | Stricter wins |
 | Deprecated | `DAIMON_TOOL_SAFETY__ENABLED` |

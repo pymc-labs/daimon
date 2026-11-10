@@ -34,6 +34,7 @@ Requirement = Literal[
     "gemini_key",
     "microsoft_accounts",
     "repo_memory_setup",
+    "teams_public_url",
     "support_channel",
 ]
 """``platform_adapter``: the chat platform's adapter is set up in this deployment.
@@ -144,11 +145,11 @@ class FeatureSpec:
             return True
         if self.effect == "limit" and tier == "deployment":
             try:
-                return float(value) >= 0 and float(value) == float(value)
+                number = float(value)
             except ValueError:
                 return False
-        return False
             return math.isfinite(number) and number >= 0
+        return False
 
     def label(self, value: str) -> str:
         return self.values.get(value, "Default" if value == DEFAULT else value)
@@ -163,7 +164,6 @@ class FeatureSpec:
         return tuple(tier for tier in self.tiers if tier in allowed)
 
 
-def _builtin(tool: str) -> FeatureSpec:
 def limit_int(value: str) -> int:
     """A whole-number limit as text (`12`, or `12.0` as a deployment variable may say it).
     Raises ValueError for text `FeatureSpec.accepts` would refuse as not finite."""
@@ -173,6 +173,7 @@ def limit_int(value: str) -> int:
     return int(number)
 
 
+def _builtin(tool: str) -> FeatureSpec:
     words = tool.replace("_", " ")
     return FeatureSpec(
         key=f"tool.{tool}",
@@ -601,15 +602,17 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         category="capabilities",
         effect="capability",
         values=_ON_OFF,
-        default="off",
+        default="on",
         tiers=("deployment",),
         binds="turn",
         doc=(
             "Every message in private and shared channels is read through Microsoft "
-            "Graph, not only the ones that mention the agent. Read once at startup, so only "
-            "the server operator sets it and a restart applies it."
+            "Graph, not only the ones that mention the agent. Needs the public address the "
+            "bot is reached at. Read once at startup, so only the server operator sets it "
+            "and a restart applies it."
         ),
         platforms=frozenset({"teams"}),
+        requires=("teams_public_url",),
         authority=_ADMIN,
         legacy_env=("DAIMON_PRIVATE_CHANNEL_MESSAGES__ENABLED",),
     ),
@@ -668,7 +671,7 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         category="guardrails",
         effect="guardrail",
         values=_OFF_ON,
-        default="off",
+        default="on",
         tiers=("deployment",),
         binds="turn",
         doc=(
@@ -799,7 +802,8 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "watches",
         "Watches",
         "The agent can watch a page or feed and start a conversation when it changes. "
-        "Off removes the watch tools here and stops the watches made here.",
+        "Off removes the watch tools here and stops the watches made here. Watches fire "
+        "only once the operator enables them, whatever this says.",
         legacy_env=("DAIMON_WATCHES__ENABLED",),
     ),
     _capability(

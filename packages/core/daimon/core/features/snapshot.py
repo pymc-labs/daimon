@@ -97,6 +97,7 @@ _SETUP: Final[Mapping[Requirement, Callable[[Settings], bool]]] = {
     "gemini_key": lambda s: s.gemini.api_key is not None,
     "microsoft_accounts": lambda s: s.microsoft_accounts_enabled and bool(s.crypto.keys),
     "repo_memory_setup": lambda s: get_repo_memory_settings(s).enabled,
+    "teams_public_url": lambda s: s.teams is not None and s.teams.public_url is not None,
 }
 """One integration's setup, exactly the condition its tools need to run. Unmet, the session is not
 offered them, so a check here must never be stricter than the tools. Watches and GitHub have none:
@@ -216,6 +217,12 @@ def may_turn_on(settings: Settings, key: str, platform: str) -> bool:
     place = FeaturePlace(uuid.UUID(int=0), platform)
     resolved = resolve_one(FEATURES[key], settings, place, ())
     return resolved.unavailable is None and (resolved.on or not resolved.locked)
+
+
+def deployment_on(settings: Settings, key: str, platform: str) -> bool:
+    """Whether a deployment-only feature is on for `platform`: its value and its setup."""
+    place = FeaturePlace(uuid.UUID(int=0), platform)
+    return resolve_one(FEATURES[key], settings, place, ()).on
 
 
 @dataclass(frozen=True)

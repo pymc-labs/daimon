@@ -50,7 +50,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Guardrails are features too, and a lower level can only make them stricter.**
   Tool safety (`tool_safety`), the reach check (`reach_budget`), built-in tools in routines (`unattended_capabilities`) and requiring a routine destination (`require_routine_destination`) are set at the levels `docs/features.md` lists, and a level below can tighten but never loosen them. An agent asking to change one gets a confirmation card, or a refusal where no card can be shown.
-  `DAIMON_TOOL_SAFETY__ENABLED`, `DAIMON_OUTBOUND__REACH_BUDGET_ENABLED` and `DAIMON_MCP__REQUIRE_ROUTINE_DESTINATION` still work but log a deprecation. Nothing changes until a level sets one.
+  `DAIMON_TOOL_SAFETY__ENABLED`, `DAIMON_OUTBOUND__REACH_BUDGET_ENABLED` and `DAIMON_MCP__REQUIRE_ROUTINE_DESTINATION` still work but log a deprecation.
+  Tool safety is now On by default, so a write by a third-party tool waits for an approval card unless a level turns it off (`DAIMON_FEATURES__TOOL_SAFETY=off`). Private channel messages (`private_channel_messages`) are On by default too, and on Teams they need the bot's public address (`DAIMON_TEAMS__PUBLIC_URL`) like any other setup, instead of failing startup.
+  A limit set to a non-finite number is refused, and an unreadable one no longer drops the operator's outbound limits.
 
 - **The Azure deploy can keep MCP private while Teams is public.**
   Set `mcpPublicIngress` to false and MCP is reachable only from apps in the same Container Apps environment. The default keeps it public, as before.

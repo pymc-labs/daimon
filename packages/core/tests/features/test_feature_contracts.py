@@ -325,6 +325,7 @@ _KEY_READERS = {
     "place_feature_or_none": 3,
     "feature_in_or_none": 3,
     "_chosen": 2,
+    "deployment_on": 1,
 }
 """Calls that read a feature key, and the position of the key among their arguments."""
 _SNAPSHOT_READS = {"on", "value", "get"}

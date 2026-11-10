@@ -47,20 +47,24 @@ def test_tool_safety_trusted_annotations_defaults_empty_and_reads_a_json_list(
     assert load_settings(_env_file=None).tool_safety.trusted_annotations == ("bridge", "linear")
 
 
-def test_private_channel_messages_is_a_top_level_switch_that_needs_a_teams_public_url(
+def test_private_channel_messages_is_on_by_default_and_needs_a_teams_public_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from daimon.core.features.registry import FEATURES
+    from daimon.core.features.snapshot import deployment_on
+
     monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
     monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
     for name in ("CLIENT_ID", "CLIENT_SECRET", "TENANT_ID"):
         monkeypatch.setenv(f"DAIMON_TEAMS__{name}", "11111111-1111-1111-1111-111111111111")
     monkeypatch.delenv("DAIMON_TEAMS__PUBLIC_URL", raising=False)
-    assert not load_settings(_env_file=None).private_channel_messages.enabled, "off by default"
-    monkeypatch.setenv("DAIMON_PRIVATE_CHANNEL_MESSAGES__ENABLED", "true")
-    with pytest.raises(ValidationError, match="DAIMON_TEAMS__PUBLIC_URL"):
-        load_settings(_env_file=None)
+    spec = FEATURES["private_channel_messages"]
+    assert spec.default == "on"
+    no_url = load_settings(_env_file=None)
+    assert not deployment_on(no_url, "private_channel_messages", "teams"), "set up first"
     monkeypatch.setenv("DAIMON_TEAMS__PUBLIC_URL", "https://bot.example")
-    assert load_settings(_env_file=None).private_channel_messages.enabled, "on with a URL"
+    with_url = load_settings(_env_file=None)
+    assert deployment_on(with_url, "private_channel_messages", "teams")
 
 
 def test_discord_stale_card_age_exceeds_turn_ceiling_and_attempts_are_bounded() -> None:

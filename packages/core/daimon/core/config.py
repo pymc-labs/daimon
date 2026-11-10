@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Annotated, Literal, cast
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from daimon.core.features.registry import deployment_key, parse_deployment
+from daimon.core.features.registry import FEATURES, deployment_key, parse_deployment
 from daimon.core.mcp_server_url import ascii_mcp_url, canonical_mcp_url
 from daimon.core.outbound.reach import DEFAULT_MAX_PEOPLE
 from daimon.core.scope_cascade import CascadeMode
@@ -3062,18 +3062,17 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _tool_safety_feature(self) -> Settings:
         """`DAIMON_FEATURES__TOOL_SAFETY` sets the policy every tool-safety reader holds."""
+        was_set = "enabled" in self.tool_safety.model_fields_set
         if (raw := self.features.get("tool_safety")) is not None:
             enabled = parse_deployment("tool_safety", raw)[0] == "on"
-            self.tool_safety = self.tool_safety.model_copy(update={"enabled": enabled})
-        return self
-
-    @model_validator(mode="after")
-    def _private_channel_messages_need_a_public_url(self) -> Settings:
-        teams = self.teams
-        if self.private_channel_messages.enabled and teams is not None and teams.public_url is None:
-            raise ValueError(
-                "DAIMON_PRIVATE_CHANNEL_MESSAGES__ENABLED needs DAIMON_TEAMS__PUBLIC_URL"
-            )
+        elif was_set:
+            return self
+        else:
+            enabled = FEATURES["tool_safety"].default == "on"
+        policy = self.tool_safety.model_copy(update={"enabled": enabled})
+        if not was_set and raw is None:
+            policy.__pydantic_fields_set__.discard("enabled")  # a default, not an operator value
+        self.tool_safety = policy
         return self
 
     model_config = SettingsConfigDict(

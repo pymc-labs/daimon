@@ -41,7 +41,7 @@ Three questions, each a total function of its arguments:
   then the fixed gates (`PUBLISH_TOOLS`, `CONFIRMED_DAIMON_TOOLS`), then an
   agent `ask`. A rule never loosens a fixed gate.
 
-With `enabled=False` (the default), ordinary toolsets stay `always_allow`.
+With `enabled=False`, ordinary toolsets stay `always_allow`.
 Person-only actions, including watch creation, resume and key rotation, retain
 their confirmation cards regardless of that switch.
 
