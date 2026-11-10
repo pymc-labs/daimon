@@ -75,17 +75,18 @@ async def session_card_gap(
     Read from the session itself: the verified origin's live session must run
     the origin's responder and hold `tool_name` on `always_ask`, as MA reports
     it or, failing that, as daimon recorded sending it (`_recorded_as_gated`).
-    An `agent_chat` or unattended session has no origin.
+    An `agent_chat` or unattended session has no origin, or an unattended one.
     """
     if origin is None:
         return "no_origin"
     if card_satisfied(auth):
         # The person pressed Approve on Daimon's own card for exactly this call.
         return None
+    if not origin.attended:
+        # A provider turn nobody watches has an unattended origin; MA's has none.
+        return "no_origin"
     if tool_name == "lead_intake_resolve" and (
-        not origin.attended
-        or not auth.chat_session_id
-        or origin.chat_session_id != auth.chat_session_id
+        not auth.chat_session_id or origin.chat_session_id != auth.chat_session_id
     ):
         return "no_origin"
     async with runtime.session_factory() as session:

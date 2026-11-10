@@ -37,6 +37,7 @@ from daimon.core.context_prompt import TurnContext, context_prompt
 from daimon.core.context_provider import ContextHook, ContextRequest, LoadedProvider
 from daimon.core.errors import TurnError
 from daimon.core.features.eval_key import EvalKey
+from daimon.core.features.snapshot import deployment_on
 from daimon.core.handoff_context import (
     render_lost_workspace_framing,
     render_previous_session,
@@ -146,12 +147,15 @@ from daimon.core.turn.status_log import status_log_override
 from daimon.core.turn.termination import TerminationReason, termination_reason
 from daimon.core.turn.unattended import (
     dm_session_authority,
+    is_provider_turn,
     refuse_ungated_confirmation,
     require_native_unattended_capabilities,
     session_gate,
+    unattended_provider_origin,
 )
 from daimon.core.turn.unattended_capabilities import (
     ServerTool,
+    UnattendedEntryPoint,
     capability_policy,
     capability_posture,
     constrain_capabilities,
@@ -1689,6 +1693,20 @@ async def run_prepared_turn_impl(
             selected_path = deps.turn_path or load_turn_settings().path
             posture = confirmation
             async with contextlib.AsyncExitStack() as stack:
+                if origin_id is None and unattended and is_provider_turn(admission):
+                    # MCP reads `origin.attended` for every gated call: give this
+                    # provider turn an unattended origin of its own.
+                    origin_id = (
+                        await stack.enter_async_context(
+                            unattended_provider_origin(
+                                deps.sessionmaker,
+                                admission,
+                                tenant_id=tenant_id,
+                                platform=platform,
+                                thread_id=thread_id,
+                            )
+                        )
+                    ).id
                 if unattended:
                     revision = admission.backend_revision
                     managed = revision is None or revision.profile == MANAGED_AGENTS.profile_id
@@ -1827,18 +1845,30 @@ async def run_prepared_turn_impl(
                         # read/write and sandbox decider for those inspected actions.
                         if revision is None or revision.profile != SELFHOSTED_LOOP.profile_id:
                             posture = PolicyApproval(decide=refuse_ungated_confirmation)
-                            require_native_unattended_capabilities(
-                                prepared._native_spec,  # pyright: ignore[reportPrivateUsage]
-                                profile_id=revision.profile if revision is not None else "unknown",
+                            native_entry: UnattendedEntryPoint = (
+                                "long_job"
+                                if job_row is not None
+                                else "watch"
+                                if watch_row is not None
+                                else unattended_entry_point(origin)
+                            )
+                            native_profile = revision.profile if revision is not None else "unknown"
+                            native_gated = deps.settings is not None and deployment_on(
+                                deps.settings, "host_call_gate", platform
                             )
 
-                            async def native_gate() -> None:
+                            def native_check() -> None:
                                 require_native_unattended_capabilities(
                                     prepared._native_spec,  # pyright: ignore[reportPrivateUsage]
-                                    profile_id=revision.profile
-                                    if revision is not None
-                                    else "unknown",
+                                    profile_id=native_profile,
+                                    gated=native_gated,
+                                    sandbox=capability_policy(native_entry).allow_builtins,
                                 )
+
+                            native_check()
+
+                            async def native_gate() -> None:
+                                native_check()
 
                             stack.enter_context(unattended_sends(native_gate))
                         else:

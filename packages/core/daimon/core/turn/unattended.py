@@ -25,7 +25,8 @@ with it on, the same selection a chat turn asks on.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -74,18 +75,73 @@ from mux.profiles import get_profile
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
+    from daimon.core.stores.domain import TurnOriginRow
     from daimon.core.turn.admission import Admission
     from daimon.core.turn.deps import TurnDeps
 
 
-def require_native_unattended_capabilities(spec: AgentSpec | None, *, profile_id: str) -> None:
+def is_provider_turn(admission: Admission) -> bool:
+    """A turn on another model provider (not Managed Agents, not the selfhosted loop)."""
+    from mux.profiles import MANAGED_AGENTS
+    from mux.profiles.selfhosted import LOOP as SELFHOSTED_LOOP
+
+    revision = admission.backend_revision
+    return revision is not None and revision.profile not in (
+        MANAGED_AGENTS.profile_id,
+        SELFHOSTED_LOOP.profile_id,
+    )
+
+
+@asynccontextmanager
+async def unattended_provider_origin(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    admission: Admission,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    thread_id: str,
+) -> AsyncIterator[TurnOriginRow]:
+    """An `attended=False` origin for a provider turn nobody watches, for its lifetime.
+
+    The MCP server judges each gated call by its origin (`origin.attended`), so
+    the call reaches the unattended verdict at once. Managed Agents turns keep
+    no origin: their session gate already decides.
+    """
+    from daimon.core.stores.domain import Role
+    from daimon.core.turn_origin import turn_origin
+
+    async with turn_origin(
+        sessionmaker,
+        tenant_id=tenant_id,
+        account_id=admission.account_id,
+        platform=platform,
+        parent_channel_id=admission.origin_channel_id or admission.budget_channel_id or thread_id,
+        thread_id=thread_id,
+        responder_ma_agent_id=admission.agent.id,
+        responder_name=admission.config.agent_name or admission.agent.name,
+        role=Role.USER,
+        sender_foreign=admission.hold is not None,
+        shared_channel=admission.shared_channel,
+        attended=False,
+    ) as origin:
+        yield origin
+
+
+def require_native_unattended_capabilities(
+    spec: AgentSpec | None, *, profile_id: str, gated: bool = False, sandbox: bool = False
+) -> None:
     """Refuse unreviewed or automatic native sandbox/custom tools before send.
 
     Selfhosted inspects every call at its host boundary and Managed Agents
     rewrites its session. Other providers must expose a reviewed native
     target; their automatic tools cannot be stopped by refusing a pause.
+    `gated`: the host call gate is on, so every gated Daimon MCP call reaches
+    the unattended verdict at the server and MCP, automatic tools and
+    extensions may run. `sandbox`: the entry point opted in to sandbox tools
+    (`capability_policy`), the only way hosted execution runs unattended.
     """
-    if get_profile(profile_id).implicit_execution:
+    profile = get_profile(profile_id)
+    if profile.implicit_execution and not sandbox:
         # Hosted OpenAI bash is implicit in its environment, so an empty
         # agent.tools readback does not prove that execution is disabled.
         raise AdmissionDenied(
@@ -98,22 +154,29 @@ def require_native_unattended_capabilities(spec: AgentSpec | None, *, profile_id
             detail="The tool configuration cannot be checked for a reply nobody is watching.",
         )
     if any(
-        tool.kind in {"builtin", "custom"} and tool.permission == "auto"
+        tool.permission == "auto"
+        and (
+            tool.kind == "custom"
+            or (tool.kind == "builtin" and tool.name in profile.execution_tools and not sandbox)
+            or (tool.kind == "builtin" and not gated)
+        )
         for tool in spec.tools or ()
     ):
         raise AdmissionDenied(
             reason="backend_unsupported",
             detail="Automatic sandbox or custom tools cannot run without someone watching.",
         )
-    if (
-        any(tool.permission == "auto" for tool in spec.tools or ())
-        or spec.mcp_servers
-        or spec.extensions
-        or spec.model.options
+    if profile.undeclared_model_options(spec.model.options) or (
+        not gated
+        and (
+            any(tool.permission == "auto" for tool in spec.tools or ())
+            or spec.mcp_servers
+            or spec.extensions
+        )
     ):
-        # These runtimes have no host inspection of automatic MCP calls or
-        # provider-specific capabilities. Refusing their confirmation pauses
-        # would not prevent an automatic call from executing.
+        # Without the gate these runtimes have no host inspection of automatic
+        # MCP calls or provider-specific capabilities. Refusing their
+        # confirmation pauses would not prevent an automatic call from executing.
         raise AdmissionDenied(
             reason="backend_unsupported",
             detail=(
