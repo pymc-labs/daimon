@@ -12,7 +12,6 @@ refresh token twice. Watches never read this table.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterable
 from datetime import datetime
 from typing import Any, cast
 
@@ -124,19 +123,14 @@ async def list_connector_token_urls(
     tenant_id: uuid.UUID,
     agent_id: uuid.UUID,
     account_id: uuid.UUID,
-    server_urls: Iterable[str],
 ) -> frozenset[str]:
-    """Of `server_urls`, those this person holds a Daimon-refreshed token for on this agent."""
-    urls = list(server_urls)
-    if not urls:
-        return frozenset()
+    """The server URLs this person holds a Daimon-refreshed token for on this agent."""
     rows = await session.scalars(
         select(ConnectorToken.server_url).where(
             ConnectorToken.tenant_id == tenant_id,
             ConnectorToken.agent_id == agent_id,
             ConnectorToken.account_id == account_id,
             ConnectorToken.refresh_owner == "daimon",
-            ConnectorToken.server_url.in_(urls),
         )
     )
     return frozenset(rows)
