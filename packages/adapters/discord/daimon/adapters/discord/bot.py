@@ -205,7 +205,6 @@ from daimon.core.thread_naming import (
     naming_text,
     strip_mentions,
 )
-from daimon.core.thread_participation import ParticipationMode
 from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit, backend_facts
 from daimon.core.turn.bookkeeping import release_turn_markers
 from daimon.core.turn.ceiling import turn_deadline
@@ -2580,7 +2579,7 @@ class DaimonBot(commands.Bot):
         if self._participant is None:
             self._participant = ThreadParticipant(
                 settings=self.runtime.settings.thread_participation,
-                deployment=switch_default(self.runtime.settings, "participation", "discord"),
+                deployment=self.runtime.settings,
                 sessionmaker=self.runtime.sessionmaker,
                 anthropic=self.runtime.anthropic,
                 bot_user_id=bot_user_id,
@@ -2627,11 +2626,11 @@ class DaimonBot(commands.Bot):
             # Cascade first: it says `off` for almost every message, so the
             # tenant liveness read is only paid by threads actually followed.
             resolved = await responder.resolve(tenant_id=tenant_id, thread=thread)
-            if resolved.mode is not ParticipationMode.ON:
+            if not resolved.on:
                 log.debug(
                     "thread_participation.not_following",
                     thread_id=str(thread_id),
-                    mode=resolved.mode.value,
+                    value=resolved.value,
                     tier=resolved.tier,
                 )
                 return
@@ -2877,7 +2876,7 @@ class DaimonBot(commands.Bot):
                 bot_user_id=self.user.id, bot_display_name=discord_settings.bot_display_name
             )
             resolved = await responder.resolve(tenant_id=tenant_id, thread=thread)
-            if resolved.mode is ParticipationMode.ON:
+            if resolved.on:
                 self._unmentioned_hint_cooldown.release(thread_id)
                 return
             # A reaction is a post: where the agent may not write (or that

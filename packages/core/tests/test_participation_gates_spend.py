@@ -9,12 +9,12 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from daimon.core.config import ThreadParticipationSettings
+from daimon.core.features.resolver import ResolvedFeature
 from daimon.core.participation_gates import ParticipationGates
 from daimon.core.stores import spend_allowances
 from daimon.core.thread_participation import (
     ClassifierMessage,
     ParticipationMode,
-    ResolvedParticipation,
 )
 from daimon.testing.factories import make_ledger_entry, make_tenant
 from mux.testing.isolated_sdk import build_async_anthropic
@@ -67,7 +67,7 @@ async def test_an_exhausted_allowance_skips_the_classifier(
             caller_id="caller",
             candidates=[ClassifierMessage("person", "organic message", False)],
             recent=recent,
-            resolved=ResolvedParticipation(ParticipationMode.ON, "thread"),
+            resolved=ResolvedFeature("participation", "on", "thread"),
         )
     finally:
         await client.close()

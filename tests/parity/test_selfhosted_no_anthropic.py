@@ -18,10 +18,11 @@ from daimon.adapters.teams.participation import TeamsParticipation
 from daimon.adapters.teams.thread_reader import ThreadReader
 from daimon.core.channel_backend import channel_ref, set_channel_backend
 from daimon.core.config import ThreadParticipationSettings
+from daimon.core.features.resolver import ResolvedFeature
 from daimon.core.participation_gates import ParticipationGates
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import mux_state
-from daimon.core.thread_participation import ParticipationMode, ResolvedParticipation
+from daimon.core.thread_participation import ParticipationMode
 from daimon.testing.db import (  # noqa: F401
     db_clean,
     db_engine,
@@ -110,7 +111,7 @@ async def test_selfhosted_discord_and_teams_followed_threads_stay_mention_only(
         [message],
         trigger=message,
         tenant_id=tenants["discord"].id,
-        resolved=ResolvedParticipation(ParticipationMode.ON, "deployment"),
+        resolved=ResolvedFeature("participation", "on", "deployment"),
     )
 
     gates = ParticipationGates(

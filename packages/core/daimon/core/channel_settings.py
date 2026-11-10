@@ -41,7 +41,6 @@ from daimon.core.errors import StaleChannelValue
 from daimon.core.permissions import channel_rule, with_channel_rule
 from daimon.core.rule_views import binding_refusal
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
-from daimon.core.scope_cascade import CascadeScope
 from daimon.core.specs import SkillRef
 from daimon.core.stores import agent_tool_rules as tool_rules
 from daimon.core.stores import mux_state
@@ -53,10 +52,10 @@ from daimon.core.stores.access_policy import (
 )
 from daimon.core.stores.channel_changes import WORKSPACE_ID, record_change, write_workspace_default
 from daimon.core.stores.channel_skills import list_channel_skills, remove_channel_skill
-from daimon.core.stores.domain import ChannelSkillRow
+from daimon.core.stores.domain import ChannelSkillRow, FeatureTarget
+from daimon.core.stores.feature_values import clear_feature_value, list_feature_values
 from daimon.core.stores.platform_names import list_channel_names
 from daimon.core.stores.scoped_config_read import get_scope
-from daimon.core.stores.switch_modes import Switch, list_switch_modes, set_switch_mode
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ChannelRef
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -438,6 +437,7 @@ async def set_workspace_default_agent(
 # ---------- Thread overrides ----------
 
 ThreadOverrideKind = Literal["participation", "progress_plans", "thread_rule", "handoff"]
+_THREAD_FEATURES: tuple[ThreadOverrideKind, ...] = ("participation", "progress_plans")
 
 
 @dataclass(frozen=True)
@@ -452,17 +452,16 @@ async def list_thread_overrides(
     session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, channel_id: str
 ) -> list[ThreadOverride]:
     """Every thread under `channel_id` with its own setting, one entry per setting."""
-    found: list[ThreadOverride] = []
-    for switch in ("participation", "progress_plans"):
-        modes = await list_switch_modes(
-            session,
-            switch,
-            tenant_id=tenant_id,
-            platform=platform,
-            scope=CascadeScope.THREAD,
-            parent_id=channel_id,
-        )
-        found += [ThreadOverride(t, switch, m.value) for t, m in sorted(modes.items())]
+    rows = await list_feature_values(
+        session, tenant_id=tenant_id, keys=_THREAD_FEATURES, tier="thread", channel_id=channel_id
+    )
+    rows.sort(key=lambda row: row.thread_key)
+    found = [
+        ThreadOverride(row.thread_key, kind, row.value)
+        for kind in _THREAD_FEATURES
+        for row in rows
+        if row.key == kind
+    ]
     policy = await load_access_policy(session, tenant_id=tenant_id)
     for key in await _thread_rule_keys(session, tenant_id, platform, channel_id, policy):
         rule = channel_rule(policy, key)
@@ -513,16 +512,12 @@ async def clear_thread_override(
         match = next((o for o in listed if o.thread_id == thread_id and o.kind == kind), None)
         if match is None:
             raise StaleChannelValue(kind, None)
-        if kind in ("participation", "progress_plans"):
-            switch: Switch = "participation" if kind == "participation" else "progress_plans"
-            await set_switch_mode(
+        if kind in _THREAD_FEATURES:
+            await clear_feature_value(
                 session,
-                switch,
                 tenant_id=actor.tenant_id,
-                platform=platform,
-                scope=CascadeScope.THREAD,
-                scope_id=thread_id,
-                mode=None,
+                target=FeatureTarget("thread", channel_id=channel_id, thread_key=thread_id),
+                key=kind,
             )
         elif kind == "thread_rule":
             await lock_access_policy(session, tenant_id=actor.tenant_id)

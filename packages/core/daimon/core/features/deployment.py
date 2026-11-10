@@ -13,13 +13,11 @@ from functools import cache
 import structlog
 from daimon.core.config import (
     FeatureEnvSettings,
-    ProgressPlansSettings,
     Settings,
-    ThreadParticipationSettings,
     get_repo_memory_settings,
 )
-from daimon.core.features.registry import FEATURES, FeatureSpec, parse_deployment
-from daimon.core.features.resolver import TierValue, as_cascade, from_mode, resolve_feature
+from daimon.core.features.registry import FeatureSpec, parse_deployment
+from daimon.core.features.resolver import TierValue
 from daimon.core.scope_cascade import CascadeMode
 
 log = structlog.get_logger(__name__)
@@ -127,17 +125,7 @@ def deployment_value(settings: Settings | None, spec: FeatureSpec) -> TierValue 
         return None
     for env in spec.legacy_env:
         _warn_legacy(env, spec.key)
-    value, locked = from_mode(mode)
-    return TierValue("deployment", value, locked)
-
-
-def deployment_mode(settings: Settings, key: str) -> CascadeMode:
-    """The deployment tier (or the registry default) as an on/off/disabled cascade mode."""
-    spec = FEATURES[key]
-    found = deployment_value(settings, spec)
-    return as_cascade(resolve_feature(spec, [found] if found is not None else [])).mode
-
-
-def block_mode(block: ThreadParticipationSettings | ProgressPlansSettings) -> CascadeMode:
-    """A settings block's own deprecated mode, for callers handed only the block."""
-    return block.mode
+    # A deprecated `disabled` is Off + Locked.
+    if mode is CascadeMode.DISABLED:
+        return TierValue("deployment", "off", True)
+    return TierValue("deployment", mode.value)

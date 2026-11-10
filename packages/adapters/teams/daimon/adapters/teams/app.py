@@ -1123,7 +1123,7 @@ class TeamsApp:
                 anthropic=self.runtime.anthropic,
                 bot_display_name=inbound.bot_name or "daimon",
                 markup=settings.billing.markup,
-                deployment=switch_default(settings, "participation", "teams"),
+                deployment=settings,
             )
             self._participation = TeamsParticipation(
                 gates=gates,

@@ -53,7 +53,7 @@ def test_every_path_has_the_command_and_writes_through_the_core() -> None:
 
 
 def test_store_writers_are_called_only_from_core_or_listed_paths() -> None:
-    writers = {"set_approval_gate", "set_switch", "set_feature_value", "change_feature"}
+    writers = {"set_approval_gate", "set_feature_value", "change_feature"}
     found = {
         path.relative_to(_ADAPTERS).as_posix()
         for path in _ADAPTERS.rglob("*.py")

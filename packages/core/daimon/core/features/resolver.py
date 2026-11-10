@@ -3,8 +3,7 @@
 The walk goes broadest first (deployment, workspace, agent, channel, thread). A
 locked tier is final for every tier below it; otherwise the spec's `combine` rule
 decides: most specific wins, a set Off is a ceiling, the stricter value wins, or the
-minimum. Generalises `scope_cascade.resolve_cascade`, which is the most-specific
-rule with today's `disabled` read as Off + Locked.
+minimum. A legacy `disabled` is Off + Locked.
 """
 
 from __future__ import annotations
@@ -110,8 +109,3 @@ def as_cascade(resolved: ResolvedFeature) -> ResolvedCascade:
     if resolved.unavailable is not None or (resolved.locked and not resolved.on):
         return ResolvedCascade(CascadeMode.DISABLED, tier)
     return ResolvedCascade(CascadeMode.ON if resolved.on else CascadeMode.OFF, tier)
-
-
-def from_mode(mode: CascadeMode) -> tuple[str, bool]:
-    """A legacy cascade mode as (value, locked): `disabled` is Off + Locked."""
-    return ("off", True) if mode is CascadeMode.DISABLED else (mode.value, False)

@@ -2,9 +2,7 @@
 
 Platform-agnostic and free of I/O. Three pieces:
 
-- `resolve_participation`: the scope cascade (`daimon.core.scope_cascade`).
-  Deployment default, then workspace, channel, thread; the most specific
-  explicit value wins, except that `DISABLED` at any tier is final below it.
+- Whether a thread is followed is the `participation` feature (`daimon.core.features`).
 - `decide_pre_classifier`: the gates that cost nothing, applied to a snapshot
   the adapter gathered. `Respond` here means "spend a classifier call".
 - The classifier prompt and verdict parser; `decide_post_classifier` maps the
@@ -19,27 +17,10 @@ from enum import StrEnum
 from typing import Final, Literal, cast
 from xml.sax.saxutils import escape, quoteattr
 
-from daimon.core.scope_cascade import (
-    CascadeMode,
-    CascadeScope,
-    CascadeTier,
-    ResolvedCascade,
-    resolve_cascade,
-)
-from daimon.core.scope_cascade import (
-    scope_label as scope_label,
-)
-from daimon.core.scope_cascade import (
-    tier_word as tier_word,
-)
+from daimon.core.scope_cascade import CascadeMode
 
-# The cascade is shared with progress plans (`daimon.core.scope_cascade`); these
-# names are what the participation code and its callers have always used.
 ParticipationMode = CascadeMode
-ParticipationScope = CascadeScope
-ParticipationTier = CascadeTier
-ResolvedParticipation = ResolvedCascade
-resolve_participation = resolve_cascade
+"""The deprecated deployment variable's mode (`ThreadParticipationSettings.mode`)."""
 
 
 class SkipReason(StrEnum):
@@ -52,7 +33,7 @@ class SkipReason(StrEnum):
 class ParticipationSnapshot:
     """Everything the pre-classifier gates need, gathered by the adapter."""
 
-    mode: ParticipationMode
+    on: bool
     auto_responses_in_window: int
     max_per_window: int
 
@@ -72,7 +53,7 @@ ParticipationDecision = Respond | Skip
 
 def decide_pre_classifier(snapshot: ParticipationSnapshot) -> ParticipationDecision:
     """Apply every gate that needs no model call. `Respond` means "ask the classifier"."""
-    if snapshot.mode is not ParticipationMode.ON:
+    if not snapshot.on:
         return Skip(SkipReason.NOT_ON)
     if snapshot.auto_responses_in_window >= snapshot.max_per_window:
         return Skip(SkipReason.RATE_LIMITED)
@@ -180,63 +161,3 @@ def decide_post_classifier(verdict: ClassifierVerdict) -> ParticipationDecision:
             return Respond()
         case "silence":
             return Skip(SkipReason.CLASSIFIER_SILENCED)
-
-
-# --- Notes returned by the participation tool ---------------------------------
-
-
-def build_participation_explanation(
-    effective: ResolvedParticipation, *, thread_id: str | None, platform: str | None = None
-) -> str:
-    """One sentence naming the winning tier, so "why are you (not) replying here" is answerable.
-
-    Lives in core beside `build_participation_note` because it is the same
-    pure cascade-to-prose mapping; the participation tool only renders it.
-    """
-    tier = tier_word(effective.tier, platform)
-    where = f"thread {thread_id}" if thread_id is not None else "here"
-    if effective.mode is ParticipationMode.ON:
-        return (
-            f"I follow {where}: the {tier} setting is on, so I may reply "
-            "to messages that call for it without being addressed first."
-        )
-    if effective.mode is ParticipationMode.DISABLED:
-        return (
-            f"I only reply in {where} when @mentioned: the {tier} setting is "
-            "disabled, and no narrower setting can turn it back on."
-        )
-    return (
-        f"I only reply in {where} when @mentioned: the {tier} setting is the "
-        "narrowest one with a value, and it is off."
-    )
-
-
-def build_participation_note(
-    *,
-    scope: ParticipationScope,
-    scope_id: str | None,
-    requested: ParticipationMode | None,
-    effective: ResolvedParticipation,
-    platform: str | None = None,
-) -> str:
-    """One sentence stating what was written and what is now in effect at that scope.
-
-    Returned by the tool rather than recalled from a prompt, so the agent reports
-    the cascade's actual answer: a thread turned `on` under a `disabled` channel
-    stays silent, and the note says so.
-    """
-    where = scope_label(scope, scope_id, platform)
-    wrote = (
-        f"{where} now inherits its setting"
-        if requested is None
-        else f"{where} is set to {requested.value}"
-    )
-    if effective.mode is ParticipationMode.ON:
-        return f"{wrote}; I will reply in threads there when a message calls for it."
-    if effective.mode is ParticipationMode.DISABLED:
-        tier = tier_word(effective.tier, platform)
-        return (
-            f"{wrote}, but participation is disabled at the {tier} level, "
-            "so I only reply when @mentioned and this cannot be turned on below that level."
-        )
-    return f"{wrote}; I only reply there when @mentioned."

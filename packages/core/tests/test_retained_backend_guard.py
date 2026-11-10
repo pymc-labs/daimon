@@ -9,12 +9,12 @@ import pytest
 from daimon.core.anthropic_guard import anthropic_disabled, guard_selfhosted_channel
 from daimon.core.channel_backend import channel_ref, set_channel_backend
 from daimon.core.config import ThreadParticipationSettings
+from daimon.core.features.resolver import ResolvedFeature
 from daimon.core.participation_gates import ParticipationGates
 from daimon.core.stores import mux_state
 from daimon.core.thread_participation import (
     ClassifierMessage,
     ParticipationMode,
-    ResolvedParticipation,
 )
 from daimon.testing.factories import (
     make_account,
@@ -125,7 +125,7 @@ async def test_participation_uses_retained_backend_before_history_and_classifier
                 caller_id="caller",
                 candidates=[ClassifierMessage("person", "organic message", False)],
                 recent=recent,
-                resolved=ResolvedParticipation(ParticipationMode.ON, "thread"),
+                resolved=ResolvedFeature("participation", "on", "thread"),
             )
         assert result == (retained == "anthropic")
         assert len(requests) == (1 if retained == "anthropic" else 0)

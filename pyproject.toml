@@ -447,7 +447,6 @@ source_modules = [
     "daimon.core.channel_listing",
     "daimon.core.channel_reads",
     "daimon.core.channel_settings",
-    "daimon.core.channel_switches",
     "daimon.core.channel_visibility",
     "daimon.core.environment_admin",
     "daimon.core.feedback_summary",

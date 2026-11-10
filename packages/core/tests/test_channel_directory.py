@@ -20,11 +20,10 @@ from daimon.core.channel_directory import (
 )
 from daimon.core.platform_names import ChannelSighting
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
-from daimon.core.scope_cascade import CascadeMode, CascadeScope
-from daimon.core.stores._scope_modes import set_scope_mode
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.channel_budgets import set_channel_budget
-from daimon.core.stores.domain import ChannelNameRow, TenantRow
+from daimon.core.stores.domain import ChannelNameRow, FeatureTarget, TenantRow
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.platform_names import upsert_channel_names
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.teams_installations import record_teams_installation
@@ -114,14 +113,14 @@ async def test_the_directory_unions_every_channel_source(
         platform="discord",
         names={"c6": ChannelSighting("general", kind="text", parent_id="k1", parent_name="Team")},
     )
-    await set_scope_mode(
+    await set_feature_value(
         db_session,
-        "participation",
         tenant_id=tenant.id,
-        platform="discord",
-        scope=CascadeScope.CHANNEL,
-        scope_id="c7",
-        mode=CascadeMode.ON,
+        target=FeatureTarget("channel", channel_id="c7"),
+        key="participation",
+        value="on",
+        set_by=None,
+        surface="web",
     )
     await _spend(db_session, tenant.id, "c2", "1.5", NOW - timedelta(days=2))
     await _usage(db_session, tenant, "c2", "0.75", NOW - timedelta(days=2))

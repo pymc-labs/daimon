@@ -41,7 +41,7 @@ _PRODUCT = [
 _WRITERS = {"set_feature_value", "clear_feature_value", "replace_agent_values"}
 _MAY_WRITE = {
     "core/stores/feature_values.py",
-    "core/stores/_scope_modes.py",
+    "core/channel_settings.py",
     "core/features/service.py",
 }
 _LEGACY_MODE = {"progress_plans", "thread_participation"}

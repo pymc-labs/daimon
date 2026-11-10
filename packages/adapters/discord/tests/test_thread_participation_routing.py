@@ -34,13 +34,13 @@ from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
-from daimon.core.stores import thread_participation as store
+from daimon.core.stores.domain import FeatureTarget
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.tenants import set_turn_cap
 from daimon.core.thread_classifier import ClassifierOutcome
 from daimon.core.thread_participation import (
     ClassifierVerdict,
     ParticipationMode,
-    ParticipationScope,
 )
 from daimon.testing.settings_mock import mock_settings
 from daimon.testing.turn_fakes import deps_for
@@ -190,13 +190,14 @@ async def _follow_thread(
     sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID
 ) -> None:
     async with sessionmaker() as session, session.begin():
-        await store.set_participation_mode(
+        await set_feature_value(
             session,
             tenant_id=tenant_id,
-            platform="discord",
-            scope=ParticipationScope.THREAD,
-            scope_id=str(THREAD_ID),
-            mode=ParticipationMode.ON,
+            target=FeatureTarget("thread", channel_id=str(PARENT_ID), thread_key=str(THREAD_ID)),
+            key="participation",
+            value="on",
+            set_by=None,
+            surface="web",
         )
 
 
