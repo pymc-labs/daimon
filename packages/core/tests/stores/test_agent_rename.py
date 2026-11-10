@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 
 import pytest
-from daimon.core._models import TenantAccessPolicyRecord
+from daimon.core._models import Base, TenantAccessPolicyRecord
 from daimon.core.stores.agent_avatars import get_or_create_avatar
-from daimon.core.stores.agent_rename import rename_agent_references, rename_selfhosted_agent
+from daimon.core.stores.agent_rename import (
+    _KEYED_NAME_COLUMNS,  # pyright: ignore[reportPrivateUsage]
+    _LIVE_NAME_COLUMNS,  # pyright: ignore[reportPrivateUsage]
+    rename_agent_references,
+    rename_selfhosted_agent,
+)
 from daimon.core.stores.selfhosted_resources import SelfHostedAgents
 from daimon.testing.factories import make_account, make_routine, make_tenant
-from sqlalchemy import select, text
+from sqlalchemy import String, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .test_selfhosted_resources import agent_spec, scope
@@ -192,3 +198,37 @@ async def test_rename_selfhosted_when_agents_exist_then_reports_outcome(
         )
     ).scalars()
     assert list(revisions) == [1], "the rename keeps the revision a running turn pinned"
+
+
+# Columns that name an agent but keep the name they hold, with why.
+_KEPT_NAME_COLUMNS = {
+    ("agent_tool_rule_history", "before_agent_name"): "history keeps the name it recorded",
+    ("agent_tool_rule_history", "after_agent_name"): "history keeps the name it recorded",
+    ("security_audit_events", "agent_name"): "audit keeps the name it recorded",
+    ("web_audit", "target"): "audit keeps the name it recorded",
+    ("neutral_skill_versions", "agent_name"): "the neutral catalog is immutable",
+    ("credential_requests", "target"): "a credential's target, not an agent",
+    ("session_preparations", "target_fingerprint"): "a hash, not a name",
+}
+# Moved outside the column lists: by `rename_selfhosted_agent` and by hand.
+_OTHER_RENAMED = {("selfhosted_agents", "name"), ("user_config", "agent_name")}
+_AGENT_LIKE = re.compile(r"agent|responder|helper|target")
+
+
+def test_agent_name_columns_when_schema_walked_then_each_is_renamed_or_kept() -> None:
+    found = {
+        (table.name, column.name)
+        for table in Base.metadata.tables.values()
+        for column in table.columns
+        if isinstance(column.type, String)
+        and not column.name.endswith("_id")
+        and (_AGENT_LIKE.search(column.name) or (column.name == "name" and "agent" in table.name))
+    }
+    handled = {
+        *_LIVE_NAME_COLUMNS,
+        *((table, column) for table, column, _ in _KEYED_NAME_COLUMNS),
+        *_OTHER_RENAMED,
+        *_KEPT_NAME_COLUMNS,
+    }
+    assert found <= handled, f"rename or keep each agent-name column: {found - handled}"
+    assert handled <= found, f"drop entries for columns that are gone: {handled - found}"
