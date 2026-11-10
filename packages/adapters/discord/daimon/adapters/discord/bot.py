@@ -946,29 +946,15 @@ class DaimonBot(commands.Bot):
         self, tenant_id: uuid.UUID, row: TaskContinuationRow
     ) -> Callable[[], Awaitable[str]] | None:
         """Runs the thread's press-approved calls inside this wake's lease (`host_calls`)."""
-        from daimon.core.host_calls import (
-            ConfirmedCallRunner,
-            confirmed_call_prefix,
-            mcp_call_tool,
-        )
+        from daimon.core.host_calls import wake_prefix
 
-        mcp = self.runtime.settings.mcp
-        if mcp.public_url is None or mcp.jwt_secret is None:
-            # The gate never posts a card without its server, so nothing can be approved.
-            return None
-        return confirmed_call_prefix(
-            ConfirmedCallRunner(
-                sessionmaker=self.runtime.sessionmaker,
-                secret=mcp.jwt_secret.get_secret_value().encode(),
-                tenant_id=tenant_id,
-                platform="discord",
-                thread_id=row.thread_id,
-                executing_agent_id=derive_agent_uuid(
-                    tenant_id=tenant_id, ma_agent_id=row.target_ma_agent_id
-                ),
-                call_tool=mcp_call_tool(str(mcp.public_url)),
-                clock=lambda: datetime.now(UTC),
-            )
+        return wake_prefix(
+            self.runtime.sessionmaker,
+            self.runtime.settings.mcp,
+            tenant_id=tenant_id,
+            platform="discord",
+            thread_id=row.thread_id,
+            target_ma_agent_id=row.target_ma_agent_id,
         )
 
     async def _archive_requested(self, origin_id: uuid.UUID) -> bool:

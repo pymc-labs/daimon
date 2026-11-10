@@ -23,6 +23,7 @@ import structlog
 from daimon.core.untrusted import render_untrusted
 
 if TYPE_CHECKING:
+    from daimon.core.config import McpSettings
     from daimon.core.posted_controls import PostedCard
     from daimon.core.stores.domain import TurnOriginRow
     from daimon.core.stores.host_call_cards import HostCallCardRow
@@ -469,3 +470,34 @@ def mcp_call_tool(url: str) -> CallTool:
             return await session.call_tool(name, cast("Mapping[str, JsonValue]", args))
 
     return call
+
+
+def wake_prefix(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    mcp: McpSettings,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    thread_id: str,
+    target_ma_agent_id: str,
+) -> Callable[[], Awaitable[str]] | None:
+    """A `confirmed_call` wake's prefix hook: its thread's approved calls, in its own lease."""
+    from daimon.core.ma_identity import derive_agent_uuid
+
+    if mcp.public_url is None or mcp.jwt_secret is None:
+        # The gate never posts a card without its server, so nothing can be approved.
+        return None
+    return confirmed_call_prefix(
+        ConfirmedCallRunner(
+            sessionmaker=sessionmaker,
+            secret=mcp.jwt_secret.get_secret_value().encode(),
+            tenant_id=tenant_id,
+            platform=platform,
+            thread_id=thread_id,
+            executing_agent_id=derive_agent_uuid(
+                tenant_id=tenant_id, ma_agent_id=target_ma_agent_id
+            ),
+            call_tool=mcp_call_tool(str(mcp.public_url)),
+            clock=lambda: dt.datetime.now(dt.UTC),
+        )
+    )
