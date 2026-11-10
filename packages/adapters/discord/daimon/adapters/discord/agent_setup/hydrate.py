@@ -41,6 +41,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import UserFacingError
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.model_switch import panel_edit_deps, read_picker
 from daimon.core.roster import RosterAgent, load_roster
 from daimon.core.rule_views import RuleViewer, load_rule_viewer
 from daimon.core.scope import ChannelConfigRow
@@ -444,20 +445,24 @@ async def load_details_for(
                 background_sessionmaker=runtime.sessionmaker,
             )
             state.avatar_urls[agent.name] = identity.avatar_url
-    if state.is_admin and channel_backend.backend_selection_enabled(runtime.settings.turn):
-        service = channel_backend.make_backend_service(
-            runtime.sessionmaker, runtime.settings.turn, capture_source=channel_backend.NO_CAPTURE
+    state.model_picker = None
+    if state.is_admin or agent.ma_agent_id in state.owned_agent_ids:
+        state.model_picker = await read_picker(
+            channel_backend.make_backend_service(
+                runtime.sessionmaker,
+                runtime.settings.turn,
+                capture_source=channel_backend.NO_CAPTURE,
+            ),
+            panel_edit_deps(
+                runtime.settings,
+                client=runtime.anthropic,
+                session_factory=runtime.sessionmaker,
+                resolver_cache=runtime.resolver_cache,
+                deployment_default=runtime.deployment_default,
+            ),
+            tenant_id=_tenant_id(state),
+            agent_name=agent.name,
         )
-        state.backend_options = ()
-        state.backend_selection = None
-        selection = await service.read_selection(
-            runtime.anthropic, tenant_id=_tenant_id(state), agent_name=agent.name
-        )
-        if selection is not None:
-            state.backend_options = selection.policy.enabled_backends
-            state.backend_selection = (
-                selection.revision.backend if selection.revision is not None else None
-            )
     return details
 
 
