@@ -175,3 +175,12 @@ async def test_web_admin_tools_when_no_card_then_refused(monkeypatch: pytest.Mon
     for call in calls:
         with pytest.raises(ToolError, match="Nothing changed"):
             await call
+
+
+async def test_session_card_gap_when_the_origin_is_unattended_then_no_session_can_ask() -> None:
+    from daimon.adapters.mcp.tools._session_gate import session_card_gap
+
+    gap = await session_card_gap(
+        fake_runtime(), make_auth(), _origin(attended=False), tool_name="revert_agent"
+    )
+    assert gap == "no_origin", "a provider turn nobody watches must get the unattended verdict"
