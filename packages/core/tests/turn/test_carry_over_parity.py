@@ -1,0 +1,250 @@
+"""Every provider move carries the conversation over, in every direction.
+
+Pairs come from the live preparation registry plus Managed Agents; each host
+module and the Managed Agents bind path are checked for the one core helper.
+"""
+
+from __future__ import annotations
+
+import ast
+import contextlib
+import inspect
+import uuid
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
+
+import pytest
+from daimon.core.turn import carry_over
+from daimon.core.turn import prepare as preparation
+from daimon.core.turn.carry_over import CarriedOver, carry_on_adoption
+from daimon.core.turn.prepare import ProviderPreparationRequest
+from daimon.core.turn.replace_binding import OldSession
+from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
+from mux.contracts.ids import ResourceRef
+from mux.contracts.resources import ProviderBinding
+from mux.profiles import MANAGED_AGENTS, backend_selection
+from mux.state.memory import MemoryStateStore
+from mux.state.store import RELEASED_REF, released_successor
+
+from tests.turn.test_binding_replacement_parity import (  # pyright: ignore[reportMissingTypeStubs]
+    HOSTS,
+    SCOPE,
+    SLOT,
+    THREAD,
+    _Backend,  # pyright: ignore[reportPrivateUsage]
+)
+
+MA = MANAGED_AGENTS.profile_id
+PROFILES = (*sorted(HOSTS), MA)
+PAIRS = [(s, t) for s in PROFILES for t in PROFILES if s.split(".")[0] != t.split(".")[0]]
+RELEASED_AT = datetime(2026, 11, 1, 12, tzinfo=UTC)
+
+
+def _provider(profile: str) -> str:
+    return MANAGED_AGENTS.provider if profile == MA else profile.split(".", 1)[0]
+
+
+def _revision(profile: str, local: int) -> ConfigRevision:
+    backend = _provider(profile)
+    resolved = resolve_default(
+        BackendConfig(backend=backend, profile=profile, model=backend_selection(backend).model)  # pyright: ignore[reportArgumentType]
+    )
+    return ConfigRevision.create(THREAD.channel, local, resolved)
+
+
+def _old_binding(profile: str, revision: int, refs: dict[str, str]) -> ProviderBinding:
+    return ProviderBinding(
+        id="binding-1",
+        thread=THREAD,
+        provider=_provider(profile),  # pyright: ignore[reportArgumentType]
+        profile=profile,
+        native_refs=refs,
+        generation=1,
+        config_revision=revision,
+        legacy_account_id="a",
+    )
+
+
+def _ref(binding: ProviderBinding) -> ResourceRef:
+    return ResourceRef(
+        id="old-session",
+        kind="session",
+        provider=binding.provider,
+        account_scope_id="scope-1",
+    )
+
+
+async def _move(
+    monkeypatch: pytest.MonkeyPatch,
+    store: MemoryStateStore,
+    *,
+    source: str,
+    target: str,
+    ma_row_at: datetime | None,
+    runtimes: dict[str, object] | None = None,
+) -> CarriedOver | None:
+    backend = _Backend()
+    row = (
+        SimpleNamespace(ma_session_id="old-session", created_at=ma_row_at)
+        if ma_row_at is not None
+        else None
+    )
+
+    async def get_row(session: object, **_: object) -> object:
+        return row
+
+    def reader(
+        runtime: object, revision: object, scope: object, binding: ProviderBinding, store: object
+    ) -> OldSession:
+        return OldSession(binding=binding, ref=_ref(binding), backend=backend)  # pyright: ignore[reportArgumentType]
+
+    @contextlib.asynccontextmanager
+    async def sessionmaker() -> AsyncIterator[None]:
+        yield None
+
+    def ma_backend(*_: object, **__: object) -> _Backend:
+        return backend
+
+    def ma_ref(*_: object, **__: object) -> ResourceRef:
+        return _ref(_old_binding(MA, 0, {}))
+
+    monkeypatch.setattr(carry_over, "get_thread_session_at", get_row)
+    monkeypatch.setattr(carry_over, "managed_agents", ma_backend)
+    monkeypatch.setattr(carry_over, "resource_ref", ma_ref)
+    for profile in HOSTS:
+        monkeypatch.setitem(carry_over._READERS, profile, reader)  # pyright: ignore[reportPrivateUsage]
+    request = SimpleNamespace(
+        deps=SimpleNamespace(
+            sessionmaker=sessionmaker,
+            turn_runtimes=runtimes if runtimes is not None else {p: object() for p in HOSTS},
+            turn_runtime_factory=None,
+            anthropic=None,
+        ),
+        admission=SimpleNamespace(
+            backend_revision=None
+            if target == MA
+            else await store.put_config_revision(_revision(target, 2))
+        ),
+        scope=SCOPE,
+        tenant_id=uuid.uuid4(),
+        platform="slack",
+        thread_id="x",
+        session_account_id=uuid.uuid4(),
+        reuse_existing=True,
+        now=lambda: RELEASED_AT + timedelta(minutes=1),
+    )
+    return await carry_on_adoption(
+        cast(ProviderPreparationRequest, request),
+        store=store,
+        slot=SLOT,
+        model_id="model-1",
+        agent_name="Daimon",
+    )
+
+
+async def _released(store: MemoryStateStore, profile: str) -> None:
+    revision = await store.put_config_revision(_revision(profile, 1))
+    old = _old_binding(
+        profile, revision.local, {"session": "old-session", "account_scope": "scope-1"}
+    )
+    await store.put_binding(old, expected_generation=0)
+    await store.put_binding(released_successor(old, released_at=RELEASED_AT), expected_generation=1)
+
+
+@pytest.mark.parametrize(("source", "target"), PAIRS)
+async def test_provider_move_when_confirmed_then_carries_the_excerpt(
+    monkeypatch: pytest.MonkeyPatch, source: str, target: str
+) -> None:
+    store = MemoryStateStore()
+    if source != MA:
+        await _released(store, source)
+    carried = await _move(
+        monkeypatch,
+        store,
+        source=source,
+        target=target,
+        ma_row_at=RELEASED_AT - timedelta(hours=1) if source == MA else None,
+    )
+    assert carried is not None, f"{source} -> {target} carried nothing"
+    continuity = carried.continuity
+    assert continuity.state == "replaced", f"{source} -> {target}: {continuity.state}"
+    assert "What is the answer?" in continuity.user_prefix, "excerpt missing"
+
+
+@pytest.mark.parametrize("target", [p for p in PROFILES if p != "openai.persistent_workspace"])
+async def test_legacy_release_when_carried_then_gets_the_lost_framing(
+    monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    store = MemoryStateStore()
+    old = _old_binding("openai.persistent_workspace", 1, {"session": "old-session"})
+    await store.put_binding(old, expected_generation=0)
+    legacy = old.model_copy(update={"generation": 2, "native_refs": {RELEASED_REF: "1"}})
+    await store.put_binding(legacy, expected_generation=1)
+    carried = await _move(monkeypatch, store, source="", target=target, ma_row_at=None)
+    assert carried is not None, f"legacy release into {target} carried nothing"
+    assert carried.continuity.state == "replaced_after_loss", carried.continuity.state
+    assert "was lost" in carried.continuity.user_prefix, "lost framing missing"
+
+
+async def test_missing_runtime_when_carried_then_degrades_to_the_lost_framing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = MemoryStateStore()
+    await _released(store, "openai.persistent_workspace")
+    carried = await _move(
+        monkeypatch,
+        store,
+        source="openai.persistent_workspace",
+        target=MA,
+        ma_row_at=None,
+        runtimes={},
+    )
+    assert carried is not None, "a missing runtime must still carry the framing"
+    assert carried.continuity.state == "replaced_after_loss", carried.continuity.state
+
+
+async def test_managed_agents_target_when_it_already_ran_then_carries_nothing_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = MemoryStateStore()
+    await _released(store, "openai.persistent_workspace")
+    carried = await _move(
+        monkeypatch,
+        store,
+        source="openai.persistent_workspace",
+        target=MA,
+        ma_row_at=RELEASED_AT + timedelta(seconds=1),
+    )
+    assert carried is None, "a session started after the move carries nothing again"
+
+
+async def test_bound_slot_when_host_prepares_then_carries_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = MemoryStateStore()
+    await store.put_binding(
+        _old_binding("openai.persistent_workspace", 1, {"session": "s"}), expected_generation=0
+    )
+    carried = await _move(
+        monkeypatch, store, source="", target="gemini.inline_reuse", ma_row_at=None
+    )
+    assert carried is None, "a live binding is the host's to replace, not carry over"
+
+
+def test_every_move_path_when_scanned_then_calls_the_core_helper() -> None:
+    modules = {inspect.getmodule(prepare) for prepare in HOSTS.values()}
+    paths = {Path(inspect.getfile(m)) for m in modules if m is not None}
+    paths.add(Path(inspect.getfile(preparation)))  # the Managed Agents bind path
+    for path in paths:
+        tree = ast.parse(path.read_text())
+        called = {
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        assert "carry_on_adoption" in called, f"{path.name} does not carry over"
+    readers = set(carry_over._READERS)  # pyright: ignore[reportPrivateUsage]
+    assert set(HOSTS) <= readers, f"no session reader for {set(HOSTS) - readers}"
