@@ -233,7 +233,10 @@ def test_a_capability_without_setup_hides_its_tools_and_only_those() -> None:
     toolset = agent_toolset(FeatureSnapshot(place, 1, features), _agent())
     unset = {"notebooks", "report_publish", "media", "microsoft_365", "compute"}
     assert toolset.off_capabilities == unset, "exactly the features whose setup is missing"
-    for key in ("watches", "github", "routines", "long_jobs", "lead_intake"):
+    assert not features["long_jobs"].on, (
+        "long jobs start Off, and stay offered until a level says so"
+    )
+    for key in ("watches", "github", "routines", "lead_intake"):
         assert features[key].on, f"{key} has no setup condition its tools share"
 
 

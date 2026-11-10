@@ -114,7 +114,6 @@ class Action(StrEnum):
     SET_CHANNEL_AGENT_TOOL_RULE = "set_channel_agent_tool_rule"
     # Turn built-in sandbox tools on or off for one routine's own runs:
     # current human admins only, never the routine's owner as such.
-    SET_LONG_JOB_POLICY = "set_long_job_policy"
     SET_ROUTINE_SANDBOX_TOOLS = "set_routine_sandbox_tools"
     SET_CONTEXT_PROVIDER = "set_context_provider"
     # Hand a thread's conversation to another agent (`Place` is the thread).
@@ -690,7 +689,6 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
 
     if req.action in (
         Action.SET_ROUTINE_SANDBOX_TOOLS,
-        Action.SET_LONG_JOB_POLICY,
         Action.SET_CONTEXT_PROVIDER,
     ):
         return ALLOW if subject.is_admin and not subject.via_agent_key else _deny("admin_required")

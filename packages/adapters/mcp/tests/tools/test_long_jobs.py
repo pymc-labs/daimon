@@ -13,12 +13,11 @@ import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import long_jobs as tools
-from daimon.core.authz import Subject
 from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
-from daimon.core.long_job_models import LongJobPolicy
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import long_jobs as store
-from daimon.core.stores.domain import Role
+from daimon.core.stores.domain import FeatureTarget, Role
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.tenants import set_funding_mode
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
@@ -44,14 +43,14 @@ async def test_start_binds_approved_provider_identity_before_any_launch(
         tenant = await make_tenant(db)
         owner = await make_account(db, tenant=tenant)
         await set_funding_mode(db, tenant_id=tenant.id, funding_mode="operator_funded")
-        await store.set_policy(
+        await set_feature_value(
             db,
             tenant_id=tenant.id,
-            agent_id=None,
-            policy=LongJobPolicy(enabled=True),
-            ceilings=settings.long_jobs,
-            actor=Subject(is_admin=True),
-            set_by=str(owner.id),
+            target=FeatureTarget("workspace"),
+            key="long_jobs",
+            value="on",
+            set_by=None,
+            surface="chat",
         )
     auth = AuthIdentity(
         tenant_id=tenant.id,

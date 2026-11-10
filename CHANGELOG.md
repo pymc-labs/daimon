@@ -42,6 +42,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Ask a person (`support_escalation`) is set per workspace, and keeping an answer's messages apart (`status_log`) at every level. Turning off long jobs, cloud computers or lead intake also stops their queued and scheduled work; running work finishes.
   A capability that lacks its setup no longer offers its tools. `DAIMON_TURN__STATUS_LOG`, `DAIMON_LONG_JOBS__MAX_USD`, `DAIMON_LONG_JOBS__MAX_DEADLINE_MINUTES` and the outbound limits still work but log a deprecation. Nothing changes until a level sets one.
 
+- **Long jobs are set as features.**
+  `long_jobs` is Off until a workspace or agent turns it on, and its dollar cap (default $5) and time limit are set at the same levels. This replaces the long-job policy: `daimon tenants long-job-policy` is gone, and an existing policy is copied into features on upgrade.
+
 - **Chat behaviour and display settings join the same system.**
   Completion pings, table rendering, message feedback buttons and cost shown with native models are set at every level; typed `@name` mentions, budget notices, thread naming, the unmentioned-reply hint and the "no writers" notice down to a channel; direct messages, read-only memory in direct messages and the waiting card at the workspace. Each web app module is a setting too (`web.chat`, `web.agents` and so on).
   The old per-workspace variables (`DAIMON_COMPLETION_PINGS`, `DAIMON_TABLE_RENDERING`, `DAIMON_BUDGET_NOTICES`) keep working, log a deprecation, and lose to any workspace setting; `daimon features import-env` writes them as workspace settings. The other old variables still work but log a deprecation.

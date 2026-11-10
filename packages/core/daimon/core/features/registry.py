@@ -750,16 +750,18 @@ def _capability(
     requires: tuple[Requirement, ...] = (),
     legacy_env: tuple[str, ...] = (),
     binds: Binding = "session_mutable",
+    default: Literal["on", "off"] = "on",
 ) -> FeatureSpec:
-    """A capability that is On unless a tier turns it Off; off, the session is not offered its
-    tools (`CAPABILITY_TOOLS`) and what it does in the background stops."""
+    """A capability that is On unless a tier turns it Off (Off until one turns it On, for
+    `default="off"`); off, the session is not offered its tools (`CAPABILITY_TOOLS`) and what
+    it does in the background stops."""
     return FeatureSpec(
         key=key,
         name=name,
         category="capabilities",
         effect="capability",
         values=_ON_OFF,
-        default="on",
+        default=default,
         tiers=tiers,
         binds=binds,
         doc=doc,
@@ -777,17 +779,18 @@ def _limit(
     steps: Mapping[str, str],
     *,
     tiers: tuple[Tier, ...],
+    default: str | None = None,
     legacy_env: tuple[str, ...] = (),
 ) -> FeatureSpec:
-    """A limit: the smallest tier setting wins. `steps` run from the built-in default, the
-    first, down to the strictest; a tier can only lower what the operator allows."""
+    """A limit: the smallest tier setting wins. `steps` run from the loosest down to the
+    strictest; the default is the first unless `default` names another step."""
     return FeatureSpec(
         key=key,
         name=name,
         category="limits",
         effect="limit",
         values=steps,
-        default=next(iter(steps)),
+        default=default or next(iter(steps)),
         tiers=tiers,
         binds="turn",
         doc=doc,
@@ -816,7 +819,8 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "long_jobs",
         "Long jobs",
         "The agent can start a long job that keeps working after the chat moves on. Off "
-        "removes the long-job tools here.",
+        "until a workspace or agent turns it on; off removes the long-job tools here.",
+        default="off",
     ),
     _capability(
         "compute",
@@ -900,17 +904,16 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
     _limit(
         "long_jobs_max_usd",
         "Long job dollar cap",
-        "The most one long job may spend. The smallest setting wins, and the team's "
-        "long-job policy still applies.",
+        "The most one long job may spend. The smallest setting wins.",
         {"20": "$20", "10": "$10", "5": "$5", "2": "$2", "1": "$1"},
+        default="5",
         tiers=("deployment", "workspace", "agent"),
         legacy_env=("DAIMON_LONG_JOBS__MAX_USD",),
     ),
     _limit(
         "long_jobs_max_deadline",
         "Long job time limit",
-        "The longest one long job may run. The smallest setting wins, and the team's "
-        "long-job policy still applies.",
+        "The longest one long job may run. The smallest setting wins.",
         {"70": "70 minutes", "60": "60 minutes", "30": "30 minutes", "15": "15 minutes"},
         tiers=("deployment", "workspace", "agent"),
         legacy_env=("DAIMON_LONG_JOBS__MAX_DEADLINE_MINUTES",),

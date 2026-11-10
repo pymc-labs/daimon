@@ -69,7 +69,7 @@ Where each feature can be set, and its default.
 | Web app: integrations | `web.integrations` | Capability | On | ✓ | ✓ |  |  |  |  |
 | Watches | `watches` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Routines | `routines` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
-| Long jobs | `long_jobs` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
+| Long jobs | `long_jobs` | Capability | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Cloud computers | `compute` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs the operator's setup |
 | Notebooks | `notebooks` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs the operator's setup |
 | Report publishing | `report_publish` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs the operator's setup |
@@ -80,7 +80,7 @@ Where each feature can be set, and its default.
 | GitHub access | `github` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Lead intake | `lead_intake` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Posting to others | `outbound_reach` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
-| Long job dollar cap | `long_jobs_max_usd` | Limit | $20 | ✓ | ✓ | ✓ |  |  |  |
+| Long job dollar cap | `long_jobs_max_usd` | Limit | $5 | ✓ | ✓ | ✓ |  |  |  |
 | Long job time limit | `long_jobs_max_deadline` | Limit | 70 minutes | ✓ | ✓ | ✓ |  |  |  |
 | New threads per reply | `outbound_threads` | Limit | 2 | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Places per reply | `outbound_places` | Limit | 2 | ✓ | ✓ | ✓ | ✓ | ✓ |  |
@@ -764,13 +764,13 @@ The agent can set up and run routines: tasks that run on a schedule. Off removes
 
 ## Long jobs
 
-The agent can start a long job that keeps working after the chat moves on. Off removes the long-job tools here.
+The agent can start a long job that keeps working after the chat moves on. Off until a workspace or agent turns it on; off removes the long-job tools here.
 
 | | |
 | --- | --- |
 | Key | `long_jobs` |
 | Values | `on` (On), `off` (Off) |
-| Default | `on` |
+| Default | `off` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Off above is a ceiling |
 
@@ -885,20 +885,20 @@ The agent can take in sales leads and look them up. Off removes the lead tools h
 
 ## Long job dollar cap
 
-The most one long job may spend. The smallest setting wins, and the team's long-job policy still applies.
+The most one long job may spend. The smallest setting wins.
 
 | | |
 | --- | --- |
 | Key | `long_jobs_max_usd` |
 | Values | `20` ($20), `10` ($10), `5` ($5), `2` ($2), `1` ($1) |
-| Default | `20` |
+| Default | `5` |
 | Levels | Deployment, Workspace, Agent |
 | Combines | Lowest wins |
 | Deprecated | `DAIMON_LONG_JOBS__MAX_USD` |
 
 ## Long job time limit
 
-The longest one long job may run. The smallest setting wins, and the team's long-job policy still applies.
+The longest one long job may run. The smallest setting wins.
 
 | | |
 | --- | --- |

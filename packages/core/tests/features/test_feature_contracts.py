@@ -31,6 +31,7 @@ from daimon.core.features.registry import (
 from daimon.core.features.resolver import TierValue, resolve_feature
 from daimon.core.features.session_identity import IDENTITY_KEYS
 from daimon.core.features.snapshot import may_turn_on
+from daimon.core.long_job_models import LongJobPolicy
 from pydantic import PostgresDsn, SecretStr
 
 _ROOT = Path(__file__).resolve().parents[4]
@@ -181,7 +182,7 @@ def test_a_limit_defaults_are_the_built_in_values() -> None:
         "outbound_places": outbound.max_places,
         "outbound_people": outbound.max_people,
         "outbound_length": outbound.max_length,
-        "long_jobs_max_usd": jobs.max_usd,
+        "long_jobs_max_usd": LongJobPolicy().max_usd,
         "long_jobs_max_deadline": jobs.max_deadline_minutes,
     }
     for key, value in built_in.items():

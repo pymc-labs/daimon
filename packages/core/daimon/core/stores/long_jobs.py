@@ -1,26 +1,23 @@
-"""Tenant-fenced long jobs, policy history and atomic completion wakes."""
+"""Tenant-fenced long jobs and atomic completion wakes."""
 
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from daimon.core._models import (
     Account,
     LongJobCancelAuditRecord,
-    LongJobPolicyHistory,
-    LongJobPolicyRecord,
     LongJobRecord,
     Tenant,
 )
-from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.authz import Action, Subject, authorize
-from daimon.core.config import LongJobsSettings
+from daimon.core.config import LongJobsSettings, Settings
 from daimon.core.errors import StoreError
 from daimon.core.features.snapshot import FeaturePlace, feature_in, feature_in_or_none
 from daimon.core.long_job_models import (
     ACTIVE_STATES,
+    DEFAULT_DEADLINE_MINUTES,
     LongJob,
     LongJobManifest,
     LongJobPolicy,
@@ -40,98 +37,30 @@ async def scope(session: AsyncSession, tenant_id: uuid.UUID) -> None:
 
 
 async def get_policy(
-    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: str | None, ceilings: LongJobsSettings
+    session: AsyncSession, *, place: FeaturePlace, settings: Settings | None
 ) -> LongJobPolicy:
-    await scope(session, tenant_id)
-    row = await session.scalar(
-        select(LongJobPolicyRecord)
-        .where(
-            LongJobPolicyRecord.tenant_id == tenant_id,
-            or_(LongJobPolicyRecord.agent_id == agent_id, LongJobPolicyRecord.agent_id.is_(None)),
-        )
-        .order_by(LongJobPolicyRecord.agent_id.is_(None))
-        .limit(1)
-    )
-    policy = LongJobPolicy() if row is None else LongJobPolicy.model_validate(row)
-    place = FeaturePlace(tenant_id, "", agent_id=agent_id)
-    max_usd = min(policy.max_usd, ceilings.max_usd)
-    maximum = min(policy.max_deadline_minutes, ceilings.max_deadline_minutes)
-    # A tier's setting only lowers: the default step is not a setting.
-    if (usd := await _chosen(session, place, "long_jobs_max_usd")) is not None:
-        max_usd = min(max_usd, Decimal(usd))
-    if (minutes := await _chosen(session, place, "long_jobs_max_deadline")) is not None:
-        maximum = min(maximum, int(minutes))
-    return policy.model_copy(
-        update={
-            "max_deadline_minutes": maximum,
-            "default_deadline_minutes": min(policy.default_deadline_minutes, maximum),
-            "max_usd": max_usd,
-        }
+    """What long jobs may do at `place`: the `long_jobs` feature and the resolved limits."""
+    enabled = await feature_in(session, settings, place, "long_jobs")
+    usd = await feature_in(session, settings, place, "long_jobs_max_usd")
+    minutes = await feature_in(session, settings, place, "long_jobs_max_deadline")
+    maximum = int(minutes.value)
+    return LongJobPolicy(
+        enabled=enabled.on,
+        default_deadline_minutes=min(DEFAULT_DEADLINE_MINUTES, maximum),
+        max_deadline_minutes=maximum,
+        max_usd=Decimal(usd.value),
     )
 
 
-async def _chosen(session: AsyncSession, place: FeaturePlace, key: str) -> str | None:
-    """What a tier chose for a long-job limit, or None while none did."""
-    found = await feature_in(session, None, place, key)
-    return None if found.tier == "default" else found.value
-
-
-async def set_policy(
-    session: AsyncSession,
-    *,
-    tenant_id: uuid.UUID,
-    agent_id: str | None,
-    policy: LongJobPolicy,
-    ceilings: LongJobsSettings,
-    actor: Subject,
-    set_by: str,
-) -> LongJobPolicy:
-    if not authorize(TenantAccessPolicy(), subject=actor, action=Action.SET_LONG_JOB_POLICY):
-        raise PermissionError("Only a current human admin may change long-job policy")
-    if (
-        policy.default_deadline_minutes > policy.max_deadline_minutes
-        or policy.max_deadline_minutes > ceilings.max_deadline_minutes
-        or policy.max_usd > ceilings.max_usd
-    ):
-        raise StoreError("Long-job policy exceeds the operator ceiling or its own maximum")
-    await scope(session, tenant_id)
-    # Serialize absent-row inserts as well as updates.
-    await session.scalar(select(Tenant.id).where(Tenant.id == tenant_id).with_for_update())
-    row = await session.scalar(
-        select(LongJobPolicyRecord)
-        .where(
-            LongJobPolicyRecord.tenant_id == tenant_id,
-            LongJobPolicyRecord.agent_id.is_not_distinct_from(agent_id),
-        )
-        .with_for_update()
+def job_place(job: LongJob | LongJobRecord) -> FeaturePlace:
+    """Where a job runs, for the feature reads."""
+    return FeaturePlace.of(
+        job.tenant_id,
+        job.platform,
+        job.parent_channel_id,
+        job.thread_id,
+        agent_id=job.agent_id,
     )
-    before = None if row is None else LongJobPolicy.model_validate(row)
-    if before == policy:
-        return policy
-    now = datetime.now(UTC)
-    values = policy.model_dump()
-    if row is None:
-        session.add(
-            LongJobPolicyRecord(
-                tenant_id=tenant_id, agent_id=agent_id, **values, set_by=set_by, set_at=now
-            )
-        )
-    else:
-        for key, value in values.items():
-            setattr(row, key, value)
-        row.set_by, row.set_at = set_by, now
-    session.add(
-        LongJobPolicyHistory(
-            tenant_id=tenant_id,
-            agent_id=agent_id,
-            before=None if before is None else before.model_dump(mode="json"),
-            after=policy.model_dump(mode="json"),
-            set_by=set_by,
-            set_at=now,
-        )
-    )
-    await session.flush()
-    return policy
 
 
 async def get_registration(session: AsyncSession, job: LongJob) -> LongJob | None:
@@ -150,7 +79,13 @@ async def get_registration(session: AsyncSession, job: LongJob) -> LongJob | Non
     return LongJob.model_validate(existing)
 
 
-async def register(session: AsyncSession, job: LongJob, *, ceilings: LongJobsSettings) -> LongJob:
+async def register(
+    session: AsyncSession,
+    job: LongJob,
+    *,
+    ceilings: LongJobsSettings,
+    settings: Settings | None = None,
+) -> LongJob:
     await scope(session, job.tenant_id)
     existing = await get_registration(session, job)
     if existing is not None:
@@ -188,9 +123,7 @@ async def register(session: AsyncSession, job: LongJob, *, ceilings: LongJobsSet
         raise StoreError("Long job refused: tenant running cap reached")
     if owner_count >= ceilings.per_owner_running:
         raise StoreError("Long job refused: owner running cap reached")
-    policy = await get_policy(
-        session, tenant_id=job.tenant_id, agent_id=job.agent_id, ceilings=ceilings
-    )
+    policy = await get_policy(session, place=job_place(job), settings=settings)
     validate_limits(policy, deadline_minutes=job.deadline_minutes, max_usd=job.max_usd)
     await session.execute(
         insert(LongJobRecord)
@@ -296,6 +229,7 @@ async def claim(
     owner: str,
     now: datetime,
     ceilings: LongJobsSettings,
+    settings: Settings | None = None,
     limit: int = 20,
 ) -> list[LongJob]:
     await scope(session, tenant_id)
@@ -329,8 +263,7 @@ async def claim(
     result: list[LongJob] = []
     for row in rows:
         if row.state == "queued" and not row.cancel_requested:
-            place = FeaturePlace(tenant_id, "", agent_id=row.agent_id)
-            enabled = await feature_in_or_none(session, None, place, "long_jobs")
+            enabled = await feature_in_or_none(session, settings, job_place(row), "long_jobs")
             if enabled is None or not enabled.on:
                 # Off or unreadable here: a queued job waits, and launches once On again.
                 continue
