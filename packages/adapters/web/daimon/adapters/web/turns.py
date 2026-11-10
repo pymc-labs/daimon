@@ -36,8 +36,9 @@ from daimon.core.output_delivery import (
     DeliverableFile,
     OutputPostingUnavailable,
     SkippedFile,
-    sweep_session_outputs,
+    sweep_outputs,
 )
+from daimon.core.output_runtime import OutputRuntime
 from daimon.core.stores import file_uploads
 from daimon.core.stores import web_chat as chat_store
 from daimon.core.stores.domain import (
@@ -81,6 +82,7 @@ from daimon.core.turn.state import ToolUseBlock
 from daimon.core.turn_origin import render_turn_origin, turn_origin
 from daimon.core.turn_queue import TurnQueue
 from daimon.core.web_identity import WebPrincipal, place_of, thread_key, with_spend_person
+from mux.errors import ProviderError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -490,10 +492,12 @@ class WebTurns:
         else:
             used_tools = any(isinstance(b, ToolUseBlock) for b in outcome.state.content)
             revision = admission.backend_revision
-            if used_tools and (revision is None or revision.backend != "selfhosted"):
-                lifecycle.files = await self._outputs(
-                    outcome.ma_session_id, tenant_id, thread.person_id
-                )
+            if (
+                used_tools
+                and outcome.outputs is not None
+                and (revision is None or revision.backend != "selfhosted")
+            ):
+                lifecycle.files = await self._outputs(outcome.outputs, tenant_id, thread.person_id)
             await lifecycle.finish("done")
 
     def _link_for(self, tenant_id: uuid.UUID) -> Callable[[str], str] | None:
@@ -509,7 +513,7 @@ class WebTurns:
         return link
 
     async def _outputs(
-        self, session_id: str, tenant_id: uuid.UUID, person_id: uuid.UUID
+        self, outputs: OutputRuntime, tenant_id: uuid.UUID, person_id: uuid.UUID
     ) -> tuple[WebOutputFile, ...]:
         """The files the turn left in its session's outputs, kept for its reply."""
         kept: list[WebOutputFile] = []
@@ -529,14 +533,13 @@ class WebTurns:
             log.info("web.output.too_large", size=file.size_bytes)
 
         try:
-            await sweep_session_outputs(
-                self.deps.anthropic,
-                session_id=session_id,
+            await sweep_outputs(
+                outputs,
                 post=post,
                 on_skip=skip,
                 max_bytes=file_uploads.MAX_UPLOAD_BYTES,
             )
-        except (anthropic.APIError, OutputPostingUnavailable) as err:
+        except (anthropic.APIError, ProviderError, OutputPostingUnavailable) as err:
             # Files missed now stay listed; the session's next tool turn sweeps them.
             log.warning("web.output.sweep_failed", err_type=type(err).__name__)
         return tuple(kept)
