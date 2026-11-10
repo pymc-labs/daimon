@@ -17,7 +17,7 @@ import re
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, Literal
+from typing import TYPE_CHECKING, Final, Literal, cast
 
 import structlog
 from daimon.core.untrusted import render_untrusted
@@ -416,3 +416,15 @@ def _framed(row: HostCallCardRow, status: str, outcome: str) -> str:
     return render_untrusted(
         outcome, source=f"tool:{row.tool_name}", tag="confirmed_call", attrs={"status": status}
     )
+
+
+def mcp_call_tool(url: str) -> CallTool:
+    """Call a tool on Daimon's own MCP server at `url` with a confirmed_call token."""
+    from daimon.core.mcp_tool_call import mcp_tool_session
+    from pydantic import JsonValue
+
+    async def call(token: str, name: str, args: Mapping[str, object]) -> object:
+        async with mcp_tool_session(url, token) as session:
+            return await session.call_tool(name, cast("Mapping[str, JsonValue]", args))
+
+    return call

@@ -215,6 +215,7 @@ from daimon.core.turn.errors import (
     SessionPreparationFailed,
 )
 from daimon.core.turn.lifecycle import TurnLifecycle
+from daimon.core.turn.mutation_gate import initial_send_prefix
 from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
 from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.output import OutputAuthorization
@@ -941,6 +942,35 @@ class DaimonBot(commands.Bot):
                 error=str(exc)[:300],
             )
 
+    def _confirmed_call_prefix(
+        self, tenant_id: uuid.UUID, row: TaskContinuationRow
+    ) -> Callable[[], Awaitable[str]] | None:
+        """Runs the thread's press-approved calls inside this wake's lease (`host_calls`)."""
+        from daimon.core.host_calls import (
+            ConfirmedCallRunner,
+            confirmed_call_prefix,
+            mcp_call_tool,
+        )
+
+        mcp = self.runtime.settings.mcp
+        if mcp.public_url is None or mcp.jwt_secret is None:
+            # The gate never posts a card without its server, so nothing can be approved.
+            return None
+        return confirmed_call_prefix(
+            ConfirmedCallRunner(
+                sessionmaker=self.runtime.sessionmaker,
+                secret=mcp.jwt_secret.get_secret_value().encode(),
+                tenant_id=tenant_id,
+                platform="discord",
+                thread_id=row.thread_id,
+                executing_agent_id=derive_agent_uuid(
+                    tenant_id=tenant_id, ma_agent_id=row.target_ma_agent_id
+                ),
+                call_tool=mcp_call_tool(str(mcp.public_url)),
+                clock=lambda: datetime.now(UTC),
+            )
+        )
+
     async def _archive_requested(self, origin_id: uuid.UUID) -> bool:
         """Whether the agent asked, during this turn, to archive its own thread.
 
@@ -1309,6 +1339,9 @@ class DaimonBot(commands.Bot):
         from daimon.adapters.discord.posted_controls.switch_card import SwitchCardControl
 
         self.add_dynamic_items(SwitchCardControl)
+        from daimon.adapters.discord.posted_controls.host_call import HostCallControl
+
+        self.add_dynamic_items(HostCallControl)
 
         # Same rationale as CredentialRequestButton above: the wizard's
         # first screen is posted by the MCP process, and every tap on it
@@ -4662,6 +4695,11 @@ class DaimonBot(commands.Bot):
                 else:
                     await running_origin.enter_async_context(origins.pop_all())
                     origin = prepared_origin
+                if row.reason == "confirmed_call":
+                    running_origin.callback(
+                        initial_send_prefix.reset,
+                        initial_send_prefix.set(self._confirmed_call_prefix(tenant_id, row)),
+                    )
                 outcome = await run_prepared_turn(
                     self.runtime.turn_deps,
                     prepared,
