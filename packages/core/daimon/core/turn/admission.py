@@ -68,6 +68,7 @@ from daimon.core.features.model_input import (
     HistoryDepth,
     SessionToolset,
     agent_toolset,
+    builtins_of,
 )
 from daimon.core.features.registry import FEATURES
 from daimon.core.features.resolver import ResolvedFeature
@@ -1792,6 +1793,7 @@ async def _admit_gates(
                     )
                 )
             ),
+            agent_builtins=builtins_of(agent),
         ),
     )
     if follow_generation is not None:

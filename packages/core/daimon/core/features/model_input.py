@@ -204,6 +204,11 @@ def _own_builtin(tools: list[Tool], tool: str) -> bool | None:
     return found
 
 
+def builtins_of(agent: BetaManagedAgentsAgent) -> dict[str, bool | None]:
+    """The agent tier of every `tool.*` key, from `agent`'s own tool config."""
+    return agent_builtins(cast(list[Tool], [tool.model_dump(mode="json") for tool in agent.tools]))
+
+
 def agent_toolset(
     features: FeatureSnapshot | None, agent: BetaManagedAgentsAgent
 ) -> SessionToolset:
@@ -213,9 +218,8 @@ def agent_toolset(
 
     if features is None:
         return DEFAULT_TOOLSET
-    tools = cast(list[Tool], [tool.model_dump(mode="json") for tool in agent.tools])
     isolated = (agent.metadata or {}).get(MA_METADATA_KEY_ISOLATED) == "true"
-    return SessionToolset.of(features, agent_builtins(tools), isolated=isolated)
+    return SessionToolset.of(features, builtins_of(agent), isolated=isolated)
 
 
 DEFAULT_TOOLSET: Final = SessionToolset()
