@@ -15,7 +15,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import structlog
@@ -734,10 +734,11 @@ def create_mcp_app(
         from daimon.adapters.mcp.connector_relay import CONNECTOR_ROUTE, build_connector_relay
 
         # Registered always; the deployment feature is read per request, so off is a 404.
-        relay = build_connector_relay(
-            runtime, effective_auth, str(effective_settings.mcp.public_url)
-        )
-        app.add_route(CONNECTOR_ROUTE, relay.handle, methods=["GET", "POST", "DELETE"])
+        public_url = str(effective_settings.mcp.public_url)
+        relay = build_connector_relay(runtime, effective_auth, public_url)
+        # Served where relay_url points: under the public URL's path (/mcp/connectors/...).
+        prefix = urlsplit(public_url).path.rstrip("/")
+        app.add_route(prefix + CONNECTOR_ROUTE, relay.handle, methods=["GET", "POST", "DELETE"])
     app.add_route("/readyz", _build_readyz(effective_sessionmaker), methods=["GET"])
     app.add_route(
         "/avatars/{token}/{sha12}.png",
