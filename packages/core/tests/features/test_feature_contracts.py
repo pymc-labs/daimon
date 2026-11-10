@@ -459,3 +459,21 @@ def test_may_turn_on_is_false_only_when_nothing_narrower_could_turn_it_on() -> N
         _settings(features={"participation": "on:locked"}), "participation", "discord"
     ), "a lock On is not a bar"
     assert not may_turn_on(_settings(), "participation", "slack"), "no adapter, no feature"
+
+
+def test_repo_memory_needs_the_setup_and_the_setting_does_not_read_the_feature() -> None:
+    import uuid
+
+    from daimon.core.config import RepoMemorySettings, get_repo_memory_settings
+    from daimon.core.features.snapshot import FeaturePlace, resolve_one
+
+    place = FeaturePlace(uuid.UUID(int=0), "discord")
+    spec = FEATURES["repo_memory"]
+    bare = _settings(features={"repo_memory": "on"})
+    assert resolve_one(spec, bare, place, ()).unavailable == "requires", "on without the setup"
+    assert not get_repo_memory_settings(bare).enabled, "the setup ignores the feature"
+    setup = _settings(repo_memory=RepoMemorySettings(enabled=True))
+    assert resolve_one(spec, setup, place, ()).on, "set up: on by default"
+    off = _settings(repo_memory=RepoMemorySettings(enabled=True), features={"repo_memory": "off"})
+    assert get_repo_memory_settings(off).enabled, "the feature does not undo the setup"
+    assert not resolve_one(spec, off, place, ()).on, "but turns the feature off"

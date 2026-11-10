@@ -954,10 +954,8 @@ async def _prepare_session_for_turn_locked(
             fernet=deps.fernet,
             recorded=recorded,
             tool_safety=deps.tool_safety,
-            legacy_memory_servers=(
-                get_repo_memory_settings(deps).legacy_mcp_server_names
-                if get_repo_memory_settings(deps).enabled
-                else ()
+            legacy_memory_servers=admission.toolset.legacy_memory_servers(
+                get_repo_memory_settings(deps).legacy_servers
             ),
             public_url=deps.public_url,
             requires_chat_session=(
@@ -1211,10 +1209,8 @@ async def _prepare_session_for_turn_locked(
                 daimon_rule_tools=admission.daimon_rule_tools,
                 toolset=admission.toolset,
                 mcp_vault_ids=deps.resolver_cache.mcp_vault_ids,
-                legacy_memory_servers=(
-                    get_repo_memory_settings(deps).legacy_mcp_server_names
-                    if get_repo_memory_settings(deps).enabled
-                    else ()
+                legacy_memory_servers=admission.toolset.legacy_memory_servers(
+                    get_repo_memory_settings(deps).legacy_servers
                 ),
             )
 

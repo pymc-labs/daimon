@@ -27,7 +27,7 @@ from anthropic.types.beta.beta_managed_agents_system_content_block_param import 
     BetaManagedAgentsSystemContentBlockParam,
 )
 from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
-from daimon.core.config import get_repo_memory_settings, load_turn_settings
+from daimon.core.config import load_turn_settings
 from daimon.core.confirmation import (
     ConfirmationHook,
     ToolRuleCardReference,
@@ -1287,9 +1287,7 @@ async def _repo_memory_state(
     origin: TurnContext,
     unattended: bool,
 ) -> MemoryState:
-    if not get_repo_memory_settings(deps).enabled or not prepared.admission.feature_on(
-        "repo_memory"
-    ):
+    if not prepared.admission.feature_on("repo_memory"):
         return MemoryState()
     return await turn_memory_state(
         deps.sessionmaker,

@@ -4,6 +4,7 @@ self-hosted turn tools, and the agent tier written through the agent's own confi
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -176,7 +177,10 @@ def test_repo_memory_off_at_the_deployment_hides_nothing() -> None:
     base = _snapshot()
     features = {**base.features, "repo_memory": ResolvedFeature("repo_memory", "off", "deployment")}
     snapshot = FeatureSnapshot(base.place, 1, features)
-    assert agent_toolset(snapshot, _agent()) == DEFAULT_TOOLSET, "nothing to hide"
+    toolset = agent_toolset(snapshot, _agent())
+    assert toolset == replace(DEFAULT_TOOLSET, memory_on=False), "nothing to hide"
+    assert toolset.legacy_memory_servers(("old",)) == (), "legacy readers stay while memory is off"
+    assert DEFAULT_TOOLSET.legacy_memory_servers(("old",)) == ("old",), "and step aside when on"
 
 
 def test_capabilities_change_nothing_at_their_defaults() -> None:

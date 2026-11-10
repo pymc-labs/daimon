@@ -73,6 +73,8 @@ def _notes(spec: FeatureSpec) -> str:
     notes: list[str] = []
     if (held := _locked_until_set(spec)) is not None:
         notes.append(f"{held} and locked until the operator turns it on")
+    if any(need != "platform_adapter" for need in spec.requires):
+        notes.append("Needs the operator's setup")
     if spec.platforms != EVERY_PLATFORM and set(spec.platforms) != set(CHAT_PLATFORMS):
         notes.append("Only " + ", ".join(sorted(p.title() for p in spec.platforms)))
     for platform, value in sorted(spec.platform_defaults.items()):

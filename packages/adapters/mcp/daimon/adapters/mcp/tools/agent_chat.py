@@ -898,10 +898,8 @@ async def _start_turn_impl(
             fernet=runtime.fernet,
             app_session_unmapped=True,
             tool_safety=runtime.settings.tool_safety,
-            legacy_memory_servers=(
-                get_repo_memory_settings(runtime.settings).legacy_mcp_server_names
-                if get_repo_memory_settings(runtime.settings).enabled
-                else ()
+            legacy_memory_servers=toolset.legacy_memory_servers(
+                get_repo_memory_settings(runtime.settings).legacy_servers
             ),
             github_fallback_pat=github_fallback_pat,
             github_app_id=github_app_id,

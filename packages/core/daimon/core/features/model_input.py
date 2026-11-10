@@ -93,6 +93,8 @@ class SessionToolset:
     daimon_tools: bool = True
     builtins: Mapping[str, bool] = field(default_factory=dict[str, bool])
     repo_memory: bool = True
+    memory_on: bool = True
+    """Repository memory is on here, not off or missing its setup: legacy readers step aside."""
     env_file: bool = True
     """`agent_env_file`: the agent's keys are mounted as `.env`."""
     off_capabilities: frozenset[str] = frozenset()
@@ -121,7 +123,7 @@ class SessionToolset:
         found = features.features.get("daimon_tools")
         memory = features.features.get("repo_memory")
         env = features.features.get("agent_env_file")
-        # Off at the deployment registers no memory tools, so there is nothing to hide.
+        # Without the setup, or Off and locked at the deployment, no memory tools are registered.
         hides_memory = (
             memory is not None and not memory.on and memory.tier not in ("default", "deployment")
         )
@@ -129,6 +131,7 @@ class SessionToolset:
             daimon_tools=not isolated and (found is None or found.on),
             builtins=builtins,
             repo_memory=not hides_memory,
+            memory_on=memory is not None and memory.on,
             env_file=env is None or env.on,
             off_capabilities=frozenset(
                 key
@@ -148,6 +151,10 @@ class SessionToolset:
             or not self.env_file
             or bool(self.off_capabilities)
         )
+
+    def legacy_memory_servers(self, names: tuple[str, ...]) -> tuple[str, ...]:
+        """`names` (already limited to a set-up deployment) while native memory is on here."""
+        return names if self.memory_on else ()
 
     @property
     def hidden_daimon_tools(self) -> frozenset[str]:

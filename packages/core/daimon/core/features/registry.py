@@ -32,6 +32,7 @@ Requirement = Literal[
     "report_host",
     "gemini_key",
     "microsoft_accounts",
+    "repo_memory_setup",
     "support_channel",
 ]
 """``platform_adapter``: the chat platform's adapter is set up in this deployment.
@@ -1029,17 +1030,18 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
         category="capabilities",
         effect="capability",
         values=_ON_OFF,
-        default="off",
+        default="on",
         tiers=("deployment", "workspace", "agent", "channel", "thread"),
         binds="turn",
         doc=(
             "Each message starts with the notes the agent keeps in its repository memory. "
-            "The operator turns it on, with the memory tools; below that it can only be "
-            "turned off, which also switches the memory tools off."
+            "Needs the operator's setup (an import of existing memory, then "
+            "`DAIMON_REPO_MEMORY__ENABLED`), which also adds the memory tools. Off hides "
+            "the tools and the notes here."
         ),
         platforms=EVERY_PLATFORM,
+        requires=("repo_memory_setup",),
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
-        legacy_env=("DAIMON_REPO_MEMORY__ENABLED",),
     ),
     FeatureSpec(
         key="context_provider",

@@ -2835,7 +2835,9 @@ class RepoMemorySettings(BaseModel):
     enabled: bool = Field(
         default=False,
         description=(
-            "Enable native repository memory tools and turn injection after a verified import."
+            "Set up native repository memory (its tools and the notes sent with each message) "
+            "after a verified import. Once set up, the `repo_memory` feature turns it on or off "
+            "(`DAIMON_FEATURES__REPO_MEMORY`)."
         ),
     )
     legacy_mcp_server_names: tuple[str, ...] = Field(
@@ -2854,19 +2856,17 @@ class RepoMemorySettings(BaseModel):
             raise ValueError("The native daimon-mcp server cannot be a legacy memory server.")
         return names
 
+    @property
+    def legacy_servers(self) -> tuple[str, ...]:
+        """The legacy servers to step aside for, once native memory is set up."""
+        return self.legacy_mcp_server_names if self.enabled else ()
+
 
 def get_repo_memory_settings(settings: object) -> RepoMemorySettings:
-    """Absent or undeclared settings keep the optional feature disabled;
-    `DAIMON_FEATURES__REPO_MEMORY` decides over the deprecated `enabled`."""
+    """The repository-memory setup; absent or undeclared settings are not set up.
+    Whether it is on is the `repo_memory` feature."""
     value = getattr(settings, "repo_memory", None)
-    found = value if isinstance(value, RepoMemorySettings) else RepoMemorySettings()
-    features = cast(object, getattr(settings, "features", None))
-    raw = (
-        cast(dict[str, object], features).get("repo_memory") if isinstance(features, dict) else None
-    )
-    if not isinstance(raw, str):
-        return found
-    return found.model_copy(update={"enabled": raw.strip().lower().partition(":")[0] == "on"})
+    return value if isinstance(value, RepoMemorySettings) else RepoMemorySettings()
 
 
 class Settings(BaseSettings):

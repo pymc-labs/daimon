@@ -17,7 +17,7 @@ from functools import cache
 from typing import Final, cast
 
 import structlog
-from daimon.core.config import Settings
+from daimon.core.config import Settings, get_repo_memory_settings
 from daimon.core.features.deployment import deployment_value
 from daimon.core.features.registry import (
     FEATURES,
@@ -96,6 +96,7 @@ _SETUP: Final[Mapping[Requirement, Callable[[Settings], bool]]] = {
     ),
     "gemini_key": lambda s: s.gemini.api_key is not None,
     "microsoft_accounts": lambda s: s.microsoft_accounts_enabled and bool(s.crypto.keys),
+    "repo_memory_setup": lambda s: get_repo_memory_settings(s).enabled,
 }
 """One integration's setup, exactly the condition its tools need to run. Unmet, the session is not
 offered them, so a check here must never be stricter than the tools. Watches and GitHub have none:

@@ -54,7 +54,7 @@ Where each feature can be set, and its default.
 | Reply hint | `unmentioned_reply_hint` | Chat | Off | ✓ | ✓ |  | ✓ |  | Only Discord |
 | No-writers notice | `writers_none_notice` | Chat | Off | ✓ | ✓ |  | ✓ |  | Only Discord |
 | Waiting card | `waiting_card` | Chat | Off | ✓ | ✓ |  |  |  | Only Discord |
-| Repository memory | `repo_memory` | Capability | Off | ✓ | ✓ | ✓ | ✓ | ✓ | Off and locked until the operator turns it on |
+| Repository memory | `repo_memory` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs the operator's setup |
 | Context provider | `context_provider` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
 | Personal memory | `memory_personal` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Always Off on Gemini, OpenAI |
 | Shared memory | `memory_shared` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Always On on Gemini, OpenAI |
@@ -70,13 +70,13 @@ Where each feature can be set, and its default.
 | Watches | `watches` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Routines | `routines` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Long jobs | `long_jobs` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
-| Cloud computers | `compute` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
-| Notebooks | `notebooks` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
-| Report publishing | `report_publish` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
-| Video transcripts | `media` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
-| Microsoft 365 | `microsoft_365` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
+| Cloud computers | `compute` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs the operator's setup |
+| Notebooks | `notebooks` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs the operator's setup |
+| Report publishing | `report_publish` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs the operator's setup |
+| Video transcripts | `media` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs the operator's setup |
+| Microsoft 365 | `microsoft_365` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs the operator's setup |
 | Chart images in answers | `artifact_images` | Capability | On | ✓ | ✓ |  |  |  |  |
-| Ask a person | `support_escalation` | Capability | On | ✓ | ✓ |  |  |  |  |
+| Ask a person | `support_escalation` | Capability | On | ✓ | ✓ |  |  |  | Needs the operator's setup |
 | GitHub access | `github` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Lead intake | `lead_intake` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Posting to others | `outbound_reach` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
@@ -146,16 +146,15 @@ Finished answers end with a footer naming the agent, the time taken, what the an
 
 ## Repository memory
 
-Each message starts with the notes the agent keeps in its repository memory. The operator turns it on, with the memory tools; below that it can only be turned off, which also switches the memory tools off.
+Each message starts with the notes the agent keeps in its repository memory. Needs the operator's setup (an import of existing memory, then `DAIMON_REPO_MEMORY__ENABLED`), which also adds the memory tools. Off hides the tools and the notes here.
 
 | | |
 | --- | --- |
 | Key | `repo_memory` |
 | Values | `on` (On), `off` (Off) |
-| Default | `off` |
+| Default | `on` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Off above is a ceiling |
-| Deprecated | `DAIMON_REPO_MEMORY__ENABLED` |
 
 ## Context provider
 

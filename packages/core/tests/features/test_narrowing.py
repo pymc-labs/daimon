@@ -15,6 +15,7 @@ from daimon.core.config import (
     GeminiSettings,
     MicrosoftAccountsSettings,
     NotebookSettings,
+    RepoMemorySettings,
     ReportHostSettings,
     Settings,
 )
@@ -81,6 +82,7 @@ def _integrated_settings() -> Settings:
                 host_url=HttpUrl("http://report-host:8002"), admin_secret=SecretStr("s")
             ),
             "gemini": GeminiSettings(api_key=SecretStr("s")),
+            "repo_memory": RepoMemorySettings(enabled=True),
         }
     )
 
