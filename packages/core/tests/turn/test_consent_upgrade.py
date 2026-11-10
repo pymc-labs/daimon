@@ -23,6 +23,8 @@ def copy_for(
     drops: tuple[str, ...] = ("memory",),
     url: str = "https://a.invalid/mcp",
     allowed: tuple[str, ...] = ("describe_agent",),
+    relays: tuple[str, ...] = (),
+    relay_ref: str = "turn",
 ) -> AgentSpec:
     return AgentSpec(
         name="copy",
@@ -35,6 +37,10 @@ def copy_for(
                 url=url,
                 credential_ref="turn",
                 tool_policy={"allowed_tools": list(allowed)},
+            ),
+            *(
+                MCPConnection(name=name, url=f"{url}/connectors/{name}", credential_ref=relay_ref)
+                for name in relays
             ),
         ),
         declared_drops=drops,
@@ -122,6 +128,34 @@ def test_the_gate_turned_off_is_a_daimon_decided_drop() -> None:
     then = copy_for(allowed=CARDED)
     today = copy_for(drops=(PUBLISH, "memory"))
     assert holds(consent_for(then), today, "gpt-6-luna"), "the gate's drop is no new loss"
+
+
+LINEAR = "mcp_server:linear"
+
+
+def test_covers_a_connector_the_relay_mounts_again() -> None:
+    """A connector the consent named lost runs through the relay on each person's grant."""
+    consent = consent_for(copy_for(drops=(LINEAR, "memory")))
+    assert _regained(consent, copy_for(relays=("linear",))), "a relayed connector is consented"
+    both = consent_for(copy_for(drops=(LINEAR, PUBLISH, "memory")))
+    assert _regained(both, copy_for(allowed=CARDED, relays=("linear",))), "tool and connector"
+
+
+def test_a_relayed_connector_still_pins_the_rest_of_the_target() -> None:
+    """Only a relay server on Daimon's own credential and URL counts as a regain."""
+    consent = consent_for(copy_for(drops=(LINEAR, "memory")))
+    moved = copy_for(relays=("linear",), url="https://b.invalid/mcp")
+    foreign = copy_for(relays=("linear",), relay_ref="other")
+    assert not _regained(consent, moved), "an MCP URL change asks again"
+    assert not _regained(consent, foreign), "a relay on another credential asks again"
+
+
+def test_the_relay_turned_off_is_a_daimon_decided_drop() -> None:
+    """With the relay gate off a connector is lost again; its owner is not asked."""
+    then = copy_for(relays=("linear",))
+    today = copy_for(drops=(LINEAR, "memory"))
+    assert holds(consent_for(then), today, "gpt-6-luna"), "the relay's drop is no new loss"
+    assert holds(consent_for(today), then, "gpt-6-luna"), "the relay's mount is no new gain"
 
 
 def test_no_module_compares_a_consent_digest_outside_the_helper() -> None:
