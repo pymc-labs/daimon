@@ -30,6 +30,7 @@ class _Backends:
     def __init__(self, *, on: str | None) -> None:
         self.on = on
         self.writes: list[tuple[str, dict[str, Any]]] = []
+        self.previews = 0
 
     async def tenant_policy(self, tenant_id: uuid.UUID) -> TenantBackendPolicy:
         return TenantBackendPolicy(
@@ -43,6 +44,7 @@ class _Backends:
         return True
 
     async def preview(self, _agent: BackendAgent, target: str | None, *_: Any) -> Any:
+        self.previews += 1
         return SimpleNamespace(allowed=True, digest=f"digest-{target}", setting_revision=4)
 
     async def set_backend(self, _agent: BackendAgent, target: str, *args: Any, **kw: Any) -> str:
@@ -151,6 +153,7 @@ async def test_a_digest_the_person_saw_is_the_one_checked(
     assert (write["expected_preview_digest"], write["revision"]) == ("seen", 2), (
         "the caller's preview is what the service checks"
     )
+    assert backends.previews == 0, "the write re-previews; no second read before it"
 
 
 async def test_back_to_claude_edits_the_record_then_clears_the_pin(
@@ -166,19 +169,28 @@ async def test_back_to_claude_edits_the_record_then_clears_the_pin(
 
 
 @pytest.mark.parametrize(
-    ("model", "backends"),
+    ("model", "backends", "reason"),
     [
-        (ModelRef(provider="gemini", id="gemini-4-argon"), _Backends(on=None)),
-        (LUNA, None),
-        (ModelRef(provider="anthropic", id="claude-nope"), _Backends(on=None)),
+        (
+            ModelRef(provider="gemini", id="gemini-4-argon"),
+            _Backends(on=None),
+            "backend_not_allowed",
+        ),
+        (LUNA, None, "model_not_selectable"),
+        (
+            ModelRef(provider="anthropic", id="claude-nope"),
+            _Backends(on=None),
+            "model_not_selectable",
+        ),
+        (ModelRef(provider="openai", id="gpt-nope"), _Backends(on=None), "model_not_selectable"),
     ],
 )
 async def test_a_model_outside_the_catalog_is_refused(
-    monkeypatch: pytest.MonkeyPatch, model: ModelRef, backends: _Backends | None
+    monkeypatch: pytest.MonkeyPatch, model: ModelRef, backends: _Backends | None, reason: str
 ) -> None:
     """A provider the tenant hasn't enabled, provider choice off, or an unknown id: refused."""
     deps, edits = _deps(monkeypatch, backends)
     with pytest.raises(AgentBackendRefused) as refused:
         await change_model(**deps, agent=_agent(), model=model, actor=_actor())
-    assert refused.value.reason == "model_not_selectable", f"{model} is not in the catalog"
+    assert refused.value.reason == reason, f"{model} is refused as {reason}"
     assert edits == [], "nothing is written"

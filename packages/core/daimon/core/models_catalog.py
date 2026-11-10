@@ -87,7 +87,7 @@ def _runnable(entry: AgentModel, tenant: TenantBackendPolicy | None) -> bool:
         return True
     if tenant is None or not backend_is_enabled(provider, tenant.enabled_backends):
         return False
-    channel = ChannelRef(tenant_id=str(tenant.tenant_id), platform="cli", channel_id="catalog")
+    channel = ChannelRef(tenant_id="catalog", platform="cli", channel_id="catalog")
     try:
         check_backend(
             ConfigRevision.create(channel, 1, agent_selection(provider, entry.model.id, None))

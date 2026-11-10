@@ -53,6 +53,7 @@ from daimon.core.channel_backend import (
     AgentSettings,
     BackendActor,
     BackendUnsupported,
+    backend_is_enabled,
     load_backend_agent,
 )
 from daimon.core.constants import MODEL_DISPLAY_NAMES
@@ -728,18 +729,20 @@ class ModelChanged:
     record: BetaManagedAgentsAgent | None = None
 
 
-async def _in_catalog(
+async def _require_in_catalog(
     backends: AgentBackendService | None, agent: BackendAgent, model: ModelRef
-) -> bool:
+) -> None:
     if model.provider == DEFAULT_BACKEND:
-        return is_priced_claude_model(model.id)
+        if not is_priced_claude_model(model.id):
+            raise AgentBackendRefused("model_not_selectable", provider=model.provider)
+        return
     if backends is None or not backends.enabled:
-        return False
+        raise AgentBackendRefused("model_not_selectable", provider=model.provider)
     tenant = await backends.tenant_policy(agent.tenant_id)
-    return any(
-        (choice.provider, choice.id) == (model.provider, model.id)
-        for choice in list_model_choices(tenant=tenant, default=None)
-    )
+    if not backend_is_enabled(model.provider, tenant.enabled_backends):
+        raise AgentBackendRefused("backend_not_allowed", provider=model.provider)
+    if not any(choice.model == model for choice in list_model_choices(tenant=tenant, default=None)):
+        raise AgentBackendRefused("model_not_selectable", provider=model.provider)
 
 
 async def change_model(
@@ -760,11 +763,11 @@ async def change_model(
     the provider setting through the preview, consent and digest checks; capture is the
     one `backends` was built with (None: provider choice is off here). `expected_digest`
     and `expected_revision` are the preview the person saw; None takes the current one.
-    Refused with
-    `AgentBackendRefused`/`BackendUnsupported`, or `AgentEditError` for a record edit.
+    Refused with `AgentBackendRefused` (`backend_not_allowed`: the tenant hasn't enabled
+    the provider; `model_not_selectable`: not in the catalog), `BackendUnsupported`, or
+    `AgentEditError` for a record edit.
     """
-    if not await _in_catalog(backends, agent, model):
-        raise AgentBackendRefused("model_not_selectable", provider=model.provider)
+    await _require_in_catalog(backends, agent, model)
     service = backends if backends is not None and backends.enabled else None
     current = await service.current(agent) if service is not None else None
     claude = model.provider == DEFAULT_BACKEND
@@ -778,11 +781,14 @@ async def change_model(
     if not await service.may_edit(agent, backend_actor):
         raise AgentBackendRefused("owner_or_admin_required", provider=model.provider)
     target = None if claude else model.provider
-    preview = await service.preview(agent, target, None if claude else model.id, settings)
-    if not preview.allowed:
-        raise AgentBackendRefused("backend_not_allowed", provider=model.provider)
-    revision = preview.setting_revision if expected_revision is None else expected_revision
-    digest = preview.digest if expected_digest is None else expected_digest
+    revision, digest = expected_revision, expected_digest
+    if revision is None or digest is None:
+        # The write re-previews and checks the digest; this only fills what's missing.
+        preview = await service.preview(agent, target, None if claude else model.id, settings)
+        if not preview.allowed:
+            raise AgentBackendRefused("backend_not_allowed", provider=model.provider)
+        revision = preview.setting_revision if revision is None else revision
+        digest = preview.digest if digest is None else digest
     if target is not None:
         written = await service.set_backend(
             agent,
