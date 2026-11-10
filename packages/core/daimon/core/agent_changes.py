@@ -50,6 +50,7 @@ from daimon.core.agent_view import (
 from daimon.core.channel_backend import (
     AgentBackendRefused,
     AgentBackendService,
+    AgentSettings,
     BackendActor,
     BackendUnsupported,
     load_backend_agent,
@@ -58,11 +59,16 @@ from daimon.core.constants import MODEL_DISPLAY_NAMES
 from daimon.core.defaults.ma_index import list_skills_lenient
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, strip_tenant_prefix
 from daimon.core.model_presets import ModelConfig
+from daimon.core.models_catalog import is_priced_claude_model, list_model_choices
 from daimon.core.permissions import WEB_PLACE_ID
 from daimon.core.stores import agent_drafts as drafts_store
 from daimon.core.stores import agent_helpers, agent_tool_rules
 from daimon.core.stores.agent_tool_rules import Rule
-from daimon.core.stores.domain import BackendAgent, CompatibilityPreview
+from daimon.core.stores.domain import (
+    AgentBackendRevision,
+    BackendAgent,
+    CompatibilityPreview,
+)
 from daimon.core.turn.notices import provider_name
 from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.ids import ModelRef, Provider
@@ -711,6 +717,104 @@ async def switch_provider(
         deps, actor=actor, agent=agent, provider=provider, model_id=model_id
     )
     await write_provider_switch(deps, switch)
+
+
+@dataclass(frozen=True)
+class ModelChanged:
+    """What `change_model` wrote: the provider setting, the agent record, or both."""
+
+    model: ModelRef
+    revision: AgentBackendRevision | None = None
+    record: BetaManagedAgentsAgent | None = None
+
+
+async def _in_catalog(
+    backends: AgentBackendService | None, agent: BackendAgent, model: ModelRef
+) -> bool:
+    if model.provider == DEFAULT_BACKEND:
+        return is_priced_claude_model(model.id)
+    if backends is None or not backends.enabled:
+        return False
+    tenant = await backends.tenant_policy(agent.tenant_id)
+    return any(
+        (choice.provider, choice.id) == (model.provider, model.id)
+        for choice in list_model_choices(tenant=tenant, default=None)
+    )
+
+
+async def change_model(
+    agent: BackendAgent,
+    model: ModelRef,
+    *,
+    actor: AgentActor,
+    edit: AgentEditDeps,
+    backends: AgentBackendService | None,
+    accepted_drops: tuple[str, ...] | None = None,
+    expected_digest: str | None = None,
+    expected_revision: int | None = None,
+    settings: AgentSettings | None = None,
+) -> ModelChanged:
+    """Run `agent` on any catalog `model`: the one model write every surface calls.
+
+    A Claude model on an agent already on Claude edits its record. Any other move writes
+    the provider setting through the preview, consent and digest checks; capture is the
+    one `backends` was built with (None: provider choice is off here). `expected_digest`
+    and `expected_revision` are the preview the person saw; None takes the current one.
+    Refused with
+    `AgentBackendRefused`/`BackendUnsupported`, or `AgentEditError` for a record edit.
+    """
+    if not await _in_catalog(backends, agent, model):
+        raise AgentBackendRefused("model_not_selectable", provider=model.provider)
+    service = backends if backends is not None and backends.enabled else None
+    current = await service.current(agent) if service is not None else None
+    claude = model.provider == DEFAULT_BACKEND
+    if claude and (current is None or current.backend in (None, DEFAULT_BACKEND)):
+        return ModelChanged(model=model, record=await _edit_record_model(edit, agent, model, actor))
+    if service is None:
+        raise AgentBackendRefused("feature_disabled", provider=model.provider)
+    backend_actor = BackendActor(
+        tenant_id=actor.tenant_id, account_id=actor.account_id, subject=actor.subject
+    )
+    if not await service.may_edit(agent, backend_actor):
+        raise AgentBackendRefused("owner_or_admin_required", provider=model.provider)
+    target = None if claude else model.provider
+    preview = await service.preview(agent, target, None if claude else model.id, settings)
+    if not preview.allowed:
+        raise AgentBackendRefused("backend_not_allowed", provider=model.provider)
+    revision = preview.setting_revision if expected_revision is None else expected_revision
+    digest = preview.digest if expected_digest is None else expected_digest
+    if target is not None:
+        written = await service.set_backend(
+            agent,
+            target,
+            revision,
+            backend_actor,
+            expected_preview_digest=digest,
+            accepted_drops=accepted_drops,
+            model=model.id,
+            settings=settings,
+        )
+        return ModelChanged(model=model, revision=written)
+    # Back to Claude: the record names the model, then the provider pin goes.
+    record = await _edit_record_model(edit, agent, model, actor)
+    written = await service.clear_backend(
+        agent, revision, backend_actor, expected_preview_digest=digest
+    )
+    return ModelChanged(model=model, revision=written, record=record)
+
+
+async def _edit_record_model(
+    edit: AgentEditDeps, agent: BackendAgent, model: ModelRef, actor: AgentActor
+) -> BetaManagedAgentsAgent:
+    if agent.source is None:
+        raise AgentBackendRefused("source_unavailable", provider=model.provider)
+    return await agent_editing.update_agent(
+        edit,
+        actor=actor,
+        ma_agent_id=agent.source.ref.id,
+        patch=AgentPatch(model=model.id),
+        expected_version=None,
+    )
 
 
 def _provider_revision(facts: AgentFacts) -> int:
