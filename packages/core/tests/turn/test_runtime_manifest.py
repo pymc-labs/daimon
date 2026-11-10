@@ -207,7 +207,7 @@ def test_a_target_is_rebuilt_as_a_pre_1483_consent_named_it(
     before: tuple[str, ...],
     instructions: str | None,
 ) -> None:
-    from daimon.core.turn.runtime_manifest import _with_tools_dropped
+    from daimon.core.turn.consent_upgrade import with_tools_dropped
     from mux.contracts.ids import ModelRef
     from mux.contracts.resources import AgentSpec, ToolSpec
 
@@ -222,12 +222,12 @@ def test_a_target_is_rebuilt_as_a_pre_1483_consent_named_it(
         tools=(ToolSpec(name="bash", kind="builtin"),),
         declared_drops=today,
     )
-    rebuilt = _with_tools_dropped(target, instructions)
+    rebuilt = with_tools_dropped(target, instructions)
     assert rebuilt is not None
     assert rebuilt.tools == () and rebuilt.declared_drops == before
     # An agent with no instructions of its own has the losses line alone.
     assert rebuilt.system == losses(before)
-    assert _with_tools_dropped(rebuilt, instructions) is None, "no tools: nothing to rebuild"
+    assert with_tools_dropped(rebuilt, instructions) is None, "no tools: nothing to rebuild"
 
 
 COPIES = [("openai", "gpt-6-luna"), ("gemini", "gemini-3.8-flash")]
@@ -286,7 +286,7 @@ def gate_also(monkeypatch: pytest.MonkeyPatch, *names: str, ungate: tuple[str, .
 @pytest.mark.parametrize(("provider", "model"), COPIES)
 def test_a_consent_from_before_fleet_removal_still_holds(provider: Provider, model: str) -> None:
     """Then request_fleet_config was gated, start_long_job not, and get_long_job was listed."""
-    from daimon.core.turn.runtime_manifest import _same_losses
+    from daimon.core.turn.consent_upgrade import same_losses
 
     then = daimon_copy(
         provider,
@@ -301,14 +301,14 @@ def test_a_consent_from_before_fleet_removal_still_holds(provider: Provider, mod
         runs=("describe_agent", "get_long_job"),
         losses=("memory",),
     )
-    assert _same_losses(today, consent_for(then)), (
+    assert same_losses(today, consent_for(then)), (
         "a tool Daimon removed and one it gated since are Daimon's change, not the owner's"
     )
 
 
 def test_a_gemini_default_model_consent_survives_newly_gated_tools() -> None:
     """Its stored losses in full, on the provider default, against today's gated set."""
-    from daimon.core.turn.runtime_manifest import _model_consented, _same_losses
+    from daimon.core.turn.consent_upgrade import model_consented, same_losses
 
     gated_then = (
         "add_skill",
@@ -343,8 +343,8 @@ def test_a_gemini_default_model_consent_survives_newly_gated_tools() -> None:
         runs=("describe_agent", "get_long_job"),
         losses=losses,
     )
-    assert _same_losses(today, consent_for(then)), "only Daimon's gating changed"
-    assert _model_consented("gemini", "gemini-3.8-flash", None), "its default model"
+    assert same_losses(today, consent_for(then)), "only Daimon's gating changed"
+    assert model_consented("gemini", "gemini-3.8-flash", None), "its default model"
 
 
 @pytest.mark.parametrize(
@@ -363,9 +363,9 @@ def test_losses_count_only_for_the_model_the_consent_was_for(
     backend: str, model: str | None, picked: str | None, consented: bool
 ) -> None:
     """A moved provider default is another model: it never rides on an old consent."""
-    from daimon.core.turn.runtime_manifest import _model_consented
+    from daimon.core.turn.consent_upgrade import model_consented
 
-    assert _model_consented(backend, model, picked) is consented, (backend, model, picked)
+    assert model_consented(backend, model, picked) is consented, (backend, model, picked)
 
 
 @pytest.mark.parametrize(("provider", "model"), COPIES)
@@ -373,13 +373,13 @@ def test_an_owner_ask_tool_daimon_later_gates_needs_no_new_confirmation(
     monkeypatch: pytest.MonkeyPatch, provider: Provider, model: str
 ) -> None:
     """hand_off was a loss the owner set to ask; gating it changes nothing they lose."""
-    from daimon.core.turn.runtime_manifest import _same_losses
+    from daimon.core.turn.consent_upgrade import same_losses
 
     then = daimon_copy(provider, model, asks=("add_skill", "hand_off"), runs=("describe_agent",))
     gate_also(monkeypatch, "hand_off")
     today = daimon_copy(provider, model, asks=("add_skill", "hand_off"), runs=("describe_agent",))
     today = today.model_copy(update={"system": "Source, reworded.\n\nUnavailable: all of it."})
-    assert _same_losses(today, consent_for(then)), "gating and instructions text are Daimon's"
+    assert same_losses(today, consent_for(then)), "gating and instructions text are Daimon's"
 
 
 @pytest.mark.parametrize(("provider", "model"), COPIES)
@@ -388,7 +388,7 @@ def test_a_gain_or_a_new_loss_still_asks_again(
     monkeypatch: pytest.MonkeyPatch, provider: Provider, model: str, change: str
 ) -> None:
     """A tool gating gave back, a loss never confirmed, or MCP back on a copy without it."""
-    from daimon.core.turn.runtime_manifest import _same_losses
+    from daimon.core.turn.consent_upgrade import same_losses
 
     then = daimon_copy(provider, model, asks=("add_skill",), runs=("describe_agent",))
     asks, runs, losses = ("add_skill",), ("describe_agent",), ("memory",)
@@ -402,7 +402,7 @@ def test_a_gain_or_a_new_loss_still_asks_again(
     else:
         losses = ()
     today = daimon_copy(provider, model, asks=asks, runs=runs, losses=losses)
-    assert not _same_losses(today, consent_for(then)), f"{change} needs a fresh confirmation"
+    assert not same_losses(today, consent_for(then)), f"{change} needs a fresh confirmation"
 
 
 @pytest.mark.parametrize(("provider", "model"), COPIES)
@@ -411,13 +411,13 @@ def test_a_self_carded_tool_newly_offered_asks_again(
 ) -> None:
     """A gated tool Daimon starts carding itself runs on provider turns: a gain."""
     from daimon.core import tool_safety
-    from daimon.core.turn.runtime_manifest import _same_losses
+    from daimon.core.turn.consent_upgrade import same_losses
 
     then = daimon_copy(provider, model, asks=("add_skill",), runs=("describe_agent",))
     carded = tool_safety.self_carded_tools() | {"add_skill"}
     monkeypatch.setattr(tool_safety, "self_carded_tools", lambda: carded)
     today = daimon_copy(provider, model, runs=("add_skill", "describe_agent"))
-    assert not _same_losses(today, consent_for(then)), "add_skill now runs, never confirmed"
+    assert not same_losses(today, consent_for(then)), "add_skill now runs, never confirmed"
 
 
 @pytest.mark.parametrize(("provider", "model"), COPIES)
@@ -425,13 +425,13 @@ def test_a_consent_with_the_switch_tool_off_holds_when_daimon_gates_more(
     monkeypatch: pytest.MonkeyPatch, provider: Provider, model: str
 ) -> None:
     """The owner turned the switch tool off before confirming; it stays a loss on both sides."""
-    from daimon.core.turn.runtime_manifest import _same_losses
+    from daimon.core.turn.consent_upgrade import same_losses
 
     asks = ("add_skill", "request_agent_backend_switch")
     then = daimon_copy(provider, model, asks=asks, runs=("describe_agent", "hand_off"))
     gate_also(monkeypatch, "hand_off")
     today = daimon_copy(provider, model, asks=(*asks, "hand_off"), runs=("describe_agent",))
-    assert _same_losses(today, consent_for(then)), "the switch tool is the same loss as confirmed"
+    assert same_losses(today, consent_for(then)), "the switch tool is the same loss as confirmed"
 
 
 @pytest.mark.parametrize(
@@ -449,13 +449,13 @@ def test_a_pre_1483_tools_loss_covers_todays_web_losses(
     provider: Provider, today: tuple[str, ...], before: tuple[str, ...]
 ) -> None:
     """A consent that lost `tools` whole holds once the template keeps all but web tools."""
-    from daimon.core.turn.runtime_manifest import _same_losses
+    from daimon.core.turn.consent_upgrade import same_losses
 
     then = daimon_copy(provider, "m", losses=("memory", "tools", *before))
     now = daimon_copy(provider, "m", losses=("memory", *today))
-    assert _same_losses(now, consent_for(then)), "its tools come back; web tools stay lost"
+    assert same_losses(now, consent_for(then)), "its tools come back; web tools stay lost"
     skills = daimon_copy(provider, "m", losses=("memory", "skills", *today))
-    assert not _same_losses(skills, consent_for(then)), "any other loss still asks again"
+    assert not same_losses(skills, consent_for(then)), "any other loss still asks again"
 
 
 async def test_a_counterpart_that_wont_prepare_names_its_real_error(monkeypatch):

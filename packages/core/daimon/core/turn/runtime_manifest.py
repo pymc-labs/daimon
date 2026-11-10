@@ -20,15 +20,15 @@ from daimon.core.errors import DaimonError
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.ceiling import remaining_s, turn_deadline
+from daimon.core.turn.consent_upgrade import covers
 from daimon.core.turn.errors import AdmissionDenied
 from mux.contracts.config import CapabilityRequirement, ConfigRevision, ThreadMode
 from mux.contracts.extensions import ExtensionConfig
-from mux.contracts.ids import ModelRef, Provider, ResourceRef, SkillRef
+from mux.contracts.ids import ModelRef, ResourceRef, SkillRef
 from mux.contracts.profile import Capability
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, ResourceBinding, ToolSpec
 from mux.errors import InvalidConfig, MuxError, UnsupportedCapability
 from mux.profiles import (
-    CONSENTED_DEFAULT_MODELS,
     backend_selection,
     get_profile,
     native_agent_tools,
@@ -49,8 +49,7 @@ if TYPE_CHECKING:
     from daimon.core.neutral_resources import NeutralResourceHost
     from daimon.core.stores.domain import (
         BackendAgent,
-        SourceRepresentation,
-        _BackendDropConsent,  # pyright: ignore[reportPrivateUsage]
+        SourceRepresentation,  # pyright: ignore[reportPrivateUsage]
     )
     from daimon.core.stores.neutral_catalog import AgentRevision
     from daimon.core.turn.prepare import ProviderPreparationRequest
@@ -1308,161 +1307,6 @@ def preview_source_drops(source: BackendAgent, model: ModelRef) -> AgentSpec:
     return target
 
 
-#: The template drop a provider turn's consent named before Daimon posted the
-#: switch card itself (`tool_safety.self_carded_tools`).
-_SWITCH_TOOL_DROP: Final[str] = f"mcp_tool:{DAIMON_SERVER_NAME}:request_agent_backend_switch"
-
-
-def _model_consented(backend: Provider, model: str | None, picked: str | None) -> bool:
-    """The resolved `model` is the one the consent was confirmed for.
-
-    A consent stores no model (a release before this one must still read the
-    row), so a default-model setting counts only while the provider default is
-    still the one such consents were recorded under. No model means the
-    source's own, which the source pin covers.
-    """
-    return model is None or model == (picked or CONSENTED_DEFAULT_MODELS.get(backend))
-
-
-def _consented(target: AgentSpec | None, consent: _BackendDropConsent) -> bool:
-    return (
-        target is not None
-        and target.declared_drops == consent.declared_drops
-        and request_digest(target.model_dump(mode="json")) == consent.target_digest
-    )
-
-
-def _same_losses(target: AgentSpec, consent: _BackendDropConsent) -> bool:
-    """`target` loses what `consent` accepted, apart from what Daimon's own tools decide.
-
-    Daimon's gating and catalogue change with a release, not with the agent: the
-    server refuses a gated tool to provider turns whatever the consent says, and a
-    tool Daimon no longer serves can't be lost. The source pin covers the owner's
-    tool settings. Any other difference, a gain included (a tool Daimon stops
-    gating, MCP back on a copy confirmed without it), asks again.
-    """
-    from daimon.core.tool_safety import confirmation_gated_tools, self_carded_tools
-
-    prefix = f"mcp_tool:{DAIMON_SERVER_NAME}:"
-    # A self-carded tool runs on provider turns: offering it is a gain.
-    gated = confirmation_gated_tools() - self_carded_tools()
-    served = {
-        drop.removeprefix(prefix) for drop in target.declared_drops if drop.startswith(prefix)
-    }
-    for server in target.mcp_servers or ():
-        allowed = server.tool_policy.get("allowed_tools") if server.tool_policy else None
-        if server.name == DAIMON_SERVER_NAME and isinstance(allowed, list):
-            served.update(name for name in allowed if isinstance(name, str))
-    today = {
-        drop
-        for drop in target.declared_drops
-        if not drop.startswith(prefix) or drop.removeprefix(prefix) not in gated
-    }
-    # A consent from before the switch tool was offered names it a loss; one the
-    # owner confirmed with it turned off still loses it.
-    switch_offered = _SWITCH_TOOL_DROP not in target.declared_drops
-    accepted = {
-        drop
-        for drop in consent.declared_drops
-        if not drop.startswith(prefix)
-        or (
-            not (switch_offered and drop == _SWITCH_TOOL_DROP)
-            and drop.removeprefix(prefix) in served - gated
-        )
-    }
-    if "tools" in accepted and "tools" not in today and target.tools:
-        # Before #1483 a template lost the source's tools whole; now it keeps
-        # them and names only the web tools it can't carry.
-        accepted = (accepted - {"tools"}) | {d for d in today if d.startswith("builtin_tool:")}
-    return today == accepted
-
-
-def _with_switch_tool_dropped(target: AgentSpec, source_system: str | None) -> AgentSpec | None:
-    """`target` as a consent recorded before the switch tool was offered names it.
-
-    That consent declared the tool a loss: not allowed on Daimon's MCP, one more
-    drop, and the drops line in the instructions. Only that one difference is
-    rebuilt; anything else still differs and still needs a fresh confirmation.
-    """
-    if _SWITCH_TOOL_DROP in target.declared_drops:
-        return None
-    tool = _SWITCH_TOOL_DROP.rsplit(":", 1)[1]
-    from mux.contracts.resources import MCPConnection
-
-    servers: list[MCPConnection] = []
-    found = False
-    for server in target.mcp_servers or ():
-        allowed = server.tool_policy.get("allowed_tools") if server.tool_policy else None
-        if server.name == DAIMON_SERVER_NAME and isinstance(allowed, list) and tool in allowed:
-            found = True
-            server = server.model_copy(
-                update={
-                    "tool_policy": {
-                        **server.tool_policy,
-                        "allowed_tools": [name for name in allowed if name != tool],
-                    }
-                }
-            )
-        servers.append(server)
-    if not found:
-        return None
-    drops = tuple(sorted((*target.declared_drops, _SWITCH_TOOL_DROP)))
-    return target.model_copy(
-        update={
-            "mcp_servers": tuple(servers),
-            "declared_drops": drops,
-            "system": compose_source_instructions(
-                source_system, "Unavailable capabilities: " + ", ".join(drops) + "."
-            ),
-        }
-    )
-
-
-def _with_tools_dropped(target: AgentSpec, source_system: str | None) -> AgentSpec | None:
-    """`target` as a consent recorded before a template kept the source's tools names it.
-
-    That consent (before #1483) declared `tools` a whole loss: no tools on the
-    target, `tools` among its drops, and neither of today's granular web losses
-    (an OpenAI consent already named web fetch). Only that difference is rebuilt;
-    the copy then runs with its tools from now on.
-    """
-    if "tools" in target.declared_drops or not target.tools:
-        return None
-    from mux.profiles.openai import PERSISTENT_WORKSPACE
-
-    granular: set[str] = {"builtin_tool:web_search"}
-    if target.model.provider != PERSISTENT_WORKSPACE.provider:
-        granular.add("builtin_tool:web_fetch")
-    drops = tuple(sorted({*target.declared_drops, "tools"} - granular))
-    return target.model_copy(
-        update={
-            "tools": (),
-            "declared_drops": drops,
-            "system": compose_source_instructions(
-                source_system, "Unavailable capabilities: " + ", ".join(drops) + "."
-            ),
-        }
-    )
-
-
-def _consented_before(
-    target: AgentSpec, source_system: str | None, consent: _BackendDropConsent
-) -> bool:
-    """A consent recorded before a template kept the source's tools (#1483) or
-    offered the switch tool (#1438).
-
-    Either difference alone, or both, is rebuilt; anything else still needs a
-    fresh confirmation.
-    """
-    without_tools = _with_tools_dropped(target, source_system)
-    candidates = (
-        _with_switch_tool_dropped(target, source_system),
-        without_tools,
-        _with_switch_tool_dropped(without_tools, source_system) if without_tools else None,
-    )
-    return any(_consented(candidate, consent) for candidate in candidates)
-
-
 def _source_facts(source: BackendAgent) -> dict[str, object]:
     updates: dict[str, object] = {"resource_scope": None}
     for name in ("source", "environment"):
@@ -1628,13 +1472,13 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
         target = preview_source_drops(
             source, ModelRef(provider=revision.backend, id=revision.model or spec.model.id)
         )
-        if not (
-            _consented(target, consent)
-            or (
-                _model_consented(revision.backend, revision.model, setting.model)
-                and _same_losses(target, consent)
-            )
-            or _consented_before(target, spec.system, consent)
+        if not covers(
+            consent,
+            target,
+            source_system=spec.system,
+            backend=revision.backend,
+            model=revision.model,
+            picked=setting.model,
         ):
             raise AgentBackendRefused("re_confirm", detail="losses_differ")
     retain_native = (
