@@ -105,7 +105,12 @@ from daimon.adapters.discord.vision import (
     is_vision_image_attachment,
 )
 from daimon.adapters.discord.watch_access import require_watch_thread_access
-from daimon.core.agent_identity import AgentIdentity, identity_enabled_for, resolve_agent_identity
+from daimon.core.agent_identity import (
+    AgentIdentity,
+    identity_enabled_for,
+    is_builtin_agent,
+    resolve_agent_identity,
+)
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.anthropic_spend import spend_limit_error
@@ -3914,6 +3919,7 @@ class DaimonBot(commands.Bot):
             client=self,
             public_base_url=self.runtime.settings.mcp.app_root_url,
             identity_enabled=identity_enabled_for(self.runtime.settings, "discord", guild_id),
+            default_agent_name=self.runtime.deployment_default.agent_name,
         )
 
     async def _may_post_in(self, *, tenant_id: uuid.UUID, channel: object) -> bool:
@@ -4368,7 +4374,11 @@ class DaimonBot(commands.Bot):
                     identity_session,
                     tenant_id=tenant_id,
                     agent_name=agent.name,
-                    is_builtin=agent.name.casefold() == "daimon",
+                    is_builtin=is_builtin_agent(
+                        name=agent.name,
+                        metadata=agent.metadata,
+                        default_agent_name=self.runtime.deployment_default.agent_name,
+                    ),
                     public_base_url=self.runtime.settings.mcp.app_root_url,
                     enabled=identity_enabled_for(self.runtime.settings, "discord", guild_id),
                     background_sessionmaker=self.runtime.sessionmaker,
@@ -5435,7 +5445,11 @@ class DaimonBot(commands.Bot):
                     identity_session,
                     tenant_id=tenant_id,
                     agent_name=agent.name,
-                    is_builtin=agent.name.casefold() == "daimon",
+                    is_builtin=is_builtin_agent(
+                        name=agent.name,
+                        metadata=agent.metadata,
+                        default_agent_name=self.runtime.deployment_default.agent_name,
+                    ),
                     public_base_url=self.runtime.settings.mcp.app_root_url,
                     enabled=identity_enabled_for(self.runtime.settings, "discord", guild_id),
                     background_sessionmaker=self.runtime.sessionmaker,
