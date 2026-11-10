@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, overload
 from uuid import uuid4
 
 from anthropic import AsyncAnthropic
@@ -25,8 +25,10 @@ from mux.drivers.anthropic import (
 )
 from mux.errors import ScopeViolation, UnsupportedCapability
 from mux.profiles import get_profile
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
+    from daimon.core.agent_record_ports import RecordRoutedManagedAgents
     from daimon.core.stores.neutral_catalog import AgentRevision
     from daimon.core.turn.deps import TurnDeps
     from daimon.core.turn.prepare import ProviderPreparationRequest
@@ -170,19 +172,47 @@ def turn_backend(request: TurnBackendRequest) -> TurnBackend:
     return bound
 
 
+@overload
 def managed_agents(
     client: AsyncAnthropic,
     *,
     scope: Scope | None = None,
     resources: frozenset[tuple[str, str]] = frozenset(),
     secrets: SecretResolver | None = None,
+    records: None = None,
+) -> AnthropicManagedAgents: ...
+@overload
+def managed_agents(
+    client: AsyncAnthropic,
+    *,
+    scope: Scope | None = None,
+    resources: frozenset[tuple[str, str]] = frozenset(),
+    secrets: SecretResolver | None = None,
+    records: async_sessionmaker[AsyncSession],
+) -> RecordRoutedManagedAgents: ...
+def managed_agents(
+    client: AsyncAnthropic,
+    *,
+    scope: Scope | None = None,
+    resources: frozenset[tuple[str, str]] = frozenset(),
+    secrets: SecretResolver | None = None,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> AnthropicManagedAgents:
+    """The one Managed Agents constructor for host code.
+
+    With `records`, agent and environment ports serve Daimon-owned records from
+    the database and refuse Anthropic only for calls that reach it.
+    """
+    authorization = ResourceAuthorization(scope, resources) if scope is not None else None
+    if records is not None:
+        # The record store imports host modules that import this one.
+        from daimon.core.agent_record_ports import RecordRoutedManagedAgents
+
+        return RecordRoutedManagedAgents(
+            client, records=records, authorization=authorization, secrets=secrets
+        )
     require_anthropic_allowed()
-    return AnthropicManagedAgents(
-        client,
-        authorization=ResourceAuthorization(scope, resources) if scope is not None else None,
-        secrets=secrets,
-    )
+    return AnthropicManagedAgents(client, authorization=authorization, secrets=secrets)
 
 
 def resource_ref(
