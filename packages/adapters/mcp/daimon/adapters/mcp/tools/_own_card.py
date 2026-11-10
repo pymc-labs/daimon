@@ -46,4 +46,29 @@ async def post_own_card(
         return await post_switch_card(
             runtime, auth, channel_id=origin.thread_id, card=card, origin=place
         )
+    if origin.platform == "web":
+        return await _notify_web(runtime, origin, card)
     raise ToolError("I can't post a confirmation card in this conversation. Nothing changed.")
+
+
+async def _notify_web(runtime: McpRuntime, origin: TurnOriginRow, card: PostedCard) -> str:
+    """Hand the card to the web process, which shows it in the person's chat."""
+    from daimon.core.stores.web_notices import WebControlNotice, send_web_notice
+
+    pressable = next((button.custom_id for button in card.buttons if button.custom_id), None)
+    if pressable is None or pressable.count(":") != 2:
+        raise ToolError("I can't post a confirmation card in this conversation. Nothing changed.")
+    # "hcc:<id>": every button of the card shares it, and the press route checks it.
+    card_id = pressable.rsplit(":", 1)[0]
+    async with runtime.session_factory.begin() as session:
+        await send_web_notice(
+            session,
+            WebControlNotice(
+                thread_id=origin.thread_id,
+                card_id=card_id,
+                title=card.headline,
+                details=card.facts,
+                footer=card.footer,
+            ),
+        )
+    return card_id

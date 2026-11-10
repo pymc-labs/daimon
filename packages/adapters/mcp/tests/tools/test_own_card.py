@@ -97,3 +97,35 @@ async def test_an_unknown_platform_is_refused(calls: list[tuple[str, dict[str, o
             card=_card(),
         )
     assert calls == [], "nothing was posted"
+
+
+async def test_a_web_card_is_a_notice_to_the_chat(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The web has no message API: the card goes to the chat as a notice, keyed by its id."""
+    from contextlib import asynccontextmanager
+
+    from daimon.core.stores import web_notices
+
+    sent: list[object] = []
+
+    async def send(_session: object, notice: object) -> None:
+        sent.append(notice)
+
+    @asynccontextmanager
+    async def begin():
+        yield object()
+
+    monkeypatch.setattr(web_notices, "send_web_notice", send)
+    card = _card()
+    runtime = SimpleNamespace(session_factory=SimpleNamespace(begin=begin))
+
+    got = await _own_card.post_own_card(
+        runtime,  # pyright: ignore[reportArgumentType]
+        SimpleNamespace(),  # pyright: ignore[reportArgumentType]
+        origin=_origin("web", "web:t"),
+        card=card,
+    )
+
+    (notice,) = sent
+    assert isinstance(notice, web_notices.WebControlNotice), "a control notice is sent"
+    assert (notice.thread_id, notice.title) == ("web:t", card.headline), "it names the chat"
+    assert got == notice.card_id and got.startswith("bsw:"), "the card id is the message id"
