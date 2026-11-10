@@ -10,6 +10,7 @@ import pytest
 from anthropic import AsyncAnthropic
 from daimon.core.channel_backend import AgentBackendRefused, load_backend_agent
 from daimon.core.defaults.builtin_agent import resolve_builtin_agent_name
+from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import MAResolverMissError, new_resolver_cache, resolve_agent
 from daimon.core.setup_conversations import resolve_setup_agents
@@ -17,11 +18,14 @@ from daimon.core.stores.selfhosted_resources import SelfHostedAgents, SelfHosted
 from daimon.core.turn.selfhosted_records import resolve_records
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent
+from mux.contracts.ids import Scope
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
 
 from ..stores.test_selfhosted_resources import agent_spec, environment_spec, scope
+from ..test_neutral_resource_host import SDKCase, raw_agent, reply
+from ..test_neutral_resource_host import spec as catalog_spec
 
 _MANAGED = {"daimon_managed": "true"}
 
@@ -180,6 +184,78 @@ async def test_resolve_records_when_builtin_requested_then_follows_the_rule(
     )
 
     assert agent.name == expected, f"records {names} route default to {expected!r}"
+
+
+@pytest.mark.parametrize(
+    ("catalog", "expected"),
+    [
+        ((("ag_daimon", "daimon", True),), "ag_daimon"),
+        ((("ag_daimon", "daimon", True), ("ag_default", "default", True)), "ag_default"),
+        ((("ag_daimon", "daimon", False),), None),
+        ((("ag_daimon", "daimon", True), ("ag_own", "default", False)), "ag_own"),
+    ],
+    ids=["legacy-only", "migrated", "unmanaged-daimon", "explicit-own"],
+)
+async def test_load_backend_agent_when_catalog_host_keeps_daimon_then_falls_back_to_managed_only(
+    catalog: tuple[tuple[str, str, bool], ...],
+    expected: str | None,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """OpenAI and Gemini catalog agents are not renamed, so the fallback never ends there.
+
+    A catalog counterpart keeps the source agent's name and `daimon_managed` tag from
+    when it was materialized; only the tag tells a seeded `daimon` from a workspace's own.
+    """
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    host_scope = Scope(
+        tenant_id=str(tenant.id),
+        account_id=str(account.id),
+        principal_id="caller",
+        authorization_id="authorized-host",
+    )
+    case = SDKCase((db_session_factory, host_scope, host_scope))
+    specs = {
+        agent_id: catalog_spec(name).model_copy(
+            update={
+                "metadata": {MA_METADATA_KEY_NAME: name, **(_MANAGED if managed else {})},
+            }
+        )
+        for agent_id, name, managed in catalog
+    }
+    for agent_id, requested in specs.items():
+        await case.seed_agent(requested, id_=agent_id)
+    if expected is not None:
+        case.trace.queue(
+            reply("GET", f"/agents/{expected}", raw_agent(specs[expected], host_scope, expected))
+        )
+
+    async with case.sdk() as sdk:
+        host = case.host(sdk)
+        if expected is None:
+            with pytest.raises(AgentBackendRefused):
+                await load_backend_agent(
+                    _client(tenant.id),
+                    db_session_factory,
+                    tenant_id=tenant.id,
+                    agent_name="default",
+                    resource_host=host,
+                )
+            return
+        loaded = await load_backend_agent(
+            _client(tenant.id),
+            db_session_factory,
+            tenant_id=tenant.id,
+            agent_name="default",
+            resource_host=host,
+        )
+
+    case.trace.assert_consumed()
+    assert loaded.source is not None and loaded.source.ref.id == expected, (
+        f"default on a catalog host reaches {expected!r}"
+    )
 
 
 # Functions that resolve an agent by name for a turn, a schedule, setup or an
