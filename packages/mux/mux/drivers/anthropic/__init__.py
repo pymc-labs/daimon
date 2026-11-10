@@ -22,6 +22,7 @@ from mux.contracts.ports import MemoryStores as CoreMemoryStores
 from mux.contracts.ports import PlatformExport as CorePlatformExport
 from mux.contracts.ports import Vaults as CoreVaults
 from mux.contracts.profile import Profile
+from mux.drivers.anthropic.completions import AnthropicCompletions
 from mux.drivers.anthropic.core_admin import AnthropicCoreAdmin, CoreAdmin
 from mux.drivers.anthropic.credential_schemas import CredentialCreate, CredentialUpdate
 from mux.drivers.anthropic.normalize import EventNormalizer, object_json
@@ -257,6 +258,7 @@ class AnthropicManagedAgents:
 
 
 __all__ = [
+    "AnthropicCompletions",
     "AGENT_TOOLS_NAMESPACE",
     "AgentModelConfig",
     "AgentToolsConfig",

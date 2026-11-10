@@ -158,6 +158,8 @@ TOOL_MODEL_PRICING: dict[str, ModelRates] = {
         input=2.00, output=120.00, cache_write=0.0, cache_read=0.0
     ),
     "gemini-2.5-flash": ModelRates(input=0.30, output=2.50, cache_write=0.0, cache_read=0.03),
+    # Side calls (titles, participation verdicts) on an OpenAI-only install.
+    "gpt-5-mini": ModelRates(input=0.25, output=2.00, cache_write=0.0, cache_read=0.025),
 }
 
 _SNAPSHOT_SUFFIX = re.compile(r"-\d{8}$")

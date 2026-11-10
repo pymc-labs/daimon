@@ -24,7 +24,6 @@ from daimon.core.channel_backend import effective_thread_backend
 from daimon.core.config import Settings, ThreadParticipationSettings
 from daimon.core.features.resolver import ResolvedFeature
 from daimon.core.features.snapshot import FeaturePlace, place_feature
-from daimon.core.pricing import MODEL_PRICING
 from daimon.core.rule_views import is_thread_turn_refused
 from daimon.core.scope import DeploymentDefault
 from daimon.core.spend_gate import SpendBlock, SpendRequest, spend_gate_in_new_session
@@ -40,7 +39,7 @@ from daimon.core.thread_participation import (
     decide_post_classifier,
     decide_pre_classifier,
 )
-from daimon.core.usage_recording import record_classifier_usage
+from daimon.core.usage_recording import record_auxiliary_usage
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger()
@@ -201,16 +200,17 @@ class ParticipationGates:
             candidates=list(candidates),
         )
         if outcome.usage is not None:
-            await record_classifier_usage(
+            await record_auxiliary_usage(
+                purpose="classifier",
+                provider=outcome.provider,
                 sessionmaker=self._sessionmaker,
                 tenant_id=tenant_id,
                 platform_user_id=caller_id,
-                model_id=self._settings.classifier_model,
+                model_id=outcome.model_id or self._settings.classifier_model,
                 input_tokens=outcome.usage.input_tokens,
                 output_tokens=outcome.usage.output_tokens,
                 cache_read_input_tokens=outcome.usage.cache_read_input_tokens,
                 markup=self._markup,
-                pricing=MODEL_PRICING.get(self._settings.classifier_model),
                 channel_id=channel_id,
             )
         verdict = outcome.verdict

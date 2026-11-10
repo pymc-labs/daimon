@@ -7,8 +7,8 @@ executable record of that split is
 
 Functional core, imperative shell (`guideline:architecture`):
 ``strip_mentions``, ``parse_thread_name`` and ``fallback_thread_name`` are pure;
-``suggest_thread_name`` is the single I/O call, a plain ``messages.create`` like
-``thread_classifier``. Metering is the caller's job
+``suggest_thread_name`` is the single I/O call, a completion through
+``auxiliary_calls`` like ``thread_classifier``. Metering is the caller's job
 (``usage_recording.record_thread_naming_usage``) because the caller owns the tenant
 and runs after the balance and cap gates.
 """
@@ -20,12 +20,13 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from anthropic import AsyncAnthropic
-from anthropic.types import TextBlock
-from daimon.core.anthropic_guard import require_anthropic_allowed
+from daimon.core.auxiliary_calls import auxiliary_complete
+from daimon.core.auxiliary_models import AUXILIARY_MODELS
 from daimon.core.name_mentions import strip_name_mentions
+from mux.contracts.ids import Provider
 
 # Priced in AGENT_MODEL_PRICING; a title must never run on an unmetered model.
-THREAD_NAMING_MODEL = "claude-haiku-5-5"
+THREAD_NAMING_MODEL = AUXILIARY_MODELS["anthropic"]
 THREAD_NAME_MAX_CHARS = 50
 _MAX_OUTPUT_TOKENS = 60
 _MENTION_RE = re.compile(r"<(?:@[!&]?|#)\d+>")
@@ -87,6 +88,9 @@ class ThreadNameSuggestion:
 
     name: str | None
     usage: ThreadNamingUsage
+    provider: Provider
+    model_id: str
+    """What the call ran on, for metering."""
 
 
 def strip_mentions(text: str, bot_names: Iterable[str | None] = ()) -> str:
@@ -164,34 +168,35 @@ async def suggest_thread_name(
     *,
     message_text: str,
     max_input_chars: int,
+    provider: Provider | None = None,
 ) -> ThreadNameSuggestion:
-    """One Haiku call over the (truncated) opening message.
+    """One small-model call over the (truncated) opening message.
 
+    Runs on Anthropic when a key exists, else on ``provider`` (the admitted one).
     ``message_text`` must be non-empty; the caller skips a bare mention with
     no text and no file rather than paying for a call with nothing to title.
-    SDK errors propagate: the adapter boundary decides what a failed
+    Provider errors propagate: the adapter boundary decides what a failed
     naming means (fall back to the message-derived title). A refusal is
     treated like a blank answer: no title, usage still reported.
     """
-    require_anthropic_allowed()
-    response = await anthropic.messages.create(
-        model=THREAD_NAMING_MODEL,
+    done = await auxiliary_complete(
+        anthropic,
+        provider=provider,
+        purpose="thread_naming",
+        system=_SYSTEM_PROMPT,
+        prompt=_USER_TURN.format(text=message_text[:max_input_chars]),
         max_tokens=_MAX_OUTPUT_TOKENS,
         # Haiku 5.5 thinks by default and thinking counts toward max_tokens,
         # which would leave a 60-token cap with no title text.
-        thinking={"type": "disabled"},
-        system=_SYSTEM_PROMPT,
-        messages=[
-            {"role": "user", "content": _USER_TURN.format(text=message_text[:max_input_chars])}
-        ],
+        effort="none",
     )
-    raw = "".join(block.text for block in response.content if isinstance(block, TextBlock))
-    refused = response.stop_reason == "refusal"
     return ThreadNameSuggestion(
-        name=None if refused else parse_thread_name(raw),
+        name=None if done.refused else parse_thread_name(done.text),
         usage=ThreadNamingUsage(
-            input_tokens=response.usage.input_tokens,
-            output_tokens=response.usage.output_tokens,
-            cache_read_input_tokens=response.usage.cache_read_input_tokens or 0,
+            input_tokens=done.usage.input_tokens,
+            output_tokens=done.usage.output_tokens,
+            cache_read_input_tokens=done.usage.cache_read_input_tokens,
         ),
+        provider=done.provider,
+        model_id=done.model_id,
     )

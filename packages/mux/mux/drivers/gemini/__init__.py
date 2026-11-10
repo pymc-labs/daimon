@@ -11,6 +11,7 @@ from mux.contracts.resources import Agent
 from mux.contracts.usage import UsageObservation
 from mux.drivers.gemini.catalog import GeminiCatalogAdapter
 from mux.drivers.gemini.catalog_transport import AgentCatalogTransport
+from mux.drivers.gemini.completions import GeminiCompletions
 from mux.drivers.gemini.core import (
     Base,
     GeminiAgents,
@@ -159,6 +160,7 @@ class GeminiManagedAgents:
 
 
 __all__ = [
+    "GeminiCompletions",
     "NO_TOOLS_FUNCTION",
     "NO_TOOLS_TOOL",
     "ATTEMPT_MODELS",

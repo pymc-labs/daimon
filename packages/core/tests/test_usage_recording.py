@@ -671,3 +671,39 @@ async def test_record_media_usage_stamps_the_agent_on_the_usage_row(
     )
     agent_ids = (await db_session.execute(select(UsageEvent.agent_id))).scalars().all()
     assert agent_ids == ["agent_1"], "a tool model call is attributed to the calling agent"
+
+
+async def test_record_auxiliary_usage_meters_an_openai_side_call_at_its_price(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    await usage_recording.record_auxiliary_usage(
+        purpose="thread_naming",
+        provider="openai",
+        sessionmaker=db_session_factory,
+        tenant_id=tenant.id,
+        platform_user_id="u1",
+        model_id="gpt-5-mini",
+        input_tokens=100,
+        output_tokens=8,
+        cache_read_input_tokens=0,
+        managed_session_id="thread-naming:openai",
+        event_id="title",
+    )
+    rows = await usage_events.list_for_tenant(db_session, tenant_id=tenant.id)
+    assert [(r.model, r.input_tokens, r.output_tokens) for r in rows] == [("gpt-5-mini", 100, 8)], (
+        "the side call is one usage row on the model it ran on"
+    )
+    with pytest.raises(KeyError):
+        await usage_recording.record_auxiliary_usage(
+            purpose="classifier",
+            provider="openai",
+            sessionmaker=db_session_factory,
+            tenant_id=tenant.id,
+            platform_user_id="u1",
+            model_id="unpriced-model",
+            input_tokens=1,
+            output_tokens=1,
+            cache_read_input_tokens=0,
+        )

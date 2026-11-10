@@ -34,4 +34,5 @@ class Completions(Protocol):
         effort: CompletionEffort | None = None,
     ) -> CompletionResult: ...
 
+
 __all__ = ["CompletionEffort", "CompletionResult", "CompletionUsage", "Completions"]
