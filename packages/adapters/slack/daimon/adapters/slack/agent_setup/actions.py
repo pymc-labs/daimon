@@ -124,6 +124,7 @@ from daimon.adapters.slack.setup_conversations import (
 )
 from daimon.core import backend_capture, channel_backend
 from daimon.core.admin_actions import DelegatedAction
+from daimon.core.agent_editing import AgentEditDeps
 from daimon.core.agent_identity import (
     CUSTOM_PICTURES_OFF,
     identity_enabled_for,
@@ -132,7 +133,6 @@ from daimon.core.agent_identity import (
 from daimon.core.agent_ownership import owns_agent
 from daimon.core.answering_map import AnsweringMap, routed_agent_names
 from daimon.core.authz import build_subject
-from daimon.core.backend_refusals import refusal_card
 from daimon.core.channel_rules import as_readers, as_writers, channel_rule_status
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.errors import DaimonError
@@ -143,9 +143,20 @@ from daimon.core.github_panel import (
     sync_connect_admin,
 )
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
+from daimon.core.model_switch import (
+    ModelPicker,
+    SwitchRefusal,
+    back_to_claude,
+    confirm_or_refusal,
+    panel_actor,
+    panel_edit_deps,
+    preview_or_refusal,
+    read_picker,
+    switch_fact_lines,
+)
 from daimon.core.models_catalog import claude_model_choices
 from daimon.core.observability import capture_exception_with_scope
-from daimon.core.panel_audit import record_panel_write
+from daimon.core.panel_audit import PanelOutcome, record_panel_write
 from daimon.core.panel_operator_tokens import list_panel_operator_tokens
 from daimon.core.permissions import channel_permissions
 from daimon.core.roster import Roster, paginate
@@ -157,8 +168,6 @@ from daimon.core.stores.github_access_requests import list_asker_requests
 from daimon.core.stores.github_connected_repos import agent_repo_summary
 from daimon.core.stores.github_links import account_link_status
 from daimon.core.stores.identity import get_or_create_platform_principal
-from mux.contracts.config import BackendConfig
-from mux.contracts.ids import Provider
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.exc import SQLAlchemyError
@@ -745,20 +754,18 @@ async def load_details_view(
                 background_sessionmaker=runtime.sessionmaker,
             )
             avatar_url = identity.avatar_url
-    backend_options: tuple[Provider, ...] = ()
-    backend_selection: Provider | None = None
-    if is_admin and channel_backend.backend_selection_enabled(runtime.settings.turn):
-        service = channel_backend.make_backend_service(
-            runtime.sessionmaker, runtime.settings.turn, capture_source=channel_backend.NO_CAPTURE
+    model_picker: ModelPicker | None = None
+    if is_admin or viewer_owns:
+        model_picker = await read_picker(
+            channel_backend.make_backend_service(
+                runtime.sessionmaker,
+                runtime.settings.turn,
+                capture_source=channel_backend.NO_CAPTURE,
+            ),
+            _edit_deps(runtime),
+            tenant_id=tenant_id,
+            agent_name=agent_name,
         )
-        selection = await service.read_selection(
-            runtime.anthropic, tenant_id=tenant_id, agent_name=agent_name
-        )
-        if selection is not None:
-            backend_options = selection.policy.enabled_backends
-            backend_selection = (
-                selection.revision.backend if selection.revision is not None else None
-            )
     view = build_details_view(
         details,
         meta=meta.with_view("details", agent_name=agent_name),
@@ -775,11 +782,183 @@ async def load_details_view(
             and not details.daimon_managed
             and details.name != runtime.deployment_default.agent_name
         ),
-        backend_options=backend_options,
-        backend_selection=backend_selection,
+        model_picker=model_picker,
         viewer_owns=viewer_owns,
     )
     return view
+
+
+def _edit_deps(runtime: SlackRuntime) -> AgentEditDeps:
+    return panel_edit_deps(
+        runtime.settings,
+        client=runtime.anthropic,
+        session_factory=runtime.sessionmaker,
+        resolver_cache=runtime.resolver_cache,
+        deployment_default=runtime.deployment_default,
+    )
+
+
+async def _model_action(
+    runtime: SlackRuntime,
+    client: AsyncWebClient,
+    action: Mapping[str, object],
+    *,
+    tenant_id: uuid.UUID,
+    meta: PanelMetadata,
+    is_admin: bool,
+    user_id: str,
+    team_id: str,
+    view_info: Mapping[str, Any],
+) -> None:
+    """Pick a model, review it, confirm once; or step back, or switch back to Claude.
+
+    Whether this person may change the agent is decided by the write (admin or owner),
+    never by what the panel rendered.
+    """
+    action_id = str(action.get("action_id") or "")
+    name = meta.agent_name or ""
+    view_id = str(view_info.get("id") or "")
+    view_hash = str(view_info.get("hash") or "")
+    if not name or not view_id:
+        return
+
+    async def audit(outcome: PanelOutcome, reason: str) -> None:
+        await record_panel_write(
+            runtime.sessionmaker,
+            tenant_id=tenant_id,
+            platform="slack",
+            platform_user_id=user_id,
+            op="agent_backend",
+            outcome=outcome,
+            reason=reason,
+            agent_name=name,
+        )
+
+    async def show_details() -> None:
+        view = await load_details_view(
+            runtime,
+            tenant_id=tenant_id,
+            meta=meta.with_view("details", agent_name=name),
+            agent_name=name,
+            is_admin=is_admin,
+            viewer_user_id=user_id,
+        )
+        if view is not None:
+            await client.views_update(  # pyright: ignore[reportUnknownMemberType]
+                view_id=view_id, hash=view_hash or None, view=view
+            )
+
+    if action_id == panel_views.ACTION_BACKEND_CANCEL:
+        await show_details()
+        return
+    async with runtime.sessionmaker.begin() as session:
+        principal = await get_or_create_platform_principal(
+            session, tenant_id=tenant_id, platform="slack", external_id=user_id
+        )
+    subject = build_subject(is_admin=is_admin, platform_user_id=user_id)
+    service = channel_backend.make_backend_service(
+        runtime.sessionmaker,
+        runtime.settings.turn,
+        capture_source=backend_capture.for_agent(
+            runtime.turn_deps, account_id=principal.account_id, subject=subject
+        ),
+    )
+    edit = _edit_deps(runtime)
+    actor = panel_actor(tenant_id=tenant_id, account_id=principal.account_id, subject=subject)
+
+    async def refuse(refusal: SwitchRefusal, value: str | None) -> None:
+        await audit("denied", refusal.reason)
+        await client.views_update(  # pyright: ignore[reportUnknownMemberType]
+            view_id=view_id,
+            view=panel_views.build_model_switch_view(
+                (refusal.line,),
+                meta=dataclasses.replace(meta, backend_target=value),
+                confirm=False,
+                action=refusal.action,
+            ),
+        )
+
+    if action_id == panel_views.ACTION_BACKEND_BACK:
+        done = await back_to_claude(
+            service,
+            edit,
+            actor=actor,
+            agent_name=name,
+            platform="slack",
+            channel_id=meta.channel_id or "",
+            admin=is_admin,
+        )
+        if isinstance(done, SwitchRefusal):
+            await refuse(done, meta.backend_target)
+            return
+        await audit("allowed", "switched_back")
+        await show_details()
+        return
+
+    if action_id in (panel_views.ACTION_BACKEND_SELECT, panel_views.ACTION_BACKEND_AGAIN):
+        if action_id == panel_views.ACTION_BACKEND_SELECT:
+            option = cast("Mapping[str, object]", action.get("selected_option") or {})
+            value = str(option.get("value") or "")
+        else:
+            value = meta.backend_target or ""
+        shown = await preview_or_refusal(
+            service, edit, actor=actor, agent_name=name, value=value, admin=is_admin
+        )
+        if isinstance(shown, SwitchRefusal):
+            await refuse(shown, value)
+            return
+        bound = dataclasses.replace(
+            meta,
+            backend_revision=shown.revision,
+            backend_digest=shown.digest,
+            backend_target=value,
+        )
+        await client.views_update(  # pyright: ignore[reportUnknownMemberType]
+            view_id=view_id,
+            hash=view_hash or None,
+            view=panel_views.build_model_switch_view(
+                switch_fact_lines(shown, agent_name=name, escape=escape_mrkdwn),
+                meta=bound,
+                confirm=shown.allowed,
+            ),
+        )
+        return
+
+    # Confirm: the revision, digest and pick the person was shown.
+    if meta.backend_revision is None or meta.backend_digest is None or meta.backend_target is None:
+        await post_ephemeral(
+            client,
+            channel_id=meta.channel_id or user_id,
+            user_id=user_id,
+            text="That preview is no longer available. Choose a model again.",
+            error=True,
+        )
+        return
+    try:
+        await client.views_update(  # pyright: ignore[reportUnknownMemberType]
+            view_id=view_id,
+            hash=view_hash or None,
+            view=panel_views.build_model_switch_view((), meta=meta, confirm=False, applying=True),
+        )
+    except SlackApiError as exc:
+        if _is_hash_conflict(exc):
+            return
+        raise
+    done = await confirm_or_refusal(
+        service,
+        edit,
+        actor=actor,
+        agent_name=name,
+        value=meta.backend_target,
+        digest=meta.backend_digest,
+        revision=meta.backend_revision,
+        admin=is_admin,
+    )
+    if isinstance(done, SwitchRefusal):
+        await refuse(done, meta.backend_target)
+        return
+    await audit("allowed", "completed")
+    await show_details()
 
 
 async def _update_paged_view(
@@ -872,191 +1051,20 @@ async def _dispatch_panel_action(
         panel_views.ACTION_BACKEND_SELECT,
         panel_views.ACTION_BACKEND_CONFIRM,
         panel_views.ACTION_BACKEND_CANCEL,
+        panel_views.ACTION_BACKEND_BACK,
+        panel_views.ACTION_BACKEND_AGAIN,
     }:
-        name = meta.agent_name or ""
-        if not name or not view_id:
-            return
-        if not is_admin or not channel_backend.backend_selection_enabled(runtime.settings.turn):
-            await record_panel_write(
-                runtime.sessionmaker,
-                tenant_id=tenant_id,
-                platform="slack",
-                platform_user_id=user_id,
-                op="agent_backend",
-                outcome="denied",
-                reason="needs_admin" if not is_admin else "feature_disabled",
-                agent_name=name,
-            )
-            await post_ephemeral(
-                client,
-                channel_id=meta.channel_id or user_id,
-                user_id=user_id,
-                text="Model provider wasn't changed. Ask a workspace admin to open the panel.",
-                error=True,
-            )
-            return
-        if action_id == panel_views.ACTION_BACKEND_CANCEL:
-            view = await load_details_view(
-                runtime,
-                tenant_id=tenant_id,
-                meta=meta.with_view("details", agent_name=name),
-                agent_name=name,
-                is_admin=True,
-                viewer_user_id=user_id,
-            )
-            if view is not None:
-                await client.views_update(  # pyright: ignore[reportUnknownMemberType]
-                    view_id=view_id, hash=view_hash, view=view
-                )
-            return
-        async with runtime.sessionmaker.begin() as session:
-            principal = await get_or_create_platform_principal(
-                session, tenant_id=tenant_id, platform="slack", external_id=user_id
-            )
-        subject = build_subject(is_admin=is_admin, platform_user_id=user_id)
-        service = channel_backend.make_backend_service(
-            runtime.sessionmaker,
-            runtime.settings.turn,
-            capture_source=backend_capture.for_agent(
-                runtime.turn_deps, account_id=principal.account_id, subject=subject
-            ),
-        )
-        if action_id != panel_views.ACTION_BACKEND_SELECT and (
-            meta.backend_revision is None
-            or meta.backend_digest is None
-            or meta.backend_target is None
-        ):
-            await post_ephemeral(
-                client,
-                channel_id=meta.channel_id or user_id,
-                user_id=user_id,
-                text="That preview is no longer available. Choose a model provider again.",
-                error=True,
-            )
-            return
-        if action_id == panel_views.ACTION_BACKEND_SELECT:
-            option = cast("Mapping[str, object]", action.get("selected_option") or {})
-            choice = str(option.get("value") or "")
-        else:
-            choice = meta.backend_target
-        target = BackendConfig.model_validate(
-            {"backend": None if choice == "clear" else choice}
-        ).backend
-        selection = await service.read_selection(
-            runtime.anthropic, tenant_id=tenant_id, agent_name=name, target_backend=target
-        )
-        if selection is None:
-            await record_panel_write(
-                runtime.sessionmaker,
-                tenant_id=tenant_id,
-                platform="slack",
-                platform_user_id=user_id,
-                op="agent_backend",
-                outcome="denied",
-                reason="selection_unavailable",
-                agent_name=name,
-            )
-            await post_ephemeral(
-                client,
-                channel_id=meta.channel_id or user_id,
-                user_id=user_id,
-                text="That preview isn't available. Nothing was changed; choose again.",
-                error=True,
-            )
-            return
-        preview = selection.preview
-        if action_id == panel_views.ACTION_BACKEND_SELECT:
-            bound = dataclasses.replace(
-                meta,
-                backend_revision=preview.setting_revision,
-                backend_digest=preview.digest,
-                backend_target=choice,
-            )
-            await client.views_update(  # pyright: ignore[reportUnknownMemberType]
-                view_id=view_id,
-                hash=view_hash,
-                view=panel_views.build_backend_preview_view(preview, meta=bound),
-            )
-            return
-        try:
-            await client.views_update(  # pyright: ignore[reportUnknownMemberType]
-                view_id=view_id,
-                hash=view_hash,
-                view=panel_views.build_backend_preview_view(preview, meta=meta, applying=True),
-            )
-        except SlackApiError as exc:
-            if _is_hash_conflict(exc):
-                return
-            raise
-        is_admin = await resolve_is_admin(
-            client, user_id=user_id, host_team_id=team_id, action=DelegatedAction.AGENT_SETTINGS
-        )
-        actor = channel_backend.BackendActor(
-            tenant_id=tenant_id,
-            account_id=principal.account_id,
-            subject=build_subject(is_admin=is_admin, platform_user_id=user_id),
-        )
-        try:
-            current = await channel_backend.load_backend_agent(
-                runtime.anthropic, runtime.sessionmaker, tenant_id=tenant_id, agent_name=name
-            )
-            if target is None:
-                await service.clear_backend(
-                    current,
-                    cast(int, meta.backend_revision),
-                    actor,
-                    expected_preview_digest=meta.backend_digest,
-                )
-            else:
-                await service.set_backend(
-                    current,
-                    target,
-                    cast(int, meta.backend_revision),
-                    actor,
-                    expected_preview_digest=meta.backend_digest,
-                    accepted_drops=preview.declared_drops,
-                )
-        except channel_backend.AgentBackendRefused as exc:
-            await record_panel_write(
-                runtime.sessionmaker,
-                tenant_id=tenant_id,
-                platform="slack",
-                platform_user_id=user_id,
-                op="agent_backend",
-                outcome="denied",
-                reason=exc.reason,
-                agent_name=name,
-            )
-            await post_ephemeral(
-                client,
-                channel_id=meta.channel_id or user_id,
-                user_id=user_id,
-                text=refusal_card(exc)[0],
-                error=True,
-            )
-        else:
-            await record_panel_write(
-                runtime.sessionmaker,
-                tenant_id=tenant_id,
-                platform="slack",
-                platform_user_id=user_id,
-                op="agent_backend",
-                outcome="allowed",
-                reason="completed",
-                agent_name=name,
-            )
-        view = await load_details_view(
+        await _model_action(
             runtime,
+            client,
+            action,
             tenant_id=tenant_id,
-            meta=meta.with_view("details", agent_name=name),
-            agent_name=name,
+            meta=meta,
             is_admin=is_admin,
-            viewer_user_id=user_id,
+            user_id=user_id,
+            team_id=team_id,
+            view_info=payload.get("view") or {},
         )
-        if view is not None:
-            await client.views_update(  # pyright: ignore[reportUnknownMemberType]
-                view_id=view_id, view=view
-            )
         return
 
     if action_id == panel_views.ACTION_AVATAR_CHANGE:
