@@ -80,7 +80,6 @@ _ADMIN_HANDOFF_TOOLS: set[str] = {
     "set_channel_rule",
     "set_agent_rule",
     "set_channel_budget",
-    "set_plain_text_mentions",
     "set_agent_helpers",
 }
 

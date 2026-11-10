@@ -5,12 +5,25 @@ from __future__ import annotations
 
 import pytest
 from daimon.core.channel_changes import ChannelChangeRefused
-from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
-from daimon.core.features.service import FeatureActor, change_feature, change_refusal
+from daimon.core.config import (
+    AnthropicSettings,
+    DatabaseSettings,
+    DiscordSettings,
+    GeminiSettings,
+    NotebookSettings,
+    ReportHostSettings,
+    Settings,
+)
+from daimon.core.features.registry import FEATURES
+from daimon.core.features.service import (
+    FeatureActor,
+    change_feature,
+    change_refusal,
+)
 from daimon.core.features.snapshot import FeaturePlace, feature_in
 from daimon.core.stores.channel_changes import list_changes
 from daimon.testing.factories import make_tenant
-from pydantic import PostgresDsn, SecretStr
+from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -26,6 +39,31 @@ def _settings() -> Settings:
 
 async def _admin(_: object) -> bool:
     return True
+
+
+def _history_keys() -> list[str]:
+    """Every feature set at a channel or a thread. Approvals alone is left out: its writes
+    need a live native admin check, which `test_approval_gate` covers."""
+    return [
+        key
+        for key, spec in FEATURES.items()
+        if ("channel" in spec.tiers or "thread" in spec.tiers) and not spec.authority.native
+    ]
+
+
+def _integrated_settings() -> Settings:
+    """`_settings()` with the notebook, report and Gemini setup, so those features are offered."""
+    return _settings().model_copy(
+        update={
+            "notebook": NotebookSettings(
+                host_url=HttpUrl("http://notebook-host:8001"), admin_secret=SecretStr("s")
+            ),
+            "report_host": ReportHostSettings(
+                host_url=HttpUrl("http://report-host:8002"), admin_secret=SecretStr("s")
+            ),
+            "gemini": GeminiSettings(api_key=SecretStr("s")),
+        }
+    )
 
 
 async def test_a_channel_cannot_turn_on_a_capability_the_workspace_turned_off(
@@ -85,29 +123,25 @@ async def test_a_channel_cannot_raise_a_limit_above_the_workspace(
     assert (found.value, found.tier) == ("10", "channel"), "a lower step is allowed"
 
 
-@pytest.mark.parametrize(
-    ("key", "tier", "value", "setting"),
-    [
-        ("watches", "channel", "off", "watches"),
-        ("outbound_places", "channel", "1", "outbound_places"),
-        ("participation", "thread", "on", "thread_participation"),
-    ],
-)
+@pytest.mark.parametrize("key", _history_keys())
 async def test_the_channel_history_lists_every_feature_write(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     key: str,
-    tier: str,
-    value: str,
-    setting: str,
 ) -> None:
+    spec = FEATURES[key]
+    tier = "thread" if "thread" in spec.tiers else "channel"
+    # A lower level may only narrow: a guardrail takes its strictest value, the rest Off or
+    # any non-default value.
+    values = list(spec.values)
+    value = values[-1] if spec.effect == "guardrail" else spec.off or values[-1]
     tenant = await make_tenant(db_session)
     await db_session.commit()
     actor = FeatureActor(tenant.id, None, "web", None, _admin)
     place = FeaturePlace(tenant.id, "discord", "C1", thread_id="T1")
     await change_feature(
         db_session_factory,
-        _settings(),
+        _integrated_settings(),
         actor,
         key=key,
         tier=tier,
@@ -116,4 +150,7 @@ async def test_the_channel_history_lists_every_feature_write(
     )
     async with db_session_factory() as session:
         changes = await list_changes(session, tenant_id=tenant.id, channel_id="C1")
-    assert [change.setting for change in changes] == [setting], "a non-legacy key lists back"
+    # Two thread features keep their older history names; every other write lists under its key.
+    expected = {"participation": "thread_participation", "progress_plans": "thread_progress_plans"}
+    expected = expected.get(key, key) if tier == "thread" else key
+    assert [change.setting for change in changes] == [expected], "the write lists back"

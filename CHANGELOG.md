@@ -45,7 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Chat behaviour and display settings join the same system.**
   Typed `@name` mentions, direct messages, read-only memory in direct messages, completion pings, table rendering, message feedback buttons, budget notices, cost shown with native models, thread naming, the unmentioned-reply hint, the "no writers" notice and the waiting card are set at the server level and, where the platform allows it, down to a channel. Each web app module is a setting too (`web.chat`, `web.agents` and so on).
   The old per-workspace variables (`DAIMON_COMPLETION_PINGS`, `DAIMON_TABLE_RENDERING`, `DAIMON_BUDGET_NOTICES`) keep working until you run `daimon features import-env`, which copies them into workspace settings once; after that a variable left set is ignored and logged. The other old variables still work but log a deprecation.
-  The old controls (the typed-mention and web settings tools, `PATCH /api/admin/settings` and the direct-message commands) behave as before and now change the same stored values, so the two never disagree.
+  The remaining older controls (the web settings, `PATCH /api/admin/settings` and the direct-message commands) behave as before and now change the same stored values, so the two never disagree.
 
 - **Guardrails are features too, and a lower level can only make them stricter.**
   Tool safety (`tool_safety`), the reach check (`reach_budget`), built-in tools in routines (`unattended_capabilities`) and requiring a routine destination (`require_routine_destination`) are set from the deployment down, and a level below can tighten but never loosen them. An agent asking to change one gets a confirmation card, or a refusal where no card can be shown.
