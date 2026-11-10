@@ -753,7 +753,7 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         (this turn's), and a run is skipped while that budget is used up.
 
         ``agent_name`` MUST be the exact daimon-side display name of an
-        existing agent on this tenant (e.g. ``"daimon"``, ``"daimon-copy"``,
+        existing agent on this tenant (e.g. ``"default"``, ``"daimon-copy"``,
         ``"research-bot"``). It is NOT:
 
         - a free-text description of the routine
@@ -773,7 +773,7 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         Example: a user says "daimon, create a routine that pings me every
         5 minutes with the message 'ping'". The correct call is
-        ``create_routine(agent_name="daimon", cron_expr="*/5 * * * *",
+        ``create_routine(agent_name="default", cron_expr="*/5 * * * *",
         timezone="UTC", trigger_message="ping")``.
         """
         auth = await _auth(ctx)

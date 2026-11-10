@@ -687,7 +687,7 @@
           "allowed_mentions": {
             "parse": []
           },
-          "content": "-# test-agent\nHello from the agent!",
+          "content": "Hello from the agent!",
           "embeds": [
             {
               "color": 5763719,
@@ -1159,7 +1159,7 @@
           "allowed_mentions": {
             "parse": []
           },
-          "content": "-# test-agent\nHello from the agent!",
+          "content": "Hello from the agent!",
           "embeds": [
             {
               "color": 5763719,
@@ -1538,7 +1538,7 @@
           "allowed_mentions": {
             "parse": []
           },
-          "content": "-# test-agent\nHello from the agent!",
+          "content": "Hello from the agent!",
           "embeds": [
             {
               "color": 5763719,

@@ -5,8 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from collections.abc import Iterable
-from typing import Any
+from collections.abc import Iterable, Mapping
+from types import MappingProxyType
+from typing import Any, Final
 
 MA_METADATA_KEY_PRIVATE_DM = "daimon_private_dm"
 # A routine's session carries the private-DM stamp as "routine:<id>": as with a
@@ -39,6 +40,10 @@ MA_METADATA_KEY_ACCOUNT = "daimon_account"
 # Only agent-chat-created sessions can be driven by headless MCP/hub callers.
 MA_METADATA_KEY_AGENT_CHAT = "daimon_agent_chat"
 MA_METADATA_KEY_MANAGED = "daimon_managed"
+# The seeded built-in agent (`defaults/agents/default.yaml`); it answers setup conversations.
+BUILTIN_AGENT_NAME = "default"
+# Former names of seeded agents, old -> new. Apply renames them in place.
+LEGACY_AGENT_RENAMES: Final[Mapping[str, str]] = MappingProxyType({"daimon": BUILTIN_AGENT_NAME})
 # Set by an outside release pipeline that publishes the agent: the release's name,
 # when it was cut (ISO 8601 with offset) and its https page. Daimon only reads them.
 MA_METADATA_KEY_SOURCE_RELEASE = "source_release"

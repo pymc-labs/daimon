@@ -10,7 +10,12 @@ from __future__ import annotations
 from uuid import UUID
 
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
-from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
+from daimon.core.defaults.builtin_agent import builtin_lookup_names, resolve_builtin_agent_name
+from daimon.core.defaults.metadata import (
+    BUILTIN_AGENT_NAME,
+    MA_METADATA_KEY_NAME,
+    MA_METADATA_KEY_TENANT,
+)
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.stores.selfhosted_resources import SelfHostedAgents, SelfHostedEnvironments
 from daimon.core.turn.errors import AdmissionDenied
@@ -18,6 +23,31 @@ from mux.contracts.ids import ResourceRef, Scope
 from mux.errors import ProviderError
 from mux.profiles.selfhosted import LOOP
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+
+async def _builtin_target(agents: SelfHostedAgents, scope: Scope, agent_name: str) -> str:
+    """The record a request for `agent_name` reaches (see `builtin_agent`).
+
+    Records carry no managed flag: a `default` beside a legacy record is the
+    workspace's own, since apply refuses to rename into it.
+    """
+    names = builtin_lookup_names(agent_name)
+    live: set[str] = set()
+    for name in names:
+        try:
+            await agents.resolve(scope, name)
+        except ProviderError as error:
+            if error.category != "not_found":
+                raise
+        else:
+            live.add(name)
+    holders = {name: name != BUILTIN_AGENT_NAME or live == {name} for name in live}
+    target = resolve_builtin_agent_name(
+        agent_name, holders, tenant_id=scope.tenant_id, surface="selfhosted_turn"
+    )
+    if target is None:
+        raise ProviderError("not_found", retryable=False)
+    return target
 
 
 async def resolve_records(
@@ -42,7 +72,7 @@ async def resolve_records(
                 ),
             )
             if responder_id is not None
-            else await agents.resolve(scope, agent_name)
+            else await agents.resolve(scope, await _builtin_target(agents, scope, agent_name))
         )
     except ProviderError as error:
         if error.category != "not_found":

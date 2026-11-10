@@ -10,7 +10,7 @@ This module imports neither `apply` nor `provisioning` (Landmine L4).
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from pathlib import Path
 
 import structlog
@@ -29,6 +29,7 @@ from daimon.core.defaults.preflight import check_models_accepted
 from daimon.core.defaults.reconcile_agents import reconcile_agent
 from daimon.core.defaults.reconcile_environments import reconcile_environment
 from daimon.core.defaults.reconcile_skills import reconcile_skill
+from daimon.core.defaults.rename_agents import pending_renames, rename_seeded_agent
 from daimon.core.defaults.report import Action, ApplyReport, ResourceKind, ResourceOutcome
 from daimon.core.defaults.sweep import (
     sweep_removed_agents,
@@ -37,6 +38,8 @@ from daimon.core.defaults.sweep import (
 )
 from daimon.core.errors import DaimonError, DefaultsError
 from daimon.core.model_presets import model_choice_id
+from daimon.core.specs import AgentSpec
+from daimon.core.stores.agent_rename import list_tenants_with_selfhosted_agent
 from daimon.core.stores.channel_skills import list_channel_skill_ids
 from daimon.core.stores.seeded_skills import prune_seeded_skills
 from sqlalchemy import text
@@ -104,6 +107,66 @@ async def _channel_skill_ids(
         return None
 
 
+def _check_skill_references(agent_specs: list[AgentSpec], skill_names_present: set[str]) -> None:
+    """Raise `DefaultsError` for an agent that names a custom skill the tree lacks."""
+    for spec in agent_specs:
+        for ref in spec.skills:
+            if ref.type == "custom" and ref.skill_id not in skill_names_present:
+                raise DefaultsError(
+                    f"agent {spec.name!r} references unknown skill {ref.skill_id!r}; "
+                    "add defaults/skills/<name>/SKILL.md first."
+                )
+
+
+def reconcile_lock_key(tenant_id: uuid.UUID) -> str:
+    """The advisory lock key every reconcile and rename of this tenant takes."""
+    return f"{_RECONCILE_LOCK_NAMESPACE}:{tenant_id}"
+
+
+async def rename_selfhosted_defaults(
+    session_factory: async_sessionmaker[AsyncSession],
+    client: AsyncAnthropic | None,
+    defaults_root: Path,
+    *,
+    dry_run: bool,
+    skip_tenant_ids: Collection[uuid.UUID] = (),
+) -> ApplyReport:
+    """Run pending seeded renames for every tenant with a self-hosted record to move.
+
+    Self-hosted deployments may have no Anthropic credentials, so this needs only
+    Postgres; a `client` also lets each tenant's managed agents move with it.
+    The tree is checked first, so a bad one fails before any write. Run it after
+    `apply_defaults` has passed its pre-flight, and pass the tenants that apply
+    renamed itself as `skip_tenant_ids` so none is reported twice.
+    """
+    report = ApplyReport()
+    agents_root = defaults_root / "agents"
+    specs = load_agent_specs(agents_root) if agents_root.exists() else []
+    skill_names = {load_skill_spec(d)[0].name for d in load_skill_paths(defaults_root / "skills")}
+    _check_skill_references(specs, skill_names)
+    for old, new in pending_renames({spec.name for spec in specs}):
+        async with session_factory() as session:
+            tenant_ids = await list_tenants_with_selfhosted_agent(session, name=old)
+        for tenant_id in tenant_ids:
+            if tenant_id in skip_tenant_ids:
+                continue
+            await _run_isolated(
+                report,
+                lambda tenant_id=tenant_id, old=old, new=new: rename_seeded_agent(
+                    client,
+                    session_factory,
+                    tenant_id=tenant_id,
+                    old=old,
+                    new=new,
+                    lock_key=reconcile_lock_key(tenant_id),
+                    dry_run=dry_run,
+                ),
+                kind="agent",
+                name=new,
+            )
+    return report
+
+
 async def _run_per_resource(
     report: ApplyReport,
     fn: Callable[[], Awaitable[ResourceOutcome]],
@@ -111,6 +174,19 @@ async def _run_per_resource(
     kind: ResourceKind,
     name: str,
 ) -> ResourceOutcome:
+    outcome = await _run_isolated(report, fn, kind=kind, name=name)
+    assert outcome is not None, "fn returns an outcome"
+    return outcome
+
+
+async def _run_isolated(
+    report: ApplyReport,
+    fn: Callable[[], Awaitable[ResourceOutcome | None]],
+    *,
+    kind: ResourceKind,
+    name: str,
+) -> ResourceOutcome | None:
+    """Run one step, recording a failure as its outcome; None (nothing done) adds nothing."""
     try:
         outcome = await fn()
     except (APIError, DaimonError) as err:
@@ -134,7 +210,8 @@ async def _run_per_resource(
             action=Action.FAILED,
             error=f"internal error: {type(err).__name__}",
         )
-    report.add(outcome)
+    if outcome is not None:
+        report.add(outcome)
     return outcome
 
 
@@ -171,13 +248,7 @@ async def _reconcile_core(
     skill_names_present = {load_skill_spec(d)[0].name for d in skill_dirs}
 
     # Validate agent->skill references before any MA write.
-    for spec in agent_specs:
-        for ref in spec.skills:
-            if ref.type == "custom" and ref.skill_id not in skill_names_present:
-                raise DefaultsError(
-                    f"agent {spec.name!r} references unknown skill {ref.skill_id!r}; "
-                    "add defaults/skills/<name>/SKILL.md first."
-                )
+    _check_skill_references(agent_specs, skill_names_present)
 
     # Pre-flight: verify MA accepts every unique agent model before any writes.
     # Catches MA whitelist drift. Skip in dry-run — dry-run must be 100% read-only.
@@ -190,6 +261,29 @@ async def _reconcile_core(
                 f"pre-flight failed: MA rejected {len(failed)} agent model(s); "
                 f"aborting before any writes. Rejections: {failed}"
             )
+
+    # Rename seeded agents in place before the agent pass and sweep: the sweep
+    # would archive the old name and the pass would create the new one. While a
+    # rename is blocked, failed or (dry run) pending, both are skipped.
+    lock_key = reconcile_lock_key(tenant_id)
+    skip_agents = False
+    for old, new in pending_renames({s.name for s in agent_specs}):
+        outcome = await _run_isolated(
+            report,
+            lambda old=old, new=new: rename_seeded_agent(
+                client,
+                session_factory,
+                tenant_id=tenant_id,
+                old=old,
+                new=new,
+                lock_key=lock_key,
+                dry_run=dry_run,
+            ),
+            kind="agent",
+            name=new,
+        )
+        if outcome is not None and (outcome.action is Action.FAILED or dry_run):
+            skip_agents = True
 
     async def _run_passes(skill_session: AsyncSession | None) -> ApplyReport:
         # Skill pass.
@@ -236,7 +330,7 @@ async def _reconcile_core(
 
         # Agent pass — account_id threads the guild ownership axis.
         seeded_agent_ids: set[str] = set()
-        for spec in agent_specs:
+        for spec in [] if skip_agents else agent_specs:
             outcome = await _run_per_resource(
                 report,
                 lambda spec=spec: reconcile_agent(
@@ -257,7 +351,7 @@ async def _reconcile_core(
 
         # The seeded pass owns its own fingerprints. User-created agents have no
         # spec to reconcile, so refresh their system guidance separately.
-        if not dry_run:
+        if not dry_run and not skip_agents:
             await backfill_credential_guidance(
                 client,
                 tenant_id=tenant_id,
@@ -276,9 +370,10 @@ async def _reconcile_core(
             tenant_scoped_display_title(tenant_id=tenant_id, name=name)
             for name in skill_names_present
         }
-        await _run_sweep(
-            report, sweep_removed_agents, "agent", client, present_agents, tenant_id, dry_run
-        )
+        if not skip_agents:
+            await _run_sweep(
+                report, sweep_removed_agents, "agent", client, present_agents, tenant_id, dry_run
+            )
         await _run_sweep(
             report,
             sweep_removed_environments,
@@ -310,7 +405,6 @@ async def _reconcile_core(
     # The transaction context releases it on success, exception, or cancellation.
     # Share this session with the skill pass to avoid nested pool checkout while
     # holding a lock connection (some test and operator pools have one connection).
-    lock_key = f"{_RECONCILE_LOCK_NAMESPACE}:{tenant_id}"
     async with session_factory() as lock_session, lock_session.begin():
         await lock_session.execute(
             text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),

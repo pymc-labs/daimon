@@ -217,8 +217,8 @@ daimon selfhosted init \
 
 It needs only the database and prints the agent and environment IDs. Repeating
 it with the same configuration reuses them, and a changed configuration is
-refused. Override the names `daimon` and `default` with `--name` and
-`--environment-name`, and read the system prompt from a file with
+refused. Both the agent and the environment are named `default`; override them with
+`--name` and `--environment-name`, and read the system prompt from a file with
 `--system-file`. `--auth-ref` records a variable name, never its value. HTTPS is
 required outside loopback. `--allow-insecure-http` permits HTTP on internal
 names and private addresses.

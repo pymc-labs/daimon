@@ -34,7 +34,7 @@ def _others(platform: str) -> re.Pattern[str]:
 
 
 def _shipped_system() -> str:
-    spec = yaml.safe_load((_DEFAULTS / "agents" / "daimon.yaml").read_text())
+    spec = yaml.safe_load((_DEFAULTS / "agents" / "default.yaml").read_text())
     return apply_credential_guidance(spec["system"])
 
 
@@ -196,7 +196,7 @@ def test_every_platform_prompt_carries_the_etiquette_block(platform: str) -> Non
 
 
 def test_the_daimon_agent_always_attaches_the_etiquette_skill() -> None:
-    spec = yaml.safe_load((_DEFAULTS / "agents" / "daimon.yaml").read_text())
+    spec = yaml.safe_load((_DEFAULTS / "agents" / "default.yaml").read_text())
 
     [entry] = [s for s in spec["skills"] if s["skill_id"] == "team-etiquette"]
 

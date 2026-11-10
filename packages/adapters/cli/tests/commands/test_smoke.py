@@ -218,7 +218,7 @@ def test_smoke_defaults_tags_when_deployment_default_unset(
     result = _invoke([])
 
     assert result.exit_code == 0, result.stdout
-    assert captured["agent_tag"] == "daimon", captured["agent_tag"]
+    assert captured["agent_tag"] == "default", captured["agent_tag"]
     assert captured["environment_tag"] == "default", captured["environment_tag"]
 
 

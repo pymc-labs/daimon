@@ -27,7 +27,7 @@ from daimon.core.channel_backend import load_backend_agent
 
 from .test_j2_gemini_root_e2e import fresh_chat as fresh_chat
 
-#: A custom skill as the built-in Daimon ships it (defaults/agents/daimon.yaml).
+#: A custom skill as the built-in Daimon ships it (defaults/agents/default.yaml).
 SKILL = {"type": "custom", "skill_id": "skill_file_handling", "version": "1"}
 #: The declared loss that means the root lost each capability.
 LOSS = {"skill": "skills", "builtin": "tools", "mcp": "mcp"}

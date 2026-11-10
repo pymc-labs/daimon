@@ -187,7 +187,7 @@ async def a7_pair(context: LiveContext) -> Mapping[str, object]:
 
 
 def default_manifest(root: Path, mcp_url: str) -> DefaultManifest:
-    authored = yaml.safe_load((root / "defaults/agents/daimon.yaml").read_text())
+    authored = yaml.safe_load((root / "defaults/agents/default.yaml").read_text())
     skills: list[NamedSkill] = []
     custom = tuple(
         ref["skill_id"]

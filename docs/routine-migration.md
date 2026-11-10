@@ -19,7 +19,7 @@ Leave out routines the source system has turned off, so they stay paused.
 
    ```bash
    daimon routines create --tenant TENANT_UUID --owner DISCORD_USER_ID \
-     --agent daimon --schedule '0 9 * * *' --timezone UTC \
+     --agent default --schedule '0 9 * * *' --timezone UTC \
      --trigger 'Summarize my tasks' --destination dm --paused --dry-run
    ```
 

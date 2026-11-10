@@ -11,9 +11,10 @@ from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.flags import JSON_OPTION
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.core.config import load_settings
-from daimon.core.defaults.apply import apply_defaults
+from daimon.core.defaults.apply import apply_defaults, rename_selfhosted_defaults
 from daimon.core.defaults.provisioning import verify_tenant_defaults
 from daimon.core.defaults.report import ApplyReport, ResourceOutcome, classify_verification
+from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.tenants import list_tenants_by_platform
 from rich.console import Console
 from rich.table import Table
@@ -89,7 +90,8 @@ async def defaults_apply(
     as_json: bool,
     defaults_root: Path,
 ) -> None:
-    if rt.settings.anthropic.api_key is None:
+    client = None if rt.settings.anthropic.api_key is None else rt.anthropic
+    if client is None:
         # OpenAI-only deployment (see docs/providers.md's "Run on OpenAI"):
         # there is no Anthropic-backed default agent/environment/
         # skill set to reconcile. `daimon openai init` seeds the OpenAI
@@ -99,18 +101,32 @@ async def defaults_apply(
             "Anthropic default agent/environment/skill reconciliation. Run "
             "`daimon openai init` to provision and seed defaults on OpenAI instead."
         )
-        report = ApplyReport()
+        # Self-hosted records need only Postgres, so they still move.
+        report = await rename_selfhosted_defaults(
+            rt.sessionmaker, None, defaults_root, dry_run=dry_run
+        )
     else:
         public_url = (
             str(rt.settings.mcp.public_url) if rt.settings.mcp.public_url is not None else None
         )
+        # Apply goes first: it renames cli:local itself, after its pre-flight and
+        # spec checks, so a failure there leaves every self-hosted record untouched.
         report = await apply_defaults(
             rt.sessionmaker,
-            rt.anthropic,
+            client,
             defaults_root,
             dry_run=dry_run,
             public_url=public_url,
         )
+        renames = await rename_selfhosted_defaults(
+            rt.sessionmaker,
+            client,
+            defaults_root,
+            dry_run=dry_run,
+            skip_tenant_ids={derive_tenant_uuid(platform="cli", workspace_id="local")},
+        )
+        for outcome in renames.agents:
+            report.add(outcome)
     if as_json:
         _format_report_json(console, report)
     else:

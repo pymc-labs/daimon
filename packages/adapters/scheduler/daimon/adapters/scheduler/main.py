@@ -763,7 +763,7 @@ async def _build_fire(
         # self-healing across MA archive/recreate. The environment follows the
         # routine's channel, then the tenant default, like a turn there would.
         # defensive: post-0012 agent_name is NOT NULL but the fallback is harmless and free.
-        agent_tag = row.agent_name or deployment_default.agent_name or "daimon"
+        agent_tag = row.agent_name or deployment_default.agent_name or "default"
         _public_url = str(settings.mcp.public_url) if settings.mcp.public_url else None
         resolved_agent_id = await resolve_agent(
             client,

@@ -28,7 +28,7 @@ async def test_setup_resolves_builtin_without_parent_default_or_namesake_fallbac
     now = datetime.now(UTC)
     daimon = ma_agent(
         id="ag_builtin",
-        name="daimon",
+        name="default",
         tenant_id=tenant_id,
         metadata={"daimon_managed": "true"},
         created_at=now,
@@ -68,6 +68,54 @@ async def test_setup_resolves_builtin_without_parent_default_or_namesake_fallbac
         assert target is not None and target.id == "ag_specialist", (
             "selected specialist remains target"
         )
+
+
+async def test_resolve_setup_agents_when_workspace_has_own_daimon_then_picks_builtin_default() -> (
+    None
+):
+    tenant_id = uuid.uuid4()
+    agents = [
+        ma_agent(id="ag_user_daimon", name="daimon", tenant_id=tenant_id),
+        ma_agent(
+            id="ag_default",
+            name="default",
+            tenant_id=tenant_id,
+            metadata={"daimon_managed": "true"},
+        ),
+    ]
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda req, match: list_response([a.model_dump(mode="json") for a in agents]),
+    )
+    responder, _ = await resolve_setup_agents(
+        build_fake_anthropic(router.dispatch), tenant_id=tenant_id
+    )
+    assert responder.id == "ag_default", "the managed built-in agent answers setup, not a namesake"
+
+
+@pytest.mark.parametrize(
+    ("name", "accepted"), [("default", True), ("daimon", True), ("other", False)]
+)
+async def test_get_setup_responder_when_bound_agent_named_then_accepts_builtin_names_only(
+    name: str, accepted: bool
+) -> None:
+    tenant_id = uuid.uuid4()
+    bound = ma_agent(
+        id="ag_bound", name=name, tenant_id=tenant_id, metadata={"daimon_managed": "true"}
+    )
+    client = build_fake_anthropic(
+        lambda req: httpx.Response(200, json=bound.model_dump(mode="json"))
+    )
+    if not accepted:
+        with pytest.raises(UserFacingError, match="no longer the built-in Daimon"):
+            await get_setup_responder(client, tenant_id=tenant_id, ma_agent_id="ag_bound")
+        return
+    responder = await get_setup_responder(client, tenant_id=tenant_id, ma_agent_id="ag_bound")
+    assert responder.id == "ag_bound", (
+        f"a setup thread bound to the built-in agent named {name!r} keeps answering"
+    )
 
 
 async def test_missing_bound_responder_is_explicit_and_does_not_reconcile() -> None:

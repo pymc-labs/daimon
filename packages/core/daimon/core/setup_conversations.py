@@ -7,8 +7,11 @@ from typing import Final
 
 from anthropic import APIStatusError, AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
-from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
+from daimon.core.defaults.builtin_agent import route_builtin_agent
+from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import (
+    BUILTIN_AGENT_NAME,
+    LEGACY_AGENT_RENAMES,
     MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_NAME,
     MA_METADATA_KEY_TENANT,
@@ -32,6 +35,9 @@ EMPTY_ROSTER_COPY: Final = "No agent answers here yet. Use Set up agents to add 
 # Discord rejects a thread name longer than 100 characters outright, so the
 # name is truncated rather than left to fail at thread creation.
 _MAX_SETUP_THREAD_NAME_CHARS: Final = 100
+
+# A setup thread opened before the built-in agent's rename keeps its responder.
+_RESPONDER_NAMES = frozenset({BUILTIN_AGENT_NAME, *LEGACY_AGENT_RENAMES})
 
 
 def setup_thread_name(target_name: str | None) -> str:
@@ -99,7 +105,7 @@ async def get_setup_responder(
         ) from error
     if (
         responder.metadata.get(MA_METADATA_KEY_MANAGED) != "true"
-        or responder.metadata.get(MA_METADATA_KEY_NAME) != "daimon"
+        or responder.metadata.get(MA_METADATA_KEY_NAME) not in _RESPONDER_NAMES
     ):
         raise UserFacingError(
             "This conversation's agent is no longer the built-in Daimon. "
@@ -114,12 +120,12 @@ async def resolve_setup_agents(
     tenant_id: uuid.UUID,
     target_ma_agent_id: str | None = None,
 ) -> tuple[BetaManagedAgentsAgent, BetaManagedAgentsAgent | None]:
-    responders = [
-        agent
-        for agent in await find_agents_by_daimon_tag(anthropic, tenant_id=tenant_id, name="daimon")
-        if agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-    ]
-    if len(responders) != 1:
+    responders = route_builtin_agent(
+        await list_agents_by_tenant(anthropic, tenant_id=tenant_id),
+        tenant_id=tenant_id,
+        surface="setup_conversation",
+    )
+    if responders is None or len(responders) != 1:
         raise UserFacingError(
             "The built-in Daimon is unavailable. Ask the operator to restore it, then retry setup."
         )

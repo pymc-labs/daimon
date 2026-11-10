@@ -17,6 +17,9 @@ from pathlib import Path
 
 from anthropic import AsyncAnthropic
 from daimon.core.defaults._reconcile import _reconcile_core  # pyright: ignore[reportPrivateUsage]
+from daimon.core.defaults._reconcile import (
+    rename_selfhosted_defaults as rename_selfhosted_defaults,
+)
 from daimon.core.defaults.report import ApplyReport
 from daimon.core.ma_identity import derive_tenant_uuid
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker

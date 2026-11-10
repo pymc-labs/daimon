@@ -46,7 +46,7 @@ def smoke_command(
 
     async def _with_smoke() -> None:
         async with build_runtime(settings) as rt:
-            agent_tag = rt.deployment_default.agent_name or "daimon"
+            agent_tag = rt.deployment_default.agent_name or "default"
             environment_tag = rt.deployment_default.environment_name or "default"
 
             # The ledger idempotency key must be unique per top-up opportunity —

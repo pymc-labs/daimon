@@ -17,7 +17,7 @@ DEFAULTS = REPO_ROOT / "defaults"
 
 def test_defaults_agents_parse() -> None:
     specs = load_agent_specs(DEFAULTS / "agents")
-    assert any(s.name == "daimon" for s in specs)
+    assert any(s.name == "default" for s in specs), "the seeded agent is named default"
     assert not any(s.name == "dev_agent" for s in specs), (
         "dev_agent must not be auto-seeded — it lives in agents-optional/ as an opt-in"
     )
@@ -75,7 +75,7 @@ def test_defaults_skills_parse() -> None:
 def test_defaults_daimon_agent_guidance_routes_credentials_to_request_tools() -> None:
     """Seeded guidance names callable setup tools and avoids obsolete panel paths."""
     specs = load_agent_specs(DEFAULTS / "agents")
-    daimon = next(s for s in specs if s.name == "daimon")
+    daimon = next(s for s in specs if s.name == "default")
     skill_names = {ref.skill_id for ref in daimon.skills if ref.type == "custom"}
     skill_bodies = [
         load_skill_spec(d)[1]

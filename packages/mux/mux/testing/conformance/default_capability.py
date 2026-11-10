@@ -131,7 +131,7 @@ def request_metadata(session: ResourceRef, *, stream: bool) -> RequestMetadata:
 
 
 def skill_text(manifest: DefaultManifest) -> str:
-    require(manifest.name == "daimon", "F1: expected authored default agent")
+    require(manifest.name == "default", "F1: expected authored default agent")
     require(
         tuple(s.name for s in manifest.skills) == DEFAULT_SKILLS,
         "F1: default must bind all twelve authored skills",

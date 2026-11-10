@@ -85,7 +85,7 @@ def test_staging_refuses_production_mcp_host_even_with_marker() -> None:
 def test_haiku_rehearsal_overrides_the_seeded_default_model(tmp_path: Path) -> None:
     settings = cast("Settings", SimpleNamespace(defaults_root=REPO_ROOT / "defaults"))
     root = _defaults_root(settings, "haiku", tmp_path)
-    spec = yaml.safe_load((root / "agents" / "daimon.yaml").read_text())
+    spec = yaml.safe_load((root / "agents" / "default.yaml").read_text())
     assert spec["model"] == "claude-haiku-4-5"
     assert expected_agent_model("haiku") == "claude-haiku-4-5"
 
@@ -93,7 +93,7 @@ def test_haiku_rehearsal_overrides_the_seeded_default_model(tmp_path: Path) -> N
 def test_event_rehearsal_expects_the_seeded_default_model(tmp_path: Path) -> None:
     settings = cast("Settings", SimpleNamespace(defaults_root=REPO_ROOT / "defaults"))
     assert _defaults_root(settings, "event", tmp_path) == REPO_ROOT / "defaults"
-    seeded = yaml.safe_load((REPO_ROOT / "defaults" / "agents" / "daimon.yaml").read_text())
+    seeded = yaml.safe_load((REPO_ROOT / "defaults" / "agents" / "default.yaml").read_text())
     assert expected_agent_model("event") == seeded["model"] == DEFAULT_AGENT_MODEL
 
 

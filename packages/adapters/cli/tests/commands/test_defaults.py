@@ -8,7 +8,9 @@ from io import StringIO
 from pathlib import Path
 from typing import Any, cast
 
+import httpx
 import pytest
+import typer
 from daimon.adapters.cli import main as main_mod
 from daimon.adapters.cli.commands import defaults as cmd_mod
 from daimon.adapters.cli.commands.defaults import (
@@ -18,14 +20,32 @@ from daimon.adapters.cli.commands.defaults import (
 )
 from daimon.adapters.cli.runtime import CliRuntime
 from daimon.core.config import Settings
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.defaults.provisioning import archive_tenant
 from daimon.core.defaults.report import Action, ApplyReport, ResourceOutcome
+from daimon.core.errors import DefaultsError
+from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores.domain import Platform
+from daimon.core.stores.selfhosted_resources import SelfHostedAgents
 from daimon.core.stores.tenants import set_provision_status
-from daimon.testing.factories import make_tenant
-from mux.testing.drivers.anthropic.ma import build_stub_anthropic
+from daimon.testing.factories import make_routine, make_tenant
+from daimon.testing.ma_models import ma_agent
+from mux.contracts.ids import ModelRef, Scope
+from mux.contracts.resources import AgentSpec
+from mux.profiles.selfhosted import LOOP
+from mux.testing.drivers.anthropic.ma import (
+    FakeMAState,
+    build_fake_anthropic,
+    build_stub_anthropic,
+    combine_handlers,
+    list_response,
+    make_archive_agent_handler,
+    make_fake_ma_handler,
+)
 from rich.console import Console
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from typer.testing import CliRunner
 
@@ -93,21 +113,240 @@ class _NoAnthropicSettings:
         api_key = None
 
 
-def test_defaults_apply_skips_anthropic_reconciliation_with_no_key_configured() -> None:
+def test_defaults_apply_when_no_key_then_skips_anthropic_and_renames_selfhosted(
+    tmp_path: Path, schema_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    (tmp_path / "agents").mkdir()
+    (tmp_path / "agents" / "default.yaml").write_text(
+        "name: default\nmodel: claude-sonnet-4-6\nsystem: You are Daimon.\n"
+    )
+
+    async def seed() -> uuid.UUID:
+        async with schema_sessionmaker() as s, s.begin():
+            tenant = await make_tenant(s, platform="discord", workspace_id="guild-sh")
+            await make_routine(s, tenant=tenant, agent_name="daimon")
+        await SelfHostedAgents(schema_sessionmaker).create(
+            Scope(
+                tenant_id=str(tenant.id),
+                account_id="operator",
+                principal_id="cli",
+                authorization_id="cli-deployment-operator",
+            ),
+            AgentSpec(name="daimon", model=ModelRef(provider=LOOP.provider, id="gpt-6.1-sol")),
+            key="seed",
+        )
+        return tenant.id
+
+    tenant_id = asyncio.run(seed())
     rt = object.__new__(CliRuntime)
     object.__setattr__(rt, "settings", cast(Settings, _NoAnthropicSettings()))
+    object.__setattr__(rt, "sessionmaker", schema_sessionmaker)
     buf = StringIO()
     console = Console(file=buf, force_terminal=False, highlight=False, width=120)
 
     asyncio.run(
-        defaults_apply(
-            rt=rt, console=console, dry_run=False, as_json=False, defaults_root=Path("unused")
-        )
+        defaults_apply(rt=rt, console=console, dry_run=False, as_json=False, defaults_root=tmp_path)
     )
 
     out = buf.getvalue()
-    assert "no DAIMON_ANTHROPIC__API_KEY configured" in out
-    assert "daimon openai init" in out
+    assert "no DAIMON_ANTHROPIC__API_KEY configured" in out, out
+    assert "renamed" in out, f"the report lists the self-hosted rename: {out}"
+
+    async def names() -> list[str]:
+        async with schema_sessionmaker() as s:
+            rows = await s.execute(
+                text(
+                    "SELECT name FROM selfhosted_agents WHERE tenant_id = :t"
+                    " UNION ALL SELECT agent_name FROM routines WHERE tenant_id = :t"
+                ),
+                {"t": tenant_id},
+            )
+            return list(rows.scalars())
+
+    assert asyncio.run(names()) == ["default", "default"], (
+        "the record and its references move without Anthropic credentials"
+    )
+
+
+class _KeyedSettings:
+    """Just enough shape for `defaults_apply` when an Anthropic key is configured."""
+
+    class anthropic:  # mirrors the real nested-settings shape
+        api_key = "sk-test"
+
+    class mcp:
+        public_url = None
+
+
+_CLI_LOCAL = derive_tenant_uuid(platform="cli", workspace_id="local")
+
+
+def _keyed_runtime(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    state: FakeMAState,
+    *,
+    reject_models: bool = False,
+) -> CliRuntime:
+    agents = combine_handlers(make_archive_agent_handler(), make_fake_ma_handler(state))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/environments":
+            return list_response([])
+        if reject_models and request.method == "POST" and request.url.path == "/v1/agents":
+            message = "model.id: claude-sonnet-4-6 is not supported"
+            return httpx.Response(400, json={"type": "error", "error": {"message": message}})
+        return agents(request)
+
+    rt = object.__new__(CliRuntime)
+    object.__setattr__(rt, "settings", cast(Settings, _KeyedSettings()))
+    object.__setattr__(rt, "anthropic", build_fake_anthropic(handler))
+    object.__setattr__(rt, "sessionmaker", sessionmaker)
+    return rt
+
+
+def _default_tree(root: Path) -> Path:
+    (root / "agents").mkdir()
+    (root / "agents" / "default.yaml").write_text(
+        "name: default\nmodel: claude-sonnet-4-6\nsystem: You are Daimon.\n"
+    )
+    return root
+
+
+async def _seed_legacy_tenant(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    platform: Platform,
+    workspace_id: str,
+    *names: str,
+) -> uuid.UUID:
+    """A tenant with a routine on `daimon` and live self-hosted records `names`."""
+    async with sessionmaker() as s, s.begin():
+        tenant = await make_tenant(s, platform=platform, workspace_id=workspace_id)
+        await make_routine(s, tenant=tenant, agent_name="daimon")
+    agents = SelfHostedAgents(sessionmaker)
+    for name in names:
+        await agents.create(
+            Scope(
+                tenant_id=str(tenant.id),
+                account_id="operator",
+                principal_id="cli",
+                authorization_id="cli-deployment-operator",
+            ),
+            AgentSpec(name=name, model=ModelRef(provider=LOOP.provider, id="gpt-6.1-sol")),
+            key=f"{workspace_id}-{name}",
+        )
+    return tenant.id
+
+
+async def _agent_outcomes(
+    rt: CliRuntime, root: Path, *, dry_run: bool, expect_exit: bool = False
+) -> list[dict[str, str]]:
+    buf = StringIO()
+    console = Console(file=buf, force_terminal=False, highlight=False, width=200)
+    call = defaults_apply(rt=rt, console=console, dry_run=dry_run, as_json=True, defaults_root=root)
+    if expect_exit:
+        with pytest.raises(typer.Exit):
+            await call
+    else:
+        await call
+    return json.loads(buf.getvalue())["agents"]
+
+
+def test_defaults_apply_when_cli_local_rename_blocked_then_reports_one_failure(
+    tmp_path: Path, schema_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    async def run() -> list[dict[str, str]]:
+        await _seed_legacy_tenant(schema_sessionmaker, "cli", "local", "daimon", "default")
+        state = FakeMAState()
+        agent = ma_agent(
+            id="ag_daimon",
+            name="daimon",
+            tenant_id=_CLI_LOCAL,
+            metadata={MA_METADATA_KEY_MANAGED: "true"},
+        )
+        state.agents["ag_daimon"] = agent.model_dump(mode="json")
+        rt = _keyed_runtime(schema_sessionmaker, state)
+        return await _agent_outcomes(rt, _default_tree(tmp_path), dry_run=False, expect_exit=True)
+
+    outcomes = asyncio.run(run())
+
+    failed = [o for o in outcomes if o["action"] == "failed"]
+    assert len(failed) == 1, (
+        f"cli:local is renamed once, by apply, not again by the pre-pass: {outcomes}"
+    )
+
+
+def test_defaults_apply_when_dry_run_then_each_tenant_reports_one_rename(
+    tmp_path: Path, schema_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    async def run() -> list[dict[str, str]]:
+        await _seed_legacy_tenant(schema_sessionmaker, "cli", "local", "daimon")
+        await _seed_legacy_tenant(schema_sessionmaker, "discord", "guild-sh", "daimon")
+        rt = _keyed_runtime(schema_sessionmaker, FakeMAState())
+        return await _agent_outcomes(rt, _default_tree(tmp_path), dry_run=True)
+
+    outcomes = asyncio.run(run())
+
+    renamed = [o for o in outcomes if o["action"] == "renamed"]
+    assert len(renamed) == 2, f"one rename for cli:local and one for the other tenant: {outcomes}"
+
+
+def test_defaults_apply_when_preflight_fails_then_selfhosted_records_are_untouched(
+    tmp_path: Path, schema_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    async def run() -> list[str]:
+        await _seed_legacy_tenant(schema_sessionmaker, "cli", "local", "daimon")
+        other = await _seed_legacy_tenant(schema_sessionmaker, "discord", "guild-sh", "daimon")
+        rt = _keyed_runtime(schema_sessionmaker, FakeMAState(), reject_models=True)
+        with pytest.raises(DefaultsError, match="pre-flight failed"):
+            await defaults_apply(
+                rt=rt,
+                console=Console(file=StringIO()),
+                dry_run=False,
+                as_json=False,
+                defaults_root=_default_tree(tmp_path),
+            )
+        async with schema_sessionmaker() as s:
+            rows = await s.execute(
+                text(
+                    "SELECT name FROM selfhosted_agents UNION ALL"
+                    " SELECT agent_name FROM routines ORDER BY 1"
+                )
+            )
+            assert other, "the second tenant exists"
+            return list(rows.scalars())
+
+    assert asyncio.run(run()) == ["daimon"] * 4, "no record or reference moved before the abort"
+
+
+def test_defaults_apply_when_agent_names_unknown_skill_then_selfhosted_records_are_untouched(
+    tmp_path: Path, schema_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    root = _default_tree(tmp_path)
+    (root / "agents" / "default.yaml").write_text(
+        "name: default\nmodel: claude-sonnet-4-6\nsystem: You are Daimon.\n"
+        "skills:\n  - type: custom\n    skill_id: missing\n"
+    )
+
+    async def run() -> list[str]:
+        await _seed_legacy_tenant(schema_sessionmaker, "discord", "guild-sh", "daimon")
+        rt = object.__new__(CliRuntime)
+        object.__setattr__(rt, "settings", cast(Settings, _NoAnthropicSettings()))
+        object.__setattr__(rt, "sessionmaker", schema_sessionmaker)
+        with pytest.raises(DefaultsError, match="unknown skill"):
+            await defaults_apply(
+                rt=rt,
+                console=Console(file=StringIO()),
+                dry_run=False,
+                as_json=False,
+                defaults_root=root,
+            )
+        async with schema_sessionmaker() as s:
+            rows = await s.execute(
+                text("SELECT name FROM selfhosted_agents UNION ALL SELECT agent_name FROM routines")
+            )
+            return list(rows.scalars())
+
+    assert asyncio.run(run()) == ["daimon", "daimon"], "a bad tree fails before any rename"
 
 
 # ---------------------------------------------------------------------------

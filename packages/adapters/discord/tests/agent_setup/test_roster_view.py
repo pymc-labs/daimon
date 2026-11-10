@@ -606,7 +606,7 @@ async def test_setup_targets_the_answering_agent_and_binds_it_without_a_billed_t
         tenant = await make_tenant(session, platform="discord", workspace_id=str(GUILD_ID))
         account = await make_account(session, tenant=tenant)
     responder = ma_agent(
-        id="agent_daimon", name="daimon", tenant_id=tenant.id, metadata={"daimon_managed": "true"}
+        id="agent_daimon", name="default", tenant_id=tenant.id, metadata={"daimon_managed": "true"}
     )
     target = ma_agent(id="agent_specialist", name="specialist", tenant_id=tenant.id)
 

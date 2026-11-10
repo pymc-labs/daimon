@@ -1276,7 +1276,7 @@ async def test_platform_limited_skills_stay_off_the_seeded_agent_and_its_spec_ha
     from daimon.core.defaults.loader import load_agent_specs
 
     root = Path(__file__).resolve().parents[4] / "defaults" / "agents"
-    shipped = next(spec for spec in load_agent_specs(root) if spec.name == "daimon")
+    shipped = next(spec for spec in load_agent_specs(root) if spec.name == "default")
     limited = [ref for ref in shipped.skills if ref.platforms is not None]
     assert [(ref.type, ref.skill_id, ref.platforms) for ref in limited] == [
         *(("anthropic", name, ("teams",)) for name in ("docx", "pptx", "xlsx")),
@@ -1307,7 +1307,7 @@ async def test_platform_limited_skills_stay_off_the_seeded_agent_and_its_spec_ha
         def on_create(req: httpx.Request, _m: object) -> httpx.Response:
             payload.update(json.loads(req.content))
             return httpx.Response(
-                200, json=_tagged_agent(id_="ag", name="daimon", tenant_id=TENANT_ID)
+                200, json=_tagged_agent(id_="ag", name="default", tenant_id=TENANT_ID)
             )
 
         router.add("POST", r"/v1/agents", on_create)

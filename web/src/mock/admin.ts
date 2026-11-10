@@ -77,7 +77,7 @@ const audit: AuditEntry[] = ([
 
 const settings: WorkspaceSettings = {
   modules: { chat: true, agents: true, channels: true, routines: true, credits: true, integrations: true },
-  default_agent: "ag_daimon",
+  default_agent: "ag_default",
   access: { people: null, others: 0, dm_enabled: false, dm_memory_read_only: false, plain_text_mentions: false },
   providers: {
     offered: [{ id: "anthropic", label: "Anthropic" }, { id: "openai", label: "OpenAI" }, { id: "gemini", label: "Google" }],
@@ -182,7 +182,7 @@ export const adminHandlers: HttpHandler[] = [
     const raw: Feedback = {
       days,
       agents: [
-        { id: "ag_daimon", name: "Daimon", up: n(86), down: n(9), reasons: [{ code: "inaccurate", label: "Wrong or inaccurate", count: n(4) }, { code: "incomplete", label: "Incomplete or cut off", count: n(3) }, { code: "too_slow", label: "Too slow", count: n(2) }] },
+        { id: "ag_default", name: "Daimon", up: n(86), down: n(9), reasons: [{ code: "inaccurate", label: "Wrong or inaccurate", count: n(4) }, { code: "incomplete", label: "Incomplete or cut off", count: n(3) }, { code: "too_slow", label: "Too slow", count: n(2) }] },
         { id: "ag_mmm", name: "MMM Analyst", up: n(41), down: n(6), reasons: [{ code: "inaccurate", label: "Wrong or inaccurate", count: n(3) }, { code: "ignored_request", label: "Didn't do what I asked", count: n(2) }] },
         { id: "ag_review", name: "Code Reviewer", up: n(23), down: n(1), reasons: [{ code: "other", label: "Something else", count: n(1) }] },
         { id: null, name: "Unknown agent", up: n(2), down: 0, reasons: [] },
