@@ -6,7 +6,7 @@ gets two things from this module:
 - **Daimon-authored framing** — what was carried over, where the archive is
   mounted, what was NOT carried, and the work to continue. This
   is operator text, so it rides a ``system.message`` event where the model
-  supports one (observed: sonnet-5 / opus-5 / opus-4-8 / fable-5 / mythos-5
+  supports one (observed: sonnet-5 / opus-5 / opus-4-8 / fable-5 / fable-5-2 / mythos-5
   accept it; haiku-4-5 and sonnet-4-6 reject the request outright), and is
   prepended to the user message otherwise.
 - **The previous conversation** — a text-only, newest-first-selected excerpt

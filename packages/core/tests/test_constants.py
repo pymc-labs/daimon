@@ -67,6 +67,30 @@ def test_current_generation_opus_and_sonnet_are_both_selectable() -> None:
         assert model in ALLOWED_MODEL_IDS, f"{model} must be selectable as an agent model"
 
 
+def test_fable_5_2_is_selectable_but_never_the_default() -> None:
+    """Fable 5.2 is offered by name; adding it must not move anyone's default.
+
+    It lists at four times Sonnet 5.5's token price, so a new agent only runs on
+    it when someone picks it.
+    """
+    assert "claude-fable-5-2" in ALLOWED_MODEL_IDS, "fable 5.2 must be selectable"
+    assert DEFAULT_AGENT_MODEL == "claude-sonnet-5-5", (
+        f"new agents must keep defaulting to Sonnet 5.5, not {DEFAULT_AGENT_MODEL}"
+    )
+
+
+def test_fable_5_2_is_not_the_first_picker_option() -> None:
+    """Pickers list ALLOWED_MODEL_IDS in order, so the top option is the first row.
+
+    Fable 5.2 is the priciest model offered; it sits below Opus 5.5 so it is never
+    the first thing someone sees in the list.
+    """
+    assert ALLOWED_MODEL_IDS[0] == "claude-opus-5-5", "Opus 5.5 leads the picker list"
+    assert ALLOWED_MODEL_IDS.index("claude-fable-5-2") > ALLOWED_MODEL_IDS.index(
+        "claude-opus-5-5"
+    ), "fable 5.2 must be listed below opus 5.5"
+
+
 def test_default_agent_model_matches_the_seeded_agent() -> None:
     """The default new agents get must equal the model `defaults/` ships.
 

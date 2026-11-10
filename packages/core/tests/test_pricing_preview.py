@@ -23,7 +23,7 @@ def test_actual_model_and_existing_prompt_tiers_are_preserved() -> None:
         "prompt > 100,000: input $0.5, output $2.5, cache-read $0.05, cache-write $0.625" in preview
     )
     assert "5-minute rate" in preview
-    assert "checked 2026-10-10" in preview
+    assert "checked 2026-11-10" in preview
     opus = list_price_preview("claude-opus-5-5", AGENT_MODEL_PRICING["claude-opus-5-5"])
     assert "input $4, output $20, cache-read $0.2, cache-write $5" in opus
     assert "haiku" not in opus

@@ -1370,9 +1370,10 @@
         Required: ``name`` and ``model``. Use ``"claude-sonnet-5-5"`` when the user
         asks for Sonnet and ``"claude-opus-5-5"`` when they ask for Opus — always
         the current generation. For the cheapest Claude, use ``"claude-haiku-5-5"``:
-        Haiku is the cheapest current generation, never ``claude-haiku-4-5``. Only
-        pass an older id (``claude-sonnet-5``, ``claude-opus-5``, …) when the user
-        names that version themselves.
+        Haiku is the cheapest current generation, never ``claude-haiku-4-5``. Use
+        ``"claude-fable-5-2"`` only when the user asks for Fable: it costs four
+        times Sonnet. Only pass an older id (``claude-sonnet-5``, ``claude-opus-5``,
+        …) when the user names that version themselves.
         Any other provider's model works the same way, by name: ``"flash"``,
         ``"argon"``, ``"luna"``, ``"astra"`` (or its id). The agent is created on that
         provider directly: never create it on Claude first, and nothing else is needed
