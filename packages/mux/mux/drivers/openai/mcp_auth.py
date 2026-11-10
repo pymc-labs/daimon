@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Awaitable, Callable, Sequence
 from urllib.parse import urlsplit
 
-from pydantic import TypeAdapter
+from pydantic import BaseModel, ConfigDict, TypeAdapter
 
 from mux.contracts.ids import Scope
 from mux.contracts.resources import MCPConnection
@@ -84,12 +85,51 @@ def encode(connections: Sequence[MCPConnection], context: Context) -> Object:
         # An authenticated override may copy only resolver-bound MCP tools.
         # Anonymous-only agents retain their credential-free native requests.
         raise context.unsupported("unbound_mcp_destination")
-    if len(authenticated) != 1:
-        raise context.unsupported("single_bound_mcp_server")
-    value = json.dumps([c.model_dump(mode="json") for c in authenticated], separators=(",", ":"))
+    if len(authenticated) == 1:
+        value = json.dumps([authenticated[0].model_dump(mode="json")], separators=(",", ":"))
+    else:
+        value = _shared_intent(authenticated, context)
     if len(value) > 512:
         raise context.unsupported("mcp_credential_metadata_size")
     return {KEY: value}
+
+
+def _digest(connections: Sequence[MCPConnection]) -> str:
+    # Normalized like decode's checks: the API may echo an unset `required` as false.
+    rows = [
+        [
+            c.name,
+            c.url,
+            c.credential_ref,
+            c.tool_policy.get("allowed_tools"),
+            bool(c.tool_policy.get("required", False)),
+        ]
+        for c in connections
+    ]
+    dumped = json.dumps(rows, separators=(",", ":"))
+    return hashlib.sha256(dumped.encode()).hexdigest()[:32]
+
+
+def _shared_intent(connections: Sequence[MCPConnection], context: Context) -> str:
+    """Several servers on one credential, all under the first one's URL (a host's own
+    routes), in a form that fits OpenAI's 512-character metadata value.
+
+    The digest binds every name, URL and tool policy; decoding rebuilds them from
+    the native tools and must reproduce it.
+    """
+    first = connections[0]
+    reference = first.credential_ref
+    base = first.url.rstrip("/")
+    if any(
+        c.credential_ref != reference
+        or (c is not first and not c.url.startswith(base + "/"))
+        or c.transport != first.transport
+        for c in connections
+    ):
+        raise context.unsupported("single_bound_mcp_server")
+    servers = [[c.name, c.url.removeprefix(base)] for c in connections]
+    shared = {"ref": reference, "url": base, "servers": servers, "digest": _digest(connections)}
+    return json.dumps(shared, separators=(",", ":"))
 
 
 def non_mcp_tool(native: Object) -> Object:
@@ -179,9 +219,12 @@ def decode(raw: Object, context: Context) -> tuple[MCPConnection, ...]:
     value = text(metadata[KEY])
     if len(value) > 512:
         raise ValueError("oversized MCP credential intent")
-    connections = _CONNECTIONS.validate_json(value)
-    if len(connections) != 1:
-        raise ValueError("invalid MCP credential references")
+    if value.startswith("{"):
+        connections = _decode_shared(value, tools)
+    else:
+        connections = _CONNECTIONS.validate_json(value)
+        if len(connections) != 1:
+            raise ValueError("invalid MCP credential references")
     if len([t for t in tools if t.get("type") == "mcp"]) != len(connections):
         raise ValueError("native MCP destination is not host-resolver bound")
     for connection in connections:
@@ -204,3 +247,38 @@ def decode(raw: Object, context: Context) -> tuple[MCPConnection, ...]:
         ):
             raise ValueError("MCP credential destination or policy changed")
     return connections
+
+
+class _SharedIntent(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    ref: str
+    url: str
+    servers: tuple[tuple[str, str], ...]
+    digest: str
+
+
+def _decode_shared(value: str, tools: Sequence[Object]) -> tuple[MCPConnection, ...]:
+    """Rebuild a shared-credential intent from the native tools; its digest must match."""
+    intent = _SharedIntent.model_validate_json(value)
+    if len(intent.servers) < 2:
+        raise ValueError("invalid MCP credential references")
+    native = {text(t["server_label"]): t for t in tools if t.get("type") == "mcp"}
+    connections: list[MCPConnection] = []
+    for name, suffix in intent.servers:
+        found = native.get(name)
+        if found is None:
+            raise ValueError("MCP credential destination or policy changed")
+        connections.append(
+            MCPConnection(
+                name=name,
+                url=intent.url + suffix,
+                credential_ref=intent.ref,
+                tool_policy={
+                    key: found[key] for key in ("allowed_tools", "required") if key in found
+                },
+            )
+        )
+    if _digest(connections) != intent.digest:
+        raise ValueError("MCP credential destination or policy changed")
+    return tuple(connections)

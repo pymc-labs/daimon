@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pydantic import JsonValue
 
 from mux.contracts.ids import ResourceRef, Scope
-from mux.contracts.resources import CredentialBinding, ProviderBinding
+from mux.contracts.resources import CredentialBinding, MCPConnection, ProviderBinding
 from mux.drivers.openai._common import Context, objects, text
 from mux.drivers.openai.mcp_auth import MCPSecretResolver, decode, non_mcp_tool, tool
 from mux.drivers.openai.transport import Object, suppress_mcp_error_details
@@ -119,34 +119,18 @@ async def prepare(
         raise context.unsupported("mixed_mcp_authentication")
     if scope.is_platform or scope.is_legacy_host_authorized:
         raise context.unsupported("caller_scoped_mcp_vault")
-    connection = connections[0]
-    reference = connection.credential_ref
-    if reference is None:
-        raise ValueError("missing MCP credential reference")
-    try:
-        secret = valid_secret(await resolver(scope, reference, connection.url))
-    except Exception:
-        raise ProviderError(
-            "permission", retryable=False, native_code="mcp_secret_unavailable"
-        ) from None
+    secrets = [await _secret(resolver, scope, c) for c in connections]
     # Validate every copied tool before allocating any provider-held credential.
     tools: list[JsonValue] = [
         non_mcp_tool(value) for value in objects(agent["tools"]) if value.get("type") != "mcp"
     ]
-    expected = tool(connection, context)
+    expected = [tool(c, context) for c in connections]
     owned: set[str] = set()
-
-    async def resolve(candidate: Scope, credential_ref: str) -> str:
-        if candidate != scope or credential_ref != reference:
-            raise ScopeViolation(credential_ref, "MCP credential has a foreign scope")
-        return secret
-
-    port = _port(context, scope, owned, resolve)
     digest = hashlib.sha256(f"{scope.tenant_id}\0{scope.account_id}\0{key}".encode()).hexdigest()
     name = "mux-session-mcp-" + digest
     with suppress_mcp_error_details():
         try:
-            vault = await port.create(scope, name, key=key + ":mcp-vault")
+            vault = await _port(context, scope, owned).create(scope, name, key=key + ":mcp-vault")
         except BaseException as error:
             error.add_note(
                 f"MCP vault creation has no usable ACK; verify native inventory for {name} "
@@ -155,26 +139,60 @@ async def prepare(
             raise
         owned.add(vault.ref.id)
         managed = SessionMCPVault(vault.ref, name)
+        ids: list[str] = []
         try:
-            credential = await port.put(
-                scope,
-                vault.ref,
-                CredentialBinding(
-                    name=connection.name,
-                    kind="static_bearer",
-                    credential_ref=reference,
-                    mcp_server_url=connection.url,
-                ),
-                expected=None,
-                key=key + ":mcp-credential",
-            )
+            for index, (connection, secret) in enumerate(zip(connections, secrets, strict=True)):
+                # One credential per destination: OpenAI binds each to one server URL.
+                port = _port(context, scope, owned, _resolve(scope, connection, secret))
+                credential = await port.put(
+                    scope,
+                    vault.ref,
+                    CredentialBinding(
+                        name=connection.name,
+                        kind="static_bearer",
+                        credential_ref=_reference(connection),
+                        mcp_server_url=connection.url,
+                    ),
+                    expected=None,
+                    key=key + ":mcp-credential" + (f":{index}" if index else ""),
+                )
+                ids.append(credential.id)
         except BaseException as error:
             # No session request has been sent, so deleting the child is safe.
             await managed.cleanup_after(context, scope, error, key=key + ":mcp-cleanup")
             raise
-        managed = SessionMCPVault(vault.ref, name, credential.id)
-        tools.append({**expected, "credential_id": credential.id, "connection_origin": "service"})
+        managed = SessionMCPVault(vault.ref, name, ",".join(ids))
+        for native, credential_id in zip(expected, ids, strict=True):
+            tools.append({**native, "credential_id": credential_id, "connection_origin": "service"})
         return tools, managed
+
+
+def _reference(connection: MCPConnection) -> str:
+    if connection.credential_ref is None:
+        raise ValueError("missing MCP credential reference")
+    return connection.credential_ref
+
+
+async def _secret(resolver: MCPSecretResolver, scope: Scope, connection: MCPConnection) -> str:
+    """Resolve one destination's bearer; the host authorizes reference and URL together."""
+    reference = _reference(connection)
+    try:
+        return valid_secret(await resolver(scope, reference, connection.url))
+    except Exception:
+        raise ProviderError(
+            "permission", retryable=False, native_code="mcp_secret_unavailable"
+        ) from None
+
+
+def _resolve(scope: Scope, connection: MCPConnection, secret: str) -> SecretResolver:
+    reference = _reference(connection)
+
+    async def resolve(candidate: Scope, credential_ref: str) -> str:
+        if candidate != scope or credential_ref != reference:
+            raise ScopeViolation(credential_ref, "MCP credential has a foreign scope")
+        return secret
+
+    return resolve
 
 
 async def rotate(
@@ -192,29 +210,24 @@ async def rotate(
     changes, so a per-turn credential serves every later turn of the session.
     """
     connections = decode(agent, context)
-    if len(connections) != 1 or managed.credential_id is None:
-        raise ValueError("session MCP vault has no single bound credential")
+    ids = managed.credential_id.split(",") if managed.credential_id else []
+    if not connections or len(ids) != len(connections):
+        raise ValueError("session MCP vault credentials do not match the agent")
     if scope.is_platform or scope.is_legacy_host_authorized:
         raise context.unsupported("caller_scoped_mcp_vault")
-    connection = connections[0]
-    reference = connection.credential_ref
-    if reference is None:
-        raise ValueError("missing MCP credential reference")
-    try:
-        secret = valid_secret(await resolver(scope, reference, connection.url))
-    except Exception:
-        raise ProviderError(
-            "permission", retryable=False, native_code="mcp_secret_unavailable"
-        ) from None
-
-    async def resolve(candidate: Scope, credential_ref: str) -> str:
-        if candidate != scope or credential_ref != reference:
-            raise ScopeViolation(credential_ref, "MCP credential has a foreign scope")
-        return secret
-
-    port = _port(context, scope, {managed.vault.id}, resolve)
+    secrets = [await _secret(resolver, scope, c) for c in connections]
     with suppress_mcp_error_details():
-        actual = await port.retrieve(scope, managed.vault)
+        actual = await _port(context, scope, {managed.vault.id}).retrieve(scope, managed.vault)
         if actual.name != managed.name:
             raise ScopeViolation(managed.vault.id, "session MCP vault identity changed")
-        await port.replace_secret(scope, managed.vault, managed.credential_id, reference, key=key)
+        for index, (connection, secret, credential_id) in enumerate(
+            zip(connections, secrets, ids, strict=True)
+        ):
+            port = _port(context, scope, {managed.vault.id}, _resolve(scope, connection, secret))
+            await port.replace_secret(
+                scope,
+                managed.vault,
+                credential_id,
+                _reference(connection),
+                key=key + (f":{index}" if index else ""),
+            )
