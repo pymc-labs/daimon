@@ -186,8 +186,9 @@ def source_agent_record(item: BetaManagedAgentsAgent, scope: Scope) -> Agent | N
         return None
     if not item.id.startswith("dm_agent_"):
         return record
-    # A Daimon record's projection is Managed Agents shaped; restore its provider.
-    provider = _model_provider(record.spec.model.id)
+    # A Daimon record's projection is Managed Agents shaped; its facts carry the provider.
+    carried = (item.model.model_extra or {}).get("provider")
+    provider: Provider = carried if carried in ("openai", "gemini") else "anthropic"
     model = record.spec.model.model_copy(update={"provider": provider})
     return record.model_copy(
         update={

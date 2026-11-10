@@ -74,7 +74,8 @@ def agent_facts(agent: Agent, *, tenant_id: str) -> BetaManagedAgentsAgent:
             "type": "agent",
             "name": spec.name,
             "version": agent.revision.local,
-            "model": {"id": spec.model.id},
+            # `provider` rides as an extra field so a Daimon record keeps its provider.
+            "model": {"id": spec.model.id, "provider": spec.model.provider},
             "system": spec.system,
             "description": spec.description,
             "metadata": {

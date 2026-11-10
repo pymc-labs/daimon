@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Output files arrive on every provider.** Files an agent produces during a
+  turn are now posted to Discord, Slack, Teams and the web chat whichever
+  provider runs the agent, not only on Anthropic. Each file is delivered once
+  and then cleared from the workspace listing, so a long conversation never
+  re-posts an earlier file. On Gemini, where a workspace file cannot be removed,
+  Daimon remembers what it already delivered and posts a file again only when
+  its contents change. Size limits and the notice for oversized files are the
+  same as before.
+
+- **Thread titles and participation checks no longer need an Anthropic key.**
+  The short side calls that name a new thread and decide whether to join a
+  conversation now go through a provider-neutral call. When an Anthropic key
+  is set they run on the same small model as before, so nothing changes; on an
+  install without one they use a small model from the active provider and are
+  billed to the message author at that model's price. If no provider can answer,
+  a title falls back to the message text and a participation check stays silent.
+
 - **Daimon runs with only an OpenAI or Gemini key.** With no Anthropic key,
   setup seeds the default agents and environment on the keyed provider, at
   its default model, and agents you create or edit live on that provider too.
