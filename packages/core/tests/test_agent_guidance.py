@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import re
 
+import pytest
 from daimon.core.agent_guidance import (
     CREDENTIAL_GUIDANCE_BLOCK,
     SAFETY_BLOCK,
@@ -428,12 +429,21 @@ def test_commit_guidance_adds_no_personal_access_token_hint() -> None:
     assert re.search(r"\bPATs?\b", block) is None, "no PAT hint (PATCH is an HTTP method)"
 
 
-def test_an_isolated_agent_keeps_its_prompt_byte_for_byte() -> None:
-    """Isolated agents run their author's prompt: no safety or guidance block is added."""
+@pytest.mark.parametrize("guidance", [True, False])
+def test_an_isolated_agent_gets_the_safety_block_and_never_the_guidance(guidance: bool) -> None:
+    """The safety rule is fixed for every agent; an isolated one mounts no secrets, so no guidance."""
     system = "You are an isolated reader."
-    assert apply_credential_guidance(system, guidance=False, isolated=True) == system, (
-        "an isolated prompt is never rewritten"
-    )
+    out = apply_credential_guidance(system, guidance=guidance, isolated=True)
+    assert out == f"{SAFETY_BLOCK}\n\n{system}", "safety block over the author's prompt"
+    assert "credential-guidance" not in out, "no credential guidance for an isolated agent"
+
+
+def test_an_isolated_agent_that_had_the_guidance_drops_it_and_keeps_safety() -> None:
+    """Switching an agent to isolated gives the same prompt as one that always was."""
+    had_guidance = apply_credential_guidance("Mine")
+    assert apply_credential_guidance(had_guidance, isolated=True) == (
+        apply_credential_guidance("Mine", isolated=True)
+    ), "an isolated prompt does not depend on its history"
 
 
 def test_guidance_on_keeps_the_prompt_shipped_before_the_feature_existed() -> None:

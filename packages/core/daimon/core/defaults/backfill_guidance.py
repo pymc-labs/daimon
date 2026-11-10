@@ -32,7 +32,7 @@ async def backfill_credential_guidance(
     sessions: Sessions | None = None,
 ) -> None:
     """Update only ``system`` on live user agents; never fail boot. An isolated agent
-    is left as written; the `guidance` feature decides the rest."""
+    gets the safety block alone; the `guidance` feature decides the rest."""
     updated = skipped = failed = 0
     try:
         agents = await list_agents_by_tenant(client, tenant_id=tenant_id)
