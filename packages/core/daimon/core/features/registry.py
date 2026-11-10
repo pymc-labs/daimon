@@ -67,9 +67,9 @@ _PROVIDER_ONLY: Final[Mapping[str, tuple[Tier, ...]]] = {
 }
 """Gemini and OpenAI compile one revision per agent, so a model feature stops at the agent."""
 _MANAGED_AGENTS_ONLY: Final[Mapping[str, tuple[Tier, ...]]] = {_GEMINI: (), _OPENAI: ()}
-"""Runs only on Managed Agents turns; Gemini and OpenAI agents never get it."""
+"""Runs only on Claude agent turns; Gemini and OpenAI agents never get it."""
 BACKEND_NAMES: Final[Mapping[str, str]] = {
-    _ANTHROPIC: "Managed Agents",
+    _ANTHROPIC: "Claude",
     _GEMINI: "Gemini",
     _OPENAI: "OpenAI",
 }
@@ -82,11 +82,14 @@ BUILTIN_TOOLS: Final[tuple[str, ...]] = (
 class Authority:
     """Who may set a feature: an admin for `action` at the workspace and channel tiers,
     an owner or admin at the agent tier, anyone at the thread tier when `thread_anyone`.
-    `native` (approvals) asks for a live native platform admin at every tier."""
+    `native` (approvals) asks for a live native platform admin at every tier. With
+    `action=None` only a server admin may set it, and `agent_owner=False` keeps an
+    agent's owner from setting the agent tier too (money and background work)."""
 
     action: DelegatedAction | None = None
     thread_anyone: bool = False
     native: bool = False
+    agent_owner: bool = True
 
 
 @dataclass(frozen=True)
@@ -173,11 +176,24 @@ def limit_int(value: str) -> int:
     return int(number)
 
 
+_BUILTIN_WORDS: Final[Mapping[str, tuple[str, str]]] = {
+    "bash": ("Run commands", "run commands"),
+    "read": ("Read files", "read files"),
+    "edit": ("Edit files", "edit files"),
+    "write": ("Write files", "write new files"),
+    "grep": ("Search file contents", "search inside files"),
+    "glob": ("Find files", "find files by name"),
+    "web_fetch": ("Open web pages", "open web pages"),
+    "web_search": ("Search the web", "search the web"),
+}
+"""Each built-in tool's name and what it lets the agent do."""
+
+
 def _builtin(tool: str) -> FeatureSpec:
-    words = tool.replace("_", " ")
+    name, does = _BUILTIN_WORDS[tool]
     return FeatureSpec(
         key=f"tool.{tool}",
-        name=f"Built-in tool: {words}",
+        name=name,
         category="model_input",
         effect="model",
         values=_ON_OFF,
@@ -185,9 +201,8 @@ def _builtin(tool: str) -> FeatureSpec:
         tiers=("deployment", "workspace", "agent", "channel", "thread"),
         binds="session_mutable",
         doc=(
-            f"The agent's built-in {words} tool. The agent level is the agent's own tool "
-            "settings. On never widens what a self-hosted harness allows. Applies from the "
-            "next message in a conversation."
+            f"The agent can {does}. Off removes it here; On never gives more than the "
+            "agent's own tool settings allow. Applies from the next message in a conversation."
         ),
         backend_tiers=_PROVIDER_ONLY,
         platforms=EVERY_PLATFORM,
@@ -206,9 +221,9 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment", "workspace", "agent"),
         binds="provision",
         doc=(
-            "Instructions at the top of the agent's prompt on where its keys, repo, memory "
-            "and files are and what it may share. Off leaves the agent's own prompt and the "
-            "safety rules. Applies when the agent is next saved or synced."
+            "Instructions at the top of the agent's prompt on where its keys, repo, memory and "
+            "files are and what it may share. Off leaves the agent's own prompt and the safety "
+            "rules. Applies the next time the agent is saved."
         ),
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
@@ -223,11 +238,9 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment", "workspace", "agent", "channel", "thread"),
         binds="session_mutable",
         doc=(
-            "Daimon's own tools: chat, settings, routines, memory and the rest. "
-            "On keeps at least the conversation ids the tools need. An isolated agent "
-            "never has them. Gemini and OpenAI agents always have "
-            "them, so it can't be changed there. Applies from the next message in a "
-            "conversation."
+            "Daimon's own tools: chat, settings, routines, memory and the rest. An agent kept "
+            "apart from the team's data never has them, and Gemini and OpenAI agents always do. "
+            "Applies from the next message in a conversation."
         ),
         backend_fixed={_GEMINI: "on", _OPENAI: "on"},
         platforms=EVERY_PLATFORM,
@@ -239,15 +252,14 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         name="Message controls",
         category="model_input",
         effect="model",
-        values={"full": "Full", "origin": "Origin only", "minimal": "Minimal"},
+        values={"full": "Full", "origin": "Where and who", "minimal": "Basics"},
         default="full",
         tiers=TIERS,
         binds="turn",
         doc=(
-            "Facts sent with each message: where it was sent, who is answering, and how "
-            "to use them. Origin only keeps the ids and the honesty facts; Minimal keeps "
-            "only the facts about the model and the conversation. Daimon tools keep it at "
-            "Origin only or more."
+            "What each message tells the agent: where it was sent, who is answering and how to "
+            "act on that. Where and who drops the how-to; Basics keeps only the model and the "
+            "conversation. Daimon tools need Where and who or more."
         ),
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
@@ -276,8 +288,8 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         binds="turn",
         doc=(
             "Before each chat message, the agent's connected servers that offer a context tool "
-            "are sent the message, and their answers go in front of it as quoted data. "
-            "Managed Agents only."
+            "see the message, and their answers go in front of it as quoted text. Claude agents "
+            "only."
         ),
         backend_tiers=_MANAGED_AGENTS_ONLY,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
@@ -285,7 +297,7 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
     ),
     FeatureSpec(
         key="origin_fragments",
-        name="Run instructions",
+        name="Notes on non-chat messages",
         category="model_input",
         effect="model",
         values=_ON_OFF,
@@ -293,9 +305,8 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         tiers=TIERS,
         binds="turn",
         doc=(
-            "A short note in front of a message that did not come from chat: a routine, a "
-            "relayed draft, a handoff or another agent's request, with any wording the "
-            "agent's spec adds. Off sends the message alone."
+            "A short note in front of a message that did not come from chat, such as a routine, a"
+            " handoff or another agent's request. Off sends the message alone."
         ),
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
@@ -312,7 +323,7 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         doc=(
             "The agent's saved keys as a .env file in its working files. Off leaves the file "
             "out; the keys stay saved. Applies from the next message in a conversation. "
-            "Managed Agents only."
+            "Claude agents only."
         ),
         backend_tiers=_MANAGED_AGENTS_ONLY,
         platforms=EVERY_PLATFORM,
@@ -328,9 +339,9 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         tiers=TIERS,
         binds="turn",
         doc=(
-            "When a long conversation starts over, the agent is first asked to save its "
-            "working files to carry across. Off carries only the conversation and skips "
-            "that extra paid step. Managed Agents only."
+            "When a long conversation starts over, the agent is first asked to save its working "
+            "files to carry across. Off carries only the conversation and skips that extra paid "
+            "step. Claude agents only."
         ),
         backend_tiers=_MANAGED_AGENTS_ONLY,
         platforms=EVERY_PLATFORM,
@@ -369,8 +380,8 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
         tiers=TIERS,
         binds="session_identity",
         doc=(
-            "The skills Daimon adds for the chat platform, such as its formatting. "
-            f"{_KEPT} Managed Agents only."
+            "The skills Daimon adds for the chat app, such as its formatting. A conversation "
+            "keeps what it started with until /new. Claude agents only."
         ),
         backend_tiers=_MANAGED_AGENTS_ONLY,
         platforms=EVERY_PLATFORM,
@@ -403,8 +414,8 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
         tiers=TIERS,
         binds="session_identity",
         doc=(
-            "The skills added to a channel. They need the read tool, so they are off "
-            f"wherever it is. {_KEPT} Managed Agents only."
+            "The skills added to a channel. They need the read tool, so they are off wherever it "
+            "is. A conversation keeps what it started with until /new. Claude agents only."
         ),
         backend_tiers=_MANAGED_AGENTS_ONLY,
         platforms=EVERY_PLATFORM,
@@ -456,7 +467,7 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
         binds="session_identity",
         doc=(
             "The memory a restricted channel keeps for itself in place of the shared one. "
-            f"{_KEPT} Managed Agents only."
+            f"{_KEPT} Claude agents only."
         ),
         backend_tiers=_MANAGED_AGENTS_ONLY,
         platforms=EVERY_PLATFORM,
@@ -468,6 +479,8 @@ _DM_PLATFORMS: Final = frozenset({"discord", "slack"})
 _DISCORD: Final = frozenset({"discord"})
 _CALL_GATE_PLATFORMS: Final = frozenset({"discord", "slack", "teams", "web"})
 _SETTINGS: Final = Authority(DelegatedAction.AGENT_SETTINGS)
+# Long jobs spend money in the background: server admins only, no delegation, no owners.
+_SERVER_ADMIN: Final = Authority(None, agent_owner=False)
 _CHANNELS: Final[tuple[Tier, ...]] = ("deployment", "workspace", "channel")
 _ADMIN: Final = Authority(DelegatedAction.CHANNEL_PERMISSIONS)
 WEB_MODULES: Final[tuple[str, ...]] = (
@@ -554,16 +567,20 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
     ),
     _shown(
         "status_log",
-        "Keep messages apart",
-        "An answer made of several agent messages keeps each one, set apart by a blank "
-        "line, instead of joining them into one block.",
+        "Separate agent messages",
+        (
+            "An answer made of several agent messages keeps each one, set apart by a blank line, "
+            "instead of joining them into one block."
+        ),
         legacy_env=("DAIMON_TURN__STATUS_LOG",),
     ),
     _shown(
         "native_footer_cost",
-        "Cost on hosted-model footers",
-        "A finished answer from an OpenAI or Gemini agent shows what it cost, or that the "
-        "cost is unknown or partial. Managed Agents footers are unchanged.",
+        "Cost on Gemini and OpenAI footers",
+        (
+            "A finished answer from a Gemini or OpenAI agent shows what it cost, or that the "
+            "cost is unknown or partial. Claude agent footers are unchanged."
+        ),
         legacy_env=("DAIMON_TURN__NATIVE_FOOTER_COST",),
     ),
     _shown(
@@ -607,10 +624,9 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment",),
         binds="turn",
         doc=(
-            "Every message in private and shared channels is read through Microsoft "
-            "Graph, not only the ones that mention the agent. Needs the public address the "
-            "bot is reached at. Read once at startup, so only the server operator sets it "
-            "and a restart applies it."
+            "Every message in private and shared channels is read through Microsoft Graph, not "
+            "only the ones that mention the agent. Needs the public address the bot is reached "
+            "at. Whoever runs Daimon sets it, and it applies after a restart."
         ),
         platforms=frozenset({"teams"}),
         requires=("teams_public_url",),
@@ -677,8 +693,8 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         binds="turn",
         doc=(
             "A change through a connected tool waits for the person to press Approve. In a "
-            "routine or other run nobody watches, it is refused unless the operator allowed "
-            "that tool. Reads always run."
+            "routine or other run nobody watches, it is refused unless whoever runs Daimon "
+            "allowed that tool. Reads always run."
         ),
         platforms=EVERY_PLATFORM,
         authority=_ADMIN,
@@ -723,13 +739,13 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         name="Built-in tools in routines",
         category="guardrails",
         effect="guardrail",
-        values={"on": "Per routine", "off": "Off"},
+        values={"on": "Allowed", "off": "Off"},
         default="on",
         tiers=("deployment", "workspace", "agent"),
         binds="turn",
         doc=(
-            "Per routine lets an admin turn on built-in tools for one routine. Off keeps "
-            "them off in every routine, even one an admin turned them on for."
+            "Allowed lets an admin turn on built-in tools for one routine. Off keeps them off in "
+            "every routine, even one an admin turned them on for."
         ),
         platforms=EVERY_PLATFORM,
         authority=_ADMIN,
@@ -768,6 +784,7 @@ def _capability(
     legacy_env: tuple[str, ...] = (),
     binds: Binding = "session_mutable",
     default: Literal["on", "off"] = "on",
+    authority: Authority = _SETTINGS,
 ) -> FeatureSpec:
     """A capability that is On unless a tier turns it Off (Off until one turns it On, for
     `default="off"`); off, the session is not offered its tools (`CAPABILITY_TOOLS`) and what
@@ -784,7 +801,7 @@ def _capability(
         doc=doc,
         platforms=EVERY_PLATFORM,
         requires=requires,
-        authority=_SETTINGS,
+        authority=authority,
         legacy_env=legacy_env,
     )
 
@@ -798,6 +815,7 @@ def _limit(
     tiers: tuple[Tier, ...],
     default: str | None = None,
     legacy_env: tuple[str, ...] = (),
+    authority: Authority = _SETTINGS,
 ) -> FeatureSpec:
     """A limit: the smallest tier setting wins. `steps` run from the loosest down to the
     strictest; the default is the first unless `default` names another step."""
@@ -812,7 +830,7 @@ def _limit(
         binds="turn",
         doc=doc,
         platforms=EVERY_PLATFORM,
-        authority=_SETTINGS,
+        authority=authority,
         legacy_env=legacy_env,
     )
 
@@ -821,9 +839,11 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
     _capability(
         "watches",
         "Watches",
-        "The agent can watch a page or feed and start a conversation when it changes. "
-        "Off removes the watch tools here and stops the watches made here. Watches fire "
-        "only once the operator enables them, whatever this says.",
+        (
+            "The agent can watch a page or feed and start a conversation when it changes. Off"
+            " removes the watch tools here and stops the watches made here. Watches only run "
+            "once whoever runs Daimon allows them, whatever this says."
+        ),
         legacy_env=("DAIMON_WATCHES__ENABLED",),
     ),
     _capability(
@@ -835,9 +855,12 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
     _capability(
         "long_jobs",
         "Long jobs",
-        "The agent can start a long job that keeps working after the chat moves on. Off "
-        "until an admin turns it on; off removes the long-job tools here.",
+        (
+            "The agent can start a long job that keeps working after the chat moves on. Off "
+            "until a server admin turns it on; off removes the long-job tools here."
+        ),
         default="off",
+        authority=_SERVER_ADMIN,
     ),
     _capability(
         "compute",
@@ -900,9 +923,9 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment", "workspace"),
         binds="turn",
         doc=(
-            "Answers offer a way to ask the Daimon team for help, which posts the request in "
-            "the operator's support channel. Off removes the button and the form. The "
-            "operator sets the channel and each person's credits."
+            "Answers offer a way to ask the Daimon team for help, which posts the request in the "
+            "support channel. Off removes the button and the form. Whoever runs Daimon sets the "
+            "channel and each person's credits."
         ),
         requires=("support_channel",),
         authority=_SETTINGS,
@@ -926,6 +949,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         default="5",
         tiers=("deployment", "workspace", "agent"),
         legacy_env=("DAIMON_LONG_JOBS__MAX_USD",),
+        authority=_SERVER_ADMIN,
     ),
     _limit(
         "long_jobs_max_deadline",
@@ -934,6 +958,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         {"70": "70 minutes", "60": "60 minutes", "30": "30 minutes", "15": "15 minutes"},
         tiers=("deployment", "workspace", "agent"),
         legacy_env=("DAIMON_LONG_JOBS__MAX_DEADLINE_MINUTES",),
+        authority=_SERVER_ADMIN,
     ),
     _capability(
         "outbound_reach",
@@ -947,7 +972,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "New threads per reply",
         "How many new threads or forum posts outside its own channel, or tagging someone "
         "else, one reply may open without approval. The smallest setting wins.",
-        {"2": "2", "1": "1", "0": "None"},
+        {"2": "2 threads", "1": "1 thread", "0": "None"},
         tiers=TIERS,
         legacy_env=("DAIMON_OUTBOUND__MAX_THREADS",),
     ),
@@ -956,7 +981,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "Places per reply",
         "How many channels, threads and direct-message recipients outside its own "
         "conversation one reply may post into without approval. The smallest setting wins.",
-        {"2": "2", "1": "1", "0": "None"},
+        {"2": "2 places", "1": "1 place", "0": "None"},
         tiers=TIERS,
         legacy_env=("DAIMON_OUTBOUND__MAX_PLACES",),
     ),
@@ -964,24 +989,32 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "outbound_people",
         "People tagged per reply",
         "How many different people one reply may tag without approval. The smallest setting wins.",
-        {"5": "5", "3": "3", "1": "1", "0": "None"},
+        {"5": "5 people", "3": "3 people", "1": "1 person", "0": "None"},
         tiers=TIERS,
         legacy_env=("DAIMON_OUTBOUND__MAX_PEOPLE",),
     ),
     _limit(
         "outbound_length",
-        "Post length outside the conversation",
+        "Post length elsewhere",
         "The longest post, in characters, a reply may send outside its own conversation. "
         "The smallest setting wins.",
-        {"1500": "1500", "1000": "1000", "500": "500", "250": "250"},
+        {
+            "1500": "1500 characters",
+            "1000": "1000 characters",
+            "500": "500 characters",
+            "250": "250 characters",
+        },
         tiers=TIERS,
         legacy_env=("DAIMON_OUTBOUND__MAX_LENGTH",),
     ),
     _limit(
         "daily_model_cap",
         "Daily spend per model",
-        "The most the team may spend on one OpenAI or Gemini model in a day, at list "
-        "price. The smallest setting wins, and the operator's provider cap still applies.",
+        (
+            "The most the team may spend on one OpenAI or Gemini model in a day, at list "
+            "price. The smallest setting wins, and the provider cap set by whoever runs "
+            "Daimon still applies."
+        ),
         {"20": "$20", "10": "$10", "5": "$5", "2": "$2", "1": "$1"},
         tiers=("deployment", "workspace", "agent"),
     ),
@@ -999,9 +1032,8 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
         tiers=("workspace", "channel", "thread"),
         binds="turn",
         doc=(
-            "Ask before an agent writes to a third-party service. Decided most specific first: "
-            "only a native platform admin, checked live, may change it, and it applies "
-            "only once the operator enables approval overrides."
+            "Ask before an agent writes to an outside service. Only an admin of the chat app can "
+            "change it, once whoever runs Daimon allows approval changes."
         ),
         authority=Authority(native=True),
         combine_override="most_specific",
@@ -1016,10 +1048,8 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
         tiers=("deployment", "workspace", "channel", "thread"),
         binds="turn",
         doc=(
-            "Reply in a thread without being mentioned when a short classifier call says "
-            "the agent can help. A lower tier may turn it on under a higher Off, as before "
-            "the registry; a Lock stops that. There is no agent level: the gate decides before "
-            "an agent answers, so an agent setting would never be read."
+            "The agent joins a thread without being mentioned when it can help. A channel or "
+            "thread can turn it on where it is off above, unless that is locked."
         ),
         platforms=frozenset({"discord", "teams"}),
         requires=("platform_adapter",),
@@ -1068,10 +1098,9 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
         tiers=("deployment", "workspace", "agent", "channel", "thread"),
         binds="turn",
         doc=(
-            "Each message starts with the notes the agent keeps in its repository memory. "
-            "Needs the operator's setup (an import of existing memory, then "
-            "`DAIMON_REPO_MEMORY__ENABLED`), which also adds the memory tools. Off hides "
-            "the tools and the notes here."
+            "Each message starts with the notes in the agent's repository memory, and the agent "
+            "gets the memory tools. Off hides both here. Whoever runs Daimon must set it up "
+            "first."
         ),
         platforms=EVERY_PLATFORM,
         requires=("repo_memory_setup",),
@@ -1087,8 +1116,8 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
         tiers=("deployment", "workspace", "agent", "channel", "thread"),
         binds="turn",
         doc=(
-            "A context provider set up for this channel or agent adds what it knows to "
-            "each message. Off skips it here. Managed Agents only."
+            "A context provider set up for this channel or agent adds what it knows to each "
+            "message. Off skips it here. Claude agents only."
         ),
         backend_tiers=_MANAGED_AGENTS_ONLY,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),

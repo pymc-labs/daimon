@@ -50,7 +50,7 @@ export function Page({ crumbs: given, actions, tabs, children, className, flush 
               end={t.end}
               className={({ isActive }) => cn(
                 "flex h-10 shrink-0 items-center border-b-2 text-sm whitespace-nowrap transition-colors",
-                isActive ? "border-link font-medium text-foreground" : "border-transparent text-muted-foreground hover:text-foreground",
+                (t.active ?? isActive) ? "border-link font-medium text-foreground" : "border-transparent text-muted-foreground hover:text-foreground",
               )}
             >
               {t.label}

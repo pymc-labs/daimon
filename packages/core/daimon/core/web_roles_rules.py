@@ -226,6 +226,17 @@ async def roles_of(
     return roles
 
 
+async def server_admin(session: AsyncSession, person: WebPersonRow) -> bool:
+    """Whether the person is a platform admin or an admin of the chat workspace itself, as
+    chat's own admin check is; a workspace grant alone is not enough."""
+    if (await accounts_store.list_roles(session, {person.account_id})).get(
+        person.account_id
+    ) == AccountRole.ADMIN:
+        return True
+    standing = (await chat_standings(session, [person])).get(person.id)
+    return standing is not None and standing.admitted and standing.is_admin
+
+
 async def role_of(session: AsyncSession, person: WebPersonRow) -> Role:
     """The person's role in their workspace."""
     return (await roles_of(session, [person]))[person.id]

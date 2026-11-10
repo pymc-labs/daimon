@@ -159,11 +159,11 @@ def register_scope_settings_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> SettingsResult:
         """Report this conversation's settings (every registered feature).
 
-        Each lists its own value at the workspace, agent, channel and thread tiers of where
-        you are, what is in effect, which tier decided it (``source``: ``default``,
-        ``deployment``, ``workspace``, ``agent``, ``channel`` or ``thread``) and whether it
-        is locked. Anyone may read them; read each ``summary`` back. People change them
-        with ``/settings``, the web app's Settings section or ``change_setting``.
+        Each lists its own value at the workspace, agent, channel and thread levels of where
+        you are, what is in effect, which level decided it (``source``: ``default``,
+        ``deployment`` for everywhere, ``workspace``, ``agent``, ``channel`` or ``thread``)
+        and whether it is locked. Anyone may read them; read each ``summary`` back. People
+        change them with ``/settings``, the web app's Settings section or ``change_setting``.
         """
         return await _get_settings_impl(runtime, await _auth(ctx), origin_context_id)
 
@@ -179,8 +179,8 @@ def register_scope_settings_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """Change one setting where you are, after the person presses Approve.
 
         ``key`` and ``value`` are one of ``get_settings``' keys and its values, or
-        ``default`` to clear the tier's own value. ``tier`` is the ``workspace``,
-        ``agent``, ``channel`` or ``thread`` of this conversation; other places cannot be
+        ``default`` to clear the level's own value. ``tier`` is the ``workspace``,
+        ``agent``, ``channel`` or ``thread`` level of this conversation; other places cannot be
         named. ``locked`` (an admin's, not at the thread tier) makes the value final
         below. Approvals need a live admin of the chat platform; a thread's participation
         or progress plans are anyone's; the rest an admin's. Read the returned ``note``

@@ -28,7 +28,7 @@ def test_watches_keep_their_operator_gate_outside_the_feature() -> None:
     spec = FEATURES["watches"]
     assert spec.legacy_env == ("DAIMON_WATCHES__ENABLED",), "the variable is the old switch"
     assert not any(need in _SETUP for need in spec.requires), "no setup entry hides the tools"
-    assert "only once the operator enables them" in spec.doc
+    assert "only run once whoever runs Daimon allows them" in spec.doc
 
 
 def test_the_watches_doc_says_they_fire_only_once_the_operator_enables_them() -> None:

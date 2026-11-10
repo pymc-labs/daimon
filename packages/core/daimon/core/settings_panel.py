@@ -31,6 +31,8 @@ from daimon.core.features.service import (
     admin_word,
     change_feature,
     read_features,
+    tier_word,
+    where,
 )
 from daimon.core.features.service import change_refusal as feature_refusal
 from daimon.core.features.snapshot import FeaturePlace
@@ -41,8 +43,6 @@ from daimon.core.features.surface import (
     parse_choice,
     source_text,
     tier_options,
-    tier_word,
-    where,
 )
 from daimon.core.stores.identity import find_platform_principal
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker

@@ -44,7 +44,7 @@ inherits from the level above, and at the top it is the feature's built-in defau
 Settings show which level decided.
 
 An admin can lock a value at the Deployment, Workspace, Agent or Channel level. Levels
-below then cannot change it. `disabled` means Off and locked.
+below then cannot change it. A locked Off turns the feature off below.
 
 Set the deployment level with `DAIMON_FEATURES__<KEY>`, for example
 `DAIMON_FEATURES__PROGRESS_PLANS=on:locked`; a dot in a key is an
@@ -72,9 +72,9 @@ def _locked_until_set(spec: FeatureSpec) -> str | None:
 def _notes(spec: FeatureSpec) -> str:
     notes: list[str] = []
     if (held := _locked_until_set(spec)) is not None:
-        notes.append(f"{held} and locked until the operator turns it on")
+        notes.append(f"{held} and locked until whoever runs Daimon turns it on")
     if any(need != "platform_adapter" for need in spec.requires):
-        notes.append("Needs the operator's setup")
+        notes.append("Needs setup by whoever runs Daimon")
     if spec.platforms != EVERY_PLATFORM and set(spec.platforms) != set(CHAT_PLATFORMS):
         notes.append("Only " + ", ".join(sorted(p.title() for p in spec.platforms)))
     for platform, value in sorted(spec.platform_defaults.items()):

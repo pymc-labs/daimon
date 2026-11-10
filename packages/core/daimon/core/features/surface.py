@@ -24,8 +24,12 @@ from daimon.core.features.registry import (
     Tier,
 )
 from daimon.core.features.resolver import ResolvedFeature
-from daimon.core.features.service import FeatureChange, FeatureView, TierSetting
-from daimon.core.platform_words import space_for
+from daimon.core.features.service import (
+    FeatureChange,
+    FeatureView,
+    TierSetting,
+    where,
+)
 
 CATEGORIES: Final[Mapping[Category, str]] = {
     "model_input": "What the agent sees",
@@ -40,19 +44,6 @@ _UNAVAILABLE: Final[Mapping[str, str]] = {
     "requires": "Not set up",
 }
 LOCK_FLAG: Final = "lock"
-
-
-def tier_word(tier: Tier | str, platform: str | None) -> str:
-    """The tier as the platform's people say it: the workspace is the server on Discord."""
-    return space_for(platform) if tier == "workspace" else str(tier)
-
-
-def where(tier: Tier | str, platform: str | None) -> str:
-    """``this channel``, ``the server``: the tier as a phrase."""
-    word = tier_word(tier, platform)
-    if tier == "deployment":
-        return word
-    return f"the {word}" if tier in ("workspace", "agent") else f"this {word}"
 
 
 def value_text(spec: FeatureSpec, value: str, locked: bool = False) -> str:
@@ -75,7 +66,7 @@ def source_text(spec: FeatureSpec, resolved: ResolvedFeature, platform: str | No
     if resolved.tier == "default":
         return f"{text}, the default"
     if resolved.tier == "deployment":
-        return f"{text} for all of Daimon" + (", locked" if resolved.locked else "")
+        return f"{text} everywhere" + (", locked" if resolved.locked else "")
     where_ = where(resolved.tier, platform)
     return f"{text}, locked by {where_}" if resolved.locked else f"{text}, set for {where_}"
 
@@ -84,7 +75,7 @@ def own_text(spec: FeatureSpec, own: TierSetting) -> str:
     return value_text(spec, own.value, own.locked)
 
 
-OVERRIDES_OFF: Final = "Saved but ignored until the operator enables approval overrides."
+OVERRIDES_OFF: Final = "Saved, but it has no effect yet. Ask an admin to allow approval changes."
 
 
 def _ignored(spec: FeatureSpec, overrides_active: bool) -> str:

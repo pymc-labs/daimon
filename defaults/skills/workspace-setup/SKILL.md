@@ -318,17 +318,17 @@ off is the preferred answer — turn a thread on when someone asks you to follow
 it, and off again when they ask you to stop.
 
 Use the Settings group: `change_setting(key="participation", tier=..., value=...)`
-changes it at the `thread`, `channel` or `workspace` tier of this conversation, and
-`get_settings()` reads every tier and which one decided. Only this conversation's place
+changes it at the `thread`, `channel` or `workspace` level of this conversation, and
+`get_settings()` reads every level and which one decided. Only this conversation's place
 can be changed; a person changes another channel with `/settings` there or in the
 web app. The person presses Approve before a change is saved.
 
-Values are `on`, `off` and `default` (drop this tier's own setting). An admin's
-`locked=true` (not at the thread tier) makes the value final for every narrower tier.
+Values are `on`, `off` and `default` (drop this level's own setting). An admin's
+`locked=true` (not at the thread level) makes the value final for every narrower level.
 
-Resolution cascades the operator's environment, then workspace, channel and
-thread: the narrowest tier with a setting wins, except that a locked tier beats
-every tier below it. Any member may set a thread; channel and workspace tiers
+Resolution starts from the default, then the workspace, channel
+and thread: the narrowest level with a setting wins, except that a locked level
+beats every level below it. Any member may set a thread; channel and workspace levels
 require an admin (`words.admin`), and a non-admin caller is refused with no
 write. Where following threads isn't available yet, the tool says so.
 
@@ -348,7 +348,7 @@ Each finished answer ends with one line naming the agent, the time taken, what
 it cost and the money left. On by default; an admin can hide it for everyone in
 this `words.space` with `change_setting(key="cost_footer", tier="workspace", value="hidden")`
 and bring it back with `value="shown"`; `get_settings()` reads it. It can also be set
-for one channel or thread (`tier="channel"` or `"thread"`); the narrowest tier wins.
+for one channel or thread (`tier="channel"` or `"thread"`); the narrowest level wins.
 Read the returned `note` back.
 Hiding it changes nothing else: the billing panel still shows usage and credit.
 

@@ -1,4 +1,4 @@
-import { Lock, LockOpen } from "lucide-react"
+import { Ban, Lock } from "lucide-react"
 import { useState } from "react"
 
 import { InheritedSelect } from "@/components/inherited"
@@ -10,7 +10,7 @@ import { useFeatureSave, useFeatures, useFeatureSchema } from "./api"
 import type { FeaturePlace, FeatureSchema, FeatureView, Tier } from "./types"
 
 const DEFAULT = "default"
-const TIER_NAME: Record<string, string> = { deployment: "Deployment", default: "Default", workspace: "Workspace", agent: "Agent", channel: "Channel", thread: "Thread" }
+const TIER_NAME: Record<string, string> = { deployment: "Built-in", default: "Built-in", workspace: "Workspace", agent: "Agent", channel: "Channel", thread: "Thread" }
 
 type Group = { name: string; rows: { key: string; label: string; control: React.ReactNode }[] }
 
@@ -20,10 +20,10 @@ const labelOf = (s: FeatureSchema, value: string) => s.values.find((v) => v.valu
 /**
  * The controls for every feature that can be set at `tier`, grouped by category, from the schema.
  * Each control is the value set at this tier, or the inherited one with where it comes from.
- * A person who may not change it, or a lock above, sees the value in effect instead; so does
- * a value another level overrides, next to its control.
+ * A person who may not change it, or a lock above, sees the value in effect instead, with the level
+ * that locked it; so does a value another level overrides, next to its control.
  */
-function useGroups(place: FeaturePlace, tier: Tier, edit: boolean, report: (error: string | null) => void) {
+function useGroups(place: FeaturePlace, tier: Tier, edit: boolean, report: (error: string | null) => void, width?: string) {
   const schema = useFeatureSchema()
   const doc = useFeatures(place)
   const save = useFeatureSave(place)
@@ -36,25 +36,41 @@ function useGroups(place: FeaturePlace, tier: Tier, edit: boolean, report: (erro
   const control = (s: FeatureSchema, v: FeatureView) => {
     const own = v.tiers.find((t) => t.tier === tier)
     const ownValue = own && own.value !== DEFAULT ? own.value : null
-    if (v.unavailable) return <span className="text-muted-foreground">{v.summary}</span>
-    if (!edit || (v.locked && v.source !== tier)) return <span>{v.summary}</span>
+    if (v.unavailable) {
+      return (
+        <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-muted-foreground">
+          <span className="inline-flex items-center gap-1.5"><Ban className="size-3.5" />Unavailable</span>
+          <span className="text-xs">{v.unavailable}</span>
+        </span>
+      )
+    }
+    if (v.locked && v.source !== tier) {
+      return (
+        <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+          <span className="inline-flex items-center gap-1.5"><Lock className="size-3.5 text-muted-foreground" />{labelOf(s, v.value)}</span>
+          <span className="text-xs text-muted-foreground">Locked by the {(TIER_NAME[v.source] ?? "Workspace").toLowerCase()}. Ask an admin.</span>
+        </span>
+      )
+    }
+    if (!edit) return <span>{v.summary}</span>
     const overridden = ownValue !== null && v.source !== tier && v.value !== ownValue
     const lockable = s.lockable.includes(tier) && ownValue !== null ? own : undefined
     return (
       <>
         <InheritedSelect
-          bare label={s.name} value={ownValue} disabled={save.pending} className="w-60"
-          inherited={{ value: v.value, label: ownValue === null ? labelOf(s, v.value) : "", from: TIER_NAME[v.source] ?? "Default" }}
+          bare label={s.name} value={ownValue} disabled={save.pending} className={width}
+          inherited={{ value: v.value, label: ownValue === null ? labelOf(s, v.value) : "", from: TIER_NAME[v.source] ?? "Built-in" }}
           options={s.values.map((o) => ({ value: o.value, label: o.label }))}
           onChange={(next) => void run(s, v, next ?? DEFAULT, false)}
         />
         {overridden && <span className="text-xs text-muted-foreground">{v.summary}</span>}
         {lockable && (
           <Button
-            variant="ghost" size="icon-sm" disabled={save.pending} aria-pressed={lockable.locked}
-            aria-label={`${lockable.locked ? "Unlock" : "Lock"} ${s.name}`} title={lockable.locked ? "Locked below this level" : "Lock below this level"}
+            variant={lockable.locked ? "secondary" : "outline"} size="sm" disabled={save.pending} aria-pressed={lockable.locked}
+            aria-label={`${lockable.locked ? "Unlock" : "Lock"} ${s.name}`}
+            title={lockable.locked ? "Let lower levels change it" : "Stop lower levels changing it"}
             onClick={() => void run(s, v, lockable.value, !lockable.locked)}
-          >{lockable.locked ? <Lock /> : <LockOpen />}</Button>
+          ><Lock />{lockable.locked ? "Locked" : "Lock"}</Button>
         )}
       </>
     )
@@ -96,7 +112,7 @@ export function FeatureSettings({ place, tier, edit }: Props) {
 /** A page's Settings: one bordered list per category. */
 export function FeatureList({ place, tier, edit }: Props) {
   const [error, setError] = useState<string | null>(null)
-  const { groups, schema, doc } = useGroups(place, tier, edit, setError)
+  const { groups, schema, doc } = useGroups(place, tier, edit, setError, "w-60")
   return (
     <QueryState query={schema.data ? doc : schema} className="px-4 pt-6 lg:px-6">{() => (
       <div className="px-4 py-6 lg:px-6">

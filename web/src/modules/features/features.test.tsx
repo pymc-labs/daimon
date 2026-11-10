@@ -36,7 +36,7 @@ describe("FeatureSettings", () => {
 
   it("draws a control for each key set at this level, from the schema", () => {
     render(<FeatureSettings place={{ channel: "c1" }} tier="channel" edit />)
-    expect(screen.getByRole("combobox", { name: "Progress plans" })).toHaveTextContent("Default (On)")
+    expect(screen.getByRole("combobox", { name: "Progress plans" })).toHaveTextContent("Built-in default (On)")
     expect(screen.queryByRole("combobox", { name: "Setup guidance" })).not.toBeInTheDocument()
   })
 
@@ -95,9 +95,17 @@ describe("FeatureSettings", () => {
   })
 
   it("shows a value locked above as read-only", () => {
-    features = [view("progress_plans", { locked: true, source: "workspace", summary: "Off, locked by the workspace" })]
+    features = [view("progress_plans", { value: "off", locked: true, source: "workspace", summary: "Off, locked by the workspace" })]
     render(<FeatureSettings place={{ channel: "c1" }} tier="channel" edit />)
     expect(screen.queryByRole("combobox", { name: "Progress plans" })).not.toBeInTheDocument()
-    expect(screen.getByText("Off, locked by the workspace")).toBeInTheDocument()
+    expect(screen.getByText("Off")).toBeInTheDocument()
+    expect(screen.getByText("Locked by the workspace. Ask an admin.")).toBeInTheDocument()
+  })
+
+  it("shows why a feature is unavailable as a state", () => {
+    features = [view("progress_plans", { unavailable: "Needs a sandbox. Ask an admin.", tiers: [{ tier: "channel", value: "off", locked: false, text: "off" }] })]
+    render(<FeatureSettings place={{ channel: "c1" }} tier="channel" edit />)
+    expect(screen.getByText("Unavailable")).toBeInTheDocument()
+    expect(screen.getByText("Needs a sandbox. Ask an admin.")).toBeInTheDocument()
   })
 })
