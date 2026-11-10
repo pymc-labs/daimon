@@ -167,8 +167,8 @@ def recipe(
         if index == 0:
             call(
                 "get_agent",
-                {"name": "daimon", "origin_context_id": origin},
-                '{"name":"daimon","answering_agent_name":"qa-channel-agent"}',
+                {"name": "default", "origin_context_id": origin},
+                '{"name":"default","answering_agent_name":"qa-channel-agent"}',
             )
             answer = "I am daimon. qa-channel-agent answers in this channel."
         else:

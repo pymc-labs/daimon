@@ -371,7 +371,7 @@ def main() -> None:
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--budget-usd", type=Decimal, default=Decimal("25"))
     parser.add_argument("--threads-per-team", type=int, default=3)
-    parser.add_argument("--fork-from", default="daimon")
+    parser.add_argument("--fork-from", default="default")
     parser.add_argument("--bot-token-env", default="DISCORD_QA_BOT_TOKEN")
     parser.add_argument("--teardown", action="store_true")
     parser.add_argument("--no-roles", action="store_true")
