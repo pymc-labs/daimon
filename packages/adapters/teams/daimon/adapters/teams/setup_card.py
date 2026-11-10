@@ -15,7 +15,6 @@ from daimon.adapters.teams.billing_panel import channel_name_text
 from daimon.adapters.teams.card import notice_adaptive_card
 from daimon.adapters.teams.card_actions import button, clip, heading, open_in_web
 from daimon.adapters.teams.channel_settings_card import CHANNEL_DIALOG
-from daimon.core import channel_backend
 from daimon.core.agent_detail_lists import (
     DETAIL_LIST_COLLAPSED_COUNT,
     DetailListName,
@@ -23,8 +22,10 @@ from daimon.core.agent_detail_lists import (
 )
 from daimon.core.agent_details import AgentDetails
 from daimon.core.answering_map import AnsweringMap
+from daimon.core.backend_refusals import RefusalAction
 from daimon.core.github_panel import GrantsPanel
 from daimon.core.github_repo_auth import normalize_owner_repo
+from daimon.core.model_switch import REVIEW_AGAIN_LABEL, SWITCH_BACK_LABEL, ModelPicker
 from daimon.core.models_catalog import ModelChoice
 from daimon.core.panel_operator_tokens import PANEL_SCOPES, PANEL_TTL_DAYS, operator_token_line
 from daimon.core.platform_words import words_for
@@ -39,7 +40,6 @@ from daimon.core.setup_conversations import (
 )
 from daimon.core.skills.ingest import SkillPreview
 from daimon.core.stores.domain import McpTokenRow
-from daimon.core.turn.notices import conversations_follow_line
 from microsoft_teams.cards import (
     Action,
     ActionSet,
@@ -58,7 +58,6 @@ from microsoft_teams.cards import (
     TextBlock,
     TextInput,
 )
-from mux.contracts.ids import Provider
 
 VERB = "agent_setup"
 CREATE_DIALOG = "agent_create"
@@ -83,6 +82,8 @@ _LIST_HEADINGS: dict[DetailListName, str] = {
     "keys": "Keys",
 }
 
+_MODEL_LIMIT = 100
+
 Op = Literal[
     "agents",
     "details",
@@ -92,6 +93,8 @@ Op = Literal[
     "backend_preview",
     "backend_confirm",
     "backend_cancel",
+    "backend_back",
+    "backend_again",
 ]
 
 
@@ -232,8 +235,7 @@ def details_card(
     is_admin: bool,
     github_panel: GrantsPanel | None = None,
     expanded: DetailListName | None = None,
-    backend_options: tuple[Provider, ...] = (),
-    backend_selection: Provider | None = None,
+    model_picker: ModelPicker | None = None,
     channel_names: Mapping[str, str] | None = None,
     owned: bool = False,
 ) -> AdaptiveCard:
@@ -275,16 +277,17 @@ def details_card(
         )
         body.append(_text("\n".join(lines)))
     body += _detail_lists(details, page=page, expanded=expanded)
-    if backend_options:
+    if model_picker is not None and model_picker.choices:
+        shown = model_picker.limited(_MODEL_LIMIT)
+        current = next((c.value for c in shown if c.model == model_picker.current), None)
         body.extend(
             [
                 ChoiceSetInput(
-                    id="model_backend",
-                    label="Model provider",
-                    value=backend_selection or "clear",
+                    id="model_pick",
+                    label="Model",
+                    value=current,
                     choices=[
-                        Choice(title=channel_backend.DEFAULT_BACKEND_LABEL, value="clear"),
-                        *(Choice(title=provider, value=provider) for provider in backend_options),
+                        Choice(title=_model_title(choice), value=choice.value) for choice in shown
                     ],
                 ),
                 ActionSet(actions=[_button("Preview", "backend_preview", agent=details.name)]),
@@ -305,44 +308,35 @@ def details_card(
     return _card(details.name, body, actions)
 
 
-def backend_preview_card(
-    preview: channel_backend.CompatibilityPreview, *, agent_name: str, clear: bool
+def _model_title(choice: ModelChoice) -> str:
+    return f"{choice.label} ({choice.description})" if choice.description else choice.label
+
+
+def model_switch_card(
+    lines: Sequence[str],
+    *,
+    agent_name: str,
+    value: str,
+    revision: int = 0,
+    digest: str = "",
+    confirm: bool = False,
+    action: RefusalAction | None = None,
 ) -> AdaptiveCard:
-    selection = "Use default" if clear else preview.target_backend
-    lines = [f"Model provider: {selection}"]
-    for label, items in (
-        ("Unsupported skills", preview.unsupported_skills),
-        ("Unsupported connections", preview.unsupported_mcps),
-        ("Unsupported capabilities", preview.unsupported_capabilities),
-        ("Shared-thread limits", preview.shared_thread_limits),
-    ):
-        names = ", ".join(items) or "None"
-        shown = names if len(names) <= 500 else names[:500] + "… (truncated)"
-        lines.append(f"{label}: {shown}")
-    lines.extend(
-        [
-            preview.cost_line,
-            conversations_follow_line(agent_name, None if clear else preview.target_backend)
-            + " Channel settings still apply.",
-        ]
-    )
-    if not preview.allowed:
-        lines.append("This provider is off for this organisation. Pick another.")
-    actions: list[Action] = [_button("Cancel", "backend_cancel", agent=agent_name)]
-    if preview.allowed:
-        actions.insert(
-            0,
+    """A pick's preview or refusal: Confirm once, or the one step the refusal offers."""
+    fields: dict[str, str | int] = {"agent": agent_name, "target": value}
+    actions: list[Action] = []
+    if confirm:
+        actions.append(
             _button(
-                "Confirm",
-                "backend_confirm",
-                "positive",
-                agent=agent_name,
-                target="clear" if clear else preview.target_backend,
-                revision=preview.setting_revision,
-                digest=preview.digest,
-            ),
+                "Confirm", "backend_confirm", "positive", revision=revision, digest=digest, **fields
+            )
         )
-    return _card("Model provider", [_text("\n".join(lines)[:3000])], actions)
+    elif action == "switch_back_to_claude":
+        actions.append(_button(SWITCH_BACK_LABEL, "backend_back", "positive", **fields))
+    elif action in ("fresh_preview", "confirm_again"):
+        actions.append(_button(REVIEW_AGAIN_LABEL, "backend_again", "positive", **fields))
+    actions.append(_button("Cancel", "backend_cancel", agent=agent_name))
+    return _card("Model", [_text("\n".join(lines)[:3000])], actions)
 
 
 def routing_card(
