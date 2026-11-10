@@ -17,6 +17,7 @@ class Action(StrEnum):
     UPDATED = "updated"
     SKIPPED = "skipped"
     ARCHIVED = "archived"
+    RENAMED = "renamed"
     DELETED = "deleted"
     FAILED = "failed"
 

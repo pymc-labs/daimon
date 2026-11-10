@@ -29,6 +29,7 @@ from daimon.core.defaults.preflight import check_models_accepted
 from daimon.core.defaults.reconcile_agents import reconcile_agent
 from daimon.core.defaults.reconcile_environments import reconcile_environment
 from daimon.core.defaults.reconcile_skills import reconcile_skill
+from daimon.core.defaults.rename_agents import pending_renames, rename_seeded_agent
 from daimon.core.defaults.report import Action, ApplyReport, ResourceKind, ResourceOutcome
 from daimon.core.defaults.sweep import (
     sweep_removed_agents,
@@ -111,6 +112,19 @@ async def _run_per_resource(
     kind: ResourceKind,
     name: str,
 ) -> ResourceOutcome:
+    outcome = await _run_isolated(report, fn, kind=kind, name=name)
+    assert outcome is not None, "fn returns an outcome"
+    return outcome
+
+
+async def _run_isolated(
+    report: ApplyReport,
+    fn: Callable[[], Awaitable[ResourceOutcome | None]],
+    *,
+    kind: ResourceKind,
+    name: str,
+) -> ResourceOutcome | None:
+    """Run one step, recording a failure as its outcome; None (nothing done) adds nothing."""
     try:
         outcome = await fn()
     except (APIError, DaimonError) as err:
@@ -134,7 +148,8 @@ async def _run_per_resource(
             action=Action.FAILED,
             error=f"internal error: {type(err).__name__}",
         )
-    report.add(outcome)
+    if outcome is not None:
+        report.add(outcome)
     return outcome
 
 
@@ -191,6 +206,29 @@ async def _reconcile_core(
                 f"aborting before any writes. Rejections: {failed}"
             )
 
+    # Rename seeded agents in place before the agent pass and sweep: the sweep
+    # would archive the old name and the pass would create the new one. While a
+    # rename is blocked, failed or (dry run) pending, both are skipped.
+    lock_key = f"{_RECONCILE_LOCK_NAMESPACE}:{tenant_id}"
+    skip_agents = False
+    for old, new in pending_renames({s.name for s in agent_specs}):
+        outcome = await _run_isolated(
+            report,
+            lambda old=old, new=new: rename_seeded_agent(
+                client,
+                session_factory,
+                tenant_id=tenant_id,
+                old=old,
+                new=new,
+                lock_key=lock_key,
+                dry_run=dry_run,
+            ),
+            kind="agent",
+            name=new,
+        )
+        if outcome is not None and (outcome.action is Action.FAILED or dry_run):
+            skip_agents = True
+
     async def _run_passes(skill_session: AsyncSession | None) -> ApplyReport:
         # Skill pass.
         skills_view = None
@@ -236,7 +274,7 @@ async def _reconcile_core(
 
         # Agent pass — account_id threads the guild ownership axis.
         seeded_agent_ids: set[str] = set()
-        for spec in agent_specs:
+        for spec in [] if skip_agents else agent_specs:
             outcome = await _run_per_resource(
                 report,
                 lambda spec=spec: reconcile_agent(
@@ -257,7 +295,7 @@ async def _reconcile_core(
 
         # The seeded pass owns its own fingerprints. User-created agents have no
         # spec to reconcile, so refresh their system guidance separately.
-        if not dry_run:
+        if not dry_run and not skip_agents:
             await backfill_credential_guidance(
                 client,
                 tenant_id=tenant_id,
@@ -276,9 +314,10 @@ async def _reconcile_core(
             tenant_scoped_display_title(tenant_id=tenant_id, name=name)
             for name in skill_names_present
         }
-        await _run_sweep(
-            report, sweep_removed_agents, "agent", client, present_agents, tenant_id, dry_run
-        )
+        if not skip_agents:
+            await _run_sweep(
+                report, sweep_removed_agents, "agent", client, present_agents, tenant_id, dry_run
+            )
         await _run_sweep(
             report,
             sweep_removed_environments,
@@ -310,7 +349,6 @@ async def _reconcile_core(
     # The transaction context releases it on success, exception, or cancellation.
     # Share this session with the skill pass to avoid nested pool checkout while
     # holding a lock connection (some test and operator pools have one connection).
-    lock_key = f"{_RECONCILE_LOCK_NAMESPACE}:{tenant_id}"
     async with session_factory() as lock_session, lock_session.begin():
         await lock_session.execute(
             text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),

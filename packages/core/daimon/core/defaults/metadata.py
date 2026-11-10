@@ -39,6 +39,8 @@ MA_METADATA_KEY_ACCOUNT = "daimon_account"
 # Only agent-chat-created sessions can be driven by headless MCP/hub callers.
 MA_METADATA_KEY_AGENT_CHAT = "daimon_agent_chat"
 MA_METADATA_KEY_MANAGED = "daimon_managed"
+# The seeded built-in agent (`defaults/agents/default.yaml`); it answers setup conversations.
+BUILTIN_AGENT_NAME = "default"
 # Set by an outside release pipeline that publishes the agent: the release's name,
 # when it was cut (ISO 8601 with offset) and its https page. Daimon only reads them.
 MA_METADATA_KEY_SOURCE_RELEASE = "source_release"
