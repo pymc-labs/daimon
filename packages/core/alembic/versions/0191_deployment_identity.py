@@ -5,8 +5,8 @@ does). It stops two installs that share an OpenAI project from adopting each
 other's per-tenant environments. A downgrade drops the table; the next upgrade
 stamps a new id, so environments named under the old one are not adopted again.
 
-Revision ID: 0190_deployment_identity
-Revises: 0189_workspace_feature_values
+Revision ID: 0191_deployment_identity
+Revises: 0190_long_job_features
 
 downgrade: destructive
 """
@@ -17,8 +17,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0190_deployment_identity"
-down_revision: str | None = "0189_workspace_feature_values"
+revision: str = "0191_deployment_identity"
+down_revision: str | None = "0190_long_job_features"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
