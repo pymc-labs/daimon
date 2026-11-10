@@ -12,6 +12,87 @@ Set the deployment level with `DAIMON_FEATURES__<KEY>`, for example
 underscore (`DAIMON_FEATURES__TOOL_BASH`). Set the others with `/settings` in chat,
 the `change_setting` MCP tool, the web app or `daimon features`.
 
+## All features
+
+Where each feature can be set, and its default.
+
+| Feature | Key | Kind | Default | Deployment | Server | Agent | Channel | Thread | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Chat history | `history_depth` | Model input | 100 messages | ✓ | ✓ | ✓ | ✓ |  |  |
+| Setup guidance | `guidance` | Model input | On | ✓ | ✓ | ✓ |  |  |  |
+| Daimon tools | `daimon_tools` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Always On on Gemini, OpenAI |
+| Built-in tool: bash | `tool.bash` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
+| Built-in tool: read | `tool.read` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
+| Built-in tool: edit | `tool.edit` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
+| Built-in tool: write | `tool.write` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
+| Built-in tool: grep | `tool.grep` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
+| Built-in tool: glob | `tool.glob` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
+| Built-in tool: web fetch | `tool.web_fetch` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
+| Built-in tool: web search | `tool.web_search` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
+| Message controls | `turn_controls` | Model input | Full | ✓ | ✓ | ✓ |  |  |  |
+| Web app links | `web_awareness` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
+| Connected server briefing | `mcp_briefing` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
+| Run instructions | `origin_fragments` | Model input | On |  |  | ✓ |  |  |  |
+| Keys file | `agent_env_file` | Model input | On |  |  | ✓ |  |  | Not on Gemini, OpenAI |
+| Carry working files | `checkpoint_prompt` | Model input | On | ✓ | ✓ | ✓ |  |  | Not on Gemini, OpenAI |
+| Platform prompt | `platform_prompt` | Model input | On | ✓ | ✓ | ✓ |  |  | Always Off on OpenAI |
+| Platform skills | `platform_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ |  | Not on Gemini, OpenAI |
+| Agent skills | `agent_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ |  | Always On on Gemini, OpenAI |
+| Channel skills | `channel_skills` | Model input | On |  | ✓ | ✓ | ✓ |  | Not on Gemini, OpenAI |
+| Thread participation | `participation` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ | Only Discord, Teams |
+| Progress plans | `progress_plans` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |
+| Cost footer | `cost_footer` | Chat | Shown |  | ✓ |  | ✓ | ✓ |  |
+| Thread titles | `thread_naming` | Chat | On | ✓ | ✓ |  | ✓ |  | Only Discord |
+| Typed mentions | `plain_text_mentions` | Chat | Off | ✓ | ✓ |  | ✓ |  |  |
+| Completion pings | `completion_pings` | Chat | Off | ✓ | ✓ |  | ✓ |  |  |
+| Table images | `table_rendering` | Chat | On | ✓ | ✓ |  | ✓ |  | Only Discord, Slack; Off by default on Slack |
+| Budget notices | `budget_notices` | Chat | On | ✓ | ✓ |  |  |  |  |
+| Keep messages apart | `status_log` | Chat | Off | ✓ | ✓ |  | ✓ |  |  |
+| Cost on hosted-model footers | `native_footer_cost` | Chat | Off | ✓ | ✓ |  |  |  |  |
+| Vote buttons | `message_feedback` | Chat | On | ✓ | ✓ |  | ✓ |  | Only Discord |
+| Reply hint | `unmentioned_reply_hint` | Chat | Off | ✓ | ✓ |  | ✓ |  | Only Discord |
+| No-writers notice | `writers_none_notice` | Chat | Off | ✓ | ✓ |  | ✓ |  | Only Discord |
+| Waiting card | `waiting_card` | Chat | Off | ✓ | ✓ |  |  |  | Only Discord |
+| Repository memory | `repo_memory` | Capability | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |
+| Context provider | `context_provider` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
+| Personal memory | `memory_personal` | Capability | On | ✓ | ✓ | ✓ | ✓ |  | Always Off on Gemini, OpenAI |
+| Shared memory | `memory_shared` | Capability | On | ✓ | ✓ | ✓ | ✓ |  | Always On on Gemini, OpenAI |
+| Channel memory | `memory_channel` | Capability | On |  | ✓ | ✓ | ✓ |  | Not on Gemini, OpenAI |
+| Private channel messages | `private_channel_messages` | Capability | Off | ✓ | ✓ |  | ✓ |  | Only Teams |
+| Direct messages | `direct_messages` | Capability | Off | ✓ | ✓ |  |  |  | Only Discord, Slack |
+| Web app: chat | `web.chat` | Capability | On | ✓ | ✓ |  |  |  |  |
+| Web app: agents | `web.agents` | Capability | On | ✓ | ✓ |  |  |  |  |
+| Web app: channels | `web.channels` | Capability | On | ✓ | ✓ |  |  |  |  |
+| Web app: routines | `web.routines` | Capability | On | ✓ | ✓ |  |  |  |  |
+| Web app: credits | `web.credits` | Capability | On | ✓ | ✓ |  |  |  |  |
+| Web app: integrations | `web.integrations` | Capability | On | ✓ | ✓ |  |  |  |  |
+| Watches | `watches` | Capability | On | ✓ | ✓ | ✓ | ✓ |  |  |
+| Routines | `routines` | Capability | On | ✓ | ✓ | ✓ | ✓ |  |  |
+| Long jobs | `long_jobs` | Capability | On | ✓ | ✓ | ✓ |  |  |  |
+| Cloud computers | `compute` | Capability | On | ✓ | ✓ | ✓ |  |  |  |
+| Notebooks | `notebooks` | Capability | On | ✓ | ✓ | ✓ | ✓ |  |  |
+| Report publishing | `report_publish` | Capability | On | ✓ | ✓ | ✓ | ✓ |  |  |
+| Video transcripts | `media` | Capability | On | ✓ | ✓ | ✓ | ✓ |  |  |
+| Microsoft 365 | `microsoft_365` | Capability | On | ✓ | ✓ | ✓ |  |  |  |
+| Chart images in answers | `artifact_images` | Capability | On | ✓ | ✓ |  |  |  |  |
+| Ask a person | `support_escalation` | Capability | On | ✓ | ✓ |  |  |  |  |
+| GitHub access | `github` | Capability | On | ✓ | ✓ | ✓ | ✓ |  |  |
+| Lead intake | `lead_intake` | Capability | On | ✓ | ✓ | ✓ |  |  |  |
+| Posting to others | `outbound_reach` | Capability | On | ✓ | ✓ | ✓ | ✓ |  |  |
+| Long job dollar cap | `long_jobs_max_usd` | Limit | $20 | ✓ | ✓ | ✓ |  |  |  |
+| Long job time limit | `long_jobs_max_deadline` | Limit | 70 minutes | ✓ | ✓ | ✓ |  |  |  |
+| New threads per reply | `outbound_threads` | Limit | 2 | ✓ | ✓ | ✓ | ✓ |  |  |
+| Places per reply | `outbound_places` | Limit | 2 | ✓ | ✓ | ✓ | ✓ |  |  |
+| People tagged per reply | `outbound_people` | Limit | 5 | ✓ | ✓ | ✓ | ✓ |  |  |
+| Post length outside the conversation | `outbound_length` | Limit | 1500 | ✓ | ✓ | ✓ | ✓ |  |  |
+| Daily spend per model | `daily_model_cap` | Limit | $20 | ✓ | ✓ | ✓ |  |  |  |
+| Approvals | `approvals` | Guardrail | Ask |  | ✓ |  | ✓ | ✓ |  |
+| Read-only memory in direct messages | `dm_memory_read_only` | Guardrail | Writable | ✓ | ✓ |  |  |  | Only Discord, Slack |
+| Tool safety | `tool_safety` | Guardrail | Off | ✓ |  |  |  |  |  |
+| Reach check | `reach_budget` | Guardrail | On | ✓ | ✓ | ✓ | ✓ |  |  |
+| Built-in tools in routines | `unattended_capabilities` | Guardrail | Per routine | ✓ | ✓ | ✓ |  |  |  |
+| Routines must say where they post | `require_routine_destination` | Guardrail | Optional | ✓ | ✓ |  |  |  |  |
+
 ## Approvals
 
 Ask before an agent writes to a third-party service. Decided most specific first: only a native platform admin, checked live, may change it, and it applies only once the operator enables approval overrides.

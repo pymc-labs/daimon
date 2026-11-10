@@ -8,7 +8,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from daimon.core.features.registry import FEATURES
+from daimon.core.features.registry import EVERY_PLATFORM, FEATURES, FeatureSpec
+from daimon.core.stores.domain import CHAT_PLATFORMS
 
 OUT = Path(__file__).resolve().parents[1] / "docs" / "features.md"
 _TIER = {
@@ -19,6 +20,13 @@ _TIER = {
     "thread": "Thread",
 }
 _BACKEND = {"gemini": "Gemini", "openai": "OpenAI", "selfhosted": "self-hosted"}
+_CATEGORY = {
+    "model_input": "Model input",
+    "chat": "Chat",
+    "capabilities": "Capability",
+    "limits": "Limit",
+    "guardrails": "Guardrail",
+}
 _COMBINE = {
     "most_specific": "Most specific wins",
     "ceiling": "Off above is a ceiling",
@@ -41,8 +49,39 @@ the `change_setting` MCP tool, the web app or `daimon features`.
 """
 
 
+def _notes(spec: FeatureSpec) -> str:
+    notes: list[str] = []
+    if spec.platforms != EVERY_PLATFORM and set(spec.platforms) != set(CHAT_PLATFORMS):
+        notes.append("Only " + ", ".join(sorted(p.title() for p in spec.platforms)))
+    for platform, value in sorted(spec.platform_defaults.items()):
+        notes.append(f"{spec.values.get(value, value)} by default on {platform.title()}")
+    by_note: dict[str, list[str]] = {}
+    for backend, tiers in sorted(spec.backend_tiers.items()):
+        note = f"Up to {_TIER[tiers[-1]]} on" if tiers else "Not on"
+        by_note.setdefault(note, []).append(_BACKEND.get(backend, backend))
+    for backend, value in sorted(spec.backend_fixed.items()):
+        note = f"Always {spec.values.get(value, value)} on"
+        by_note.setdefault(note, []).append(_BACKEND.get(backend, backend))
+    notes += [f"{note} {', '.join(backends)}" for note, backends in by_note.items()]
+    return "; ".join(notes)
+
+
+def summary() -> str:
+    head = "| Feature | Key | Kind | Default | " + " | ".join(_TIER.values()) + " | Notes |"
+    rows = [head, "|" + " --- |" * (len(_TIER) + 5)]
+    for spec in sorted(FEATURES.values(), key=lambda s: list(_CATEGORY).index(s.category)):
+        levels = " | ".join("✓" if tier in spec.tiers else "" for tier in _TIER)
+        default = spec.values.get(spec.default, spec.default)
+        rows.append(
+            f"| {spec.name} | `{spec.key}` | {_CATEGORY[spec.category]} | {default} | "
+            f"{levels} | {_notes(spec)} |"
+        )
+    intro = "## All features\n\nWhere each feature can be set, and its default.\n\n"
+    return intro + "\n".join(rows) + "\n"
+
+
 def render() -> str:
-    parts = [_INTRO]
+    parts = [_INTRO, summary()]
     for spec in FEATURES.values():
         values = ", ".join(f"`{key}` ({label})" for key, label in spec.values.items())
         rows = [

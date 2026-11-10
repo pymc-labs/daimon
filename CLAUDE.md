@@ -75,7 +75,9 @@ Declare its effect, tiers (per backend), binding, `requires` and `depends_on`.
 Read it from the `FeatureSnapshot` that `resolve_features` builds on every session
 and turn path; write it with `change_feature`.
 `packages/core/tests/features/test_feature_contracts.py` checks reads, writes and
-paths. Then run `scripts/generate_feature_reference.py` for `docs/features.md`.
+paths. A new feature, or a changed default, tier or platform, must update the "All
+features" table in `docs/features.md`: re-run `scripts/generate_feature_reference.py`
+(CI runs it with `--check`) and add a `CHANGELOG.md` line.
 
 ## Documentation
 
@@ -86,7 +88,8 @@ It grew to 120k words by every PR appending a paragraph; these rules stop that.
 **Generated pages.** Settings: `docs/configuration.md` and `.env.example`, from
 the field's `description=` (`scripts/generate_config_reference.py`,
 `scripts/generate_env_example.py`). MCP tools: `docs/mcp-tools.md`, from the
-docstring (`scripts/generate_mcp_tool_catalogue.py`). Re-run the generator;
+docstring (`scripts/generate_mcp_tool_catalogue.py`). Features: `docs/features.md`,
+from the registry (`scripts/generate_feature_reference.py`). Re-run the generator;
 CI runs each with `--check`. Keep descriptions to one short paragraph.
 
 **When to touch a hand-written page.** Only when a fact a reader acts on
