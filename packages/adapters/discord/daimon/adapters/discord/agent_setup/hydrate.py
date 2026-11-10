@@ -445,7 +445,9 @@ async def load_details_for(
             )
             state.avatar_urls[agent.name] = identity.avatar_url
     if state.is_admin and channel_backend.backend_selection_enabled(runtime.settings.turn):
-        service = channel_backend.make_backend_service(runtime.sessionmaker, runtime.settings.turn)
+        service = channel_backend.make_backend_service(
+            runtime.sessionmaker, runtime.settings.turn, capture_source=channel_backend.NO_CAPTURE
+        )
         state.backend_options = ()
         state.backend_selection = None
         selection = await service.read_selection(

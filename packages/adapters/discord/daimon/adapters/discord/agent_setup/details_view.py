@@ -42,7 +42,7 @@ from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.layout import hairline
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core import channel_backend
+from daimon.core import backend_capture, channel_backend
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_detail_lists import (
     DETAIL_LIST_COLLAPSED_COUNT,
@@ -51,7 +51,7 @@ from daimon.core.agent_detail_lists import (
 )
 from daimon.core.agent_details import AgentDetails, RepoBinding
 from daimon.core.agent_identity import identity_enabled_for, is_builtin_agent
-from daimon.core.authz import build_subject
+from daimon.core.authz import Subject, build_subject
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.errors import DaimonError
 from daimon.core.github_repo_auth import RepoAccess, normalize_owner_repo
@@ -557,6 +557,22 @@ class DetailsView(PanelViewBase):
             return False
         return True
 
+    async def _backend_service(
+        self, interaction: discord.Interaction
+    ) -> tuple[channel_backend.AgentBackendService, Subject]:
+        """The backend service reading the agent's own source as the clicking admin."""
+        subject = build_subject(
+            is_admin=await is_guild_admin(interaction, action=DelegatedAction.AGENT_SETTINGS),  # pyright: ignore[reportArgumentType]
+            platform_user_id=str(interaction.user.id),
+        )
+        capture = backend_capture.for_agent(
+            self.runtime.turn_deps, account_id=self.state.account_id, subject=subject
+        )
+        service = channel_backend.make_backend_service(
+            self.runtime.sessionmaker, self.runtime.settings.turn, capture_source=capture
+        )
+        return service, subject
+
     async def _backend_audit(
         self, interaction: discord.Interaction, *, outcome: PanelOutcome, reason: str
     ) -> None:
@@ -581,9 +597,7 @@ class DetailsView(PanelViewBase):
             return
         await interaction.response.defer()
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(self.state.guild_id))
-        service = channel_backend.make_backend_service(
-            self.runtime.sessionmaker, self.runtime.settings.turn
-        )
+        service, _subject = await self._backend_service(interaction)
         clear = select.values[0] == "clear"
         target = BackendConfig.model_validate(
             {"backend": None if clear else select.values[0]}
@@ -634,16 +648,9 @@ class DetailsView(PanelViewBase):
             return
         await interaction.response.defer()
         preview = self.backend_preview
-        service = channel_backend.make_backend_service(
-            self.runtime.sessionmaker, self.runtime.settings.turn
-        )
+        service, subject = await self._backend_service(interaction)
         actor = channel_backend.BackendActor(
-            tenant_id=preview.tenant_id,
-            account_id=self.state.account_id,
-            subject=build_subject(
-                is_admin=await is_guild_admin(interaction, action=DelegatedAction.AGENT_SETTINGS),  # pyright: ignore[reportArgumentType]
-                platform_user_id=str(interaction.user.id),
-            ),
+            tenant_id=preview.tenant_id, account_id=self.state.account_id, subject=subject
         )
         try:
             agent = await channel_backend.load_backend_agent(
@@ -663,6 +670,7 @@ class DetailsView(PanelViewBase):
                     preview.setting_revision,
                     actor,
                     expected_preview_digest=preview.digest,
+                    accepted_drops=preview.declared_drops,
                 )
         except channel_backend.AgentBackendRefused as exc:
             await self._backend_audit(interaction, outcome="denied", reason=exc.reason)
