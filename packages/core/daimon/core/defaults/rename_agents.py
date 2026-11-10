@@ -32,6 +32,7 @@ from daimon.core.errors import DefaultsError
 from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import update_agent
+from daimon.core.stores.agent_avatars import normalize_agent_name
 from daimon.core.stores.agent_rename import (
     SelfHostedState,
     inspect_selfhosted_rename,
@@ -90,7 +91,13 @@ def _reader_sources(agent: BetaManagedAgentsAgent) -> list[str]:
 
 
 def _named(agents: Collection[BetaManagedAgentsAgent], name: str) -> list[BetaManagedAgentsAgent]:
-    return [agent for agent in agents if agent.metadata.get(MA_METADATA_KEY_NAME) == name]
+    """`agents` whose name matches `name` in any case, as agent names compare."""
+    wanted = normalize_agent_name(name)
+    return [
+        agent
+        for agent in agents
+        if normalize_agent_name(agent.metadata.get(MA_METADATA_KEY_NAME, "")) == wanted
+    ]
 
 
 def _legacy_readers(

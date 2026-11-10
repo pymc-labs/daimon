@@ -234,10 +234,11 @@ async def test_apply_when_reader_source_is_not_seeded_then_reader_stays(
         assert {"default", "default-reader"} == set(live), "the seeded agent's reader follows it"
 
 
+@pytest.mark.parametrize("name", ["default", "Default"])
 async def test_apply_when_only_own_default_exists_then_fails_without_adopting_it(
-    tmp_path: Path, db_session_factory: async_sessionmaker[AsyncSession]
+    name: str, tmp_path: Path, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    own = ma_agent(id="ag_own", name="default", tenant_id=_TENANT)
+    own = ma_agent(id="ag_own", name=name, tenant_id=_TENANT)
     state = FakeMAState()
     _seed(state, own)
 
@@ -245,8 +246,8 @@ async def test_apply_when_only_own_default_exists_then_fails_without_adopting_it
 
     assert report.is_failure(), "a workspace's own default blocks the seeded agent"
     live = _live(state)
-    assert list(live) == ["default"], f"nothing is created or archived: {live}"
-    metadata = live["default"]["metadata"]
+    assert list(live) == [name], f"nothing is created or archived: {live}"
+    metadata = live[name]["metadata"]
     assert isinstance(metadata, dict)
     assert MA_METADATA_KEY_MANAGED not in metadata, "the workspace's agent is never stamped managed"
 
