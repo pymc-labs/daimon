@@ -349,7 +349,7 @@ async def change_refusal(
             await _native_admin(sessions, settings, actor, place.platform)
         elif not await may_change(actor, spec, tier, locked=locked, agent_id=place.agent_id):
             raise needs_admin(spec, place.platform)
-        if value is not None and spec.combine == "stricter":
+        if value is not None and spec.combine != "most_specific":
             async with sessions() as session:
                 values = await _values_at(session, settings, spec, place)
             above = resolve_above(spec, values, tier)
@@ -444,13 +444,19 @@ def _locked_above(
 
 
 def _loosens(spec: FeatureSpec, after: TierSetting, above: ResolvedFeature) -> bool:
-    """A guardrail below the deployment can only tighten what applies above it."""
-    return (
-        spec.combine == "stricter"
-        and after.tier != "deployment"
-        and after.value != DEFAULT
-        and stricter_than(spec, after.value, above.value) < 0
-    )
+    """A write that resolution would override: the stricter of a guardrail, an Off capability
+    turned back on, a limit raised above the one in force above it. Defaults decide nothing."""
+    if after.tier == "deployment" or after.value == DEFAULT:
+        return False
+    match spec.combine:
+        case "stricter":
+            return stricter_than(spec, after.value, above.value) < 0
+        case "ceiling":
+            return above.tier != "default" and above.value == spec.off and after.value != spec.off
+        case "minimum":
+            return above.tier != "default" and float(after.value) > float(above.value)
+        case "most_specific":
+            return False
 
 
 def _looser_than_above(
@@ -459,9 +465,15 @@ def _looser_than_above(
     where = (
         "everywhere" if above.tier in ("deployment", "default") else f"at the {above.tier} level"
     )
+    narrow = {
+        "stricter": "can only make it stricter",
+        "ceiling": "can't turn it on",
+        "minimum": "can only choose that or lower",
+        "most_specific": "can't change it",
+    }[spec.combine]
     return _refused(
-        f"{spec.name} is {spec.label(above.value)} {where}, so this {tier} can only make it "
-        f"stricter. Ask {admin_word(place.platform)}.",
+        f"{spec.name} is {spec.label(above.value)} {where}, so this {tier} {narrow}. "
+        f"Ask {admin_word(place.platform)}.",
         "looser_than_above",
     )
 
@@ -560,9 +572,7 @@ async def _write_in(
         channel_id=place.channel_id
         if tier in ("channel", "thread") and place.channel_id
         else WORKSPACE_ID,
-        setting=_THREAD_SETTING.get(spec.key, cast(ChannelSetting, spec.key))
-        if tier == "thread"
-        else cast(ChannelSetting, spec.key),
+        setting=_THREAD_SETTING.get(spec.key, spec.key) if tier == "thread" else spec.key,
         before=_history(before, place),
         after=_history(after, place),
         actor_account_id=actor.account_id,

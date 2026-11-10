@@ -604,31 +604,10 @@ class ChannelBudgetRow(BaseModel):
 
 ChangeSurface = Literal["web", "chat", "panel", "cli"]
 """Where a channel change was made: the web app, a chat tool, a platform panel, the CLI."""
-ChannelSetting = Literal[
-    "default_agent",
-    "kept_agents",
-    "access",
-    "budget",
-    "participation",
-    "progress_plans",
-    "environment",
-    "skills",
-    "provider_pin",
-    "channel_copy",
-    "thread_participation",
-    "thread_progress_plans",
-    "thread_rule",
-    "thread_handoff",
-    "approvals",
-    "thread_approvals",
-    "cost_footer",
-    "tool_safety",
-    "reach_budget",
-    "unattended_capabilities",
-    "require_routine_destination",
-]
-"""What a change record names. The `thread_*` settings are a thread's own, recorded under
-its channel with the thread id in the values."""
+ChannelSetting = str
+"""What a change record names: a legacy channel setting, a `thread_*` setting or any feature key.
+The `thread_*` settings are a thread's own, recorded under its channel with the thread id in the
+values. Open on purpose: a feature write records its registry key."""
 
 
 class ChannelChangeRow(BaseModel):
