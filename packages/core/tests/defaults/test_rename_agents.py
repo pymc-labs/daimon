@@ -403,3 +403,36 @@ async def test_rename_when_reader_name_differs_in_case_then_reader_is_renamed(
     metadata = live["default-reader"]["metadata"]
     assert isinstance(metadata, dict)
     assert metadata[MA_METADATA_KEY_NAME] == "default-reader", "the tag keeps the reader suffix"
+
+
+async def test_apply_when_new_reader_serves_renamed_agent_then_leaves_old_reader(
+    tmp_path: Path, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The agent moved, its reader rename failed, and a turn then made `default-reader`."""
+    state = FakeMAState()
+    _seed(
+        state,
+        ma_agent(id="ag_daimon", name="default", tenant_id=_TENANT, metadata=_MANAGED),
+        ma_agent(
+            id="ag_old_reader",
+            name="daimon-reader",
+            tenant_id=_TENANT,
+            metadata={MA_METADATA_KEY_READER_OF: "old", MA_METADATA_KEY_READER_SOURCE: "daimon"},
+        ),
+        ma_agent(
+            id="ag_new_reader",
+            name="default-reader",
+            tenant_id=_TENANT,
+            metadata={MA_METADATA_KEY_READER_OF: "new", MA_METADATA_KEY_READER_SOURCE: "default"},
+        ),
+    )
+    root = _tree(tmp_path)
+
+    for attempt in ("first", "second"):
+        report = await _apply(db_session_factory, state, root, dry_run=False)
+
+        assert not report.is_failure(), f"the {attempt} apply is not blocked: {report}"
+        assert ("default", Action.RENAMED) not in _actions(report), "no rename is left to do"
+        assert set(_live(state)) == {"default", "daimon-reader", "default-reader"}, (
+            "the new reader stays and the stale old reader is left unarchived"
+        )

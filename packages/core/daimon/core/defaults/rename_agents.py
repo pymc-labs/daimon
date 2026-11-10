@@ -25,6 +25,7 @@ from daimon.core.defaults.metadata import (
     LEGACY_AGENT_RENAMES,
     MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_NAME,
+    MA_METADATA_KEY_READER_OF,
     MA_METADATA_KEY_READER_SOURCE,
 )
 from daimon.core.defaults.report import Action, ResourceOutcome
@@ -107,7 +108,11 @@ def _legacy_readers(
 
     A live agent named `old` that is not the seeded one owns those readers, so
     they stay. A live `new` reader blocks the rename: access rules follow the
-    new name, so a reader left behind would lose them.
+    new name, so a reader left behind would lose them. The exception is a
+    `new` reader of the renamed seeded agent itself (a turn made it after the
+    agent moved but before its old reader did): it already serves that agent,
+    so the stale old reader is left as it is, which is how readers are
+    treated when nothing else uses them.
     """
     readers = [
         reader
@@ -116,9 +121,26 @@ def _legacy_readers(
     ]
     if not readers or old_agent_live:
         return []
-    if _named(agents, f"{new}{_READER_SUFFIX}"):
+    taken = _named(agents, f"{new}{_READER_SUFFIX}")
+    if taken and _serves_renamed_seeded(agents, taken, new=new):
+        return []
+    if taken:
         raise AgentRenameBlocked(old=f"{old}{_READER_SUFFIX}", new=f"{new}{_READER_SUFFIX}")
     return readers
+
+
+def _serves_renamed_seeded(
+    agents: Collection[BetaManagedAgentsAgent],
+    readers: Collection[BetaManagedAgentsAgent],
+    *,
+    new: str,
+) -> bool:
+    """Whether every reader is a reader variant of the seeded agent now named `new`."""
+    return any(_managed(agent) for agent in _named(agents, new)) and all(
+        MA_METADATA_KEY_READER_OF in reader.metadata
+        and normalize_agent_name(new) in map(normalize_agent_name, _reader_sources(reader))
+        for reader in readers
+    )
 
 
 async def _rename_on_provider(
