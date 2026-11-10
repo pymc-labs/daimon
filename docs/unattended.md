@@ -125,11 +125,16 @@ provider's own status, so a paused turn lists as `idle`.
 ## Other providers
 
 A turn on a backend other than Managed Agents has no session to check, so it
-refuses every tool call that pauses. Native OpenAI and Gemini profiles that
-need automatic sandbox, bash or custom tools are refused before the first
-message. Conversation-only workers and attended conversations still work. A
-self-hosted harness inspects every tool at the host, so allowed reads continue
-while sandbox calls and unapproved writes are refused.
+refuses every tool call that pauses. With the `host_call_gate` deployment
+feature on, an OpenAI or Gemini turn nobody watches keeps its Daimon tools:
+each call gets the unattended verdict above. Automatic custom tools are always
+refused before the first message.
+
+OpenAI's persistent workspace always has a shell, so its unattended turns run
+only where sandbox tools are allowed, such as a long job. With the feature off,
+native turns that need MCP, sandbox, bash or custom tools are refused before
+the first message. A self-hosted harness inspects every tool at the host, so
+allowed reads continue while sandbox calls and unapproved writes are refused.
 
 ## Origins
 

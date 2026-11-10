@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Routines, watch wakes and long jobs on OpenAI or Gemini keep Daimon's tools.**
+  With the `host_call_gate` deployment feature on, a turn nobody watches no
+  longer refuses its MCP tools up front. Each call is decided like on Anthropic:
+  allowed calls run, and a call that would need a confirmation is refused.
+  OpenAI's persistent workspace always has a shell, so it runs unattended only
+  where sandbox tools are allowed, such as a long job. Watch wakes never get
+  one. Model options run only when the provider declares them.
 - **On Discord, agents on OpenAI or Gemini can use tools that need a confirmation.**
   Before, these tools were refused because the provider shows no confirmation card.
   Daimon now posts its own card with Approve and Deny, showing the tool and its exact inputs.
