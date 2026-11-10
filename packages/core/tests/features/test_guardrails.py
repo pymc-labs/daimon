@@ -19,10 +19,17 @@ from daimon.core.features.deployment import deployment_value
 from daimon.core.features.registry import FEATURES, Tier
 from daimon.core.features.resolver import TierValue, resolve_feature
 from daimon.core.features.service import FeatureActor, change_feature, change_refusal
-from daimon.core.features.snapshot import FeaturePlace, feature_in, place_guardrail
+from daimon.core.features.snapshot import (
+    FeaturePlace,
+    feature_in,
+    feature_in_or_none,
+    place_feature_or_none,
+    place_guardrail,
+)
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.testing.factories import make_tenant
 from pydantic import PostgresDsn, SecretStr
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 GUARDRAILS = [key for key, spec in FEATURES.items() if spec.combine == "stricter"]
@@ -116,6 +123,24 @@ async def test_an_unreadable_guardrail_applies_its_strictest_value() -> None:
     place = FeaturePlace.of(uuid.uuid4(), "slack", None)
     found = await place_guardrail(Broken(), None, place, "unattended_capabilities")  # pyright: ignore[reportArgumentType]
     assert found.value == "off"
+
+
+async def test_a_background_read_that_fails_returns_none_not_a_default(
+    db_session: AsyncSession,
+) -> None:
+    """Workers skip the item on None; only the turn path may guess a registry default."""
+
+    class Broken:
+        def __call__(self) -> object:
+            raise RuntimeError("down")
+
+    place = FeaturePlace.of(uuid.uuid4(), "slack", None)
+    got = await place_feature_or_none(Broken(), None, place, "routines")  # pyright: ignore[reportArgumentType]
+    assert got is None, "an unreadable place is not read as the registry default"
+    healthy = await feature_in_or_none(db_session, None, place, "routines")
+    assert healthy is not None, "a readable place resolves normally"
+    assert await feature_in_or_none(db_session, None, place, "no_such_feature") is None
+    assert (await db_session.execute(text("select 1"))).scalar_one() == 1, "session still usable"
 
 
 async def test_an_opted_in_routine_loses_its_builtins_when_the_guardrail_is_off(

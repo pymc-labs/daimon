@@ -1,9 +1,14 @@
-"""Every registered feature is reachable from chat, MCP, web and the CLI, or exempted here.
+"""Every surface reads and writes features through the registry, never by naming a key.
 
-Each surface reads and writes through the registry (`read_features`, `change_feature`, the
-chat panel), so a new key is covered the moment it is registered. That holds only while no
-surface names a key itself, which the first test checks; the second records the deliberate
-differences, each with its reason, and fails when one names a key or tier that is gone.
+A new key is then reachable from chat, MCP, web and the CLI the moment it is registered,
+which holds only while no surface names a key itself (the first test) and each goes
+through the core service (the second). `_GAPS` records the deliberate differences with their
+reasons, and the last test fails when one names a key or tier that is gone.
+
+This file does not prove reachability end to end: that needs each surface driven for each
+key, which the per-surface suites do (`test_settings_panel` lists every feature on each chat
+platform within the select limit, `test_features_routes` the web schema, `test_features` the
+CLI). `_GAPS` is therefore a record of intent, not a checked claim.
 """
 
 from __future__ import annotations

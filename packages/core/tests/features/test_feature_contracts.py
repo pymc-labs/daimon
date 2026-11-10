@@ -8,6 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from daimon.core.capability_tools import CAPABILITY_KEYS
 from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
@@ -285,6 +286,9 @@ _KEY_READERS = {
     "place_feature": 3,
     "place_guardrail": 3,
     "feature_in": 3,
+    "place_feature_or_none": 3,
+    "feature_in_or_none": 3,
+    "_chosen": 2,
 }
 """Calls that read a feature key, and the position of the key among their arguments."""
 _SNAPSHOT_READS = {"on", "value", "get"}
@@ -298,7 +302,9 @@ def _read_key(node: ast.AST) -> str | None:
         name = getattr(node.func, "id", None) or getattr(node.func, "attr", "")
         receiver = node.func.value if isinstance(node.func, ast.Attribute) else None
         named = getattr(receiver, "id", None) or getattr(receiver, "attr", "") or ""
-        snapshot = name in _SNAPSHOT_READS and named.endswith("features")
+        snapshot = (name in _SNAPSHOT_READS and named.endswith("features")) or (
+            name in {"on", "value"} and named == "found"
+        )
         at = _KEY_READERS.get(name, 0 if snapshot else None)
         key = node.args[at] if at is not None and len(node.args) > at else None
     else:
@@ -309,18 +315,30 @@ def _read_key(node: ast.AST) -> str | None:
 def test_every_feature_key_read_is_registered_and_every_registered_key_is_read() -> None:
     """A typo in a read fails here, and so does a registered control nothing obeys."""
     read: dict[str, str] = {}
-    # Both are built from a list, so no literal names them.
-    named: set[str] = set(TOOL_KEYS) | {f"web.{module}" for module in WEB_MODULES}
+    # Read through a list or a lookup, so no reader call names them.
+    named: set[str] = (
+        set(TOOL_KEYS)
+        | set(IDENTITY_KEYS)
+        | set(CAPABILITY_KEYS)
+        | {f"web.{module}" for module in WEB_MODULES}
+        | {"daily_model_cap"}  # request.admission.resolved("daily_model_cap")
+    )
     for path in _PRODUCT:
+        constants: set[str] = set()
+        has_reader = False
         for node in ast.walk(ast.parse(path.read_text())):
             if (key := _read_key(node)) is not None:
                 read.setdefault(key, f"{path.name}:{getattr(node, 'lineno', 0)}")
+                has_reader = True
             if (
                 path.name != "registry.py"
                 and isinstance(node, ast.Constant)
                 and node.value in FEATURES
             ):
-                named.add(node.value)
+                constants.add(node.value)
+        # A bare string only counts in a file that reads some feature.
+        if has_reader:
+            named |= constants
     assert len(read) >= 10, "the feature readers moved; point this test at them"
     unknown = {key: where for key, where in read.items() if key not in FEATURES}
     assert not unknown, f"feature keys read but not registered: {unknown}"

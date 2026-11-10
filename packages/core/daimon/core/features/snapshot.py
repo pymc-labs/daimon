@@ -293,7 +293,10 @@ async def resolve_features(
     cache: FeatureCache = CACHE,
 ) -> FeatureSnapshot:
     """Resolve `keys` (every registered feature by default) for `place` in one read.
-    Without `settings` the deployment tier is the registry default."""
+
+    Without `settings` the deployment tier is the registry default. A database failure
+    raises; this reader never falls back to a default. Callers that must keep working
+    wrap it (`place_feature`) or fail closed (`place_feature_or_none`)."""
     # Imported here: the access policy reaches `defaults`, whose agent writers resolve
     # features through this module.
     from daimon.core.approval_gate import resolve_approval_gate

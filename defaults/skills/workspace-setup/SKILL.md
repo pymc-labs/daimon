@@ -348,8 +348,9 @@ by "(" or by a dot and a letter is ignored ("@Daimon (urgent)", "@Daimon.Thanks"
 Each finished answer ends with one line naming the agent, the time taken, what
 it cost and the money left. On by default; an admin can hide it for everyone in
 this `words.space` with `change_setting(key="cost_footer", level="server", value="hidden")`
-and bring it back with `value="shown"`; `get_settings()` reads it. It has no channel
-or thread level. Read the returned `note` back.
+and bring it back with `value="shown"`; `get_settings()` reads it. It can also be set
+for one channel or thread (`level="channel"` or `"thread"`); the narrowest level wins.
+Read the returned `note` back.
 Hiding it changes nothing else: the billing panel still shows usage and credit.
 
 ## Scheduled routines

@@ -284,7 +284,7 @@ agent.
 | `help` | List the commands that work where you sent it. |
 | `setup` | Manage agents and who answers where; connect coding tools and mint operator tokens (admins). |
 | `here` | Show who answers here, what it can read and whether publishing needs approval. |
-| `settings` | In a channel post, see and change approvals, thread participation, progress plans and the cost footer for the post, its channel or the organisation. |
+| `settings` | In a channel post, see and change every feature for the post, its channel or the organisation; see [features](features.md). |
 | `routines` | List routines (admins see all); admins create, and admins and creators pause, resume or delete. |
 | `memory` | Show what the agent remembers here. `memory mine` shows your personal memory, and `memory forget-mine` clears it after a code. |
 | `privacy` | See, export or delete what Daimon stores about you, or disconnect your Microsoft account. |
