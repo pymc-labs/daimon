@@ -2534,6 +2534,25 @@ class SupportEscalation(Base):
     )
 
 
+class DeploymentIdentity(Base):
+    """This install's own id, stamped once on first need where no cloud names it.
+
+    One row (`singleton` is always true). It tells this install's hosted OpenAI
+    environments apart from another install's that shares the OpenAI project; on
+    GCP the project id plays that part and this row is never read. It holds
+    nothing tenant-owned, so it has no `tenant_id`.
+    """
+
+    __tablename__ = "deployment_identity"
+    __table_args__ = (CheckConstraint("singleton", name="ck_deployment_identity_singleton"),)
+
+    singleton: Mapped[bool] = mapped_column(Boolean, primary_key=True, server_default=text("true"))
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class HubOAuthKv(Base):
     """Backing table for the hub login proxies' key-value store.
 

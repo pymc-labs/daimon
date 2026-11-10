@@ -558,10 +558,11 @@ def _environments(key: str) -> EnvironmentPort:
     return OpenAIEnvironments(Context(transport, DEFAULT_PROJECT, PROFILE, None))
 
 
-async def _deployment_id() -> str | None:
+async def _deployment_id(request: ProviderPreparationRequest) -> str | None:
     from daimon.core.turn.openai_environment import deployment_id
+    from daimon.core.turn.runtime_defaults import DEFAULT_PROJECT
 
-    return await deployment_id()
+    return await deployment_id(sessionmaker=request.deps.sessionmaker, project=DEFAULT_PROJECT)
 
 
 async def prepare_tenant_environment(
@@ -592,7 +593,7 @@ async def prepare_tenant_environment(
         or manifest_has_row(request)
     ):
         return request
-    deployment = await _deployment_id()
+    deployment = await _deployment_id(request)
     if deployment is None:
         # Fail closed: without a name only this deployment uses, a reconcile could
         # adopt another deployment's environment. The turn stays as it was before.
