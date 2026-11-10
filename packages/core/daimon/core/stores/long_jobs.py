@@ -14,6 +14,7 @@ from daimon.core._models import (
 )
 from daimon.core.config import LongJobsSettings, Settings
 from daimon.core.errors import StoreError
+from daimon.core.features.registry import limit_int
 from daimon.core.features.snapshot import FeaturePlace, feature_in, feature_in_or_none
 from daimon.core.long_job_models import (
     ACTIVE_STATES,
@@ -43,7 +44,7 @@ async def get_policy(
     enabled = await feature_in(session, settings, place, "long_jobs")
     usd = await feature_in(session, settings, place, "long_jobs_max_usd")
     minutes = await feature_in(session, settings, place, "long_jobs_max_deadline")
-    maximum = int(minutes.value)
+    maximum = limit_int(minutes.value)
     return LongJobPolicy(
         enabled=enabled.on,
         default_deadline_minutes=min(DEFAULT_DEADLINE_MINUTES, maximum),
