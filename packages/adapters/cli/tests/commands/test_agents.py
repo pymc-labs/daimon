@@ -57,6 +57,7 @@ from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.testing.factories import make_tenant
+from mux.contracts.ids import ModelRef
 from mux.testing.drivers.anthropic.ma import MARouter, build_stub_anthropic, list_response
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -407,6 +408,71 @@ async def test_agents_create_calls_sdk_create(
     assert md.get("daimon_account") == str(derive_guild_account_uuid(tenant_id)), (
         "CLI-created agents must carry the derived guild account so the panel can edit them"
     )
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("openai:gpt-6-luna", ModelRef(provider="openai", id="gpt-6-luna")),
+        ("anthropic:claude-sonnet-4-6", ModelRef(provider="anthropic", id="claude-sonnet-4-6")),
+        ("claude-sonnet-4-6", ModelRef(provider="anthropic", id="claude-sonnet-4-6")),
+    ],
+)
+def test_model_flag_reads_provider_and_id(value: str, expected: ModelRef) -> None:
+    assert agents_cmd.parse_model_flag(value) == expected, f"{value} names {expected}"
+
+
+@pytest.mark.parametrize("value", ["nope:gpt-6-luna", "claude-nope", "gpt-6-luna"])
+def test_model_flag_refuses_what_no_provider_runs(value: str) -> None:
+    with pytest.raises(typer.BadParameter):
+        agents_cmd.parse_model_flag(value)
+
+
+@pytest.mark.asyncio
+async def test_agents_create_with_another_provider_sets_its_backend(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--model openai:...` creates the record from the file, then sets the backend."""
+    async with db_session_factory() as s, s.begin():
+        tenant = await make_tenant(s, platform="cli", workspace_id="local")
+        await get_or_create_cli_principal(s, tenant_id=tenant.id, os_user="testuser")
+        tenant_id = tenant.id
+    created: list[dict[str, object]] = []
+
+    def on_create(req: httpx.Request, _m: object) -> httpx.Response:
+        created.append(json.loads(req.content))
+        return httpx.Response(
+            200, json=_agent_json(agent_id="ag_new", name="new-agent", tenant_id=tenant_id)
+        )
+
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda req, m: list_response([]))
+    router.add("POST", r"/v1/agents", on_create)
+    changes: list[dict[str, object]] = []
+
+    async def backend_change(**kw: object) -> None:
+        changes.append(kw)
+
+    monkeypatch.setattr(agents_cmd, "agents_backend_change", backend_change)
+    console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
+    rt = build_cli_runtime(db_session_factory, router=router, settings=_FakeSettings())
+    spec_path = tmp_path / "agent.yaml"
+    spec_path.write_text("name: new-agent\nmodel: claude-sonnet-4-6\n")
+
+    await agents_create(
+        rt=rt,
+        console=console,
+        path=spec_path,
+        model=ModelRef(provider="openai", id="gpt-6-luna"),
+        yes=True,
+    )
+
+    assert len(created) == 1, "the record is created from the file"
+    assert [(c["name"], c["backend"], c["model"], c["yes"]) for c in changes] == [
+        ("new-agent", "openai", "gpt-6-luna", True)
+    ], "the backend change gets the provider and model, consent passed through"
 
 
 @pytest.mark.asyncio

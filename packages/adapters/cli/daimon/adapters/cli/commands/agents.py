@@ -53,6 +53,8 @@ from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.defaults.reconcile_agents import reconcile_agent
 from daimon.core.errors import SpecError, StoreError
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.model_presets import resolve_model
+from daimon.core.models_catalog import is_priced_claude_model, priced_claude_ids
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_agent, retrieve_agent, update_agent
 from daimon.core.specs import load_agent_spec, merge_default_agent_toolset
@@ -61,6 +63,8 @@ from daimon.core.stores.agent_google_binding import upsert_agent_google_binding
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.tenants import list_tenants_by_platform
 from daimon.core.turn.notices import conversations_follow_line
+from mux.contracts.config import DEFAULT_BACKEND
+from mux.contracts.ids import ModelRef
 from mux.profiles import selectable_models
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from rich.console import Console
@@ -565,26 +569,92 @@ async def agents_bind_google(
     )
 
 
+MODEL_OPTION = typer.Option(
+    "--model", help="provider:id, or a Claude id; overrides the file's model."
+)
+
+
+def parse_model_flag(value: str) -> ModelRef:
+    """`--model`: `provider:id`, or a bare Claude id."""
+    provider, sep, model_id = value.strip().partition(":")
+    try:
+        ref = ModelRef.model_validate(
+            {"provider": provider if sep else DEFAULT_BACKEND, "id": model_id if sep else provider}
+        )
+    except ValidationError as exc:
+        raise typer.BadParameter("--model takes provider:id, like openai:gpt-6-luna.") from exc
+    if ref.provider == DEFAULT_BACKEND and not is_priced_claude_model(ref.id):
+        raise typer.BadParameter(f"--model must be one of: {', '.join(priced_claude_ids())}.")
+    return ref
+
+
+async def _apply_model_flag(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    name: str,
+    model: ModelRef | None,
+    yes: bool,
+    accept_drops: str | None,
+    selector: TenantSelector | None,
+) -> None:
+    """Another provider's `--model` is its backend setting, after the record is written."""
+    if model is None or model.provider == DEFAULT_BACKEND:
+        return
+    await agents_backend_change(
+        rt=rt,
+        console=console,
+        name=name,
+        backend=model.provider,
+        yes=yes,
+        as_json=False,
+        selector=selector,
+        accept_drops=accept_drops,
+        model=model.id,
+    )
+
+
 @agents_app.command("create")
 def agents_create_command(
     ctx: typer.Context,
     path: Path,
+    model: Annotated[str | None, MODEL_OPTION] = None,
+    yes: Annotated[bool, YES_OPTION] = False,
+    accept_drops: Annotated[str | None, typer.Option("--accept-drops")] = None,
 ) -> None:
     settings = load_settings()
     console = Console(highlight=False)
     selector = ctx.obj
+    picked = parse_model_flag(model) if model is not None else None
 
     async def _with_defaults() -> None:
         async with build_runtime(settings) as rt:
-            await agents_create(rt=rt, console=console, path=path, selector=selector)
+            await agents_create(
+                rt=rt,
+                console=console,
+                path=path,
+                selector=selector,
+                model=picked,
+                yes=yes,
+                accept_drops=accept_drops,
+            )
 
     run_cli(_with_defaults(), console=console)
 
 
 async def agents_create(
-    *, rt: CliRuntime, console: Console, path: Path, selector: TenantSelector | None = None
+    *,
+    rt: CliRuntime,
+    console: Console,
+    path: Path,
+    selector: TenantSelector | None = None,
+    model: ModelRef | None = None,
+    yes: bool = False,
+    accept_drops: str | None = None,
 ) -> None:
     spec = load_agent_spec(path)
+    if model is not None and model.provider == DEFAULT_BACKEND:
+        spec.model = resolve_model(model.id)
     async with rt.sessionmaker() as session, session.begin():
         override = await resolve_tenant_override(session, selector)
         tenant_id = await discover_tenant(session, override=override)
@@ -626,6 +696,15 @@ async def agents_create(
         timeout_s=FACE_WAIT_S,
     )
     console.print(f"[green]✓ created agent {spec.name!r}[/green]")
+    await _apply_model_flag(
+        rt=rt,
+        console=console,
+        name=spec.name,
+        model=model,
+        yes=yes,
+        accept_drops=accept_drops,
+        selector=selector,
+    )
 
 
 @agents_app.command("update")
@@ -633,14 +712,27 @@ def agents_update_command(
     ctx: typer.Context,
     name: str,
     path: Path,
+    model: Annotated[str | None, MODEL_OPTION] = None,
+    yes: Annotated[bool, YES_OPTION] = False,
+    accept_drops: Annotated[str | None, typer.Option("--accept-drops")] = None,
 ) -> None:
     settings = load_settings()
     console = Console(highlight=False)
     selector = ctx.obj
+    picked = parse_model_flag(model) if model is not None else None
 
     async def _with_defaults() -> None:
         async with build_runtime(settings) as rt:
-            await agents_update(rt=rt, console=console, name=name, path=path, selector=selector)
+            await agents_update(
+                rt=rt,
+                console=console,
+                name=name,
+                path=path,
+                selector=selector,
+                model=picked,
+                yes=yes,
+                accept_drops=accept_drops,
+            )
 
     run_cli(_with_defaults(), console=console)
 
@@ -652,6 +744,9 @@ async def agents_update(
     name: str,
     path: Path,
     selector: TenantSelector | None = None,
+    model: ModelRef | None = None,
+    yes: bool = False,
+    accept_drops: str | None = None,
 ) -> None:
     spec = load_agent_spec(path)
     if spec.name != name:
@@ -659,6 +754,8 @@ async def agents_update(
             f"cannot rename {name!r} -> {spec.name!r} via update; agent names are identity. "
             "Fork under the new name instead."
         )
+    if model is not None and model.provider == DEFAULT_BACKEND:
+        spec.model = resolve_model(model.id)
     async with rt.sessionmaker() as session, session.begin():
         override = await resolve_tenant_override(session, selector)
         tenant_id = await discover_tenant(session, override=override)
@@ -690,6 +787,15 @@ async def agents_update(
         sessions=rt.sessionmaker,
     )
     console.print(f"[green]✓ updated agent {spec.name!r}[/green]")
+    await _apply_model_flag(
+        rt=rt,
+        console=console,
+        name=name,
+        model=model,
+        yes=yes,
+        accept_drops=accept_drops,
+        selector=selector,
+    )
 
 
 @backend_app.command("set")
