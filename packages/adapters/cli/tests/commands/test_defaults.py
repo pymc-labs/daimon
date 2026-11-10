@@ -27,6 +27,7 @@ from daimon.core.errors import DefaultsError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores.domain import Platform
 from daimon.core.stores.selfhosted_resources import SelfHostedAgents
 from daimon.core.stores.tenants import set_provision_status
 from daimon.testing.factories import make_routine, make_tenant
@@ -212,7 +213,10 @@ def _default_tree(root: Path) -> Path:
 
 
 async def _seed_legacy_tenant(
-    sessionmaker: async_sessionmaker[AsyncSession], platform: str, workspace_id: str, *names: str
+    sessionmaker: async_sessionmaker[AsyncSession],
+    platform: Platform,
+    workspace_id: str,
+    *names: str,
 ) -> uuid.UUID:
     """A tenant with a routine on `daimon` and live self-hosted records `names`."""
     async with sessionmaker() as s, s.begin():
