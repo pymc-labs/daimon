@@ -367,8 +367,7 @@ async def _prepare_selfhosted(request: ProviderPreparationRequest) -> PreparedTu
         raise AdmissionDenied(reason="backend_unsupported")
     current = await reauthorize(request.deps, request.admission)
     if (
-        current.memory_read_only
-        or current.origin_seal_ids
+        current.origin_seal_ids
         or current.source_sealed
         or current.asks_before_publishing
         or current.slack_turn_context_id is not None

@@ -347,14 +347,17 @@ async def mint_turn_mcp_authorization(
     now: datetime | None = None,
     slack_turn_context_id: uuid.UUID | None = None,
     hold: TurnHold | None = None,
+    memory_read_only: bool | None = None,
 ) -> MintedMcpAuthorization:
     """Register a live agent's token; the host revokes jti in its turn-finally path.
 
     A `hold` binds it to the held channel as MA's chat credential does; the server
-    then lists only the held allowlist."""
+    then lists only the held allowlist. `memory_read_only` binds the token to the
+    executing turn's origin, so the server reads that turn's memory as read-only."""
     from daimon.core.ma_identity import derive_agent_uuid
-    from daimon.core.mcp_auth import CHAT_TOKEN_TTL, mint_chat_mcp_token
+    from daimon.core.mcp_auth import CHAT_TOKEN_TTL, bind_execution_session, mint_chat_mcp_token
     from daimon.core.stores.accounts import get_account_with_tenant
+    from daimon.core.turn_origin import current_execution_origin_id
 
     if (
         scope.is_platform
@@ -385,7 +388,10 @@ async def mint_turn_mcp_authorization(
         or live.ref.account_scope_id != scope.tenant_id
     ):
         raise ScopeViolation(agent.id, "MCP credential requires a live tenant agent")
+    if memory_read_only and current_execution_origin_id.get() is None:
+        raise ScopeViolation(agent.id, "a read-only turn's credential needs its executing origin")
     tenant_id, account_id = uuid.UUID(scope.tenant_id), uuid.UUID(scope.account_id)
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id)
     async with sessions() as session, session.begin():
         identity = await get_account_with_tenant(session, account_id=account_id)
         if identity is None or identity.tenant_id != tenant_id:
@@ -393,13 +399,23 @@ async def mint_turn_mcp_authorization(
         token, jti, expires_at = await mint_chat_mcp_token(
             session,
             account_id=account_id,
-            agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id),
+            agent_id=agent_id,
             secret=secret,
             now=now,
             ttl=timedelta(seconds=deadline_s + 60),
             anthropic_disabled=True,
             slack_turn_context_id=slack_turn_context_id,
             hold=hold,
+        )
+    if memory_read_only:
+        token = await bind_execution_session(
+            sessions,
+            token=token,
+            secret=secret,
+            scope=scope,
+            agent_id=agent_id,
+            now=now,
+            memory_read_only=True,
         )
     return MintedMcpAuthorization(SecretStr(f"Bearer {token}"), jti, expires_at)
 

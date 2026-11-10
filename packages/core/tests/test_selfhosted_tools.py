@@ -451,6 +451,72 @@ async def test_minted_token_is_registered_expiring_redacted_and_tenant_bound(
             now=NOW,
         )
 
+    from daimon.core.stores.domain import Role
+    from daimon.core.stores.turn_origins import create_origin, get_active_origin
+    from daimon.core.turn_origin import current_execution_origin_id
+
+    with pytest.raises(ScopeViolation, match="origin"):
+        await mint_turn_mcp_authorization(
+            db_session_factory,
+            scope=scope,
+            agent=agent,
+            agents=agents,
+            deadline_s=300,
+            secret=b"t" * 32,
+            now=NOW,
+            memory_read_only=True,
+        )
+    async with db_session_factory() as session, session.begin():
+        origin = await create_origin(
+            session,
+            tenant_id=tenant.id,
+            account_id=principal.account_id,
+            platform="discord",
+            parent_channel_id="channel",
+            thread_id="thread",
+            responder_ma_agent_id=agent.id,
+            responder_name="Agent",
+            configuration_target_ma_agent_id=None,
+            configuration_target_name=None,
+            role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
+            now=NOW,
+            expires_at=NOW + dt.timedelta(minutes=10),
+        )
+    reset = current_execution_origin_id.set(origin.id)
+    try:
+        read_only = await mint_turn_mcp_authorization(
+            db_session_factory,
+            scope=scope,
+            agent=agent,
+            agents=agents,
+            deadline_s=300,
+            secret=b"t" * 32,
+            now=NOW,
+            memory_read_only=True,
+        )
+    finally:
+        current_execution_origin_id.reset(reset)
+    bound = jwt.decode(
+        read_only.header.get_secret_value().removeprefix("Bearer "),
+        b"t" * 32,
+        algorithms=["HS256"],
+        options={"verify_exp": False},
+    )
+    assert bound["chat_session_id"] == str(origin.id), "the credential names its turn's origin"
+    assert bound["jti"] == str(read_only.jti), "binding keeps the registered credential"
+    async with db_session_factory() as session:
+        stamped = await get_active_origin(
+            session,
+            origin_id=origin.id,
+            tenant_id=tenant.id,
+            account_id=principal.account_id,
+            platform="discord",
+            now=NOW,
+        )
+    assert stamped is not None and stamped.memory_read_only is True, "the server reads it read-only"
+
 
 def test_skill_count_cap_and_identical_reference_deduplication() -> None:
     from daimon.core.constants import AGENT_SKILL_CAP

@@ -437,6 +437,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
                     body["tool_policy"] = merge_tool_policy(original_policy, effective_host_policy)
                 from daimon.core.turn.persistence import current_persistence
                 from daimon.core.turn.selfhosted_tools import mint_turn_mcp_authorization
+                from daimon.core.turn.template_mcp import origin_read_only
                 from mux.contracts.ids import ResourceRef
 
                 active = current_persistence.get()
@@ -476,6 +477,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
                         deadline_s=token_deadline_s,
                         slack_turn_context_id=request.admission.slack_turn_context_id,
                         hold=request.admission.hold,
+                        memory_read_only=origin_read_only(request.admission),
                     )
 
             async def token_provider() -> str:
