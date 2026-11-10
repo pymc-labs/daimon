@@ -15,7 +15,7 @@ from mux.drivers.openai.session_controls import SessionControls
 from mux.drivers.openai.transport import SDKTransport
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
-from mux.errors import UnsupportedCapability
+from mux.errors import ProviderError, UnsupportedCapability
 from mux.testing.isolated_sdk import build_async_openai
 from pydantic import ValidationError
 
@@ -306,3 +306,47 @@ async def test_g1_session_shape_omits_optional_spending_control_per_current_refe
     }
     assert seen[-1].headers["OpenAI-Beta"] == "agents=v1"
     assert seen[-1].headers["Idempotency-Key"] == "g1-optional-spend"
+
+
+@pytest.mark.asyncio
+async def test_mcp_disabled_session_drops_agent_mcp_without_a_resolver() -> None:
+    from mux.contracts.digest import digest_body
+
+    assert "mcp_enabled" not in digest_body(SessionControls(model="gpt-6-luna"))
+    mcp = {"type": "mcp", "server_label": "daimon-mcp", "transport": {"type": "http"}}
+    seen: list[httpx.Request] = []
+    native = native_session()
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.path == "/v1/agents/a":
+            return httpx.Response(
+                200, json={"id": "a", "metadata": {}, "tools": [{"type": "web_search"}, mcp]}
+            )
+        return httpx.Response(200, json=native)
+
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
+        api_key="offline-placeholder",
+        base_url="https://openai.invalid/v1",
+    ) as sdk:
+        driver = OpenAIDriver(
+            SDKTransport(sdk),
+            account_scope_id="project",
+            authorization=lambda scope, kind, id_: scope == SCOPE,
+            journal=MemoryRecoveryJournal(),
+            usage_revisions=MemoryUsageRevisions(),
+            session_controls=SessionControls(mcp_enabled=False),
+        )
+        spec = SessionSpec(
+            agent=REF.model_copy(update={"kind": "agent", "id": "a"}),
+            agent_revision=Revision(local=0),
+            config_revision=1,
+            environment=REF.model_copy(update={"kind": "environment", "id": "template"}),
+        )
+        session = await driver.sessions.create(SCOPE, spec, key="create")
+        assert json.loads(seen[-1].content)["agent"]["tools"] == [{"type": "web_search"}]
+        assert "vault_ids" not in json.loads(seen[-1].content)
+        native["agent"] = {"id": "a", "model": "fixture", "tools": [mcp]}
+        with pytest.raises(ProviderError):
+            await driver.sessions.retrieve(SCOPE, session.ref)

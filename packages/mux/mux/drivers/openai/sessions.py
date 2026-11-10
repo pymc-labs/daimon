@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 
+from pydantic import JsonValue
+
 from mux.contracts.actions import UserMessage
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ChannelRef, Page, PageRequest, ResourceRef, Revision, Scope, ThreadRef
@@ -22,7 +24,7 @@ from mux.contracts.resources import (
 from mux.drivers.openai import session_mcp
 from mux.drivers.openai._common import Context, objects, owned, query, text
 from mux.drivers.openai.actions import content
-from mux.drivers.openai.mcp_auth import MCPSecretResolver
+from mux.drivers.openai.mcp_auth import MCPSecretResolver, non_mcp_tool
 from mux.drivers.openai.mounts import resources, vault_ids
 from mux.drivers.openai.normalize import required_actions
 from mux.drivers.openai.session_controls import SessionControls
@@ -127,6 +129,11 @@ class OpenAISessions:
                 raise ProviderError(
                     "permission", retryable=False, native_code="host_delegation_enabled"
                 )
+        if self._controls.mcp_enabled is False and any(
+            value.get("type") == "mcp"
+            for value in objects(object_json(raw["agent"]).get("tools") or [])
+        ):
+            raise ProviderError("permission", retryable=False, native_code="host_mcp_disabled")
         status = text(raw["status"])
         states = {
             "idle": "idle",
@@ -256,9 +263,18 @@ class OpenAISessions:
             body["input"] = [
                 {"role": "user", "content": content(initial.content, self._c.profile_id)}
             ]
-        tools, managed = await session_mcp.prepare(
-            self._c, scope, agent, self._mcp_secrets, key=key, vaults_attached=bool(vaults)
-        )
+        if self._controls.mcp_enabled is False:
+            native = objects(agent.get("tools") or [])
+            tools: list[JsonValue] | None = (
+                [non_mcp_tool(value) for value in native if value.get("type") != "mcp"]
+                if any(value.get("type") == "mcp" for value in native)
+                else None
+            )
+            managed = None
+        else:
+            tools, managed = await session_mcp.prepare(
+                self._c, scope, agent, self._mcp_secrets, key=key, vaults_attached=bool(vaults)
+            )
         if tools is not None:
             body["agent"] = {**object_json(body.get("agent") or {}), "tools": tools}
         if managed is not None:
