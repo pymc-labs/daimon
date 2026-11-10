@@ -306,3 +306,29 @@ async def test_rename_when_nothing_pending_then_returns_without_taking_the_lock(
         )
 
     assert outcome is None, "a migrated tenant has nothing to rename"
+
+
+async def test_apply_when_new_reader_exists_then_fails_and_moves_nothing(
+    tmp_path: Path,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _selfhosted(db_session, db_session_factory)
+    reader = {**_MANAGED, MA_METADATA_KEY_READER_SOURCE: "daimon"}
+    state = FakeMAState()
+    _seed(
+        state,
+        _legacy_daimon(),
+        ma_agent(id="ag_reader", name="daimon-reader", tenant_id=_TENANT, metadata=reader),
+        ma_agent(id="ag_taken", name="default-reader", tenant_id=_TENANT),
+    )
+
+    report = await _apply(db_session_factory, state, _tree(tmp_path), dry_run=False)
+
+    failed = [o for o in report.agents if o.action is Action.FAILED]
+    assert failed and "'default-reader'" in (failed[0].error or ""), f"names the reader: {failed}"
+    assert set(_live(state)) == {"daimon", "daimon-reader", "default-reader"}, (
+        "no agent is renamed, created or archived"
+    )
+    routines = await _names(db_session, "SELECT agent_name FROM routines WHERE tenant_id = :t")
+    assert routines == ["daimon"], "database references are unchanged"

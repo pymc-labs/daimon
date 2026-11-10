@@ -96,11 +96,11 @@ def _named(agents: Collection[BetaManagedAgentsAgent], name: str) -> list[BetaMa
 def _legacy_readers(
     agents: Collection[BetaManagedAgentsAgent], *, old: str, new: str, old_agent_live: bool
 ) -> list[BetaManagedAgentsAgent]:
-    """The old agent's reader variants, or none when they cannot move.
+    """The seeded old agent's reader variants, which move with it.
 
-    A live agent named `old` that is not the seeded one owns those readers; a
-    live `new` reader means the new name already has one. A stray reader is
-    harmless, so either case is skipped rather than failed.
+    A live agent named `old` that is not the seeded one owns those readers, so
+    they stay. A live `new` reader blocks the rename: access rules follow the
+    new name, so a reader left behind would lose them.
     """
     readers = [
         reader
@@ -110,8 +110,7 @@ def _legacy_readers(
     if not readers or old_agent_live:
         return []
     if _named(agents, f"{new}{_READER_SUFFIX}"):
-        _log.warning("defaults.rename_reader_taken", name=new)
-        return []
+        raise AgentRenameBlocked(old=f"{old}{_READER_SUFFIX}", new=f"{new}{_READER_SUFFIX}")
     return readers
 
 
