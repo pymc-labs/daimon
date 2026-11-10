@@ -137,6 +137,7 @@ from typing import Literal
 import structlog
 from anthropic import APIError, AsyncAnthropic
 from daimon.core import platform_names
+from daimon.core.anthropic_guard import anthropic_configured
 from daimon.core.errors import UserFacingError
 from daimon.core.ma import SessionDeletionReport, delete_sessions_for_account
 from daimon.core.memory_resource import (
@@ -528,8 +529,9 @@ async def purge_principal(
     # DB transaction committed. Upstream deletion is best-effort — a single
     # call, since one principal belongs to exactly one tenant/account.
     # Deliberate boundary catch mirroring purge_account: the DB purge has
-    # already committed, so an upstream APIError must NOT propagate.
-    if anthropic is not None:
+    # already committed, so an upstream APIError must NOT propagate. With no
+    # Anthropic key there are no Managed Agents sessions to delete.
+    if anthropic is not None and anthropic_configured(anthropic):
         try:
             sessions_report = await delete_sessions_for_account(
                 anthropic, tenant_id=tenant_id, account_id=account_id
@@ -800,8 +802,9 @@ async def purge_account(
     # upstream APIError must NOT propagate — the caller would misreport a
     # completed, irreversible erasure as failed. Fold the failure into the
     # sessions report instead (upstream_error=True) and log for the operator;
-    # a failure in one tenant does not skip the remaining tenants.
-    if anthropic is not None:
+    # a failure in one tenant does not skip the remaining tenants. With no
+    # Anthropic key the work item stays queued for an install that adds one.
+    if anthropic is not None and anthropic_configured(anthropic):
         sessions = await retry_account_session_delete(anthropic, sm, account_id=account_id)
         # The person's own memory stores, archived ones included: deleted
         # upstream, then unbound. Independent of the session work item, which
@@ -893,15 +896,19 @@ async def sweep_privacy_session_deletes(
 
     Also finishes the personal memory stores of every account already erased
     (`sweep_erased_personal_memory`), whether or not a session work item is
-    left for it.
+    left for it. With no Anthropic key the queued work waits for one.
     """
-    try:
-        await sweep_erased_personal_memory(anthropic, sm)
-    except Exception:
-        log.exception("purge.personal_memory_sweep_failed")
+    configured = anthropic_configured(anthropic)
+    if configured:
+        try:
+            await sweep_erased_personal_memory(anthropic, sm)
+        except Exception:
+            log.exception("purge.personal_memory_sweep_failed")
     async with sm() as session:
         work = await privacy_deletes_store.list_work(session)
     for item in work:
+        if not configured and item.tenant_ids:
+            continue
         try:
             await retry_account_session_delete(anthropic, sm, account_id=item.account_id)
         except Exception:

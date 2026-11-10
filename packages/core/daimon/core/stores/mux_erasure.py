@@ -173,10 +173,17 @@ class MuxRetained:
     shared_conversations: int = 0
     shared_operations: int = 0
     accounting_records: int = 0
+    # Provider state a shared conversation owns (Gemini rows keyed by the thread).
+    shared_provider_records: int = 0
 
     @property
     def total(self) -> int:
-        return self.shared_conversations + self.shared_operations + self.accounting_records
+        return (
+            self.shared_conversations
+            + self.shared_operations
+            + self.accounting_records
+            + self.shared_provider_records
+        )
 
 
 @dataclass(frozen=True)
@@ -281,7 +288,17 @@ async def inventory(
             select(func.count()).select_from(MuxOperation).where(owned, not_(_on_shared_slot())),
         ),
     )
+    # Imported here: the Gemini store reaches `channel_backend` through `shared_threads`.
+    from daimon.core.stores.gemini_runtime_state import count_shared_records
+
+    threads = [
+        (tenant, platform, channel, thread)
+        for tenant, platform, channel, thread in (
+            await session.execute(select(shared_conversations))
+        ).tuples()
+    ]
     retained = MuxRetained(
+        shared_provider_records=await count_shared_records(session, threads=threads),
         shared_conversations=await _count(
             session, select(func.count()).select_from(shared_conversations)
         ),

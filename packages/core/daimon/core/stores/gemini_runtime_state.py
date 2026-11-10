@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
@@ -10,10 +10,10 @@ from uuid import UUID
 
 from daimon.core._models import Account, GeminiRuntimeState
 from daimon.core.session_fence_retry import FenceUnavailable, retry_fences, try_fence
-from daimon.core.shared_threads import shared_owner
+from daimon.core.shared_threads import shared_owner, shared_slot
 from mux.contracts.ids import Scope
 from mux.state.lease import Slot
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import delete, func, select, text, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import DBAPIError
@@ -222,6 +222,26 @@ class PostgresPayloadDatabase:
             deadline, initialize=False, after_dispatch=after_dispatch
         ) as payload:
             yield payload
+
+
+async def count_shared_records(
+    session: AsyncSession, *, threads: Iterable[tuple[UUID, str, str, str]]
+) -> int:
+    """Rows a shared thread owns: (tenant, platform, channel, thread) each, every kind.
+
+    A shared thread's rows belong to the thread, not to any one participant.
+    """
+    owners = {(tenant, shared_owner(shared_slot(tenant, *rest))) for tenant, *rest in threads}
+    if not owners:
+        return 0
+    return int(
+        await session.scalar(
+            select(func.count())
+            .select_from(GeminiRuntimeState)
+            .where(tuple_(GeminiRuntimeState.tenant_id, GeminiRuntimeState.account_id).in_(owners))
+        )
+        or 0
+    )
 
 
 async def count_records_for_account(session: AsyncSession, *, account_id: UUID) -> int:

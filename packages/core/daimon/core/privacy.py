@@ -125,6 +125,7 @@ class PurgePreview(BaseModel):
     retained_shared_conversations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     retained_shared_operations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     retained_accounting_records: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    retained_shared_provider_records: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
 
 
 def held_lines(preview: PurgePreview) -> list[str]:
@@ -576,5 +577,8 @@ async def collect_purge_preview(
         ),
         retained_accounting_records=PurgePreviewRow(
             count=mux.retained.accounting_records, example=None
+        ),
+        retained_shared_provider_records=PurgePreviewRow(
+            count=mux.retained.shared_provider_records, example=None
         ),
     )
