@@ -18,7 +18,7 @@ from daimon.core.compute_models import ComputeSession, ComputeStatus, ComputeTas
 from daimon.core.compute_provider import ComputeProviderError
 from daimon.core.compute_sessions import ComputeCaller, ComputeSessions
 from daimon.core.errors import StoreError
-from daimon.core.session_seal import origin_stamp
+from daimon.core.session_seal import child_seal_ids, origin_stamp
 from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, PROXY_TOOL_NAME
@@ -118,9 +118,11 @@ async def _approved(
         if not approval:
             raise ToolError("Run the command from the owner's conversation.")
         raise ToolError("Approval of this exact action and its limits is required.")
+    # A provider turn's parent carries no seal metadata; its credential's seals do.
+    seal = child_seal_ids(parent.metadata, auth.seal_ids) if auth.seal_ids else ()
     return parent.id + ":" + matches[-1].id, {
         **parent.metadata,
-        **origin_stamp(channel_id=origin.parent_channel_id, thread_id=origin.thread_id),
+        **origin_stamp(channel_id=origin.parent_channel_id, thread_id=origin.thread_id, seal=seal),
     }
 
 

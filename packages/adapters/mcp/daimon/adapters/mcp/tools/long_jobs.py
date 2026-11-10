@@ -21,7 +21,7 @@ from daimon.core.long_job_models import LongJob, LongJobCancelReply, LongJobReda
 from daimon.core.long_jobs import require_admission
 from daimon.core.permissions import limiting_ids_at
 from daimon.core.scope import ScopeContext
-from daimon.core.session_seal import origin_stamp, seal_ids
+from daimon.core.session_seal import child_seal_ids, origin_stamp
 from daimon.core.stores import long_jobs as store
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.stores.thread_sessions import get_live_thread_session
@@ -143,7 +143,7 @@ def register_long_job_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         provenance = origin_stamp(
             channel_id=origin.parent_channel_id,
             thread_id=origin.thread_id,
-            seal=seal_ids(parent.metadata)
+            seal=child_seal_ids(parent.metadata, auth.seal_ids)
             | limiting_ids_at(
                 privacy_policy, channel_id=origin.parent_channel_id, thread_id=origin.thread_id
             ),

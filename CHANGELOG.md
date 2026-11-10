@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Sealed channels and Slack DM context run on OpenAI, Gemini and self-hosted
   harnesses.** The turn's credential carries its seal and Slack context, so it
   reads only the sealed conversations its own seal covers, as on Anthropic.
+- **Sessions a sealed OpenAI, Gemini or self-hosted turn starts stay sealed.**
+  Long jobs, compute sessions and agent-chat sessions started from a sealed turn
+  now carry that turn's seal, so their transcripts stay readable only inside it,
+  as on Anthropic.
 - **Shared threads run on OpenAI.** Everyone in the thread continues one session.
   It runs without Daimon's tools or any caller's personal stores, so nobody's
   credentials reach the others. Gemini and self-hosted harnesses still refuse

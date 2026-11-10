@@ -29,7 +29,9 @@ from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 
-@pytest.mark.parametrize("mode", ["approved", "unapproved", "different_command", "deadline_over"])
+@pytest.mark.parametrize(
+    "mode", ["approved", "provider_sealed", "unapproved", "different_command", "deadline_over"]
+)
 async def test_start_binds_approved_provider_identity_before_any_launch(
     db_engine, db_clean, monkeypatch, mode
 ):
@@ -59,6 +61,8 @@ async def test_start_binds_approved_provider_identity_before_any_launch(
         role=Role.USER,
         platform_user_id="user",
         chat_session_id="chat",
+        # A provider turn's parent session has no seal metadata; its credential has.
+        seal_ids=frozenset({"provider-seal"}) if mode == "provider_sealed" else frozenset(),
     )
     origin_id = str(uuid.uuid4())
     origin = SimpleNamespace(
@@ -120,7 +124,7 @@ async def test_start_binds_approved_provider_identity_before_any_launch(
             "daimon_account": str(owner.id),
             "daimon_channel": "channel",
             "daimon_thread": "thread",
-            "daimon_sealed": "prior-seal",
+            **({} if mode == "provider_sealed" else {"daimon_sealed": "prior-seal"}),
             "daimon_private_dm": "private-grant",
         },
     )
@@ -142,7 +146,7 @@ async def test_start_binds_approved_provider_identity_before_any_launch(
     )
     try:
         async with Client(mcp) as client:
-            if mode != "approved":
+            if mode not in {"approved", "provider_sealed"}:
                 with pytest.raises(ToolError):
                     await client.call_tool("start_long_job", arguments)
             else:
@@ -155,13 +159,13 @@ async def test_start_binds_approved_provider_identity_before_any_launch(
                 )
         async with sm.begin() as db:
             rows = await store.list_jobs(db, tenant_id=tenant.id, owner_account_id=owner.id)
-            assert len(rows) == (1 if mode == "approved" else 0)
+            assert len(rows) == (1 if mode in {"approved", "provider_sealed"} else 0)
             if rows:
                 [row] = rows
                 assert row.source_metadata == {
                     "daimon_channel": "channel",
                     "daimon_thread": "thread",
-                    "daimon_sealed": "prior-seal",
+                    "daimon_sealed": "provider-seal" if mode == "provider_sealed" else "prior-seal",
                     "daimon_private_dm": "private-grant",
                 }
                 assert row.owner_account_id == owner.id and row.parent_session_id == parent.id
