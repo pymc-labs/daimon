@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **On Discord, agents on OpenAI or Gemini can use tools that need a confirmation.**
+  Before, these tools were refused because the provider shows no confirmation card.
+  Daimon now posts its own card with Approve and Deny, showing the tool and its exact inputs.
+  Only the person who asked can answer it, and an admin's request needs an admin to approve.
+  An approved call runs once in a new reply from the agent, which reports the result.
+  Cards expire with the confirmation timeout. A call interrupted by a restart is never rerun;
+  the card says to check before asking again. Operators can turn this off with the
+  `host_call_gate` deployment feature. Slack, Teams and the web still refuse these tools.
 - **A conversation on OpenAI, Gemini or a self-hosted model survives a changed setup.**
   When the agent, model, provider or plan behind a thread changes, its next message starts a new session that carries over the recent conversation (and, on OpenAI's persistent workspace, saved files) instead of failing.
 - **Switching an agent's provider from a panel or the web now records what the move drops.**
