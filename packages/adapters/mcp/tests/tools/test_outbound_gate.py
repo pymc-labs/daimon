@@ -889,3 +889,16 @@ async def test_a_workspace_can_lower_the_post_limits_and_turn_reach_off(sessionm
             await prepare_posts(
                 runtime, auth, [OutgoingPost(text="hi", place="C1")], plan=plan, scope=scope
             )
+
+
+async def test_an_unreadable_limit_keeps_the_operators_config(sessionmaker):
+    runtime, auth = await _setup(sessionmaker, "discord")
+    await _workspace_sets(runtime, auth, outbound_people="inf")
+    rules = await _outbound.outbound_rules(runtime, auth, _scope(card=False))
+    config = runtime.settings.outbound
+    assert (rules.threads, rules.places, rules.people) == (
+        config.max_threads,
+        config.max_places,
+        config.max_people,
+    )
+    assert rules.reach is True and rules.budget is True

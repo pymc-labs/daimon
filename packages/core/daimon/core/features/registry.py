@@ -7,6 +7,7 @@ in code is registered and every registered key is read.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Final, Literal, get_args
@@ -147,6 +148,7 @@ class FeatureSpec:
             except ValueError:
                 return False
         return False
+            return math.isfinite(number) and number >= 0
 
     def label(self, value: str) -> str:
         return self.values.get(value, "Default" if value == DEFAULT else value)
@@ -162,6 +164,15 @@ class FeatureSpec:
 
 
 def _builtin(tool: str) -> FeatureSpec:
+def limit_int(value: str) -> int:
+    """A whole-number limit as text (`12`, or `12.0` as a deployment variable may say it).
+    Raises ValueError for text `FeatureSpec.accepts` would refuse as not finite."""
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("a limit must be a finite number")
+    return int(number)
+
+
     words = tool.replace("_", " ")
     return FeatureSpec(
         key=f"tool.{tool}",

@@ -9,7 +9,7 @@ from typing import Any, Final, Literal, cast
 from anthropic.types.beta import BetaManagedAgentsAgent
 from anthropic.types.beta.agent_create_params import Tool
 from daimon.core.capability_tools import CAPABILITY_KEYS, CAPABILITY_TOOLS
-from daimon.core.features.registry import BUILTIN_TOOLS
+from daimon.core.features.registry import BUILTIN_TOOLS, limit_int
 from daimon.core.features.snapshot import FeatureSnapshot
 from daimon.core.repo_memory_tools import REPO_MEMORY_TOOLS
 
@@ -77,7 +77,7 @@ class HistoryDepth:
     def of(cls, features: FeatureSnapshot | None) -> HistoryDepth:
         """From a snapshot; none, or one without the key (a hand-built admission), reads 100."""
         found = features.features.get("history_depth") if features is not None else None
-        return cls() if found is None else cls(int(found.value))
+        return cls() if found is None else cls(limit_int(found.value))
 
 
 FULL_HISTORY: Final[HistoryDepth] = HistoryDepth()
