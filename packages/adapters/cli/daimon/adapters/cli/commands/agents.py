@@ -30,6 +30,7 @@ from daimon.adapters.cli.tenant import (
     resolve_tenant_override,
 )
 from daimon.core import channel_backend
+from daimon.core.agent_convert import convert_agent_to_daimon
 from daimon.core.agent_fork import copy_agent
 from daimon.core.agent_identity import ensure_agent_face
 from daimon.core.agent_lifecycle import archive_memory_store_best_effort, forget_archived_agent
@@ -64,7 +65,7 @@ from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.tenants import list_tenants_by_platform
 from daimon.core.turn.notices import conversations_follow_line
 from mux.contracts.config import DEFAULT_BACKEND
-from mux.contracts.ids import ModelRef
+from mux.contracts.ids import ModelRef, Provider
 from mux.profiles import selectable_models
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from rich.console import Console
@@ -1228,10 +1229,17 @@ async def agents_archive(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
     # Session closed. MA calls below.
-    agent = await find_agent_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=name)
+    agent = await find_agent_by_daimon_tag(
+        rt.anthropic, tenant_id=tenant_id, name=name, records=rt.sessionmaker
+    )
     if agent is None:
         raise StoreError(f"no agent named {name!r} in your account or system defaults.")
-    await archive_agent(rt.anthropic, agent.id, scope=resource_scope(tenant_id=str(tenant_id)))
+    await archive_agent(
+        rt.anthropic,
+        agent.id,
+        scope=resource_scope(tenant_id=str(tenant_id)),
+        records=rt.sessionmaker,
+    )
     await archive_memory_store_best_effort(
         anthropic=rt.anthropic,
         sessionmaker=rt.sessionmaker,
@@ -1246,6 +1254,59 @@ async def agents_archive(
     await forget_archived_agent(rt.sessionmaker, tenant_id=tenant_id, name=name, agent=agent)
 
     console.print(f"[green]✓ archived agent {name!r}[/green]")
+
+
+@agents_app.command(
+    "convert",
+    help="Move a Claude agent to a Daimon agent on OpenAI or Gemini, keeping its name and rules.",
+)
+def agents_convert_command(
+    ctx: typer.Context,
+    name: str,
+    to: Annotated[str | None, typer.Option("--to", help="openai or gemini.")] = None,
+    yes: Annotated[bool, YES_OPTION] = False,
+) -> None:
+    settings = load_settings()
+    console = Console(highlight=False)
+    selector = ctx.obj
+
+    async def _run() -> None:
+        async with build_runtime(settings) as rt:
+            await agents_convert(
+                rt=rt, console=console, name=name, to=to, yes=yes, selector=selector
+            )
+
+    run_cli(_run(), console=console)
+
+
+async def agents_convert(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    name: str,
+    to: str | None,
+    yes: bool,
+    selector: TenantSelector | None = None,
+) -> None:
+    """Convert an MA agent to a Daimon record (`agent_convert`)."""
+    if to not in (None, "openai", "gemini"):
+        raise StoreError("--to takes openai or gemini.")
+    async with rt.sessionmaker() as session, session.begin():
+        override = await resolve_tenant_override(session, selector)
+        tenant_id = await discover_tenant(session, override=override)
+        tenant_label = await resolve_tenant_display(session, tenant_id)
+        confirm_or_abort(console, f"convert agent {name!r} in {tenant_label}?", yes=yes)
+    converted = await convert_agent_to_daimon(
+        rt.anthropic,
+        rt.sessionmaker,
+        tenant_id=tenant_id,
+        name=name,
+        subject=Subject(is_admin=True),
+        provider=cast("Provider | None", to),
+    )
+    console.print(f"[green]✓ converted agent {name!r} ({converted.agent.id})[/green]")
+    if converted.dropped_skills:
+        console.print(f"[yellow]Left off: {', '.join(converted.dropped_skills)}[/yellow]")
 
 
 @agents_app.command(
@@ -1294,10 +1355,14 @@ async def agents_fork(
     # Session closed. MA calls below.
     # Tenant-scoped collision pre-check on the destination name.
     # ANY match in this tenant blocks the fork regardless of owner.
-    dst_matches = await find_agents_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=dst)
+    dst_matches = await find_agents_by_daimon_tag(
+        rt.anthropic, tenant_id=tenant_id, name=dst, records=rt.sessionmaker
+    )
     if dst_matches:
         raise StoreError(f"agent {dst!r} already exists in this server — pick a different name.")
-    source = await find_agent_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=src)
+    source = await find_agent_by_daimon_tag(
+        rt.anthropic, tenant_id=tenant_id, name=src, records=rt.sessionmaker
+    )
     if source is None:
         raise StoreError(f"no agent named {src!r} in your account or system defaults.")
     public_url = str(rt.settings.mcp.public_url) if rt.settings.mcp.public_url is not None else None
