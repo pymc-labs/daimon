@@ -37,9 +37,6 @@ Requirement = Literal[
 """``platform_adapter``: the chat platform's adapter is set up in this deployment.
 ``support_channel``: the platform has an escalation channel and people have credits to ask.
 The rest name one integration's setup: its operator switch or host address, credentials and keys."""
-ENV_IMPORTED: Final = "env_imported"
-"""A workspace-tier row (not a feature) that marks the workspace's deprecated env maps as
-copied into rows by `daimon features import-env`."""
 DEFAULT: Final = "default"
 """The value a control writes to drop its own setting and inherit."""
 
@@ -120,7 +117,7 @@ class FeatureSpec:
     """A platform whose default differs from `default`, kept as it was before the registry."""
     env_map: str | None = None
     """The `Settings` field of a deprecated per-workspace map (workspace id to on/off) that
-    stands for the workspace tier until `daimon features import-env` copies it into rows."""
+    stands for the workspace tier; a stored workspace row always beats it."""
 
     def default_for(self, platform: str) -> str:
         return self.platform_defaults.get(platform, self.default)

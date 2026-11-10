@@ -31,7 +31,6 @@ from daimon.core.errors import StaleChannelValue
 from daimon.core.features.registry import (
     BACKEND_NAMES,
     DEFAULT,
-    ENV_IMPORTED,
     FEATURES,
     LOCKABLE,
     FeatureSpec,
@@ -369,7 +368,7 @@ async def _values_at(
         agent_id=place.agent_id,
         channel_id=place.channel_id,
         thread_key=place.thread_key,
-        keys=(spec.key, ENV_IMPORTED),
+        keys=(spec.key,),
     )
     return tier_values(spec, settings, place, rows)
 
@@ -614,22 +613,19 @@ async def set_workspace_feature(
 
 
 async def import_env(session: AsyncSession, settings: Settings) -> int:
-    """Copy each workspace's deprecated per-workspace env values into workspace-tier rows.
-    A workspace is imported once: its marker row ends the env map's say, and a value
-    already stored is kept. Returns how many workspaces were imported."""
+    """Write each deprecated per-workspace env value as a workspace-tier row. A value
+    already stored is kept. Returns how many rows were written."""
     workspace = FeatureTarget("workspace")
     specs = [spec for spec in FEATURES.values() if spec.env_map is not None]
     maps = {
         spec.key: cast("Mapping[uuid.UUID, bool]", getattr(settings, cast(str, spec.env_map)))
         for spec in specs
     }
-    imported = 0
+    written = 0
     for tenant_id in sorted({tenant for values in maps.values() for tenant in values}, key=str):
         stored = await list_feature_values(
-            session, tenant_id=tenant_id, keys=[ENV_IMPORTED, *maps], tier="workspace"
+            session, tenant_id=tenant_id, keys=list(maps), tier="workspace"
         )
-        if any(row.key == ENV_IMPORTED for row in stored):
-            continue
         have = {row.key for row in stored}
         for key, values in maps.items():
             if tenant_id in values and key not in have:
@@ -642,17 +638,8 @@ async def import_env(session: AsyncSession, settings: Settings) -> int:
                     set_by=None,
                     surface="cli",
                 )
-        await set_feature_value(
-            session,
-            tenant_id=tenant_id,
-            target=workspace,
-            key=ENV_IMPORTED,
-            value="done",
-            set_by=None,
-            surface="cli",
-        )
-        imported += 1
-    return imported
+                written += 1
+    return written
 
 
 async def _write_builtin(

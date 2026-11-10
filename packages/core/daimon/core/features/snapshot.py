@@ -20,7 +20,6 @@ import structlog
 from daimon.core.config import Settings
 from daimon.core.features.deployment import deployment_value
 from daimon.core.features.registry import (
-    ENV_IMPORTED,
     FEATURES,
     FeatureSpec,
     Requirement,
@@ -141,8 +140,8 @@ def unavailable_reason(
 
 
 @cache
-def _warn_ignored(env: str, key: str) -> None:
-    log.warning("features.legacy_env_ignored", env=env, imported_to=key)
+def _warn_deprecated(env: str, key: str) -> None:
+    log.warning("features.legacy_env_deprecated", env=env, feature=key)
 
 
 def _env_map_value(
@@ -151,14 +150,14 @@ def _env_map_value(
     place: FeaturePlace,
     rows: Iterable[FeatureValueRow],
 ) -> TierValue | None:
-    """A deprecated per-workspace env map as the workspace tier, until it is imported."""
+    """A deprecated per-workspace env map as the workspace tier; a stored row beats it."""
     if spec.env_map is None or settings is None:
         return None
     raw = cast(Mapping[uuid.UUID, bool], getattr(settings, spec.env_map)).get(place.tenant_id)
     if raw is None:
         return None
-    if any(row.key == ENV_IMPORTED for row in rows):
-        _warn_ignored(spec.legacy_env[0], spec.key)
+    _warn_deprecated(spec.legacy_env[0], spec.key)
+    if any(row.key == spec.key and row.tier == "workspace" for row in rows):
         return None
     return TierValue("workspace", "on" if raw else "off")
 
@@ -431,7 +430,7 @@ async def feature_in(
         agent_id=place.agent_id,
         channel_id=place.channel_id,
         thread_key=place.thread_key,
-        keys=(key, ENV_IMPORTED),
+        keys=(key,),
     )
     return resolve_one(FEATURES[key], settings, place, rows)
 
