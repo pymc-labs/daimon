@@ -53,7 +53,7 @@ features:
       description: Your usage and credit
       should_escape: false
     - command: /settings
-      description: Approvals, threads, plans and the cost line here
+      description: Turn features on or off here
       should_escape: false
     - command: /privacy
       description: See, export or delete your data
