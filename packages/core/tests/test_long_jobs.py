@@ -311,6 +311,27 @@ async def test_a_queued_job_waits_while_long_jobs_is_off_for_its_workspace(db_en
     assert len(rows) == 1
 
 
+async def test_a_queued_job_waits_while_long_jobs_cannot_be_read(
+    db_engine, db_clean, monkeypatch: pytest.MonkeyPatch
+):
+    """A failed feature read skips the job for this sweep; the next sweep launches it."""
+    from daimon.core.features import snapshot
+
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    job = await seed(sm)
+    async with sm.begin() as db:
+        await store.register(db, job, ceilings=LIMITS)
+    real = snapshot.place_values
+    monkeypatch.setattr(snapshot, "place_values", AsyncMock(side_effect=RuntimeError("down")))
+    async with sm.begin() as db:
+        held = await store.claim(db, tenant_id=job.tenant_id, owner="e", now=NOW, ceilings=LIMITS)
+    assert held == [], "an unreadable feature never launches a job"
+    monkeypatch.setattr(snapshot, "place_values", real)
+    async with sm.begin() as db:
+        rows = await store.claim(db, tenant_id=job.tenant_id, owner="e", now=NOW, ceilings=LIMITS)
+    assert len(rows) == 1, "the job launches once the feature reads again"
+
+
 async def test_finish_cas_publishes_one_unattended_wake(db_engine, db_clean):
     sm = async_sessionmaker(db_engine, expire_on_commit=False)
     job = await claimed(sm, await seed(sm))

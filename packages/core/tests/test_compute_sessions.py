@@ -380,6 +380,31 @@ async def test_disabling_launch_cleans_partial_creation_without_starting_a_machi
     assert fake.resources == {} and fake.machine_env == {}
 
 
+async def test_a_launching_session_waits_while_compute_cannot_be_read(
+    db_engine, db_clean, monkeypatch: pytest.MonkeyPatch
+):
+    """An unreadable `compute` feature leaves the session as it is: no machine, no stop."""
+    from unittest.mock import AsyncMock
+
+    from daimon.core.features import snapshot
+
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, _, _ = await caller(sm)
+    fake = FakeComputeProvider()
+    fake.fail_create = True
+    service = ComputeSessions(sm, settings(), fake, clock=lambda: NOW)
+    with pytest.raises(ComputeProviderError):
+        await launch(service, owner)
+    [session] = await service.list(owner)
+    fake.fail_create = False
+    real = snapshot.place_values
+    monkeypatch.setattr(snapshot, "place_values", AsyncMock(side_effect=RuntimeError("down")))
+    await service.reconcile()
+    monkeypatch.setattr(snapshot, "place_values", real)
+    assert (await service.get(owner, session.id)).state == "launching", "left for the next tick"
+    assert fake.machine_env == {}, "no machine started on a guess"
+
+
 async def test_reconcile_isolates_unexpected_errors_and_still_deletes_orphans(monkeypatch):
     from contextlib import asynccontextmanager
     from types import SimpleNamespace

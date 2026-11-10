@@ -33,7 +33,7 @@ from daimon.core.compute_provider import (
 )
 from daimon.core.config import ComputeSettings
 from daimon.core.errors import StoreError
-from daimon.core.features.snapshot import FeaturePlace, feature_in
+from daimon.core.features.snapshot import FeaturePlace, feature_in_or_none
 from daimon.core.stores import compute_sessions as store
 from daimon.core.stores import compute_tasks as task_store
 from daimon.core.stores.domain import TurnOriginRow
@@ -324,9 +324,10 @@ class ComputeSessions:
                 except ComputeProviderError:
                     log.warning("compute.orphan_delete_retry", session_id=str(resource.session_id))
 
-    async def _allowed(self, db: AsyncSession, session: ComputeSession) -> bool:
+    async def _allowed(self, db: AsyncSession, session: ComputeSession) -> bool | None:
         """Whether a session still waiting to launch may: the deployment switch and the
-        `compute` feature at its place. Off here stops it instead of provisioning."""
+        `compute` feature at its place. Off here stops it instead of provisioning; None
+        when the feature cannot be read, so this tick leaves the session as it is."""
         place = FeaturePlace.of(
             session.tenant_id,
             session.platform,
@@ -334,7 +335,10 @@ class ComputeSessions:
             session.thread_id,
             agent_id=session.agent_id,
         )
-        return self.settings.enabled and (await feature_in(db, None, place, "compute")).on
+        if not self.settings.enabled:
+            return False
+        found = await feature_in_or_none(db, None, place, "compute")
+        return None if found is None else found.on
 
     async def _reconcile_one(self, session: ComputeSession, *, archived: bool) -> None:
         async with self.sm.begin() as db:
@@ -344,11 +348,16 @@ class ComputeSessions:
             if current is None or current.state == "deleted":
                 return
             now = self.clock()
+            allowed: bool | None = True
+            if current.state == "launching" and not archived and current.expires_at > now:
+                allowed = await self._allowed(db, current)
+                if allowed is None:
+                    return
             if (
                 archived
                 or current.expires_at <= now
                 or current.state == "stopping"
-                or (current.state == "launching" and not await self._allowed(db, current))
+                or (current.state == "launching" and not allowed)
             ):
                 current = current.model_copy(update={"state": "stopping"})
                 await store.save(db, current)

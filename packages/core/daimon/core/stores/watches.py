@@ -26,7 +26,7 @@ from daimon.core._models import (
 from daimon.core.config import load_watches_settings
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.continuity.page_events import SignedPageEvent, verify_page_event
-from daimon.core.features.snapshot import FeaturePlace, feature_in
+from daimon.core.features.snapshot import FeaturePlace, feature_in_or_none
 from daimon.core.stores import watch_credentials
 from daimon.core.stores.direct_messages import DM_SCOPE_PREFIX
 from daimon.core.stores.domain import (
@@ -413,6 +413,7 @@ async def set_watch_control(session: AsyncSession, *, scope: str, enabled: bool)
 
 
 async def is_watch_enabled(session: AsyncSession, watch: WatchRow) -> bool:
+    """Whether a watch may run now; a feature that cannot be read counts as Off."""
     if not load_watches_settings().enabled:
         return False
     place = FeaturePlace.of(
@@ -422,7 +423,8 @@ async def is_watch_enabled(session: AsyncSession, watch: WatchRow) -> bool:
         watch.thread_id,
         agent_id=watch.agent_id,
     )
-    if not (await feature_in(session, None, place, "watches")).on:
+    found = await feature_in_or_none(session, None, place, "watches")
+    if found is None or not found.on:
         return False
     controls = dict(
         (

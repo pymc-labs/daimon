@@ -584,6 +584,40 @@ async def test_run_one_tick_skips_a_routine_its_workspace_turned_off(
     assert fetched.last_error == "routines_turned_off", "the owner can see why it did not run"
 
 
+async def test_run_one_tick_skips_a_routine_whose_feature_cannot_be_read(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed read must not run a routine on the registry default, which is On."""
+    from unittest.mock import AsyncMock
+
+    from daimon.core.features import snapshot
+
+    now = datetime(2026, 5, 8, 12, 0, 0, tzinfo=UTC)
+    row = await _seed_due_routine(db_session, now=now)
+    await db_session.commit()
+    monkeypatch.setattr(snapshot, "resolve_features", AsyncMock(side_effect=RuntimeError("down")))
+
+    async def fire(_r: RoutineRow) -> None:
+        raise AssertionError("a routine whose feature is unreadable must not run")
+
+    await run_one_tick(
+        now=now,
+        sm=db_session_factory,
+        fire=fire,
+        max_age=timedelta(minutes=15),
+        max_concurrent_fires=10,
+        dispatch_timeout_s=5.0,
+        wait_for_completion=True,
+    )
+
+    async with db_session_factory() as s:
+        fetched = await get_routine(s, row.id, tenant_id=row.tenant_id)
+    assert fetched is not None
+    assert fetched.last_error == "feature_read_failed", "the owner can see why it did not run"
+
+
 async def test_run_one_tick_skips_an_intake_routine_when_lead_intake_is_off(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],

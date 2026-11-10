@@ -380,6 +380,18 @@ async def place_feature(
         return ResolvedFeature(key, spec.default_for(place.platform), "default")
 
 
+async def place_feature_or_none(
+    sessions: Sessions, settings: Settings | None, place: FeaturePlace, key: str
+) -> ResolvedFeature | None:
+    """`place_feature` for a background worker: None when the read fails, so the caller
+    skips this tick's work instead of running it on a guessed default."""
+    try:
+        return (await resolve_features(sessions, settings, place, keys=(key,))).get(key)
+    except Exception:
+        log.warning("features.background_read_failed", key=key, exc_info=True)
+        return None
+
+
 async def place_guardrail(
     sessions: Sessions, settings: Settings | None, place: FeaturePlace, key: str
 ) -> ResolvedFeature:
@@ -410,3 +422,16 @@ async def feature_in(
         keys=(key, ENV_IMPORTED),
     )
     return resolve_one(FEATURES[key], settings, place, rows)
+
+
+async def feature_in_or_none(
+    session: AsyncSession, settings: Settings | None, place: FeaturePlace, key: str
+) -> ResolvedFeature | None:
+    """`feature_in` for a background worker: None when the read fails, so the caller skips
+    this item. The read runs in a savepoint, so a failure leaves the transaction usable."""
+    try:
+        async with session.begin_nested():
+            return await feature_in(session, settings, place, key)
+    except Exception:
+        log.warning("features.background_read_failed", key=key, exc_info=True)
+        return None

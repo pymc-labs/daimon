@@ -272,6 +272,18 @@ async def test_a_workspace_turning_watches_off_stops_its_watches(permanent_watch
 
 
 @pytest.mark.fresh_schema
+async def test_a_watch_whose_feature_cannot_be_read_does_not_run(permanent_watch, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from daimon.core.features import snapshot
+
+    factory, watch, _ = permanent_watch
+    async with factory.begin() as db:
+        monkeypatch.setattr(snapshot, "place_values", AsyncMock(side_effect=RuntimeError("down")))
+        assert not await watches.is_watch_enabled(db, watch), "unreadable counts as Off"
+
+
+@pytest.mark.fresh_schema
 async def test_ceilings_read_tenant_then_global_then_defaults(permanent_watch):
     factory, watch, _ = permanent_watch
     async with factory.begin() as db:

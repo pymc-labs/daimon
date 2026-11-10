@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable, Coroutine
 from datetime import UTC, datetime, timedelta
 
 import structlog
-from daimon.core.features.snapshot import FeaturePlace, place_feature
+from daimon.core.features.snapshot import FeaturePlace, place_feature_or_none
 from daimon.core.ids import generate_request_id
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.routine_delivery import record_routine_failure
@@ -176,16 +176,18 @@ async def run_one_tick(
             async with sem:
                 try:
                     place = FeaturePlace(row.tenant_id, "", row.channel_id, agent_id=row.agent_id)
-                    if not (await place_feature(sm, None, place, "routines")).on:
-                        # Routines turned Off here: the schedule does not run.
-                        await _record_fire_error(sm, row, "routines_turned_off", None)
+                    routines = await place_feature_or_none(sm, None, place, "routines")
+                    if routines is None or not routines.on:
+                        # Off here, or unreadable: the schedule does not run this tick.
+                        reason = "routines_turned_off" if routines else "feature_read_failed"
+                        await _record_fire_error(sm, row, reason, None)
                         return
-                    if (row.tenant_id, row.id) in intake_bindings and not (
-                        await place_feature(sm, None, place, "lead_intake")
-                    ).on:
-                        # Lead intake turned Off here: its routines do not run.
-                        await _record_fire_error(sm, row, "lead_intake_turned_off", None)
-                        return
+                    if (row.tenant_id, row.id) in intake_bindings:
+                        intake = await place_feature_or_none(sm, None, place, "lead_intake")
+                        if intake is None or not intake.on:
+                            reason = "lead_intake_turned_off" if intake else "feature_read_failed"
+                            await _record_fire_error(sm, row, reason, None)
+                            return
                     with observation.activate():
                         async with routine_execution(
                             sm,

@@ -18,7 +18,7 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Subject, authorize
 from daimon.core.config import LongJobsSettings
 from daimon.core.errors import StoreError
-from daimon.core.features.snapshot import FeaturePlace, feature_in
+from daimon.core.features.snapshot import FeaturePlace, feature_in, feature_in_or_none
 from daimon.core.long_job_models import (
     ACTIVE_STATES,
     LongJob,
@@ -330,8 +330,9 @@ async def claim(
     for row in rows:
         if row.state == "queued" and not row.cancel_requested:
             place = FeaturePlace(tenant_id, "", agent_id=row.agent_id)
-            if not (await feature_in(session, None, place, "long_jobs")).on:
-                # Long jobs turned Off here: a queued job waits, and launches once On again.
+            enabled = await feature_in_or_none(session, None, place, "long_jobs")
+            if enabled is None or not enabled.on:
+                # Off or unreadable here: a queued job waits, and launches once On again.
                 continue
             active = select(LongJobRecord).where(
                 LongJobRecord.tenant_id == tenant_id,
