@@ -2080,6 +2080,68 @@ class MicrosoftUserToken(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class ConnectorToken(Base):
+    """An OAuth connector grant whose tokens Daimon holds and refreshes.
+
+    Personal (`account_id` set, the person who signed in) or agent-wide
+    (`account_id` NULL). Kept apart from `watch_credentials` on purpose: watches
+    read keys by (tenant, owner, URL) and must never reach an OAuth connector
+    token. Rotation is a compare-and-set on `updated_at`; no row lock is held
+    across the token endpoint call.
+    """
+
+    __tablename__ = "connector_tokens"
+    __table_args__ = (
+        CheckConstraint(
+            "refresh_owner IN ('ma', 'daimon')", name="ck_connector_tokens_refresh_owner"
+        ),
+        Index(
+            "uq_connector_tokens_personal",
+            "tenant_id",
+            "account_id",
+            "agent_id",
+            "server_url",
+            unique=True,
+            postgresql_where=text("account_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_connector_tokens_agent_wide",
+            "tenant_id",
+            "agent_id",
+            "server_url",
+            unique=True,
+            postgresql_where=text("account_id IS NULL"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=True
+    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    server_url: Mapped[str] = mapped_column(Text, nullable=False)
+    access_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    refresh_token_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    token_endpoint: Mapped[str] = mapped_column(Text, nullable=False)
+    client_id: Mapped[str] = mapped_column(Text, nullable=False)
+    client_secret_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    token_endpoint_auth_method: Mapped[str] = mapped_column(Text, nullable=False)
+    scope: Mapped[str | None] = mapped_column(Text, nullable=True)
+    resource: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    refresh_owner: Mapped[str] = mapped_column(Text, nullable=False)
+    refresh_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class MicrosoftSignIn(Base):
     """One Connect Microsoft link, spent by its callback.
 

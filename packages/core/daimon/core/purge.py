@@ -16,7 +16,7 @@ principal_links -> principal row -> platform_user_names (platform only,
 platform-user-scoped, after the principal row on purpose: see the call) ->
 teams_messages and microsoft_user_tokens (Teams principals only, keyed by (tenant,
 Entra user)).
-Account-level deletes (mcp_tokens, GitHub connect requests and click intents,
+Account-level deletes (mcp_tokens, connector_tokens, GitHub connect requests and click intents,
 message_feedback, tag_opt_outs, user_configs, accounts)
 run in `purge_account` after all principal rows are gone; mcp_tokens and
 message_feedback are keyed by account_id and are deleted before delete_account
@@ -146,6 +146,7 @@ from daimon.core.memory_resource import (
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import agent_posts as agent_posts_store
 from daimon.core.stores import coding_key_claims as coding_key_claims_store
+from daimon.core.stores import connector_tokens as connector_tokens_store
 from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores import direct_messages as direct_messages_store
 from daimon.core.stores import gemini_runtime_state as gemini_state_store
@@ -203,6 +204,7 @@ class PurgeReport(BaseModel):
     github_connect_click_intents: int = 0
     github_user_links: int = 0
     mcp_tokens: int = 0
+    connector_tokens: int = 0
     gemini_records: int = 0
     selfhosted_operations: int = 0
     slack_user_tokens: int = 0
@@ -247,6 +249,7 @@ class PurgeReport(BaseModel):
             ),
             github_user_links=self.github_user_links + other.github_user_links,
             mcp_tokens=self.mcp_tokens + other.mcp_tokens,
+            connector_tokens=self.connector_tokens + other.connector_tokens,
             gemini_records=self.gemini_records + other.gemini_records,
             selfhosted_operations=self.selfhosted_operations + other.selfhosted_operations,
             slack_user_tokens=self.slack_user_tokens + other.slack_user_tokens,
@@ -617,6 +620,9 @@ async def _purge_account_transaction(
     gemini_records_count = await gemini_state_store.delete_records_for_account(
         session, account_id=account_id
     )
+    connector_tokens_count = await connector_tokens_store.delete_connector_tokens_for_account(
+        session, account_id=account_id
+    )
     selfhosted_operations_count = await selfhosted_store.delete_operations_for_account(
         session, account_id=account_id
     )
@@ -703,6 +709,7 @@ async def _purge_account_transaction(
             mux_release_requests=mux_erased.release_requests,
             mux_operations=mux_erased.operations,
             mcp_tokens=mcp_tokens_count,
+            connector_tokens=connector_tokens_count,
             gemini_records=gemini_records_count,
             selfhosted_operations=selfhosted_operations_count,
             github_connect_requests=github_connect_requests_count,

@@ -515,6 +515,35 @@ class MicrosoftUserTokenRow(BaseModel):
     updated_at: datetime
 
 
+ConnectorRefreshOwner = Literal["ma", "daimon"]
+"""Who refreshes one connector grant: the Managed Agents vault, or Daimon's store."""
+
+
+class ConnectorTokenRow(BaseModel):
+    """One stored connector grant, ciphertext only; `account_id` None means agent-wide."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    account_id: uuid.UUID | None
+    agent_id: uuid.UUID
+    server_url: str
+    access_token_encrypted: bytes
+    refresh_token_encrypted: bytes | None
+    token_endpoint: str
+    client_id: str
+    client_secret_encrypted: bytes | None
+    token_endpoint_auth_method: Literal["none", "client_secret_basic", "client_secret_post"]
+    scope: str | None
+    resource: str | None
+    expires_at: datetime | None
+    refresh_owner: ConnectorRefreshOwner
+    refresh_started_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
 class MicrosoftSignInRow(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 

@@ -156,6 +156,7 @@ TAIL = (
     "0191_deployment_identity",
     "0192_host_call_cards",
     "0193_agent_record_versions",
+    "0194_connector_tokens",
 )
 HEAD = TAIL[-1]
 
