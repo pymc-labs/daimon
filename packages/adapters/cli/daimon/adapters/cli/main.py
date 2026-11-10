@@ -18,6 +18,7 @@ from daimon.adapters.cli.commands.config import config_app
 from daimon.adapters.cli.commands.context_provider import context_provider_app
 from daimon.adapters.cli.commands.crypto import crypto_app
 from daimon.adapters.cli.commands.defaults import defaults_app
+from daimon.adapters.cli.commands.deployment import deployment_app
 from daimon.adapters.cli.commands.environments import environments_app
 from daimon.adapters.cli.commands.features import features_app
 from daimon.adapters.cli.commands.github import github_app
@@ -47,6 +48,7 @@ app.add_typer(agents_app, name="agents")
 app.add_typer(admins_app, name="admins")
 app.add_typer(backup_app, name="backup")
 app.add_typer(channels_app, name="channels")
+app.add_typer(deployment_app, name="deployment")
 app.add_typer(environments_app, name="environments")
 app.add_typer(tenants_app, name="tenants")
 app.add_typer(usage_app, name="usage")
