@@ -78,16 +78,15 @@ def _build_settings(defaults_root: Path) -> Settings:
         jwt_secret = None
         public_url = None
 
-    class _Settings:
-        tool_safety = ToolSafetyPolicy()
-        cli = _Cli()
-        mcp = _Mcp()
-        github_app = GithubAppSettings()
-        features: dict[str, str] = {}
-
-    settings = _Settings()
-    settings.defaults_root = defaults_root  # type: ignore[attr-defined]
-    return cast(Settings, settings)
+    # Real defaults for every settings block; only what the command reads is replaced.
+    return Settings.model_construct(
+        tool_safety=ToolSafetyPolicy(),
+        cli=_Cli(),
+        mcp=_Mcp(),
+        github_app=GithubAppSettings(),
+        defaults_root=defaults_root,
+        features={},
+    )
 
 
 def _make_rt(

@@ -4,7 +4,7 @@ import json
 import uuid
 from io import StringIO
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import httpx
 import jwt as pyjwt
@@ -47,13 +47,16 @@ class _FakeMcp:
     public_url = None
 
 
-class _FakeSettings:
-    tool_safety = ToolSafetyPolicy()
-    cli = _FakeCli()
-    mcp = _FakeMcp()
-    github_app = GithubAppSettings()
-    defaults_root = Path("defaults")
-    features: dict[str, str] = {}
+def _fake_settings(mcp: object | None = None) -> Settings:
+    """Real defaults for every settings block; only what the command reads is replaced."""
+    return Settings.model_construct(
+        tool_safety=ToolSafetyPolicy(),
+        cli=_FakeCli(),
+        mcp=mcp or _FakeMcp(),
+        github_app=GithubAppSettings(),
+        defaults_root=Path("defaults"),
+        features={},
+    )
 
 
 def _session_body(
@@ -177,7 +180,7 @@ async def test_sessions_create_json_prints_session_id_agent_env(
     rt = build_cli_runtime(
         db_session_factory,
         anthropic=make_stub_anthropic(_create_router(tenant_id, "sess_test_01").dispatch),
-        settings=_FakeSettings(),
+        settings=_fake_settings(),
     )
     console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
 
@@ -208,7 +211,7 @@ async def test_sessions_create_bare_prints_session_id(
     rt = build_cli_runtime(
         db_session_factory,
         anthropic=make_stub_anthropic(_create_router(tenant_id, "sess_bare_42").dispatch),
-        settings=_FakeSettings(),
+        settings=_fake_settings(),
     )
     console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
 
@@ -230,7 +233,7 @@ async def test_sessions_create_without_defaults_exits_one_with_apply_hint(
 ) -> None:
     from daimon.adapters.cli.sessions_bootstrap import SessionBootstrapError
 
-    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_fake_settings())
     console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
 
     with pytest.raises(SessionBootstrapError) as exc_info:
@@ -270,7 +273,7 @@ async def test_sessions_get_json_prints_session_body(
     rt = build_cli_runtime(
         db_session_factory,
         anthropic=make_stub_anthropic(_retrieve_handler("sess_xyz")),
-        settings=_FakeSettings(),
+        settings=_fake_settings(),
     )
     buf = StringIO()
     console = Console(file=buf, force_terminal=False, highlight=False, width=120)
@@ -291,7 +294,7 @@ async def test_sessions_get_human_renders_table(
     rt = build_cli_runtime(
         db_session_factory,
         anthropic=make_stub_anthropic(_retrieve_handler("sess_human")),
-        settings=_FakeSettings(),
+        settings=_fake_settings(),
     )
     buf = StringIO()
     console = Console(file=buf, force_terminal=False, highlight=False, width=120)
@@ -314,7 +317,7 @@ async def test_sessions_get_missing_raises_api_error(
         )
 
     rt = build_cli_runtime(
-        db_session_factory, anthropic=make_stub_anthropic(not_found), settings=_FakeSettings()
+        db_session_factory, anthropic=make_stub_anthropic(not_found), settings=_fake_settings()
     )
     console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
 
@@ -327,13 +330,8 @@ class _ConfiguredMcp:
     public_url = HttpUrl("https://mcp.example.com/mcp")
 
 
-class _ConfiguredSettings:
-    tool_safety = ToolSafetyPolicy()
-    cli = _FakeCli()
-    mcp = _ConfiguredMcp()
-    github_app = GithubAppSettings()
-    defaults_root = Path("defaults")
-    features: dict[str, str] = {}
+def _configured_settings() -> Settings:
+    return _fake_settings(_ConfiguredMcp())
 
 
 def _create_router_with_vault(
@@ -402,7 +400,7 @@ async def test_cli_sessions_create_lands_vault_credential_with_cli_local_scope(
     router = _create_router_with_vault(tenant_id, captured, "sess_cli_vault_01")
 
     rt = CliRuntime(
-        settings=cast(Settings, _ConfiguredSettings()),
+        settings=_configured_settings(),
         anthropic=make_stub_anthropic(router.dispatch),
         sessionmaker=db_session_factory,
         deployment_default=DeploymentDefault(),
@@ -444,7 +442,7 @@ async def test_cli_sessions_create_back_compat_when_mcp_settings_unset(
     rt = build_cli_runtime(
         db_session_factory,
         anthropic=make_stub_anthropic(router.dispatch),
-        settings=_FakeSettings(),
+        settings=_fake_settings(),
     )
     console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
 
@@ -521,7 +519,7 @@ async def test_sessions_create_threads_agent_uuid(
     router.add("POST", r"/v1/vaults/vlt_agent_uuid_test/credentials", cred_create_handler)
 
     rt = CliRuntime(
-        settings=cast(Settings, _ConfiguredSettings()),
+        settings=_configured_settings(),
         anthropic=make_stub_anthropic(router.dispatch),
         sessionmaker=db_session_factory,
         deployment_default=DeploymentDefault(),
