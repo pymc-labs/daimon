@@ -717,6 +717,22 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         authority=_ADMIN,
     ),
     FeatureSpec(
+        key="mcp_connector_relay",
+        name="MCP connectors on OpenAI, Gemini and self-hosted",
+        category="guardrails",
+        effect="guardrail",
+        values=_OFF_ON,
+        default="on",
+        tiers=("deployment",),
+        binds="turn",
+        doc=(
+            "An agent's own MCP connectors work on OpenAI, Gemini and self-hosted agents: "
+            "Daimon calls them for the agent with the person's sign-in. Off leaves them out there."
+        ),
+        platforms=_CALL_GATE_PLATFORMS,
+        authority=_ADMIN,
+    ),
+    FeatureSpec(
         key="reach_budget",
         name="Reach check",
         category="guardrails",

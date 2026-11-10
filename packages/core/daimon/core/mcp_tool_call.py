@@ -11,7 +11,7 @@ A poll runs with nobody watching and may carry a credential, so every request:
   from the environment and never sends a cookie back;
 - refuses a compressed response before reading it, stops reading past
   `MAX_RESPONSE_BYTES` while it streams, and gives each request
-  `REQUEST_TIMEOUT_S`;
+  `REQUEST_TIMEOUT_S` (an attended relay call passes `INTERACTIVE_LIMITS`);
 - parses JSON strictly: no NaN or Infinity, no duplicate keys.
 
 A failure raises `McpCallError` carrying only a fixed class name. Nothing here
@@ -26,6 +26,7 @@ import json
 import socket
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Final, Literal, cast
 from urllib.parse import urlsplit
 
@@ -34,9 +35,12 @@ from daimon.core.mcp_oauth.urls import McpUrlError, assert_public_https_url
 from pydantic import JsonValue
 
 __all__ = [
+    "INTERACTIVE_LIMITS",
     "MAX_RESPONSE_BYTES",
     "REQUEST_TIMEOUT_S",
+    "WATCH_LIMITS",
     "AddressRefusedError",
+    "Limits",
     "McpCallError",
     "McpToolSession",
     "PinnedTransport",
@@ -49,6 +53,20 @@ MAX_RESPONSE_BYTES: Final = 262144
 REQUEST_TIMEOUT_S: Final = 10.0
 MAX_CATALOGUE_PAGES: Final = 20
 PROTOCOL_VERSION: Final = "2025-06-18"
+MAX_SSE_MESSAGES: Final = 64
+
+
+@dataclass(frozen=True, slots=True)
+class Limits:
+    """One session's bounds: bytes read per response and seconds per request."""
+
+    max_response_bytes: int
+    timeout_s: float
+
+
+WATCH_LIMITS: Final = Limits(MAX_RESPONSE_BYTES, REQUEST_TIMEOUT_S)
+# A person waits on a relayed connector call: larger replies, slower tools.
+INTERACTIVE_LIMITS: Final = Limits(4 * 1024 * 1024, 60.0)
 
 CallFailure = Literal[
     "address", "redirect", "refused", "too_large", "timeout", "transport", "protocol", "tool_error"
@@ -184,12 +202,17 @@ def strict_json(text: str) -> JsonValue:
 
 
 def _sse_messages(text: str) -> list[JsonValue]:
-    """Each event's `data:` lines, joined as the SSE format says, parsed as JSON."""
+    """Each event's `data:` lines, joined as the SSE format says, parsed as JSON.
+
+    At most `MAX_SSE_MESSAGES` events: a stream of tiny events is refused, not parsed.
+    """
     messages: list[JsonValue] = []
     data: list[str] = []
     for line in [*text.splitlines(), ""]:
         if line == "":
             if data:
+                if len(messages) == MAX_SSE_MESSAGES:
+                    raise McpCallError("too_large")
                 messages.append(strict_json("\n".join(data)))
                 data = []
         elif line.startswith("data:"):
@@ -207,9 +230,11 @@ class McpToolSession:
         *,
         target: str,
         token: str | None,
+        max_response_bytes: int = MAX_RESPONSE_BYTES,
     ) -> None:
         self._http = http
         self._target = target
+        self._max_bytes = max_response_bytes
         self._headers = {
             "Accept": "application/json, text/event-stream",
             # An encoded reply is refused unread; see `_post`.
@@ -248,7 +273,7 @@ class McpToolSession:
             try:
                 async for chunk in response.aiter_bytes():
                     size += len(chunk)
-                    if size > MAX_RESPONSE_BYTES:
+                    if size > self._max_bytes:
                         raise McpCallError("too_large")
                     chunks.append(chunk)
             except httpx.TimeoutException:
@@ -339,12 +364,18 @@ class McpToolSession:
             cursor = following
         raise McpCallError("too_large")
 
+    async def call_tool_result(
+        self, name: str, arguments: Mapping[str, JsonValue]
+    ) -> dict[str, JsonValue]:
+        """The `tools/call` result object as sent, for a relay to hand back unchanged."""
+        return await self._rpc("tools/call", {"name": name, "arguments": dict(arguments)})
+
     async def call_tool(self, name: str, arguments: Mapping[str, JsonValue]) -> JsonValue:
         """The tool's result: `structuredContent`, else its one text item (JSON when it parses).
 
         `isError` raises `McpCallError("tool_error")`; the error text is dropped.
         """
-        result = await self._rpc("tools/call", {"name": name, "arguments": dict(arguments)})
+        result = await self.call_tool_result(name, arguments)
         if result.get("isError") is True:
             raise McpCallError("tool_error")
         structured = result.get("structuredContent")
@@ -372,6 +403,7 @@ async def mcp_tool_session(
     *,
     resolve: Resolver = resolve_public_address,
     transport: httpx.AsyncBaseTransport | None = None,
+    limits: Limits = WATCH_LIMITS,
 ) -> AsyncIterator[McpToolSession]:
     """An initialised session with `url`, sending `token` (if any) to that URL only.
 
@@ -387,7 +419,11 @@ async def mcp_tool_session(
         raise McpCallError("address") from None
     if not host or not host.isascii() or parts.username or parts.password:
         raise McpCallError("address")
-    async with pinned_http_client(resolve=resolve, transport=transport) as http:
-        session = McpToolSession(http, target=url, token=token)
+    async with pinned_http_client(
+        resolve=resolve, transport=transport, timeout=limits.timeout_s
+    ) as http:
+        session = McpToolSession(
+            http, target=url, token=token, max_response_bytes=limits.max_response_bytes
+        )
         await session.initialize()
         yield session

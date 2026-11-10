@@ -91,6 +91,7 @@ Where each feature can be set, and its default.
 | Read-only memory in direct messages | `dm_memory_read_only` | Guardrail | Writable | ✓ | ✓ |  |  |  | Only Discord, Slack |
 | Tool safety | `tool_safety` | Guardrail | On | ✓ |  |  |  |  |  |
 | Approve cards for OpenAI and Gemini | `host_call_gate` | Guardrail | On | ✓ |  |  |  |  | Only Discord, Slack, Teams, Web |
+| MCP connectors on OpenAI, Gemini and self-hosted | `mcp_connector_relay` | Guardrail | On | ✓ |  |  |  |  | Only Discord, Slack, Teams, Web |
 | Reach check | `reach_budget` | Guardrail | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Built-in tools in routines | `unattended_capabilities` | Guardrail | Allowed | ✓ | ✓ | ✓ |  |  |  |
 | Routines must say where they post | `require_routine_destination` | Guardrail | Optional | ✓ | ✓ |  |  |  |  |
@@ -1006,6 +1007,18 @@ On an OpenAI or Gemini agent, a tool that needs approval posts an Approve card a
 | | |
 | --- | --- |
 | Key | `host_call_gate` |
+| Values | `off` (Off), `on` (On) |
+| Default | `on` |
+| Levels | Deployment |
+| Combines | Stricter wins |
+
+## MCP connectors on OpenAI, Gemini and self-hosted
+
+An agent's own MCP connectors work on OpenAI, Gemini and self-hosted agents: Daimon calls them for the agent with the person's sign-in. Off leaves them out there.
+
+| | |
+| --- | --- |
+| Key | `mcp_connector_relay` |
 | Values | `off` (Off), `on` (On) |
 | Default | `on` |
 | Levels | Deployment |
