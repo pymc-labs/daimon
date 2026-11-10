@@ -145,7 +145,7 @@ async def _rename_on_provider(
 
 
 async def rename_seeded_agent(
-    client: AsyncAnthropic,
+    client: AsyncAnthropic | None,
     session_factory: async_sessionmaker[AsyncSession],
     *,
     tenant_id: uuid.UUID,
@@ -160,8 +160,9 @@ async def rename_seeded_agent(
     self-hosted record holds `new`, with or without a seeded `old`, and
     `AgentRenameAmbiguous` when self-hosted records differ from `old` only in
     case: nothing is renamed and the caller skips the agent pass, so that agent is never adopted.
+    Without a `client` (no Anthropic credentials) only self-hosted records move.
     """
-    agents = await list_agents_by_tenant(client, tenant_id=tenant_id)
+    agents = [] if client is None else await list_agents_by_tenant(client, tenant_id=tenant_id)
     olds = _named(agents, old)
     legacy = [agent for agent in olds if _managed(agent)]
     if _only_unmanaged(_named(agents, new)):
@@ -187,8 +188,9 @@ async def rename_seeded_agent(
         _raise_if_selfhosted_blocked(selfhosted, old=old, new=new)
         if legacy or selfhosted == "pending":
             await rename_agent_references(session, tenant_id=tenant_id, old=old, new=new)
-    for agent in (*legacy, *readers):
-        await _rename_on_provider(client, agent, tenant_id=tenant_id, old=old, new=new)
+    if client is not None:
+        for agent in (*legacy, *readers):
+            await _rename_on_provider(client, agent, tenant_id=tenant_id, old=old, new=new)
     _log.info("defaults.agent_renamed", tenant_id=str(tenant_id), old=old, new=new)
     return outcome
 

@@ -38,6 +38,7 @@ from daimon.core.defaults.sweep import (
 )
 from daimon.core.errors import DaimonError, DefaultsError
 from daimon.core.model_presets import model_choice_id
+from daimon.core.stores.agent_rename import list_tenants_with_selfhosted_agent
 from daimon.core.stores.channel_skills import list_channel_skill_ids
 from daimon.core.stores.seeded_skills import prune_seeded_skills
 from sqlalchemy import text
@@ -103,6 +104,47 @@ async def _channel_skill_ids(
     except SQLAlchemyError as err:
         _log.warning("defaults.channel_skills_read_failed", error=str(err))
         return None
+
+
+def reconcile_lock_key(tenant_id: uuid.UUID) -> str:
+    """The advisory lock key every reconcile and rename of this tenant takes."""
+    return f"{_RECONCILE_LOCK_NAMESPACE}:{tenant_id}"
+
+
+async def rename_selfhosted_defaults(
+    session_factory: async_sessionmaker[AsyncSession],
+    client: AsyncAnthropic | None,
+    defaults_root: Path,
+    *,
+    dry_run: bool,
+) -> ApplyReport:
+    """Run pending seeded renames for every tenant with a self-hosted record to move.
+
+    Self-hosted deployments may have no Anthropic credentials, so this needs only
+    Postgres; a `client` also lets each tenant's managed agents move with it.
+    """
+    report = ApplyReport()
+    agents_root = defaults_root / "agents"
+    specs = load_agent_specs(agents_root) if agents_root.exists() else []
+    for old, new in pending_renames({spec.name for spec in specs}):
+        async with session_factory() as session:
+            tenant_ids = await list_tenants_with_selfhosted_agent(session, name=old)
+        for tenant_id in tenant_ids:
+            await _run_isolated(
+                report,
+                lambda tenant_id=tenant_id, old=old, new=new: rename_seeded_agent(
+                    client,
+                    session_factory,
+                    tenant_id=tenant_id,
+                    old=old,
+                    new=new,
+                    lock_key=reconcile_lock_key(tenant_id),
+                    dry_run=dry_run,
+                ),
+                kind="agent",
+                name=new,
+            )
+    return report
 
 
 async def _run_per_resource(
@@ -209,7 +251,7 @@ async def _reconcile_core(
     # Rename seeded agents in place before the agent pass and sweep: the sweep
     # would archive the old name and the pass would create the new one. While a
     # rename is blocked, failed or (dry run) pending, both are skipped.
-    lock_key = f"{_RECONCILE_LOCK_NAMESPACE}:{tenant_id}"
+    lock_key = reconcile_lock_key(tenant_id)
     skip_agents = False
     for old, new in pending_renames({s.name for s in agent_specs}):
         outcome = await _run_isolated(

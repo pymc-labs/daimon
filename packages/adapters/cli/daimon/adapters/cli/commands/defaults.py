@@ -11,7 +11,7 @@ from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.flags import JSON_OPTION
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.core.config import load_settings
-from daimon.core.defaults.apply import apply_defaults
+from daimon.core.defaults.apply import apply_defaults, rename_selfhosted_defaults
 from daimon.core.defaults.provisioning import verify_tenant_defaults
 from daimon.core.defaults.report import ApplyReport, ResourceOutcome, classify_verification
 from daimon.core.stores.tenants import list_tenants_by_platform
@@ -89,7 +89,12 @@ async def defaults_apply(
     as_json: bool,
     defaults_root: Path,
 ) -> None:
-    if rt.settings.anthropic.api_key is None:
+    client = None if rt.settings.anthropic.api_key is None else rt.anthropic
+    # Self-hosted records need only Postgres, so they move even without a key.
+    renames = await rename_selfhosted_defaults(
+        rt.sessionmaker, client, defaults_root, dry_run=dry_run
+    )
+    if client is None:
         # OpenAI-only deployment (see docs/providers.md's "Run on OpenAI"):
         # there is no Anthropic-backed default agent/environment/
         # skill set to reconcile. `daimon openai init` seeds the OpenAI
@@ -99,18 +104,20 @@ async def defaults_apply(
             "Anthropic default agent/environment/skill reconciliation. Run "
             "`daimon openai init` to provision and seed defaults on OpenAI instead."
         )
-        report = ApplyReport()
+        report = renames
     else:
         public_url = (
             str(rt.settings.mcp.public_url) if rt.settings.mcp.public_url is not None else None
         )
         report = await apply_defaults(
             rt.sessionmaker,
-            rt.anthropic,
+            client,
             defaults_root,
             dry_run=dry_run,
             public_url=public_url,
         )
+        for outcome in renames.agents:
+            report.add(outcome)
     if as_json:
         _format_report_json(console, report)
     else:

@@ -22,10 +22,15 @@ from daimon.core.defaults.provisioning import archive_tenant
 from daimon.core.defaults.report import Action, ApplyReport, ResourceOutcome
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores.selfhosted_resources import SelfHostedAgents
 from daimon.core.stores.tenants import set_provision_status
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_routine, make_tenant
+from mux.contracts.ids import ModelRef, Scope
+from mux.contracts.resources import AgentSpec
+from mux.profiles.selfhosted import LOOP
 from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from rich.console import Console
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from typer.testing import CliRunner
 
@@ -93,21 +98,59 @@ class _NoAnthropicSettings:
         api_key = None
 
 
-def test_defaults_apply_skips_anthropic_reconciliation_with_no_key_configured() -> None:
+def test_defaults_apply_when_no_key_then_skips_anthropic_and_renames_selfhosted(
+    tmp_path: Path, schema_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    (tmp_path / "agents").mkdir()
+    (tmp_path / "agents" / "default.yaml").write_text(
+        "name: default\nmodel: claude-sonnet-4-6\nsystem: You are Daimon.\n"
+    )
+
+    async def seed() -> uuid.UUID:
+        async with schema_sessionmaker() as s, s.begin():
+            tenant = await make_tenant(s, platform="discord", workspace_id="guild-sh")
+            await make_routine(s, tenant=tenant, agent_name="daimon")
+        await SelfHostedAgents(schema_sessionmaker).create(
+            Scope(
+                tenant_id=str(tenant.id),
+                account_id="operator",
+                principal_id="cli",
+                authorization_id="cli-deployment-operator",
+            ),
+            AgentSpec(name="daimon", model=ModelRef(provider=LOOP.provider, id="gpt-6.1-sol")),
+            key="seed",
+        )
+        return tenant.id
+
+    tenant_id = asyncio.run(seed())
     rt = object.__new__(CliRuntime)
     object.__setattr__(rt, "settings", cast(Settings, _NoAnthropicSettings()))
+    object.__setattr__(rt, "sessionmaker", schema_sessionmaker)
     buf = StringIO()
     console = Console(file=buf, force_terminal=False, highlight=False, width=120)
 
     asyncio.run(
-        defaults_apply(
-            rt=rt, console=console, dry_run=False, as_json=False, defaults_root=Path("unused")
-        )
+        defaults_apply(rt=rt, console=console, dry_run=False, as_json=False, defaults_root=tmp_path)
     )
 
     out = buf.getvalue()
-    assert "no DAIMON_ANTHROPIC__API_KEY configured" in out
-    assert "daimon openai init" in out
+    assert "no DAIMON_ANTHROPIC__API_KEY configured" in out, out
+    assert "renamed" in out, f"the report lists the self-hosted rename: {out}"
+
+    async def names() -> list[str]:
+        async with schema_sessionmaker() as s:
+            rows = await s.execute(
+                text(
+                    "SELECT name FROM selfhosted_agents WHERE tenant_id = :t"
+                    " UNION ALL SELECT agent_name FROM routines WHERE tenant_id = :t"
+                ),
+                {"t": tenant_id},
+            )
+            return list(rows.scalars())
+
+    assert asyncio.run(names()) == ["default", "default"], (
+        "the record and its references move without Anthropic credentials"
+    )
 
 
 # ---------------------------------------------------------------------------
