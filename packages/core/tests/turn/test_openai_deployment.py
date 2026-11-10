@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import uuid
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -459,3 +460,18 @@ async def test_real_application_prepares_and_runs_using_builtin_runtime(
     assert all(source.closed for source in wire.sources)
     assert clients and all(client.is_closed() for client in clients)
     assert await store.pending_outbox()  # unpriced actual usage remains durable pending
+
+
+async def test_a_shared_turn_runs_without_any_caller_mcp_credential(
+    application: ProviderPreparationRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    manifest(monkeypatch, tmp_path / "runtime.json", [entry()])
+    shared = replace(
+        application, admission=replace(application.admission, shared_owner=uuid.uuid4())
+    )
+    runtime = build_openai_runtime(shared)
+    assert runtime.mcp_secrets is None and runtime.end_of_turn is None
+    assert runtime.controls.mcp_enabled is False
+    assert build_openai_runtime(application).controls.mcp_enabled is None

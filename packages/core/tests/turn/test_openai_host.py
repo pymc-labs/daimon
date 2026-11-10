@@ -1444,3 +1444,63 @@ async def test_existing_positional_runtime_constructor_keeps_billing_arguments(c
     assert retained.price is runtime.price
     assert retained.infrastructure is runtime.infrastructure
     assert retained.mcp_secrets is None
+
+
+async def test_a_shared_thread_binds_once_and_a_second_caller_continues_it(composed):
+    from daimon.core.turn.errors import AdmissionDenied
+
+    request, wire, store, _, runtime = composed
+    owner = uuid5(NAMESPACE_URL, "shared-owner-fixture")
+    other = uuid5(NAMESPACE_URL, "second-caller")
+
+    async def plan(prepared):
+        return SessionSpec(
+            agent=ResourceRef(
+                id="native-agent",
+                kind="agent",
+                provider="openai",
+                account_scope_id="project",
+                tenant_id=prepared.scope.tenant_id,
+                account_id=prepared.scope.account_id,
+            ),
+            agent_revision=Revision(local=0),
+            config_revision=REVISION.local,
+        )
+
+    shared_runtime = replace(
+        runtime,
+        session_plan=plan,
+        authorization=lambda scope, kind, id_: scope.tenant_id == SCOPE.tenant_id,
+        controls=runtime.controls.model_copy(update={"mcp_enabled": False}),
+    )
+    deps = replace(request.deps, turn_runtimes={PROFILE: shared_runtime})
+
+    def caller(account):
+        return replace(
+            request,
+            deps=deps,
+            admission=replace(request.admission, account_id=account, shared_owner=owner),
+            scope=SCOPE.model_copy(update={"account_id": str(account)}),
+            session_account_id=owner,
+        )
+
+    first = await prepare_openai(caller(ACCOUNT))
+    second = await prepare_openai(caller(other))
+    assert first.session_ref.id == second.session_ref.id and second.reused
+    assert second.session_ref.account_id == str(other)
+    thread = ThreadRef(channel=REVISION.channel, thread_id="thread")
+    binding = await store.get_binding(Slot(thread=thread, account_id=None))
+    assert binding.id == str(owner) and binding.legacy_account_id is None
+    assert "daimon_chat_session_id" not in binding.native_refs
+    assert await store.get_binding(Slot(thread=thread, account_id=SCOPE.account_id)) is None
+    assert len([r for r in wire.requests if r.method == "POST"]) == 1
+    # A shared turn mints no per-caller credential, and an agent-origin source's
+    # counterpart and MCP are per caller.
+    assert first._finalize is None
+    agent_origin = caller(other)
+    agent_origin = replace(
+        agent_origin,
+        admission=replace(agent_origin.admission, backend_revision_origin="agent"),
+    )
+    with pytest.raises(AdmissionDenied):
+        await prepare_openai(agent_origin)

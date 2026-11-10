@@ -20,7 +20,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from daimon.core.provider_keys import DEFAULT_KEY_ENV, provider_key_present
-from mux.profiles import INLINE_REUSE, PERSISTENT_WORKSPACE, selectable_models
+from mux.profiles import (
+    INLINE_REUSE,
+    PERSISTENT_WORKSPACE,
+    get_profile,
+    selectable_models,
+    shared_threads_available,
+)
 
 if TYPE_CHECKING:
     from daimon.core.turn.prepare import ProviderPreparationRequest
@@ -46,7 +52,9 @@ def _grant(profile: str, models: tuple[str, ...]) -> dict[str, JsonValue]:
     return {
         "profiles": [profile],
         "models": list(models),
-        "thread_modes": ["per_caller"],
+        "thread_modes": ["per_caller", "shared"]
+        if shared_threads_available(get_profile(profile).provider)
+        else ["per_caller"],
         "requires": {},
     }
 

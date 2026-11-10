@@ -196,7 +196,7 @@ _BACKEND_SELECTIONS: Mapping[Provider, BackendSelection] = {
     "anthropic": BackendSelection(BackendConfig(), ("per_caller", "shared")),
     "openai": BackendSelection(
         BackendConfig(backend="openai", profile="openai.persistent_workspace", model=LUNA_MODEL),
-        ("per_caller",),
+        ("per_caller", "shared"),
         allowed_models=(ASTRA_MODEL,),
     ),
     "selfhosted": BackendSelection(

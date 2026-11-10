@@ -528,6 +528,7 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
     # it, a turn is bounded by admission (balance, user and channel caps), the per-model
     # daily cap (`openai_host._check_daily_model_cap`) and its deadline. Astra included.
     native_limit = spend_limit if native_cap else None
+    shared = request.admission.shared_owner is not None
     runtime = OpenAIHostRuntime(
         transport_factory=transport,
         read_agent_counterpart=read,
@@ -540,19 +541,23 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
         # infrastructure. A persistent workspace's container cost stays unknown.
         session_plan=plan,
         authorization=authorize,
-        mcp_secrets=resolve_mcp
+        # A shared thread has no caller to mint for: its session carries no MCP.
+        mcp_secrets=None
+        if shared
+        else resolve_mcp
         if deployment.source_capabilities is not None
         else template_mcp.resolve
         if mcp_template
         else None,
         end_of_turn=template_mcp.finalize
-        if mcp_template or needs_turn_credential(request.admission)
+        if not shared and (mcp_template or needs_turn_credential(request.admission))
         else None,
         controls=SessionControls(
             model=revision.model,
             multi_agent_enabled=False,
             container_size="small" if deployment.profile == PROFILE else None,
             spend_limit_usd_cents=native_limit,
+            mcp_enabled=False if shared else None,
         ),
     )
 

@@ -385,13 +385,18 @@ async def _prepare_with_runtime(
     revision = request.admission.backend_revision
     if revision is None or not request.deps.channel_backends or request.deps.turn_path != "mux":
         raise AdmissionDenied(reason="backend_unsupported")
-    # A held turn runs on a per-turn held credential (`template_mcp`).
-    if request.admission.shared_owner is not None or revision.thread_mode != "per_caller":
+    # A held turn runs on a per-turn held credential (`template_mcp`). A shared
+    # thread binds the account-less slot and runs with no caller MCP credential;
+    # an agent-origin source's counterpart and MCP are per caller.
+    shared = request.admission.shared_owner
+    if shared is not None and request.admission.backend_revision_origin == "agent":
         raise AdmissionDenied(reason="backend_unsupported")
     if (
         revision.channel.tenant_id != request.scope.tenant_id
         or revision.channel.platform != request.platform
-        or request.scope.account_id != str(request.session_account_id)
+        or str(request.session_account_id)
+        != (str(shared) if shared is not None else request.scope.account_id)
+        or (shared is not None and runtime.mcp_secrets is not None)
     ):
         raise ScopeViolation("preparation", "OpenAI thread differs from admitted scope")
     current = await reauthorize(request.deps, request.admission)
@@ -436,7 +441,7 @@ async def _prepare_with_runtime(
         await store.put_config_revision(revision)
     slot = Slot(
         thread=ThreadRef(channel=revision.channel, thread_id=request.thread_id),
-        account_id=request.scope.account_id,
+        account_id=None if shared is not None else request.scope.account_id,
     )
     # OpenAI captures MCP bearers during creation, before an origin is bound.
     # A stable slot grant survives reuse; only the executing driver binds it to
@@ -450,8 +455,21 @@ async def _prepare_with_runtime(
         spec = spec.model_copy(
             update={"metadata": {**spec.metadata, "daimon_chat_session_id": chat_session_id}}
         )
+    # A shared session's plan is the same for every caller: its refs' account is not.
+    planned_spec = (
+        spec
+        if shared is None
+        else spec.model_copy(
+            update={
+                "agent": spec.agent.model_copy(update={"account_id": None}),
+                "environment": spec.environment.model_copy(update={"account_id": None})
+                if spec.environment is not None
+                else None,
+            }
+        )
+    )
     plan_digest = request_digest(
-        {"spec": digest_body(spec), "controls": digest_body(runtime.controls)}
+        {"spec": digest_body(planned_spec), "controls": digest_body(runtime.controls)}
     )
     binding = await store.get_binding(slot)
     reused = binding is not None
@@ -494,7 +512,7 @@ async def _prepare_with_runtime(
             },
             generation=1,
             config_revision=revision.local,
-            legacy_account_id=request.scope.account_id,
+            legacy_account_id=None if shared is not None else request.scope.account_id,
         )
 
     def session_ref(bound: ProviderBinding, account_scope_id: str) -> ResourceRef:
@@ -590,7 +608,9 @@ async def _prepare_with_runtime(
             created = await _create(request, store, slot, backend, planned, runtime)
         binding_id, era = adopted_identity(
             await store.get_binding(slot, include_released=True),
-            str(uuid5(NAMESPACE_URL, "openai:binding:" + slot.model_dump_json())),
+            str(shared)
+            if shared is not None
+            else str(uuid5(NAMESPACE_URL, "openai:binding:" + slot.model_dump_json())),
         )
         native, published = await publishable(created, binding_id, era)
         binding = await store.put_binding(published, expected_generation=0)
