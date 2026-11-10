@@ -819,7 +819,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "long_jobs",
         "Long jobs",
         "The agent can start a long job that keeps working after the chat moves on. Off "
-        "until a workspace or agent turns it on; off removes the long-job tools here.",
+        "until an admin turns it on; off removes the long-job tools here.",
         default="off",
     ),
     _capability(

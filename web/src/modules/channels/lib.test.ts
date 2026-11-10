@@ -219,7 +219,7 @@ describe("switches", () => {
     expect(unavailableText("participation", "slack")).toBe("Not on Slack")
     expect(unavailableText("progress_plans", "slack")).toBe("Not available")
     expect(defaultSource({ source: "workspace" })).toBe("Workspace")
-    expect(defaultSource({ source: "deployment" })).toBe("Deployment default")
+    expect(defaultSource({ source: "deployment" })).toBe("Built-in default")
     expect(defaultSource({ source: null })).toBeNull()
   })
 })

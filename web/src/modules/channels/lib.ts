@@ -238,7 +238,7 @@ export function accessFlags(
 
 export const SWITCH_VALUE: Record<SwitchMode, string> = { on: "On", off: "Off", disabled: "Disabled" }
 export const SWITCH_SOURCE: Record<ChannelSwitch["source"], string> = {
-  deployment: "Deployment default", workspace: "Workspace default", channel: "Set here", thread: "Set in a thread",
+  deployment: "Built-in default", workspace: "Workspace default", channel: "Set here", thread: "Set in a thread",
 }
 export type SwitchChoice = "inherit" | SwitchMode
 
@@ -332,7 +332,7 @@ export function toolRuleChange(
   return { agent: next.agent, tool: next.tool, rule: next.rule, scope: next.scope ?? prior?.scope, expected_revision: prior?.revision ?? 0 }
 }
 
-const DEFAULT_SOURCE = { workspace: "Workspace", deployment: "Deployment default" } as const
+const DEFAULT_SOURCE = { workspace: "Workspace", deployment: "Built-in default" } as const
 
 /** Where a workspace default comes from, shown apart from its value. */
 export const defaultSource = (s: { source: Sourced["source"] | ChannelSwitch["source"] }) =>

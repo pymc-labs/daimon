@@ -764,7 +764,7 @@ The agent can set up and run routines: tasks that run on a schedule. Off removes
 
 ## Long jobs
 
-The agent can start a long job that keeps working after the chat moves on. Off until a workspace or agent turns it on; off removes the long-job tools here.
+The agent can start a long job that keeps working after the chat moves on. Off until an admin turns it on; off removes the long-job tools here.
 
 | | |
 | --- | --- |

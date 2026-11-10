@@ -73,7 +73,7 @@ def sample_controls() -> list[str]:
                     requested_work="work",
                     workspace="transferred",
                 ),
-                running_on={"provider": "anthropic", "model": "m"},
+                running_on={"provider": "p", "model": "m"},
                 moved={"kind": "moved"},
                 web=TenantLinks("https://example.test", nobody, frozenset(), True),
                 features=FeatureSnapshot(FeaturePlace(nobody, "slack"), 0, found),
