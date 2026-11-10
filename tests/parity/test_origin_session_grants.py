@@ -20,6 +20,7 @@ from daimon.adapters.slack.continuation_dispatch import (
 from daimon.adapters.teams.app import TeamsApp
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
 from daimon.core.continuity.continuation import ContinuationDecision
+from daimon.core.defaults.metadata import BUILTIN_AGENT_NAME
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import mint_chat_mcp_token
 from daimon.core.stores.domain import ChatPlatform, Role, TaskContinuationRow, TurnOriginRow
@@ -110,7 +111,7 @@ async def test_registered_handoff_cannot_borrow_human_attendance(
             now=now,
             chat_session_id=caller_grant,
         )
-    target = ma_agent(id=TARGET, name="daimon", tenant_id=tenant.id)
+    target = ma_agent(id=TARGET, name=BUILTIN_AGENT_NAME, tenant_id=tenant.id)
     router = MARouter()
     router.add("GET", r"/v1/agents", lambda _r, _m: list_response([target.model_dump(mode="json")]))
     router.add_agent(target)
