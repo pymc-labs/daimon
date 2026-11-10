@@ -38,14 +38,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Turns go to that provider without any Anthropic request. An agent still on
   Anthropic gets a clear card instead of an error: ask for a copy on another
   provider, or ask whoever runs Daimon to add the Anthropic key.
-- **An agent's own MCP connectors work on OpenAI, Gemini and self-hosted agents.**
-  The provider calls them through Daimon with the turn's own credential, and
-  Daimon calls the connector with the person's sign-in, which the provider never
-  sees. Each tool keeps the agent's permission: an ask tool posts a card the
+- **An agent's own MCP connectors work on OpenAI and Gemini agents.**
+  A copy on either keeps them instead of losing them, and an agent already
+  switched keeps its confirmation. The provider calls them through Daimon with
+  the turn's own credential, and Daimon calls the connector with the person's
+  sign-in, which the provider never sees. Each tool keeps the agent's permission: an ask tool posts a card the
   person presses, and an unattended turn runs only what its rules allow. In a
   shared thread only agent-wide sign-ins apply. Personal connectors need one
   sign-in again after the switch: the person presses Reconnect once. Operators
-  can turn this off with the `mcp_connector_relay` feature.
+  can turn this off with the `mcp_connector_relay` feature. Self-hosted agents
+  don't get them yet.
 - **A refused model switch now says why and what to do next.** Each cause has
   one plain line, whichever place you switch from: a provider that isn't turned
   on, a self-hosted model that isn't enabled, a shared thread that needs an
