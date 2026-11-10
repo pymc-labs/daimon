@@ -87,6 +87,7 @@ _NARROWED: dict[str, str] = {
     "dm_memory_read_only": "a workspace policy for DMs, which have no agent or thread to choose",
     "artifact_images": "read by the artifact tool at the workspace",
     "tool_safety": "operator-only security switch",
+    "host_call_gate": "operator-only rollback switch",
     "unattended_capabilities": "read for unattended runs, which have no channel or thread",
     "require_routine_destination": "read when a routine is created, at the workspace",
     "long_jobs_max_usd": "checked when a job starts, from its workspace and agent",

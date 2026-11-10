@@ -684,6 +684,22 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         legacy_env=("DAIMON_TOOL_SAFETY__ENABLED",),
     ),
     FeatureSpec(
+        key="host_call_gate",
+        name="Approve cards for OpenAI and Gemini",
+        category="guardrails",
+        effect="guardrail",
+        values=_OFF_ON,
+        default="on",
+        tiers=("deployment",),
+        binds="turn",
+        doc=(
+            "On an OpenAI or Gemini agent, a tool that needs approval posts an Approve card "
+            "and runs once the person presses it. Off refuses those tools there."
+        ),
+        platforms=_DISCORD,
+        authority=_ADMIN,
+    ),
+    FeatureSpec(
         key="reach_budget",
         name="Reach check",
         category="guardrails",

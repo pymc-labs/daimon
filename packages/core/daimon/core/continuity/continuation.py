@@ -524,9 +524,11 @@ async def decide_continuation(
             )
 
     # A timer is the agent's own appointment: the person talking in the
-    # meantime is expected, not a newer request that replaces it.
+    # meantime is expected, not a newer request that replaces it. A confirmed call
+    # was pressed after the person's last message, and its card must still run.
     if (
-        request.reason not in ("timer", "watch_fired", "watch_report", "job_finished")
+        request.reason
+        not in ("timer", "watch_fired", "watch_report", "job_finished", "confirmed_call")
         and latest_user_message_at is not None
         and latest_user_message_at > row.created_at
     ):

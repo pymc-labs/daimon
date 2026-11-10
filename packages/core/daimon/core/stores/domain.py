@@ -55,6 +55,7 @@ ContinuationReason = Literal[
     "watch_fired",
     "job_finished",
     "watch_report",
+    "confirmed_call",
 ]
 #: Where a watch reports each fire.
 WatchDelivery = Literal["thread", "dm", "new_thread"]

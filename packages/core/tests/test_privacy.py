@@ -1073,6 +1073,9 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # Same shape: a previewed skill add waits at most 15 minutes for its
             # person's reply, holds only a content hash, and cascades with accounts.id.
             "pending_skill_adds",
+            # Same shape: a gated call waits at most a day for its requester's press,
+            # and its requester_account_id cascades with accounts.id.
+            "host_call_cards",
             # A tenant-wide channel budget; the only accounts.id FK is the admin
             # who set it, set_by_account_id with ON DELETE SET NULL.
             "channel_budgets",

@@ -90,6 +90,7 @@ Where each feature can be set, and its default.
 | Approvals | `approvals` | Guardrail | Ask |  | ✓ |  | ✓ | ✓ |  |
 | Read-only memory in direct messages | `dm_memory_read_only` | Guardrail | Writable | ✓ | ✓ |  |  |  | Only Discord, Slack |
 | Tool safety | `tool_safety` | Guardrail | On | ✓ |  |  |  |  |  |
+| Approve cards for OpenAI and Gemini | `host_call_gate` | Guardrail | On | ✓ |  |  |  |  | Only Discord |
 | Reach check | `reach_budget` | Guardrail | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Built-in tools in routines | `unattended_capabilities` | Guardrail | Per routine | ✓ | ✓ | ✓ |  |  |  |
 | Routines must say where they post | `require_routine_destination` | Guardrail | Optional | ✓ | ✓ |  |  |  |  |
@@ -997,6 +998,18 @@ A change through a connected tool waits for the person to press Approve. In a ro
 | Levels | Deployment |
 | Combines | Stricter wins |
 | Deprecated | `DAIMON_TOOL_SAFETY__ENABLED` |
+
+## Approve cards for OpenAI and Gemini
+
+On an OpenAI or Gemini agent, a tool that needs approval posts an Approve card and runs once the person presses it. Off refuses those tools there.
+
+| | |
+| --- | --- |
+| Key | `host_call_gate` |
+| Values | `off` (Off), `on` (On) |
+| Default | `on` |
+| Levels | Deployment |
+| Combines | Stricter wins |
 
 ## Reach check
 

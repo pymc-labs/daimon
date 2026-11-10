@@ -154,6 +154,7 @@ TAIL = (
     "0189_workspace_feature_values",
     "0190_long_job_features",
     "0191_deployment_identity",
+    "0192_host_call_cards",
 )
 HEAD = TAIL[-1]
 

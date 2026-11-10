@@ -3029,7 +3029,8 @@ class TaskContinuation(Base):
     __table_args__ = (
         CheckConstraint(
             "reason IN ('task_handoff', 'private_input_applied', 'timer', "
-            "'github_access_ready', 'watch_fired', 'job_finished', 'watch_report')",
+            "'github_access_ready', 'watch_fired', 'job_finished', 'watch_report', "
+            "'confirmed_call')",
             name="ck_task_continuations_reason",
         ),
         CheckConstraint(
@@ -4199,6 +4200,61 @@ class BackendSwitchCard(Base):
     outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
     message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class HostCallCard(Base):
+    """A gated tool call waiting on its requester's Approve card (`daimon.core.host_calls`).
+
+    Recorded for a provider-hosted turn, which has no confirmation card of its own. The
+    status moves pending -> approved -> executing -> applied/failed, or ends denied,
+    cancelled or expired, each step exactly once. No foreign key to `turn_origins`: the
+    origin is gone by the time anyone presses.
+    """
+
+    __tablename__ = "host_call_cards"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'approved', 'executing', 'applied', 'failed', 'denied', "
+            "'cancelled', 'expired')",
+            name="ck_host_call_cards_status",
+        ),
+        Index(
+            "uq_host_call_cards_pending_call",
+            "origin_id",
+            "tool_name",
+            "args_digest",
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+        ),
+        Index("ix_host_call_cards_thread_status", "tenant_id", "platform", "thread_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
+    origin_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    requester_account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    requester_platform_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
+    executing_agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    executing_ma_agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_name: Mapped[str] = mapped_column(Text, nullable=False)
+    tool_name: Mapped[str] = mapped_column(Text, nullable=False)
+    args_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    reference: Mapped[Any] = mapped_column(JSONB, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'pending'"))
+    outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
+    message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    executing_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
