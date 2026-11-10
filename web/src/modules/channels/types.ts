@@ -137,7 +137,7 @@ export type ChannelApprovals = {
   available: boolean
   own: ApprovalMode | null
   value: ApprovalMode
-  source: "default" | "server" | "channel" | "thread"
+  source: "default" | "deployment" | "workspace" | "agent" | "channel" | "thread"
   active: boolean
   editable: boolean
 }
@@ -167,12 +167,6 @@ export type ChannelSettings = {
   agents: AgentRefs
 }
 
-/** PUT /:id/participation, /:id/progress-plans, /api/channel-defaults/{participation,progress-plans}. null mode inherits. */
-export type SwitchChange = { mode: SwitchMode | null; expected: SwitchMode | null }
-/** PUT /:id/approvals, /api/channel-defaults/approvals. null mode inherits. */
-export type ApprovalsChange = { mode: ApprovalMode | null; expected: ApprovalMode | null }
-/** PUT /api/channel-defaults/cost-footer. */
-export type CostFooterChange = { shown: boolean; expected: boolean }
 /** PUT /:id/environment, /api/channel-defaults/environment. A 428 asks to resend with `confirm_open_network`. */
 export type EnvironmentChange = { environment: string | null; expected: string | null; confirm_open_network?: boolean }
 /** POST /:id/skills. `skill` is a name or id to add, the skill id to remove; `expected` the skill ids as read. */

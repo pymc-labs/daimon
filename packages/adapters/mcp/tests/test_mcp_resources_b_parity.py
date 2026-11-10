@@ -544,6 +544,7 @@ async def test_public_chart_delivery_keeps_files_beta_queries_and_download_bytes
             session_id="session",
             turn_started_at=clock,
             message="answer",
+            embed_images=True,
             record_failure=failure,
             upload_deadline=float("inf"),
         )

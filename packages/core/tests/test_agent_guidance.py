@@ -12,7 +12,12 @@ from __future__ import annotations
 import hashlib
 import re
 
-from daimon.core.agent_guidance import CREDENTIAL_GUIDANCE_BLOCK, apply_credential_guidance
+import pytest
+from daimon.core.agent_guidance import (
+    CREDENTIAL_GUIDANCE_BLOCK,
+    SAFETY_BLOCK,
+    apply_credential_guidance,
+)
 
 
 def test_github_helper_guidance_adds_exactly_one_static_paragraph() -> None:
@@ -422,3 +427,43 @@ def test_commit_guidance_adds_no_personal_access_token_hint() -> None:
     block = _collapse(CREDENTIAL_GUIDANCE_BLOCK)
     assert block.count("personal access token") == 1, "only the existing prohibition"
     assert re.search(r"\bPATs?\b", block) is None, "no PAT hint (PATCH is an HTTP method)"
+
+
+@pytest.mark.parametrize("guidance", [True, False])
+def test_an_isolated_agent_gets_the_safety_block_and_never_the_guidance(guidance: bool) -> None:
+    """The safety rule is fixed for every agent; an isolated one mounts no secrets, so no guidance."""
+    system = "You are an isolated reader."
+    out = apply_credential_guidance(system, guidance=guidance, isolated=True)
+    assert out == f"{SAFETY_BLOCK}\n\n{system}", "safety block over the author's prompt"
+    assert "credential-guidance" not in out, "no credential guidance for an isolated agent"
+
+
+def test_an_isolated_agent_that_had_the_guidance_drops_it_and_keeps_safety() -> None:
+    """Switching an agent to isolated gives the same prompt as one that always was."""
+    had_guidance = apply_credential_guidance("Mine")
+    assert apply_credential_guidance(had_guidance, isolated=True) == (
+        apply_credential_guidance("Mine", isolated=True)
+    ), "an isolated prompt does not depend on its history"
+
+
+def test_guidance_on_keeps_the_prompt_shipped_before_the_feature_existed() -> None:
+    """Guidance On writes the one guidance block, safety rule inside, as before features.
+
+    Gemini and OpenAI counterparts require the stored system as an exact prefix, so a
+    new block or a moved paragraph would deny their turns until each was re-materialised.
+    """
+    stored = f"{CREDENTIAL_GUIDANCE_BLOCK}\n\nMy own instructions"
+    assert apply_credential_guidance("My own instructions") == stored, "the old layout"
+    assert apply_credential_guidance(stored) == stored, "a stored prompt is a fixed point"
+    assert "daimon:safety" not in stored, "no separate safety block when guidance is On"
+    rule = SAFETY_BLOCK.splitlines()[1:-1]
+    assert "\n".join(rule) in CREDENTIAL_GUIDANCE_BLOCK, "the guidance carries the safety rule"
+
+
+def test_guidance_off_keeps_only_the_safety_block_and_on_restores_the_old_prompt() -> None:
+    """Off leaves the safety rule alone above the prompt; turning it On again is lossless."""
+    off = apply_credential_guidance("Mine", guidance=False)
+    assert off == f"{SAFETY_BLOCK}\n\nMine", "the safety rule survives guidance Off"
+    assert apply_credential_guidance(off) == f"{CREDENTIAL_GUIDANCE_BLOCK}\n\nMine", (
+        "On replaces the safety block with the guidance, never stacks both"
+    )

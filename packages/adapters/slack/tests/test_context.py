@@ -633,3 +633,15 @@ def test_render_message_keeps_the_words_of_daimons_notice_cards() -> None:
     )
     unfurl = {"user": "U3", "ts": "2.0", "text": "see", "attachments": [{"fallback": "a link"}]}
     assert "a link" not in "\n".join(_render_message(unfurl, proxy=None)), "only bot cards"
+
+
+async def test_a_chat_history_of_none_reads_no_thread_messages() -> None:
+    """At 0 the Chat history feature reads nothing, where Slack would read 0 as its default."""
+    with AioResponsesMock() as mock:
+        mock.get(_REPLIES_PATTERN, payload={"ok": True, "messages": _fifteen_messages()})
+        xml = await build_context_xml(
+            _make_client(), channel="C1", thread_ts="100.0", user_query="hi", page_limit=0
+        )
+        assert not mock.requests, "no conversations.replies call"
+    assert "<message " not in xml, "no earlier message is replayed"
+    assert "hi" in xml.split("</context>", 1)[1], "the message itself still goes"

@@ -23,12 +23,11 @@ from daimon.adapters.teams.thread_reader import ThreadReader
 from daimon.core.config import ThreadParticipationSettings
 from daimon.core.participation_gates import ParticipationGates
 from daimon.core.stores import tenant_ledger
-from daimon.core.stores.thread_participation import set_participation_mode
+from daimon.core.stores.domain import FeatureTarget
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.teams_graph import GraphUnavailable
 from daimon.core.thread_participation import (
     ClassifierMessage,
-    ParticipationMode,
-    ParticipationScope,
 )
 from daimon.testing.factories import make_tenant
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic
@@ -154,21 +153,18 @@ async def _funded_tenant(session: AsyncSession) -> uuid.UUID:
     return tenant.id
 
 
-async def _follow(
-    session: AsyncSession,
-    tenant_id: uuid.UUID,
-    scope: ParticipationScope,
-    scope_id: str | None,
-    *,
-    platform: str = "teams",
-) -> None:
-    await set_participation_mode(
+THREAD_ROW = FeatureTarget("thread", channel_id=CHANNEL_ID, thread_key=THREAD_ID)
+
+
+async def _follow(session: AsyncSession, tenant_id: uuid.UUID, target: FeatureTarget) -> None:
+    await set_feature_value(
         session,
         tenant_id=tenant_id,
-        platform=platform,
-        scope=scope,
-        scope_id=scope_id,
-        mode=ParticipationMode.ON,
+        target=target,
+        key="participation",
+        value="on",
+        set_by=None,
+        surface="web",
     )
     await session.commit()
 
@@ -185,44 +181,28 @@ async def test_an_unfollowed_thread_costs_one_read_and_nothing_else(
 
 
 @pytest.mark.parametrize(
-    ("scope", "scope_id"),
-    [
-        (ParticipationScope.THREAD, THREAD_ID),
-        (ParticipationScope.CHANNEL, CHANNEL_ID),
-        (ParticipationScope.WORKSPACE, None),
-    ],
+    "target",
+    [THREAD_ROW, FeatureTarget("channel", channel_id=CHANNEL_ID), FeatureTarget("workspace")],
 )
 async def test_each_cascade_tier_keys_on_the_teams_ids(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
-    scope: ParticipationScope,
-    scope_id: str | None,
+    target: FeatureTarget,
 ) -> None:
     tenant_id = await _funded_tenant(db_session)
-    await _follow(db_session, tenant_id, scope, scope_id)
+    await _follow(db_session, tenant_id, target)
     rig = _Rig(db_session_factory)
 
     assert await rig.observe(_reply("anyone?"), tenant_id) == 1
-    assert len(rig.timers) == 1, f"a {scope.value} row follows the thread"
+    assert len(rig.timers) == 1, f"a {target.tier} row follows the thread"
     rig.participation.cancel_all()
-
-
-async def test_a_discord_row_does_not_follow_a_teams_thread(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
-) -> None:
-    tenant_id = await _funded_tenant(db_session)
-    await _follow(db_session, tenant_id, ParticipationScope.WORKSPACE, None, platform="discord")
-    rig = _Rig(db_session_factory)
-
-    await rig.observe(_reply("anyone?"), tenant_id)
-    assert rig.timers == []
 
 
 async def test_a_burst_restarts_the_timer_and_is_judged_once_for_its_last_author(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     tenant_id = await _funded_tenant(db_session)
-    await _follow(db_session, tenant_id, ParticipationScope.THREAD, THREAD_ID)
+    await _follow(db_session, tenant_id, THREAD_ROW)
     rig = _Rig(db_session_factory)
     first, other, last = (
         _reply("is the release on?"),
@@ -247,7 +227,7 @@ async def test_a_silence_verdict_runs_no_turn(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     tenant_id = await _funded_tenant(db_session)
-    await _follow(db_session, tenant_id, ParticipationScope.THREAD, THREAD_ID)
+    await _follow(db_session, tenant_id, THREAD_ROW)
     rig = _Rig(db_session_factory, decision="silence")
 
     await rig.observe(_reply("thanks all"), tenant_id)
@@ -260,7 +240,7 @@ async def test_an_unfunded_tenant_is_not_classified(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     tenant_id = (await make_tenant(db_session, platform="teams")).id
-    await _follow(db_session, tenant_id, ParticipationScope.THREAD, THREAD_ID)
+    await _follow(db_session, tenant_id, THREAD_ROW)
     rig = _Rig(db_session_factory)
 
     await rig.observe(_reply("anyone?"), tenant_id)
@@ -274,7 +254,7 @@ async def test_unreadable_history_is_silent(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     tenant_id = await _funded_tenant(db_session)
-    await _follow(db_session, tenant_id, ParticipationScope.THREAD, THREAD_ID)
+    await _follow(db_session, tenant_id, THREAD_ROW)
     rig = _Rig(db_session_factory, reader=_Reader(GraphUnavailable("forbidden", status=403)))
 
     await rig.observe(_reply("anyone?"), tenant_id)
@@ -287,7 +267,7 @@ async def test_a_followed_thread_without_graph_or_a_live_tenant_stays_mention_on
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     tenant_id = await _funded_tenant(db_session)
-    await _follow(db_session, tenant_id, ParticipationScope.THREAD, THREAD_ID)
+    await _follow(db_session, tenant_id, THREAD_ROW)
     rig = _Rig(db_session_factory)
 
     assert await rig.observe(_reply("anyone?"), tenant_id, live=False) == 1
@@ -302,7 +282,7 @@ async def test_a_quiet_thread_is_judged_by_its_timer(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     tenant_id = await _funded_tenant(db_session)
-    await _follow(db_session, tenant_id, ParticipationScope.THREAD, THREAD_ID)
+    await _follow(db_session, tenant_id, THREAD_ROW)
     rig = _Rig(db_session_factory, quiet_seconds=0.01)
     reply = _reply("is the release on?")
 
@@ -315,7 +295,7 @@ async def test_a_followed_reply_is_batched_as_admitted_returns_it(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     tenant_id = await _funded_tenant(db_session)
-    await _follow(db_session, tenant_id, ParticipationScope.THREAD, THREAD_ID)
+    await _follow(db_session, tenant_id, THREAD_ROW)
     rig = _Rig(db_session_factory)
     reply = _reply("is the release on?")
     classified = dataclasses.replace(reply, user_name="as admitted")

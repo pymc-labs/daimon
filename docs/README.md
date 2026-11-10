@@ -43,6 +43,7 @@ server](https://daimon.decision.ai/) instead.
 ## Look something up
 
 - [Configuration](configuration.md): every environment variable.
+- [Features](features.md): every feature, its levels and values.
 - [MCP tools](mcp-tools.md): every tool the agent can call.
 
 Both are generated from the code and checked in CI.

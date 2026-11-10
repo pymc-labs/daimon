@@ -61,6 +61,7 @@ async def _change_impl(
             invoker_people=people,
             dm_enabled=dm_enabled,
             dm_memory_read_only=dm_memory_read_only,
+            surface="chat",
         )
     except WebAdminError as err:
         raise refused(err) from err

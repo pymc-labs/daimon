@@ -187,11 +187,15 @@ async def build_context_xml(
 
     ``status_ts`` is this turn's own status card, left out of the replay.
     """
-    resp = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]
-        channel=channel, ts=thread_ts, limit=page_limit
-    )
-    messages = cast(list[dict[str, Any]], resp["messages"])  # pyright: ignore[reportUnknownVariableType]
-    truncated = bool(resp.get("has_more"))  # pyright: ignore[reportUnknownMemberType]
+    # A chat history limit of 0 reads none; Slack would read 0 as its own default.
+    messages: list[dict[str, Any]] = []
+    truncated = False
+    if page_limit > 0:
+        resp = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]
+            channel=channel, ts=thread_ts, limit=page_limit
+        )
+        messages = cast(list[dict[str, Any]], resp["messages"])  # pyright: ignore[reportUnknownVariableType]
+        truncated = bool(resp.get("has_more"))  # pyright: ignore[reportUnknownMemberType]
 
     lines: list[str] = [
         "<context>",
@@ -350,9 +354,11 @@ async def build_channel_context_xml(
     Slack may return fewer than ``limit`` (15 for apps distributed outside
     the Marketplace).
     """
-    history = (
+    history: tuple[list[dict[str, Any]], bool] | None = (
         None
         if read_policy is None
+        else ([], False)
+        if limit <= 0
         else await _channel_history(client, channel=channel, trigger_ts=trigger_ts, limit=limit)
     )
 

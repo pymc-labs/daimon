@@ -43,6 +43,7 @@ from daimon.core.access_policy import (
 )
 from daimon.core.authz import AgentRef, Subject, Surface, build_turn_place
 from daimon.core.defaults.provisioning import provision_tenant
+from daimon.core.features.model_input import FULL_HISTORY
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, set_access_policy
 from daimon.core.turn.admission import AdmissionGrant
@@ -425,6 +426,7 @@ async def _first_turn(
     # What the turn controls read: on the default provider, no move (M03).
     admission.backend_revision = None
     admission.backend_follow = None
+    admission.history_depth = FULL_HISTORY
     admission.agent.model.id = "claude-haiku-5-5"
     admission.account_id = tenant.account_id
     admission.agent.id = "agent_test_id"
@@ -629,3 +631,11 @@ async def test_a_recovery_reseed_rereads_the_policy(
     assert "thread root note" in first and "open message" in first
     assert "thread root note" not in reseed, "the reseed decides on the policy as it is then"
     assert "open message" in reseed
+
+
+async def test_a_chat_history_of_none_reads_no_channel_messages() -> None:
+    """At 0 the Chat history feature reads nothing, where Slack would read 0 as its default."""
+    xml, requests = await _build(_read_policy(), limit=0)
+    assert requests == [], "no conversations.history call"
+    envelope = _envelope(xml)
+    assert envelope.attrib["count"] == "0" and len(envelope) == 0, "an empty, available block"

@@ -615,6 +615,7 @@ async def agents_create(
         public_url=public_url,
         managed=False,
         references=rt.sessionmaker,
+        sessions=rt.sessionmaker,
     )
     await ensure_agent_face(
         rt.sessionmaker,
@@ -686,6 +687,7 @@ async def agents_update(
         public_url=public_url,
         managed=False,
         references=rt.sessionmaker,
+        sessions=rt.sessionmaker,
     )
     console.print(f"[green]✓ updated agent {spec.name!r}[/green]")
 

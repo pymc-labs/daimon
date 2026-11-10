@@ -51,6 +51,7 @@ from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.split import split_for_discord_safe
 from daimon.core.config import SupportSettings
+from daimon.core.features.snapshot import FeaturePlace, place_feature
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.permissions import readers_limited_at
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
@@ -222,14 +223,20 @@ class SupportModal(discord.ui.Modal, title=ASK_THE_TEAM):
 
         settings = self._runtime.settings
         channel_id = discord_channel(settings.support)
-        if channel_id is None:
-            # Disabled between the reaction and the submit. Nothing is spent.
-            await interaction.followup.send(embed=build_notice_embed(_MALFORMED), ephemeral=True)
-            return
         # The button arrives by direct message, so `interaction.guild_id` is
         # None and the originating guild comes from the custom_id instead.
         guild_id = self._guild_id
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
+        offered = await place_feature(
+            self._runtime.sessionmaker,
+            settings,
+            FeaturePlace.of(tenant_id, "discord", None),
+            "support_escalation",
+        )
+        if channel_id is None or not offered.on:
+            # Disabled between the reaction and the submit. Nothing is spent.
+            await interaction.followup.send(embed=build_notice_embed(_MALFORMED), ephemeral=True)
+            return
         user_id = str(interaction.user.id)
 
         async with self._runtime.sessionmaker() as session, session.begin():

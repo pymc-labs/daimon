@@ -166,7 +166,6 @@ class TenantRow(BaseModel):
     provision_status: str  # "ready" | "pending" | "failed"
     funding_mode: FundingMode = "prepaid"
     turn_cap: int | None = None
-    plain_text_mentions: bool = False
     last_reconcile_error: str | None = None
     archived_at: datetime | None = None
     registered_at: datetime
@@ -605,27 +604,10 @@ class ChannelBudgetRow(BaseModel):
 
 ChangeSurface = Literal["web", "chat", "panel", "cli"]
 """Where a channel change was made: the web app, a chat tool, a platform panel, the CLI."""
-ChannelSetting = Literal[
-    "default_agent",
-    "kept_agents",
-    "access",
-    "budget",
-    "participation",
-    "progress_plans",
-    "environment",
-    "skills",
-    "provider_pin",
-    "channel_copy",
-    "thread_participation",
-    "thread_progress_plans",
-    "thread_rule",
-    "thread_handoff",
-    "approvals",
-    "thread_approvals",
-    "cost_footer",
-]
-"""What a change record names. The `thread_*` settings are a thread's own, recorded under
-its channel with the thread id in the values."""
+ChannelSetting = str
+"""What a change record names: a legacy channel setting, a `thread_*` setting or any feature key.
+The `thread_*` settings are a thread's own, recorded under its channel with the thread id in the
+values. Open on purpose: a feature write records its registry key."""
 
 
 class ChannelChangeRow(BaseModel):
@@ -1244,6 +1226,41 @@ class SupportEscalationRow(BaseModel):
     note: str
     delivered_at: datetime | None
     created_at: datetime
+
+
+FeatureTier = Literal["workspace", "agent", "channel", "thread"]
+"""The tiers `feature_values` stores; the deployment tier is the `features` setting."""
+FeatureSurface = Literal["web", "chat", "panel", "cli", "spec", "migration"]
+"""Where a feature was set: a `ChangeSurface`, an agent spec, or the 0187 migration."""
+
+
+@dataclass(frozen=True)
+class FeatureTarget:
+    """One tier of one place; the ids a tier does not use are None."""
+
+    tier: FeatureTier
+    agent_id: str | None = None
+    channel_id: str | None = None
+    thread_key: str | None = None
+
+
+class FeatureValueRow(BaseModel):
+    """A feature set at one tier of one place."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    tier: FeatureTier
+    agent_id: str
+    channel_id: str
+    thread_key: str
+    key: str
+    value: str
+    locked: bool
+    set_by: uuid.UUID | None
+    surface: FeatureSurface
+    set_at: datetime
+    revision: int
 
 
 class ThreadAutoResponseRow(BaseModel):

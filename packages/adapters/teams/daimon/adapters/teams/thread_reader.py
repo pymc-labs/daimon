@@ -18,7 +18,6 @@ import structlog
 from daimon.adapters.teams.attachments import ChannelMedia, SharedFile
 from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.context import (
-    CHANNEL_BACKFILL_LIMIT,
     Attached,
     HistoryBlock,
     channel_block,
@@ -36,9 +35,12 @@ from daimon.adapters.teams.context import (
     unavailable_block,
 )
 from daimon.adapters.teams.identity import TeamsInbound
+from daimon.core.features.model_input import FULL_HISTORY, HistoryDepth
 from daimon.core.teams_graph import (
+    MAX_PAGE,
     GraphClient,
     GraphMessage,
+    GraphPage,
     GraphToken,
     GraphUnavailable,
     TeamGroups,
@@ -136,16 +138,17 @@ class ThreadReader:
         watermark: str | None,
         skip_ids: frozenset[str],
         images: Mapping[str, int] | None = None,
+        depth: HistoryDepth = FULL_HISTORY,
     ) -> HistoryBlock | None:
         """The history to replay; None for a chat, an unavailable block when Graph fails.
 
         A mention starting a thread gets the channel's recent posts and their
         replies; a reply the thread, or with a numeric `watermark` only what came
         after it. `images` names the images already inlined (a reseed); without
-        it the newest replayed images are picked.
+        it the newest replayed images are picked. `depth` caps a first read.
         """
         if inbound.kind == "group":
-            return await self._read_chat(inbound, watermark, skip_ids, images)
+            return await self._read_chat(inbound, watermark, skip_ids, images, depth)
         root = root_id(inbound.conversation_id)
         if inbound.kind != "channel" or root is None:
             return None
@@ -153,8 +156,12 @@ class ThreadReader:
             group = await self._group_id(inbound)
             channel, bot = inbound.channel_id, self._bot_app_id
             if inbound.activity_id == root:
-                posts = await self._graph.list_channel_messages(
-                    group, channel, top=CHANNEL_BACKFILL_LIMIT, expand_replies=True
+                posts = (
+                    await self._graph.list_channel_messages(
+                        group, channel, top=depth.backfill, expand_replies=True
+                    )
+                    if depth.backfill
+                    else GraphPage()
                 )
                 skip = skip_ids | {root}
                 messages = channel_messages(posts, skip_ids=skip)
@@ -162,7 +169,15 @@ class ThreadReader:
                     channel_block, posts, skip_ids=skip, bot_app_id=bot, channel_id=channel
                 )
             else:
-                replies = await self._graph.list_replies(group, channel, root)
+                fresh = watermark is None or not watermark.isdigit()
+                top = min(MAX_PAGE, depth.replay) if fresh else MAX_PAGE
+                # A chat history limit of 0 reads nothing, the thread's root included.
+                replies = (
+                    await self._graph.list_replies(group, channel, root, top=top)
+                    if top
+                    else GraphPage()
+                )
+                skip_ids = skip_ids if top else skip_ids | {root}
                 if watermark is not None and watermark.isdigit():
                     after = int(watermark)
                     messages = delta_messages(replies, after=after, skip_ids=skip_ids)
@@ -186,6 +201,7 @@ class ThreadReader:
         watermark: str | None,
         skip_ids: frozenset[str],
         images: Mapping[str, int] | None,
+        depth: HistoryDepth,
     ) -> HistoryBlock:
         """A group chat's newest messages, or with a numeric `watermark` those after it."""
         chat, bot = inbound.channel_id, self._bot_app_id
@@ -197,7 +213,8 @@ class ThreadReader:
                     delta_block, page, after=after, skip_ids=skip_ids, bot_app_id=bot
                 )
             else:
-                page = await self._graph.list_chat_messages(chat, top=CHANNEL_BACKFILL_LIMIT)
+                top = depth.backfill
+                page = await self._graph.list_chat_messages(chat, top=top) if top else GraphPage()
                 messages = chat_messages(page, skip_ids=skip_ids)
                 build = functools.partial(chat_block, page, skip_ids=skip_ids, bot_app_id=bot)
         except GraphUnavailable as err:

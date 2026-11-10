@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
-from daimon.core.stores.tenants import get_tenant
 from daimon.testing.factories import make_tenant
 from sqlalchemy import Connection, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,7 +31,7 @@ async def test_plain_text_mentions_upgrade_leaves_existing_tenants_off(
 
     await conn.run_sync(upgrade)
     db_session.expire_all()
-    row = await get_tenant(db_session, tenant.id)
-    assert row is not None and row.plain_text_mentions is False, (
-        "an existing tenant must start with the switch off"
+    value = await db_session.scalar(
+        text("SELECT plain_text_mentions FROM tenants WHERE id = :id"), {"id": tenant.id}
     )
+    assert value is False, "an existing tenant must start with the switch off"

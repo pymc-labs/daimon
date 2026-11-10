@@ -16,12 +16,11 @@ from typing import Any
 import pytest
 from daimon.adapters.discord import bot as discord_bot
 from daimon.adapters.discord.gating import is_plain_text_mention_candidate
-from daimon.adapters.mcp.tools import plain_text_mentions as mcp_tool
 from daimon.adapters.slack import app as slack_app
 from daimon.adapters.slack.gating import is_plain_text_mention_event
 from daimon.adapters.teams import app as teams_app
 from daimon.adapters.teams.identity import TeamsInbound, parse_inbound
-from daimon.core.stores import tenants
+from daimon.core.features.snapshot import place_feature
 from microsoft_teams.api import MessageActivity
 
 _BOT = "Daimon"
@@ -117,14 +116,7 @@ def test_every_adapter_agrees_on_who_qualifies(
 
 @pytest.mark.parametrize("module", [discord_bot, slack_app, teams_app], ids=lambda m: m.__name__)
 def test_every_adapter_reads_the_same_tenant_switch(module: object) -> None:
-    """A matching message is admitted only by the one per-tenant flag the admin tool writes."""
-    assert getattr(module, "get_plain_text_mentions", None) is tenants.get_plain_text_mentions, (
-        f"{module!r} must read tenants.plain_text_mentions through the shared store"
-    )
-
-
-def test_the_admin_tool_serves_all_three_platforms() -> None:
-    """The switch can be set from any of the platforms that honour it."""
-    assert {"discord", "slack", "teams"} == mcp_tool._CHAT_PLATFORMS, (  # pyright: ignore[reportPrivateUsage]
-        "the set tool must accept exactly the platforms whose adapters read the flag"
+    """A matching message is admitted only by the one `plain_text_mentions` feature."""
+    assert getattr(module, "place_feature", None) is place_feature, (
+        f"{module!r} must read the plain_text_mentions feature through the shared resolver"
     )

@@ -38,6 +38,7 @@ from daimon.core.usage_aggregation import disjoint_observations, replace_observa
 from daimon.core.usage_compat import event_observation
 from mux.contracts.usage import UsageObservation
 from mux.profiles import accounting_mode_for
+from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -103,6 +104,8 @@ class TurnObservation:
     alertable: bool = field(default=True, kw_only=True)
     """False for a turn nobody asked for (an unprompted reply): its failure is
     recorded in the outcome row but never logged as `turn.user_failure`."""
+    eval_key: dict[str, JsonValue] | None = field(default=None, kw_only=True)
+    """`EvalKey.to_json()` of what the turn ran with; None where nothing set it."""
     id: uuid.UUID = field(default_factory=uuid.uuid4)
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     _started: float = field(default_factory=time.monotonic)
@@ -360,6 +363,7 @@ class TurnObservation:
             else sum((sample.cost or Decimal(0) for sample in samples), Decimal(0)),
             unpriced_calls=unpriced_calls,
             billing_posture=posture,
+            eval_key=self.eval_key,
         )
         if not self.usage_available:
             # SDK polling/dispatch paths have outcomes but do not consume model spans.

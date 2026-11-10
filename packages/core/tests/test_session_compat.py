@@ -521,6 +521,20 @@ def test_decision_replaces_env_file_when_env_hash_differs_and_swap_is_supported(
     ), "the env swap carries the recorded handles, which is what delete-then-add needs"
 
 
+def test_agent_env_file_off_removes_the_mounted_env_file() -> None:
+    """`agent_env_file` Off: the desired session has no `.env`, so the swap only removes."""
+    decision = decide_session_compatibility(
+        recorded=make_snapshot(env_resource_id="res_env_1", env_file_id="file_env_1"),
+        desired=make_snapshot(env_sha256=None),
+        capabilities=DEFAULT_MA_CAPABILITIES,
+        now=NOW,
+    )
+    assert decision == UpdateInPlace(
+        ops=(ReplaceEnvFile(old_resource_id="res_env_1", old_file_id="file_env_1", keep=False),),
+        reasons=("env_file",),
+    )
+
+
 def test_replace_env_file_op_defaults_to_the_dot_env_mount_path() -> None:
     op = ReplaceEnvFile(old_resource_id=None, old_file_id=None)
     assert op.mount_path == ".env", "the env file is mounted at .env unless a caller says otherwise"

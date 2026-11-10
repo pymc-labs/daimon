@@ -39,12 +39,6 @@ from daimon.core.stores.domain import ChatPlatform
 from daimon.core.stores.github_access import SERVER_WIDE_GRANT_MESSAGE
 from daimon.core.stores.github_connect import CHANNEL_LIMITED_REPO_MESSAGE
 from daimon.core.thread_handoff import render_handoff_refused
-from daimon.core.thread_participation import (
-    ParticipationMode,
-    ParticipationScope,
-    ResolvedParticipation,
-    build_participation_note,
-)
 
 _PLATFORMS: tuple[ChatPlatform, ...] = get_args(ChatPlatform)
 
@@ -141,20 +135,6 @@ def test_the_environment_notes_use_the_platforms_words(platform: ChatPlatform) -
         ),
     ):
         _assert_native(platform, text)
-
-
-@pytest.mark.parametrize("platform", _PLATFORMS)
-def test_the_participation_notes_name_the_platforms_space(platform: ChatPlatform) -> None:
-    space = words_for(platform).space
-    note = build_participation_note(
-        scope=ParticipationScope.WORKSPACE,
-        scope_id=None,
-        requested=ParticipationMode.ON,
-        effective=ResolvedParticipation(mode=ParticipationMode.ON, tier="workspace"),
-        platform=platform,
-    )
-    _assert_native(platform, note)
-    assert f"the whole {space}" in note
 
 
 def test_the_unknown_caller_gets_the_neutral_space() -> None:

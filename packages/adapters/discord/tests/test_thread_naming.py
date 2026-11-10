@@ -37,6 +37,7 @@ from daimon.core.turn.deps import build_turn_deps
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import resolved_agent_env_router
 from daimon.testing.membership import FixtureMembershipResolver
+from daimon.testing.settings_mock import mock_settings
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from mux.testing.drivers.anthropic.ma_models import ma_session
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -289,7 +290,7 @@ def _runtime(
     router: MARouter,
     thread_naming: ThreadNamingSettings,
 ) -> DiscordRuntime:
-    settings = MagicMock()
+    settings = mock_settings()
     settings.mcp = McpSettings()
     settings.defaults_root = MagicMock()
     settings.billing.markup = Decimal("1.0")

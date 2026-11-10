@@ -37,7 +37,7 @@ from daimon.adapters.mcp.tools.agents import (
 )
 from daimon.core import agent_fork
 from daimon.core.access_policy import AgentRule, TenantAccessPolicy
-from daimon.core.agent_guidance import CREDENTIAL_GUIDANCE_BLOCK
+from daimon.core.agent_guidance import CREDENTIAL_GUIDANCE_BLOCK, SAFETY_BLOCK
 from daimon.core.constants import AGENT_MCP_CAP, AGENT_SKILL_CAP
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
 from daimon.core.defaults.metadata import MA_METADATA_KEY_ISOLATED, tenant_scoped_display_title
@@ -1745,9 +1745,9 @@ async def test_fork_agent_impl_adds_guidance_when_source_has_none(
 async def test_fork_agent_impl_skips_guidance_for_isolated_source(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """A fork of an isolated-stamped source carries no guidance block at all —
-    its session mounts no secrets, so the block would teach it to look for
-    resources it must not have."""
+    """A fork of an isolated-stamped source carries the safety rule and no credential
+    guidance: its session mounts no secrets, so the guidance would teach it to look
+    for resources it must not have."""
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -1814,8 +1814,8 @@ async def test_fork_agent_impl_skips_guidance_for_isolated_source(
     assert "<!-- daimon:credential-guidance" not in forked_system, (
         "an isolated source's fork must carry no guidance block"
     )
-    assert forked_system == isolated_system, (
-        "an isolated source's fork system must be byte-identical to the source's"
+    assert forked_system == f"{SAFETY_BLOCK}\n\n{isolated_system}", (
+        "an isolated source's fork keeps its own prompt behind the safety rule alone"
     )
 
 

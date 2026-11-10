@@ -147,8 +147,6 @@ from daimon.adapters.slack.github_connect import (
 )
 from daimon.adapters.slack.help import handle_help_command
 from daimon.adapters.slack.here import (
-    handle_here_approval_submission,
-    handle_here_approvals,
     handle_here_command,
     handle_make_confidential,
 )
@@ -243,6 +241,8 @@ from daimon.core.continuity.wakes import WakeThread, run_wake_poller
 from daimon.core.credential_requests import SLACK_ACTION_ID as SLACK_CREDENTIAL_ACTION_ID
 from daimon.core.defaults.provisioning import teardown_slack_install
 from daimon.core.errors import DaimonError, UserFacingError
+from daimon.core.features.registry import limit_int
+from daimon.core.features.snapshot import FeaturePlace, place_feature
 from daimon.core.github_connect_delivery import run_connect_notice_poller
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.github_request_expiry import run_request_expiry_poller
@@ -265,7 +265,7 @@ from daimon.core.stores.slack_turn_contexts import (
     create_slack_turn_context,
     delete_slack_turn_context,
 )
-from daimon.core.stores.tenants import get_plain_text_mentions, get_tenant, get_turn_cap
+from daimon.core.stores.tenants import get_tenant, get_turn_cap
 from daimon.core.stores.thread_agent_bindings import get_binding as get_setup_binding
 from daimon.core.stores.thread_sessions import (
     clear_active_turn,
@@ -280,7 +280,13 @@ from daimon.core.stores.turn_card_intents import (
 )
 from daimon.core.stores.turn_origins import get_active_origin
 from daimon.core.turn import turn_deadline
-from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit, backend_facts
+from daimon.core.turn.admission import (
+    Admission,
+    AdmissionDenied,
+    MissingTurnConfigError,
+    admit,
+    backend_facts,
+)
 from daimon.core.turn.errors import (
     SessionAgentMismatch,
     SessionBusyError,
@@ -1234,12 +1240,6 @@ class SlackApp:
                         )
 
                     self._spawn(_run_feedback_text())
-            elif cb_id == "here_approvals_thread":
-                await client.send_socket_mode_response(
-                    SocketModeResponse(envelope_id=req.envelope_id)
-                )
-                if not is_external_interactive(payload):
-                    self._spawn(handle_here_approval_submission(self.runtime, payload))
             elif cb_id == SUPPORT_CALLBACK_ID:
                 # Pure evaluate (no I/O) — must run before the single ack.
                 _sup = evaluate_support_submission(payload)
@@ -1535,8 +1535,6 @@ class SlackApp:
             or action_id == "routines_create"
         ):
             self._spawn(handle_routine_action(self.runtime, payload))
-        elif action_id == "here_approvals":
-            self._spawn(handle_here_approvals(self.runtime, payload))
         elif action_id == SETTINGS_ACTION_ID:
             self._spawn(handle_settings_change(self.runtime, payload))
         elif action_id == "billing_topup":
@@ -1749,14 +1747,14 @@ class SlackApp:
             log.debug("slack.event_dropped.duplicate", team_id=team_id, event_ts=event_ts)
         return is_new
 
-    async def _plain_text_mentions_on(self, tenant_id: uuid.UUID) -> bool:
-        """Read the tenant's switch for a message that already names the bot as text."""
-        try:
-            return await get_plain_text_mentions(self.runtime.sessionmaker, tenant_id=tenant_id)
-        except SQLAlchemyError as exc:
-            # A failed read leaves the message unaddressed, as with the switch off.
-            log.warning("plain_text_mention.lookup_failed", error_type=type(exc).__name__)
-            return False
+    async def _plain_text_mentions_on(self, tenant_id: uuid.UUID, channel_id: str) -> bool:
+        """Read the typed-mention setting for a message that already names the bot as text.
+        A failed read leaves the message unaddressed, as with the setting off."""
+        place = FeaturePlace.of(tenant_id, "slack", channel_id)
+        found = await place_feature(
+            self.runtime.sessionmaker, self.runtime.settings, place, "plain_text_mentions"
+        )
+        return found.on
 
     async def _handle_app_mention(
         self,
@@ -1805,7 +1803,9 @@ class SlackApp:
         tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
         # Most named messages meet a switch that is off: one read, then nothing.
         # It posts nothing, so the may-post rule below still holds.
-        if by_name and not await self._plain_text_mentions_on(tenant_id):
+        if by_name and not await self._plain_text_mentions_on(
+            tenant_id, str(event.get("channel") or "")
+        ):
             return
 
         await self._wait_for_orphan_recovery()
@@ -2629,12 +2629,13 @@ class SlackApp:
         cancel_event = asyncio.Event()
         lifecycle = SlackTurnLifecycle(
             sessionmaker=self.runtime.sessionmaker,
-            reply_people_cap=self._reply_people_cap(),
+            reply_people_cap=self._reply_people_cap(admission),
             alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
-            ask_human=slack_support_enabled(self.runtime.settings.support),
+            ask_human=slack_support_enabled(self.runtime.settings.support)
+            and admission.feature_on("support_escalation"),
             tenant_id=tenant_id,
             budget_channel_id=admission.budget_channel_id,
-            render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
+            render_tables=admission.shown("table_rendering", "slack"),
             client=web_client,
             channel=channel,
             thread_ts=thread_id,
@@ -2642,8 +2643,7 @@ class SlackApp:
             author_id=str(event.get("user") or ""),
             requester_is_admin=is_admin,
             requester_foreign=standing.foreign,
-            notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
-            is True,
+            notify_on_completion=admission.shown("completion_pings", "slack"),
             trigger_ts=str(event.get("_reaction_ts") or event.get("ts") or "") or None,
             agent_name=_lc_agent_name,
             model_id=_lc_model_id,
@@ -2984,6 +2984,7 @@ class SlackApp:
                         author_name=author_name,
                         proxy=proxy_ctx,
                         key_names=key_names,
+                        limit=admission.history_depth.backfill,
                     )
                 return await build_context_xml(
                     web_client,
@@ -2995,7 +2996,7 @@ class SlackApp:
                     author_name=author_name,
                     proxy=proxy_ctx,
                     key_names=key_names,
-                    page_limit=self._history_page_limit(),
+                    page_limit=min(self._history_page_limit(), admission.history_depth.replay),
                     status_ts=lifecycle.status_ts,
                 )
 
@@ -3089,13 +3090,13 @@ class SlackApp:
             def _recovery_lifecycle(cancel: asyncio.Event) -> TurnLifecycle:
                 new_lifecycle = SlackTurnLifecycle(
                     sessionmaker=self.runtime.sessionmaker,
-                    reply_people_cap=self._reply_people_cap(),
+                    reply_people_cap=self._reply_people_cap(admission),
                     alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
-                    ask_human=slack_support_enabled(self.runtime.settings.support),
+                    ask_human=slack_support_enabled(self.runtime.settings.support)
+                    and admission.feature_on("support_escalation"),
                     tenant_id=tenant_id,
                     budget_channel_id=admission.budget_channel_id,
-                    render_tables=self.runtime.settings.table_rendering.get(tenant_id, False)
-                    is True,
+                    render_tables=admission.shown("table_rendering", "slack"),
                     client=web_client,
                     channel=channel,
                     thread_ts=thread_id,
@@ -3103,10 +3104,7 @@ class SlackApp:
                     author_id=str(event.get("user") or ""),
                     requester_is_admin=is_admin,
                     requester_foreign=standing.foreign,
-                    notify_on_completion=self.runtime.settings.completion_pings.get(
-                        tenant_id, False
-                    )
-                    is True,
+                    notify_on_completion=admission.shown("completion_pings", "slack"),
                     trigger_ts=str(event.get("_reaction_ts") or event.get("ts") or "") or None,
                     agent_name=_lc_agent_name,
                     model_id=_lc_model_id,
@@ -3349,10 +3347,13 @@ class SlackApp:
                         await clear_active_turn(_clear_session, id=_marker_id)
                         await _clear_session.commit()
 
-    def _reply_people_cap(self, attended: bool = True) -> int | None:
+    def _reply_people_cap(self, admission: Admission, attended: bool = True) -> int | None:
         """People an automatic reply may ping besides its author; None leaves it uncapped."""
         outbound = self.runtime.settings.outbound
-        return outbound.max_people if attended and outbound.reach_budget_enabled else None
+        if not (attended and admission.feature_on("reach_budget")):
+            return None
+        found = admission.resolved("outbound_people")
+        return outbound.max_people if found is None else limit_int(found.value)
 
     async def _run_continuation_turn(
         self,
@@ -3546,13 +3547,15 @@ class SlackApp:
         follow_lifecycle = SlackTurnLifecycle(
             sessionmaker=self.runtime.sessionmaker,
             reply_people_cap=self._reply_people_cap(
-                attended=row.reason != "watch_fired" and continuation_attended(row)
+                follow_admission,
+                attended=row.reason != "watch_fired" and continuation_attended(row),
             ),
             alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
-            ask_human=slack_support_enabled(self.runtime.settings.support),
+            ask_human=slack_support_enabled(self.runtime.settings.support)
+            and follow_admission.feature_on("support_escalation"),
             tenant_id=tenant_id,
             budget_channel_id=follow_admission.budget_channel_id,
-            render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
+            render_tables=follow_admission.shown("table_rendering", "slack"),
             client=web_client,
             channel=channel,
             thread_ts=thread_id,
@@ -3560,8 +3563,7 @@ class SlackApp:
             author_id=row.requester_external_user_id,
             requester_is_admin=follow_admission.is_admin,
             requester_foreign=standing.foreign,
-            notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
-            is True,
+            notify_on_completion=follow_admission.shown("completion_pings", "slack"),
             agent_name=follow_admission.agent.name,
             model_id=follow_admission.agent.model.id,
             markup=self.runtime.turn_deps.markup,
@@ -3647,13 +3649,15 @@ class SlackApp:
             new_lifecycle = SlackTurnLifecycle(
                 sessionmaker=self.runtime.sessionmaker,
                 reply_people_cap=self._reply_people_cap(
-                    attended=row.reason != "watch_fired" and continuation_attended(row)
+                    follow_admission,
+                    attended=row.reason != "watch_fired" and continuation_attended(row),
                 ),
                 alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
-                ask_human=slack_support_enabled(self.runtime.settings.support),
+                ask_human=slack_support_enabled(self.runtime.settings.support)
+                and follow_admission.feature_on("support_escalation"),
                 tenant_id=tenant_id,
                 budget_channel_id=follow_admission.budget_channel_id,
-                render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
+                render_tables=follow_admission.shown("table_rendering", "slack"),
                 client=web_client,
                 channel=channel,
                 thread_ts=thread_id,
@@ -3661,8 +3665,7 @@ class SlackApp:
                 author_id=row.requester_external_user_id,
                 requester_is_admin=follow_admission.is_admin,
                 requester_foreign=standing.foreign,
-                notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
-                is True,
+                notify_on_completion=follow_admission.shown("completion_pings", "slack"),
                 agent_name=follow_admission.agent.name,
                 model_id=follow_admission.agent.model.id,
                 markup=self.runtime.turn_deps.markup,

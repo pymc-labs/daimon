@@ -46,7 +46,8 @@ from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import get_account, set_role
 from daimon.core.stores.agent_memory_stores import insert_memory_store
 from daimon.core.stores.agent_posts import get_post
-from daimon.core.stores.domain import Role, TenantRow, WizardSessionRow
+from daimon.core.stores.domain import FeatureTarget, Role, TenantRow, WizardSessionRow
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.thread_sessions import get_live_thread_session, list_orphaned_turns
 from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
@@ -1106,9 +1107,18 @@ async def test_a_submit_turn_claims_and_releases_a_per_tenant_in_flight_slot(
     stream_hits: list[str] = []
     router = _build_router(str(tenant.id), sent_events=sent_events, stream_hits=stream_hits)
     runtime = _make_runtime(db_session_factory, router)
-    runtime.settings.table_rendering = (
-        {} if table_rendering is None else {tenant.id: table_rendering}
-    )
+    if table_rendering is not None:
+        async with db_session_factory() as session:
+            await set_feature_value(
+                session,
+                tenant_id=tenant.id,
+                target=FeatureTarget("workspace"),
+                key="table_rendering",
+                value="on" if table_rendering else "off",
+                set_by=None,
+                surface="cli",
+            )
+            await session.commit()
     bot = _make_bot(runtime)
     interaction = _interaction(user_id=_REQUESTER_ID, client=bot, channel=channel, guild_id=123)
 

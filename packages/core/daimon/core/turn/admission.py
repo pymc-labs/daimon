@@ -59,6 +59,27 @@ from daimon.core.channel_skills import turn_channel_skills, turn_platform_skills
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
+from daimon.core.features.model_input import (
+    CHAT_KEYS,
+    HISTORY_KEYS,
+    PER_TURN_KEYS,
+    SESSION_KEYS,
+    TURN_KEYS,
+    HistoryDepth,
+    SessionToolset,
+    agent_toolset,
+    builtins_of,
+)
+from daimon.core.features.registry import FEATURES
+from daimon.core.features.resolver import ResolvedFeature
+from daimon.core.features.session_identity import IDENTITY_KEYS, SessionIdentity
+from daimon.core.features.snapshot import (
+    FeaturePlace,
+    FeatureSnapshot,
+    feature_in,
+    place_feature,
+    resolve_features,
+)
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import (
     MAResolverMissError,
@@ -406,6 +427,42 @@ class Admission:
     request: AdmitRequest | None = field(default=None, compare=False, repr=False)
     # This workspace's links into the web app for the admitted role; None with no web app.
     web: TenantLinks | None = field(default=None, compare=False, repr=False)
+    # The turn-bound, session-tool and session-identity features at this place; None only
+    # for hand-built admissions, which render every turn control and keep every tool.
+    features: FeatureSnapshot | None = field(default=None, compare=False, repr=False)
+
+    @property
+    def toolset(self) -> SessionToolset:
+        """What this place's features change in the agent's session tools."""
+        return agent_toolset(self.features, self.agent)
+
+    @property
+    def identity(self) -> SessionIdentity:
+        """What a session created now at this place is built with."""
+        return SessionIdentity.of(self.features)
+
+    @property
+    def history_depth(self) -> HistoryDepth:
+        """How much earlier chat a context builder reads at this place."""
+        return HistoryDepth.of(self.features)
+
+    def feature_on(self, key: str) -> bool:
+        """`key` at this place; a hand-built admission, or a key not resolved, keeps it on."""
+        found = self.features.features.get(key) if self.features is not None else None
+        return found is None or found.on
+
+    def resolved(self, key: str) -> ResolvedFeature | None:
+        """`key` as resolved at this place; None for a hand-built admission or an unresolved key."""
+        return self.features.features.get(key) if self.features is not None else None
+
+    def shown(self, key: str, platform: str = "") -> bool:
+        """A display feature at this place; a hand-built admission, or a key not resolved,
+        keeps the registry default on `platform` (several are off by default, unlike
+        `feature_on`)."""
+        found = self.features.features.get(key) if self.features is not None else None
+        if found is not None:
+            return found.on
+        return FEATURES[key].default_for(platform) not in ("off", "hidden")
 
     @property
     def is_admin(self) -> bool:
@@ -1306,7 +1363,9 @@ async def _admit_gates(
     # them are recorded, so unsealing one later leaves the others holding.
     seal_ids = limiting_ids_at(policy, channel_id=channel_id, thread_id=thread_id)
     source_sealed = bool(seal_ids)
-    memory_read_only = _memory_read_only(policy, grant, source_sealed)
+    memory_read_only = _memory_read_only(
+        policy, grant, source_sealed, await _dm_memory_read_only(deps, grant)
+    )
 
     # The agent's rules on daimon's own tools, read once per turn (no query
     # unless tool safety and agent rules are both on).
@@ -1584,7 +1643,13 @@ async def _admit_gates(
             )
         )
     if budget_exceeded:
-        if tenant_id not in deps.budget_notices_off:
+        notices = await place_feature(
+            deps.sessionmaker,
+            deps.settings,
+            FeaturePlace.of(tenant_id, platform, budget_channel_id),
+            "budget_notices",
+        )
+        if notices.on:
             spawn_budget_notice(
                 sessionmaker=deps.sessionmaker,
                 notifier=deps.budget_notifier,
@@ -1702,6 +1767,34 @@ async def _admit_gates(
         model_fell_back=thread_model.fell_back,
         backend_switch_stale=backend_switch_stale,
         web=await _web_links(deps, tenant_id, principal.account_id, chat_admin=effective_admin),
+    )
+    result = replace(
+        result,
+        features=await resolve_features(
+            deps.sessionmaker,
+            deps.settings,
+            FeaturePlace.of(
+                tenant_id,
+                platform,
+                channel_id,
+                thread_id,
+                agent_id=agent.id,
+                backend=running_on(result)["provider"],
+            ),
+            keys=tuple(
+                dict.fromkeys(
+                    (
+                        *TURN_KEYS,
+                        *SESSION_KEYS,
+                        *PER_TURN_KEYS,
+                        *IDENTITY_KEYS,
+                        *HISTORY_KEYS,
+                        *CHAT_KEYS,
+                    )
+                )
+            ),
+            agent_builtins=builtins_of(agent),
+        ),
     )
     if follow_generation is not None:
         # Admitted: this conversation follows its agent (M03), only if its slot is
@@ -2031,7 +2124,7 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
     # new seals: a DM turn picks up `dm_memory_read_only` switched on since
     # admission. Read-only never relaxes back to writable here.
     memory_read_only = admission.memory_read_only or _memory_read_only(
-        policy, grant, bool(seal_ids)
+        policy, grant, bool(seal_ids), await _dm_memory_read_only(deps, grant)
     )
     asks_before_publishing = _asks_before_publishing(policy, grant)
     approval_gate = _approval_gate_for(deps, policy, grant)
@@ -2153,10 +2246,20 @@ def decide_before_send(
     return decide
 
 
-def _memory_read_only(policy: TenantAccessPolicy, grant: AdmissionGrant, sealed: bool) -> bool:
-    return (sealed and not _is_own_agent(policy, grant)) or (
-        grant.is_dm and policy.dm_memory_read_only
-    )
+async def _dm_memory_read_only(deps: TurnDeps, grant: AdmissionGrant) -> bool:
+    """The `dm_memory_read_only` feature for a DM turn; not read for any other turn. One
+    workspace-wide setting, so the platform only has to be one that offers it."""
+    if not grant.is_dm:
+        return False
+    place = FeaturePlace(grant.tenant_id, "discord")
+    async with deps.sessionmaker() as session:
+        return (await feature_in(session, None, place, "dm_memory_read_only")).on
+
+
+def _memory_read_only(
+    policy: TenantAccessPolicy, grant: AdmissionGrant, sealed: bool, dm_read_only: bool
+) -> bool:
+    return (sealed and not _is_own_agent(policy, grant)) or dm_read_only
 
 
 async def _awaits_its_switch_here(
@@ -2382,7 +2485,9 @@ async def capture_backend_source(
                 environment,
                 config,
                 grant=grant,
-                memory_read_only=_memory_read_only(policy, grant, bool(seals)),
+                memory_read_only=_memory_read_only(
+                    policy, grant, bool(seals), await _dm_memory_read_only(deps, grant)
+                ),
                 asks_before_publishing=_asks_before_publishing(policy, grant),
                 approval_gate=_approval_gate_for(deps, policy, grant),
                 daimon_rule_tools=rule_set.tools,
@@ -2527,6 +2632,7 @@ def backend_facts(admission: Admission) -> dict[str, Any]:
     follow = admission.backend_follow
     return {
         "web": admission.web,
+        "features": admission.features,
         "running_on": running_on(admission),
         # A later hand-off summary (#1434) slots in here beside the move.
         "moved": None

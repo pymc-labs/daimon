@@ -1,9 +1,8 @@
 import io
-import uuid
 
 import pytest
 from daimon.adapters.discord import tables
-from daimon.adapters.discord.tables import render_discord_tables, tables_enabled
+from daimon.adapters.discord.tables import render_discord_tables
 from PIL import Image
 
 
@@ -51,13 +50,6 @@ async def test_unsupported_header_preserves_table_but_supported_neighbor_renders
     text, files = await render_discord_tables(raw + "\n" + supported, enabled=True)
     assert raw in text
     assert len(files) == 1
-
-
-def test_tables_render_by_default_and_explicit_false_opts_out():
-    tenant = uuid.uuid4()
-    assert tables_enabled({}, tenant) is True
-    assert tables_enabled({tenant: True}, tenant) is True
-    assert tables_enabled({tenant: False}, tenant) is False
 
 
 @pytest.mark.parametrize("char", ["x", "é", "\U0001f130"])

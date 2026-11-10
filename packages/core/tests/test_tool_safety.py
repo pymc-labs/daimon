@@ -275,6 +275,7 @@ def test_session_tools_gate_third_party_toolsets_only() -> None:
     assert out is not None
     assert out[0] == _tools()[0]
     assert out[1] == _tools()[1] | {
+        "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
         "configs": [
             {"name": name, "enabled": True, "permission_policy": {"type": "always_ask"}}
             for name in (
@@ -301,9 +302,12 @@ def test_session_tools_gate_third_party_toolsets_only() -> None:
                 "update_watch",
                 "update_web_person",
             )
-        ]
+        ],
     }, "Daimon confirms skill installation and standing watch authority"
-    assert out[2]["default_config"] == {"permission_policy": {"type": "always_ask"}}
+    assert out[2]["default_config"] == {
+        "enabled": True,
+        "permission_policy": {"type": "always_ask"},
+    }
     assert out[2]["configs"] == [
         {"name": "create_issue", "permission_policy": {"type": "always_ask"}}
     ], "a per-tool always_allow would let that tool skip the pause"
@@ -767,7 +771,10 @@ def test_a_daimon_rule_makes_call_tool_and_the_named_tool_ask() -> None:
     )
     assert out is not None
     daimon = out[1]
-    assert daimon["default_config"] == {"permission_policy": {"type": "always_allow"}}
+    assert daimon["default_config"] == {
+        "enabled": True,
+        "permission_policy": {"type": "always_allow"},
+    }
     asked = {c["name"] for c in daimon["configs"] if c["permission_policy"]["type"] == "always_ask"}
     assert asked == {
         "add_server_skill",
@@ -1034,7 +1041,10 @@ def test_a_routed_github_toolset_keeps_its_permission_policy() -> None:
     routed = gated(github_router_url(_PUBLIC))
     assert direct is not None and routed is not None
     assert routed == direct
-    assert routed[0]["default_config"] == {"permission_policy": {"type": "always_ask"}}
+    assert routed[0]["default_config"] == {
+        "enabled": True,
+        "permission_policy": {"type": "always_ask"},
+    }
 
 
 def test_change_setting_is_carded_protected_and_never_auto_allowed() -> None:

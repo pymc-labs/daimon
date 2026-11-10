@@ -24,6 +24,7 @@ NO_CARD = (
     f"approval, and approval cannot be asked here. {CHEAPER_SHAPE}"
 )
 NO_PLAN = "Not posted: add plan with the totals for the whole request (threads, places, people)."
+REACH_OFF = "Not posted: the team keeps Daimon to the conversation it is in. Tell the requester."
 TOO_LONG = "Lead with the ask and a three-line summary; attach or link the rest."
 SHORT_CAPTION = "Say who it is for, the one takeaway, and how long it runs."
 

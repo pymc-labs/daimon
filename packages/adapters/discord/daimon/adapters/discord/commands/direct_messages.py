@@ -26,7 +26,6 @@ from daimon.adapters.discord.checks import (
 from daimon.adapters.discord.commands.cold_dm_views import ServerSelector, ServerSwitch
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.notice_card import build_notice_embed
-from daimon.adapters.discord.tables import tables_enabled
 from daimon.adapters.discord.tool_confirmation import discord_confirmation_hook
 from daimon.adapters.discord.views import CancelView
 from daimon.core.admin_actions import DelegatedAction
@@ -881,9 +880,7 @@ class DirectMessageCog(commands.Cog):
                 requester_id=message.author.id,
                 requester_is_admin=admission.is_admin,
                 in_dm=True,
-                render_tables=tables_enabled(
-                    runtime.settings.table_rendering, conversation.tenant_id
-                ),
+                render_tables=admission.shown("table_rendering"),
                 sessionmaker=runtime.sessionmaker,
                 tenant_id=conversation.tenant_id,
                 budget_channel_id=admission.budget_channel_id,

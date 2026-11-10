@@ -697,9 +697,11 @@ async def test_a_second_cancel_cannot_abandon_credential_revocation(monkeypatch)
             origin_thread_id=None,
             agent=SimpleNamespace(id="agent"),
             backend_footer_profile=None,
+            features=None,
             backend_revision=None,
         ),
         ma_session_id="session",
+        snapshot=None,
         _finalize=finalize,
     )
     deps = SimpleNamespace(
@@ -763,9 +765,11 @@ async def test_a_second_cancel_during_revocation_still_restores_the_callers_log_
             account_id=None,
             agent=SimpleNamespace(id="agent"),
             backend_footer_profile=None,
+            features=None,
             backend_revision=None,
         ),
         ma_session_id="session",
+        snapshot=None,
         _finalize=finalize,
     )
     deps = SimpleNamespace(
@@ -830,9 +834,11 @@ async def test_a_failing_revocation_still_restores_the_callers_log_fields(
             account_id=None,
             agent=SimpleNamespace(id="agent"),
             backend_footer_profile=None,
+            features=None,
             backend_revision=None,
         ),
         ma_session_id="session",
+        snapshot=None,
         _finalize=finalize,
     )
     deps = SimpleNamespace(
@@ -904,9 +910,11 @@ async def test_a_finalizer_outliving_its_wait_stays_referenced_and_its_failure_i
             origin_thread_id=None,
             agent=SimpleNamespace(id="agent"),
             backend_footer_profile=None,
+            features=None,
             backend_revision=None,
         ),
         ma_session_id="session",
+        snapshot=None,
         _finalize=slow_failing_finalize,
     )
     deps = SimpleNamespace(

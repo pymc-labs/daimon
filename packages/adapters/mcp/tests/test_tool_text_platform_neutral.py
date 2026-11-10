@@ -87,22 +87,6 @@ async def test_shared_tool_text_names_no_platform_word(
     assert _offences(tools) == []
 
 
-async def test_thread_participation_tools_are_hidden_from_slack(
-    sessionmaker: async_sessionmaker[AsyncSession],
-) -> None:
-    """Slack callers are always refused, so Slack must not list the tools."""
-    app = create_mcp_app(
-        settings=_fully_configured_settings(),
-        sessionmaker=sessionmaker,
-        auth=StaticTokenVerifier(tokens={}),
-        anthropic=build_stub_anthropic(),
-    )
-    tools = {tool.name: tool for tool in await app.state.mcp.local_provider.list_tools()}
-
-    for name in ("set_thread_participation", "get_thread_participation"):
-        assert tools[name].tags & _PLATFORM_TAGS == {"discord", "teams"}
-
-
 async def test_hub_tool_text_names_no_platform_word(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:

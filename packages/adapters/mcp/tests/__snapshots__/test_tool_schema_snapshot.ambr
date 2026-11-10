@@ -945,54 +945,44 @@
       'description': '''
         Change one setting where you are, after the person presses Approve.
         <blank line>
-        ``approvals`` is ``on`` (Ask before third-party writes), ``off`` (Allow writes) or
-        ``inherit``; only an admin of the chat platform itself, checked live, may change
-        it. ``participation`` (reply in threads without being addressed) and
-        ``progress_plans`` are ``on``, ``off``, ``disabled`` (a channel or server lock) or
-        ``inherit``: a thread's for anyone, a channel's or the server's for an admin.
-        ``cost_footer`` is ``shown`` or ``hidden``, server level only, for an admin.
-        ``level`` is the ``server``, ``channel`` or ``thread`` of this conversation; other
-        places cannot be named. Read the returned ``note`` back.
+        ``key`` and ``value`` are one of ``get_settings``' keys and its values, or
+        ``default`` to clear the level's own value. ``tier`` is the ``workspace``,
+        ``agent``, ``channel`` or ``thread`` level of this conversation; other places cannot be
+        named. ``locked`` (an admin's, not at the thread tier) makes the value final
+        below. Approvals need a live admin of the chat platform; a thread's participation
+        or progress plans are anyone's; the rest an admin's. Read the returned ``note``
+        back.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
           'key': dict({
-            'enum': list([
-              'approvals',
-              'participation',
-              'progress_plans',
-              'cost_footer',
-            ]),
             'type': 'string',
           }),
-          'level': dict({
+          'locked': dict({
+            'default': False,
+            'type': 'boolean',
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'tier': dict({
             'enum': list([
-              'server',
+              'workspace',
+              'agent',
               'channel',
               'thread',
             ]),
             'type': 'string',
           }),
-          'origin_context_id': dict({
-            'type': 'string',
-          }),
           'value': dict({
-            'enum': list([
-              'on',
-              'off',
-              'disabled',
-              'inherit',
-              'shown',
-              'hidden',
-            ]),
             'type': 'string',
           }),
         }),
         'required': list([
           'origin_context_id',
           'key',
-          'level',
+          'tier',
           'value',
         ]),
         'type': 'object',
@@ -4148,20 +4138,6 @@
         'type': 'object',
       }),
     }),
-    'get_cost_footer': dict({
-      'description': '''
-        Deprecated: use ``get_settings``. Report whether finished answers here end with
-        the cost footer. Removed in a later release.
-        <blank line>
-        Reading needs no admin; changing it does. Read the returned ``note`` back to the user.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-        }),
-        'type': 'object',
-      }),
-    }),
     'get_credits_overview': dict({
       'description': '''
         The workspace's credit balance, spend over the last 30 days and this month with
@@ -4373,59 +4349,6 @@
         'type': 'object',
       }),
     }),
-    'get_plain_text_mentions': dict({
-      'description': '''
-        Report whether a typed "@<your name>" in a channel or thread starts a reply here.
-        <blank line>
-        Reading needs no admin; changing it does (``set_plain_text_mentions``,
-        an admin). Read the returned ``note`` back to the
-        user.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-        }),
-        'type': 'object',
-      }),
-    }),
-    'get_progress_plans': dict({
-      'description': '''
-        Deprecated: use ``get_settings``. Report whether progress plans are on for a
-        thread or channel, and which tier decided it. Removed in a later release.
-        <blank line>
-        Scope: ``thread_id`` and ``channel_id`` for a thread; ``channel_id``
-        alone for a channel; neither for the workspace. Reading
-        needs no admin. Read the returned ``explanation`` back to the user.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-          'channel_id': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-          }),
-          'thread_id': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-          }),
-        }),
-        'type': 'object',
-      }),
-    }),
     'get_routine': dict({
       'description': '''
         Get a routine by id. Raises if not found, cross-tenant, or someone else's and you
@@ -4482,12 +4405,13 @@
     }),
     'get_settings': dict({
       'description': '''
-        Report this conversation's settings: approvals, thread participation, progress
-        plans and the cost footer.
+        Report this conversation's settings (every registered feature).
         <blank line>
-        Each lists its own value at the server, channel and thread level of where you are,
-        and what is in effect. Anyone may read them; read each ``note`` back. People change
-        them with ``/settings``, the web app's Settings section or ``change_setting``.
+        Each lists its own value at the workspace, agent, channel and thread levels of where
+        you are, what is in effect, which level decided it (``source``: ``default``,
+        ``deployment`` for everywhere, ``workspace``, ``agent``, ``channel`` or ``thread``)
+        and whether it is locked. Anyone may read them; read each ``summary`` back. People
+        change them with ``/settings``, the web app's Settings section or ``change_setting``.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -4545,49 +4469,6 @@
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
-        }),
-        'type': 'object',
-      }),
-    }),
-    'get_thread_participation': dict({
-      'description': '''
-        Deprecated: use ``get_settings``. Report whether you follow a thread or channel,
-        and which tier decided it. Removed in a later release.
-        <blank line>
-        Scope: ``thread_id`` from ``<thread role="current_thread">`` for a
-        thread (its parent is looked up, so ``channel_id`` is optional);
-        ``channel_id`` from ``<channel role="parent_channel">`` alone for a
-        channel; neither for the workspace. Reading needs no admin; changing
-        channel or workspace scope does.
-        <blank line>
-        Reports every tier (deployment, workspace, channel, thread) plus the
-        winner. Read the returned ``explanation`` back to the user.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-          'channel_id': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-          }),
-          'thread_id': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-          }),
         }),
         'type': 'object',
       }),
@@ -9612,29 +9493,6 @@
         'type': 'object',
       }),
     }),
-    'set_cost_footer': dict({
-      'description': '''
-        Deprecated: use ``change_setting`` with ``key="cost_footer"``. Show or hide the
-        footer under each finished answer. Admin-only. Removed in a later release.
-        <blank line>
-        For the whole workspace. The footer is one line naming the agent, the
-        time taken, what the turn cost and the money left. With ``shown``
-        false, answers end without it; the answer itself and the billing
-        panel are unchanged. On by default. Read the returned ``note`` back to the user.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-          'shown': dict({
-            'type': 'boolean',
-          }),
-        }),
-        'required': list([
-          'shown',
-        ]),
-        'type': 'object',
-      }),
-    }),
     'set_display_identity': dict({
       'description': '''
         Change how Daimon appears in this Discord server: its display name,
@@ -9710,91 +9568,6 @@
             'type': 'boolean',
           }),
         }),
-        'type': 'object',
-      }),
-    }),
-    'set_plain_text_mentions': dict({
-      'description': '''
-        Let a typed "@<your name>" in a channel or thread start a reply. Admin-only.
-        <blank line>
-        For the whole workspace. When
-        ``enabled`` is true, a person's message in a channel or thread that
-        contains your name after "@" as plain text (any case, for example a
-        pasted prompt or a mention typed on a phone without picking you from
-        the list) is answered as if they had mentioned you. Messages from
-        bots and webhooks never count, and direct messages are unchanged. So
-        that suffixes and domains never match, a name followed by "(" or by a
-        dot and a letter is ignored ("@Daimon (urgent)", "@Daimon.Thanks"). Off
-        by default. Read the returned ``note`` back to the user.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-          'enabled': dict({
-            'type': 'boolean',
-          }),
-        }),
-        'required': list([
-          'enabled',
-        ]),
-        'type': 'object',
-      }),
-    }),
-    'set_progress_plans': dict({
-      'description': '''
-        Deprecated: use ``change_setting`` with ``key="progress_plans"``. Turn progress
-        plans on or off where you are asked to. Removed in a later release.
-        <blank line>
-        A progress plan is a short checklist of a longer task's steps on the
-        progress card. Call this when someone asks, for example "turn on
-        progress plans here".
-        <blank line>
-        Scope: ``thread_id`` and ``channel_id`` (this turn's thread and channel
-        ids) for a thread; ``channel_id`` alone for a channel; neither for the
-        workspace. Channel and workspace scope need an admin.
-        <blank line>
-        Modes: ``on``, ``off``, ``disabled`` (lock a channel or workspace so
-        nothing below can turn it on; not valid for a thread), ``inherit``
-        (drop this scope's setting). Read the returned ``note`` back to the user.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-          'channel_id': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-          }),
-          'mode': dict({
-            'enum': list([
-              'on',
-              'off',
-              'disabled',
-              'inherit',
-            ]),
-            'type': 'string',
-          }),
-          'thread_id': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-          }),
-        }),
-        'required': list([
-          'mode',
-        ]),
         'type': 'object',
       }),
     }),
@@ -9923,63 +9696,6 @@
         'required': list([
           'origin_context_id',
           'model',
-        ]),
-        'type': 'object',
-      }),
-    }),
-    'set_thread_participation': dict({
-      'description': '''
-        Deprecated: use ``change_setting`` with ``key="participation"``. Start or stop
-        replying in a thread without being addressed each time. Removed in a later release.
-        <blank line>
-        Scope: ``thread_id`` from ``<thread role="current_thread">`` for a
-        thread (its parent is looked up, so ``channel_id`` is optional);
-        ``channel_id`` from ``<channel role="parent_channel">`` alone for a
-        channel; neither for the workspace. Channel and workspace scope need an
-        admin.
-        <blank line>
-        Modes: ``on`` follow, ``off`` do not, ``disabled`` lock a channel or
-        workspace so nothing below can turn it on (not valid for a thread),
-        ``inherit`` drop this scope's setting. Read the returned ``note`` back
-        to the user.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-          'channel_id': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-          }),
-          'mode': dict({
-            'enum': list([
-              'on',
-              'off',
-              'disabled',
-              'inherit',
-            ]),
-            'type': 'string',
-          }),
-          'thread_id': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-          }),
-        }),
-        'required': list([
-          'mode',
         ]),
         'type': 'object',
       }),
@@ -10118,7 +9834,7 @@
         <blank line>
         Requires an attended owner turn and approval card. The parent thread goes idle;
         completion wakes it to read and report. Worker waits are bounded to 280 seconds.
-        Tenant/agent admin policy must enable jobs. Omitted limits use effective policy;
+        The long_jobs feature must be on here. Omitted limits use the feature limits;
         a deadline or dollar cap above its maximum is refused. No connectors, skills,
         shared memory or credentials are mounted. Jobs are billed to the owner.
       ''',

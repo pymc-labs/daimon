@@ -199,6 +199,7 @@ def build_turn_tools(
     agent_skills: Sequence[SkillRef] = (),
     platform_skills: Sequence[SkillRef] = (),
     channel_skills: Sequence[ChannelSkillRow] = (),
+    daimon_tools: bool = True,
 ) -> TurnTools:
     """Pure preparation from authorized records; exact pins never fall back to latest.
 
@@ -206,6 +207,7 @@ def build_turn_tools(
     pinned channel bundles are reported as skips. Platform/channel additions use
     the shared ownership, mount and count rules. Archive corruption/digest/cap
     failures refuse the turn rather than quietly changing requested content.
+    With `daimon_tools` off the Daimon server is left out; its name stays reserved.
     """
     daimon_mcp_url = _mcp_url(daimon_mcp_url, credential=True)
     servers = [
@@ -214,7 +216,7 @@ def build_turn_tools(
             url=daimon_mcp_url,
             headers_env={"Authorization": DAIMON_MCP_AUTH_ENV},
         )
-    ]
+    ][: int(daimon_tools)]
     bindings = {binding.name: binding for binding in mcp_credential_bindings}
     if len(bindings) != len(mcp_credential_bindings):
         raise ValueError("MCP credential binding names must be unique")

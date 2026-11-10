@@ -1484,7 +1484,6 @@
   "packages/adapters/mcp/tests/tools/test_pagination.py": 0.0,
   "packages/adapters/mcp/tests/tools/test_pin_guard.py": 0.35,
   "packages/adapters/mcp/tests/tools/test_pinned_sends.py": 0.71,
-  "packages/adapters/mcp/tests/tools/test_plain_text_mentions.py": 0.2,
   "packages/adapters/mcp/tests/tools/test_platform_words.py": 0.01,
   "packages/adapters/mcp/tests/tools/test_promo_codes.py": 0.18,
   "packages/adapters/mcp/tests/tools/test_publish.py": 2.42,

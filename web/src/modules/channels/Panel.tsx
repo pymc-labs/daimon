@@ -6,6 +6,7 @@ import { DrawerTabs, Facts, PanelHead, PanelSection, Tag } from "@/components/pa
 import { QueryState } from "@/components/QueryState"
 import { Button } from "@/components/ui/button"
 import { shortDate, usd } from "@/lib/format"
+import { FeatureSettings } from "@/modules/features/Settings"
 import { Access } from "./Access"
 import { Answers } from "./Answers"
 import { useChannel, useChannels, useChannelSettings } from "./api"
@@ -18,7 +19,6 @@ import { Sandbox } from "./Sandbox"
 import { PlatformIcon } from "./shared"
 import { Skills } from "./Skills"
 import { SpendBreakdown } from "./Spend"
-import { Switches } from "./Switches"
 import { Threads } from "./Threads"
 import { ToolRules } from "./ToolRules"
 import type { ChannelDetail, ChannelSettings } from "./types"
@@ -91,7 +91,7 @@ export function ChannelPanel({ id }: { id: string }) {
                 <Budget c={c} />
                 {c.platform !== "web" && s && (
                   <>
-                    <Switches c={c} s={s} />
+                    <FeatureSettings place={{ channel: c.id }} tier="channel" edit={c.can_manage} />
                     <Sandbox c={c} workspace={list?.default_environment} />
                     <Model c={c} s={s} />
                     <Skills c={c} s={s} />

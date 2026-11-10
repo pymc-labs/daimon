@@ -63,6 +63,7 @@ from daimon.core.stores.turn_origins import create_origin
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.deps import build_turn_deps
 from daimon.testing.asgi import asgi_lifespan
+from daimon.testing.settings_mock import mock_settings
 from daimon.testing.turn_leg import turn_leg
 from microsoft_teams.apps.token_manager import TokenManager
 from microsoft_teams.common import Client, ClientOptions
@@ -309,7 +310,7 @@ class TeamsDriver:
 
         A `turn` runs as the other drivers' do: no daimon-mcp, `test-agent` by default.
         """
-        settings = MagicMock()
+        settings = mock_settings()
         settings.teams = TeamsSettings(
             client_id=_CLIENT_ID,
             client_secret=SecretStr("parity-secret"),

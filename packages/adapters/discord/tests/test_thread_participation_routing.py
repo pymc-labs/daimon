@@ -34,14 +34,15 @@ from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
-from daimon.core.stores import thread_participation as store
+from daimon.core.scope_cascade import CascadeMode
+from daimon.core.stores.domain import FeatureTarget
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.tenants import set_turn_cap
 from daimon.core.thread_classifier import ClassifierOutcome
 from daimon.core.thread_participation import (
     ClassifierVerdict,
-    ParticipationMode,
-    ParticipationScope,
 )
+from daimon.testing.settings_mock import mock_settings
 from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -56,13 +57,13 @@ PARENT_ID = 700
 def _make_runtime(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
-    mode: ParticipationMode = ParticipationMode.OFF,
+    mode: CascadeMode = CascadeMode.OFF,
     # Short but non-zero: the timer must not fire while the *next* message is
     # still being handled (the shared test connection allows no overlap).
     quiet_seconds: float = 0.2,
     cap: int = 100,
 ) -> DiscordRuntime:
-    settings = MagicMock()
+    settings = mock_settings()
     settings.mcp = McpSettings()
     discord_settings = MagicMock()
     discord_settings.max_concurrent_turns_per_tenant = cap
@@ -189,13 +190,14 @@ async def _follow_thread(
     sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID
 ) -> None:
     async with sessionmaker() as session, session.begin():
-        await store.set_participation_mode(
+        await set_feature_value(
             session,
             tenant_id=tenant_id,
-            platform="discord",
-            scope=ParticipationScope.THREAD,
-            scope_id=str(THREAD_ID),
-            mode=ParticipationMode.ON,
+            target=FeatureTarget("thread", channel_id=str(PARENT_ID), thread_key=str(THREAD_ID)),
+            key="participation",
+            value="on",
+            set_by=None,
+            surface="web",
         )
 
 
@@ -205,7 +207,7 @@ async def test_disabled_deployment_never_reaches_the_responder(
     monkeypatch: pytest.MonkeyPatch,
     classifier: _FakeClassifier,
 ) -> None:
-    bot = make_bot(_make_runtime(db_session_factory, mode=ParticipationMode.DISABLED))
+    bot = make_bot(_make_runtime(db_session_factory, mode=CascadeMode.DISABLED))
     turns = _stub_turn(bot)
     liveness_reads: list[uuid.UUID] = []
 
@@ -235,7 +237,7 @@ async def test_a_thread_that_is_not_followed_costs_one_read_and_nothing_else(
     tenant_id: uuid.UUID,
     classifier: _FakeClassifier,
 ) -> None:
-    bot = make_bot(_make_runtime(db_session_factory, mode=ParticipationMode.OFF))
+    bot = make_bot(_make_runtime(db_session_factory, mode=CascadeMode.OFF))
     turns = _stub_turn(bot)
 
     await bot.on_message(_thread_message(_make_thread(), content="a question?"))
@@ -260,9 +262,7 @@ async def test_a_burst_is_judged_once_and_the_last_message_is_the_trigger(
 ) -> None:
     await _follow_thread(db_session_factory, tenant_id)
     bot = make_bot(
-        _make_runtime(
-            db_session_factory, mode=ParticipationMode.OFF, quiet_seconds=BURST_QUIET_SECONDS
-        )
+        _make_runtime(db_session_factory, mode=CascadeMode.OFF, quiet_seconds=BURST_QUIET_SECONDS)
     )
     turns = _stub_turn(bot)
     recorded = _spy_record(monkeypatch)
@@ -297,7 +297,7 @@ async def test_global_cap_sheds_unprompted_turn_after_classifier(
     classifier: _FakeClassifier,
 ) -> None:
     await _follow_thread(db_session_factory, tenant_id)
-    bot = make_bot(_make_runtime(db_session_factory, mode=ParticipationMode.OFF))
+    bot = make_bot(_make_runtime(db_session_factory, mode=CascadeMode.OFF))
     assert bot.runtime.settings.discord is not None
     bot.turn_queue.global_cap = 1
     bot.turn_queue.claim(uuid.uuid4())
@@ -320,7 +320,7 @@ async def test_classifier_silence_runs_no_turn(
 ) -> None:
     classifier.decision = "silence"
     await _follow_thread(db_session_factory, tenant_id)
-    bot = make_bot(_make_runtime(db_session_factory, mode=ParticipationMode.OFF))
+    bot = make_bot(_make_runtime(db_session_factory, mode=CascadeMode.OFF))
     turns = _stub_turn(bot)
     recorded = _spy_record(monkeypatch)
 
@@ -338,9 +338,7 @@ async def test_a_mention_during_the_quiet_window_takes_the_batch(
     classifier: _FakeClassifier,
 ) -> None:
     await _follow_thread(db_session_factory, tenant_id)
-    bot = make_bot(
-        _make_runtime(db_session_factory, mode=ParticipationMode.OFF, quiet_seconds=30.0)
-    )
+    bot = make_bot(_make_runtime(db_session_factory, mode=CascadeMode.OFF, quiet_seconds=30.0))
     turns = _stub_turn(bot)
     thread = _make_thread()
 
@@ -364,7 +362,7 @@ async def test_bot_authored_and_top_level_messages_are_ignored(
     classifier: _FakeClassifier,
 ) -> None:
     await _follow_thread(db_session_factory, tenant_id)
-    bot = make_bot(_make_runtime(db_session_factory, mode=ParticipationMode.ON))
+    bot = make_bot(_make_runtime(db_session_factory, mode=CascadeMode.ON))
     _stub_turn(bot)
 
     await bot.on_message(_thread_message(_make_thread(), content="beep", author_is_bot=True))
@@ -384,7 +382,7 @@ async def test_in_flight_thread_skips_the_candidate(
     classifier: _FakeClassifier,
 ) -> None:
     await _follow_thread(db_session_factory, tenant_id)
-    bot = make_bot(_make_runtime(db_session_factory, mode=ParticipationMode.ON))
+    bot = make_bot(_make_runtime(db_session_factory, mode=CascadeMode.ON))
     turns = _stub_turn(bot)
     bot._processing.add(THREAD_ID)  # pyright: ignore[reportPrivateUsage]
 
@@ -402,7 +400,7 @@ async def test_a_tenant_that_is_not_ready_is_silent(
     db_session_factory: async_sessionmaker[AsyncSession],
     classifier: _FakeClassifier,
 ) -> None:
-    bot = make_bot(_make_runtime(db_session_factory, mode=ParticipationMode.ON))
+    bot = make_bot(_make_runtime(db_session_factory, mode=CascadeMode.ON))
     turns = _stub_turn(bot)
     message = _thread_message(_make_thread(), content="anyone?")
 
@@ -423,7 +421,7 @@ async def test_concurrency_shed_is_silent(
     await _follow_thread(db_session_factory, tenant_id)
     async with db_session_factory() as session, session.begin():
         await set_turn_cap(session, tenant_id=tenant_id, cap=1)
-    bot = make_bot(_make_runtime(db_session_factory, mode=ParticipationMode.ON, cap=100))
+    bot = make_bot(_make_runtime(db_session_factory, mode=CascadeMode.ON, cap=100))
     bot.turn_queue.claim(tenant_id)
     turns = _stub_turn(bot)
     message = _thread_message(_make_thread(), content="anyone?")
@@ -448,9 +446,7 @@ async def test_a_burst_is_judged_for_the_newest_author_only(
     """One turn = one caller: another author's words never become this caller's candidates."""
     await _follow_thread(db_session_factory, tenant_id)
     bot = make_bot(
-        _make_runtime(
-            db_session_factory, mode=ParticipationMode.OFF, quiet_seconds=BURST_QUIET_SECONDS
-        )
+        _make_runtime(db_session_factory, mode=CascadeMode.OFF, quiet_seconds=BURST_QUIET_SECONDS)
     )
     turns = _stub_turn(bot)
     thread = _make_thread()
@@ -476,7 +472,7 @@ async def test_the_ledger_counts_admitted_turns_even_when_nothing_is_posted(
 ) -> None:
     """The cap is a spend backstop: a turn the agent ends in silence still spent a turn."""
     await _follow_thread(db_session_factory, tenant_id)
-    bot = make_bot(_make_runtime(db_session_factory, mode=ParticipationMode.OFF))
+    bot = make_bot(_make_runtime(db_session_factory, mode=CascadeMode.OFF))
     recorded = _spy_record(monkeypatch)
     order: list[str] = []
 
@@ -506,7 +502,7 @@ async def test_a_drain_that_starts_while_the_classifier_runs_stops_the_turn(
     classifier: _FakeClassifier,
 ) -> None:
     await _follow_thread(db_session_factory, tenant_id)
-    bot = make_bot(_make_runtime(db_session_factory, mode=ParticipationMode.OFF))
+    bot = make_bot(_make_runtime(db_session_factory, mode=CascadeMode.OFF))
     turns = _stub_turn(bot)
     recorded = _spy_record(monkeypatch)
 
@@ -529,7 +525,7 @@ async def test_mention_claiming_thread_during_cap_read_stops_participation(
     classifier: _FakeClassifier,
 ) -> None:
     await _follow_thread(db_session_factory, tenant_id)
-    bot = make_bot(_make_runtime(db_session_factory, mode=ParticipationMode.OFF))
+    bot = make_bot(_make_runtime(db_session_factory, mode=CascadeMode.OFF))
     turns: list[bool] = []
     cap_read = asyncio.Event()
     release_cap = asyncio.Event()
@@ -577,9 +573,7 @@ async def test_a_batch_keeps_only_the_newest_messages(
 ) -> None:
     await _follow_thread(db_session_factory, tenant_id)
     bot = make_bot(
-        _make_runtime(
-            db_session_factory, mode=ParticipationMode.OFF, quiet_seconds=BURST_QUIET_SECONDS
-        )
+        _make_runtime(db_session_factory, mode=CascadeMode.OFF, quiet_seconds=BURST_QUIET_SECONDS)
     )
     _stub_turn(bot)
     thread = _make_thread()
@@ -600,9 +594,7 @@ async def test_a_thread_that_never_goes_quiet_still_fires_on_a_bounded_delay(
     classifier: _FakeClassifier,
 ) -> None:
     await _follow_thread(db_session_factory, tenant_id)
-    bot = make_bot(
-        _make_runtime(db_session_factory, mode=ParticipationMode.OFF, quiet_seconds=30.0)
-    )
+    bot = make_bot(_make_runtime(db_session_factory, mode=CascadeMode.OFF, quiet_seconds=30.0))
     _stub_turn(bot)
     thread = _make_thread()
 

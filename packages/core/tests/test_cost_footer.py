@@ -23,6 +23,6 @@ class _Unreachable:
 
 async def test_an_unreadable_setting_shows_the_footer() -> None:
     sessions = cast(async_sessionmaker[AsyncSession], _Unreachable())
-    assert await cost_footer_shown(sessions, tenant_id=uuid.uuid4()) is True, (
+    assert await cost_footer_shown(sessions, tenant_id=uuid.uuid4(), platform="discord") is True, (
         "a display setting must never cost a turn its footer or its close"
     )

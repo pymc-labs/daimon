@@ -28,9 +28,11 @@ from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
-from daimon.core.stores import thread_participation as store
-from daimon.core.thread_participation import ParticipationMode, ParticipationScope
+from daimon.core.scope_cascade import CascadeMode
+from daimon.core.stores.domain import FeatureTarget
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.turn.protection import ProtectionState
+from daimon.testing.settings_mock import mock_settings
 from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -48,7 +50,7 @@ QA_BOT_ID = 333
 def _make_runtime(
     sessionmaker: async_sessionmaker[AsyncSession], *, hint: bool = True
 ) -> DiscordRuntime:
-    settings = MagicMock()
+    settings = mock_settings(unmentioned_reply_hint="on" if hint else "off")
     settings.mcp = McpSettings()
     discord_settings = MagicMock()
     discord_settings.max_concurrent_turns_per_tenant = 100
@@ -60,7 +62,7 @@ def _make_runtime(
     settings.discord = discord_settings
     settings.billing.markup = Decimal("1.0")
     settings.thread_participation = ThreadParticipationSettings(
-        mode=ParticipationMode.OFF, quiet_seconds=0.2
+        mode=CascadeMode.OFF, quiet_seconds=0.2
     )
     return DiscordRuntime(
         settings=settings,
@@ -241,13 +243,14 @@ async def test_no_hint_in_a_followed_thread(
     db_session_factory: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID
 ) -> None:
     async with db_session_factory() as session, session.begin():
-        await store.set_participation_mode(
+        await set_feature_value(
             session,
             tenant_id=tenant_id,
-            platform="discord",
-            scope=ParticipationScope.THREAD,
-            scope_id=str(THREAD_ID),
-            mode=ParticipationMode.ON,
+            target=FeatureTarget("thread", channel_id=str(PARENT_ID), thread_key=str(THREAD_ID)),
+            key="participation",
+            value="on",
+            set_by=None,
+            surface="web",
         )
     bot = make_bot(_make_runtime(db_session_factory))
     _stub_turn(bot)

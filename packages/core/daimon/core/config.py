@@ -20,10 +20,10 @@ from typing import TYPE_CHECKING, Annotated, Literal, cast
 from urllib.parse import urlsplit
 from uuid import UUID
 
+from daimon.core.features.registry import FEATURES, deployment_key, parse_deployment
 from daimon.core.mcp_server_url import ascii_mcp_url, canonical_mcp_url
 from daimon.core.outbound.reach import DEFAULT_MAX_PEOPLE
 from daimon.core.scope_cascade import CascadeMode
-from daimon.core.thread_participation import ParticipationMode
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolSafetyPolicy
 from pydantic import (
     AwareDatetime,
@@ -243,12 +243,7 @@ class McpSettings(BaseModel):
 
     require_routine_destination: bool = Field(
         default=False,
-        description=(
-            "Require an explicit destination when the MCP create_routine tool is called. "
-            "When enabled, a missing destination is refused before agent lookup or creation, "
-            "with a warning that the routine would not post. Default false preserves "
-            "record-only routines; existing routines and updates are unaffected."
-        ),
+        description=("Deprecated: use DAIMON_FEATURES__REQUIRE_ROUTINE_DESTINATION."),
     )
     public_url: HttpUrl | None = Field(
         default=None,
@@ -574,6 +569,7 @@ class ProgressPlansSettings(BaseModel):
     mode: CascadeMode = Field(
         default=CascadeMode.OFF,
         description=(
+            "Deprecated: use DAIMON_FEATURES__PROGRESS_PLANS. "
             'Deployment default for progress plans on the "Working on it…" card (Discord, '
             "Slack and Teams). On, the agent keeps a short checklist of a longer task's "
             "steps on the card and may add one-line updates on what it found and does "
@@ -647,9 +643,10 @@ class ThreadParticipationSettings(BaseModel):
     requests. `on` follows every thread unless a lower tier says otherwise.
     """
 
-    mode: ParticipationMode = Field(
-        default=ParticipationMode.OFF,
+    mode: CascadeMode = Field(
+        default=CascadeMode.OFF,
         description=(
+            "Deprecated: use DAIMON_FEATURES__PARTICIPATION. "
             "Deployment default for replying in threads unprompted. off: mention-only "
             "until a thread, channel or workspace is turned on. disabled: mention-only "
             "and cannot be turned on. on: follow every thread unless turned off below."
@@ -2129,11 +2126,7 @@ class OutboundSettings(BaseModel):
 
     reach_budget_enabled: bool = Field(
         default=True,
-        description=(
-            "Ask the requester on an approval card before one interactive turn opens "
-            "more threads, posts into more places or tags more people than the limits "
-            "below. Where no card can be shown, the post is refused instead."
-        ),
+        description=("Deprecated: use DAIMON_FEATURES__REACH_BUDGET."),
     )
     max_threads: int = Field(
         default=2,
@@ -2842,7 +2835,9 @@ class RepoMemorySettings(BaseModel):
     enabled: bool = Field(
         default=False,
         description=(
-            "Enable native repository memory tools and turn injection after a verified import."
+            "Set up native repository memory (its tools and the notes sent with each message) "
+            "after a verified import. Once set up, the `repo_memory` feature turns it on or off "
+            "(`DAIMON_FEATURES__REPO_MEMORY`)."
         ),
     )
     legacy_mcp_server_names: tuple[str, ...] = Field(
@@ -2861,9 +2856,15 @@ class RepoMemorySettings(BaseModel):
             raise ValueError("The native daimon-mcp server cannot be a legacy memory server.")
         return names
 
+    @property
+    def legacy_servers(self) -> tuple[str, ...]:
+        """The legacy servers to step aside for, once native memory is set up."""
+        return self.legacy_mcp_server_names if self.enabled else ()
+
 
 def get_repo_memory_settings(settings: object) -> RepoMemorySettings:
-    """Absent or undeclared settings keep the optional feature disabled."""
+    """The repository-memory setup; absent or undeclared settings are not set up.
+    Whether it is on is the `repo_memory` feature."""
     value = getattr(settings, "repo_memory", None)
     return value if isinstance(value, RepoMemorySettings) else RepoMemorySettings()
 
@@ -2943,6 +2944,15 @@ class Settings(BaseSettings):
     agent_identity: AgentIdentitySettings = Field(default_factory=AgentIdentitySettings)
     environment: EnvironmentSettings = Field(default_factory=EnvironmentSettings)
     discord: DiscordSettings | None = None
+    features: dict[str, str] = Field(
+        default_factory=dict[str, str],
+        description=(
+            "Deployment defaults for features, one variable each: "
+            "DAIMON_FEATURES__PROGRESS_PLANS=on. A value may end in :locked so no "
+            "workspace, agent, channel or thread can change it; disabled is off:locked. "
+            "An unknown feature stops startup. docs/features.md lists them."
+        ),
+    )
     thread_participation: ThreadParticipationSettings = Field(
         default_factory=ThreadParticipationSettings,
         description="Replying in threads unprompted. See ThreadParticipationSettings.",
@@ -3044,13 +3054,25 @@ class Settings(BaseSettings):
         """
         return self.microsoft_accounts.touched and not self.microsoft_accounts_missing()
 
+    @field_validator("features")
+    @classmethod
+    def _features_are_registered(cls, value: dict[str, str]) -> dict[str, str]:
+        return _registered_features(value)
+
     @model_validator(mode="after")
-    def _private_channel_messages_need_a_public_url(self) -> Settings:
-        teams = self.teams
-        if self.private_channel_messages.enabled and teams is not None and teams.public_url is None:
-            raise ValueError(
-                "DAIMON_PRIVATE_CHANNEL_MESSAGES__ENABLED needs DAIMON_TEAMS__PUBLIC_URL"
-            )
+    def _tool_safety_feature(self) -> Settings:
+        """`DAIMON_FEATURES__TOOL_SAFETY` sets the policy every tool-safety reader holds."""
+        was_set = "enabled" in self.tool_safety.model_fields_set
+        if (raw := self.features.get("tool_safety")) is not None:
+            enabled = parse_deployment("tool_safety", raw)[0] == "on"
+        elif was_set:
+            return self
+        else:
+            enabled = FEATURES["tool_safety"].default == "on"
+        policy = self.tool_safety.model_copy(update={"enabled": enabled})
+        if not was_set and raw is None:
+            policy.__pydantic_fields_set__.discard("enabled")  # a default, not an operator value
+        self.tool_safety = policy
         return self
 
     model_config = SettingsConfigDict(
@@ -3076,6 +3098,32 @@ def load_settings(*, _env_file: str | None = ".env") -> Settings:
 
         validate_configured_runtime_manifest()
     return settings
+
+
+def _registered_features(value: dict[str, str]) -> dict[str, str]:
+    features = {deployment_key(key): raw for key, raw in value.items()}
+    for key, raw in features.items():
+        parse_deployment(key, raw)
+    return features
+
+
+class FeatureEnvSettings(BaseSettings):
+    """Only `DAIMON_FEATURES__*`, for a feature writer handed no `Settings`."""
+
+    features: dict[str, str] = Field(default_factory=dict[str, str])
+
+    @field_validator("features")
+    @classmethod
+    def _features_are_registered(cls, value: dict[str, str]) -> dict[str, str]:
+        return _registered_features(value)
+
+    model_config = SettingsConfigDict(
+        env_prefix="DAIMON_",
+        env_nested_delimiter="__",
+        env_file=".env",
+        extra="ignore",
+        hide_input_in_errors=True,
+    )
 
 
 class _CryptoSettingsSource(BaseSettings):

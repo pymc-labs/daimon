@@ -17,6 +17,8 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import list_running_origins
 from daimon.adapters.mcp.tools._session_gate import session_card_gap
+from daimon.core.features.registry import limit_int
+from daimon.core.features.snapshot import FeaturePlace, resolve_features
 from daimon.core.outbound.mentions import (
     Platform,
     RenderedPost,
@@ -30,6 +32,7 @@ from daimon.core.outbound.opt_out import opt_out_names, tag_opt_outs
 from daimon.core.outbound.reach import (
     NO_CARD,
     NO_PLAN,
+    REACH_OFF,
     SHORT_CAPTION,
     TOO_LONG,
     ReachPlan,
@@ -91,6 +94,70 @@ class TurnScope:
     @property
     def interactive(self) -> bool:
         return self.kind != "unattended"
+
+
+@dataclass(frozen=True)
+class OutboundRules:
+    """The reach limits that apply to one turn: its place's features over the config."""
+
+    reach: bool
+    threads: int
+    places: int
+    people: int
+    length: int
+    own_threads: int
+    budget: bool = True
+
+
+_OUTBOUND_KEYS = (
+    "reach_budget",
+    "outbound_reach",
+    "outbound_threads",
+    "outbound_places",
+    "outbound_people",
+    "outbound_length",
+)
+
+
+async def outbound_rules(
+    runtime: McpRuntime, auth: AuthIdentity, scope: TurnScope
+) -> OutboundRules:
+    """What the turn's workspace, agent and channel allow. A failed read keeps the config,
+    with the reach budget on."""
+    config = runtime.settings.outbound
+    try:
+        origin = scope.origin
+        place = FeaturePlace.of(
+            auth.tenant_id,
+            _platform(auth),
+            origin.parent_channel_id if origin else None,
+            origin.thread_id if origin else None,
+            agent_id=origin.responder_ma_agent_id if origin else None,
+        )
+        found = await resolve_features(
+            runtime.session_factory, runtime.settings, place, keys=_OUTBOUND_KEYS
+        )
+        length = found.get("outbound_length")
+        return OutboundRules(
+            reach=found.on("outbound_reach"),
+            threads=limit_int(found.value("outbound_threads")),
+            places=limit_int(found.value("outbound_places")),
+            people=limit_int(found.value("outbound_people")),
+            # The operator's 0 means no limit: it stays so until a tier picks a length.
+            length=limit_int(length.value) if config.max_length or length.tier != "default" else 0,
+            own_threads=config.max_own_threads,
+            budget=found.on("reach_budget"),
+        )
+    except Exception:  # named boundary: the posts keep the operator's limits
+        log.warning("outbound.rules_read_failed", exc_info=True)
+        return OutboundRules(
+            True,
+            config.max_threads,
+            config.max_places,
+            config.max_people,
+            config.max_length,
+            config.max_own_threads,
+        )
 
 
 def is_media(filename: str) -> bool:
@@ -323,12 +390,16 @@ async def prepare_posts(
     )
     if validate is not None:
         validate(rendered)
+    rules = await outbound_rules(runtime, auth, scope)
+    if not rules.reach and any(reach):
+        record_denial("outbound_reach_off")
+        raise ToolError(REACH_OFF)
     if not scope.interactive:
         return rendered
     settings = runtime.settings.outbound
     # Length and captions guard other people's attention, item by item.
     for post in (p for p, r in zip(posts, reach, strict=True) if r):
-        if settings.max_length and len(post.text) > settings.max_length:
+        if rules.length and len(post.text) > rules.length:
             record_denial("outbound_too_long")
             raise ToolError(TOO_LONG)
         if (
@@ -353,14 +424,14 @@ async def prepare_posts(
     )
     if not (reaching or call.people or call.own_threads):
         return rendered
-    if plan is None and reaching and settings.reach_budget_enabled:
+    if plan is None and reaching and rules.budget:
         # The own conversation never needs a plan; reaching others does, so the card shows it all.
         record_denial("reach_no_plan")
         raise ToolError(NO_PLAN)
     async with runtime.session_factory() as session, session.begin():
         so_far, approved = await lock_tally(session, tenant_id=auth.tenant_id, turn_key=scope.key)
-        if settings.reach_budget_enabled:
-            _gate(scope, so_far, approved, call, plan or call.counts(), runtime, auth)
+        if rules.budget:
+            _gate(scope, so_far, approved, call, plan or call.counts(), rules, auth)
         await save_tally(
             session, tenant_id=auth.tenant_id, turn_key=scope.key, tally=so_far.plus(call)
         )
@@ -422,16 +493,13 @@ def _gate(
     approved: ReachPlan | None,
     call: ReachTally,
     plan: ReachPlan,
-    runtime: McpRuntime,
+    rules: OutboundRules,
     auth: AuthIdentity,
 ) -> None:
-    settings = runtime.settings.outbound
-    limits = ReachPlan(
-        threads=settings.max_threads, places=settings.max_places, people=settings.max_people
-    )
+    limits = ReachPlan(threads=rules.threads, places=rules.places, people=rules.people)
     verdict = check_reach(plan=plan, so_far=so_far, call=call, limits=limits, approved=approved)
     own_total = so_far.own_threads + call.own_threads
-    own_over = own_total > max(settings.max_own_threads, approved.threads if approved else 0)
+    own_over = own_total > max(rules.own_threads, approved.threads if approved else 0)
     if verdict == "ok" and not own_over:
         return
     record_denial(f"reach_{verdict}" if verdict != "ok" else "reach_own_threads")
@@ -440,7 +508,7 @@ def _gate(
         # No card can be shown (an outside client, or a backend without one): fail closed.
         raise ToolError(NO_CARD)
     if verdict == "ok":
-        raise ToolError(needs_own_approval(own_total, settings.max_own_threads))
+        raise ToolError(needs_own_approval(own_total, rules.own_threads))
     raise ToolError(needs_approval(plan.widest(so_far.plus(call).counts()), limits))
 
 
@@ -532,12 +600,16 @@ async def render_edit(runtime: McpRuntime, auth: AuthIdentity, text: str, *, pla
     An edit can turn a short post into a wall of text, so it meets R4 as a post would.
     """
     platform = _platform(auth)
-    max_length = runtime.settings.outbound.max_length
-    if max_length and len(text) > max_length:
-        scope = await turn_scope(runtime, auth)
-        if scope.interactive and _outside(OutgoingPost(text=text, place=place), scope):
-            record_denial("outbound_too_long")
-            raise ToolError(TOO_LONG)
+    scope = await turn_scope(runtime, auth)
+    max_length = (await outbound_rules(runtime, auth, scope)).length
+    if (
+        max_length
+        and len(text) > max_length
+        and scope.interactive
+        and _outside(OutgoingPost(text=text, place=place), scope)
+    ):
+        record_denial("outbound_too_long")
+        raise ToolError(TOO_LONG)
     skip, names, _ = await _opt_outs(
         runtime, auth, platform, set(mentioned_user_ids(text, platform))
     )

@@ -73,7 +73,6 @@ from daimon.adapters.mcp.tools.channel_rules import register_channel_rule_tools
 from daimon.adapters.mcp.tools.channel_skills import register_channel_skill_tools
 from daimon.adapters.mcp.tools.channels import register_channel_tools
 from daimon.adapters.mcp.tools.cli_token import register_cli_token_tool
-from daimon.adapters.mcp.tools.cost_footer import register_cost_footer_tools
 from daimon.adapters.mcp.tools.credential_requests import register_credential_request_tools
 from daimon.adapters.mcp.tools.credit_reports import register_credit_report_tools
 from daimon.adapters.mcp.tools.github_app import register_github_app_tools
@@ -91,7 +90,6 @@ from daimon.adapters.mcp.tools.models import register_model_tools
 from daimon.adapters.mcp.tools.my_data import register_my_data_tools
 from daimon.adapters.mcp.tools.never_tag import register_never_tag_tools
 from daimon.adapters.mcp.tools.notebook import register_notebook_tools
-from daimon.adapters.mcp.tools.plain_text_mentions import register_plain_text_mentions_tools
 from daimon.adapters.mcp.tools.progress_plans import register_progress_plan_tools
 from daimon.adapters.mcp.tools.promo_codes import register_promo_code_tools
 from daimon.adapters.mcp.tools.promo_issuing import register_promo_issuing_tools
@@ -109,7 +107,6 @@ from daimon.adapters.mcp.tools.teams._client import build_teams_client
 from daimon.adapters.mcp.tools.tenant_summary import register_tenant_summary_tools
 from daimon.adapters.mcp.tools.thread_model import register_thread_model_tools
 from daimon.adapters.mcp.tools.thread_overrides import register_thread_override_tools
-from daimon.adapters.mcp.tools.thread_participation import register_thread_participation_tools
 from daimon.adapters.mcp.tools.tidy import register_tidy_tools
 from daimon.adapters.mcp.tools.timers import register_timer_tools
 from daimon.adapters.mcp.tools.web_invites import register_web_invite_tools
@@ -581,10 +578,8 @@ def create_mcp_app(
     register_channel_rule_tools(mcp, runtime)  # who reads and posts in a channel; where agents run
     register_channel_copy_tools(mcp, runtime)  # archive a closing channel's copy
     register_channel_environment_tools(mcp, runtime)  # which environment a channel runs in
-    register_thread_participation_tools(mcp, runtime)  # follow/unfollow threads
     register_progress_plan_tools(mcp, runtime)  # the plan on the progress card, and its switch
     register_scope_settings_tools(mcp, runtime)  # the Settings group: get_settings, change_setting
-    register_plain_text_mentions_tools(mcp, runtime)  # typed "@<name>" starts a turn
     register_agent_coding_key_tools(mcp, runtime)
     register_my_data_tools(mcp, runtime)
     register_routine_run_tool(mcp, runtime)
@@ -598,7 +593,6 @@ def create_mcp_app(
     register_skill_library_edit_tools(mcp, runtime)  # library skill files and versions
     register_server_skill_tools(mcp, runtime)  # the data server node's skills
     register_credit_report_tools(mcp, runtime)  # own credits, overview, spend, feedback
-    register_cost_footer_tools(mcp, runtime)  # the line under each finished answer
     register_never_tag_tools(mcp, runtime)  # a person opts out of being tagged
     register_channel_budget_tools(mcp, runtime)  # per-channel spend budgets
     register_channel_skill_tools(mcp, runtime)  # per-channel extra skills

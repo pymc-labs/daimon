@@ -23,10 +23,10 @@ from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.identity import DENIED, GraphSource, TeamsInbound
 from daimon.adapters.teams.restart_catch_up import CATCH_UP_WINDOW, RestartCatchUp
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.stores.domain import TeamsInstallationRow
+from daimon.core.stores.domain import FeatureTarget, TeamsInstallationRow
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.teams_channel_subscriptions import insert_teams_channel_subscription
 from daimon.core.stores.teams_message_admissions import forget_teams_messages_for_user
-from daimon.core.stores.tenants import set_plain_text_mentions
 from daimon.core.teams_graph import GraphClient, GraphMessage
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from microsoft_teams.api import MessageActivity
@@ -530,7 +530,15 @@ async def test_a_typed_bot_name_in_the_gap_is_a_mention_when_the_switch_is_on(
 ) -> None:
     """The bot's name comes from its own earlier message in what was read."""
     async with db_session_factory.begin() as session:
-        await set_plain_text_mentions(session, tenant_id=TENANT, enabled=True)
+        await set_feature_value(
+            session,
+            tenant_id=TENANT,
+            target=FeatureTarget("workspace"),
+            key="plain_text_mentions",
+            value="on",
+            set_by=None,
+            surface="cli",
+        )
     graph = FakeGraph()
     thread = _graph("1700000000001", 30, "<p>planning</p>")
     thread["replies"] = [
@@ -556,7 +564,15 @@ async def test_a_typed_bot_name_is_not_known_when_nothing_read_names_the_bot(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with db_session_factory.begin() as session:
-        await set_plain_text_mentions(session, tenant_id=TENANT, enabled=True)
+        await set_feature_value(
+            session,
+            tenant_id=TENANT,
+            target=FeatureTarget("workspace"),
+            key="plain_text_mentions",
+            value="on",
+            set_by=None,
+            surface="cli",
+        )
     graph = FakeGraph()
     graph.channels[CHANNEL_ID] = [_graph("1700000000004", 2, "<p>@Daimon summarise</p>")]
     await _admitted_before(db_session_factory, CHANNEL_ID)

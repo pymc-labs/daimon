@@ -12,7 +12,6 @@ import re
 import uuid
 from dataclasses import replace
 from typing import Any
-from unittest.mock import MagicMock
 
 import daimon.adapters.mcp.tools._channel_policy as channel_policy_mod
 import httpx
@@ -22,7 +21,6 @@ from anthropic.types.beta import SkillListResponse
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import _channel_target as channel_target
-from daimon.adapters.mcp.tools import thread_participation as participation_mod
 from daimon.adapters.mcp.tools._channel_policy import (
     load_read_policy,
     require_channel_writable,
@@ -72,9 +70,6 @@ from daimon.adapters.mcp.tools.skills import (
 from daimon.adapters.mcp.tools.tenant_summary import (
     _get_tenant_summary_impl,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools.thread_participation import (
-    _get_thread_participation_impl,  # pyright: ignore[reportPrivateUsage]
-)
 from daimon.adapters.mcp.tools.timers import (
     _list_timers_impl,  # pyright: ignore[reportPrivateUsage]
 )
@@ -100,6 +95,7 @@ from daimon.core.stores.user_skills import upsert_user_skill
 from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
+from daimon.testing.settings_mock import mock_settings
 from fastmcp.exceptions import ToolError
 from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
@@ -141,7 +137,7 @@ class _World:
 
 
 def _runtime(sessionmaker: async_sessionmaker[AsyncSession], client: AsyncAnthropic) -> McpRuntime:
-    settings = MagicMock()
+    settings = mock_settings()
     settings.mcp = McpSettings()
     settings.github.oauth_scopes = ()
     return McpRuntime(
@@ -1094,11 +1090,8 @@ async def test_a_running_held_turn_holds_calls_that_name_no_origin(
         return None
 
     monkeypatch.setattr(channel_target, "resolve_visible_channel", visible)
-    monkeypatch.setattr(participation_mod, "verify_participation_scope", verified)
     with pytest.raises(ToolError, match="personal user credential"):
         await _get_channel_budget_impl(runtime, builtin, OTHER)
-    with pytest.raises(ToolError, match="nothing outside it is read"):
-        await _get_thread_participation_impl(runtime, builtin, None, OTHER)
     with pytest.raises(ToolError, match="personal user credential"):
         await _get_channel_budget_impl(runtime, builtin, ROOM, origin_id)
     other_account = replace(builtin, account_id=uuid.uuid4())

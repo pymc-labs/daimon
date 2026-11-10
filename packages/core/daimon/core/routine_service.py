@@ -164,7 +164,8 @@ class RoutineEnv:
     """The channel a destination-less routine's spend counts against."""
     resolve_source: SourceResolver | None = None
     """None where the surface has no conversation; the store then derives the source."""
-    require_destination: bool = False
+    require_destination: Callable[[], Awaitable[bool]] | None = None
+    """Whether a routine made here must name where it posts; read only when it names none."""
     on_change: OnChange | None = None
     now: Callable[[], datetime] = lambda: datetime.now(UTC)
 
@@ -517,7 +518,11 @@ async def create_routine(env: RoutineEnv, caller: RoutineCaller, new: NewRoutine
     destination_channel_id = await check_destination(
         env, caller, kind=new.destination_kind, destination_id=destination_id
     )
-    if env.require_destination and new.destination_kind is None:
+    if (
+        new.destination_kind is None
+        and env.require_destination is not None
+        and await env.require_destination()
+    ):
         raise RoutineRefused(
             "No destination was supplied. This routine won't post, so nothing was created. "
             "Where should results be delivered?"

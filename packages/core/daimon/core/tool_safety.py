@@ -41,7 +41,7 @@ Three questions, each a total function of its arguments:
   then the fixed gates (`PUBLISH_TOOLS`, `CONFIRMED_DAIMON_TOOLS`), then an
   agent `ask`. A rule never loosens a fixed gate.
 
-With `enabled=False` (the default), ordinary toolsets stay `always_allow`.
+With `enabled=False`, ordinary toolsets stay `always_allow`.
 Person-only actions, including watch creation, resume and key rotation, retain
 their confirmation cards regardless of that switch.
 
@@ -334,9 +334,6 @@ PERMISSION_SETTER_TOOLS: Final[frozenset[str]] = frozenset(
         "set_agent_backend",
         "set_agent_default",
         "clear_agent_default",
-        "set_thread_participation",
-        "set_plain_text_mentions",
-        "set_cost_footer",
         "change_setting",
         "grant_admin",
         "revoke_admin",
@@ -518,6 +515,7 @@ class ToolSafetyPolicy(BaseModel):
     enabled: bool = Field(
         default=False,
         description=(
+            "Deprecated: use DAIMON_FEATURES__TOOL_SAFETY. "
             "Classify attached (third-party) MCP tools as read or write and gate the writes: "
             "a write in chat waits for the requester to press Approve on a confirmation card, "
             "and a write in a routine or other unattended run is refused unless listed in "
@@ -542,7 +540,7 @@ class ToolSafetyPolicy(BaseModel):
         default=False,
         exclude_if=lambda value: not value,
         description=(
-            "Let native server admins change third-party MCP write approvals from /here "
+            "Let native server admins change third-party MCP write approvals from /settings "
             "at server, channel or thread scope. The most specific explicit on/off setting wins. "
             "Stored settings are ignored while off. Fixed confirmation and permission-setter "
             "names never receive an override, regardless of server host. Deny rules, direct "
@@ -1078,7 +1076,7 @@ def session_tools_for_policy(
     `call_tool` proxy that reaches most of them; `search_tools` never asks. The
     wildcard `*` (an agent-wide deny of every daimon tool) gates the proxy only. An
     agent with no such rule gets exactly the tools it got before.
-    Every config written here is complete
+    Every config written here, and the default of a toolset it changes, is complete
     (`enabled` and `permission_policy`), so the session reports back exactly
     what was sent and its tools hash the same on the next bind.
 
@@ -1131,6 +1129,9 @@ def session_tools_for_policy(
                 entry.get("configs") or [], asked, enabled=default_config.get("enabled", True)
             )
             changed = changed or asking
+        if entry != tool:
+            # A toolset read back without `enabled` is on, as the API reads it.
+            entry["default_config"] = {"enabled": True, **entry.get("default_config", {})}
         out.append(entry)
     return out if changed else None
 

@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 import pytest
 import structlog
 from daimon.core import scheduler
+from daimon.core.features.resolver import ResolvedFeature
 from daimon.core.logging_setup import configure_log_level
 from daimon.core.release import current_release
 from daimon.core.scheduler import run_one_tick
@@ -260,6 +261,9 @@ async def test_a_routine_fire_that_returns_without_finishing_logs_nothing(
             agent_id="agent",
             created_by_user_id=None,
             updated_at=None,
+            destination_kind=None,
+            destination_id=None,
+            channel_id=None,
         ),
     )
 
@@ -278,6 +282,12 @@ async def test_a_routine_fire_that_returns_without_finishing_logs_nothing(
     monkeypatch.setattr(scheduler, "claim_due_fireable", claim)
     monkeypatch.setattr(scheduler, "skip_slots_during_fire", nothing)
     monkeypatch.setattr(scheduler, "configured_routines", AsyncMock(return_value=set()))
+    # The sessionmaker never connects, so the feature read is answered here.
+    monkeypatch.setattr(
+        scheduler,
+        "place_feature_or_none",
+        AsyncMock(return_value=ResolvedFeature("routines", "on", "default", False)),
+    )
     with capture_logs() as logs:
         await run_one_tick(
             now=datetime(2026, 1, 1, tzinfo=UTC),

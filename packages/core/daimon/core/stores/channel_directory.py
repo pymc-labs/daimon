@@ -10,12 +10,11 @@ from daimon.core._models import (
     ChannelConfig,
     ChannelConfigRevision,
     ChannelSkill,
+    FeatureValue,
     PlatformChannelName,
-    ProgressPlanScope,
     Routine,
     SharedChannel,
     TeamsChannelSubscription,
-    ThreadParticipationScope,
 )
 from sqlalchemy import Select, and_, func, select, union
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -61,15 +60,10 @@ async def list_configured_channel_ids(
         select(AgentToolRuleRecord.channel_id).where(
             AgentToolRuleRecord.tenant_id == tenant_id, AgentToolRuleRecord.channel_id.is_not(None)
         ),
-        select(ThreadParticipationScope.scope_id).where(
-            ThreadParticipationScope.tenant_id == tenant_id,
-            ThreadParticipationScope.platform == platform,
-            ThreadParticipationScope.scope == "channel",
-        ),
-        select(ProgressPlanScope.scope_id).where(
-            ProgressPlanScope.tenant_id == tenant_id,
-            ProgressPlanScope.platform == platform,
-            ProgressPlanScope.scope == "channel",
+        select(FeatureValue.channel_id).where(
+            FeatureValue.tenant_id == tenant_id,
+            FeatureValue.tier == "channel",
+            FeatureValue.agent_id == "",
         ),
         select(Routine.channel_id).where(
             Routine.tenant_id == tenant_id, Routine.channel_id.is_not(None)

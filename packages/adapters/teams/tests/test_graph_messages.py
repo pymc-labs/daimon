@@ -19,8 +19,8 @@ from daimon.adapters.teams.admissions import HOLDING, admission_channel
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.identity import DENIED
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.stores.domain import TeamsChannelSubscriptionRow
-from daimon.core.stores.tenants import set_plain_text_mentions
+from daimon.core.stores.domain import FeatureTarget, TeamsChannelSubscriptionRow
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.teams_graph import GraphMessage
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from microsoft_teams.api import MessageActivity
@@ -149,7 +149,15 @@ class Routed:
 
 async def _switch_on(factory: async_sessionmaker[AsyncSession]) -> None:
     async with factory.begin() as session:
-        await set_plain_text_mentions(session, tenant_id=TENANT, enabled=True)
+        await set_feature_value(
+            session,
+            tenant_id=TENANT,
+            target=FeatureTarget("workspace"),
+            key="plain_text_mentions",
+            value="on",
+            set_by=None,
+            surface="cli",
+        )
 
 
 async def test_a_typed_bot_name_on_a_root_post_starts_a_thread_turn(

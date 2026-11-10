@@ -3,7 +3,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 
 /** The value a setting falls back to, and which tier supplies it. `label` is the value as people read it; empty when it is not known. */
-export type Inherited<T> = { value: T; label: string; from: "Workspace" | "Built-in" }
+export type Inherited<T> = { value: T; label: string; from: string }
 
 /** `bare` leaves out the label row, for a control that sits in a list which names it already. */
 const Row = ({ label, overridden, bare, children }: { label: string; overridden: boolean; bare?: boolean; children: React.ReactNode }) =>

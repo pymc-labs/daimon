@@ -27,6 +27,7 @@ from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.stores.tenants import set_turn_cap
 from daimon.core.turn.deps import build_turn_deps
 from daimon.testing.ma_models import ma_agent, ma_environment
+from daimon.testing.settings_mock import mock_settings
 from mux.testing.drivers.anthropic.ma_models import ma_session
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -39,7 +40,7 @@ def _make_runtime(
     *,
     max_concurrent_turns_per_tenant: int = 3,
 ) -> DiscordRuntime:
-    settings = MagicMock()
+    settings = mock_settings()
     settings.agent_identity.enabled = True
     settings.mcp = McpSettings()
     settings.defaults_root = MagicMock()

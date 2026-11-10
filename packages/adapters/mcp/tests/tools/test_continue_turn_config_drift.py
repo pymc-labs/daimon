@@ -22,7 +22,6 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from typing import Any, Literal
-from unittest.mock import MagicMock
 
 import httpx
 import pytest
@@ -49,6 +48,7 @@ from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
+from daimon.testing.settings_mock import mock_settings
 from fastmcp.exceptions import ToolError
 from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
@@ -145,7 +145,7 @@ class _World:
 
     @property
     def runtime(self) -> McpRuntime:
-        settings = MagicMock()
+        settings = mock_settings()
         settings.tool_safety = OPEN_TOOL_SAFETY
         if self.mcp is None:
             settings.mcp.public_url = None

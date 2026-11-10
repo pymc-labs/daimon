@@ -63,7 +63,7 @@ _CLASSIFIED: dict[tuple[str, str], str] = {
     ),
     (_TEAMS + "setup_panel.py", "Open setup from our 1:1 chat"): "shown only inside a 1:1 chat",
     (_TEAMS + "support.py", "(sent in the 1:1 chat)"): "`support` is a command a guest cannot run",
-    (_CORE + "agent_guidance.py", "## Your credentials & capabilities"): (
+    (_CORE + "agent_guidance.py", "A CHAT REPLY DELIVERS ITSELF."): (
         "the shipped prompt; Teams sessions run platform_system's swapped passage instead"
     ),
     (_CORE + "platform_system.py", "In a Teams channel or group chat"): (

@@ -42,6 +42,8 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_BUDGET_CHANNEL,
     MA_METADATA_KEY_TENANT,
 )
+from daimon.core.features.model_input import DEFAULT_TOOLSET
+from daimon.core.features.session_identity import DEFAULT_IDENTITY
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import DeploymentDefault
@@ -70,6 +72,15 @@ _ENV_NAME = "production"
 _MODEL = "claude-sonnet-4-6"
 _MARKUP = Decimal("1.1")
 _NOW = dt.datetime(2026, 10, 12, 9, 0, tzinfo=dt.UTC)
+
+
+@pytest.fixture(autouse=True)
+def default_place_toolset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These fakes hold no feature rows: every new session runs the default toolset and identity."""
+    monkeypatch.setattr(
+        "daimon.adapters.mcp.tools.agent_chat.place_session",
+        AsyncMock(return_value=(DEFAULT_TOOLSET, DEFAULT_IDENTITY)),
+    )
 
 
 class _Agent:

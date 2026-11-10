@@ -255,6 +255,7 @@ async def test_real_gate_and_adapter_denial_have_no_native_sends_or_provider_roo
             user=object(),
             # Merged #839 (7fa0ddf392481c6067f66f0128ba8bb02af3e411): constructor default.
             _ingress_clock=None,
+            wake_poller_enabled=False,
             runtime=SimpleNamespace(
                 turn_deps=deps,
                 sessionmaker=deps.sessionmaker,

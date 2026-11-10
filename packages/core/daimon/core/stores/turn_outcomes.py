@@ -14,6 +14,7 @@ from daimon.core.context_prompt import TurnContext
 
 if TYPE_CHECKING:
     from daimon.core.turn.termination import TerminationReason
+from pydantic import JsonValue
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -47,6 +48,7 @@ class OutcomeRecord:
     cost_usd: Decimal | None = None
     unpriced_calls: int | None = None
     billing_posture: str | None = None
+    eval_key: dict[str, JsonValue] | None = None
 
 
 async def record(session: AsyncSession, outcome: OutcomeRecord) -> None:

@@ -913,10 +913,11 @@ async def test_a_signed_bearer_is_refused_when_the_policy_cannot_be_read(world: 
 async def _register_long_job(world: _World, **stamps: str):
     from decimal import Decimal
 
-    from daimon.core.authz import Subject
     from daimon.core.config import LongJobsSettings
-    from daimon.core.long_job_models import LongJob, LongJobPolicy
+    from daimon.core.long_job_models import LongJob
     from daimon.core.stores import long_jobs as store
+    from daimon.core.stores.domain import FeatureTarget
+    from daimon.core.stores.feature_values import set_feature_value
 
     now = dt.datetime.now(dt.UTC)
     job = LongJob(
@@ -946,14 +947,14 @@ async def _register_long_job(world: _World, **stamps: str):
         source_metadata=stamps,
     )
     async with world.sessionmaker.begin() as db:
-        await store.set_policy(
+        await set_feature_value(
             db,
             tenant_id=world.tenant_id,
-            agent_id=None,
-            policy=LongJobPolicy(enabled=True),
-            ceilings=LongJobsSettings(),
-            actor=Subject(is_admin=True),
-            set_by="admin",
+            target=FeatureTarget("workspace"),
+            key="long_jobs",
+            value="on",
+            set_by=None,
+            surface="chat",
         )
         await store.register(db, job, ceilings=LongJobsSettings())
     return job

@@ -1,5 +1,5 @@
 import { ReactFlowProvider } from "@xyflow/react"
-import { Eye, History as HistoryIcon, MessagesSquare, Plug, Plus, Blocks, Sparkles, Users } from "lucide-react"
+import { Eye, History as HistoryIcon, MessagesSquare, Plug, Plus, Blocks, SlidersHorizontal, Sparkles, Users } from "lucide-react"
 import { useMemo } from "react"
 import { Link, useParams } from "react-router"
 
@@ -17,6 +17,9 @@ import { DraftBar } from "./Draft"
 import { Inspector } from "./inspector/Inspector"
 import { nodeId, nodeUi } from "./nodes/registry"
 import { LifecycleMenu } from "./setup/LifecycleMenu"
+
+/** The header actions keep their icon and drop the word on a phone, so the crumb stays readable. */
+const ICON_ON_PHONE = "max-sm:w-7 max-sm:px-0"
 
 export function AgentPage() {
   const { id = "" } = useParams()
@@ -43,14 +46,14 @@ export function AgentPage() {
           {ro && (
             <Tooltip>
               <TooltipTrigger asChild>
-                <span className="inline-flex h-7 items-center gap-1.5 rounded-md border px-2 text-xs text-muted-foreground"><Eye className="size-3.5" />View only</span>
+                <span className="inline-flex h-7 items-center gap-1.5 rounded-md border px-2 text-xs text-muted-foreground"><Eye className="size-3.5" /><span className="max-sm:sr-only">View only</span></span>
               </TooltipTrigger>
               <TooltipContent>Ask {agent.owner.name}</TooltipContent>
             </Tooltip>
           )}
           {!ro && (
             <DropdownMenu>
-              <DropdownMenuTrigger asChild><Button variant="outline" size="sm"><Plus />Add</Button></DropdownMenuTrigger>
+              <DropdownMenuTrigger asChild><Button variant="outline" size="sm" className={ICON_ON_PHONE}><Plus /><span className="max-sm:sr-only">Add</span></Button></DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-44">
                 <DropdownMenuItem onSelect={() => setNode("skills")}><Sparkles />Skill</DropdownMenuItem>
                 <DropdownMenuItem onSelect={() => setNode("mcp:new")}><Plug />MCP server</DropdownMenuItem>
@@ -68,10 +71,13 @@ export function AgentPage() {
               </DropdownMenuContent>
             </DropdownMenu>
           )}
-          <Button variant={node === "history" ? "secondary" : "outline"} size="sm" onClick={() => setNode(node === "history" ? null : "history")}>
-            <HistoryIcon />History
+          <Button variant={node === "features" ? "secondary" : "outline"} size="sm" className={ICON_ON_PHONE} onClick={() => setNode(node === "features" ? null : "features")}>
+            <SlidersHorizontal /><span className="max-sm:sr-only">Features</span>
           </Button>
-          <Button variant="outline" size="sm" asChild><Link to={`/chat?agent=${agent.id}`}><MessagesSquare />Chat</Link></Button>
+          <Button variant={node === "history" ? "secondary" : "outline"} size="sm" className={ICON_ON_PHONE} onClick={() => setNode(node === "history" ? null : "history")}>
+            <HistoryIcon /><span className="max-sm:sr-only">History</span>
+          </Button>
+          <Button variant="outline" size="sm" asChild className={ICON_ON_PHONE}><Link to={`/chat?agent=${agent.id}`}><MessagesSquare /><span className="max-sm:sr-only">Chat</span></Link></Button>
           <LifecycleMenu agent={agent} />
         </>
       )}

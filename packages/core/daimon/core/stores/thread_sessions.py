@@ -37,6 +37,7 @@ from daimon.core.session_snapshot import (
 from daimon.core.stores.access_policy import lock_access_policy
 from daimon.core.stores.domain import ThreadSessionRow, TransferKind, UnsavedWorkChoice
 from daimon.core.stores.worker_ownership import owner_is_alive
+from pydantic import JsonValue
 from sqlalchemy import and_, func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -263,6 +264,28 @@ async def list_live_session_channel_ids(
     return list(channels)
 
 
+async def thread_in_channel(
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    platform: str,
+    channel_id: str,
+    thread_key: str,
+) -> bool:
+    """Whether the workspace has a session in this thread, run for this channel."""
+    found = await session.scalar(
+        select(ThreadSession.id)
+        .where(
+            ThreadSession.tenant_id == tenant_id,
+            ThreadSession.platform == platform,
+            ThreadSession.thread_id == thread_key,
+            ThreadSession.channel_id == channel_id,
+        )
+        .limit(1)
+    )
+    return found is not None
+
+
 async def get_latest_thread_session(
     session: AsyncSession,
     *,
@@ -313,6 +336,7 @@ async def create_thread_session(
     effective_config: SessionSnapshot | None = None,
     identity_fingerprint: str | None = None,
     mutable_fingerprint: str | None = None,
+    eval_key: dict[str, JsonValue] | None = None,
     predecessor_id: _uuid.UUID | None = None,
     transfer_file_id: str | None = None,
     transfer_kind: TransferKind | None = None,
@@ -354,6 +378,7 @@ async def create_thread_session(
         ),
         "identity_fingerprint": identity_fingerprint,
         "mutable_fingerprint": mutable_fingerprint,
+        "eval_key": eval_key,
         "predecessor_id": predecessor_id,
         "transfer_file_id": transfer_file_id,
         "transfer_kind": transfer_kind,

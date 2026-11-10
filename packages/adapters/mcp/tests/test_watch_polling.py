@@ -188,6 +188,24 @@ async def lease(runtime, watch):
         return (await watches.claim_poll_watches(db))[0]["lease"]
 
 
+async def test_a_poll_whose_feature_cannot_be_read_keeps_the_watch_and_frees_the_lease(
+    runtime_watch, monkeypatch
+):
+    from unittest.mock import AsyncMock as _AsyncMock
+
+    from daimon.core.features import snapshot
+
+    runtime, watch, _ = runtime_watch
+    token = await lease(runtime, watch)
+    monkeypatch.setattr(snapshot, "place_values", _AsyncMock(side_effect=RuntimeError("down")))
+    assert not await run_poll(runtime, watch.id, token), "nothing was read"
+    monkeypatch.undo()
+    async with runtime.session_factory() as db:
+        kept = await watches.get_watch(db, watch.id)
+    assert kept is not None and kept.status == "active", "an unread feature is not a stop"
+    assert kept.lease_owner is None, "the lease is freed so the next claim retries"
+
+
 async def test_polls_recheck_live_owner_before_every_read_and_cancel_revoked_wakes(runtime_watch):
     runtime, watch, _ = runtime_watch
     source = AsyncMock(

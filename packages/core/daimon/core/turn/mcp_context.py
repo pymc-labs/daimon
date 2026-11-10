@@ -427,9 +427,7 @@ def build_turn_context_fetch(
     transport: httpx.AsyncBaseTransport | None = None,
     memo: ContextMemo | None = None,
 ) -> TurnContextFetch | None:
-    """The deployment's fetch, or None when the setting is off."""
-    if not settings.enabled:
-        return None
+    """The deployment's fetch; the `mcp_briefing` feature decides per turn whether it asks."""
     tenants = frozenset(settings.tenants)
     known = memo if memo is not None else ContextMemo()
 
@@ -581,6 +579,8 @@ async def mcp_context_prefix(
     soon as `cancel` is set.
     """
     if fetch is None or origin != "chat" or request_text is None or cancel.is_set():
+        return ""
+    if not admission.feature_on("mcp_briefing"):
         return ""
     prompt = plain_text(request_text)
     if not prompt or admission.hold is not None or admission.shared_channel:

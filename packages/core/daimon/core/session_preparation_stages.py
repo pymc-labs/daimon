@@ -36,6 +36,8 @@ from daimon.core.credential_env import (
     github_repo_map_sha256,
     github_repo_script_sha256,
 )
+from daimon.core.features.model_input import DEFAULT_TOOLSET, SessionToolset
+from daimon.core.features.session_identity import DEFAULT_IDENTITY, SessionIdentity
 from daimon.core.github_app_session import effective_repo_plan
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.memory_resource import memory_scope
@@ -282,13 +284,17 @@ async def _desired_memory_stores(
     agent_uuid: uuid.UUID,
     account_id: uuid.UUID,
     memory_hold: TurnHold | None,
+    identity: SessionIdentity = DEFAULT_IDENTITY,
 ) -> tuple[str | None, str | None]:
     """The `(memory_store_id, personal_memory_store_id)` a session now would mount.
 
     A held place mounts its channel's store alone. Otherwise the agent-wide
-    store, and a chat session also the caller's personal one beside it.
+    store, and a chat session also the caller's personal one beside it. A store
+    whose feature is off in `identity` is not mounted.
     """
     if memory_hold is not None:
+        if not identity.channel_memory:
+            return None, None
         channel_store_id = await get_channel_memory_store_id(
             session,
             tenant_id=tenant_id,
@@ -298,10 +304,14 @@ async def _desired_memory_stores(
         )
         return channel_store_id, None
     return (
-        await get_memory_store_id(session, tenant_id=tenant_id, agent_id=agent_uuid),
+        await get_memory_store_id(session, tenant_id=tenant_id, agent_id=agent_uuid)
+        if identity.shared_memory
+        else None,
         await get_personal_memory_store_id(
             session, tenant_id=tenant_id, agent_id=agent_uuid, account_id=account_id
-        ),
+        )
+        if identity.personal_memory
+        else None,
     )
 
 
@@ -323,11 +333,13 @@ async def desired_snapshot_for(
     asks_before_publishing: bool = False,
     confirmed_tools: frozenset[str] = frozenset(),
     daimon_rule_tools: frozenset[str] = frozenset(),
+    toolset: SessionToolset = DEFAULT_TOOLSET,
     legacy_memory_servers: tuple[str, ...] = (),
     channel_skills: Sequence[MaSkill] = (),
     system_override: str | None = None,
     mcp_hold: str | None = None,
     memory_hold: TurnHold | None = None,
+    identity: SessionIdentity = DEFAULT_IDENTITY,
 ) -> SessionSnapshot:
     """What a session created right now, for this caller, would freeze.
 
@@ -340,6 +352,10 @@ async def desired_snapshot_for(
     `account_id` also selects the caller's personal memory store, one more
     primary-key read. A session recorded without one is not replaced to add
     it (`session_compat`); the caller's next new session mounts it.
+
+    `identity` is the session's identity features: the recorded session's own for a
+    live one, so changing them never replaces it. `channel_skills` and
+    `system_override` come already filtered by it.
 
     `memory_hold` is the held place, if the turn is held: its channel's store is
     then the only memory (`memory_store_id`), and there is no personal store.
@@ -377,6 +393,7 @@ async def desired_snapshot_for(
             agent_uuid=agent_uuid,
             account_id=account_id,
             memory_hold=memory_hold,
+            identity=identity,
         )
 
     excluded = (
@@ -417,7 +434,9 @@ async def desired_snapshot_for(
         github_repo_script_sha256=(
             github_repo_script_sha256() if has_multi_installation_tokens else None
         ),
-        env_sha256=hash_env_bytes(assemble_env_bytes(rows)) if rows else None,
+        env_sha256=(
+            hash_env_bytes(assemble_env_bytes(rows)) if rows and toolset.env_file else None
+        ),
         repo_url=None,
         repo_branch=None,
         memory_store_id=memory_store_id,
@@ -426,6 +445,7 @@ async def desired_snapshot_for(
         asks_before_publishing=asks_before_publishing,
         confirmed_tools=confirmed_tools,
         daimon_rule_tools=daimon_rule_tools,
+        toolset=toolset,
         legacy_memory_servers=legacy_memory_servers,
         vault_id=None if recorded is None else recorded.vault_id,
         chat_session_id=None if recorded is None else recorded.chat_session_id,
@@ -439,6 +459,8 @@ async def desired_snapshot_for(
         ),
         channel_skills=channel_skills,
         system_override=system_override,
+        agent_skills=identity.agent_skills,
+        identity_features=identity.stored(),
         mcp_hold=mcp_hold,
         memory_scope=memory_scope(memory_hold),
         tool_safety=tool_safety,

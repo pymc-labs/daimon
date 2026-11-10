@@ -65,7 +65,7 @@
             "confirmation_timeout_s": 600,
             "denied": [],
             "effects": {},
-            "enabled": false,
+            "enabled": true,
             "unattended_writes": []
           },
           "trigger_message": "trigger",

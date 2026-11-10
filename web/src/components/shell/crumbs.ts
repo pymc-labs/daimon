@@ -1,7 +1,8 @@
 import { matchPath } from "react-router"
 
 export type Crumb = { label: string; to?: string }
-export type Tab = { label: React.ReactNode; to: string; end?: boolean }
+/** `active` overrides the route match, for a page that sits under a tab without being its route. */
+export type Tab = { label: React.ReactNode; to: string; end?: boolean; active?: boolean }
 
 /** A tabbed page reads `Module / Tab`: a lone crumb gains the active tab's label, unless it is the same word. */
 export function crumbsWithTab(crumbs: Crumb[], tabs: Tab[] | undefined, pathname: string): Crumb[] {

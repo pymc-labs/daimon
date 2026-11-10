@@ -117,6 +117,8 @@ from daimon.core.continuity.messages import (
 )
 from daimon.core.continuity.wakes import WakeThread, run_wake_poller
 from daimon.core.errors import DaimonError
+from daimon.core.features.model_input import FULL_HISTORY, HistoryDepth
+from daimon.core.features.snapshot import FeaturePlace, may_turn_on, place_feature
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.mux_backend import resource_scope
@@ -133,7 +135,7 @@ from daimon.core.stores.domain import (
     TurnCardIntentRow,
 )
 from daimon.core.stores.teams_installations import list_teams_installations
-from daimon.core.stores.tenants import get_plain_text_mentions, get_tenant, get_turn_cap
+from daimon.core.stores.tenants import get_tenant, get_turn_cap
 from daimon.core.stores.thread_sessions import (
     clear_active_turn,
     get_live_thread_session,
@@ -147,7 +149,6 @@ from daimon.core.stores.turn_card_intents import (
 )
 from daimon.core.teams_graph import GraphMessage
 from daimon.core.teams_threads import conversation_of
-from daimon.core.thread_participation import ParticipationMode
 from daimon.core.turn import turn_deadline
 from daimon.core.turn.admission import (
     Admission,
@@ -765,7 +766,7 @@ class TeamsApp:
     async def _hold_inbound(self, parsed: TeamsInbound) -> None:
         """Admit and hold a message parsed while draining, if it would start a turn."""
         if parsed.by_name:
-            if not await self._plain_text_mentions_on():
+            if not await self._plain_text_mentions_on(parsed.channel_id):
                 return
             parsed = _as_mention(parsed)
         # Unaddressed chatter is not held: the participation it could feed is cancelled.
@@ -1073,38 +1074,34 @@ class TeamsApp:
 
     def _ignored_unprompted(self, parsed: TeamsInbound) -> bool:
         """An unaddressed thread reply with participation off asks nothing: drop it."""
-        participation = self.runtime.settings.thread_participation.mode
         unwanted = (
-            parsed.unprompted and not parsed.by_name and participation is ParticipationMode.DISABLED
+            parsed.unprompted
+            and not parsed.by_name
+            and not may_turn_on(self.runtime.settings, "participation", "teams")
         )
         if unwanted:
             log.debug("teams.message.ignored", conversation_type="channel", reason="disabled")
         return unwanted
 
-    async def _plain_text_mentions_on(self) -> bool:
-        """Read the tenant's switch for a message that already names the bot as text."""
-        try:
-            return await get_plain_text_mentions(
-                self.runtime.sessionmaker, tenant_id=self._tenant_id
-            )
-        except SQLAlchemyError as exc:
-            # A failed read leaves the message unaddressed, as with the switch off.
-            log.warning("plain_text_mention.lookup_failed", error_type=type(exc).__name__)
-            return False
+    async def _plain_text_mentions_on(self, channel_id: str | None = None) -> bool:
+        """Read the typed-mention setting for a message that already names the bot as text.
+        A failed read leaves the message unaddressed, as with the setting off."""
+        place = FeaturePlace.of(self._tenant_id, "teams", channel_id)
+        found = await place_feature(
+            self.runtime.sessionmaker, self.runtime.settings, place, "plain_text_mentions"
+        )
+        return found.on
 
     async def _route_by_name(self, inbound: TeamsInbound) -> None:
         """A typed "@<bot name>": a mention with the tenant's switch on, else as before."""
-        if await self._plain_text_mentions_on():
+        if await self._plain_text_mentions_on(inbound.channel_id):
             log.info("plain_text_mention.accepted", conversation_type="channel")
             await self._handle(_as_mention(inbound))
             return
         # Off: a root post stays unanswered and a thread reply is screened as before.
         if not await self._finish([inbound]):
             return
-        if (
-            inbound.unprompted
-            and self.runtime.settings.thread_participation.mode is not ParticipationMode.DISABLED
-        ):
+        if inbound.unprompted and may_turn_on(self.runtime.settings, "participation", "teams"):
             await self._observe(dataclasses.replace(inbound, by_name=False))
 
     def start_wizard_turn(self, inbound: TeamsInbound) -> None:
@@ -1121,6 +1118,7 @@ class TeamsApp:
                 anthropic=self.runtime.anthropic,
                 bot_display_name=inbound.bot_name or "daimon",
                 markup=settings.billing.markup,
+                deployment=settings,
             )
             self._participation = TeamsParticipation(
                 gates=gates,
@@ -1556,7 +1554,7 @@ class TeamsApp:
                 tenant_id=tenant_id,
                 alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                 unprompted=inbound.unprompted,
-                completion_ping=self.runtime.settings.completion_pings.get(tenant_id) is True,
+                completion_ping=admission.shown("completion_pings", "teams"),
                 requester=requester,
                 requester_user_id=inbound.user_id,
                 agent_name_prefix=_agent_name_prefix(
@@ -1567,7 +1565,7 @@ class TeamsApp:
                     metadata=admission.agent.metadata,
                     default_name=self.runtime.deployment_default.agent_name,
                 ),
-                ask_human=self._ask_human,
+                ask_human=self._ask_human and admission.feature_on("support_escalation"),
                 direct_chat=inbound.kind == "dm",
                 foreign=inbound.is_foreign,
                 agent_name=admission.agent.name,
@@ -1776,7 +1774,8 @@ class TeamsApp:
         # The messages this turn answers and its status card are not history.
         skip = frozenset(filter(None, (*inbound.message_ids, lifecycle.message_id)))
         watermark = prepared.watermark if prepared.reused else None
-        history = await self._history(inbound, watermark=watermark, skip_ids=skip)
+        depth = admission.history_depth
+        history = await self._history(inbound, watermark=watermark, skip_ids=skip, depth=depth)
         read = [history]
         # An unprompted turn without its thread has nothing to answer: it stays silent.
         if (bare or inbound.unprompted) and (history is None or history.unavailable):
@@ -1863,7 +1862,9 @@ class TeamsApp:
                 # A recreated session has seen nothing: replay the whole thread.
                 images = (history.attached if history else NOTHING_ATTACHED).images
                 read.append(
-                    await self._history(inbound, watermark=None, skip_ids=skip, images=images)
+                    await self._history(
+                        inbound, watermark=None, skip_ids=skip, images=images, depth=depth
+                    )
                 )
                 return render(history=read[-1])
 
@@ -2000,11 +2001,12 @@ class TeamsApp:
         watermark: str | None,
         skip_ids: frozenset[str],
         images: Mapping[str, int] | None = None,
+        depth: HistoryDepth = FULL_HISTORY,
     ) -> HistoryBlock | None:
         if self._reader is None:
             return None
         return await self._reader.read(
-            inbound, watermark=watermark, skip_ids=skip_ids, images=images
+            inbound, watermark=watermark, skip_ids=skip_ids, images=images, depth=depth
         )
 
     async def _key_names(

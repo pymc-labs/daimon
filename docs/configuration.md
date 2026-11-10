@@ -125,6 +125,14 @@ true. Set DAIMON_TABLE_RENDERING to a JSON object.
 URL rendered on the privacy panels' Policy button. Override via
 DAIMON_PRIVACY_POLICY_URL if you host your own policy page.
 
+### `DAIMON_FEATURES`
+
+`dict[str, str]` · optional · default `{}`
+
+Deployment defaults for features, one variable each: DAIMON_FEATURES__PROGRESS_PLANS=on.
+A value may end in :locked so no workspace, agent, channel or thread can change it;
+disabled is off:locked. An unknown feature stops startup. docs/features.md lists them.
+
 ### `DAIMON_DEFAULTS_ROOT`
 
 `Path` · optional · default `defaults`
@@ -412,10 +420,7 @@ immediately.
 
 `bool` · optional · default `False`
 
-Require an explicit destination when the MCP create_routine tool is called. When
-enabled, a missing destination is refused before agent lookup or creation, with a
-warning that the routine would not post. Default false preserves record-only routines;
-existing routines and updates are unaffected.
+Deprecated: use DAIMON_FEATURES__REQUIRE_ROUTINE_DESTINATION.
 
 ### `DAIMON_MCP__PUBLIC_URL`
 
@@ -841,9 +846,10 @@ Replying in threads unprompted. See ThreadParticipationSettings.
 
 `CascadeMode` · optional · default `off`
 
-Deployment default for replying in threads unprompted. off: mention-only until a thread,
-channel or workspace is turned on. disabled: mention-only and cannot be turned on. on:
-follow every thread unless turned off below.
+Deprecated: use DAIMON_FEATURES__PARTICIPATION. Deployment default for replying in
+threads unprompted. off: mention-only until a thread, channel or workspace is turned on.
+disabled: mention-only and cannot be turned on. on: follow every thread unless turned
+off below.
 
 ### `DAIMON_THREAD_PARTICIPATION__QUIET_SECONDS`
 
@@ -888,11 +894,12 @@ The agent's plan on the working card. See ProgressPlansSettings.
 
 `CascadeMode` · optional · default `off`
 
-Deployment default for progress plans on the "Working on it…" card (Discord, Slack and
-Teams). On, the agent keeps a short checklist of a longer task's steps on the card and
-may add one-line updates on what it found and does next. off: shown only where a
-workspace, channel or thread is turned on. disabled: never shown, and cannot be turned
-on. on: shown everywhere unless turned off below.
+Deprecated: use DAIMON_FEATURES__PROGRESS_PLANS. Deployment default for progress plans
+on the "Working on it…" card (Discord, Slack and Teams). On, the agent keeps a short
+checklist of a longer task's steps on the card and may add one-line updates on what it
+found and does next. off: shown only where a workspace, channel or thread is turned on.
+disabled: never shown, and cannot be turned on. on: shown everywhere unless turned off
+below.
 
 ## Mcp Context
 
@@ -1289,7 +1296,9 @@ Read from `daimon.core.config.RepoMemorySettings`. Prefix `DAIMON_REPO_MEMORY__`
 
 `bool` · optional · default `False`
 
-Enable native repository memory tools and turn injection after a verified import.
+Set up native repository memory (its tools and the notes sent with each message) after a
+verified import. Once set up, the `repo_memory` feature turns it on or off
+(`DAIMON_FEATURES__REPO_MEMORY`).
 
 ### `DAIMON_REPO_MEMORY__LEGACY_MCP_SERVER_NAMES`
 
@@ -1811,9 +1820,7 @@ limits but keep mentions and attribution.
 
 `bool` · optional · default `True`
 
-Ask the requester on an approval card before one interactive turn opens more threads,
-posts into more places or tags more people than the limits below. Where no card can be
-shown, the post is refused instead.
+Deprecated: use DAIMON_FEATURES__REACH_BUDGET.
 
 ### `DAIMON_OUTBOUND__MAX_THREADS`
 
@@ -1984,14 +1991,15 @@ ToolSafetyPolicy.
 
 `bool` · optional · default `False`
 
-Classify attached (third-party) MCP tools as read or write and gate the writes: a write
-in chat waits for the requester to press Approve on a confirmation card, and a write in
-a routine or other unattended run is refused unless listed in unattended_writes. A new
-session gets it when created; an existing chat session gets it at its next bind, and an
-unattended turn (agent chat, daimon run, a routine, a checkpoint) sets it on the session
-before each send. Off lets ordinary third-party calls run, but Daimon's card-only
-actions still ask (lead resolution, a backend switch and Microsoft mail and invites;
-file changes only with it on).
+Deprecated: use DAIMON_FEATURES__TOOL_SAFETY. Classify attached (third-party) MCP tools
+as read or write and gate the writes: a write in chat waits for the requester to press
+Approve on a confirmation card, and a write in a routine or other unattended run is
+refused unless listed in unattended_writes. A new session gets it when created; an
+existing chat session gets it at its next bind, and an unattended turn (agent chat,
+daimon run, a routine, a checkpoint) sets it on the session before each send. Off lets
+ordinary third-party calls run, but Daimon's card-only actions still ask (lead
+resolution, a backend switch and Microsoft mail and invites; file changes only with it
+on).
 
 ### `DAIMON_TOOL_SAFETY__AGENT_RULES`
 
@@ -2005,11 +2013,11 @@ remain editable but inactive until enabled.
 
 `bool` · optional · default `False`
 
-Let native server admins change third-party MCP write approvals from /here at server,
-channel or thread scope. The most specific explicit on/off setting wins. Stored settings
-are ignored while off. Fixed confirmation and permission-setter names never receive an
-override, regardless of server host. Deny rules, direct messages and unattended_writes
-retain their existing behavior.
+Let native server admins change third-party MCP write approvals from /settings at
+server, channel or thread scope. The most specific explicit on/off setting wins. Stored
+settings are ignored while off. Fixed confirmation and permission-setter names never
+receive an override, regardless of server host. Deny rules, direct messages and
+unattended_writes retain their existing behavior.
 
 ### `DAIMON_TOOL_SAFETY__EFFECTS`
 

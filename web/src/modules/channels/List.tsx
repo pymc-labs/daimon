@@ -1,6 +1,6 @@
 import { MessageSquare, X } from "lucide-react"
 import { useMemo } from "react"
-import { Navigate, Route, Routes } from "react-router"
+import { Navigate, Route, Routes, useLocation } from "react-router"
 
 import { AgentAvatar, Ago, Money } from "@/components/common"
 import { Drawer } from "@/components/Drawer"
@@ -17,6 +17,7 @@ import { Tag } from "@/components/panel"
 import { useChannels } from "./api"
 import { DefaultsTab } from "./Defaults"
 import { ACCESS_FILTERS, agentOf, agentsOf, channelTree, filterChannels, type Filters, nameOf, OVERRIDES, platformLabel, TAGS, treeFilter, type ChannelNode, type Node } from "./lib"
+import { ThreadSettings } from "@/modules/features/Thread"
 import { ChannelPanel } from "./Panel"
 import { PlatformIcon } from "./shared"
 import type { AgentRefs, Channel } from "./types"
@@ -146,11 +147,13 @@ function ChannelsTab() {
 export function Channels() {
   const can = useCan()
   const manage = can("channels.manage")
+  const inThread = /^\/channels\/[^/]+\/threads\//.test(useLocation().pathname)
   return (
-    <Page crumbs={[{ label: "Channels" }]} tabs={manage ? [{ label: "Channels", to: "/channels", end: true }, { label: "Defaults", to: "/channels/defaults" }] : undefined} flush>
+    <Page crumbs={[{ label: "Channels" }]} tabs={manage ? [{ label: "Channels", to: "/channels", end: true, active: inThread || undefined }, { label: "Defaults", to: "/channels/defaults" }] : undefined} flush>
       <Routes>
         <Route index element={<ChannelsTab />} />
         <Route path="defaults" element={manage ? <DefaultsTab /> : <Navigate to="/channels" replace />} />
+        <Route path=":channel/threads/:thread" element={<ThreadSettings />} />
         <Route path="*" element={<Navigate to="/channels" replace />} />
       </Routes>
     </Page>

@@ -1,7 +1,8 @@
 import { useState } from "react"
+import { Link } from "react-router"
 
 import { AgentLink, ChannelLink } from "@/components/links"
-import { PanelSection } from "@/components/panel"
+import { PanelMenu, PanelSection } from "@/components/panel"
 import { Button } from "@/components/ui/button"
 import { useChannels, useSave, type Outcome } from "./api"
 import { agentOf, THREAD_KINDS, threadValue } from "./lib"
@@ -17,7 +18,7 @@ export function Threads({ c, s }: { c: ChannelDetail; s: ChannelSettings }) {
   const listed = new Set((list?.channels ?? []).map((x) => x.id))
 
   return (
-    <PanelSection title="Threads with their own settings">
+    <PanelSection title="Threads">
       <Rows>
         {s.threads.map((t) => {
           const name = t.name ?? "Unnamed thread"
@@ -31,9 +32,17 @@ export function Threads({ c, s }: { c: ChannelDetail; s: ChannelSettings }) {
                   {who ? <AgentLink id={who.id} name={who.name} avatar={who.avatar} /> : <span className="truncate">{threadValue(t.kind, t.value, labels)}</span>}
                 </span>
               </span>
+              <Button size="xs" variant="outline" asChild aria-label={`Settings of ${name}`}>
+                <Link to={`/channels/${encodeURIComponent(c.id)}/threads/${encodeURIComponent(t.thread_id)}`}>Settings</Link>
+              </Button>
               {c.can_manage && (
-                <Button size="xs" variant="ghost" disabled={save.pending} aria-label={`Clear ${THREAD_KINDS[t.kind]} in ${name}`}
-                  onClick={async () => setOut(await save.run("post", "threads/clear", { thread_id: t.thread_id, kind: t.kind }))}>Clear</Button>
+                <PanelMenu
+                  label={`More for ${name}`}
+                  items={[{
+                    label: "Use the channel's setting", disabled: save.pending,
+                    onSelect: async () => setOut(await save.run("post", "threads/clear", { thread_id: t.thread_id, kind: t.kind })),
+                  }]}
+                />
               )}
             </li>
           )

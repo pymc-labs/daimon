@@ -11,13 +11,9 @@ from daimon.core.errors import StoreError
 from daimon.core.stores.domain import TenantRow
 from daimon.core.stores.tenants import (
     delete_tenant,
-    get_cost_footer,
-    get_plain_text_mentions,
     get_tenant,
     get_tenant_dependent_counts,
     get_tenant_liveness,
-    set_cost_footer,
-    set_plain_text_mentions,
     set_provision_status,
 )
 from daimon.testing.factories import make_account, make_tenant
@@ -296,64 +292,3 @@ async def test_set_provision_status_truncates_reason_longer_than_cap(
     assert row.last_reconcile_error.endswith("[truncated]"), (
         "a truncated reason must carry a visible truncation marker"
     )
-
-
-async def test_plain_text_mentions_defaults_off_and_round_trips_when_set(
-    db_session_factory: async_sessionmaker[AsyncSession],
-    db_session: AsyncSession,
-) -> None:
-    """A new tenant has the flag off; set_plain_text_mentions turns it on and off again."""
-    tenant = await make_tenant(db_session, workspace_id="guild-plain-mentions")
-    assert tenant.plain_text_mentions is False, "the flag must default to off"
-
-    row = await set_plain_text_mentions(db_session, tenant_id=tenant.id, enabled=True)
-    assert row.plain_text_mentions is True, "the returned row must carry the new value"
-    assert await get_plain_text_mentions(db_session_factory, tenant_id=tenant.id) is True, (
-        "the hot-path read must see the flag turned on"
-    )
-
-    await set_plain_text_mentions(db_session, tenant_id=tenant.id, enabled=False)
-    assert await get_plain_text_mentions(db_session_factory, tenant_id=tenant.id) is False, (
-        "the hot-path read must see the flag turned off again"
-    )
-
-
-async def test_get_plain_text_mentions_is_off_for_unknown_tenant(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """An unknown tenant never answers to a plain-text name."""
-    enabled = await get_plain_text_mentions(db_session_factory, tenant_id=uuid.uuid4())
-    assert enabled is False, "an unknown tenant must read as off"
-
-
-async def test_set_plain_text_mentions_raises_for_unknown_tenant(db_session: AsyncSession) -> None:
-    """Writing the flag for a tenant that does not exist is an error, not a no-op."""
-    with pytest.raises(StoreError):
-        await set_plain_text_mentions(db_session, tenant_id=uuid.uuid4(), enabled=True)
-
-
-async def test_cost_footer_defaults_on_and_round_trips_when_hidden(
-    db_session: AsyncSession,
-) -> None:
-    """A new tenant shows the footer; set_cost_footer hides it and brings it back."""
-    tenant = await make_tenant(db_session, workspace_id="guild-cost-footer")
-    assert await get_cost_footer(db_session, tenant_id=tenant.id) is True, (
-        "every tenant keeps its footer until an admin hides it"
-    )
-
-    await set_cost_footer(db_session, tenant_id=tenant.id, shown=False)
-    assert await get_cost_footer(db_session, tenant_id=tenant.id) is False
-
-    await set_cost_footer(db_session, tenant_id=tenant.id, shown=True)
-    assert await get_cost_footer(db_session, tenant_id=tenant.id) is True
-
-
-async def test_cost_footer_is_shown_for_unknown_tenant(db_session: AsyncSession) -> None:
-    assert await get_cost_footer(db_session, tenant_id=uuid.uuid4()) is True, (
-        "a tenant with no row keeps the default footer"
-    )
-
-
-async def test_set_cost_footer_raises_for_unknown_tenant(db_session: AsyncSession) -> None:
-    with pytest.raises(StoreError):
-        await set_cost_footer(db_session, tenant_id=uuid.uuid4(), shown=False)

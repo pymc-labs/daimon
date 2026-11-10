@@ -327,6 +327,7 @@ def _runtime(
     settings = MagicMock()
     settings.tool_safety = policy
     settings.mcp = McpSettings(public_url=public_url, jwt_secret=None)
+    settings.features = {}
     settings.github.fallback_pat = None
     return McpRuntime(
         session_factory=factory,

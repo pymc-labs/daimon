@@ -28,7 +28,7 @@ from daimon.core.participation_gates import (
     ParticipationGates,
 )
 from daimon.core.teams_graph import GraphUnavailable
-from daimon.core.thread_participation import ClassifierMessage, ParticipationMode
+from daimon.core.thread_participation import ClassifierMessage
 
 log = structlog.get_logger()
 
@@ -103,11 +103,11 @@ class TeamsParticipation:
             resolved = await self._gates.resolve(
                 tenant_id=tenant_id, channel_id=inbound.channel_id, thread_id=key
             )
-            if resolved.mode is not ParticipationMode.ON:
+            if not resolved.on:
                 log.debug(
                     "thread_participation.not_following",
                     thread_id=key,
-                    mode=resolved.mode.value,
+                    value=resolved.value,
                     tier=resolved.tier,
                 )
                 return

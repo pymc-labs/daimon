@@ -52,10 +52,11 @@ from daimon.core.session_snapshot import (
     fingerprint_mutable,
 )
 from daimon.core.stores import tenant_ledger, usage_events
-from daimon.core.stores.domain import Role, ThreadSessionRow
+from daimon.core.stores.domain import FeatureTarget, Role, ThreadSessionRow
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token, upsert_slack_bot_token
-from daimon.core.stores.tenants import get_tenant, set_plain_text_mentions, set_turn_cap
+from daimon.core.stores.tenants import get_tenant, set_turn_cap
 from daimon.core.stores.thread_sessions import (
     create_thread_session,
     get_live_thread_session,
@@ -67,6 +68,7 @@ from daimon.core.turn.posture import Billed, BillingPosture
 from daimon.core.turn.prepare import ContinuityOutcome
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from daimon.testing.ma_models import ma_agent
+from daimon.testing.settings_mock import mock_settings
 from daimon.testing.turn_fakes import deps_for
 from mux.testing.drivers.anthropic.ma_models import ma_model_usage, ma_session, ma_session_agent
 from pydantic import SecretStr
@@ -328,7 +330,7 @@ def _make_app(
     crypto_key: str | None = None,
 ) -> SlackApp:
     """Build a SlackApp with injected dependencies for testing."""
-    settings = MagicMock()
+    settings = mock_settings()
     settings.outbound = OutboundSettings()
     if crypto_key is not None:
         settings.crypto.keys = (SecretStr(crypto_key),)
@@ -7456,7 +7458,15 @@ async def _plain_text_app(
         team_id=team_id,
         encrypted_token=encrypt_token(build_multifernet((fernet_key,)), "xoxb-plain-text"),
     )
-    await set_plain_text_mentions(db_session, tenant_id=result.tenant_id, enabled=enabled)
+    await set_feature_value(
+        db_session,
+        tenant_id=result.tenant_id,
+        target=FeatureTarget("workspace"),
+        key="plain_text_mentions",
+        value="on" if enabled else "off",
+        set_by=None,
+        surface="cli",
+    )
     await db_session.flush()
     app = _make_app(db_session_factory, crypto_key=fernet_key)
     app._bot_user_ids[team_id] = "U_BOT"  # pyright: ignore[reportPrivateUsage]
@@ -7591,14 +7601,14 @@ async def test_a_failed_switch_read_drops_the_typed_bot_name_quietly(
     )
     failing = AsyncMock(side_effect=OperationalError("SELECT", {}, Exception("pool gone")))
     with (
-        patch("daimon.adapters.slack.app.get_plain_text_mentions", failing),
+        patch("daimon.core.features.snapshot.resolve_features", failing),
         structlog.testing.capture_logs() as logs,
     ):
         await app._handle_app_mention(  # pyright: ignore[reportPrivateUsage]
             _named_message("1000000505.000001"), team_id="T_PLAIN_FAIL", by_name=True
         )
     assert turns == [], "an unreadable switch must run nothing"
-    assert "plain_text_mention.lookup_failed" in [entry["event"] for entry in logs], (
+    assert "features.place_read_failed" in [entry["event"] for entry in logs], (
         "the failure must be logged"
     )
 
@@ -7664,58 +7674,3 @@ async def test_queue_notice_delayed_by_reaction_is_fenced_to_held_turn(transitio
         )
     client.chat_postMessage.assert_not_awaited()
     client.reactions_add.assert_awaited_once()
-
-
-@pytest.mark.parametrize("external", [False, True])
-async def test_approval_thread_modal_acks_before_dispatch_and_rejects_external(external):
-    app = _make_app()
-    socket = _FakeSocketClient()
-
-    async def handle(runtime, payload):
-        socket.call_log.append("approval-thread")
-
-    with (
-        patch("daimon.adapters.slack.app.handle_here_approval_submission", new=handle),
-        patch("daimon.adapters.slack.app.is_external_interactive", return_value=external),
-    ):
-        await app.on_request(
-            socket,
-            SocketModeRequest(
-                type="interactive",
-                envelope_id="approval-thread-envelope",
-                payload={
-                    "type": "view_submission",
-                    "team": {"id": "T_TEST"},
-                    "user": {"id": "U_TEST"},
-                    "view": {"callback_id": "here_approvals_thread"},
-                },
-            ),
-        )
-        await asyncio.gather(*list(app._bg_tasks))
-    assert socket.call_log == (
-        ["send_socket_mode_response"]
-        if external
-        else ["send_socket_mode_response", "approval-thread"]
-    )
-
-
-@pytest.mark.parametrize("external", [False, True])
-async def test_approval_select_uses_verified_host_block_action_dispatch(external):
-    app = _make_app()
-    socket = _FakeSocketClient()
-    payload = _make_block_actions_payload(action_id="here_approvals")
-    payload["user"]["team_id"] = "T_OTHER" if external else "T_TEST"
-    handled = AsyncMock()
-    refused = AsyncMock()
-    with (
-        patch("daimon.adapters.slack.app.handle_here_approvals", new=handled),
-        patch.object(app, "_refuse_external_click", new=refused),
-    ):
-        await app.on_request(
-            socket,
-            SocketModeRequest(type="interactive", envelope_id="gate-select", payload=payload),
-        )
-        await asyncio.gather(*list(app._bg_tasks))
-    assert socket.call_log[0] == "send_socket_mode_response"
-    assert handled.await_count == (0 if external else 1)
-    assert refused.await_count == (1 if external else 0)

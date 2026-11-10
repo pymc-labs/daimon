@@ -9,50 +9,35 @@ Starting a job is currently supported only from Discord threads. `start_long_job
 refuses Slack, Teams and other unsupported origins before registration, worker
 launch or spend: “long jobs report back only in Discord threads for now”.
 
-Jobs are disabled by default. A current human admin configures tenant policy, with
-an optional complete override for each agent. Without a policy row the deadline
-default is 60 minutes, the maximum deadline is 70 minutes, and the maximum provider-priced spend is
-$5 per job. Normal billing markup still applies to ledger debits. Agent policy replaces tenant policy; absent both, the defaults apply.
-The operator's ceilings always win: effective maximums are the smaller of policy
-and operator settings, and the default deadline is also clamped to that maximum.
+Jobs are off by default. A server admin turns on the `long_jobs` feature for a
+workspace or one agent; a channel or thread can turn it off again (see
+[features](features.md)). The
+`long_jobs_max_deadline` and `long_jobs_max_usd` features set the longest a job may
+run (default 70 minutes) and the most it may spend (default $5, provider-priced);
+the smallest setting at any level wins. The default deadline is 60 minutes, or the
+maximum if that is lower. Normal billing markup still applies to ledger debits.
 Requests above an effective maximum are refused rather than silently reduced.
 
-The operator settings are `DAIMON_LONG_JOBS__MAX_DEADLINE_MINUTES` (70),
-`DAIMON_LONG_JOBS__MAX_USD` (20), `DAIMON_LONG_JOBS__PER_TENANT_RUNNING` (3), and
-`DAIMON_LONG_JOBS__PER_OWNER_RUNNING` (2). Durations above 70 minutes are not yet
+The operator settings are `DAIMON_LONG_JOBS__PER_TENANT_RUNNING` (3) and
+`DAIMON_LONG_JOBS__PER_OWNER_RUNNING` (2), and the hard ceilings
+`DAIMON_LONG_JOBS__MAX_DEADLINE_MINUTES` (70) and `DAIMON_LONG_JOBS__MAX_USD` (20)
+that bound running workers. Durations above 70 minutes are not yet
 validated on MA. A deadline includes worker launch and manifest delivery; commands
 need time to finish and publish their output before it expires.
 
 ## Administration
 
-Use the existing tenant CLI surface. Read effective policy by omitting
-`--enabled` and `--disabled`:
+Only a server admin can set the three features, in the web app, in chat or with
+`daimon features set`. Workspace and agent owners and delegated admins cannot.
 
-```bash
-daimon tenants long-job-policy TENANT_UUID --actor-user PLATFORM_USER_ID
-```
-
-Set a complete policy, optionally for one MA agent:
-
-```bash
-daimon tenants long-job-policy TENANT_UUID --actor-user PLATFORM_USER_ID \
-  --enabled --default-deadline 60 --max-deadline 70 --max-usd 5
-
-daimon tenants long-job-policy TENANT_UUID --actor-user PLATFORM_USER_ID \
-  --agent MA_AGENT_ID --disabled
-```
-
-This uses the same fresh human admin attestation as `tenants backend-policy`.
-That attestation currently supports Discord administrators. Unsupported platforms
-fail closed. Each change records the human account, time, and before/after policy;
-reapplying the same policy is a no-op. Admins cannot set limits above operator
-ceilings. Policy changes govern new registrations and are checked again at launch.
+Changes govern new registrations and are checked again at launch. A queued job waits
+while the feature is off and launches once it is on again.
 
 ## Starting and inspecting a job
 
 In an attended Discord thread, ask the agent to call `start_long_job` with the exact
 command and title. The approval card shows the command and requested limits.
-Optional `deadline_minutes` and `max_usd` use effective policy when omitted. The
+Optional `deadline_minutes` and `max_usd` use the feature limits when omitted. The
 registration binds the owner, tenant, agent version, environment revision, thread,
 and parent session before launching. Replaying the same approved tool call returns
 the same job. A changed agent or environment refuses launch.

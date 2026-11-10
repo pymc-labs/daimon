@@ -35,10 +35,11 @@ from daimon.core.native_admins import GroupLookupFailed
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import get_account, set_role
 from daimon.core.stores.agent_posts import PostRole, record_post
-from daimon.core.stores.domain import Role, TurnCardIntentRow
+from daimon.core.stores.domain import FeatureTarget, Role, TurnCardIntentRow
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.teams_installations import record_teams_installation
-from daimon.core.stores.tenants import set_plain_text_mentions, set_turn_cap
+from daimon.core.stores.tenants import set_turn_cap
 from daimon.core.stores.thread_agent_bindings import create_binding, update_lifecycle
 from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
 from daimon.core.stores.turn_outcomes import OutcomeRecord, list_for_tenant
@@ -1291,7 +1292,15 @@ async def _route(teams: TeamsApp, payload: dict[str, object]) -> list[tuple[str,
 
 async def _switch(sessionmaker: async_sessionmaker[AsyncSession], *, on: bool) -> None:
     async with sessionmaker.begin() as session:
-        await set_plain_text_mentions(session, tenant_id=TENANT, enabled=on)
+        await set_feature_value(
+            session,
+            tenant_id=TENANT,
+            target=FeatureTarget("workspace"),
+            key="plain_text_mentions",
+            value="on" if on else "off",
+            set_by=None,
+            surface="cli",
+        )
 
 
 @pytest.mark.usefixtures("provisioned_tenant")
@@ -1367,13 +1376,13 @@ async def test_a_failed_switch_read_leaves_a_typed_bot_name_unaddressed(
     teams = _app(db_session_factory, FakeSender())
     failing = AsyncMock(side_effect=SQLAlchemyError("down"))
     with (
-        patch.object(app_module, "get_plain_text_mentions", failing),
+        patch("daimon.core.features.snapshot.resolve_features", failing),
         structlog.testing.capture_logs() as logs,
     ):
         routed = await _route(teams, _named_post("@daimon thoughts?"))
     assert [path for path, _ in routed] == ["participation"], "it must fall back to screening"
     events = [entry["event"] for entry in logs]
-    assert "plain_text_mention.lookup_failed" in events, "the failure must be logged"
+    assert "features.place_read_failed" in events, "the failure must be logged"
     assert "teams.task_failed" not in events, "the failure must not escape the task"
 
 

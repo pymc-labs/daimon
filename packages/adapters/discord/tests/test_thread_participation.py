@@ -22,19 +22,19 @@ from daimon.adapters.discord import thread_participation
 from daimon.adapters.discord.thread_participation import ThreadParticipant
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import ThreadParticipationSettings
+from daimon.core.features.resolver import ResolvedFeature
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.stores import thread_participation as store
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.domain import FeatureTarget
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.core.thread_classifier import ClassifierOutcome, ClassifierUsage
 from daimon.core.thread_participation import (
     ClassifierMessage,
     ClassifierVerdict,
-    ParticipationMode,
-    ParticipationScope,
-    ResolvedParticipation,
 )
 from daimon.testing.factories import make_channel_budget, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -44,7 +44,7 @@ ALICE_ID = 111
 THREAD_ID = 4242
 PARENT_ID = 4200
 
-ON_THREAD = ResolvedParticipation(ParticipationMode.ON, "thread")
+ON_THREAD = ResolvedFeature("participation", "on", "thread")
 
 
 def _msg(*, author_id: int, content: str, message_id: int) -> Any:
@@ -149,17 +149,20 @@ async def _funded_tenant(session: AsyncSession) -> Any:
 async def _set(
     session: AsyncSession,
     tenant_id: uuid.UUID,
-    scope: ParticipationScope,
-    scope_id: str | None,
-    mode: ParticipationMode,
+    target: FeatureTarget,
+    value: str,
+    *,
+    locked: bool = False,
 ) -> None:
-    await store.set_participation_mode(
+    await set_feature_value(
         session,
         tenant_id=tenant_id,
-        platform="discord",
-        scope=scope,
-        scope_id=scope_id,
-        mode=mode,
+        target=target,
+        key="participation",
+        value=value,
+        locked=locked,
+        set_by=None,
+        surface="web",
     )
 
 
@@ -168,28 +171,22 @@ async def test_resolve_walks_the_cascade_from_real_rows(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant = await _funded_tenant(db_session)
-    await _set(
-        db_session, tenant.id, ParticipationScope.THREAD, str(THREAD_ID), ParticipationMode.ON
-    )
+    thread_row = FeatureTarget("thread", channel_id=str(PARENT_ID), thread_key=str(THREAD_ID))
+    await _set(db_session, tenant.id, thread_row, "on")
     await db_session.commit()
     responder = _responder(db_session_factory, mode="off")
     thread = _thread([])
 
-    assert await responder.resolve(tenant_id=tenant.id, thread=thread) == ResolvedParticipation(
-        ParticipationMode.ON, "thread"
-    ), "a thread turned on overrides an off deployment"
-
-    await _set(
-        db_session,
-        tenant.id,
-        ParticipationScope.CHANNEL,
-        str(PARENT_ID),
-        ParticipationMode.DISABLED,
+    assert await responder.resolve(tenant_id=tenant.id, thread=thread) == ON_THREAD, (
+        "a thread turned on overrides an off deployment"
     )
+
+    channel_row = FeatureTarget("channel", channel_id=str(PARENT_ID))
+    await _set(db_session, tenant.id, channel_row, "off", locked=True)
     await db_session.commit()
-    assert await responder.resolve(tenant_id=tenant.id, thread=thread) == ResolvedParticipation(
-        ParticipationMode.DISABLED, "channel"
-    ), "disabled at the channel is final for every thread under it"
+    assert await responder.resolve(tenant_id=tenant.id, thread=thread) == ResolvedFeature(
+        "participation", "off", "channel", locked=True
+    ), "Off and locked at the channel is final for every thread under it"
 
 
 async def test_rate_limited_thread_skips_without_a_classifier_call(
@@ -292,7 +289,7 @@ async def test_a_mode_that_is_not_on_never_reaches_the_classifier(
             burst,
             trigger=burst[-1],
             tenant_id=tenant.id,
-            resolved=ResolvedParticipation(ParticipationMode.OFF, "deployment"),
+            resolved=ResolvedFeature("participation", "off", "deployment"),
         )
         is False
     ), "only an `on` cascade may reply unprompted"

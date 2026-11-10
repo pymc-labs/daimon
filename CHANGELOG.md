@@ -9,6 +9,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Claude Fable 5.2 can be picked as an agent's model.**
   It appears as "Fable 5.2" in every model picker (Discord, Slack, Teams, web) and can be named in chat ("use Fable"). New agents still default to Sonnet 5.5. Fable 5.2 lists at $8 input / $40 output per million tokens, four times Sonnet 5.5, and is billed at that rate.
+- **One settings system for every feature.**
+  Each feature is set at the levels that suit it, from Deployment, Workspace, Agent, Channel and Thread (`docs/features.md` lists them), and settings show which level decided. Admins can lock a value for every level below.
+  Set the deployment level with `DAIMON_FEATURES__<KEY>`. `DAIMON_PROGRESS_PLANS__MODE` and `DAIMON_THREAD_PARTICIPATION__MODE` still work but log a deprecation. The cost footer can be set per channel and thread.
+  The web app shows every feature from one schema-driven list on the workspace, agent, channel and thread pages, with a feature-by-level table in the agent editor. `daimon features list|get|set|diff` does the same from the CLI.
+- **What the agent is sent is now a feature too.**
+  Guidance, the facts sent with each message, web app links, Daimon's own tools, each built-in tool, the connected server briefing, repository memory and context providers can be turned off at the levels `docs/features.md` lists, and take effect from the next message. An agent spec sets its own with a `features:` block.
+  `DAIMON_MCP_CONTEXT__ENABLED` still works but logs a deprecation. Repository memory still needs `DAIMON_REPO_MEMORY__ENABLED` and is then on until a level turns it off.
+  Gemini and OpenAI agents always have Daimon's tools, and the setting says so there.
+
+- **What a conversation starts with, and how much chat it reads, are features too.**
+  The platform prompt, skills, memory, notes on non-chat messages, the keys file and the working-file save at a restart can be turned off at every level, and so can how many earlier messages a new conversation reads (100, 50, 25, 10 or none).
+  A conversation keeps what it started with until `/new`. Gemini and OpenAI agents show the ones they cannot change as unavailable, with the reason.
+  `daimon sessions create` builds its session with the agent's features, as chat does.
+
+- **Each turn records what it ran with.**
+  Turn outcomes and conversations store an `eval_key`: the session's fingerprint and tools, hashes of the safety block, guidance and turn controls, the platform, and every feature with the level that decided it. Older rows keep it empty.
+
+- **What the agent can do is a feature too.**
+  Watches, routines, long jobs, cloud computers, notebooks, report publishing, video transcripts, Microsoft 365, GitHub and lead intake can be turned on or off at every level, and chart images in artifacts at the workspace. A level that turns one off removes its tools from the next message and stops the work it started there.
+  A capability whose setup is missing shows as unavailable, with the reason. Nothing changes until a level sets one. `DAIMON_WATCHES__ENABLED` and `DAIMON_ARTIFACTS__EMBED_IMAGES` still work but log a deprecation.
+
+- **Limits and the last switches are features too.**
+  How far an agent may post outside its conversation, how many threads, places and people one post may reach, the longest post, long job cost and time, and a daily spend cap per model are limits, and the lowest wins. Asking a person for help and keeping an answer's messages apart are set too.
+  Turning off long jobs, cloud computers or lead intake also stops their queued and scheduled work; running work finishes. The old variables for these still work but log a deprecation, and nothing changes until a level sets one.
+
+- **Long jobs are set as features.**
+  `long_jobs` is Off until a server admin turns it on, and its dollar cap (default $5) and time limit are set at the same levels. This replaces the long-job policy: `daimon tenants long-job-policy` is gone, and an existing policy is copied into features on upgrade.
+- **Long jobs stay for server admins only.**
+  A workspace or agent owner, or an admin handed that job, can no longer change them in `/settings`, the web app or by asking Daimon.
+
+- **Chat behaviour and display settings join the same system.**
+  Completion pings, table rendering, message feedback buttons and cost shown with native models are set at every level; typed `@name` mentions, budget notices, thread naming, the unmentioned-reply hint and the "no writers" notice down to a channel; direct messages, read-only memory in direct messages and the waiting card at the workspace. Each web app module is a setting too (`web.chat`, `web.agents` and so on).
+  The old per-workspace variables (`DAIMON_COMPLETION_PINGS`, `DAIMON_TABLE_RENDERING`, `DAIMON_BUDGET_NOTICES`) keep working, log a deprecation, and lose to any workspace setting; `daimon features import-env` writes them as workspace settings. The other old variables still work but log a deprecation.
+  `daimon tenants access-policy set --dm-memory-read-only` is gone, as nothing read it; set the `dm_memory_read_only` feature instead.
+  The remaining older controls (the web settings, `PATCH /api/admin/settings` and the direct-message commands) behave as before and now change the same stored values, so the two never disagree.
+
+- **Guardrails are features too, and a lower level can only make them stricter.**
+  Tool safety (`tool_safety`), the reach check (`reach_budget`), built-in tools in routines (`unattended_capabilities`) and requiring a routine destination (`require_routine_destination`) are set at the levels `docs/features.md` lists, and a level below can tighten but never loosen them. An agent asking to change one gets a confirmation card, or a refusal where no card can be shown.
+  `DAIMON_TOOL_SAFETY__ENABLED`, `DAIMON_OUTBOUND__REACH_BUDGET_ENABLED` and `DAIMON_MCP__REQUIRE_ROUTINE_DESTINATION` still work but log a deprecation.
+  Tool safety is now On by default, so a write by a third-party tool waits for an approval card. Upgrade note: to keep the old behaviour, turn it off in `/settings` or set `DAIMON_FEATURES__TOOL_SAFETY=off`. Private channel messages (`private_channel_messages`) are On by default too, and on Teams they need the bot's public address (`DAIMON_TEAMS__PUBLIC_URL`) like any other setup, instead of failing startup.
+  A limit set to a non-finite number is refused, and an unreadable one no longer drops the outbound limits.
+
 - **The Azure deploy can keep MCP private while Teams is public.**
   Set `mcpPublicIngress` to false and MCP is reachable only from apps in the same Container Apps environment. The default keeps it public, as before.
   It suits only the self-hosted harness running in that environment. Hosted model backends, including the default Anthropic one, sign-in and connect links, and every other Daimon web page stop working, because MCP serves them.
@@ -27,8 +69,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Admins reach it with `/settings` on Discord and Slack, `settings` on Teams, the web app's Settings section, or by asking Daimon (`get_settings`, `change_setting`).
   Every surface uses the same names, values and rules. Approvals need a platform admin, checked live; asking Daimon to change one shows an Approve card.
   Approvals and cost footer changes now appear in the channel history. Existing Slack installs must update their app to get `/settings`.
-- **Deprecated, to be removed in a later release:** `/cost-footer`, the approvals menu on `/here`, and the agent tools `set_cost_footer`, `get_cost_footer`, `set_progress_plans`, `get_progress_plans`, `set_thread_participation` and `get_thread_participation`.
-  They still work; each points to `/settings` or `change_setting`.
+- **Removed: the older ways to change these settings.**
+  The Discord `/cost-footer` command, the approvals menu on `/here` (Discord, Slack and Teams), and the agent tools `set_cost_footer`, `get_cost_footer`, `set_progress_plans`, `get_progress_plans`, `set_thread_participation`, `get_thread_participation`, `set_plain_text_mentions` and `get_plain_text_mentions` are gone. Use `/settings` (`settings` on Teams) or ask Daimon, which calls `change_setting` and `get_settings`.
+  The web app's per-channel and workspace-default save routes for these four settings are gone too; the web Settings section uses the same routes as before.
 - **Routines no longer post their own run summaries.**
   A routine with nothing to do could post a "nothing to do" note with a messaging tool, and later runs copied it. Routines now post only what their instructions ask for. Their final reply is delivered as before.
 - **A Slack routine no longer posts in a channel Daimon was removed from.**

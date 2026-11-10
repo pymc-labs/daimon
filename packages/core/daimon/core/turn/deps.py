@@ -34,7 +34,6 @@ from daimon.core.config import (
     GithubAppSettings,
     McpContextSettings,
     McpSettings,
-    ProgressPlansSettings,
     RepoMemorySettings,
     Settings,
     TurnSettings,
@@ -51,7 +50,6 @@ from daimon.core.membership import MembershipResolver
 from daimon.core.mux_backend import TurnRuntime
 from daimon.core.native_admins import ServerAdminIds
 from daimon.core.scope import DeploymentDefault
-from daimon.core.scope_cascade import CascadeMode
 from daimon.core.session_preparation_gate import PreparationGate
 from daimon.core.specs import SkillRef
 from daimon.core.tool_safety import ToolSafetyPolicy
@@ -105,6 +103,8 @@ class TurnDeps:
     # server through the router (`daimon.core.sessions.create_session`).
     github_mcp_router: bool = False
     repo_memory: RepoMemorySettings = field(default_factory=RepoMemorySettings)
+    # The deployment tier of every feature, legacy variables included; None reads the env.
+    settings: Settings | None = None
     # Required: safety off is the explicit `enabled=False` policy from settings.
     tool_safety: ToolSafetyPolicy = field(kw_only=True)
     preparation_gate: PreparationGate = field(default_factory=lambda: PreparationGate(1))
@@ -112,7 +112,6 @@ class TurnDeps:
     budget_notifier: BudgetNotifier | None = None
     # The notice's server admins, where the stored role is not the source (Teams).
     server_admins: ServerAdminIds | None = None
-    budget_notices_off: frozenset[uuid.UUID] = frozenset()
     # Native MA client remains during the rollout; ancillary Messages calls
     # have a separate injection point and never go through Events/Sessions.
     messages: AsyncAnthropic | None = None
@@ -122,7 +121,6 @@ class TurnDeps:
     # `DAIMON_TURN__CHANNEL_BACKENDS`: admission reads channel backend configuration.
     channel_backends: bool = False
     agent_backends: bool = False
-    native_footer_cost: bool = False
     # Microsoft accounts are configured, so sessions ask before `microsoft_send`.
     microsoft_send: bool = False
     # Provider owners supply transports and durable stores; no credentials
@@ -139,9 +137,6 @@ class TurnDeps:
     openai_daily_model_cap_usd: Decimal | None = None
     # `DAIMON_BILLING__GEMINI_DAILY_MODEL_CAP_USD`, the same cap for Gemini models.
     gemini_daily_model_cap_usd: Decimal | None = None
-    # `DAIMON_PROGRESS_PLANS__MODE`: the deployment tier of the progress-plans cascade.
-    # Disabled unless built from settings, so a bundle assembled by hand never reads it.
-    progress_plans: CascadeMode = CascadeMode.DISABLED
     # `DAIMON_MCP_CONTEXT__ENABLED`: asks the agent's MCP servers about each chat
     # message (`daimon.core.turn.mcp_context`). None asks nothing.
     turn_context: TurnContextFetch | None = None
@@ -193,14 +188,6 @@ def _preparation_limit(settings: Settings) -> int:
     return max(1, pool_size // 2) if isinstance(pool_size, int) else 1
 
 
-def _notices_off(settings: Settings) -> frozenset[uuid.UUID]:
-    """Tenants that turned the budget notice off; tolerate settings mocks in adapter tests."""
-    configured = cast(object, settings.budget_notices)
-    if not isinstance(configured, dict):
-        return frozenset()
-    return frozenset(t for t, on in cast("dict[uuid.UUID, bool]", configured).items() if not on)
-
-
 def _github_mcp_router(settings: Settings) -> bool:
     """`DAIMON_GITHUB__MCP_ROUTER`; tolerate settings mocks in adapter tests."""
     github: object = getattr(settings, "github", None)
@@ -230,6 +217,7 @@ def build_turn_deps(
         ),
         direct_message_policies=settings.direct_message_policies,
         repo_memory=get_repo_memory_settings(settings),
+        settings=settings if isinstance(cast(object, settings), Settings) else None,
         anthropic=anthropic,
         messages=anthropic,
         turn_runtime_factory=build_channel_runtime,
@@ -239,9 +227,6 @@ def build_turn_deps(
         ),
         agent_backends=(
             turn_settings.agent_backends if isinstance(turn_settings, TurnSettings) else False
-        ),
-        native_footer_cost=(
-            turn_settings.native_footer_cost if isinstance(turn_settings, TurnSettings) else False
         ),
         sessionmaker=sessionmaker,
         deployment_default=deployment_default,
@@ -261,14 +246,8 @@ def build_turn_deps(
         tool_safety=settings.tool_safety,
         microsoft_send=settings.microsoft_accounts.configured,
         preparation_gate=PreparationGate(_preparation_limit(settings)),
-        budget_notices_off=_notices_off(settings),
         openai_daily_model_cap_usd=settings.billing.openai_daily_model_cap_usd,
         gemini_daily_model_cap_usd=settings.billing.gemini_daily_model_cap_usd,
-        progress_plans=(
-            plans.mode
-            if isinstance(plans := cast(object, settings.progress_plans), ProgressPlansSettings)
-            else CascadeMode.DISABLED
-        ),
         turn_context=(
             build_turn_context_fetch(
                 context,

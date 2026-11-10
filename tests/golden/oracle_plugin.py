@@ -671,7 +671,11 @@ def pytest_runtest_setup(item: Any) -> None:
             }
             recorded: dict[str, Any] = {}
             for key, value in kwargs.items():
-                if key in TURN_CONTROL_KWARGS or key in {"repo_memory", "github_mcp_router"}:
+                if key in TURN_CONTROL_KWARGS or key in {
+                    "repo_memory",
+                    "github_mcp_router",
+                    "feature_settings",
+                }:
                     continue
                 if key in opaque:
                     recorded[key] = (

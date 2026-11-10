@@ -50,6 +50,7 @@ from daimon.core.agent_mcp_credentials import (
 from daimon.core.config import GithubAppSettings, McpSettings
 from daimon.core.credential_env import assemble_env_bytes, upload_env_file
 from daimon.core.errors import DaimonError
+from daimon.core.features.model_input import DEFAULT_TOOLSET, SessionToolset
 from daimon.core.github_app_session import rotate_live_app_tokens
 from daimon.core.mcp_identity import identity_relay_urls
 from daimon.core.mcp_vault import GITHUB_ROUTER_SESSION_TTL, refresh_mounted_mcp_vaults
@@ -82,6 +83,7 @@ from daimon.core.session_snapshot import (
 from daimon.core.stores import github_router_sessions
 from daimon.core.stores.agent_daimon_tools import record_enabled_daimon_tools
 from daimon.core.stores.agent_files import list_agent_files
+from daimon.core.stores.domain import AgentFileRow
 from daimon.core.tool_safety import ToolSafetyPolicy
 from mux.contracts.ids import Revision, Scope
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -179,10 +181,12 @@ async def _replace_env_file(
     Delete-then-add, in that order: MA rejects a second resource at an occupied
     mount path (P0.f/P3.a), and the vacated path is visible to the same turn
     (P3.c). An agent whose last secret was removed keeps no `.env` at all,
-    which is what a fresh session for it would mount.
+    which is what a fresh session for it would mount, as does `agent_env_file` Off.
     """
-    async with sessionmaker() as session:
-        rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_uuid)
+    rows: list[AgentFileRow] = []
+    if op.keep:
+        async with sessionmaker() as session:
+            rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_uuid)
     if snapshot.github_mode == "app":
         rows = [row for row in rows if row.key not in ("GH_TOKEN", "GITHUB_TOKEN")]
 
@@ -246,6 +250,7 @@ async def apply_update_ops(
     asks_before_publishing: bool = False,
     confirmed_tools: frozenset[str] = frozenset(),
     daimon_rule_tools: frozenset[str] = frozenset(),
+    toolset: SessionToolset = DEFAULT_TOOLSET,
     mcp_vault_ids: McpVaultIds | None = None,
     shared_owner: uuid.UUID | None = None,
     legacy_memory_servers: tuple[str, ...] = (),
@@ -330,6 +335,7 @@ async def apply_update_ops(
                     confirmed_tools=confirmed_tools,
                     daimon_rule_tools=daimon_rule_tools,
                     legacy_memory_servers=legacy_memory_servers,
+                    toolset=toolset,
                 )
                 await record_enabled_daimon_tools(
                     sessionmaker,
@@ -346,6 +352,7 @@ async def apply_update_ops(
                     chat_session_id=recorded.chat_session_id,
                     # The session's own mode: an in-place update never flips it.
                     github_transport=recorded.github_transport,
+                    toolset=toolset,
                 )
                 try:
                     await update_session_record(

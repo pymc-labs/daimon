@@ -22,11 +22,14 @@ from daimon.adapters.cli.sessions_bootstrap import (
 )
 from daimon.adapters.cli.tenant import discover_tenant
 from daimon.core.config import get_repo_memory_settings, load_settings
+from daimon.core.features.snapshot import FeaturePlace
+from daimon.core.features.toolset import place_session
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import platform_scope
 from daimon.core.session_ports_compat import retrieve_session_record
 from daimon.core.sessions import create_session
 from daimon.core.stores.identity import get_or_create_cli_principal
+from mux.profiles import MANAGED_AGENTS
 from rich.console import Console
 
 sessions_app = typer.Typer(help="Sessions: create, get")
@@ -86,11 +89,19 @@ async def sessions_create(
         cache=rt.resolver_cache,
     )
     agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(agent_row.id))
+    toolset, identity = await place_session(
+        rt.sessionmaker,
+        rt.settings,
+        FeaturePlace(tenant_id, "cli", agent_id=agent_row.id, backend=MANAGED_AGENTS.provider),
+        agent_row,
+    )
     ma_session = await create_session(
         rt.anthropic,
         account_id=principal.account_id,
         agent=agent_row,
         environment=env_row,
+        toolset=toolset,
+        identity=identity,
         mcp_settings=rt.settings.mcp,
         agent_uuid=agent_uuid,
         session_factory=rt.sessionmaker,
@@ -104,10 +115,8 @@ async def sessions_create(
         agent_github_app=getattr(rt.settings, "github_app", None),
         requester_is_headless=True,
         tool_safety=rt.settings.tool_safety,
-        legacy_memory_servers=(
-            get_repo_memory_settings(rt.settings).legacy_mcp_server_names
-            if get_repo_memory_settings(rt.settings).enabled
-            else ()
+        legacy_memory_servers=toolset.legacy_memory_servers(
+            get_repo_memory_settings(rt.settings).legacy_servers
         ),
     )
 

@@ -59,8 +59,13 @@ def encode_fragments(system: str, fragments: dict[TurnContext, ContextFragment])
     )
 
 
-def context_prompt(origin: TurnContext, *, system: str | None = None) -> str:
-    """Return a turn block; ordinary chat is byte-for-byte unchanged by default."""
+def context_prompt(
+    origin: TurnContext, *, fragments: bool = True, system: str | None = None
+) -> str:
+    """Return a turn block; ordinary chat is byte-for-byte unchanged by default.
+    `fragments` is `origin_fragments`: False sends none."""
+    if not fragments:
+        return ""
     text = DEFAULT_FRAGMENTS[origin]
     if system and _MARKER in system:
         try:

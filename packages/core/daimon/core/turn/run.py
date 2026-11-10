@@ -36,6 +36,7 @@ from daimon.core.confirmation import (
 from daimon.core.context_prompt import TurnContext, context_prompt
 from daimon.core.context_provider import ContextHook, ContextRequest, LoadedProvider
 from daimon.core.errors import TurnError
+from daimon.core.features.eval_key import EvalKey
 from daimon.core.handoff_context import (
     render_lost_workspace_framing,
     render_previous_session,
@@ -141,6 +142,7 @@ from daimon.core.turn.provider_actions import (
     ProviderActionRequester,
 )
 from daimon.core.turn.state import TurnState
+from daimon.core.turn.status_log import status_log_override
 from daimon.core.turn.termination import TerminationReason, termination_reason
 from daimon.core.turn.unattended import (
     dm_session_authority,
@@ -1149,6 +1151,9 @@ async def run_prepared_turn(
     observation.agent_id = prepared.admission.agent.id
     observation.session_id = prepared.ma_session_id
     observation.origin = origin
+    observation.eval_key = EvalKey.of(
+        prepared.snapshot, prepared.admission.features, platform
+    ).to_json()
     observation.backend_profile = (
         prepared.admission.backend_footer_profile
         if prepared.admission.backend_footer_profile is not None and deps.backend_selection_enabled
@@ -1282,7 +1287,10 @@ async def _repo_memory_state(
     origin: TurnContext,
     unattended: bool,
 ) -> MemoryState:
-    if not get_repo_memory_settings(deps).enabled:
+    # A turn with no settings cannot resolve the setup requirement, so it is checked here too.
+    if not get_repo_memory_settings(deps).enabled or not prepared.admission.feature_on(
+        "repo_memory"
+    ):
         return MemoryState()
     return await turn_memory_state(
         deps.sessionmaker,
@@ -1463,14 +1471,14 @@ async def run_prepared_turn_impl(
     # A replacement session's first user message opens with daimon's framing
     # for the work it inherited (`daimon.core.handoff_context`). Empty for
     # every ordinary turn, which then sends byte-identical bytes to before.
-    context = context_prompt(origin, system=prepared.admission.agent.system)
-    plans = await progress_plans_prefix(
-        deps.sessionmaker,
-        deployment=deps.progress_plans,
-        tenant_id=tenant_id,
+    context = context_prompt(
+        origin,
+        fragments=prepared.admission.feature_on("origin_fragments"),
+        system=prepared.admission.agent.system,
+    )
+    plans = progress_plans_prefix(
+        prepared.admission.resolved("progress_plans"),
         platform=platform,
-        channel_id=prepared.admission.origin_channel_id,
-        thread_id=thread_id,
         chat_rendered=origin in _CHAT_RENDERED_ORIGINS,
     )
     memory_state = await _repo_memory_state(
@@ -1504,6 +1512,8 @@ async def run_prepared_turn_impl(
             return LoadedProvider(config, tenant.external_id)
 
     def context_hook_for(admission: Admission, model_id: str | None) -> ContextHook | None:
+        if not admission.feature_on("context_provider"):
+            return None
         revision = admission.backend_revision
         if revision is not None and revision.profile != MANAGED_AGENTS.profile_id:
             return None
@@ -2387,8 +2397,16 @@ async def run_prepared_turn_impl(
     # Set for the whole turn, so anything inside it (a card posted mid-turn, in this
     # task or one it starts) reads the deadline and never promises a time past it.
     deadline_token = current_turn_deadline.set(effective_deadline)
+    # The reducers and answer extractors read the status log through the turn's context,
+    # so the value this place resolved reaches them without a parameter on each.
+    status_log = prepared.admission.resolved("status_log")
     try:
-        outcome = await _run_within_ceiling()
+        with (
+            status_log_override(status_log.on)
+            if status_log is not None
+            else contextlib.nullcontext()
+        ):
+            outcome = await _run_within_ceiling()
     finally:
         current_turn_deadline.reset(deadline_token)
     # Turn end: anything this session billed nowhere -- calls MA made while no

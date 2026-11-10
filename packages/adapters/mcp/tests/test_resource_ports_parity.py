@@ -341,6 +341,12 @@ class SessionFactory:
     def begin(self) -> "SessionFactory":
         return self
 
+    async def scalar(self, *args: object) -> None:
+        """No feature revision: an unknown tenant resolves every feature to its default."""
+
+    async def scalars(self, *args: object) -> Any:
+        return SimpleNamespace(all=list)
+
 
 @asynccontextmanager
 async def fence(*args: object) -> AsyncIterator[None]:

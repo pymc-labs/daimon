@@ -30,7 +30,7 @@ import hashlib
 import json
 from collections.abc import Collection, Sequence
 from datetime import datetime
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSession
 from anthropic.types.beta.beta_managed_agents_agent_toolset20260401 import (
@@ -60,8 +60,9 @@ from daimon.core.mcp_server_url import (
     session_mcp_url,
 )
 from daimon.core.model_presets import model_choice_id
-from daimon.core.repo_memory_tools import suppress_legacy_readers
+from daimon.core.repo_memory_tools import disable_mcp_tools, suppress_legacy_readers
 from daimon.core.tool_safety import (
+    DAIMON_SERVER_NAME,
     ToolSafetyPolicy,
     heal_reserved_server,
     session_tools_for_policy,
@@ -76,6 +77,10 @@ from pydantic import (
     TypeAdapter,
     model_serializer,
 )
+
+if TYPE_CHECKING:
+    # Only the type: `stores.domain` imports this module, and `features` imports it.
+    from daimon.core.features.model_input import SessionToolset
 
 type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
 type TokenScope = (
@@ -95,7 +100,7 @@ _ENV_MOUNT_SUFFIX = ".env"
 #: Session metadata key `create_session` stamps on a routed session. Recorded
 #: on the session itself, so every snapshot taken of it reads the same mode.
 MA_METADATA_KEY_GITHUB_TRANSPORT = "daimon_github_transport"
-_TOOLS: TypeAdapter[list[MaTool]] = TypeAdapter(list[MaTool])
+_TOOL: TypeAdapter[MaTool] = TypeAdapter(MaTool)
 _MCP_SERVERS: TypeAdapter[list[BetaManagedAgentsMCPServerURLDefinition]] = TypeAdapter(
     list[BetaManagedAgentsMCPServerURLDefinition]
 )
@@ -144,6 +149,7 @@ class SessionSnapshot(BaseModel):
             "github_repo_script_resource_id",
             "mcp_hold",
             "memory_scope",
+            "identity_features",
         ):
             if not data.get(name):
                 data.pop(name, None)
@@ -203,6 +209,11 @@ class SessionSnapshot(BaseModel):
     # Kept apart from `memory_store_id` so the scope is known even when the
     # store failed to provision and nothing mounted.
     memory_scope: str | None = None
+    # The session-identity features off their default when the session was created
+    # (`daimon.core.features.session_identity`). The session keeps them until `/new`
+    # or a replacement; they already show in the system, skills and memory fields,
+    # so they are never fingerprinted themselves.
+    identity_features: tuple[tuple[str, str], ...] = ()
     # How the session reaches GitHub's MCP server, fixed at creation from the
     # session's own metadata. Never fingerprinted and never re-derived: the
     # desired `mcp_servers` follow the recorded mode, so turning the router
@@ -366,6 +377,7 @@ def snapshot_from_created_session(
     personal_memory_store_ids: Collection[str] = (),
     mcp_hold: str | None = None,
     memory_scope: str | None = None,
+    identity_features: tuple[tuple[str, str], ...] = (),
 ) -> SessionSnapshot:
     """Snapshot a session we just created, from the response plus what we sent.
 
@@ -401,7 +413,13 @@ def snapshot_from_created_session(
         github_mode=github_mode,
         personal_memory_store_ids=personal_memory_store_ids,
     )
-    snapshot = snapshot.model_copy(update={"mcp_hold": mcp_hold, "memory_scope": memory_scope})
+    snapshot = snapshot.model_copy(
+        update={
+            "mcp_hold": mcp_hold,
+            "memory_scope": memory_scope,
+            "identity_features": identity_features,
+        }
+    )
     if sent_system is None:
         return snapshot
     return snapshot.model_copy(update={"system_sha256": hash_system(sent_system)})
@@ -540,16 +558,56 @@ def _snapshot_from_session(
 
 
 def session_skills(
-    agent: BetaManagedAgentsAgent, channel_skills: Sequence[MaSkill] = ()
+    agent: BetaManagedAgentsAgent,
+    channel_skills: Sequence[MaSkill] = (),
+    *,
+    agent_skills: bool = True,
 ) -> list[MaSkill]:
     """The skills a session runs: the agent's own, then the turn's extra ones.
 
     The one definition `create_session` and the drift check both use, so a
     session started with a channel's skills reads as current on its next turn.
     The extra ones, the platform's then the channel's, are decided at
-    admission (`daimon.core.channel_skills`).
+    admission (`daimon.core.channel_skills`). `agent_skills` False (the feature
+    off) leaves the agent's own out.
     """
-    return [*agent.skills, *channel_skills]
+    return [*(agent.skills if agent_skills else ()), *channel_skills]
+
+
+def _with_toolset(
+    agent: BetaManagedAgentsAgent, hidden: frozenset[str], toolset: SessionToolset | None
+) -> tuple[BetaManagedAgentsAgent, frozenset[str]]:
+    """The agent and hidden servers as the session's features leave them."""
+    if toolset is None:
+        return agent, hidden
+    if not toolset.daimon_tools:
+        hidden = hidden | {DAIMON_SERVER_NAME}
+    if toolset.builtins:
+        dumped = _dumped(agent.tools)
+        tools = _retyped(agent.tools, dumped, toolset.apply_builtins(dumped))
+        agent = agent.model_copy(update={"tools": tools})
+    return agent, hidden
+
+
+def _dumped(tools: Sequence[MaTool]) -> list[dict[str, Any]]:
+    # A read model's unset fields dump as None, which the param types refuse.
+    return [tool.model_dump(mode="json", exclude_none=True) for tool in tools]
+
+
+def _retyped(
+    tools: Sequence[MaTool], dumped: Sequence[dict[str, Any]], changed: Sequence[dict[str, Any]]
+) -> list[MaTool]:
+    """`changed` as tools: an entry equal to its dump stays the tool it came from, unvalidated.
+
+    Only an entry a rule changed is validated, so a tool the API answered in a short
+    form (a config without `enabled`) passes through as read.
+    """
+    return [
+        tools[index]
+        if index < len(dumped) and entry == dumped[index]
+        else _TOOL.validate_python(entry)
+        for index, entry in enumerate(changed)
+    ]
 
 
 def session_tools(
@@ -562,6 +620,7 @@ def session_tools(
     confirmed_tools: frozenset[str] = frozenset(),
     daimon_rule_tools: frozenset[str] = frozenset(),
     legacy_memory_servers: tuple[str, ...] = (),
+    toolset: SessionToolset | None = None,
 ) -> Sequence[MaTool]:
     """The tools a session for this caller runs: the visible ones, tool safety applied,
     and the publish tools asking first when the turn's agent may not publish freely.
@@ -573,11 +632,14 @@ def session_tools(
     in-place update all use. Hashing or pushing the agent's raw tools instead
     read every gated session as drifted and wrote `always_allow` back onto it
     on its next turn, so third-party writes stopped asking after the first.
+    `toolset` is what the session's features change (`SessionToolset`).
     """
+    agent, hidden_mcp_server_names = _with_toolset(agent, hidden_mcp_server_names, toolset)
     visible = visible_tools(agent, hidden_mcp_server_names)
+    dumped = _dumped(visible)
     gated = session_tools_for_policy(
         tool_safety,
-        [tool.model_dump(mode="json") for tool in visible],
+        dumped,
         trusted_servers=trusted_servers_for(
             public_url, {s.name: s.url for s in visible_mcp_servers(agent, hidden_mcp_server_names)}
         ),
@@ -585,10 +647,15 @@ def session_tools(
         confirmed_tools=confirmed_tools,
         daimon_rule_tools=daimon_rule_tools,
     )
-    payload = gated if gated is not None else [tool.model_dump(mode="json") for tool in visible]
+    payload = gated if gated is not None else dumped
+    hidden_tools = frozenset[str]() if toolset is None else toolset.hidden_daimon_tools
+    if not legacy_memory_servers and not hidden_tools:
+        return visible if gated is None else _retyped(visible, dumped, gated)
     if legacy_memory_servers:
-        return _TOOLS.validate_python(suppress_legacy_readers(payload, legacy_memory_servers))
-    return visible if gated is None else _TOOLS.validate_python(gated)
+        payload = suppress_legacy_readers(payload, legacy_memory_servers)
+    if hidden_tools:
+        payload = disable_mcp_tools(payload, (DAIMON_SERVER_NAME,), hidden_tools)
+    return _retyped(visible, dumped, payload)
 
 
 def session_mcp_servers(
@@ -600,13 +667,17 @@ def session_mcp_servers(
     confirmed_tools: frozenset[str] = frozenset(),
     chat_session_id: str | None = None,
     github_transport: GithubTransport = "direct",
+    toolset: SessionToolset | None = None,
 ) -> Sequence[BetaManagedAgentsMCPServerURLDefinition]:
     """The MCP servers a session for this caller runs, a foreign `daimon-mcp` re-pointed.
 
     With `github_transport="router"` (and a `public_url`), a server attached at
     GitHub's hosted MCP URL is re-pointed at the deployment's GitHub MCP router
     under the same name, so its toolset and permission policy are unchanged.
+    With Daimon tools off, `daimon-mcp` is left out like a hidden server.
     """
+    if toolset is not None and not toolset.daimon_tools:
+        hidden_mcp_server_names = hidden_mcp_server_names | {DAIMON_SERVER_NAME}
     visible = visible_mcp_servers(agent, hidden_mcp_server_names)
     healed = heal_reserved_server(
         tool_safety,
@@ -668,6 +739,9 @@ def desired_snapshot(
     public_url: str | None = None,
     channel_skills: Sequence[MaSkill] = (),
     system_override: str | None = None,
+    toolset: SessionToolset | None = None,
+    agent_skills: bool = True,
+    identity_features: tuple[tuple[str, str], ...] = (),
 ) -> SessionSnapshot:
     """What a session created right now, for this caller, would be running.
 
@@ -685,14 +759,15 @@ def desired_snapshot(
     turn's channel's extra skills, hashed with the agent's (`session_skills`).
     `system_override` is the prompt sent in place of the agent's own, hashed
     instead of it. `github_transport` is the recorded session's own mode (absent
-    means direct), never the router setting's current value.
+    means direct), never the router setting's current value. `agent_skills` and
+    `identity_features` come from the session's `SessionIdentity`.
     """
     return SessionSnapshot(
         ma_agent_id=agent.id,
         model_id=agent.model.id,
         model_speed=getattr(agent.model, "speed", None) or "standard",
         system_sha256=hash_system(agent.system if system_override is None else system_override),
-        skills_sha256=hash_skills(session_skills(agent, channel_skills)),
+        skills_sha256=hash_skills(session_skills(agent, channel_skills, agent_skills=agent_skills)),
         environment_id=environment_id,
         github_mode=github_mode,
         repo_urls=repo_urls if github_mode == "app" else (),
@@ -714,6 +789,7 @@ def desired_snapshot(
         chat_session_id=chat_session_id,
         mcp_hold=mcp_hold,
         memory_scope=memory_scope,
+        identity_features=identity_features,
         github_transport=github_transport,
         tools_sha256=hash_tools(
             session_tools(
@@ -725,6 +801,7 @@ def desired_snapshot(
                 confirmed_tools=confirmed_tools,
                 daimon_rule_tools=daimon_rule_tools,
                 legacy_memory_servers=legacy_memory_servers,
+                toolset=toolset,
             )
         ),
         mcp_servers_sha256=hash_mcp_servers(
@@ -736,6 +813,7 @@ def desired_snapshot(
                 confirmed_tools=confirmed_tools,
                 chat_session_id=chat_session_id,
                 github_transport=github_transport,
+                toolset=toolset,
             )
         ),
         env_sha256=env_sha256,

@@ -38,6 +38,8 @@ from daimon.core.session_snapshot import (
 )
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.domain import FeatureTarget
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.tenants import set_provision_status
 from daimon.core.stores.turn_card_intents import (
     TurnCardIntentRow,
@@ -48,6 +50,7 @@ from daimon.core.turn.protection import ConfirmedProtection, ProtectionState
 from daimon.core.turn_queue import TurnTicket
 from daimon.testing.factories import make_channel_budget
 from daimon.testing.ma_models import ma_agent, ma_environment
+from daimon.testing.settings_mock import mock_settings
 from mux.testing.drivers.anthropic.ma_models import DEFAULT_MODEL_ID, ma_session
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -85,7 +88,7 @@ def _make_runtime(
     BetaEnvironment instances downstream.
     """
     _ = tenant_id  # runtime no longer carries tenant_id; bot.py threads it
-    settings = MagicMock()
+    settings = mock_settings()
     settings.mcp = McpSettings()
     settings.billing.markup = Decimal("1.0")
     settings.billing.signup_credit = Decimal("0")
@@ -472,7 +475,18 @@ class TestNewThreadCreation:
         mock_find_env.return_value = "env_test"
 
         runtime = _make_runtime(tenant.id, db_session_factory)
-        runtime.settings.completion_pings = {tenant.id: True} if completion_enabled else {}
+        if completion_enabled:
+            async with db_session_factory() as session:
+                await set_feature_value(
+                    session,
+                    tenant_id=tenant.id,
+                    target=FeatureTarget("workspace"),
+                    key="completion_pings",
+                    value="on",
+                    set_by=None,
+                    surface="cli",
+                )
+                await session.commit()
         bot = make_bot(runtime)
         from daimon.adapters.discord import bot as bot_module
 
@@ -956,7 +970,6 @@ class TestNewThreadCreation:
         mock_watermark.side_effect = OperationalError("update", {}, Exception("db down"))
 
         runtime = _make_runtime(tenant.id, db_session_factory)
-        runtime.settings.completion_pings = {}
         bot = make_bot(runtime)
         message = _make_channel_message()
         card = MagicMock(spec=discord.Message)
@@ -1014,7 +1027,6 @@ class TestNewThreadCreation:
         mock_find_env.return_value = "env_test"
 
         runtime = _make_runtime(tenant.id, db_session_factory)
-        runtime.settings.completion_pings = {}
         bot = make_bot(runtime)
         message = _make_channel_message()
         replacement = MagicMock(spec=discord.Message)
@@ -1509,10 +1521,9 @@ class TestSetupHook:
         ):
             await bot.setup_hook()
 
-        assert len(add_cog_calls) == 14, "setup_hook should add exactly 14 Cogs"
+        assert len(add_cog_calls) == 13, "setup_hook should add exactly 13 Cogs"
         assert sum(type(cog).__name__ == "LeadsCog" for cog in add_cog_calls) == 1
         assert sum(type(cog).__name__ == "SettingsCog" for cog in add_cog_calls) == 1
-        assert sum(type(cog).__name__ == "CostFooterCog" for cog in add_cog_calls) == 1
         assert sum(type(cog).__name__ == "ModelCog" for cog in add_cog_calls) == 1
         assert sum(isinstance(cog, DirectMessageCog) for cog in add_cog_calls) == 1
         mock_github_cog.assert_called_once_with(bot)

@@ -16,6 +16,7 @@ from daimon.adapters.mcp.tools.setup_target import refuse_helper, require_turn_o
 from daimon.core.defaults.ma_index import find_environment_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_PRIVATE_DM
 from daimon.core.errors import StoreError
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.long_job_models import LongJob, LongJobCancelReply, LongJobRedacted
 from daimon.core.long_jobs import require_admission
 from daimon.core.permissions import limiting_ids_at
@@ -53,7 +54,7 @@ def register_long_job_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         Requires an attended owner turn and approval card. The parent thread goes idle;
         completion wakes it to read and report. Worker waits are bounded to 280 seconds.
-        Tenant/agent admin policy must enable jobs. Omitted limits use effective policy;
+        The long_jobs feature must be on here. Omitted limits use the feature limits;
         a deadline or dollar cap above its maximum is refused. No connectors, skills,
         shared memory or credentials are mounted. Jobs are billed to the owner.
         """
@@ -93,9 +94,14 @@ def register_long_job_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             )
             policy = await store.get_policy(
                 db,
-                tenant_id=auth.tenant_id,
-                agent_id=origin.responder_ma_agent_id,
-                ceilings=runtime.settings.long_jobs,
+                place=FeaturePlace.of(
+                    auth.tenant_id,
+                    origin.platform,
+                    origin.parent_channel_id,
+                    origin.thread_id,
+                    agent_id=origin.responder_ma_agent_id,
+                ),
+                settings=runtime.settings,
             )
         if live is None:
             raise ToolError("The original conversation is unavailable")
@@ -176,7 +182,9 @@ def register_long_job_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             return existing
         try:
             async with runtime.session_factory.begin() as db:
-                registered = await store.register(db, job, ceilings=runtime.settings.long_jobs)
+                registered = await store.register(
+                    db, job, ceilings=runtime.settings.long_jobs, settings=runtime.settings
+                )
                 if registered.id == job.id:
                     await require_admission(
                         runtime.session_factory,

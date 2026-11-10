@@ -2,7 +2,7 @@
 
 Each adapter that follows threads gathers its own inputs (the thread and
 channel ids, the burst, the window before it) and hands them here; the
-cascade read, the hourly ledger, the balance, cap and channel budget gates,
+feature read, the hourly ledger, the balance, cap and channel budget gates,
 the metered classifier call and the ledger write are the same on every
 platform. The decisions themselves are pure (`daimon.core.thread_participation`).
 
@@ -21,25 +21,24 @@ from typing import Final, Protocol
 import structlog
 from anthropic import AsyncAnthropic
 from daimon.core.channel_backend import effective_thread_backend
-from daimon.core.config import ThreadParticipationSettings
+from daimon.core.config import Settings, ThreadParticipationSettings
+from daimon.core.features.resolver import ResolvedFeature
+from daimon.core.features.snapshot import FeaturePlace, place_feature
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.rule_views import is_thread_turn_refused
 from daimon.core.scope import DeploymentDefault
 from daimon.core.spend_gate import SpendBlock, SpendRequest, spend_gate_in_new_session
 from daimon.core.stores.thread_participation import (
     count_auto_responses_since,
-    get_participation_modes,
     record_auto_response,
 )
 from daimon.core.thread_classifier import ClassifierOutcome, classify
 from daimon.core.thread_participation import (
     ClassifierMessage,
     ParticipationSnapshot,
-    ResolvedParticipation,
     Skip,
     decide_post_classifier,
     decide_pre_classifier,
-    resolve_participation,
 )
 from daimon.core.usage_recording import record_classifier_usage
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -90,7 +89,10 @@ class ParticipationGates:
         bot_display_name: str,
         markup: Decimal,
         deployment_default: DeploymentDefault | None = None,
+        deployment: Settings | None = None,
     ) -> None:
+        """`deployment` is the settings the `participation` feature resolves with; None
+        reads the registry default for its deployment tier."""
         self._platform = platform
         self._settings = settings
         self._sessionmaker = sessionmaker
@@ -98,25 +100,14 @@ class ParticipationGates:
         self._bot_display_name = bot_display_name
         self._markup = markup
         self._deployment_default = deployment_default
+        self._deployment = deployment
 
     async def resolve(
         self, *, tenant_id: uuid.UUID, channel_id: str, thread_id: str
-    ) -> ResolvedParticipation:
-        """Walk the scope cascade for this thread. One read covers all three tiers."""
-        async with self._sessionmaker() as session:
-            modes = await get_participation_modes(
-                session,
-                tenant_id=tenant_id,
-                platform=self._platform,
-                channel_id=channel_id,
-                thread_id=thread_id,
-            )
-        return resolve_participation(
-            deployment=self._settings.mode,
-            workspace=modes.workspace,
-            channel=modes.channel,
-            thread=modes.thread,
-        )
+    ) -> ResolvedFeature:
+        """The `participation` feature at this thread, in one read; a failed read is Off."""
+        place = FeaturePlace.of(tenant_id, self._platform, channel_id, thread_id)
+        return await place_feature(self._sessionmaker, self._deployment, place, "participation")
 
     async def should_respond(
         self,
@@ -127,7 +118,7 @@ class ParticipationGates:
         caller_id: str,
         candidates: Sequence[ClassifierMessage],
         recent: Callable[[], Awaitable[list[ClassifierMessage]]],
-        resolved: ResolvedParticipation,
+        resolved: ResolvedFeature,
         classify: Classify = classify,
     ) -> bool:
         """Run the gates and, if they pass, the classifier. Logs every skip with its reason.
@@ -162,7 +153,7 @@ class ParticipationGates:
             )
         pre = decide_pre_classifier(
             ParticipationSnapshot(
-                mode=resolved.mode,
+                on=resolved.on,
                 auto_responses_in_window=in_window,
                 max_per_window=self._settings.max_per_hour,
             )

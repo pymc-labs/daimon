@@ -11,16 +11,19 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
-from anthropic.types.beta import BetaManagedAgentsAgent
+from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsCustomSkill
 from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.billing import BillingConfig
 from daimon.core.channel_budget_notice import BudgetNotice, drain_budget_notices
 from daimon.core.config import McpSettings
 from daimon.core.direct_messages import start_dm
 from daimon.core.errors import DaimonError
+from daimon.core.features.registry import DEFAULT
+from daimon.core.features.service import set_workspace_feature
 from daimon.core.ma_resolver import MAResolverMissError, ResolverCache, new_resolver_cache
 from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
@@ -328,13 +331,35 @@ async def test_a_budget_refusal_sends_the_notice_unless_the_tenant_opted_out(
         "external_user_id": "user-1",
         "requester_org": RequesterOrg.HOST,
     }
-    opted_out = replace(base, budget_notifier=notifier, budget_notices_off=frozenset({tenant.id}))
+    await set_workspace_feature(
+        db_session,
+        None,
+        tenant_id=tenant.id,
+        platform="discord",
+        key="budget_notices",
+        value="off",
+        account_id=None,
+        surface="cli",
+    )
+    await db_session.commit()
+    opted_out = replace(base, budget_notifier=notifier)
     with pytest.raises(AdmissionDenied):
         await admit(opted_out, origin="chat", **args, channel_id="chan-1", now=_NOW)
     release.set()
     await drain_budget_notices()
     assert sent == [], "an opted-out tenant gets no notice"
 
+    await set_workspace_feature(
+        db_session,
+        None,
+        tenant_id=tenant.id,
+        platform="discord",
+        key="budget_notices",
+        value=DEFAULT,
+        account_id=None,
+        surface="cli",
+    )
+    await db_session.commit()
     release.clear()
     with pytest.raises(AdmissionDenied) as exc_info:
         await admit(
@@ -1206,6 +1231,52 @@ def _admittable_router(tenant: TenantRow) -> MARouter:
     )
 
 
+@pytest.mark.parametrize(("read_on", "expected"), [(False, False), (True, True)])
+async def test_admit_turns_channel_skills_off_when_the_agents_own_config_has_read_off(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    read_on: bool,
+    expected: bool,
+) -> None:
+    """`channel_skills` needs the read tool, and the agent's own tool config decides it."""
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    tools: Any = [
+        {
+            "type": "agent_toolset_20260401",
+            "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+            "configs": [
+                {
+                    "name": "read",
+                    "enabled": read_on,
+                    "permission_policy": {"type": "always_allow"},
+                }
+            ],
+        }
+    ]
+    router = resolved_agent_env_router(
+        ma_agent(id="ag_1", name="daimon", tenant_id=tenant.id, tools=tools),
+        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+    )
+    deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router)
+
+    admission = await admit(
+        deps,
+        origin="chat",
+        tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
+        platform="discord",
+        external_user_id="user-1",
+        channel_id="chan-1",
+        now=_NOW,
+    )
+
+    assert admission.features is not None
+    assert admission.features.on("channel_skills") is expected
+    skill = BetaManagedAgentsCustomSkill(type="custom", skill_id="channel-skill", version="1")
+    assert admission.identity.extra_skills([skill], ()) == ((skill,) if expected else ())
+
+
 @pytest.mark.parametrize("is_dm", [False, True], ids=["channel", "dm"])
 @pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
 async def test_admit_adds_the_default_agents_office_skills_on_teams_only(
@@ -1522,8 +1593,8 @@ async def test_admit_refuses_when_the_stored_policy_is_unreadable(
         (TenantAccessPolicy(sealed_channel_ids=("vault",)), "vault", None, False, True),
         (TenantAccessPolicy(sealed_channel_ids=("vault",)), "vault", "thr-1", False, True),
         (TenantAccessPolicy(sealed_channel_ids=("vault",)), "chan-1", "thr-1", False, False),
-        (TenantAccessPolicy(dm_memory_read_only=True), "dm-1", None, True, True),
-        (TenantAccessPolicy(dm_memory_read_only=True), "chan-1", None, False, False),
+        (TenantAccessPolicy(), "dm-1", None, True, True),
+        (TenantAccessPolicy(), "chan-1", None, False, False),
         (None, "dm-1", None, True, False),
         (
             TenantAccessPolicy(sealed_channel_ids=("C1:1700000000.000100",)),
@@ -1563,6 +1634,19 @@ async def test_admit_marks_memory_read_only_for_sealed_channels_and_policy_dms(
     expected: bool,
 ) -> None:
     tenant = await _seed_admittable_tenant(db_session, policy=policy)
+    if is_dm and expected:
+        # The only DM case expected read-only is the one with the workspace feature on.
+        await set_workspace_feature(
+            db_session,
+            None,
+            tenant_id=tenant.id,
+            platform="discord",
+            key="dm_memory_read_only",
+            value="on",
+            account_id=None,
+            surface="cli",
+        )
+        await db_session.commit()
     deps = _deps(
         native_member_admin=False,
         sessionmaker=db_session_factory,
@@ -2149,9 +2233,8 @@ async def test_admit_admits_a_pinned_agent_in_its_channels_and_leaves_others_alo
             True,
         ),
         (TenantAccessPolicy(sealed_channel_ids=("C1",)), "C2", None, True, False),
-        (TenantAccessPolicy(dm_memory_read_only=True), "C1", None, True, False),
     ],
-    ids=["sealed", "thread-under-sealed", "slack-thread-sealed", "unsealed", "dm-read-only"],
+    ids=["sealed", "thread-under-sealed", "slack-thread-sealed", "unsealed"],
 )
 async def test_admit_flags_a_sealed_source_apart_from_dm_memory_policy(
     db_session: AsyncSession,

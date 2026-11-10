@@ -945,6 +945,7 @@ async def _build_fire(
             # The owner's personal memory, read-only, only for a routine whose
             # result goes to nobody else; decided again from the row each fire.
             personal_memory=mounts_personal_memory(row),
+            feature_settings=settings,
             platform=platform,
             **held_fire,
         )
@@ -1983,6 +1984,7 @@ async def run(
         sm,
         ManagedLongJobPort(client, sm, settings),
         settings.long_jobs,
+        settings=settings,
         markup=settings.billing.markup,
     )
     stop_event = asyncio.Event()

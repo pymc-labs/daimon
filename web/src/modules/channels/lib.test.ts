@@ -4,7 +4,7 @@ import { flatten } from "@/components/tree-state"
 
 import {
   accessAsk, accessFlags, agentChoices, agentsOf, budgetStops, channelTree, choiceOf, cronWords, defaultSource, describeChange, fillDays,
-  type Filters, filterChannels, nameOf, overrideCount, spendLines, spentFor, switchChange, threadValue, toolRuleChange, treeFilter, unavailableText,
+  type Filters, filterChannels, nameOf, overrideCount, spendLines, spentFor, threadValue, toolRuleChange, treeFilter, unavailableText,
 } from "./lib"
 import type { Channel } from "./types"
 
@@ -211,10 +211,8 @@ describe("leaving its own agents", () => {
 })
 
 describe("switches", () => {
-  it("reads no own value as inherit and sends null to clear it", () => {
+  it("reads no own value as inherit", () => {
     expect(choiceOf({ own: null })).toBe("inherit")
-    expect(switchChange("inherit", { own: "on" })).toEqual({ mode: null, expected: "on" })
-    expect(switchChange("off", { own: null })).toEqual({ mode: "off", expected: null })
   })
 
   it("says participation is not on Slack and keeps value and source apart for defaults", () => {

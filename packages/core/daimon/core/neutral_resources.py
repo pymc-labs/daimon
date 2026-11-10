@@ -178,6 +178,7 @@ class NeutralResourceHost:
             self._catalog_adapter = catalog_adapter
         elif capabilities.profile_id != profile.profile_id:
             raise UnsupportedCapability(("neutral_resource_host_profile",), capabilities.profile_id)
+        self.sessions = sessions
         self.catalog = PostgresNeutralCatalog(
             sessions, provider=profile.provider, account_scope_id=account_scope_id
         )
@@ -330,6 +331,8 @@ class NeutralResourceHost:
         extra_metadata: Mapping[str, str] | None = None,
     ) -> HostAgentCopy:
         from daimon.core.agent_guidance import apply_credential_guidance
+        from daimon.core.features.model_input import guidance_applies
+        from daimon.core.features.snapshot import resolve_agent_features
 
         source = await self.read(source_id)
         await recheck(source.agent)
@@ -432,9 +435,19 @@ class NeutralResourceHost:
         execution = self.profile.execution_tool
         if not any(tool.name == execution and tool.kind == "builtin" for tool in tools):
             tools += (ToolSpec(name=execution, kind="builtin"),)
-        system = original.system
-        if (original.metadata or {}).get(MA_METADATA_KEY_ISOLATED) != "true":
-            system = apply_credential_guidance(system or "")
+        features = await resolve_agent_features(
+            self.sessions,
+            None,
+            tenant_id=uuid.UUID(self.scope.tenant_id),
+            agent_id=source_id,
+            keys=("guidance",),
+        )
+        isolated = (original.metadata or {}).get(MA_METADATA_KEY_ISOLATED) == "true"
+        system = apply_credential_guidance(
+            original.system or "",
+            guidance=guidance_applies(isolated=isolated, features=features),
+            isolated=isolated,
+        )
         spec = original.model_copy(
             update={
                 "name": new_name,

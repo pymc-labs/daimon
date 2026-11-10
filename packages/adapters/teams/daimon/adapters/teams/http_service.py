@@ -42,7 +42,7 @@ from daimon.adapters.teams.deployment_admins import demoting_owner_reads
 from daimon.adapters.teams.direct_chats import SdkDirectChats
 from daimon.adapters.teams.feedback import FEEDBACK_DIALOG, TeamsFeedback
 from daimon.adapters.teams.help import send_help
-from daimon.adapters.teams.here import HereApprovals, show_here
+from daimon.adapters.teams.here import show_here
 from daimon.adapters.teams.identity import GraphSource
 from daimon.adapters.teams.installations import TeamInstalls
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TimedSender
@@ -65,6 +65,7 @@ from daimon.adapters.teams.thread_handoff import TeamsThreadHandoff
 from daimon.adapters.teams.thread_reader import ThreadReader
 from daimon.adapters.teams.wizard import TeamsWizards
 from daimon.core.config import TeamsSettings
+from daimon.core.features.snapshot import deployment_on
 from daimon.core.logging_setup import mark_shutting_down
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.outbound.opt_out import tag_opt_outs
@@ -324,7 +325,10 @@ def create_teams_http_service(
         SupportCommand(runtime, direct, spawn=spawn) if support_enabled(runtime.settings) else None
     )
     subscriptions = None
-    if runtime.settings.private_channel_messages.enabled and settings.public_url is not None:
+    # Channel subscriptions are process machinery, so the operator's value gates them.
+    if settings.public_url is not None and deployment_on(
+        runtime.settings, "private_channel_messages", "teams"
+    ):
 
         async def deliver(
             message: GraphMessage, channel: TeamsChannelSubscriptionRow, *, mentions: bool = False
@@ -439,7 +443,6 @@ def create_teams_http_service(
     teams_app.on_card_action_execute(card.CANCEL_VERB, turns.handle_cancel)
     teams_app.on_card_action_execute(routines_card.VERB, routines.on_action)
     teams_app.on_card_action_execute(privacy_card.VERB, privacy.on_action)
-    teams_app.on_card_action_execute("here_approvals", HereApprovals(runtime).on_action)
     teams_app.on_card_action_execute(SETTINGS_VERB, SettingsActions(runtime).on_action)
     teams_app.on_card_action_execute(billing_panel.VERB, billing.on_action)
     teams_app.on_card_action_execute(tool_confirmation.VERB, turns.confirmations.on_action)

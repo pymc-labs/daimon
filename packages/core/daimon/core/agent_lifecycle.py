@@ -86,6 +86,7 @@ async def create_user_agent(
                 public_url=public_url,
                 managed=False,
                 create_only=True,
+                sessions=sessionmaker,
             )
         except AgentNameTaken as exc:
             raise AgentNameCollision(taken_message) from exc

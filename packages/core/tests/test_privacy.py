@@ -1158,6 +1158,10 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # A workspace's server skill mirrors: the only accounts.id FK is who added
             # one, ON DELETE SET NULL; the mirror is the workspace's, not theirs.
             "server_skills",
+            # Place settings (a feature's On/Off at a workspace, agent, channel or thread)
+            # shared by everyone there; `set_by` is attribution only, severed by
+            # ON DELETE SET NULL. Deleting the row would change the place for others.
+            "feature_values",
         }
     )
 

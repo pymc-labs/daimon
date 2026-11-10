@@ -30,7 +30,7 @@ from daimon.core.continuity.wakes import (
     settle_wake,
     start_wake,
 )
-from daimon.core.errors import DaimonError
+from daimon.core.errors import DaimonError, WatchFeatureUnreadable
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.task_continuations import list_due_watch_report_rows
 from daimon.core.stores.watches import watch_seed
@@ -85,8 +85,13 @@ async def dispatch_watch_report(
         claim = await claim_wake(sessionmaker, idempotency_key=row.idempotency_key, now=now())
         if claim is None:
             return
-        async with sessionmaker() as db:
-            seed = await watch_seed(db, row, now=now())
+        try:
+            async with sessionmaker() as db:
+                seed = await watch_seed(db, row, now=now())
+        except WatchFeatureUnreadable:
+            # Not Off, just unread: the report goes back to pending for the next tick.
+            await release_wake(sessionmaker, claim, retry_at=busy_retry_at(row, now=now()))
+            return
         if seed is None:
             # Paused, deleted, revoked or changed since it fired: nobody is waiting.
             await settle_wake(

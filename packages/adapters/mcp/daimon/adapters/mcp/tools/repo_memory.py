@@ -11,7 +11,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import load_channel_policy
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
-from daimon.core.config import get_repo_memory_settings
+from daimon.core.features.snapshot import FeaturePlace, may_turn_on, resolve_features
 from daimon.core.github_app_session import REQUESTER_CACHE, effective_app_grant_view
 from daimon.core.github_requester_access import linked_permissions
 from daimon.core.ma_identity import derive_agent_uuid
@@ -37,11 +37,24 @@ async def resolve_repo(
     repo: str | None = None,
     write: bool = False,
 ) -> AuthorizedRepo:
-    if not get_repo_memory_settings(runtime.settings).enabled:
-        raise ToolError("Native repository memory is disabled.")
     if auth.routine_id is not None or auth.execution_id is not None or auth.is_external_agent:
         raise ToolError("Repository memory tools need an interactive conversation.")
     origin = await require_turn_origin(runtime, auth, origin_context_id)
+    # The session's tool configs hide these where the feature is off; this covers the rest.
+    features = await resolve_features(
+        runtime.session_factory,
+        runtime.settings,
+        FeaturePlace.of(
+            auth.tenant_id,
+            origin.platform,
+            origin.parent_channel_id,
+            origin.thread_id,
+            agent_id=origin.responder_ma_agent_id,
+        ),
+        keys=("repo_memory", "dm_memory_read_only"),
+    )
+    if not features.on("repo_memory"):
+        raise ToolError("Repository memory is off here.")
     policy = await load_channel_policy(runtime, auth)
     is_dm = origin.thread_id.startswith("dm:")
     facts = MemoryOrigin(
@@ -51,7 +64,8 @@ async def resolve_repo(
         ),
         held=auth.hold is not None,
         foreign=auth.client or origin.sender_foreign or origin.shared_channel,
-        read_only=origin.memory_read_only is not False or (is_dm and policy.dm_memory_read_only),
+        read_only=origin.memory_read_only is not False
+        or (is_dm and features.on("dm_memory_read_only")),
     )
     try:
         facts.require(write=write)
@@ -157,7 +171,8 @@ async def repo_memory_impl(
 
 
 def register_repo_memory_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    if not get_repo_memory_settings(runtime.settings).enabled:
+    # The tools exist once set up, unless the deployment locks the feature Off.
+    if not may_turn_on(runtime.settings, "repo_memory", "discord"):
         return
 
     @mcp.tool()

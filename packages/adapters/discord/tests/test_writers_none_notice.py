@@ -26,6 +26,7 @@ from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.protection import ProtectionState
 from daimon.testing.db import DatabasePreflight, require_owned_sessionmaker
 from daimon.testing.factories import make_tenant
+from daimon.testing.settings_mock import mock_settings
 from daimon.testing.turn_fakes import deps_for
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
@@ -46,7 +47,7 @@ async def bot(
     async with sessions() as session:
         await make_tenant(session, workspace_id="60")
         await session.commit()
-    settings = MagicMock()
+    settings = mock_settings()
     settings.discord = DiscordSettings(bot_token=SecretStr("offline"), writers_none_notice=True)
     settings.turn_queue = TurnQueueSettings()
     settings.thread_participation = ThreadParticipationSettings()

@@ -38,6 +38,7 @@ from daimon.core.agent_configuration import (
     configuration_refusal,
     provider_preview_digest,
 )
+from daimon.core.features.registry import DEFAULT, FEATURES
 from daimon.core.microsoft_write_paths import write_kind
 from daimon.core.outbound.reach import ReachPlan, card_title
 from daimon.core.server_skills.gate import may_run
@@ -560,22 +561,28 @@ def _watch_edit_lines(data: dict[str, object]) -> tuple[str, ...]:
 
 
 _SETTING_PLACES: Final[Mapping[str, str]] = MappingProxyType(
-    {"server": "all channels", "channel": "this channel", "thread": "this thread"}
+    {
+        "workspace": "all channels",
+        "agent": "this agent",
+        "channel": "this channel",
+        "thread": "this thread",
+    }
 )
 
 
 def _setting_line(data: Mapping[str, object]) -> str | None:
     """`change_setting` in the words of the panel: "Approvals: Allow writes for this thread".
 
-    None for a key, level or value the tool would refuse, which gets the generic card."""
-    # Imported here: scope_settings reaches back to this module through the turn package.
-    from daimon.core.scope_settings import SPECS
-
-    spec = SPECS.get(cast("Any", data.get("key")))
-    level, value = data.get("level"), data.get("value")
-    if spec is None or level not in spec.levels or value not in spec.values:
+    None for a key, tier or value the tool would refuse, which gets the generic card."""
+    spec = FEATURES.get(cast("Any", data.get("key")))
+    tier, value = data.get("tier"), data.get("value")
+    if spec is None or tier not in _SETTING_PLACES or tier not in spec.tiers:
         return None
-    return f"{spec.name}: {spec.label(str(value))} for {_SETTING_PLACES[str(level)]}"
+    if value != DEFAULT and value not in spec.values:
+        return None
+    text = "the default" if value == DEFAULT else spec.label(str(value))
+    lock = ", locked" if data.get("locked") is True else ""
+    return f"{spec.name}: {text}{lock} for {_SETTING_PLACES[str(tier)]}"
 
 
 def prompt_for_tool_call(

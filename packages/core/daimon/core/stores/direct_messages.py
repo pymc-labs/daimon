@@ -262,17 +262,31 @@ async def set_dm_agent_name(
 
 
 async def dm_enabled(session: AsyncSession, *, tenant_id: uuid.UUID) -> bool:
-    policy = await session.get(DirectMessagePolicy, tenant_id)
-    return policy is not None and policy.enabled
+    """The `direct_messages` feature for a workspace. Discord and Slack share the one
+    setting, so the platform here only has to be one that offers it."""
+    # Imported here: the feature modules import the stores.
+    from daimon.core.features.snapshot import FeaturePlace, feature_in
+
+    place = FeaturePlace(tenant_id, "discord")
+    return (await feature_in(session, None, place, "direct_messages")).on
 
 
 async def set_dm_enabled(session: AsyncSession, *, tenant_id: uuid.UUID, enabled: bool) -> None:
-    await session.execute(
-        insert(DirectMessagePolicy)
-        .values(tenant_id=tenant_id, enabled=enabled)
-        .on_conflict_do_update(index_elements=["tenant_id"], set_={"enabled": enabled})
+    """Turn `direct_messages` on or off for a workspace, as a feature value. For the CLI and
+    fixtures; the settings surfaces go through `workspace_settings`."""
+    # Imported here: the feature service reads these stores.
+    from daimon.core.features.service import set_workspace_feature
+
+    await set_workspace_feature(
+        session,
+        None,
+        tenant_id=tenant_id,
+        platform="discord",
+        key="direct_messages",
+        value="on" if enabled else "off",
+        account_id=None,
+        surface="cli",
     )
-    await session.flush()
 
 
 async def count_conversations_for_account(session: AsyncSession, *, account_id: uuid.UUID) -> int:

@@ -67,14 +67,19 @@ from daimon.core.config import (
     GithubAppSettings,
     McpSettings,
     RepoMemorySettings,
+    Settings,
     load_turn_settings,
 )
 from daimon.core.context_prompt import TurnContext, context_prompt
+from daimon.core.features.model_input import DEFAULT_TOOLSET
+from daimon.core.features.registry import FEATURES
+from daimon.core.features.session_identity import DEFAULT_IDENTITY
+from daimon.core.features.snapshot import FeaturePlace, place_guardrail, resolve_features
+from daimon.core.features.toolset import place_session
 from daimon.core.github_app_session import close_headless_app_session
 from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
 from daimon.core.mux_compat import legacy_call, sdk_agent, sdk_environment
-from daimon.core.platform_system import system_for_platform
 from daimon.core.routine_sandbox import RoutineSandbox, run_matches_pin
 from daimon.core.rule_views import RoutineOrigin
 from daimon.core.sessions import create_session
@@ -183,6 +188,7 @@ async def run_turn(
     hold: TurnHold | None = None,
     turn_path: TurnPath | None = None,
     personal_memory: bool = False,
+    feature_settings: Settings | None = None,
 ) -> str:
     observation = current_outcome.get()
     owns_observation = observation is None
@@ -220,6 +226,7 @@ async def run_turn(
             hold=hold,
             turn_path=turn_path,
             personal_memory=personal_memory,
+            feature_settings=feature_settings,
         )
     observation.agent_id = agent_id
     observation.account_id = account_id
@@ -257,6 +264,7 @@ async def run_turn(
                 hold=hold,
                 turn_path=turn_path,
                 personal_memory=personal_memory,
+                feature_settings=feature_settings,
             )
     except BaseException as exc:
         # The enclosing scheduler owns its deadline and classifies wait_for cancellation.
@@ -264,6 +272,22 @@ async def run_turn(
             observation.finish(error=exc)
         raise
     return result
+
+
+async def _routine_builtins_allowed(
+    session_factory: async_sessionmaker[AsyncSession] | None,
+    settings: Settings | None,
+    tenant_id: uuid.UUID | None,
+    platform: str | None,
+    agent_id: str,
+) -> bool:
+    """Whether `unattended_capabilities` lets an opted-in routine keep its built-ins.
+    With no store nothing is set, so the default applies; unreadable, they stay off."""
+    if session_factory is None or tenant_id is None:
+        return FEATURES["unattended_capabilities"].default == "on"
+    place = FeaturePlace.of(tenant_id, platform or "routine", None, agent_id=agent_id)
+    found = await place_guardrail(session_factory, settings, place, "unattended_capabilities")
+    return found.on
 
 
 def _outside_turn_persistence[**P, R](run: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
@@ -322,6 +346,7 @@ async def run_turn_impl(
     hold: TurnHold | None = None,
     turn_path: TurnPath | None = None,
     personal_memory: bool = False,
+    feature_settings: Settings | None = None,
 ) -> str:
     """Run a single non-interactive turn end-to-end and return its complete final reply.
 
@@ -454,7 +479,11 @@ async def run_turn_impl(
         else frozenset[str]()
     )
 
+    fragments = True  # `origin_fragments` where the session is placed
+    memory_on = False  # `repo_memory` where the session is placed
+
     async def _assemble_session() -> BetaManagedAgentsSession:
+        nonlocal fragments, memory_on
         scope = (
             resource_scope(
                 tenant_id=str(tenant_id),
@@ -492,10 +521,28 @@ async def run_turn_impl(
                 )
             )
         )
+        toolset, identity = DEFAULT_TOOLSET, DEFAULT_IDENTITY
+        if session_factory is not None and tenant_id is not None:
+            place = FeaturePlace.of(
+                tenant_id,
+                platform or "routine",
+                origin_place.channel_id if origin_place is not None else budget_channel_id,
+                origin_place.thread_id if origin_place is not None else None,
+                agent_id=agent.id,
+                backend=MANAGED_AGENTS.provider,
+            )
+            toolset, identity = await place_session(session_factory, feature_settings, place, agent)
+            memory_on = toolset.memory_on
+            fragments = (
+                await resolve_features(
+                    session_factory, feature_settings, place, keys=("origin_fragments",)
+                )
+            ).on("origin_fragments")
         return await create_session(
             anthropic,
             agent=agent,
             environment=environment,
+            toolset=toolset,
             mcp_settings=mcp_settings,
             daimon_rule_tools=daimon_rule_tools,
             # Daimon's card-only actions ask here and are refused unattended.
@@ -510,10 +557,8 @@ async def run_turn_impl(
             github_app_private_key=github_app_private_key,
             agent_github_app=agent_github_app,
             github_mcp_router=github_mcp_router,
-            legacy_memory_servers=(
-                repo_memory.legacy_mcp_server_names
-                if repo_memory is not None and repo_memory.enabled
-                else ()
+            legacy_memory_servers=toolset.legacy_memory_servers(
+                repo_memory.legacy_servers if repo_memory is not None else ()
             ),
             requester_is_headless=True,
             billing_exempt=billing_exempt,
@@ -529,7 +574,8 @@ async def run_turn_impl(
             origin_seal_ids=origin_place.seal_ids if origin_place is not None else (),
             private_dm_id=origin_place.private_dm_id if origin_place is not None else None,
             model_override=model_override,
-            system_override=system_for_platform(agent.system, platform),
+            system_override=identity.system(agent.system, platform),
+            identity=identity,
         )
 
     try:
@@ -551,7 +597,8 @@ async def run_turn_impl(
         routine_memory = ""
         if (
             repo_memory is not None
-            and repo_memory.enabled
+            and repo_memory.enabled  # a caller without feature settings cannot see the setup
+            and memory_on
             and origin == "routine"
             and tenant_id is not None
             and session_factory is not None
@@ -590,6 +637,11 @@ async def run_turn_impl(
                     environment_id=session.environment_id,
                 )
                 await sandbox.on_drift()
+            if sandbox_tools and not await _routine_builtins_allowed(
+                session_factory, feature_settings, tenant_id, platform, session.agent.id
+            ):
+                log.info("headless.sandbox_tools_off", session_id=session.id)
+                sandbox_tools = False
 
         billing: BillingPosture
         if usage_record is not None:
@@ -686,7 +738,7 @@ async def run_turn_impl(
                 scope=turn_scope,
                 session_id=session.id,
                 user_message=(
-                    context_prompt(origin, system=session.agent.system)
+                    context_prompt(origin, fragments=fragments, system=session.agent.system)
                     + routine_memory
                     + trigger_message
                 ),

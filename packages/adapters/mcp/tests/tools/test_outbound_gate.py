@@ -18,20 +18,28 @@ from daimon.adapters.mcp.tools._outbound import (
     prepare_posts,
     render_edit,
 )
-from daimon.core.config import OutboundSettings
+from daimon.core.config import (
+    AnthropicSettings,
+    DatabaseSettings,
+    DiscordSettings,
+    OutboundSettings,
+    Settings,
+)
 from daimon.core.confirmation import prompt_for_tool_call
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.outbound.mentions import ping_users
 from daimon.core.outbound.reach import (
     NO_CARD,
     NO_PLAN,
+    REACH_OFF,
     SHORT_CAPTION,
     TOO_LONG,
     ReachPlan,
     ReachTally,
     card_title,
 )
-from daimon.core.stores.domain import Role, TurnOriginRow
+from daimon.core.stores.domain import FeatureTarget, Role, TurnOriginRow
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.platform_names import KnownName, upsert_user_names
 from daimon.core.stores.reach_tallies import lock_tally, save_tally
 from daimon.core.stores.tag_opt_outs import set_opt_out
@@ -40,6 +48,7 @@ from daimon.core.stores.turn_origins import bind_origin_session, create_origin
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from fastmcp.exceptions import ToolError
+from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 PLATFORMS = ("discord", "slack", "teams")
@@ -69,7 +78,11 @@ def _scope(*, card: bool = True, interactive: bool = True) -> TurnScope:
         kind=("live" if card else "outside") if interactive else "unattended",
         own_places=frozenset({"home"}),
         requester_id="42",
-        origin=cast(Any, object()) if card else None,
+        origin=cast(
+            Any, SimpleNamespace(parent_channel_id=None, thread_id=None, responder_ma_agent_id=None)
+        )
+        if card
+        else None,
         own_channels=frozenset({"home", "own"}),
     )
 
@@ -834,3 +847,58 @@ async def test_prepare_posts_when_another_call_holds_the_tally_then_it_waits_and
 
     with pytest.raises(ToolError, match="approve_reach"):
         await racer
+
+
+async def _workspace_sets(runtime: McpRuntime, auth: AuthIdentity, **values: str) -> None:
+    """Real settings, so the features resolve, and these workspace choices."""
+    runtime.settings = Settings.model_validate(  # type: ignore[misc]
+        {
+            "database": DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@localhost/d")),
+            "anthropic": AnthropicSettings(api_key=SecretStr("test")),
+            "discord": DiscordSettings(bot_token=SecretStr("test")),
+        }
+    )
+    async with runtime.session_factory() as session, session.begin():
+        for key, value in values.items():
+            await set_feature_value(
+                session,
+                tenant_id=auth.tenant_id,
+                target=FeatureTarget("workspace"),
+                key=key,
+                value=value,
+                set_by=None,
+                surface="chat",
+            )
+
+
+async def test_a_workspace_can_lower_the_post_limits_and_turn_reach_off(sessionmaker):
+    runtime, auth = await _setup(sessionmaker, "discord")
+    await _workspace_sets(runtime, auth, outbound_length="250", outbound_people="1")
+    rules = await _outbound.outbound_rules(runtime, auth, _scope(card=False))
+    assert (rules.length, rules.people, rules.threads) == (250, 1, 2)
+    plan = ReachPlan(threads=0, places=1, people=0)
+    with pytest.raises(ToolError, match=TOO_LONG):
+        await prepare_posts(
+            runtime, auth, [OutgoingPost(text="x" * 251, place="C1")], plan=plan, scope=_scope()
+        )
+    await _workspace_sets(runtime, auth, outbound_reach="off")
+    own = OutgoingPost(text="hi", place="home")
+    assert await prepare_posts(runtime, auth, [own], plan=None, scope=_scope(card=False))
+    for scope in (_scope(), _scope(interactive=False)):
+        with pytest.raises(ToolError, match=REACH_OFF):
+            await prepare_posts(
+                runtime, auth, [OutgoingPost(text="hi", place="C1")], plan=plan, scope=scope
+            )
+
+
+async def test_an_unreadable_limit_keeps_the_operators_config(sessionmaker):
+    runtime, auth = await _setup(sessionmaker, "discord")
+    await _workspace_sets(runtime, auth, outbound_people="inf")
+    rules = await _outbound.outbound_rules(runtime, auth, _scope(card=False))
+    config = runtime.settings.outbound
+    assert (rules.threads, rules.places, rules.people) == (
+        config.max_threads,
+        config.max_places,
+        config.max_people,
+    )
+    assert rules.reach is True and rules.budget is True

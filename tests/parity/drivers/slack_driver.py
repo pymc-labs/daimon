@@ -98,6 +98,7 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.turn_origins import create_origin
 from daimon.core.turn.deps import build_turn_deps
+from daimon.testing.settings_mock import mock_settings
 from daimon.testing.turn_leg import turn_leg
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from mux.testing.drivers.anthropic.ma_models import ma_session
@@ -346,7 +347,7 @@ class SlackDriver:
         fernet_key: str,
         billing_config: object | None = None,
     ) -> SlackRuntime:
-        settings = MagicMock()
+        settings = mock_settings()
         settings.outbound = OutboundSettings()
         settings.crypto.keys = (SecretStr(fernet_key),)
         settings.turn = turn_leg()  # the selected leg, a real TurnSettings
@@ -573,7 +574,7 @@ class SlackDriver:
         daimon-mcp settings the MCP form checks before it consumes anything,
         and a turn needs neither of them.
         """
-        settings = MagicMock()
+        settings = mock_settings()
         settings.outbound = OutboundSettings()
         settings.crypto.keys = (SecretStr(self._fernet_key),)
         settings.slack = SlackSettings(
@@ -863,7 +864,7 @@ class SlackDriver:
         truthy attribute would claim a fallback PAT and a configured App this
         deployment does not have.
         """
-        settings = MagicMock()
+        settings = mock_settings()
         settings.outbound = OutboundSettings()
         settings.crypto.keys = (SecretStr(self._fernet_key),)
         settings.slack = SlackSettings(

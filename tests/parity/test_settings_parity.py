@@ -1,6 +1,6 @@
 """The Settings group is one rule on every path: `/settings`, the agent tools and the web app.
 
-Every path writes through `daimon.core.scope_settings.change_setting`; the stores behind the
+Every path writes through `daimon.core.features.service.change_feature`; the stores behind the
 group are written directly only by the paths in `_DIRECT_WRITERS`, each with its reason.
 """
 
@@ -19,26 +19,26 @@ _PATHS = {
     "slack": "slack/daimon/adapters/slack/settings.py",
     "teams": "teams/daimon/adapters/teams/settings.py",
     "mcp": "mcp/daimon/adapters/mcp/tools/scope_settings.py",
-    "web": "web/daimon/adapters/web/channel_settings.py",
+    "web": "web/daimon/adapters/web/features.py",
 }
-_RETIRED = "a retired control, kept for one release; it records the change"
+_CORE_MODULES = {"daimon.core.features.service", "daimon.core.settings_panel"}
 _DIRECT_WRITERS = {
-    "discord/daimon/adapters/discord/commands/here.py": _RETIRED,
-    "slack/daimon/adapters/slack/here.py": _RETIRED,
-    "teams/daimon/adapters/teams/here.py": _RETIRED,
-    "mcp/daimon/adapters/mcp/tools/progress_plans.py": "deprecated set_progress_plans",
-    "mcp/daimon/adapters/mcp/tools/thread_participation.py": "deprecated set_thread_participation",
+    "mcp/daimon/adapters/mcp/tools/scope_settings.py": "`change_setting`, over the core service",
     "teams/daimon/adapters/teams/channel_settings.py": "the Teams channel dialog's own switches",
+    "cli/daimon/adapters/cli/commands/features.py": "`daimon features set`, over the core service",
+    "web/daimon/adapters/web/features.py": "`PUT /api/features`, over the core service",
 }
-#: Slack slash commands do not say which thread they ran in; a thread is set by asking there.
+#: Deliberate gap. A Slack slash command carries no thread, and a message shortcut needs an
+#: entry in the app manifest, which lives outside this repo. A Slack thread is set on the web
+#: (the thread page), by the agent's tool, or by asking Daimon in it.
 _SLACK_HAS_NO_THREAD_LEVEL = True
 
 
 def _names(tree: ast.AST) -> set[str]:
-    """Every name imported from `daimon.core.scope_settings` or called."""
+    """Every name imported from the core settings modules or called."""
     found: set[str] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "daimon.core.scope_settings":
+        if isinstance(node, ast.ImportFrom) and node.module in _CORE_MODULES:
             found |= {alias.name for alias in node.names}
         elif isinstance(node, ast.Call):
             found.add(getattr(node.func, "id", None) or getattr(node.func, "attr", ""))
@@ -49,20 +49,23 @@ def test_every_path_has_the_command_and_writes_through_the_core() -> None:
     assert all(WORDS[platform].command("settings") for platform in CHAT_PLATFORMS)
     for name, path in _PATHS.items():
         used = _names(ast.parse((_ADAPTERS / path).read_text()))
-        core_writer = {"change_setting", "apply_choice"} & used
-        assert core_writer, f"{name} must write through daimon.core.scope_settings"
+        core_writer = {"change_feature", "apply_choice", "press"} & used
+        assert core_writer, f"{name} must write through daimon.core.features.service"
 
 
 def test_store_writers_are_called_only_from_core_or_listed_paths() -> None:
-    writers = {"set_approval_gate", "set_switch", "set_cost_footer"}
+    writers = {"set_approval_gate", "set_feature_value", "change_feature"}
     found = {
         path.relative_to(_ADAPTERS).as_posix()
         for path in _ADAPTERS.rglob("*.py")
         if "/tests/" not in path.as_posix() and _names(ast.parse(path.read_text())) & writers
     }
-    assert not found - set(_DIRECT_WRITERS), "write through daimon.core.scope_settings"
+    assert not found - set(_DIRECT_WRITERS), "write through daimon.core.features.service"
 
 
 def test_slack_settings_has_no_thread_level() -> None:
     source = (_ADAPTERS / _PATHS["slack"]).read_text()
-    assert _SLACK_HAS_NO_THREAD_LEVEL and 'SettingsPlace.of("slack", channel_id, None)' in source
+    assert (
+        _SLACK_HAS_NO_THREAD_LEVEL
+        and 'FeaturePlace.of(actor.tenant_id, "slack", channel_id, None)' in source
+    )

@@ -585,6 +585,8 @@ class TranscriptWorkspaceTransfer(NativeConfig):
         "upload_failed",
         "not_worth_checkpointing",
         "archive_missing",
+        "invoker_not_allowed",
+        "checkpoint_off",
     ]
 
 

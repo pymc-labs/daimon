@@ -61,6 +61,7 @@ from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Action, Subject, authorize, build_subject
 from daimon.core.discord_membership import verify_discord_source
 from daimon.core.errors import StoreError
+from daimon.core.features.snapshot import FeaturePlace, place_guardrail
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.permissions import dm_source_limited
 from daimon.core.routine_delivery import discord_creator_may_post
@@ -465,6 +466,13 @@ def _env(
     async def origin_budget() -> str | None:
         return await origin_budget_channel(runtime.session_factory, auth, origin_context_id)
 
+    async def require_destination() -> bool:
+        place = FeaturePlace.of(auth.tenant_id, auth.platform or "web", None)
+        found = await place_guardrail(
+            runtime.session_factory, runtime.settings, place, "require_routine_destination"
+        )
+        return found.on
+
     return RoutineEnv(
         sessionmaker=runtime.session_factory,
         anthropic=runtime.client,
@@ -475,7 +483,7 @@ def _env(
         resolve_source=_source_resolver(runtime, auth, origin_context_id, verified)
         if verified_origin
         else None,
-        require_destination=runtime.settings.mcp.require_routine_destination,
+        require_destination=require_destination,
     )
 
 

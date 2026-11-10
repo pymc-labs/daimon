@@ -1112,6 +1112,17 @@ class DiscordTurnLifecycle(OutputGate):
             cost = float(debit_amount(cost, markup=self._markup))
         self._state = dataclasses.replace(self._state, cost_str=format_cost(cost))
 
+    async def _footer_shown(self) -> bool:
+        assert self._sessionmaker is not None and self._tenant_id is not None, "billing is set"
+        channel = getattr(self._trigger_message, "channel", None)
+        return await cost_footer_shown(
+            self._sessionmaker,
+            tenant_id=self._tenant_id,
+            platform="discord",
+            channel_id=self._budget_channel_id,
+            thread_id=str(channel.id) if channel is not None else None,
+        )
+
     async def _flush_terminal(self, *, summary_on_card: bool = True) -> None:
         """Unconditionally flush terminal state as a single collapsed embed,
         bypassing debounce.
@@ -1122,7 +1133,7 @@ class DiscordTurnLifecycle(OutputGate):
         with the summary would show it twice until then, or for good if the delete fails.
         """
         if self._sessionmaker is not None and self._tenant_id is not None:
-            if not await cost_footer_shown(self._sessionmaker, tenant_id=self._tenant_id):
+            if not await self._footer_shown():
                 self._state = dataclasses.replace(self._state, footer_hidden=True)
             else:
                 try:

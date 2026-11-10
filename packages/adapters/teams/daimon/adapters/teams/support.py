@@ -78,6 +78,7 @@ from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.team_owners import team_owner_lookup
 from daimon.core.authz import Action, Place, Subject, authorize
 from daimon.core.config import DirectMessagePolicy, Settings
+from daimon.core.features.snapshot import FeaturePlace, place_feature
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.identity import find_platform_principal
@@ -94,6 +95,7 @@ from daimon.core.support_escalation import (
     RECEIVED,
     SEALED_NOTE_HINT,
     SEALED_POST_MARKER,
+    UNAVAILABLE,
     received_text,
     remaining_credits,
 )
@@ -285,7 +287,20 @@ class SupportCommand:
         self._spawn = spawn
         self._asked: OrderedDict[str, _Asked] = OrderedDict()
 
+    async def _offered(self, tenant_id: uuid.UUID) -> bool:
+        """Whether the tenant's `support_escalation` feature is on."""
+        placed = await place_feature(
+            self._runtime.sessionmaker,
+            self._runtime.settings,
+            FeaturePlace.of(tenant_id, "teams", None),
+            "support_escalation",
+        )
+        return placed.on
+
     async def command(self, context: CommandContext) -> None:
+        if not await self._offered(context.tenant_id):
+            await context.send(notice_card(UNAVAILABLE))
+            return
         asked = _Asked.of(context.asked_in or context.inbound)
         if asked.place is not None:
             actor = Actor(asked.user_id, context.tenant_id, context.is_admin, asked.conversation_id)
@@ -348,6 +363,8 @@ class SupportCommand:
         actor = await card_actor(self._runtime, activity)
         if actor is None or not activity.reply_to_id:
             return dialog_notice(TITLE, DENIED)
+        if not await self._offered(actor.tenant_id):
+            return dialog_notice(TITLE, UNAVAILABLE)
         place = AnswerPlace.of(activity, activity.reply_to_id)
         if (access := await check_answer_access(self._runtime, actor, place)).access != "allowed":
             return dialog_notice(TITLE, refusal_text(access.access))
@@ -408,6 +425,8 @@ class SupportCommand:
         """
         runtime = self._runtime
         tenant_id = actor.tenant_id
+        if not await self._offered(tenant_id):
+            return UNAVAILABLE
         refusal, sealed = not_allowed, False
         source_allowed = None
         if asked.place is not None:

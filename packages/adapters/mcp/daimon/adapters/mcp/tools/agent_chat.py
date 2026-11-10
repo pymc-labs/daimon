@@ -121,6 +121,8 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_SOURCE_RELEASE_URL,
     MA_METADATA_KEY_SPEC_HASH,
 )
+from daimon.core.features.snapshot import FeaturePlace, place_feature
+from daimon.core.features.toolset import place_session
 from daimon.core.github_app_session import close_headless_app_session
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import find_agent_by_derived_uuid_cached
@@ -151,6 +153,7 @@ from fastmcp.exceptions import ToolError
 from fastmcp.tools import ToolResult
 from mux.contracts.ids import Scope
 from mux.errors import ScopeViolation
+from mux.profiles import MANAGED_AGENTS
 from pydantic import BaseModel, Field, JsonValue
 from pydantic.json_schema import SkipJsonSchema
 from sqlalchemy.exc import SQLAlchemyError
@@ -869,10 +872,24 @@ async def _start_turn_impl(
             if await _bound_seal(runtime, auth) != seal:
                 raise ToolError(_SEAL_CHANGED_DURING_START_MSG)
 
+        toolset, identity = await place_session(
+            runtime.session_factory,
+            runtime.settings,
+            FeaturePlace.of(
+                auth.tenant_id,
+                auth.platform or "mcp",
+                channel_id,
+                agent_id=ma_agent.id,
+                backend=MANAGED_AGENTS.provider,
+            ),
+            ma_agent,
+        )
         session = await create_session(
             runtime.client,
             agent=ma_agent,
             environment=environment,
+            toolset=toolset,
+            identity=identity,
             mcp_settings=runtime.settings.mcp,
             account_id=auth.account_id,
             tenant_id=auth.tenant_id,
@@ -881,10 +898,8 @@ async def _start_turn_impl(
             fernet=runtime.fernet,
             app_session_unmapped=True,
             tool_safety=runtime.settings.tool_safety,
-            legacy_memory_servers=(
-                get_repo_memory_settings(runtime.settings).legacy_mcp_server_names
-                if get_repo_memory_settings(runtime.settings).enabled
-                else ()
+            legacy_memory_servers=toolset.legacy_memory_servers(
+                get_repo_memory_settings(runtime.settings).legacy_servers
             ),
             github_fallback_pat=github_fallback_pat,
             github_app_id=github_app_id,
@@ -1258,6 +1273,14 @@ async def _get_turn_cost_impl(
     }
 
 
+async def _images_embedded(runtime: McpRuntime, auth: AuthIdentity) -> bool:
+    """Whether the workspace lets chart images ride along with an answer (`artifact_images`)."""
+    place = FeaturePlace(auth.tenant_id, auth.platform or "mcp")
+    return (
+        await place_feature(runtime.session_factory, runtime.settings, place, "artifact_images")
+    ).on
+
+
 async def _require_live_result_access(runtime: McpRuntime, auth: AuthIdentity) -> None:
     """A private Discord result requires current membership, even after a long turn."""
     if auth.platform == "discord" and auth.platform_user_id is not None:
@@ -1397,6 +1420,7 @@ async def _deliver_turn_charts_impl(
         turn_started_at=turn_started_at,
         message=final_text,
         store=runtime.artifact_store,
+        embed_images=await _images_embedded(runtime, auth),
     )
     result = AskResult(
         handle=handle,
@@ -1517,6 +1541,7 @@ async def _ask_impl(
                     turn_started_at=turn_started_at,
                     message=final_text,
                     store=runtime.artifact_store,
+                    embed_images=await _images_embedded(runtime, auth),
                 )
                 if (observation := current_outcome.get()) is not None:
                     observation.finish(reason=TerminationReason.COMPLETED)

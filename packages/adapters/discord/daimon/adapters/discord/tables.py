@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import io
-import uuid
-from collections.abc import Mapping
 from functools import cache
 from typing import cast
 
@@ -15,11 +13,6 @@ from fontTools.ttLib import TTFont  # pyright: ignore[reportMissingTypeStubs]
 from PIL import Image, ImageDraw, ImageFont
 
 import discord
-
-
-def tables_enabled(table_rendering: Mapping[uuid.UUID, bool], tenant_id: uuid.UUID) -> bool:
-    """Discord renders tables unless the tenant explicitly opts out with false."""
-    return table_rendering.get(tenant_id) is not False
 
 
 @cache
