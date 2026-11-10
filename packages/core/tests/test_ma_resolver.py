@@ -361,6 +361,69 @@ async def test_resolve_agent_no_cached_id_uses_tag_lookup(
     assert out == "ag_fresh", "no cached id should resolve via tag lookup"
 
 
+_MANAGED = {"daimon_managed": "true"}
+
+
+@pytest.mark.parametrize(
+    ("listed", "expected"),
+    [
+        ([("ag_renamed", "default", _MANAGED)], "ag_renamed"),
+        ([("ag_renamed", "default", _MANAGED), ("ag_seeded", "daimon", _MANAGED)], "ag_seeded"),
+    ],
+    ids=["renamed-only", "seeded-daimon-wins"],
+)
+async def test_resolve_agent_daimon_answers_with_seeded_agent_renamed_to_default(
+    tenant_id: uuid.UUID,
+    resolver_cache: ResolverCache,
+    listed: list[tuple[str, str, dict[str, str]]],
+    expected: str,
+) -> None:
+    """A later release renames the seeded `daimon` to `default` in place; a
+    lookup of `daimon` must reach it without applying defaults, which would
+    recreate `daimon`. A live `daimon` still wins."""
+    agents = [ma_agent(id=i, name=n, tenant_id=tenant_id, metadata=m) for i, n, m in listed]
+    router = MARouter()
+    router.add(
+        "GET", r"/v1/agents", lambda req, _m: list_response([_agent_payload(a) for a in agents])
+    )
+    client = build_fake_anthropic(router.dispatch)
+
+    async def refuse_apply() -> object:
+        raise AssertionError("a renamed seeded agent must not trigger a defaults apply")
+
+    out = await resolve_agent(
+        client,
+        tenant_id=tenant_id,
+        daimon_tag="daimon",
+        apply_callable=refuse_apply,
+        cache=resolver_cache,
+    )
+
+    assert out == expected, "daimon resolves to the seeded agent, renamed or not"
+
+
+@pytest.mark.parametrize("other_tenant", [False, True], ids=["unmanaged", "other-tenant"])
+async def test_resolve_agent_daimon_never_falls_back_to_a_default_that_is_not_seeded(
+    tenant_id: uuid.UUID, resolver_cache: ResolverCache, other_tenant: bool
+) -> None:
+    """A workspace's own `default`, or another tenant's managed one, never answers for `daimon`."""
+    owner = uuid.uuid4() if other_tenant else tenant_id
+    meta = _MANAGED if other_tenant else {}
+    agent = ma_agent(id="ag_default", name="default", tenant_id=owner, metadata=meta)
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda req, _m: list_response([_agent_payload(agent)]))
+    client = build_fake_anthropic(router.dispatch)
+
+    with pytest.raises(MAResolverMissError):
+        await resolve_agent(
+            client,
+            tenant_id=tenant_id,
+            daimon_tag="daimon",
+            apply_callable=_noop_apply,
+            cache=resolver_cache,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Agent — TTL cache behavior
 # ---------------------------------------------------------------------------

@@ -604,6 +604,35 @@ async def test_agents_update_rename_raises_spec_error(
 
 
 @pytest.mark.asyncio
+async def test_agents_update_daimon_refuses_the_seeded_agent_renamed_to_default(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Updating `daimon` after its rename to `default` must refuse, not create a second agent."""
+    async with db_session_factory() as s, s.begin():
+        tenant = await make_tenant(s, platform="cli", workspace_id="local")
+        await get_or_create_cli_principal(s, tenant_id=tenant.id, os_user="testuser")
+        tenant_id = tenant.id
+
+    renamed = _agent_json(
+        agent_id="ag_seeded",
+        name="default",
+        tenant_id=tenant_id,
+        metadata={"daimon_managed": "true"},
+    )
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda req, m: list_response([renamed]))
+    console = Console(file=StringIO(), force_terminal=False, highlight=False, width=80)
+    rt = build_cli_runtime(db_session_factory, router=router, settings=_FakeSettings())
+
+    spec_path = tmp_path / "agent.yaml"
+    spec_path.write_text("name: daimon\nmodel: claude-sonnet-4-6\nsystem: hello\n")
+
+    with pytest.raises(StoreError, match="now named 'default'"):
+        await agents_update(rt=rt, console=console, name="daimon", path=spec_path)
+
+
+@pytest.mark.asyncio
 async def test_agents_fork_strips_server_fields_and_creates(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

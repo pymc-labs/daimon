@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import unicodedata
 import uuid
-from collections.abc import Iterable
-from typing import Any
+from collections.abc import Iterable, Mapping
+from typing import Any, Final
 
 MA_METADATA_KEY_PRIVATE_DM = "daimon_private_dm"
 # A routine's session carries the private-DM stamp as "routine:<id>": as with a
@@ -83,6 +84,20 @@ MA_METADATA_KEY_BUDGET_CHANNEL = "daimon_budget_channel"
 # tenant resource — see `daimon.core.ma.find_workspace_disposable_sentinel`.
 MA_METADATA_KEY_WORKSPACE = "daimon_workspace"
 MA_METADATA_VALUE_WORKSPACE_DISPOSABLE = "disposable"
+
+
+# The seeded agent's name, then the name a later release renames it to in place
+# (the same agent, its `daimon_name` rewritten). Code from before that release
+# must treat the renamed agent as the seeded one through a rolling deploy or a
+# rollback: never sweep it, recreate `daimon` beside it, or miss it when asked
+# for `daimon`. Never remove before every deployment has run the rename.
+SEEDED_AGENT_RENAME: Final = ("daimon", "default")
+
+
+def is_renamed_seeded_agent(metadata: Mapping[str, str]) -> bool:
+    """True for a defaults-managed agent named `default`: the seeded agent after its rename."""
+    name = unicodedata.normalize("NFKC", metadata.get(MA_METADATA_KEY_NAME, "")).casefold()
+    return metadata.get(MA_METADATA_KEY_MANAGED) == "true" and name == SEEDED_AGENT_RENAME[1]
 
 
 def forked_in(platform: str | None, channel_id: str | None, thread_id: str | None) -> str:

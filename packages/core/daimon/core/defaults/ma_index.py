@@ -11,7 +11,7 @@ others are left alone and a warning is logged.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Collection
+from collections.abc import Collection, Iterable
 from typing import Literal
 
 import sentry_sdk
@@ -27,8 +27,10 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_NAME,
     MA_METADATA_KEY_TENANT,
+    SEEDED_AGENT_RENAME,
     find_conflicting_skill_body,
     find_mount_collision,
+    is_renamed_seeded_agent,
     strip_tenant_prefix,
 )
 from daimon.core.errors import DaimonError, SkillsListTruncatedError
@@ -85,19 +87,41 @@ async def find_agents_by_daimon_tag(
     archived row. Defaults to False so reconcile + the resolver never adopt
     archived agents.
     """
-    matches: list[BetaManagedAgentsAgent] = []
-    async for ag in list_agents(
-        client, include_archived=include_archived, scope=resource_scope(tenant_id=str(tenant_id))
-    ):
-        if (
-            ag.metadata.get(MA_METADATA_KEY_TENANT) == str(tenant_id)
-            and ag.metadata.get(MA_METADATA_KEY_NAME) == name
-        ):
-            matches.append(ag)
+    agents = [
+        ag
+        async for ag in list_agents(
+            client,
+            include_archived=include_archived,
+            scope=resource_scope(tenant_id=str(tenant_id)),
+        )
+    ]
+    return match_agents_by_daimon_tag(agents, tenant_id=tenant_id, name=name)
+
+
+def match_agents_by_daimon_tag(
+    agents: Iterable[BetaManagedAgentsAgent], *, tenant_id: uuid.UUID, name: str
+) -> list[BetaManagedAgentsAgent]:
+    """`find_agents_by_daimon_tag` over an already listed view: matches, canonical first."""
+    matches = [
+        ag
+        for ag in agents
+        if ag.metadata.get(MA_METADATA_KEY_TENANT) == str(tenant_id)
+        and ag.metadata.get(MA_METADATA_KEY_NAME) == name
+    ]
     if len(matches) > 1:
         _log.warning("ma_index.multi_match", kind="agents", count=len(matches))
     matches.sort(key=lambda m: m.created_at, reverse=True)
     return matches
+
+
+async def find_seeded_agents(
+    client: AsyncAnthropic, *, tenant_id: uuid.UUID
+) -> tuple[list[BetaManagedAgentsAgent], BetaManagedAgentsAgent | None]:
+    """From one live listing: the tenant's `daimon` matches (canonical first) and the
+    seeded agent renamed to `default`, if any (`SEEDED_AGENT_RENAME`)."""
+    agents = await list_agents_by_tenant(client, tenant_id=tenant_id)
+    matches = match_agents_by_daimon_tag(agents, tenant_id=tenant_id, name=SEEDED_AGENT_RENAME[0])
+    return matches, pick_renamed_seeded_agent(agents)
 
 
 async def find_agent_by_daimon_tag(
@@ -107,10 +131,18 @@ async def find_agent_by_daimon_tag(
     name: str,
     include_archived: bool = False,
 ) -> BetaManagedAgentsAgent | None:
-    """Read-only adapter for the resolver: canonical match only, no side effects."""
-    matches = await find_agents_by_daimon_tag(
-        client, tenant_id=tenant_id, name=name, include_archived=include_archived
-    )
+    """Read-only adapter for the resolver: canonical match only, no side effects.
+
+    A miss on the seeded name falls back to the tenant's seeded agent renamed in
+    place (`SEEDED_AGENT_RENAME`); never to a workspace's own agent of that name.
+    """
+    renamed = None
+    if name == SEEDED_AGENT_RENAME[0] and not include_archived:
+        matches, renamed = await find_seeded_agents(client, tenant_id=tenant_id)
+    else:
+        matches = await find_agents_by_daimon_tag(
+            client, tenant_id=tenant_id, name=name, include_archived=include_archived
+        )
     if len(matches) > 1:
         # Account-aware tripwire. The ambiguous state is degraded but not
         # an outage — adoption still proceeds with the newest match. The warning
@@ -124,7 +156,22 @@ async def find_agent_by_daimon_tag(
             adopted_account=matches[0].metadata.get(MA_METADATA_KEY_ACCOUNT),
             duplicate_accounts=[m.metadata.get(MA_METADATA_KEY_ACCOUNT) for m in matches[1:]],
         )
-    return matches[0] if matches else None
+    return matches[0] if matches else renamed
+
+
+def pick_renamed_seeded_agent(
+    agents: Iterable[BetaManagedAgentsAgent],
+) -> BetaManagedAgentsAgent | None:
+    """The newest of one tenant's `agents` that is the seeded agent after its rename."""
+    renamed = [ag for ag in agents if is_renamed_seeded_agent(ag.metadata)]
+    return max(renamed, key=lambda ag: ag.created_at, default=None)
+
+
+async def find_renamed_seeded_agent(
+    client: AsyncAnthropic, *, tenant_id: uuid.UUID
+) -> BetaManagedAgentsAgent | None:
+    """The tenant's live seeded agent renamed to `default` (`SEEDED_AGENT_RENAME`), or None."""
+    return pick_renamed_seeded_agent(await list_agents_by_tenant(client, tenant_id=tenant_id))
 
 
 async def find_environments_by_daimon_tag(

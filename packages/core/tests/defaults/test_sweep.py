@@ -138,6 +138,42 @@ async def test_sweep_preserves_user_fork_agents() -> None:
     assert archived == [], "agents.archive must NOT have been called for the user fork"
 
 
+async def test_sweep_spares_seeded_agent_renamed_to_default() -> None:
+    """A later release renames the seeded `daimon` to `default` in place. Code
+    shipping only `daimon.yaml` must not archive that agent, in any case of the
+    name, while a managed agent of any other removed name is still archived.
+    """
+    archived: list[str] = []
+
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda req, _m: list_response(
+            [
+                _tagged_agent(id_="ag_renamed", name="default"),
+                _tagged_agent(id_="ag_upper", name="Default"),
+                _tagged_agent(id_="ag_gone", name="gone"),
+            ]
+        ),
+    )
+    router.add(
+        "POST",
+        r"/v1/agents/ag_gone/archive",
+        lambda req, _m: (
+            archived.append("ag_gone")
+            or httpx.Response(200, json=ma_agent(id="ag_gone", name="gone").model_dump(mode="json"))
+        ),
+    )
+    client = build_fake_anthropic_http(router.dispatch)
+
+    outcomes = await sweep_removed_agents(
+        client, present_names={"daimon"}, tenant_id=TENANT_ID, dry_run=False
+    )
+    assert [o.name for o in outcomes] == ["gone"], "only the unrelated agent is swept"
+    assert archived == ["ag_gone"], "the renamed seeded agent must never be archived"
+
+
 async def test_sweep_preserves_user_fork_environments() -> None:
     """Parity with agents: a user-forked env without daimon_managed must
     survive the sweep — no archive (or delete) request reaches the fork.

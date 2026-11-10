@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Daimon tolerates its seeded agent being renamed in place to `default`.**
+  Ahead of that rename, a workspace whose built-in agent is already called `default` keeps it: defaults sync no longer archives it or creates a second `daimon` beside it, and asking for `daimon` answers with it. Only the workspace's own built-in agent counts, never a user's agent named `default`.
+
 - **Claude Fable 5.2 can be picked as an agent's model.**
   It appears as "Fable 5.2" in every model picker (Discord, Slack, Teams, web) and can be named in chat ("use Fable"). New agents still default to Sonnet 5.5. Fable 5.2 lists at $8 input / $40 output per million tokens, four times Sonnet 5.5, and is billed at that rate.
 - **One settings system for every feature.**
