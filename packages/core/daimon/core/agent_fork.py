@@ -30,6 +30,7 @@ from daimon.core import agent_lifecycle
 from daimon.core.agent_guidance import apply_credential_guidance
 from daimon.core.agent_identity import queue_agent_face
 from daimon.core.agent_ownership import record_agent_creator
+from daimon.core.agent_record_ports import DAIMON_ID_PREFIXES
 from daimon.core.authz import Action, Subject, authorize, build_agent_ref
 from daimon.core.defaults.ma_index import (
     download_skill_version,
@@ -46,6 +47,7 @@ from daimon.core.defaults.metadata import (
     build_metadata,
     strip_tenant_prefix,
 )
+from daimon.core.defaults.owned import create_owned_record, owned_scope
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import AgentNameCollision, DaimonError, UserFacingError
 from daimon.core.features.model_input import guidance_applies
@@ -61,6 +63,7 @@ from daimon.core.specs import merge_default_agent_toolset
 from daimon.core.stores import agent_owners, agent_tool_rules
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.domain import UserSkillRow
+from daimon.core.stores.selfhosted_resources import SelfHostedAgents
 from daimon.core.stores.user_skills import list_user_skills_for_tenant
 from daimon.core.turn_hold import TurnHold
 from mux.contracts.resources import Agent
@@ -287,6 +290,17 @@ async def copy_agent(
         )
     if not decision:
         raise UserFacingError("Only an admin can copy an agent.")
+    if source.id.startswith(DAIMON_ID_PREFIXES):
+        return await _copy_owned_agent(
+            sessionmaker,
+            tenant_id=tenant_id,
+            source=source,
+            new_name=new_name,
+            default_agent_name=default_agent_name,
+            extra_metadata=extra_metadata,
+            owner=owner,
+            hide_setup=hide_setup,
+        )
     source_ma = await retrieve_agent(
         anthropic, source.id, scope=resource_scope(tenant_id=str(tenant_id))
     )
@@ -340,40 +354,14 @@ async def copy_agent(
     created = await create_agent(
         anthropic, fork_params, scope=resource_scope(tenant_id=str(tenant_id))
     )
-    # Rules first, owner after: a copy that couldn't take its source's rules is removed,
-    # never left running looser than its source (rules are copied once, at the fork).
-    try:
-        async with sessionmaker.begin() as session:
-            await agent_tool_rules.copy_rules(
-                session,
-                tenant_id=tenant_id,
-                source_agent_id=str(source.id),
-                agent_id=created.id,
-                agent_name=new_name,
-                set_by=f"copy-of:{source.id}",
-            )
-    except Exception as exc:
-        _log.warning(
-            "agent_fork.rule_copy_failed",
-            tenant_id=str(tenant_id),
-            agent_id=created.id,
-            error=type(exc).__name__,
-        )
-        try:
-            await archive_agent(
-                anthropic, created.id, scope=resource_scope(tenant_id=str(tenant_id))
-            )
-        except Exception as archive_exc:  # best effort: the copy has no owner either way
-            _log.error(
-                "agent_fork.rule_copy_archive_failed",
-                tenant_id=str(tenant_id),
-                agent_id=created.id,
-                error=type(archive_exc).__name__,
-            )
-        raise UserFacingError(
-            "The copy couldn't take its source's tool rules, so it wasn't kept. "
-            "Try again in a moment."
-        ) from exc
+    await _copy_rules_or_remove(
+        sessionmaker,
+        anthropic,
+        tenant_id=tenant_id,
+        source_id=str(source.id),
+        copy_id=created.id,
+        new_name=new_name,
+    )
     await _record_copy_owner(
         sessionmaker, tenant_id=tenant_id, source_id=str(source.id), copy_id=created.id, owner=owner
     )
@@ -412,6 +400,135 @@ async def copy_agent(
     return AgentCopy(agent, (*split.dropped, *failed), tuple(copied))
 
 
+async def _copy_rules_or_remove(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    anthropic: AsyncAnthropic | None,
+    *,
+    tenant_id: uuid.UUID,
+    source_id: str,
+    copy_id: str,
+    new_name: str,
+) -> None:
+    """Rules first, owner after: a copy that couldn't take its source's rules is removed,
+    never left running looser than its source (rules are copied once, at the fork)."""
+    try:
+        async with sessionmaker.begin() as session:
+            await agent_tool_rules.copy_rules(
+                session,
+                tenant_id=tenant_id,
+                source_agent_id=source_id,
+                agent_id=copy_id,
+                agent_name=new_name,
+                set_by=f"copy-of:{source_id}",
+            )
+    except Exception as exc:
+        _log.warning(
+            "agent_fork.rule_copy_failed",
+            tenant_id=str(tenant_id),
+            agent_id=copy_id,
+            error=type(exc).__name__,
+        )
+        try:
+            await archive_agent(
+                anthropic,
+                copy_id,
+                scope=resource_scope(tenant_id=str(tenant_id)),
+                records=sessionmaker,
+            )
+        except Exception as archive_exc:
+            _log.error(
+                "agent_fork.rule_copy_archive_failed",
+                tenant_id=str(tenant_id),
+                agent_id=copy_id,
+                error=type(archive_exc).__name__,
+            )
+        raise UserFacingError(
+            "The copy couldn't take its source's tool rules, so it wasn't kept. "
+            "Try again in a moment."
+        ) from exc
+
+
+async def _copy_owned_agent(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    source: BetaManagedAgentsAgent,
+    new_name: str,
+    default_agent_name: str | None,
+    extra_metadata: Mapping[str, str] | None,
+    owner: uuid.UUID | Literal["source"] | None,
+    hide_setup: bool,
+) -> AgentCopy:
+    """Copy a Daimon-owned agent as another Daimon record on the same model.
+
+    Its skills are neutral references, so they carry over as they are.
+    """
+    scope = resource_scope(tenant_id=str(tenant_id))
+    record = await SelfHostedAgents(sessionmaker).resolve(scope, source.id)
+    spec = record.spec
+    metadata = build_metadata(
+        tenant_id=tenant_id, name=new_name, account_id=derive_guild_account_uuid(tenant_id)
+    ) | dict(extra_metadata or {})
+    if hide_setup or (spec.metadata or {}).get(MA_METADATA_KEY_SETUP_HIDDEN) == "true":
+        metadata[MA_METADATA_KEY_SETUP_HIDDEN] = "true"
+    servers, _ = await agent_lifecycle.strip_credentialed_mcp_servers(
+        sessionmaker=sessionmaker,
+        tenant_id=tenant_id,
+        source_agent_uuid=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=source.id),
+        mcp_servers=[
+            {"type": "url", "name": server.name, "url": server.url}
+            for server in spec.mcp_servers or ()
+        ],
+        tools=None,
+    )
+    kept = {str(server["name"]) for server in servers or ()}
+    features = await resolve_agent_features(
+        sessionmaker, None, tenant_id=tenant_id, agent_id=source.id, keys=("guidance",)
+    )
+    isolated = (spec.metadata or {}).get(MA_METADATA_KEY_ISOLATED) == "true"
+    copy = spec.model_copy(
+        update={
+            "name": new_name,
+            "metadata": metadata,
+            "system": apply_credential_guidance(
+                spec.system or "",
+                guidance=guidance_applies(isolated=isolated, features=features),
+                isolated=isolated,
+            ),
+            "mcp_servers": tuple(s for s in spec.mcp_servers or () if s.name in kept) or None,
+            "tools": tuple(
+                tool for tool in spec.tools or () if tool.kind != "mcp_toolset" or tool.name in kept
+            )
+            or None,
+        }
+    )
+    created = await create_owned_record(
+        sessionmaker,
+        type(spec).model_validate(copy.model_dump(mode="json")),
+        scope=owned_scope(tenant_id, None),
+        tenant_id=tenant_id,
+    )
+    await _copy_rules_or_remove(
+        sessionmaker,
+        None,
+        tenant_id=tenant_id,
+        source_id=source.id,
+        copy_id=created.id,
+        new_name=new_name,
+    )
+    await _record_copy_owner(
+        sessionmaker, tenant_id=tenant_id, source_id=source.id, copy_id=created.id, owner=owner
+    )
+    queue_agent_face(
+        sessionmaker,
+        tenant_id=tenant_id,
+        agent_name=new_name,
+        metadata=created.metadata,
+        default_agent_name=default_agent_name,
+    )
+    return AgentCopy(created, ())
+
+
 async def fork_agent(
     anthropic: AsyncAnthropic,
     sessionmaker: async_sessionmaker[AsyncSession],
@@ -426,9 +543,13 @@ async def fork_agent(
     owner: uuid.UUID | Literal["source"] | None = None,
 ) -> AgentCopy:
     """Copy the agent named `source_name` to `new_name`; raise `DaimonError` if either is wrong."""
-    if await find_agents_by_daimon_tag(anthropic, tenant_id=tenant_id, name=new_name):
+    if await find_agents_by_daimon_tag(
+        anthropic, tenant_id=tenant_id, name=new_name, records=sessionmaker
+    ):
         raise AgentNameCollision(f"An agent named {new_name} already exists. Pick another name.")
-    source = await find_agent_by_daimon_tag(anthropic, tenant_id=tenant_id, name=source_name)
+    source = await find_agent_by_daimon_tag(
+        anthropic, tenant_id=tenant_id, name=source_name, records=sessionmaker
+    )
     if source is None:
         raise UserFacingError("The agent you want to copy is missing. Choose another agent.")
     return await copy_agent(

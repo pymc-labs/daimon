@@ -10,6 +10,7 @@ from __future__ import annotations
 import uuid
 
 import structlog
+from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.defaults.metadata import build_metadata
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.errors import DaimonError
@@ -138,24 +139,36 @@ async def reconcile_owned_agent(
         isolated=spec.isolated,
     )
     record = owned_agent_spec(spec, provider=provider, metadata=metadata)
-    provider = record.model.provider
+    created = await create_owned_record(sessions, record, scope=scope, tenant_id=tenant_id)
+    return ResourceOutcome(
+        kind="agent", name=spec.name, action=Action.CREATED, anthropic_id=created.id
+    )
+
+
+async def create_owned_record(
+    sessions: async_sessionmaker[AsyncSession],
+    record: RecordAgentSpec,
+    *,
+    scope: Scope,
+    tenant_id: uuid.UUID,
+) -> BetaManagedAgentsAgent:
+    """Create a Daimon record with the first backend revision naming its provider."""
     # Imported here: `channel_backend` reaches `authz`, which imports `defaults`.
     from daimon.core.channel_backend import record_born_backend
 
+    provider = record.model.provider
     created = await create_owned_agent(None, record, scope=scope, records=sessions)
     async with sessions() as session, session.begin():
         await record_born_backend(
             session,
             tenant_id=tenant_id,
             record_id=created.id,
-            agent_name=spec.name,
+            agent_name=record.name,
             provider=provider,
             model=record.model.id,
         )
-    _log.info("owned_agent.created", name=spec.name, provider=provider, agent_id=created.id)
-    return ResourceOutcome(
-        kind="agent", name=spec.name, action=Action.CREATED, anthropic_id=created.id
-    )
+    _log.info("owned_agent.created", name=record.name, provider=provider, agent_id=created.id)
+    return created
 
 
 async def reconcile_owned_environment(

@@ -121,12 +121,16 @@ def _agent_values(payload: Mapping[str, object]) -> dict[str, object]:
     if "model" in result and result["model"] is not None:
         model = resolve_model(cast("ModelSelection", result["model"]))
         model_id = model if isinstance(model, str) else str(_mapping(model)["id"])
-        result["model"] = {"provider": _model_provider(model_id), "id": model_id}
-        if not isinstance(model, str):
+        provider = _model_provider(model_id)
+        result["model"] = {"provider": provider, "id": model_id}
+        # A record's model object carries its provider; Claude's model config never does,
+        # and an OpenAI or Gemini model has no Claude config to keep.
+        if not isinstance(model, str) and provider == "anthropic":
+            config = {k: v for k, v in _mapping(model).items() if k != "provider"}
             extensions["anthropic.model_config"] = {
                 "namespace": "anthropic.model_config",
                 "version": 1,
-                "value": {"model": model},
+                "value": {"model": config},
             }
     if "tools" in result and result["tools"] is not None:
         extensions["anthropic.agent_tools"] = {

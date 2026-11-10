@@ -43,13 +43,14 @@ from mux.drivers.anthropic import (
     AnthropicAgents,
     AnthropicEnvironments,
     AnthropicManagedAgents,
+    AnthropicSessionAdmin,
     EnvironmentReads,
     NativeSnapshot,
     ResourceAuthorization,
     ResourceWalk,
     SecretResolver,
 )
-from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
+from mux.errors import ProviderError, ScopeViolation
 from mux.profiles.selfhosted import LOOP
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -216,10 +217,10 @@ class RoutedAgents(AnthropicAgents):
     async def list_versions(
         self, scope: Scope, ref: ResourceRef, *, page: PageRequest
     ) -> Page[Agent]:
-        """Daimon-owned agents only; Managed Agents has no version list here."""
         local = await _local_ref(self._store, self._grant, scope, ref)
         if local is None:
-            raise UnsupportedCapability(("agent_version_list",), "anthropic.managed_agents")
+            require_anthropic(self._ma_client)
+            return await super().list_versions(scope, ref, page=page)
         listed = await self._store.list_versions(scope, local, page=page)
         return listed.model_copy(update={"data": tuple(_agent(scope, a) for a in listed.data)})
 
@@ -442,12 +443,24 @@ class RecordRoutedManagedAgents(AnthropicManagedAgents):
         self._extensions[(EnvironmentReads, "anthropic.environment_reads", 1)] = (
             self.routed_environments
         )
+        self._guard_session_admin = True
 
     def extension[T](self, port: type[T], *, namespace: str, version: int) -> T:
         implementation = super().extension(port, namespace=namespace, version=version)
         if port not in _RECORD_PORTS:
             require_anthropic(self._ma_client)
         return implementation
+
+    # The parent assigns and reads this while it is built; guard only callers after that.
+    @property
+    def session_admin(self) -> AnthropicSessionAdmin:
+        if self.__dict__.get("_guard_session_admin"):
+            require_anthropic(self._ma_client)
+        return self._session_admin
+
+    @session_admin.setter
+    def session_admin(self, value: AnthropicSessionAdmin) -> None:
+        self._session_admin = value
 
     @property
     def sessions(self) -> Sessions:

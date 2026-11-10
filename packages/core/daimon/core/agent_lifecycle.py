@@ -21,9 +21,11 @@ import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.agent_ownership import agent_name_lock, record_agent_creator
+from daimon.core.anthropic_guard import AnthropicDisabled
 from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
-from daimon.core.defaults.reconcile_agents import AgentNameTaken, reconcile_agent
+from daimon.core.defaults.owned import AgentNameTaken
+from daimon.core.defaults.reconcile_agents import reconcile_agent
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.errors import AgentNameCollision, DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
@@ -74,7 +76,9 @@ async def create_user_agent(
             await stack.enter_async_context(
                 agent_name_lock(sessionmaker, tenant_id=tenant_id, name=spec.name)
             )
-        if await find_agents_by_daimon_tag(anthropic, tenant_id=tenant_id, name=spec.name):
+        if await find_agents_by_daimon_tag(
+            anthropic, tenant_id=tenant_id, name=spec.name, records=sessionmaker
+        ):
             raise AgentNameCollision(taken_message)
         try:
             outcome = await reconcile_agent(
@@ -207,8 +211,9 @@ async def archive_memory_store_best_effort(
     and the retry path is dead (archived agents are filtered from lookup),
     so a transient memory-store archive failure must not strand the delete
     flow in a failed state — mirrors the mount-side degrade policy in
-    `memory_resource.py`. Catches ONLY `anthropic.APIError`; any other
-    exception propagates.
+    `memory_resource.py`. Catches ONLY `anthropic.APIError` and a missing
+    Anthropic key (a Daimon-owned agent has no Managed Agents store); any
+    other exception propagates.
     """
     try:
         await archive_memory_store_for_agent(
@@ -217,7 +222,7 @@ async def archive_memory_store_best_effort(
             tenant_id=tenant_id,
             agent_id=agent_id,
         )
-    except anthropic_errors.APIError:
+    except (anthropic_errors.APIError, AnthropicDisabled):
         # Best-effort degrade: the caller's own delete flow has already
         # committed (e.g. the MA agent is archived and the retry path is
         # dead), so a transient memory-store archive failure must not

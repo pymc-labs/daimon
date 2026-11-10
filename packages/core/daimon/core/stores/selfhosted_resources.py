@@ -24,7 +24,7 @@ from daimon.core._models import (
     SelfHostedResourceOperation,
     Tenant,
 )
-from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
+from daimon.core.agent_record_facts import agent_facts
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.privacy_session_deletes import lock_account
 from mux.contracts.ids import Page, PageRequest, ResourceRef, Revision, Scope
@@ -69,9 +69,8 @@ async def list_live_agent_facts(
 ) -> list[BetaManagedAgentsAgent]:
     """Local policy facts in the shape used by routing and isolation readers.
 
-    Include every live record, without a page limit. Reserved metadata comes
-    from the row's tenant and configured name, never caller-supplied aliases.
-    These facts contain no provider-managed tools or skills.
+    Include every live record, without a page limit. The projection is the one
+    admission reads, so tools, skills, MCP servers and provider survive.
     """
     rows = await session.scalars(
         select(SelfHostedAgentRecord).where(
@@ -79,34 +78,28 @@ async def list_live_agent_facts(
             SelfHostedAgentRecord.archived_at.is_(None),
         )
     )
-    facts: list[BetaManagedAgentsAgent] = []
-    for row in rows:
-        spec = AgentSpec.model_validate(row.spec)
-        facts.append(
-            BetaManagedAgentsAgent.model_validate(
+    ref = {
+        "kind": "agent",
+        "provider": LOOP.provider,
+        "account_scope_id": str(tenant_id),
+        "tenant_id": str(tenant_id),
+    }
+    return [
+        agent_facts(
+            Agent.model_validate(
                 {
-                    "id": row.id,
-                    "type": "agent",
-                    "name": spec.name,
-                    "version": row.revision,
-                    "model": {"id": spec.model.id},
-                    "system": spec.system,
-                    "description": spec.description,
-                    "metadata": {
-                        **dict(spec.metadata or {}),
-                        MA_METADATA_KEY_NAME: spec.name,
-                        MA_METADATA_KEY_TENANT: str(tenant_id),
-                    },
-                    "tools": [],
-                    "mcp_servers": [],
-                    "skills": [],
+                    "ref": {**ref, "id": row.id},
+                    "revision": Revision(local=row.revision),
+                    "spec": row.spec,
+                    "lifecycle": "active",
                     "created_at": row.created_at,
                     "updated_at": row.updated_at,
-                    "archived_at": None,
                 }
-            )
+            ),
+            tenant_id=str(tenant_id),
         )
-    return facts
+        for row in rows
+    ]
 
 
 async def _skill_attachments(
