@@ -168,6 +168,16 @@ async def get_card(
     return _row(record) if record is not None else None
 
 
+async def list_cards(session: AsyncSession, *, tenant_id: uuid.UUID) -> list[HostCallCardRow]:
+    """Every card a tenant holds, oldest first."""
+    records = await session.scalars(
+        select(HostCallCard)
+        .where(HostCallCard.tenant_id == tenant_id)
+        .order_by(HostCallCard.created_at, HostCallCard.id)
+    )
+    return [_row(record) for record in records]
+
+
 async def mark_posted(session: AsyncSession, *, card_id: uuid.UUID, message_id: str) -> None:
     await session.execute(
         update(HostCallCard).where(HostCallCard.id == card_id).values(message_id=message_id)

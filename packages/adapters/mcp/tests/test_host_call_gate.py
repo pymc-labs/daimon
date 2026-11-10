@@ -21,13 +21,13 @@ from daimon.adapters.mcp.confirmed_call import host_confirmed_call
 from daimon.adapters.mcp.middleware.host_call_gate import MISMATCH_TEXT, HostCallGate
 from daimon.adapters.mcp.middleware.mcp_identity import IdentityMiddleware
 from daimon.core import host_calls
-from daimon.core._models import HostCallCard, TurnOrigin
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
 from daimon.core.host_calls import ConfirmedCallRunner, confirmed_call_prefix, run_confirmed_calls
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.domain import Role
+from daimon.core.stores.host_call_cards import HostCallCardRow, list_cards
 from daimon.core.stores.mcp_tokens import create_mcp_token_row, get_mcp_token
-from daimon.core.stores.turn_origins import create_origin
+from daimon.core.stores.turn_origins import create_origin, get_session_origin
 from daimon.core.turn_origin import current_execution_origin_id
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from fastmcp import Client, FastMCP
@@ -35,7 +35,6 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.server.transforms.search import BM25SearchTransform
 from pydantic import HttpUrl, PostgresDsn, SecretStr
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _SECRET = "s" * 32
@@ -212,16 +211,12 @@ async def _call(
     return "".join(getattr(part, "text", "") for part in result.content)
 
 
-async def _cards(rig: Rig) -> list[HostCallCard]:
+async def _cards(rig: Rig) -> list[HostCallCardRow]:
     async with rig.sessions() as session:
-        return list(
-            await session.scalars(
-                select(HostCallCard).where(HostCallCard.tenant_id == rig.tenant_id)
-            )
-        )
+        return await list_cards(session, tenant_id=rig.tenant_id)
 
 
-async def _card(rig: Rig) -> HostCallCard:
+async def _card(rig: Rig) -> HostCallCardRow:
     rows = await _cards(rig)
     assert len(rows) == 1, f"one card was recorded: {len(rows)}"
     return rows[0]
@@ -486,11 +481,16 @@ def _in_turn(origin_id: uuid.UUID | None) -> Iterator[None]:
 
 async def _origin_id(rig: Rig) -> uuid.UUID:
     async with rig.sessions() as session:
-        row = await session.scalar(
-            select(TurnOrigin.id).where(TurnOrigin.chat_session_id == rig.grant)
+        row = await get_session_origin(
+            session,
+            tenant_id=rig.tenant_id,
+            account_id=rig.account_id,
+            platform="discord",
+            chat_session_id=rig.grant,
+            now=dt.datetime.now(dt.UTC),
         )
     assert row is not None, "the turn's origin exists"
-    return row
+    return row.id
 
 
 async def _token_revoked(rig: Rig, jti: uuid.UUID) -> bool:
