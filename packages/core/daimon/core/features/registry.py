@@ -466,7 +466,7 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
 
 _DM_PLATFORMS: Final = frozenset({"discord", "slack"})
 _DISCORD: Final = frozenset({"discord"})
-_CALL_GATE_PLATFORMS: Final = frozenset({"discord", "slack", "teams"})
+_CALL_GATE_PLATFORMS: Final = frozenset({"discord", "slack", "teams", "web"})
 _SETTINGS: Final = Authority(DelegatedAction.AGENT_SETTINGS)
 _CHANNELS: Final[tuple[Tier, ...]] = ("deployment", "workspace", "channel")
 _ADMIN: Final = Authority(DelegatedAction.CHANNEL_PERMISSIONS)
