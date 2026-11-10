@@ -25,14 +25,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   OpenAI's persistent workspace always has a shell, so it runs unattended only
   where sandbox tools are allowed, such as a long job. Watch wakes never get
   one. Model options run only when the provider declares them.
-- **On Discord, agents on OpenAI or Gemini can use tools that need a confirmation.**
+- **On Discord, Slack, Teams and the web, agents on OpenAI or Gemini can use tools that need a confirmation.**
   Before, these tools were refused because the provider shows no confirmation card.
   Daimon now posts its own card with Approve and Deny, showing the tool and its exact inputs.
   Only the person who asked can answer it, and an admin's request needs an admin to approve.
   An approved call runs once in a new reply from the agent, which reports the result.
   Cards expire with the confirmation timeout. A call interrupted by a restart is never rerun;
-  the card says to check before asking again. Operators can turn this off with the
-  `host_call_gate` deployment feature. Slack, Teams and the web still refuse these tools.
+  the card says to check before asking again. Publishing tools work the same way, so a
+  place that asks before publishing no longer refuses these backends. Agents already
+  switched keep their confirmed switch. Operators can turn this off with the
+  `host_call_gate` deployment feature.
 - **MCP tools and the CLI can pick any model the workspace can run.**
   The models an agent can run come from one catalog: Claude's models plus the
   OpenAI and Gemini models the workspace has enabled, without unpriced or

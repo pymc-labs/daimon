@@ -11,6 +11,7 @@ Read this if you self-host and do not want every turn on Anthropic.
 | Needs | Anthropic API key | OpenAI key and project | Gemini key | Your own harness service and Azure OpenAI |
 | Models | The agent's own model | `gpt-6-luna`, `gpt-6-astra` | `gemini-3.8-flash`, `gemini-4-argon` (priced through 2026-11-30, then refused) | The deployment you name (default `gpt-6.1-sol`) |
 | Shared threads | Yes | Yes, without Daimon's tools | No | No |
+| Tools that need a confirmation | Yes | Daimon's own card in chat | Daimon's own card in chat | Not documented |
 | Multi-agent delegation | Yes | No | Not documented | Not documented |
 | Memory across turns | Yes | No | Not documented | No |
 | Workspace export and import | Yes | No | Not documented | No |
