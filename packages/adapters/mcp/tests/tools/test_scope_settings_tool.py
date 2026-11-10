@@ -187,8 +187,10 @@ async def test_get_settings_reads_the_origin_place_and_no_tool_names_a_place(
 ) -> None:
     result = await tool._get_settings_impl(_runtime(), _as(world, make_auth(admin=False)), "ctx")  # pyright: ignore[reportPrivateUsage]
     assert [s.key for s in result.settings] == list(FEATURES), "every registered key"
-    assert [lv.level for lv in result.settings[0].levels] == ["server", "channel", "thread"]
-    assert [lv.level for lv in result.settings[1].levels] == [
+    by_key = {s.key: s for s in result.settings}
+    assert [lv.level for lv in by_key["approvals"].levels] == ["server", "channel", "thread"]
+    assert [lv.level for lv in by_key["participation"].levels] == ["server", "channel", "thread"]
+    assert [lv.level for lv in by_key["progress_plans"].levels] == [
         "server",
         "agent",
         "channel",
