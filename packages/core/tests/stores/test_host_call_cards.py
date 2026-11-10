@@ -5,10 +5,17 @@ import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 import pytest
 from daimon.core._models import TaskContinuation
-from daimon.core.host_calls import CRASHED_TEXT, NOT_RUN_TEXT, press_host_call
+from daimon.core.host_calls import (
+    APPROVED_TEXT,
+    CRASHED_TEXT,
+    DENIED_TEXT,
+    NOT_RUN_TEXT,
+    press_host_call,
+)
 from daimon.core.stores import host_call_cards as cards
 from daimon.testing.db import require_owned_sessionmaker
 from daimon.testing.factories import make_account, make_tenant
@@ -236,3 +243,84 @@ async def test_sweep_fails_an_approved_call_nobody_ran_as_not_run(lane: Lane) ->
     assert stranded is not None and stranded.status == "failed", f"stranded fails: {stranded}"
     assert stranded.outcome == NOT_RUN_TEXT, "approved-but-never-run says it did not run"
     assert waiting is not None and waiting.status == "approved", "an unexpired approval waits"
+
+
+async def _press_with(
+    lane: Lane,
+    card_id: uuid.UUID,
+    *,
+    action: Literal["approve", "deny"] = "approve",
+    clicker: str = "requester",
+    message_id: str = "m1",
+    tenant_id: uuid.UUID | None = None,
+):
+    async def admin(_: str) -> bool:
+        return True
+
+    return await press_host_call(
+        sessionmaker=lane.sessions,
+        enabled=True,
+        tenant_id=tenant_id or lane.tenant_id,
+        card_id=card_id,
+        action=action,
+        clicker=clicker,
+        message_id=message_id,
+        current_admin=admin,
+        now=datetime.now(UTC),
+    )
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"clicker": "stranger"},
+        {"message_id": "some-other-message"},
+        {"tenant_id": uuid.uuid4()},
+    ],
+    ids=["not_the_requester", "other_message", "other_tenant"],
+)
+async def test_press_is_ignored_unless_requester_message_and_tenant_match(
+    lane: Lane, changes: dict[str, object]
+) -> None:
+    """Anyone else's press leaves the card pending and queues no wake."""
+    created = await _card(lane)
+    assert created is not None, "card recorded"
+
+    pressed = await _press_with(lane, created.row.id, **changes)  # pyright: ignore[reportArgumentType]
+
+    async with lane.sessions() as session:
+        card = await cards.get_card(session, tenant_id=lane.tenant_id, card_id=created.row.id)
+    assert pressed is None, f"the press is not the requester's: {pressed}"
+    assert card is not None and card.status == "pending", f"the card is untouched: {card}"
+    assert await _wakes(lane) == 0, "no wake for a press that did not count"
+
+
+async def test_press_approve_claims_the_card_and_queues_one_wake(lane: Lane) -> None:
+    """Approve moves the card to approved with its outcome and wakes the thread once."""
+    created = await _card(lane)
+    assert created is not None, "card recorded"
+
+    pressed = await _press_with(lane, created.row.id)
+
+    async with lane.sessions() as session:
+        card = await cards.get_card(session, tenant_id=lane.tenant_id, card_id=created.row.id)
+    assert pressed is not None and pressed.closed and pressed.approved, f"approved: {pressed}"
+    assert card is not None and card.status == "approved", f"card approved: {card}"
+    assert card.outcome == APPROVED_TEXT, "the card says it was approved"
+    assert await _wakes(lane) == 1, "one wake runs the approved call"
+
+
+async def test_press_deny_closes_the_card_and_wakes_nothing(lane: Lane) -> None:
+    """Deny ends the call: nothing can run, and no turn is started for it."""
+    created = await _card(lane)
+    assert created is not None, "card recorded"
+
+    pressed = await _press_with(lane, created.row.id, action="deny")
+
+    async with lane.sessions() as session:
+        card = await cards.get_card(session, tenant_id=lane.tenant_id, card_id=created.row.id)
+    assert pressed is not None and pressed.closed and not pressed.approved, f"denied: {pressed}"
+    assert card is not None and card.status == "denied", f"card denied: {card}"
+    assert card.outcome == DENIED_TEXT, "the card says it was denied"
+    assert await _wakes(lane) == 0, "a denial wakes nothing"
+    assert await _consume(lane, created.row.id) is None, "a denied call cannot run"
