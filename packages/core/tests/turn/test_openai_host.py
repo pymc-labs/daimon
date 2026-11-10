@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import cast
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 import httpx
 import pytest
@@ -875,7 +875,6 @@ async def test_origin_approval_has_separate_claim_and_native_response(composed):
 @pytest.mark.parametrize(
     ("policy", "value"),
     [
-        ("source_sealed", True),
         ("daimon_rules_need_driver", True),
     ],
 )
@@ -900,10 +899,13 @@ async def test_unimplemented_restricted_policy_refuses_before_transport(composed
     [
         ("memory_read_only", True),
         ("hold", TurnHold(platform="slack", channel_id="C-SYN-1", client=True)),
+        ("source_sealed", True),
+        ("origin_seal_ids", frozenset({"C-SYN-1"})),
+        ("slack_turn_context_id", UUID("00000000-0000-4000-8000-000000000001")),
     ],
 )
 async def test_held_and_read_only_turns_prepare(composed, policy, value):
-    """A held turn runs on a per-turn held credential, a read-only one on a read-only origin."""
+    """Held, sealed and Slack-context turns run on a per-turn credential carrying them."""
     request, *_ = composed
     request = replace(request, admission=replace(request.admission, **{policy: value}))
     prepared = await prepare_openai(request)

@@ -209,7 +209,7 @@ def _causes(error: BaseException) -> list[tuple[str, ...]]:
     return found
 
 
-@pytest.mark.parametrize("failure", ["runtime", "deployment", "tenant", "sealed", "revision"])
+@pytest.mark.parametrize("failure", ["runtime", "deployment", "tenant", "revision"])
 async def test_missing_or_foreign_dependencies_refuse_before_provider_factory(
     host: Host,
     failure: str,
@@ -244,8 +244,6 @@ async def test_missing_or_foreign_dependencies_refuse_before_provider_factory(
                 }
             ),
         )
-    elif failure == "sealed":
-        admission = replace(admission, origin_seal_ids=frozenset({"sealed"}))
     else:
         admission = replace(
             admission,
@@ -257,7 +255,7 @@ async def test_missing_or_foreign_dependencies_refuse_before_provider_factory(
                 ),
             ),
         )
-    if failure in {"tenant", "sealed", "revision"}:
+    if failure in {"tenant", "revision"}:
         host.deps = replace(host.deps, turn_runtimes={PROFILE: runtime})
     with pytest.raises((ScopeViolation, AdmissionDenied)):
         await prepare(host, admission)

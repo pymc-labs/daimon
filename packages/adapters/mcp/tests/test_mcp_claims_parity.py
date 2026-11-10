@@ -23,6 +23,7 @@ from daimon.core.mcp_auth import (
     provider_hold_refusal,
 )
 from daimon.core.mcp_hold import HOLD_CLAIM, held_catalogue, hold_claim
+from daimon.core.session_seal import SEAL_CLAIM, parse_seal_claim
 from daimon.core.stores.accounts import get_account_with_tenant, set_role
 from daimon.core.stores.domain import Role
 from daimon.core.stores.mcp_tokens import get_mcp_token
@@ -67,6 +68,7 @@ async def _provider_token(
     *,
     hold: TurnHold | None = HOLD,
     slack_turn_context_id: uuid.UUID | None = None,
+    seal_ids: frozenset[str] = frozenset(),
 ) -> str:
     async with sessionmaker() as s, s.begin():
         return await mint_agent_mcp_token(
@@ -82,6 +84,7 @@ async def _provider_token(
             surface="provider_turn",
             hold=hold,
             slack_turn_context_id=slack_turn_context_id,
+            seal_ids=seal_ids,
         )
 
 
@@ -188,6 +191,82 @@ async def test_a_held_provider_credential_of_a_non_admin_verifies(
     assert access.claims.get("slack_turn_context_id") == (
         None if context is None else str(context)
     ), "the Slack turn context reaches the server"
+
+
+@pytest.mark.parametrize("held", [True, False])
+async def test_a_sealed_provider_credential_signs_and_verifies_its_seals(
+    sessionmaker: async_sessionmaker[AsyncSession], held: bool
+) -> None:
+    tenant_id, account_id = await _account(sessionmaker)
+    seals = frozenset({"C-SYN-1", "C-SYN-1:1700000000.0001"})
+    token = await _provider_token(
+        sessionmaker, tenant_id, account_id, hold=HOLD if held else None, seal_ids=seals
+    )
+    assert parse_seal_claim(_claims(token)[SEAL_CLAIM]) == seals, "the turn's seals are signed"
+
+    access = await DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker).verify_token(token)
+
+    assert access is not None, "a sealed provider-turn credential verifies"
+    assert parse_seal_claim(access.claims[SEAL_CLAIM]) == seals, "the server reads the seals"
+
+
+async def test_a_sealed_self_hosted_chat_credential_signs_its_seals(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    _, account_id = await _account(sessionmaker)
+    async with sessionmaker() as s, s.begin():
+        token, _, _ = await mint_chat_mcp_token(
+            s,
+            account_id=account_id,
+            agent_id=uuid.uuid4(),
+            secret=SECRET,
+            now=dt.datetime.now(dt.UTC),
+            seal_ids=frozenset({"C-SYN-1"}),
+        )
+
+    access = await DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker).verify_token(token)
+
+    assert access is not None, "a sealed self-hosted turn credential verifies"
+    assert parse_seal_claim(access.claims[SEAL_CLAIM]) == {"C-SYN-1"}, "its seals arrive"
+
+
+async def test_an_unheld_slack_context_provider_credential_verifies(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id, account_id = await _account(sessionmaker)
+    context = uuid.uuid4()
+    token = await _provider_token(
+        sessionmaker, tenant_id, account_id, hold=None, slack_turn_context_id=context
+    )
+
+    access = await DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker).verify_token(token)
+
+    assert access is not None, "a Slack-context provider-turn credential verifies"
+    assert access.claims.get("slack_turn_context_id") == str(context), "its context arrives"
+
+
+async def test_seals_need_the_provider_turn_surface(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id, account_id = await _account(sessionmaker)
+    async with sessionmaker() as s, s.begin():
+        with pytest.raises(ValueError, match="provider-turn"):
+            await mint_agent_mcp_token(
+                s,
+                account_id=account_id,
+                tenant_id=tenant_id,
+                agent_id=uuid.uuid4(),
+                label="key",
+                secret=SECRET,
+                now=dt.datetime.now(dt.UTC),
+                seal_ids=frozenset({"C-SYN-1"}),
+            )
+
+
+@pytest.mark.parametrize("value", [[], "C-SYN-1", [""], [1], {"C-SYN-1": True}])
+def test_a_malformed_seal_claim_is_refused(value: object) -> None:
+    assert parse_seal_claim(value) is None, "a malformed seal claim never reads as unsealed"
+    assert parse_seal_claim(None) == frozenset(), "no claim is no seal"
 
 
 @pytest.mark.parametrize(
