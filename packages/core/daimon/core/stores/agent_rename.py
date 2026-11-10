@@ -10,11 +10,23 @@ neutral catalog keep the name they recorded.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from typing import Any, Literal, cast
 
 from daimon.core._models import Base, TenantAccessPolicyRecord
 from daimon.core.stores.agent_avatars import normalize_agent_name
-from sqlalchemy import ColumnElement, Table, and_, exists, func, literal_column, select, update
+from sqlalchemy import (
+    ColumnElement,
+    Row,
+    Select,
+    Table,
+    and_,
+    exists,
+    func,
+    literal_column,
+    select,
+    update,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # (table, name column) pairs whose rows hold a tenant's live agent references.
@@ -56,7 +68,7 @@ _KEYED_NAME_COLUMNS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
 )
 _POLICY_NAME_KEYS = ("agent_rules", "agent_channel_pins")
 
-SelfHostedRename = Literal["renamed", "absent", "taken", "ambiguous"]
+SelfHostedState = Literal["pending", "absent", "taken", "ambiguous"]
 
 
 def _table(name: str) -> Table:
@@ -136,33 +148,67 @@ async def _rename_policy_keys(
         )
 
 
+def _selfhosted_rows(tenant_id: uuid.UUID) -> Select[Any]:
+    table = _table("selfhosted_agents")
+    return select(table.c.id, table.c.name, table.c.spec).where(
+        table.c.tenant_id == tenant_id, table.c.archived_at.is_(None)
+    )
+
+
+def _selfhosted_state(
+    rows: Sequence[Row[Any]], *, old: str, new: str
+) -> tuple[SelfHostedState, Row[Any] | None]:
+    legacy = [row for row in rows if normalize_agent_name(row.name) == normalize_agent_name(old)]
+    if not legacy:
+        return "absent", None
+    if len(legacy) > 1:
+        return "ambiguous", None
+    if any(normalize_agent_name(row.name) == normalize_agent_name(new) for row in rows):
+        return "taken", None
+    return "pending", legacy[0]
+
+
+async def inspect_selfhosted_rename(
+    session: AsyncSession, *, tenant_id: uuid.UUID, old: str, new: str
+) -> SelfHostedState:
+    """What `rename_selfhosted_agent` would do, read without locking."""
+    rows = (await session.execute(_selfhosted_rows(tenant_id))).all()
+    return _selfhosted_state(rows, old=old, new=new)[0]
+
+
 async def rename_selfhosted_agent(
     session: AsyncSession, *, tenant_id: uuid.UUID, old: str, new: str
-) -> SelfHostedRename:
-    """Rename the tenant's live self-hosted agent `old` in place.
+) -> SelfHostedState:
+    """Rename the tenant's live self-hosted agent `old` in place ("pending" → done).
 
     A live `new` is never merged into: both are left alone ("taken"). Two live
     records that differ only in case are left alone too ("ambiguous"). The
     revision stays: no turn pins the name, so an in-flight turn is unaffected.
     """
-    table = _table("selfhosted_agents")
-    live = and_(table.c.tenant_id == tenant_id, table.c.archived_at.is_(None))
-    rows = (
+    rows = (await session.execute(_selfhosted_rows(tenant_id).with_for_update())).all()
+    state, row = _selfhosted_state(rows, old=old, new=new)
+    if row is not None:
+        table = _table("selfhosted_agents")
         await session.execute(
-            select(table.c.id, table.c.name, table.c.spec).where(live).with_for_update()
+            update(table)
+            .where(table.c.id == row.id)
+            .values(name=new, spec={**row.spec, "name": new}, updated_at=func.now())
         )
-    ).all()
-    legacy = [row for row in rows if normalize_agent_name(row.name) == normalize_agent_name(old)]
-    if not legacy:
-        return "absent"
-    if len(legacy) > 1:
-        return "ambiguous"
-    if any(normalize_agent_name(row.name) == normalize_agent_name(new) for row in rows):
-        return "taken"
-    [row] = legacy
-    await session.execute(
-        update(table)
-        .where(table.c.id == row.id)
-        .values(name=new, spec={**row.spec, "name": new}, updated_at=func.now())
+    return state
+
+
+async def list_tenants_with_selfhosted_agent(
+    session: AsyncSession, *, name: str
+) -> list[uuid.UUID]:
+    """Tenants holding a live self-hosted agent named `name`, in any case."""
+    table = _table("selfhosted_agents")
+    return list(
+        (
+            await session.scalars(
+                select(table.c.tenant_id)
+                .where(table.c.archived_at.is_(None), _matches(table.c.name, name))
+                .distinct()
+                .order_by(table.c.tenant_id)
+            )
+        ).all()
     )
-    return "renamed"

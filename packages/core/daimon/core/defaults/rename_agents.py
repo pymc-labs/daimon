@@ -20,7 +20,7 @@ from typing import Final
 import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
-from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
+from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import (
     LEGACY_AGENT_RENAMES,
     MA_METADATA_KEY_MANAGED,
@@ -32,7 +32,12 @@ from daimon.core.errors import DefaultsError
 from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import update_agent
-from daimon.core.stores.agent_rename import rename_agent_references, rename_selfhosted_agent
+from daimon.core.stores.agent_rename import (
+    SelfHostedState,
+    inspect_selfhosted_rename,
+    rename_agent_references,
+    rename_selfhosted_agent,
+)
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -84,8 +89,12 @@ def _reader_sources(agent: BetaManagedAgentsAgent) -> list[str]:
     return agent.metadata.get(MA_METADATA_KEY_READER_SOURCE, "").split("\n")
 
 
-async def _legacy_readers(
-    client: AsyncAnthropic, *, tenant_id: uuid.UUID, old: str, new: str, old_agent_live: bool
+def _named(agents: Collection[BetaManagedAgentsAgent], name: str) -> list[BetaManagedAgentsAgent]:
+    return [agent for agent in agents if agent.metadata.get(MA_METADATA_KEY_NAME) == name]
+
+
+def _legacy_readers(
+    agents: Collection[BetaManagedAgentsAgent], *, old: str, new: str, old_agent_live: bool
 ) -> list[BetaManagedAgentsAgent]:
     """The old agent's reader variants, or none when they cannot move.
 
@@ -95,15 +104,13 @@ async def _legacy_readers(
     """
     readers = [
         reader
-        for reader in await find_agents_by_daimon_tag(
-            client, tenant_id=tenant_id, name=f"{old}{_READER_SUFFIX}"
-        )
+        for reader in _named(agents, f"{old}{_READER_SUFFIX}")
         if old in _reader_sources(reader)
     ]
     if not readers or old_agent_live:
         return []
-    if await find_agents_by_daimon_tag(client, tenant_id=tenant_id, name=f"{new}{_READER_SUFFIX}"):
-        _log.warning("defaults.rename_reader_taken", tenant_id=str(tenant_id), name=new)
+    if _named(agents, f"{new}{_READER_SUFFIX}"):
+        _log.warning("defaults.rename_reader_taken", name=new)
         return []
     return readers
 
@@ -155,37 +162,40 @@ async def rename_seeded_agent(
     `AgentRenameAmbiguous` when self-hosted records differ from `old` only in
     case: nothing is renamed and the caller skips the agent pass, so that agent is never adopted.
     """
-    olds = await find_agents_by_daimon_tag(client, tenant_id=tenant_id, name=old)
+    agents = await list_agents_by_tenant(client, tenant_id=tenant_id)
+    olds = _named(agents, old)
     legacy = [agent for agent in olds if _managed(agent)]
-    if _only_unmanaged(await find_agents_by_daimon_tag(client, tenant_id=tenant_id, name=new)):
+    if _only_unmanaged(_named(agents, new)):
         raise AgentRenameBlocked(old=old, new=new)
-    readers = await _legacy_readers(
-        client, tenant_id=tenant_id, old=old, new=new, old_agent_live=len(olds) > len(legacy)
+    readers = _legacy_readers(agents, old=old, new=new, old_agent_live=len(olds) > len(legacy))
+    async with session_factory() as session:
+        selfhosted = await inspect_selfhosted_rename(session, tenant_id=tenant_id, old=old, new=new)
+    _raise_if_selfhosted_blocked(selfhosted, old=old, new=new)
+    if not legacy and not readers and selfhosted == "absent":
+        return None
+    outcome = ResourceOutcome(
+        kind="agent", name=new, action=Action.RENAMED, anthropic_id=legacy[0].id if legacy else None
     )
     if dry_run:
-        if not legacy and not readers:
-            return None
-        return ResourceOutcome(kind="agent", name=new, action=Action.RENAMED)
+        return outcome
 
+    # Re-check under the reconcile lock: another apply may have moved first.
     async with session_factory() as session, session.begin():
         await session.execute(
             text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"), {"key": lock_key}
         )
         selfhosted = await rename_selfhosted_agent(session, tenant_id=tenant_id, old=old, new=new)
-        if selfhosted == "taken":
-            raise AgentRenameBlocked(old=old, new=new)
-        if selfhosted == "ambiguous":
-            raise AgentRenameAmbiguous(old=old)
-        if legacy or selfhosted == "renamed":
+        _raise_if_selfhosted_blocked(selfhosted, old=old, new=new)
+        if legacy or selfhosted == "pending":
             await rename_agent_references(session, tenant_id=tenant_id, old=old, new=new)
     for agent in (*legacy, *readers):
         await _rename_on_provider(client, agent, tenant_id=tenant_id, old=old, new=new)
-    if not legacy and not readers and selfhosted != "renamed":
-        return None
     _log.info("defaults.agent_renamed", tenant_id=str(tenant_id), old=old, new=new)
-    return ResourceOutcome(
-        kind="agent",
-        name=new,
-        action=Action.RENAMED,
-        anthropic_id=legacy[0].id if legacy else None,
-    )
+    return outcome
+
+
+def _raise_if_selfhosted_blocked(state: SelfHostedState, *, old: str, new: str) -> None:
+    if state == "taken":
+        raise AgentRenameBlocked(old=old, new=new)
+    if state == "ambiguous":
+        raise AgentRenameAmbiguous(old=old)

@@ -147,7 +147,7 @@ async def test_rename_references_when_policy_names_agent_then_moves_rule_unless_
 @pytest.mark.parametrize(
     ("names", "result", "after"),
     [
-        (["daimon"], "renamed", ["default"]),
+        (["daimon"], "pending", ["default"]),
         (["daimon", "default"], "taken", ["daimon", "default"]),
         (["daimon-copy"], "absent", ["daimon-copy"]),
         (["daimon", "Daimon"], "ambiguous", ["Daimon", "daimon"]),

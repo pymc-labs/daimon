@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import httpx
@@ -13,6 +14,7 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_READER_OF,
     MA_METADATA_KEY_READER_SOURCE,
 )
+from daimon.core.defaults.rename_agents import rename_seeded_agent
 from daimon.core.defaults.report import Action, ApplyReport
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.agent_avatars import get_or_create_avatar
@@ -276,3 +278,31 @@ async def test_apply_when_selfhosted_rename_unsafe_then_fails_and_moves_nothing(
         "SELECT name FROM selfhosted_agents WHERE tenant_id = :t AND archived_at IS NULL ORDER BY 1",
     )
     assert records == sorted(names), "both self-hosted records keep their names"
+
+
+async def test_rename_when_nothing_pending_then_returns_without_taking_the_lock(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    await _selfhosted(db_session, db_session_factory, "default")
+    state = FakeMAState()
+    _seed(state, ma_agent(id="ag_seeded", name="default", tenant_id=_TENANT, metadata=_MANAGED))
+    key = f"test-lock:{_TENANT}"
+
+    async with db_session_factory() as holder, holder.begin():
+        await holder.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"), {"key": key}
+        )
+        outcome = await asyncio.wait_for(
+            rename_seeded_agent(
+                build_fake_anthropic(make_fake_ma_handler(state)),
+                db_session_factory,
+                tenant_id=_TENANT,
+                old="daimon",
+                new="default",
+                lock_key=key,
+                dry_run=False,
+            ),
+            timeout=10,
+        )
+
+    assert outcome is None, "a migrated tenant has nothing to rename"
