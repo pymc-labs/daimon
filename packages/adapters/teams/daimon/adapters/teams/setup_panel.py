@@ -52,7 +52,7 @@ from daimon.adapters.teams.setup_conversation import (
     end_setup_conversation,
     open_setup_conversation,
 )
-from daimon.core import channel_backend
+from daimon.core import backend_capture, channel_backend
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_detail_lists import DetailListName
 from daimon.core.agent_details import AgentDetails, GitHubDeploymentFacts, load_agent_details
@@ -588,7 +588,9 @@ class SetupPanel:
             DelegatedAction.AGENT_SETTINGS
         ) and channel_backend.backend_selection_enabled(self._runtime.settings.turn):
             service = channel_backend.make_backend_service(
-                self._runtime.sessionmaker, self._runtime.settings.turn
+                self._runtime.sessionmaker,
+                self._runtime.settings.turn,
+                capture_source=channel_backend.NO_CAPTURE,
             )
             selection = await service.read_selection(
                 self._runtime.anthropic, tenant_id=actor.tenant_id, agent_name=name
@@ -642,8 +644,18 @@ class SetupPanel:
             if op == "backend_cancel":
                 card = await self._details(actor, name, page)
                 return replace_card(card) if card is not None else toast(GONE)
+            account_id = await get_or_create_account(self._runtime, actor)
             service = channel_backend.make_backend_service(
-                self._runtime.sessionmaker, self._runtime.settings.turn
+                self._runtime.sessionmaker,
+                self._runtime.settings.turn,
+                capture_source=backend_capture.for_agent(
+                    self._runtime.turn_deps,
+                    account_id=account_id,
+                    subject=build_subject(
+                        is_admin=actor.admin_for(DelegatedAction.AGENT_SETTINGS),
+                        platform_user_id=actor.user_id,
+                    ),
+                ),
             )
             choice = str(data.get("model_backend" if op == "backend_preview" else "target") or "")
             target = BackendConfig.model_validate(
@@ -681,7 +693,6 @@ class SetupPanel:
                 or not digest
             ):
                 return toast("That preview is no longer available. Choose a model provider again.")
-            account_id = await get_or_create_account(self._runtime, actor)
             live_actor = await card_actor(self._runtime, activity)
             if live_actor is None:
                 return toast(DENIED)
@@ -706,7 +717,12 @@ class SetupPanel:
                     )
                 else:
                     await service.set_backend(
-                        current, target, local, verified, expected_preview_digest=digest
+                        current,
+                        target,
+                        local,
+                        verified,
+                        expected_preview_digest=digest,
+                        accepted_drops=selection.preview.declared_drops,
                     )
             except channel_backend.AgentBackendRefused as exc:
                 await record_panel_write(
