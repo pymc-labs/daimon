@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Until then, requests for `default` still reach the built-in agent, never the workspace's own.
   Agent copies such as `daimon-copy` keep their names. Skills synced to the built-in agent before the rename keep their `daimon/` title prefix.
   `daimon selfhosted init --name` defaults to `default`.
+  On Discord, a reply from the deployment's default agent is unlabelled under any name, as on Slack and Teams.
 - **Claude Fable 5.2 can be picked as an agent's model.**
   It appears as "Fable 5.2" in every model picker (Discord, Slack, Teams, web) and can be named in chat ("use Fable"). New agents still default to Sonnet 5.5. Fable 5.2 lists at $8 input / $40 output per million tokens, four times Sonnet 5.5, and is billed at that rate.
 - **One settings system for every feature.**
