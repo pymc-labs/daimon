@@ -443,8 +443,8 @@ def render_turn_origin(
     if moved is not None:
         rendered += (
             " conversation_move: when kind is moved, this conversation just moved to "
-            "that provider and model: say so first, once, and that earlier messages here "
-            "aren't carried over. When kind is stays, this conversation is shared and "
+            "that provider and model: say so first, once, and that its earlier messages "
+            "came along. When kind is stays, this conversation is shared and "
             "stays on running_on while new conversations use that provider and model: "
             "say so only if asked about your model or the switch."
         )

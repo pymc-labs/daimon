@@ -1086,7 +1086,7 @@ async def test_switching_the_agent_answering_here_moves_this_conversation(active
         accepted_drops=preview.declared_drops,
     )
     assert "This conversation moves to Gemini from the next message" in changed.summary
-    assert "aren't carried over" in changed.summary
+    assert "keeps its earlier messages" in changed.summary, changed.summary
     ((channel, thread, account, _),) = await _release_rows(runtime, auth)
     assert (channel, thread, account) == ("channel", "thread", str(auth.account_id))
 

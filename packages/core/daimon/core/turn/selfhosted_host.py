@@ -20,6 +20,7 @@ from daimon.core.pricing import ProviderPrice
 from daimon.core.session_compat import ChangeReason, ReplaceSession, UpdateInPlace
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn.admission import reauthorize
+from daimon.core.turn.carry_over import carry_on_adoption, register_session_reader
 from daimon.core.turn.errors import AdmissionDenied, SessionBusyError
 from daimon.core.turn.io import TurnCodecRequest, TurnIO, register_turn_codec
 from daimon.core.turn.persistence import current_persistence
@@ -403,9 +404,6 @@ async def _prepare_selfhosted(request: ProviderPreparationRequest) -> PreparedTu
     )
     digest = request_digest({"spec": digest_body(spec), "model": runtime.model})
     binding = await store.get_binding(slot)
-    if request.transfer is not None and binding is None:
-        # Work bound to another backend has no reader here yet.
-        raise AdmissionDenied(reason="backend_unsupported")
     reused = binding is not None
     continuity = CONTINUED
     environment_id = spec.environment.id
@@ -498,6 +496,11 @@ async def _prepare_selfhosted(request: ProviderPreparationRequest) -> PreparedTu
         )
     )
     if binding is None:
+        carried = await carry_on_adoption(
+            request, store=store, slot=slot, model_id=runtime.model, agent_name=current.agent.name
+        )
+        if carried is not None:
+            continuity = carried.continuity
         _, published = await created("")
         binding = await store.put_binding(published, expected_generation=0)
     elif isinstance(decision, ReplaceSession):
@@ -565,7 +568,30 @@ async def _prepare_selfhosted(request: ProviderPreparationRequest) -> PreparedTu
     )
 
 
+def _old_session(
+    runtime: TurnRuntime,
+    revision: ConfigRevision,
+    scope: Scope,
+    binding: ProviderBinding,
+    store: StateStore,
+) -> OldSession:
+    """A released self-hosted session, read after its thread moved to another provider."""
+    host = runtime_for(runtime, revision)
+    ref = ResourceRef(
+        id=binding.native_refs["session"],
+        kind="session",
+        provider="selfhosted",
+        account_scope_id=host.account_scope_id,
+        tenant_id=scope.tenant_id,
+        account_id=scope.account_id,
+    )
+    return OldSession(
+        binding=binding, ref=ref, backend=driver(host, revision, scope, binding, store=store)
+    )
+
+
 def register_host() -> None:
+    register_session_reader(PROFILE, _old_session)
     register_turn_backend(PROFILE, _backend, fallback=True)
     register_turn_codec(PROFILE, _codec, fallback=True)
     register_turn_preparation(PROFILE, prepare_selfhosted, fallback=True)

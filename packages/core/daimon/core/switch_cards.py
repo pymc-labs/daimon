@@ -145,8 +145,8 @@ async def move_this_thread(
             now=datetime.datetime.now(datetime.UTC),
         )
     return (
-        f"This conversation moves to {provider} from the next message; "
-        "earlier messages here aren't carried over."
+        f"This conversation moves to {provider} from the next message "
+        "and keeps its earlier messages."
     )
 
 

@@ -1369,8 +1369,8 @@ def backend_switch_callbacks(
                     + conversations_follow_line(agent.name, preview.target_backend, before)
                     + (
                         f" This conversation moves to {provider} from your next message "
-                        "(unless it's shared or this channel pins its provider); earlier "
-                        "messages here aren't carried over."
+                        "(unless it's shared or this channel pins its provider) and keeps "
+                        "its earlier messages."
                         if answering == agent.name
                         else ""
                     )

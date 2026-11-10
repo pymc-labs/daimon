@@ -33,7 +33,7 @@ from daimon.core.turn.gemini import (
     compose_gemini_codec,
     gemini_backend,
 )
-from daimon.core.turn.gemini_prepare import prepare_gemini_turn
+from daimon.core.turn.gemini_prepare import old_gemini_session, prepare_gemini_turn
 from daimon.core.turn.gemini_state import (
     PostgresFlashAccounting,
     PostgresGeminiStorage,
@@ -639,11 +639,13 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
 
 def register_runtime() -> None:
     """Install the provider's host callbacks without transports or credential access."""
+    from daimon.core.turn.carry_over import register_session_reader
     from daimon.core.turn.runtimes import register_channel_runtime
 
     register_turn_backend(PROFILE, compose_gemini_backend, fallback=True)
     register_turn_codec(PROFILE, compose_gemini_codec, fallback=True)
     register_turn_preparation(PROFILE, prepare_gemini_turn, fallback=True)
+    register_session_reader(PROFILE, old_gemini_session)
     register_channel_runtime(
         PROFILE,
         build_gemini_runtime,

@@ -1125,7 +1125,7 @@ async def test_a_hand_off_in_this_thread_decides_whose_conversation_moves(owned_
     moves = "This conversation moves to OpenAI from your next message"
     assert (moves in prepared.consequence) == (handed_to == "Researcher")
     if handed_to == "Researcher":
-        assert "earlier messages here aren't carried over" in prepared.consequence
+        assert "keeps its earlier messages" in prepared.consequence
 
 
 async def _reload(owned_preview):

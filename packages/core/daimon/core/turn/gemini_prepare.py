@@ -13,10 +13,12 @@ from decimal import Decimal
 from uuid import NAMESPACE_URL, uuid5
 
 import structlog
+from daimon.core.mux_backend import TurnRuntime
 from daimon.core.native_footer_cost import NativeFooterCostContext
 from daimon.core.pricing import ProviderPrice, provider_cost_of
 from daimon.core.session_compat import ReplaceSession
 from daimon.core.turn.admission import reauthorize
+from daimon.core.turn.carry_over import carry_on_adoption
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.gemini import PROFILE, GeminiJournal, GeminiUsageRuntime, gemini_backend
 from daimon.core.turn.gemini_state import HoldSettlement, interaction_of
@@ -29,13 +31,14 @@ from daimon.core.turn.replace_binding import (
     replace_binding,
 )
 from daimon.core.usage_recording import record_provider_usage
+from mux.contracts.config import ConfigRevision
 from mux.contracts.extensions import ExtensionConfig
-from mux.contracts.ids import ResourceRef, ThreadRef
+from mux.contracts.ids import ResourceRef, Scope, ThreadRef
 from mux.contracts.resources import ProviderBinding, SessionSpec
 from mux.contracts.usage import UsageObservation
 from mux.errors import BindingConflict, ScopeViolation, UnsupportedCapability
 from mux.state.lease import Slot
-from mux.state.store import ERA_REF, adopted_identity
+from mux.state.store import ERA_REF, StateStore, adopted_identity
 
 log = structlog.get_logger(__name__)
 
@@ -145,9 +148,6 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
     slot = Slot(thread=thread, account_id=request.scope.account_id)
     store = journal.state_store
     prior = await store.get_binding(slot)
-    if request.transfer is not None and prior is None:
-        # A transfer replaces a bound session; there is nothing here to carry from.
-        raise UnsupportedCapability(("gemini_host_deployment_policy",), PROFILE)
     derived_id = str(uuid5(NAMESPACE_URL, f"gemini.host:{slot.model_dump_json()}"))
     # A released slot keeps its id; its era suffix keeps earlier creations from
     # replaying. Only a binding this host adopted (it carries its era) may differ
@@ -237,6 +237,15 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
     )
     continuity = CONTINUED
     if prior is None:
+        carried = await carry_on_adoption(
+            request,
+            store=store,
+            slot=slot,
+            model_id=config.model or "",
+            agent_name=admission.agent.name,
+        )
+        if carried is not None:
+            continuity = carried.continuity
         binding = await created(era)
         try:
             # A released slot is adopted at its next generation: keep what was written.
@@ -409,3 +418,26 @@ async def _settle_hold(
         )
     except Exception:  # expiry is the fallback; never fail a billed turn
         log.warning("provider_hold_settle_failed", interaction_id=interaction, exc_info=True)
+
+
+def old_gemini_session(
+    runtime: TurnRuntime,
+    revision: ConfigRevision,
+    scope: Scope,
+    binding: ProviderBinding,
+    store: StateStore,
+) -> OldSession:
+    """A released Gemini session, read after its thread moved to another provider."""
+    deployment = runtime.journal.deployment if isinstance(runtime.journal, GeminiJournal) else None
+    if deployment is None:
+        raise UnsupportedCapability(("gemini_pinned_deployment",), PROFILE)
+    ref = ResourceRef(
+        id=binding.native_refs["session"],
+        kind="session",
+        provider="gemini",
+        account_scope_id=deployment.account_scope_id,
+        tenant_id=scope.tenant_id,
+        account_id=scope.account_id,
+    )
+    backend = gemini_backend(revision, scope, runtime, deployment.account_scope_id)
+    return OldSession(binding=binding, ref=ref, backend=backend)

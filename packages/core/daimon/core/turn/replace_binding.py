@@ -194,7 +194,7 @@ async def hold_slot(
             await store.release_lease(lease)
 
 
-async def _read_turns(scope: Scope, old: OldSession) -> list[TranscriptTurn] | None:
+async def read_turns(scope: Scope, old: OldSession) -> list[TranscriptTurn] | None:
     """The old conversation's tail, or None when it cannot be read."""
     if old.backend is None or old.ref is None:
         return None
@@ -233,7 +233,7 @@ def _safe_name(filename: str, taken: set[str]) -> str:
     return name
 
 
-async def _carry_files(
+async def carry_files(
     scope: Scope, old: OldSession, target: Artifacts, key: str
 ) -> tuple[tuple[ResourceBinding, ...], tuple[str, ...]]:
     """Copy the old session's artifacts within the caps; mounts and their paths."""
@@ -293,7 +293,7 @@ async def _terminate(scope: Scope, old: OldSession, key: str) -> bool:
     return False
 
 
-def _framing(
+def carry_framing(
     *,
     turns: list[TranscriptTurn] | None,
     files: Sequence[str],
@@ -346,9 +346,9 @@ async def replace_binding(
         # Host journals serve a bound session's events only inside its turn context.
         reading = TurnPersistence(store, expected, scope, operation_key=key, session_ref=old.ref)
         with reading.holding(lease):
-            turns = await _read_turns(scope, old)
+            turns = await read_turns(scope, old)
             mounts, files = (
-                await _carry_files(scope, old, target_artifacts, key)
+                await carry_files(scope, old, target_artifacts, key)
                 if target_artifacts is not None and turns is not None
                 else ((), ())
             )
@@ -363,7 +363,7 @@ async def replace_binding(
         await store.renew_lease(lease, now=now, ttl=REPLACEMENT_LEASE_TTL)
         binding = await store.put_binding(successor, expected_generation=expected.generation)
         terminated = await _terminate(scope, old, key + ":terminate")
-    framing, state = _framing(
+    framing, state = carry_framing(
         turns=turns,
         files=files,
         model_id=model_id,

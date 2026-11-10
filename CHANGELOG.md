@@ -13,7 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The Discord, Slack and Teams panels and the web editor save the agent's loss consent like chat does, so the agent's next message no longer asks to confirm the switch again. An agent already switched from one of them asks once more, then keeps the answer.
 - **Off Google Cloud, hosted OpenAI environments are named with a stored id.**
   The id is made once and kept, so a restart or a rebuilt container keeps the same environments. `daimon deployment reset-id` makes a new one.
-
+- **A conversation moved to another provider keeps its earlier messages.**
+  Confirming a switch, moving one thread, or handing a conversation to an agent
+  on another provider now carries the recent conversation over, in every
+  direction, where it used to start empty. Saved files come too when the new
+  provider has a persistent workspace. A move that used to be refused because
+  the thread had no session yet now goes ahead the same way. The old session is
+  left as it was, so switching back still works. A thread released before this
+  change starts with a note that its earlier conversation could not be found.
 - **Claude Fable 5.2 can be picked as an agent's model.**
   It appears as "Fable 5.2" in every model picker (Discord, Slack, Teams, web) and can be named in chat ("use Fable"). New agents still default to Sonnet 5.5. Fable 5.2 lists at $8 input / $40 output per million tokens, four times Sonnet 5.5, and is billed at that rate.
 - **One settings system for every feature.**

@@ -30,6 +30,7 @@ from daimon.core.session_compat import ReplaceSession
 from daimon.core.stores import mux_state
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn.admission import reauthorize
+from daimon.core.turn.carry_over import carry_on_adoption, register_session_reader
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.io import TurnCodecRequest, TurnIO, register_turn_codec
 from daimon.core.turn.openai_codec import PROFILE, PROFILES
@@ -455,9 +456,6 @@ async def _prepare_with_runtime(
         {"spec": digest_body(spec), "controls": digest_body(runtime.controls)}
     )
     binding = await store.get_binding(slot)
-    if request.transfer is not None and binding is None:
-        # Work bound to another backend has no reader here yet.
-        raise AdmissionDenied(reason="backend_unsupported")
     reused = binding is not None
     continuity = CONTINUED
 
@@ -577,8 +575,21 @@ async def _prepare_with_runtime(
         backend = driver(runtime, revision, request.scope, binding)
     elif binding is None:
         backend = driver(runtime, revision, request.scope)
+        carried = await carry_on_adoption(
+            request,
+            store=store,
+            slot=slot,
+            model_id=revision.model or "",
+            agent_name=current.agent.name,
+            target_artifacts=backend.artifacts if revision.profile in _MOUNTING_PROFILES else None,
+        )
+        planned = spec
+        if carried is not None:
+            continuity = carried.continuity
+            if carried.mounts:
+                planned = spec.model_copy(update={"resources": (*spec.resources, *carried.mounts)})
         with native_mcp_session(request.scope, chat_session_id):
-            created = await _create(request, store, slot, backend, spec, runtime)
+            created = await _create(request, store, slot, backend, planned, runtime)
         binding_id, era = adopted_identity(
             await store.get_binding(slot, include_released=True),
             str(uuid5(NAMESPACE_URL, "openai:binding:" + slot.model_dump_json())),
@@ -654,9 +665,32 @@ async def _prepare_with_runtime(
     )
 
 
+def _old_session(
+    runtime: TurnRuntime,
+    revision: ConfigRevision,
+    scope: Scope,
+    binding: ProviderBinding,
+    store: StateStore,
+) -> OldSession:
+    """A released OpenAI session, read after its thread moved to another provider."""
+    host = runtime_for(runtime, revision)
+    if binding.native_refs.get("account_scope", host.account_scope_id) != host.account_scope_id:
+        raise ScopeViolation(binding.id, "OpenAI session belongs to another account scope")
+    ref = ResourceRef(
+        id=binding.native_refs["session"],
+        kind="session",
+        provider="openai",
+        account_scope_id=host.account_scope_id,
+        tenant_id=scope.tenant_id,
+        account_id=scope.account_id,
+    )
+    return OldSession(binding=binding, ref=ref, backend=driver(host, revision, scope, binding))
+
+
 def register_host() -> None:
     """Fill missing host callbacks while preserving explicit application overrides."""
     for profile in PROFILES:
+        register_session_reader(profile, _old_session)
         register_turn_backend(profile, _backend, fallback=True)
         register_turn_codec(profile, _codec, fallback=True)
         register_turn_preparation(profile, prepare_openai, fallback=True)

@@ -35,7 +35,7 @@ import contextlib
 import datetime as dt
 import hashlib
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from typing import Literal, Protocol
 
@@ -645,6 +645,7 @@ async def prepare_session_for_turn(
     transfer: WorkspaceTransfer | None = None,
     deadline: dt.datetime | None = None,
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
+    seed_carry_over: Callable[[], Awaitable[ContinuityOutcome | None]] | None = None,
 ) -> PreparedTurn | PreparationDeferred | PreparationBusy | PreparationFailure:
     """Queue before the advisory-lock transaction checks out a connection."""
 
@@ -664,6 +665,7 @@ async def prepare_session_for_turn(
                 transfer=transfer,
                 deadline=deadline,
                 now=now,
+                seed_carry_over=seed_carry_over,
             )
 
     return await retry_fences(attempt)
@@ -735,6 +737,7 @@ async def _prepare_session_for_turn_locked(
     transfer: WorkspaceTransfer | None = None,
     deadline: dt.datetime | None = None,
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
+    seed_carry_over: Callable[[], Awaitable[ContinuityOutcome | None]] | None = None,
 ) -> PreparedTurn | PreparationDeferred | PreparationBusy | PreparationFailure:
     """Find, refresh or replace this caller's session, then bind its recorder.
 
@@ -861,7 +864,8 @@ async def _prepare_session_for_turn_locked(
                 thread_id=thread_id,
                 session_account_id=session_account_id,
             )
-            return await from_fresh(fresh, CONTINUED)
+            carried = await seed_carry_over() if seed_carry_over is not None else None
+            return await from_fresh(fresh, carried or CONTINUED)
 
         fresh_start = row.fresh_start_requested_at is not None
 
@@ -1173,7 +1177,11 @@ async def _prepare_session_for_turn_locked(
             )
             if isinstance(outcome, PreparationFailure):
                 return outcome
-            return await from_fresh(outcome.fresh, outcome.continuity, recorded)
+            # A fresh start may be a move here from another provider: carry that over.
+            carried = (
+                await seed_carry_over() if fresh_start and seed_carry_over is not None else None
+            )
+            return await from_fresh(outcome.fresh, carried or outcome.continuity, recorded)
 
         assert recorded is not None, "an in-place path always has a recorded snapshot"
         applying: tuple[UpdateOp, ...] = decision.ops if isinstance(decision, UpdateInPlace) else ()
