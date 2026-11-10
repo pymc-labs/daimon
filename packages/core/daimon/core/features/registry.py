@@ -596,8 +596,8 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         binds="turn",
         doc=(
             "Every message in private and shared channels is read through Microsoft "
-            "Graph, not only the ones that mention the agent. Read once when Teams starts, "
-            "so only the deployment sets it and a restart applies it."
+            "Graph, not only the ones that mention the agent. Read once at startup, so only "
+            "the server operator sets it and a restart applies it."
         ),
         platforms=frozenset({"teams"}),
         authority=_ADMIN,

@@ -225,7 +225,7 @@ def _overridden(view: FeatureView, own: TierSetting, platform: str) -> str:
     resolved = view.resolved
     if own.value in (DEFAULT, resolved.value) or resolved.tier in (own.tier, "default"):
         return ""
-    by = "the deployment" if resolved.tier == "deployment" else where(resolved.tier, platform)
+    by = "the server" if resolved.tier == "deployment" else where(resolved.tier, platform)
     return f", overridden by {by}"
 
 
