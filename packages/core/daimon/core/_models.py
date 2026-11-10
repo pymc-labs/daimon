@@ -5082,6 +5082,24 @@ class SelfHostedAgentRecord(Base):
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class SelfHostedAgentVersion(Base):
+    """Every revision of a Daimon-owned agent, so a session can read the version it began on."""
+
+    __tablename__ = "selfhosted_agent_versions"
+
+    agent_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("selfhosted_agents.id", ondelete="CASCADE"), primary_key=True
+    )
+    version: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    spec: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    archived: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class SelfHostedEnvironmentRecord(Base):
     """Harness routing and credential references live in the environment spec."""
 

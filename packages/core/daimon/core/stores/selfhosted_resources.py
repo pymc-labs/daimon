@@ -3,6 +3,8 @@
 Mutations and reference-only receipts commit together. Tenant transaction
 locks serialize key/name races; receipt ownership matches mux operation scope.
 Receipts expire after seven days and retries never return deleted resources.
+The same tables hold Daimon-owned OpenAI and Gemini records; a row's existence
+is what makes a record Daimon-owned. Agents keep every revision for versioned reads.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from daimon.core._models import (
     Account,
     NeutralSkillVersion,
     SelfHostedAgentRecord,
+    SelfHostedAgentVersion,
     SelfHostedEnvironmentRecord,
     SelfHostedResourceOperation,
     Tenant,
@@ -48,6 +51,17 @@ from ulid import ULID
 
 _JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
 Row = SelfHostedAgentRecord | SelfHostedEnvironmentRecord
+# Model providers whose agent definitions Daimon stores and serves itself.
+OWNED_PROVIDERS: frozenset[str] = frozenset({LOOP.provider, "openai", "gemini"})
+# Ids never fall back to names, so names may not look like ids.
+_ID_PREFIXES = ("sh_", "dm_agent_", "dm_env_")
+
+
+def _id_prefix(spec: AgentSpec | EnvironmentSpec) -> str:
+    """Self-hosted harness records keep `sh_`; other Daimon-owned records use `dm_`."""
+    if isinstance(spec, AgentSpec):
+        return "sh_agent_" if spec.model.provider == LOOP.provider else "dm_agent_"
+    return "sh_env_" if spec.execution == "self_hosted" else "dm_env_"
 
 
 async def list_live_agent_facts(
@@ -294,6 +308,42 @@ class _Resources[
         except IntegrityError:
             raise ProviderError("conflict", retryable=False) from None
 
+    def record_ref(self, scope: Scope, record_id: str) -> ResourceRef:
+        """The store's own reference to a record id in this tenant."""
+        self._tenant(scope)
+        return ResourceRef(
+            id=record_id,
+            kind=self.kind,
+            provider=LOOP.provider,
+            account_scope_id=scope.tenant_id,
+            tenant_id=scope.tenant_id,
+        )
+
+    async def owns(self, scope: Scope, record_id: str) -> bool:
+        """Whether this tenant holds the record here, archived or not."""
+        async with self.sessionmaker() as session:
+            found = await session.scalar(
+                select(self.table.id).where(
+                    self.table.tenant_id == self._tenant(scope), self.table.id == record_id
+                )
+            )
+        return found is not None
+
+    async def _snapshot(self, session: AsyncSession, row: Row) -> None:
+        """Agents keep each revision; environments are unversioned."""
+        if isinstance(row, SelfHostedAgentRecord):
+            session.add(
+                SelfHostedAgentVersion(
+                    agent_id=row.id,
+                    version=row.revision,
+                    tenant_id=row.tenant_id,
+                    name=row.name,
+                    spec=row.spec,
+                    archived=row.archived_at is not None,
+                )
+            )
+            await session.flush()
+
     async def _row(self, session: AsyncSession, scope: Scope, ref: ResourceRef) -> Row:
         self._check(scope, ref)
         row = await session.scalar(
@@ -362,7 +412,9 @@ class _Resources[
         return self._result(scope, row)
 
     async def create(self, scope: Scope, spec: Spec, *, key: str) -> Result:
-        validate_resource_spec(spec)
+        validate_resource_spec(spec, providers=OWNED_PROVIDERS)
+        if spec.name.startswith(_ID_PREFIXES):
+            raise ProviderError("invalid_request", retryable=False)
         digest = request_digest(
             _JSON.validate_python([self.kind, "create", spec.model_dump(mode="json")])
         )
@@ -379,9 +431,8 @@ class _Resources[
             )
             if exists is not None:
                 raise ProviderError("conflict", retryable=False)
-            prefix = "sh_agent_" if self.kind == "agent" else "sh_env_"
             row = self.table(
-                id=prefix + str(ULID()),
+                id=_id_prefix(spec) + str(ULID()),
                 tenant_id=tenant,
                 name=spec.name,
                 spec=spec.model_dump(mode="json"),
@@ -391,6 +442,7 @@ class _Resources[
                 row.skill_attachments = await _skill_attachments(session, scope, spec, [], None)
             session.add(row)
             await session.flush()
+            await self._snapshot(session, row)
             result = self._result(scope, row)
             await self._record(session, scope, key, digest, "create", result.ref, result.revision)
             return result
@@ -402,7 +454,7 @@ class _Resources[
     async def resolve(self, scope: Scope, name_or_id: str) -> Result:
         """Resolve active resources only; reserved IDs never fall back to names."""
         async with self.sessionmaker() as session:
-            field = self.table.id if name_or_id.startswith("sh_") else self.table.name
+            field = self.table.id if name_or_id.startswith(_ID_PREFIXES) else self.table.name
             row = await session.scalar(
                 select(self.table).where(
                     self.table.tenant_id == self._tenant(scope),
@@ -474,7 +526,9 @@ class _Resources[
             spec = self.spec_type.model_validate(data)
         except ValidationError:
             raise ProviderError("invalid_request", retryable=False) from None
-        validate_resource_spec(spec)
+        validate_resource_spec(spec, providers=OWNED_PROVIDERS)
+        if spec.name != current.name and spec.name.startswith(_ID_PREFIXES):
+            raise ProviderError("invalid_request", retryable=False)
         return spec
 
     async def update(
@@ -517,6 +571,7 @@ class _Resources[
             row.spec, row.name = spec.model_dump(mode="json"), spec.name
             row.revision += 1
             row.updated_at = await self._now(session)
+            await self._snapshot(session, row)
             result = self._result(scope, row)
             await self._record(session, scope, key, digest, "update", result.ref, result.revision)
             return result
@@ -550,6 +605,7 @@ class _Resources[
             if row.archived_at is None:
                 row.archived_at = row.updated_at = await self._now(session)
                 row.revision += 1
+                await self._snapshot(session, row)
             receipt = await self._record(
                 session, scope, key, digest, "archive", ref, Revision(local=row.revision)
             )
@@ -593,6 +649,67 @@ class SelfHostedAgents(_Resources[AgentSpec, AgentPatch, Agent]):
 
     async def list(self, scope: Scope, *, filters: AgentFilter, page: PageRequest) -> Page[Agent]:
         return await self._list(scope, filters=filters, page=page)
+
+    def _version(
+        self, scope: Scope, row: SelfHostedAgentRecord, version: SelfHostedAgentVersion
+    ) -> Agent:
+        try:
+            return Agent.model_validate(
+                {
+                    "ref": self._ref(scope, row),
+                    "revision": Revision(local=version.version),
+                    "spec": version.spec,
+                    "lifecycle": "archived" if version.archived else "active",
+                    "created_at": row.created_at,
+                    "updated_at": version.created_at,
+                    "archived_at": row.archived_at if version.archived else None,
+                }
+            )
+        except ValidationError:
+            raise ProviderError("invalid_request", retryable=False) from None
+
+    async def retrieve_version(self, scope: Scope, ref: ResourceRef, version: int) -> Agent:
+        """One stored revision of an agent; unknown versions are not found."""
+        async with self.sessionmaker() as session:
+            row = await self._row(session, scope, ref)
+            assert isinstance(row, SelfHostedAgentRecord)
+            stored = await session.get(SelfHostedAgentVersion, (row.id, version))
+            if stored is None:
+                raise ProviderError("not_found", retryable=False)
+            return self._version(scope, row, stored)
+
+    async def list_versions(
+        self, scope: Scope, ref: ResourceRef, *, page: PageRequest
+    ) -> Page[Agent]:
+        """Revisions newest first by default; the cursor is the last version returned."""
+        descending = page.order != "asc"
+        query = select(SelfHostedAgentVersion).where(SelfHostedAgentVersion.agent_id == ref.id)
+        if page.cursor:
+            try:
+                cursor = int(page.cursor)
+            except ValueError:
+                raise ProviderError("invalid_request", retryable=False) from None
+            query = query.where(
+                SelfHostedAgentVersion.version < cursor
+                if descending
+                else SelfHostedAgentVersion.version > cursor
+            )
+        query = query.order_by(
+            SelfHostedAgentVersion.version.desc()
+            if descending
+            else SelfHostedAgentVersion.version.asc()
+        )
+        limit = page.limit or 100
+        async with self.sessionmaker() as session:
+            row = await self._row(session, scope, ref)
+            assert isinstance(row, SelfHostedAgentRecord)
+            versions = list(await session.scalars(query.limit(limit + 1)))
+            more = len(versions) > limit
+            return Page(
+                data=tuple(self._version(scope, row, item) for item in versions[:limit]),
+                has_more=more,
+                next_cursor=str(versions[limit - 1].version) if more else None,
+            )
 
 
 class SelfHostedEnvironments(_Resources[EnvironmentSpec, EnvironmentPatch, Environment]):
