@@ -8,10 +8,11 @@ capability. Anything it does not declare is `unknown`, and admission treats
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import model_validator
+from pydantic import JsonValue, model_validator
 
 from mux.contracts._base import Contract, FrozenMap
 from mux.contracts.errors import ExtensionVersionError, UnsupportedCapability
@@ -119,6 +120,8 @@ class Profile(Contract):
     extensions: tuple[ExtensionRef, ...] = ()
     execution_tool: Literal["bash", "code_execution"] = "code_execution"
     implicit_execution: bool = False
+    model_controls: tuple[str, ...] = ()
+    """`ModelRef.options` keys this profile's driver compiles; any other key is refused."""
     mcp_policy_keys: tuple[Literal["allowed_tools", "required"], ...] = ()
     skill_digest: Literal["version", "content"] | None = None
     tool_readback: Literal["authored", "compiled"] = "authored"
@@ -146,6 +149,10 @@ class Profile(Contract):
 
     def support_for(self, capability: Capability) -> Support:
         return self.support.get(capability, "unknown")
+
+    def undeclared_model_options(self, options: Mapping[str, JsonValue]) -> tuple[str, ...]:
+        """The option keys outside `model_controls`, sorted: empty when all are declared."""
+        return tuple(sorted(set(options) - set(self.model_controls)))
 
     @property
     def execution_tools(self) -> frozenset[str]:
