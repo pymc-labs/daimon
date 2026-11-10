@@ -190,6 +190,15 @@ def managed_agents(
     secrets: SecretResolver | None = None,
     records: async_sessionmaker[AsyncSession],
 ) -> RecordRoutedManagedAgents: ...
+@overload
+def managed_agents(
+    client: AsyncAnthropic | None,
+    *,
+    scope: Scope | None = None,
+    resources: frozenset[tuple[str, str]] = frozenset(),
+    secrets: SecretResolver | None = None,
+    records: async_sessionmaker[AsyncSession] | None,
+) -> AnthropicManagedAgents: ...
 def managed_agents(
     client: AsyncAnthropic | None,
     *,

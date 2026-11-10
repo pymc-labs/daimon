@@ -25,9 +25,16 @@ class AnthropicUnconfigured(AnthropicDisabled):
     """No Anthropic key on this install, so Managed Agents records are unreachable."""
 
 
-def anthropic_configured(client: AsyncAnthropic | None) -> bool:
-    """Whether `client` carries a real key rather than the keyless placeholder."""
-    return client is not None and client.api_key not in (
+def anthropic_configured(client: object) -> bool:
+    """Whether `client` carries a real key rather than the keyless placeholder.
+
+    A stand-in client that is not an `AsyncAnthropic` (a test double) counts as keyed.
+    """
+    if client is None:
+        return False
+    if not isinstance(client, AsyncAnthropic):
+        return True
+    return client.api_key not in (
         None,
         "",
         ANTHROPIC_UNCONFIGURED_PLACEHOLDER,

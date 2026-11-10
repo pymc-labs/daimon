@@ -17,6 +17,7 @@ from anthropic.types.beta import (
     SkillListResponse,
 )
 from daimon.core.agent_guidance import apply_credential_guidance
+from daimon.core.anthropic_guard import AnthropicUnconfigured, anthropic_configured
 from daimon.core.config import Settings
 from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
 from daimon.core.defaults.mcp_merge import (
@@ -30,6 +31,7 @@ from daimon.core.defaults.metadata import (
     build_metadata,
     compute_spec_fingerprint,
 )
+from daimon.core.defaults.owned import AgentNameTaken, reconcile_owned_agent
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.defaults.skills import resolve_refs
 from daimon.core.defaults.spec_merge import (
@@ -37,7 +39,6 @@ from daimon.core.defaults.spec_merge import (
     merge_skills_with_ma,
     merge_tools_with_ma,
 )
-from daimon.core.errors import DaimonError
 from daimon.core.features.model_input import guidance_applies
 from daimon.core.features.snapshot import Sessions, resolve_agent_features
 from daimon.core.ma import update_agent_with_version_retry
@@ -46,10 +47,6 @@ from daimon.core.mux_compat import archive_agent, create_agent, update_agent
 from daimon.core.specs import AgentSpec, dump_agent_spec
 
 _log = structlog.get_logger(__name__)
-
-
-class AgentNameTaken(DaimonError):
-    """A create-only reconcile found an agent of that name already in the tenant."""
 
 
 async def reconcile_agent(
@@ -109,6 +106,17 @@ async def reconcile_agent(
         update["tools"] = merged_tools
     if update:
         spec = spec.model_copy(update=update)
+    if not anthropic_configured(client):
+        return await _reconcile_owned(
+            spec,
+            tenant_id=tenant_id,
+            dry_run=dry_run,
+            account_id=account_id,
+            managed=managed,
+            create_only=create_only,
+            sessions=sessions,
+            settings=settings,
+        )
 
     # A seeded agent's platform-limited skill stays off it: admission adds it
     # to the sessions of turns on its platforms, so every other platform's
@@ -158,17 +166,9 @@ async def reconcile_agent(
     # The safety preamble always, then the guidance unless it is Off or the agent is
     # isolated (no vault, no mounted env: the guidance would be wrong). Applied before
     # the hash, so a changed `guidance` updates the agent once, then stabilises.
-    features = await resolve_agent_features(
-        sessions,
-        settings,
-        tenant_id=tenant_id,
-        agent_id=ma_match.id if ma_match is not None else None,
-        keys=("guidance",),
-        spec_values=spec.features,
+    spec = await _with_guidance(
+        spec, sessions, settings, tenant_id=tenant_id, agent_id=ma_match.id if ma_match else None
     )
-    guidance = guidance_applies(isolated=spec.isolated, features=features)
-    system = apply_credential_guidance(spec.system or "", guidance=guidance, isolated=spec.isolated)
-    spec = spec.model_copy(update={"system": system})
     outcome = await _write_agent(
         client,
         spec,
@@ -180,6 +180,68 @@ async def reconcile_agent(
         managed=managed,
         resolved_skills=resolved_skills,
     )
+    await _sync_features(sessions, spec, tenant_id=tenant_id, dry_run=dry_run, outcome=outcome)
+    return outcome
+
+
+async def _reconcile_owned(
+    spec: AgentSpec,
+    *,
+    tenant_id: uuid.UUID,
+    dry_run: bool,
+    account_id: uuid.UUID | None,
+    managed: bool,
+    create_only: bool,
+    sessions: Sessions | None,
+    settings: Settings | None,
+) -> ResourceOutcome:
+    """No Anthropic key: the agent is a Daimon record on the keyed provider."""
+    if sessions is None:
+        raise AnthropicUnconfigured("No Anthropic key is configured on this Daimon install.")
+    spec = await _with_guidance(spec, sessions, settings, tenant_id=tenant_id, agent_id=None)
+    outcome = await reconcile_owned_agent(
+        sessions,
+        spec,
+        tenant_id=tenant_id,
+        dry_run=dry_run,
+        account_id=account_id,
+        managed=managed,
+        create_only=create_only,
+    )
+    await _sync_features(sessions, spec, tenant_id=tenant_id, dry_run=dry_run, outcome=outcome)
+    return outcome
+
+
+async def _with_guidance(
+    spec: AgentSpec,
+    sessions: Sessions | None,
+    settings: Settings | None,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: str | None,
+) -> AgentSpec:
+    """Spec with the safety preamble and, unless Off or isolated, the credential guidance."""
+    features = await resolve_agent_features(
+        sessions,
+        settings,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        keys=("guidance",),
+        spec_values=spec.features,
+    )
+    guidance = guidance_applies(isolated=spec.isolated, features=features)
+    system = apply_credential_guidance(spec.system or "", guidance=guidance, isolated=spec.isolated)
+    return spec.model_copy(update={"system": system})
+
+
+async def _sync_features(
+    sessions: Sessions | None,
+    spec: AgentSpec,
+    *,
+    tenant_id: uuid.UUID,
+    dry_run: bool,
+    outcome: ResourceOutcome,
+) -> None:
     if sessions is not None and not dry_run and outcome.anthropic_id is not None:
         # Imported here: the feature service reaches `authz`, which imports `defaults`.
         from daimon.core.features.service import sync_agent_features
@@ -187,7 +249,6 @@ async def reconcile_agent(
         await sync_agent_features(
             sessions, tenant_id=tenant_id, agent_id=outcome.anthropic_id, values=spec.features
         )
-    return outcome
 
 
 async def _write_agent(

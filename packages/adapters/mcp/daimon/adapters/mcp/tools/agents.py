@@ -64,6 +64,7 @@ from daimon.core.agent_identity import queue_agent_face
 from daimon.core.agent_lifecycle import forget_archived_agent
 from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
 from daimon.core.agent_ownership import agent_name_lock, member_copies_lock
+from daimon.core.anthropic_guard import anthropic_configured
 from daimon.core.authz import Surface
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
 from daimon.core.defaults.ma_index import list_agents_by_tenant
@@ -840,7 +841,10 @@ async def _create_agent_impl(
     owner = may_own(auth)
 
     start: Callable[[str], Awaitable[None]] | None = None
-    if backend is not None:
+    if backend is not None and not anthropic_configured(runtime.client):
+        # No Anthropic key: the agent is born a Daimon record on that model.
+        spec = spec.model_copy(update={"model": backend[1]})
+    elif backend is not None:
         target, target_model = backend
 
         async def start_there(_ma_agent_id: str) -> None:

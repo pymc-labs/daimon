@@ -2058,3 +2058,38 @@ async def current_agent_backend(
     if not isinstance(cast(object, agent_id), uuid.UUID):
         raise AgentBackendRefused("agent_identity_required")
     return await agent_backends.current(session, tenant_id, agent_id)
+
+
+async def record_born_backend(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    record_id: str,
+    agent_name: str,
+    provider: Provider,
+    model: str,
+) -> AgentBackendRevision:
+    """Give a Daimon record created on `provider` its first backend revision.
+
+    It has no Claude source to switch from, so there is no preview and no drop
+    consent; the revision only states where it runs. Idempotent per record.
+    """
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=record_id)
+    existing = await agent_backends.current(session, tenant_id, agent_id)
+    if existing is not None:
+        return existing
+    digest = _digest(
+        {"tenant_id": tenant_id, "agent_id": agent_id, "backend": provider, "model": model}
+    )
+    return await agent_backends.put_revision(
+        session,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        local=1,
+        backend=provider,
+        digest=digest,
+        previous_local=None,
+        agent_name=agent_name,
+        preview_digest=digest,
+        model=model,
+    )
