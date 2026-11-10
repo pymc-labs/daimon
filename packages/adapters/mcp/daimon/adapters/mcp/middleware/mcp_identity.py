@@ -47,6 +47,7 @@ from daimon.core.mcp_hold import HOLD_CLAIM, parse_hold_claim
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.operator_tokens import scope_tag
 from daimon.core.security_audit import capture_decision, record_denial
+from daimon.core.session_seal import SEAL_CLAIM, parse_seal_claim
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.agent_daimon_tools import get_enabled_daimon_tools
 from daimon.core.stores.domain import McpTokenKind, Role
@@ -363,6 +364,8 @@ class IdentityMiddleware(Middleware):
             raw_session = _token.claims.get("chat_session_id")
             if raw_session is not None and (not isinstance(raw_session, str) or not raw_session):
                 raise AuthorizationError("malformed chat session binding")
+            if parse_seal_claim(_token.claims.get(SEAL_CLAIM)) is None:
+                raise AuthorizationError("malformed seal binding")
 
         # Keep chat execution identity separate from external agent credentials:
         # agent_id controls tool visibility and several authorization gates.
@@ -463,6 +466,12 @@ class IdentityMiddleware(Middleware):
                 else None
             ),
             slack_turn_context_id=slack_turn_context_id,
+            # A chat turn's own signed seals; never an agent key's or internal token's.
+            seal_ids=(
+                parse_seal_claim(_token.claims.get(SEAL_CLAIM)) or frozenset()
+                if _token is not None and agent_id is None and not internal_claim
+                else frozenset()
+            ),
             chat_session_id=(
                 _token.claims.get("chat_session_id")
                 if _token is not None

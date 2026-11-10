@@ -75,6 +75,8 @@ class AuthIdentity:
     slack_turn_context_id: uuid.UUID | None = None
     # Signed grant for one isolated provider session, never a tool argument.
     chat_session_id: str | None = None
+    # A provider turn's signed seals (`SEAL_CLAIM`): sealed sessions it reads stay inside them.
+    seal_ids: frozenset[str] = frozenset()
     # Set from the token's `mcp_tokens` row by the verifier; None for jti-less tokens.
     is_chat_execution: bool = False
     token_kind: McpTokenKind | None = None
