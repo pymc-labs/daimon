@@ -454,6 +454,8 @@ async def decide_continuation(
        Not for a timer, which is meant to fire whatever was said since.
     4. A turn is already running in this thread. The continuation waits for it
        rather than racing it, and the person is told so.
+    5. A confirmed-call wake whose approved calls an earlier wake already ran:
+       there is nothing to run, so it skips silently.
 
     Otherwise: dispatch, seeded with the person's own words.
 
@@ -541,6 +543,23 @@ async def decide_continuation(
                 request.target_name, handoff=request.reason == "task_handoff"
             ),
         )
+
+    if request.reason == "confirmed_call":
+        from daimon.core.host_calls import has_approved_calls
+        from daimon.core.ma_identity import derive_agent_uuid
+
+        # One wake runs every approved call for the thread; a second finds none left.
+        if not await has_approved_calls(
+            sessionmaker,
+            tenant_id=request.tenant_id,
+            platform=request.platform,
+            thread_id=request.thread_id,
+            executing_agent_id=derive_agent_uuid(
+                tenant_id=request.tenant_id, ma_agent_id=request.target_ma_agent_id
+            ),
+            now=now,
+        ):
+            return ContinuationDecision(action="skip_superseded")
 
     if request.reason in WATCH_REASONS:
         from daimon.core.stores.watches import watch_seed
