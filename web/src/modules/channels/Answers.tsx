@@ -39,7 +39,7 @@ export function Answers({ c, workspace, settings }: { c: ChannelDetail; workspac
   const inherited = {
     value: workspace?.value ?? "",
     label: workspace?.value ? agentName(c.agents, workspace.value) : "None",
-    from: workspace?.source === "workspace" ? "Workspace" as const : "Deployment" as const,
+    from: workspace?.source === "workspace" ? "Workspace" as const : "Built-in" as const,
   }
   const link = (k: string) => { const r = agentOf(c.agents, k)!; return <AgentLink id={r.id} name={r.name} avatar={r.avatar} /> }
   const items = choices.map((a) => ({ id: a.key, label: a.name, icon: face(a.name, a.avatar), node: c.kept_agents.includes(a.key) ? link(a.key) : undefined }))

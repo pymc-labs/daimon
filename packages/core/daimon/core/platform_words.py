@@ -61,7 +61,7 @@ DESCRIPTIONS: Mapping[Action, str] = MappingProxyType(
         "routines": "Scheduled jobs",
         "dm_me": "Continue privately (an admin turns it on)",
         "billing": "Your usage and credit",
-        "settings": "Approvals, threads, plans and the cost line here",
+        "settings": "Change how I behave here",
         "privacy": "See, export or delete your data",
         "new": "Start a fresh conversation",
         "dm_settings": "Switch server or start over in our DM",

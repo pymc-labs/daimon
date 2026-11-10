@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from daimon.core.features.registry import DEFAULT, FEATURES, TIERS
 from daimon.core.features.resolver import ResolvedFeature
-from daimon.core.features.service import TierSetting
+from daimon.core.features.service import TierSetting, tier_word, where
 from daimon.core.features.surface import (
     CATEGORIES,
     Choice,
@@ -14,8 +14,6 @@ from daimon.core.features.surface import (
     parse_choice,
     source_text,
     tier_options,
-    tier_word,
-    where,
 )
 
 
