@@ -289,16 +289,29 @@ async def fail_approved(session: AsyncSession, *, card_id: uuid.UUID, outcome: s
 
 
 async def sweep(
-    session: AsyncSession, *, now: datetime, executing_before: datetime, crashed_outcome: str
+    session: AsyncSession,
+    *,
+    now: datetime,
+    executing_before: datetime,
+    crashed_outcome: str,
+    unrun_outcome: str,
 ) -> int:
-    """Expire unanswered cards and fail calls a crashed worker left executing.
+    """Expire unanswered cards; fail approved calls nobody ran and ones a crashed worker left.
 
     A stuck `executing` row may or may not have run, so it is failed, never retried.
+    An `approved` row past its expiry never reached a wake turn (the wake was refused or
+    lost), so nothing ran: it is failed with `unrun_outcome`, never run late.
     """
     expired = await session.execute(
         update(HostCallCard)
         .where(HostCallCard.status == "pending", HostCallCard.expires_at <= now)
         .values(status="expired")
+        .returning(HostCallCard.id)
+    )
+    stranded = await session.execute(
+        update(HostCallCard)
+        .where(HostCallCard.status == "approved", HostCallCard.expires_at <= now)
+        .values(status="failed", outcome=unrun_outcome)
         .returning(HostCallCard.id)
     )
     stuck = await session.execute(
@@ -307,4 +320,4 @@ async def sweep(
         .values(status="failed", outcome=crashed_outcome)
         .returning(HostCallCard.id)
     )
-    return len(expired.all()) + len(stuck.all())
+    return len(expired.all()) + len(stranded.all()) + len(stuck.all())

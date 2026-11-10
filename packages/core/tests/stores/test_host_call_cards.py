@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from daimon.core._models import TaskContinuation
-from daimon.core.host_calls import CRASHED_TEXT, press_host_call
+from daimon.core.host_calls import CRASHED_TEXT, NOT_RUN_TEXT, press_host_call
 from daimon.core.stores import host_call_cards as cards
 from daimon.testing.db import require_owned_sessionmaker
 from daimon.testing.factories import make_account, make_tenant
@@ -199,9 +199,40 @@ async def test_sweep_expires_unanswered_and_fails_stuck_executing(lane: Lane) ->
     assert await _consume(lane, stuck.row.id, digest="s") is not None, "taken to execute"
     later = datetime.now(UTC) + timedelta(minutes=5)
     async with lane.sessions.begin() as session:
-        await cards.sweep(session, now=later, executing_before=later, crashed_outcome=CRASHED_TEXT)
+        await cards.sweep(
+            session,
+            now=later,
+            executing_before=later,
+            crashed_outcome=CRASHED_TEXT,
+            unrun_outcome=NOT_RUN_TEXT,
+        )
         expired = await cards.get_card(session, tenant_id=lane.tenant_id, card_id=late.row.id)
         failed = await cards.get_card(session, tenant_id=lane.tenant_id, card_id=stuck.row.id)
     assert expired is not None and expired.status == "expired", f"unanswered expires: {expired}"
     assert failed is not None and failed.status == "failed", f"stuck fails: {failed}"
     assert failed.outcome == CRASHED_TEXT, "the outcome says check before asking again"
+
+
+async def test_sweep_fails_an_approved_call_nobody_ran_as_not_run(lane: Lane) -> None:
+    """An approval whose wake never ran says it didn't run; a fresh one is left for its wake."""
+    now = datetime.now(UTC)
+    stale = await _card(lane, thread_id="t3", digest="a", expires_in=timedelta(minutes=1), now=now)
+    fresh = await _card(lane, thread_id="t3", digest="b", expires_in=timedelta(minutes=30), now=now)
+    assert stale is not None and fresh is not None, "cards recorded"
+    for created in (stale, fresh):
+        assert await _press(lane, created.row.id, now=now) is not None, "approved"
+    later = now + timedelta(minutes=5)
+    async with lane.sessions.begin() as session:
+        swept = await cards.sweep(
+            session,
+            now=later,
+            executing_before=later,
+            crashed_outcome=CRASHED_TEXT,
+            unrun_outcome=NOT_RUN_TEXT,
+        )
+        stranded = await cards.get_card(session, tenant_id=lane.tenant_id, card_id=stale.row.id)
+        waiting = await cards.get_card(session, tenant_id=lane.tenant_id, card_id=fresh.row.id)
+    assert swept == 1, "only the approval past its expiry is swept"
+    assert stranded is not None and stranded.status == "failed", f"stranded fails: {stranded}"
+    assert stranded.outcome == NOT_RUN_TEXT, "approved-but-never-run says it did not run"
+    assert waiting is not None and waiting.status == "approved", "an unexpired approval waits"

@@ -296,11 +296,60 @@ def confirmed_call_prefix(runner: ConfirmedCallRunner) -> Callable[[], Awaitable
     return prefix
 
 
+async def sweep_stale_calls(
+    sessionmaker: async_sessionmaker[AsyncSession], *, now: dt.datetime
+) -> int:
+    """Close what no wake will: unanswered cards, approved calls that never ran, crashed runs.
+
+    A call a crashed worker left executing may have run, so it says check first; an
+    approved call that outlived its card never started, so it says it didn't run.
+    """
+    from daimon.core.stores import host_call_cards as cards
+
+    async with sessionmaker.begin() as session:
+        return await cards.sweep(
+            session,
+            now=now,
+            executing_before=now - dt.timedelta(seconds=CONFIRMED_CALL_TTL_S),
+            crashed_outcome=CRASHED_TEXT,
+            unrun_outcome=NOT_RUN_TEXT,
+        )
+
+
+async def has_approved_calls(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    thread_id: str,
+    executing_agent_id: uuid.UUID,
+    now: dt.datetime,
+) -> bool:
+    """Whether a `confirmed_call` wake has anything to run; stale calls are closed first.
+
+    An earlier wake runs every approved call for the thread, so a later one for the
+    same thread finds none and must not spend a turn.
+    """
+    from daimon.core.stores import host_call_cards as cards
+
+    await sweep_stale_calls(sessionmaker, now=now)
+    async with sessionmaker() as session:
+        rows = await cards.list_approved(
+            session,
+            tenant_id=tenant_id,
+            platform=platform,
+            thread_id=thread_id,
+            executing_agent_id=executing_agent_id,
+        )
+    return bool(rows)
+
+
 async def run_confirmed_calls(runner: ConfirmedCallRunner) -> str:
     """Run every approved call for this thread and agent; their results, framed as untrusted."""
     from daimon.core.stores import host_call_cards as cards
     from daimon.core.turn_origin import current_execution_origin_id
 
+    await sweep_stale_calls(runner.sessionmaker, now=runner.clock())
     async with runner.sessionmaker() as session:
         rows = await cards.list_approved(
             session,
@@ -311,14 +360,6 @@ async def run_confirmed_calls(runner: ConfirmedCallRunner) -> str:
         )
     if not rows:
         return ""
-    async with runner.sessionmaker.begin() as session:
-        # A call a crashed worker left executing may have run: fail it, never rerun it.
-        await cards.sweep(
-            session,
-            now=runner.clock(),
-            executing_before=runner.clock() - dt.timedelta(seconds=CONFIRMED_CALL_TTL_S),
-            crashed_outcome=CRASHED_TEXT,
-        )
     origin_id = current_execution_origin_id.get()
     origin = None if origin_id is None else await _session_origin(runner, origin_id, rows[0])
     results: list[str] = []
