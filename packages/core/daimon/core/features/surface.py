@@ -125,10 +125,10 @@ def tier_options(
     spec: FeatureSpec, tier: Tier, own: TierSetting, *, can_lock: bool, agent: str | None = None
 ) -> tuple[tuple[str, str], ...]:
     """``(choice, label)`` for each other value this tier can take: the values, Default, and
-    an admin's Lock of each. The agent's own built-in tool is only on or off."""
+    an admin's Lock of each. The agent's own built-in tool is never locked."""
     builtin = tier == "agent" and spec.key.startswith("tool.")
     options: list[tuple[str, str]] = []
-    for value in (*spec.values, *(() if builtin else (DEFAULT,))):
+    for value in (*spec.values, DEFAULT):
         if (TierSetting(tier, value)).text != own.text:
             options.append((choice(spec.key, tier, value, agent=agent), spec.label(value)))
     if can_lock and not builtin and tier in LOCKABLE and not spec.authority.native:

@@ -291,8 +291,10 @@ async def resolve_features(
     *,
     keys: Collection[str] | None = None,
     cache: FeatureCache = CACHE,
+    agent_builtins: Mapping[str, bool | None] | None = None,
 ) -> FeatureSnapshot:
-    """Resolve `keys` (every registered feature by default) for `place` in one read.
+    """Resolve `keys` (every registered feature by default) for `place` in one read;
+    `agent_builtins` (`model_input.agent_builtins`) is the agent tier of each `tool.*`.
 
     Without `settings` the deployment tier is the registry default. A database failure
     raises; this reader never falls back to a default. Callers that must keep working
@@ -317,7 +319,8 @@ async def resolve_features(
             resolved["approvals"] = approvals_from_gate(gate.value, gate.scope)
     for key in wanted:
         if key != "approvals":
-            resolved[key] = resolve_one(FEATURES[key], settings, place, rows, resolved)
+            spec = FEATURES[key]
+            resolved[key] = resolve_one(spec, settings, place, rows, resolved, agent_builtins)
     return FeatureSnapshot(place, revision, resolved)
 
 

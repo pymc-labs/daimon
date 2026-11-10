@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 from anthropic.types.beta import BetaManagedAgentsAgent
+from anthropic.types.beta.agent_create_params import Tool
 from daimon.core.config import Settings
-from daimon.core.features.model_input import TOOLSET_KEYS, SessionToolset, agent_toolset
+from daimon.core.features.model_input import (
+    TOOLSET_KEYS,
+    SessionToolset,
+    agent_builtins,
+    agent_toolset,
+)
 from daimon.core.features.session_identity import IDENTITY_RESOLVE_KEYS, SessionIdentity
 from daimon.core.features.snapshot import FeaturePlace, Sessions, resolve_features
 
@@ -27,5 +35,7 @@ async def place_session(
 ) -> tuple[SessionToolset, SessionIdentity]:
     """The toolset and identity features a new session of `agent` at `place` gets."""
     keys = tuple(dict.fromkeys((*TOOLSET_KEYS, *IDENTITY_RESOLVE_KEYS)))
-    features = await resolve_features(sessions, settings, place, keys=keys)
+    tools = cast(list[Tool], [tool.model_dump(mode="json") for tool in agent.tools])
+    builtins = agent_builtins(tools)
+    features = await resolve_features(sessions, settings, place, keys=keys, agent_builtins=builtins)
     return agent_toolset(features, agent), SessionIdentity.of(features)

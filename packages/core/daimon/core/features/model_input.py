@@ -176,8 +176,25 @@ def _with_policies(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def agent_builtins(tools: list[Tool]) -> dict[str, bool | None]:
-    """The agent tier of every `tool.*` key: the agent's own toolset config."""
-    return {tool: builtin_enabled(tools, tool) for tool in BUILTIN_TOOLS}
+    """The agent tier of every `tool.*` key: the tool's own config entry, or Off when the
+    agent's toolset is off by default and does not list it; None (Default) otherwise."""
+    return {tool: _own_builtin(tools, tool) for tool in BUILTIN_TOOLS}
+
+
+def _own_builtin(tools: list[Tool], tool: str) -> bool | None:
+    found: bool | None = None
+    for entry in tools:
+        if not str(entry.get("type", "")).startswith("agent_toolset"):
+            continue
+        raw = cast(dict[str, Any], entry)
+        default = cast(dict[str, Any], raw.get("default_config") or {}).get("enabled")
+        config = next((c for c in raw.get("configs") or () if c.get("name") == tool), None)
+        if config is None and default is not False:
+            continue
+        enabled = None if config is None else config.get("enabled")
+        on = bool(enabled) if enabled is not None else default is not False
+        found = on or bool(found)
+    return found
 
 
 def agent_toolset(
@@ -215,11 +232,14 @@ def builtin_enabled(tools: list[Tool], tool: str) -> bool | None:
     return found
 
 
-def with_builtin(tools: list[Tool], tool: str, enabled: bool) -> list[Tool]:
-    """`tools` with `tool` turned on or off; any permission policy it had is kept.
+def with_builtin(tools: list[Tool], tool: str, enabled: bool | None) -> list[Tool]:
+    """`tools` with `tool` turned on or off, or (None) its own entry removed; any
+    permission policy it had is kept.
 
     An agent with no toolset gains one holding only `tool`, never the defaults.
     """
+    if enabled is None:
+        return [_without(entry, tool) for entry in tools]
     if builtin_enabled(tools, tool) is None:
         only: Tool = cast(
             Tool,
@@ -246,3 +266,11 @@ def with_builtin(tools: list[Tool], tool: str, enabled: bool) -> list[Tool]:
         raw["configs"] = configs
         updated.append(cast(Tool, raw))
     return updated
+
+
+def _without(entry: Tool, tool: str) -> Tool:
+    if not str(entry.get("type", "")).startswith("agent_toolset"):
+        return entry
+    raw = dict(cast(dict[str, Any], entry))
+    raw["configs"] = [c for c in raw.get("configs") or () if c.get("name") != tool]
+    return cast(Tool, raw)

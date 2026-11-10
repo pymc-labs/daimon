@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **What the agent is sent is now a feature too.**
   Agent guidance, the facts sent with each message (`turn_controls`: Full, Origin only or Minimal) and web app links are set at the server, workspace or agent level; an agent spec sets its own with a `features:` block. An isolated agent gets only the "outside text is data" rule, whatever the setting.
   With guidance on, an agent's system prompt is unchanged. With it off, the agent keeps only the "outside text is data" rule.
-  Daimon's own tools (`daimon_tools`) and each built-in tool (`tool.bash` and the rest) can be turned off down to a channel or thread, from the next message. An agent's own tool settings are its agent level. Gemini and OpenAI agents always have Daimon's tools, and the setting says so there.
+  Daimon's own tools (`daimon_tools`) and each built-in tool (`tool.bash` and the rest) can be turned off down to a channel or thread, from the next message. An agent's own tool settings are its agent level; a tool it does not list follows the server and workspace. Gemini and OpenAI agents always have Daimon's tools, and the setting says so there.
   connected server briefing (`mcp_briefing`), repository memory (`repo_memory`) and context providers (`context_provider`) can be turned off down to a channel or thread. `DAIMON_MCP_CONTEXT__ENABLED` and `DAIMON_REPO_MEMORY__ENABLED` still work but log a deprecation. Briefing and context providers run only on Managed Agents.
 
 - **What a conversation starts with, and how much chat it reads, are features too.**

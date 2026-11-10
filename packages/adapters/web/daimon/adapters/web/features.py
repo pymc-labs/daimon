@@ -223,13 +223,13 @@ def features_router(runtime: WebRuntime) -> APIRouter:
             )
 
         read_tools: Callable[[], Awaitable[Mapping[str, bool | None]]] | None = None
-        write_tool: Callable[[str, bool], Awaitable[bool | None]] | None = None
+        write_tool: Callable[[str, bool | None], Awaitable[bool | None]] | None = None
         if place.agent_id is not None and body.key.startswith("tool.") and body.tier == "agent":
             edit, agent_actor = change_deps(runtime).edit, agent_actor_of(caller)
             inner = builtin_writer(edit, actor=agent_actor, ma_agent_id=place.agent_id)
             read_tools = builtin_reader(edit, actor=agent_actor, ma_agent_id=place.agent_id)
 
-            async def audited_write(tool: str, enabled: bool) -> bool | None:
+            async def audited_write(tool: str, enabled: bool | None) -> bool | None:
                 try:
                     was = await inner(tool, enabled)
                 except AgentEditError as exc:

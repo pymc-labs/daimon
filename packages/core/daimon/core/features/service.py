@@ -78,8 +78,8 @@ class FeatureActor:
     """Who changes a feature. `native_user_id` is the chat identity checked live for
     approvals; `admin_for` answers for a delegated action as the surface decides it;
     `owns_agent` answers whether the actor owns an agent (the agent tier's authority).
-    `write_builtin` turns one of the place's agent's built-in tools on or off in the
-    agent's own config, the agent tier of `tool.*`, and returns what it was;
+    `write_builtin` turns one of the place's agent's built-in tools on or off (None: drops
+    its entry) in the agent's own config, the agent tier of `tool.*`, and returns what it was;
     `read_builtins` reads that config, so a write can check the caller's last read."""
 
     tenant_id: uuid.UUID
@@ -90,7 +90,7 @@ class FeatureActor:
     via_agent_key: bool = False
     on_write: WriteHook | None = None
     owns_agent: Callable[[str], Awaitable[bool]] | None = None
-    write_builtin: Callable[[str, bool], Awaitable[bool | None]] | None = None
+    write_builtin: Callable[[str, bool | None], Awaitable[bool | None]] | None = None
     read_builtins: Callable[[], Awaitable[Mapping[str, bool | None]]] | None = None
 
 
@@ -670,8 +670,8 @@ async def _write_builtin(
         raise _refused(
             "An agent's built-in tools are changed where the agent is edited.", "agent_tools"
         )
-    if after.value == DEFAULT or after.locked:
-        raise _refused("An agent's built-in tool is either on or off.", "invalid_value")
+    if after.locked:
+        raise _refused("An agent's built-in tool can't be locked.", "invalid_value")
     tool = spec.key.removeprefix("tool.")
     if expected is not None:
         if actor.read_builtins is None:
@@ -692,9 +692,9 @@ async def _write_builtin(
             keys=(spec.key,),
         )
     above = resolve_above(spec, tier_values(spec, settings, place, rows), "agent")
-    if above.locked and after.value != above.value:
+    if above.locked and after.value not in (DEFAULT, above.value):
         raise _locked_above(spec, above, place, "agent")
-    was = await actor.write_builtin(tool, after.value == "on")
+    was = await actor.write_builtin(tool, None if after.value == DEFAULT else after.value == "on")
     return TierSetting("agent", DEFAULT if was is None else "on" if was else "off")
 
 
