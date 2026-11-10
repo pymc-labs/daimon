@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 from daimon.core._models import HostCallCard
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -133,7 +133,8 @@ async def create_card(
         )
         .on_conflict_do_nothing(
             index_elements=["origin_id", "tool_name", "args_digest"],
-            index_where=HostCallCard.status == "pending",
+            # A literal: Postgres matches a partial index only on its exact predicate.
+            index_where=text("status = 'pending'"),
         )
         .returning(HostCallCard)
     )
