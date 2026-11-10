@@ -18,7 +18,7 @@ from anthropic.types.beta import (
 )
 from daimon.core.agent_guidance import apply_credential_guidance
 from daimon.core.config import Settings
-from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
+from daimon.core.defaults.ma_index import find_agents_by_daimon_tag, find_renamed_seeded_agent
 from daimon.core.defaults.mcp_merge import (
     is_corrupted_daimon_mcp_entry,
     merge_default_mcp_server,
@@ -26,7 +26,9 @@ from daimon.core.defaults.mcp_merge import (
 )
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
+    MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_SPEC_HASH,
+    SEEDED_AGENT_RENAME,
     build_metadata,
     compute_spec_fingerprint,
 )
@@ -121,6 +123,17 @@ async def reconcile_agent(
         skills_view=skills_view if dry_run else None,
     )
     matches = await find_agents_by_daimon_tag(client, tenant_id=tenant_id, name=spec.name)
+    seeded_live = any(m.metadata.get(MA_METADATA_KEY_MANAGED) == "true" for m in matches)
+    if managed and not seeded_live and spec.name == SEEDED_AGENT_RENAME[0]:
+        # Leave the seeded agent renamed in place alone: creating `daimon` would
+        # fork it, updating it would rename it back, and adopting a workspace's
+        # own `daimon` would overwrite that agent (see `SEEDED_AGENT_RENAME`).
+        renamed = await find_renamed_seeded_agent(client, tenant_id=tenant_id)
+        if renamed is not None:
+            _log.info("reconcile.renamed_seeded_agent_skipped", agent_id=renamed.id)
+            return ResourceOutcome(
+                kind="agent", name=spec.name, action=Action.SKIPPED, anthropic_id=renamed.id
+            )
     ma_match = matches[0] if matches else None
     if create_only and ma_match is not None:
         raise AgentNameTaken(spec.name)

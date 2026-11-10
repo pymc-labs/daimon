@@ -5,6 +5,7 @@ import uuid
 from datetime import UTC, datetime
 
 import httpx
+import pytest
 import structlog
 from anthropic.types.beta import SkillListResponse
 from daimon.core.defaults.ma_index import (
@@ -18,6 +19,9 @@ from daimon.core.errors import SkillsListTruncatedError
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import MARouter, list_response
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic as build_fake_anthropic_http
+
+_TENANT = uuid.UUID("70121a77-33ce-566b-a2ee-47d93bc422ae")
+_OTHER_TENANT = uuid.UUID("00000000-0000-0000-0000-000000000002")
 
 
 async def test_find_agent_returns_match() -> None:
@@ -57,6 +61,58 @@ async def test_find_agent_returns_none_when_missing() -> None:
     router.add("GET", r"/v1/agents", lambda req, _m: list_response([]))
     client = build_fake_anthropic_http(router.dispatch)
     assert await find_agent_by_daimon_tag(client, tenant_id=tenant_id, name="x") is None
+
+
+@pytest.mark.parametrize(
+    ("listed", "expected"),
+    [
+        ([("ag_renamed", "default", True, _TENANT)], "ag_renamed"),
+        ([("ag_users", "default", False, _TENANT)], None),
+        ([("ag_other", "default", True, _OTHER_TENANT)], None),
+        (
+            [("ag_renamed", "default", True, _TENANT), ("ag_seeded", "daimon", True, _TENANT)],
+            "ag_seeded",
+        ),
+    ],
+    ids=["renamed", "unmanaged-default", "other-tenants-default", "seeded-daimon-wins"],
+)
+async def test_find_agent_daimon_falls_back_only_to_this_tenants_renamed_seeded_agent(
+    listed: list[tuple[str, str, bool, uuid.UUID]], expected: str | None
+) -> None:
+    """A later release renames the seeded `daimon` to `default` in place. A miss
+    on `daimon` reaches that agent, never a workspace's own `default` or another
+    tenant's, and a live `daimon` still wins.
+    """
+    agents = [
+        ma_agent(
+            id=id_,
+            name=name,
+            tenant_id=tenant,
+            metadata={"daimon_managed": "true"} if managed else None,
+        ).model_dump(mode="json")
+        for id_, name, managed, tenant in listed
+    ]
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda req, _m: list_response(agents))
+    client = build_fake_anthropic_http(router.dispatch)
+
+    match = await find_agent_by_daimon_tag(client, tenant_id=_TENANT, name="daimon")
+
+    assert (match.id if match else None) == expected, "only the renamed seeded agent stands in"
+
+
+async def test_find_agent_other_names_never_fall_back_to_default() -> None:
+    """The fallback is for the seeded name alone."""
+    agent = ma_agent(
+        id="ag_renamed", name="default", tenant_id=_TENANT, metadata={"daimon_managed": "true"}
+    ).model_dump(mode="json")
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda req, _m: list_response([agent]))
+    client = build_fake_anthropic_http(router.dispatch)
+
+    assert await find_agent_by_daimon_tag(client, tenant_id=_TENANT, name="x") is None, (
+        "a miss on any other name stays a miss"
+    )
 
 
 async def test_find_agent_multi_match_returns_most_recent_and_warns() -> None:

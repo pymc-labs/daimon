@@ -11,7 +11,7 @@ others are left alone and a warning is logged.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Collection
+from collections.abc import Collection, Iterable
 from typing import Literal
 
 import sentry_sdk
@@ -27,8 +27,10 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_NAME,
     MA_METADATA_KEY_TENANT,
+    SEEDED_AGENT_RENAME,
     find_conflicting_skill_body,
     find_mount_collision,
+    is_renamed_seeded_agent,
     strip_tenant_prefix,
 )
 from daimon.core.errors import DaimonError, SkillsListTruncatedError
@@ -107,7 +109,11 @@ async def find_agent_by_daimon_tag(
     name: str,
     include_archived: bool = False,
 ) -> BetaManagedAgentsAgent | None:
-    """Read-only adapter for the resolver: canonical match only, no side effects."""
+    """Read-only adapter for the resolver: canonical match only, no side effects.
+
+    A miss on the seeded name falls back to the tenant's seeded agent renamed in
+    place (`SEEDED_AGENT_RENAME`); never to a workspace's own agent of that name.
+    """
     matches = await find_agents_by_daimon_tag(
         client, tenant_id=tenant_id, name=name, include_archived=include_archived
     )
@@ -124,7 +130,24 @@ async def find_agent_by_daimon_tag(
             adopted_account=matches[0].metadata.get(MA_METADATA_KEY_ACCOUNT),
             duplicate_accounts=[m.metadata.get(MA_METADATA_KEY_ACCOUNT) for m in matches[1:]],
         )
+    if not matches and name == SEEDED_AGENT_RENAME[0]:
+        return await find_renamed_seeded_agent(client, tenant_id=tenant_id)
     return matches[0] if matches else None
+
+
+def pick_renamed_seeded_agent(
+    agents: Iterable[BetaManagedAgentsAgent],
+) -> BetaManagedAgentsAgent | None:
+    """The newest of one tenant's `agents` that is the seeded agent after its rename."""
+    renamed = [ag for ag in agents if is_renamed_seeded_agent(ag.metadata)]
+    return max(renamed, key=lambda ag: ag.created_at, default=None)
+
+
+async def find_renamed_seeded_agent(
+    client: AsyncAnthropic, *, tenant_id: uuid.UUID
+) -> BetaManagedAgentsAgent | None:
+    """The tenant's live seeded agent renamed to `default` (`SEEDED_AGENT_RENAME`), or None."""
+    return pick_renamed_seeded_agent(await list_agents_by_tenant(client, tenant_id=tenant_id))
 
 
 async def find_environments_by_daimon_tag(
