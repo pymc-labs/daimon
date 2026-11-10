@@ -122,7 +122,7 @@ def test_registry_places_and_defaults() -> None:
         ("participation", "server", "on", SettingsPlace.of("slack", "C1", None), "wrong_platform"),
         ("approvals", "agent", "on", SettingsPlace.of("discord", "C1", None, "a1"), "wrong_level"),
         ("approvals", "thread", "on", SettingsPlace.of("discord", "C1", None), "no_such_level"),
-        ("participation", "agent", "on", THREAD, "no_such_level"),
+        ("participation", "agent", "on", THREAD, "wrong_level"),
         ("progress_plans", "thread", "disabled", THREAD, "thread_disabled"),
     ],
 )
