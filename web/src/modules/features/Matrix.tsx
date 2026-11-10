@@ -4,7 +4,7 @@ import { useFeatureSchema, useFeatures } from "./api"
 import type { FeatureSchema, Tier } from "./types"
 
 const COLUMNS: { tier: Tier; label: string }[] = [
-  { tier: "deployment", label: "Built-in" }, { tier: "workspace", label: "Workspace" }, { tier: "agent", label: "Agent" },
+  { tier: "deployment", label: "Deployment" }, { tier: "workspace", label: "Workspace" }, { tier: "agent", label: "Agent" },
 ]
 
 /** Every feature against the levels an agent inherits from: what each sets and which one wins. */

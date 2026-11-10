@@ -37,7 +37,7 @@ describe("FeatureSettings", () => {
 
   it("draws a control for each key set at this level, from the schema", () => {
     render(<FeatureSettings place={{ channel: "c1" }} tier="channel" edit />)
-    expect(screen.getByRole("combobox", { name: "Progress plans" })).toHaveTextContent("Built-in default (On)")
+    expect(screen.getByRole("combobox", { name: "Progress plans" })).toHaveTextContent("Default (On)")
     expect(screen.queryByRole("combobox", { name: "Setup guidance" })).not.toBeInTheDocument()
   })
 

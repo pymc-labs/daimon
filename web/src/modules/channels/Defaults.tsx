@@ -39,8 +39,8 @@ export function DefaultsTab() {
       const ownEnv = d.environment.source === "workspace" ? d.environment.value : null
       const choices = agentChoices(roster, d.agent.value ? [d.agent.value] : [], list?.agents)
       // The built-in value is only known while the workspace has none of its own.
-      const agentFrom = { value: d.agent.value ?? "", label: ownAgent ? "" : d.agent.value ? agentName(list?.agents, d.agent.value) : "None", from: "Built-in" as const }
-      const envFrom = { value: d.environment.value ?? "", label: ownEnv ? "" : (d.environment.value ?? "None"), from: "Built-in" as const }
+      const agentFrom = { value: d.agent.value ?? "", label: ownAgent ? "" : d.agent.value ? agentName(list?.agents, d.agent.value) : "None", from: "Default" as const }
+      const envFrom = { value: d.environment.value ?? "", label: ownEnv ? "" : (d.environment.value ?? "None"), from: "Default" as const }
       return (
         <>
         <div className="px-4 pt-6 lg:px-6">

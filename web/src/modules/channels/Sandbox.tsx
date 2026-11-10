@@ -25,7 +25,7 @@ export function Sandbox({ c, workspace }: { c: ChannelDetail; workspace?: Channe
       {c.can_manage ? (
         <InheritedSelect
           label="Sandbox" value={own} disabled={save.pending} onChange={(v) => void run(v)}
-          inherited={{ value: workspace?.value ?? "", label: workspace?.value ?? "None", from: workspace?.source === "workspace" ? "Workspace" : "Built-in" }}
+          inherited={{ value: workspace?.value ?? "", label: workspace?.value ?? "None", from: workspace?.source === "workspace" ? "Workspace" : "Deployment" }}
           options={[...new Set([...names, ...(own ? [own] : [])])].map((n) => ({ value: n, label: n }))}
         />
       ) : (

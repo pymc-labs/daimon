@@ -14,7 +14,7 @@ from daimon.core.stores.domain import CHAT_PLATFORMS
 OUT = Path(__file__).resolve().parents[1] / "docs" / "features.md"
 _TIER = {
     "deployment": "Deployment",
-    "workspace": "Server",
+    "workspace": "Workspace",
     "agent": "Agent",
     "channel": "Channel",
     "thread": "Thread",
@@ -35,11 +35,12 @@ _COMBINE = {
 }
 _INTRO = """# Features
 
-Every feature is set at one or more levels: deployment, server, agent, channel and
-thread. Each level is On, Off or Default, or one of the feature's values. Default
-inherits from the level above. Settings show which level decided.
+Every feature is set at one or more levels: Deployment, Workspace, Agent, Channel and
+Thread. Each level is On, Off or Default, or one of the feature's values. Default
+inherits from the level above, and at the top it is the feature's built-in default.
+Settings show which level decided.
 
-An admin can lock a value at the deployment, server, agent or channel level. Levels
+An admin can lock a value at the Deployment, Workspace, Agent or Channel level. Levels
 below then cannot change it. `disabled` means Off and locked.
 
 Set the deployment level with `DAIMON_FEATURES__<KEY>`, for example
