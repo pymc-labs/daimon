@@ -150,7 +150,7 @@ def seam(monkeypatch):
     # The owner-or-admin read; this fake has no owners, so admins only.
     service.may_edit = AsyncMock(side_effect=lambda actual, actor: actor.subject.is_admin)
     service.tenant_policy = AsyncMock(
-        return_value=SimpleNamespace(enabled_backends=("anthropic", "openai"))
+        return_value=SimpleNamespace(enabled_backends=("anthropic", "openai", "gemini"))
     )
     service.read_selection = cb.AgentBackendService.read_selection.__get__(service)
     service.refused = None
@@ -322,11 +322,13 @@ async def test_direct_mcp_uses_preview_and_reread_for_shared_service_cas(seam, b
         seam.runtime, auth, "analyst", backend=backend, expected_revision=4
     )
     assert seam.loader.await_count == 2
-    assert seam.calls[0][1:] == (
-        backend,
-        4,
-        BackendActor(TENANT, ACCOUNT, Subject(is_admin=True)),
-        "d" * 64,
+    _, target, local, actor, digest = seam.calls[0]
+    assert (target, local, digest) == (backend, 4, "d" * 64)
+    # A model write builds core's own actor; the fields are what matter.
+    assert (actor.tenant_id, actor.account_id, actor.subject) == (
+        TENANT,
+        ACCOUNT,
+        Subject(is_admin=True),
     )
     assert result["revision"] == 5
     assert result["preview"]["cost_line"] == Preview().cost_line

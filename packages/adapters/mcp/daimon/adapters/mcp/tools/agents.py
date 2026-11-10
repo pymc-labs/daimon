@@ -58,6 +58,7 @@ from daimon.adapters.mcp.tools.setup_target import (
 )
 from daimon.core import agent_editing, channel_backend
 from daimon.core.admin_actions import DelegatedAction
+from daimon.core.agent_changes import change_model
 from daimon.core.agent_fork import copy_agent
 from daimon.core.agent_identity import queue_agent_face
 from daimon.core.agent_lifecycle import forget_archived_agent
@@ -88,7 +89,7 @@ from daimon.core.mux_compat import archive_agent, retrieve_agent
 from daimon.core.routing_facts import build_unrouted_note
 from daimon.core.skill_sync import SyncRepoFailure, sync_agent_skills, sync_report_failures
 from daimon.core.specs import AgentSpec, SkillRepo, merge_default_agent_toolset
-from daimon.core.stores.domain import BackendAgent, TurnOriginRow
+from daimon.core.stores.domain import AgentBackendRevision, BackendAgent, TurnOriginRow
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
 from daimon.core.tool_safety import get_mcp_server_name_rejection
 from fastmcp import Context, FastMCP
@@ -1005,6 +1006,63 @@ def _reject_reserved_servers(
         raise ToolError(f"update_agent: {rejection} Nothing was saved.")
 
 
+def _move_to_other_provider(auth: AuthIdentity, model: ModelSelection | None) -> ModelRef | None:
+    """The other provider's model `model` names, when update_agent may move there itself.
+
+    Outside a chat turn the move is `change_model`'s; inside one it stays the switch card's,
+    so the admin confirms the preview.
+    """
+    if not isinstance(model, str) or is_priced_claude_model(model):
+        return None
+    from daimon.core.agent_model_names import resolve_model
+
+    try:
+        other = resolve_model(model)
+    except ValueError:
+        return None  # the Claude path names the choices
+    if other.provider == DEFAULT_BACKEND:
+        return None
+    try:
+        require_outside_chat_turn(auth)
+    except ToolError:
+        return None  # the Claude path points at request_agent_backend_switch
+    return other
+
+
+async def _change_agent_model(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    name: str,
+    agent: BetaManagedAgentsAgent,
+    model: ModelRef,
+) -> None:
+    """Run `agent` on another provider's catalog `model`; refusals in the caller's words."""
+    if auth.agent_id is not None:
+        raise ToolError("An agent key cannot change the model provider.")
+    service = channel_backend.make_backend_service(
+        runtime.session_factory,
+        runtime.settings.turn,
+        capture_source=partial(_capture_backend_source, runtime, auth, None),
+    )
+    actor = agent_editing.AgentActor(
+        tenant_id=auth.tenant_id,
+        account_id=auth.account_id,
+        subject=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.AGENT_SETTINGS)),
+        surface=Surface.CONFIG,
+    )
+    try:
+        source = await channel_backend.load_backend_agent(
+            runtime.client,
+            runtime.session_factory,
+            tenant_id=auth.tenant_id,
+            agent_name=name,
+            actual_agent=agent,
+        )
+        await change_model(source, model, actor=actor, edit=_edit_deps(runtime), backends=service)
+    except (channel_backend.AgentBackendRefused, channel_backend.BackendUnsupported) as exc:
+        raise _backend_switch_refusal(exc, name, model.provider, auth, with_code=True) from exc
+
+
 async def _update_agent_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -1019,12 +1077,16 @@ async def _update_agent_impl(
     expected_ma_agent_id: str | None = None,
     origin_context_id: str | None = None,
 ) -> AgentInfo:
-    if model is not None:
+    other = _move_to_other_provider(auth, model)
+    if other is not None:
+        model = None
+    elif model is not None:
         model = _resolve_native_agent_model(model)
         _reject_unknown_model(model)
     scalars: dict[str, Any] = {"model": model, "description": description, "system": system}
     list_fields = (tools, mcp_servers, skills)
-    if all(v is None for v in scalars.values()) and all(v is None for v in list_fields):
+    nothing_else = all(v is None for v in scalars.values()) and all(v is None for v in list_fields)
+    if nothing_else and other is None:
         raise ToolError("update_agent: at least one field is required")
     if mcp_servers is not None:
         _reject_reserved_servers(runtime, mcp_servers)
@@ -1083,21 +1145,28 @@ async def _update_agent_impl(
         except DefaultsError as exc:
             raise ToolError(str(exc)) from exc
 
+    if other is not None:
+        await _change_agent_model(runtime, auth, name, agent, other)
     try:
-        updated = await agent_editing.write_agent_patch(
-            _edit_deps(runtime),
-            actor=_edit_actor(auth),
-            agent=agent,
-            patch=agent_editing.AgentPatch(
-                model=model,
-                description=description,
-                system=system,
-                tools=tools,
-                mcp_servers=mcp_servers,
-                skills=resolved_skills,
-            ),
-            label=name,
-            mcp_replace_allowed=mcp_replace_allowed,
+        # Another provider's model lives beside the record, which stays as it was.
+        updated = (
+            agent
+            if nothing_else
+            else await agent_editing.write_agent_patch(
+                _edit_deps(runtime),
+                actor=_edit_actor(auth),
+                agent=agent,
+                patch=agent_editing.AgentPatch(
+                    model=model,
+                    description=description,
+                    system=system,
+                    tools=tools,
+                    mcp_servers=mcp_servers,
+                    skills=resolved_skills,
+                ),
+                label=name,
+                mcp_replace_allowed=mcp_replace_allowed,
+            )
         )
     except agent_editing.AgentEditError as exc:
         raise ToolError(str(exc)) from exc
@@ -1106,7 +1175,7 @@ async def _update_agent_impl(
         # The owner's edit answers with capabilities only: never the inherited setup.
         result = result.for_member()
     applies_lines: list[str] = []
-    if model is not None:
+    if model is not None or other is not None:
         applies_lines.append(
             render_change_confirmation(
                 ConfigurationChange(target_name=name, kind="model", availability="next_message")
@@ -1712,6 +1781,54 @@ async def _require_agent_editor(
         )
 
 
+async def _write_backend_model(
+    runtime: McpRuntime,
+    service: channel_backend.AgentBackendService,
+    agent: BackendAgent,
+    target: Provider,
+    model: str | None,
+    actor: channel_backend.BackendActor,
+    *,
+    expected_revision: int,
+    expected_digest: str,
+    accepted_drops: tuple[str, ...] | None = None,
+    settings: channel_backend.AgentSettings | None = None,
+) -> AgentBackendRevision:
+    """Point `agent` at another provider's model through core `change_model`."""
+    selection = channel_backend.agent_selection(target, model, settings)
+    if target == DEFAULT_BACKEND or selection.model is None:
+        # A Claude pin stays the service's own write: change_model edits Claude's record.
+        return await service.set_backend(
+            agent,
+            target,
+            expected_revision,
+            actor,
+            expected_preview_digest=expected_digest,
+            model=model,
+            settings=settings,
+            **({"accepted_drops": accepted_drops} if accepted_drops is not None else {}),
+        )
+    changed = await change_model(
+        agent,
+        ModelRef(provider=target, id=selection.model),
+        actor=agent_editing.AgentActor(
+            tenant_id=actor.tenant_id,
+            account_id=actor.account_id,
+            subject=actor.subject,
+            surface=Surface.CONFIG,
+        ),
+        edit=_edit_deps(runtime),
+        backends=service,
+        accepted_drops=accepted_drops,
+        expected_digest=expected_digest,
+        expected_revision=expected_revision,
+        settings=settings,
+    )
+    if changed.revision is None:
+        raise channel_backend.AgentBackendRefused("model_not_selectable", provider=target)
+    return changed.revision
+
+
 async def _set_agent_backend_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -1778,13 +1895,15 @@ async def _set_agent_backend_impl(
                     current, local, actor, expected_preview_digest=preview.digest
                 )
             else:
-                revision = await service.set_backend(
+                revision = await _write_backend_model(
+                    runtime,
+                    service,
                     current,
                     backend,
-                    local,
+                    model,
                     actor,
-                    expected_preview_digest=preview.digest,
-                    model=model,
+                    expected_revision=local,
+                    expected_digest=preview.digest,
                 )
         except channel_backend.AgentBackendRefused as exc:
             if exc.reason == "stale_revision":
@@ -2207,20 +2326,18 @@ async def _request_agent_backend_switch_impl(
                     switch="check",
                 )
             try:
-                await service.set_backend(
+                await _write_backend_model(
+                    runtime,
+                    service,
                     agent,
                     target_backend,
-                    reference.expected_revision,
+                    reference.model,
                     actor,
+                    expected_revision=reference.expected_revision,
                     # A bound digest was checked above; this one is the switch's own.
-                    expected_preview_digest=preview.digest if bound else reference.preview_digest,
-                    model=reference.model,
+                    expected_digest=preview.digest if bound else reference.preview_digest,
+                    accepted_drops=reference.accepted_drops,
                     settings=reference_settings(reference),
-                    **(
-                        {"accepted_drops": reference.accepted_drops}
-                        if reference.accepted_drops is not None
-                        else {}
-                    ),
                 )
             except channel_backend.AgentBackendRefused as exc:
                 if exc.reason == "stale_revision":
@@ -2463,7 +2580,8 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> AgentInfo:
         """Change an agent's instructions (system prompt), switch its model, or add existing
         skills such as build-models. Scalar ``model``, ``description`` and ``system`` fields
-        replace.
+        replace. Outside chat ``model`` may be any ``list_models`` model, another
+        provider's too; in chat move providers with ``request_agent_backend_switch``.
 
         Prefer current-generation ``claude-sonnet-5-5`` for Sonnet,
         ``claude-opus-5-5`` for Opus and ``claude-haiku-5-5`` for the cheapest
